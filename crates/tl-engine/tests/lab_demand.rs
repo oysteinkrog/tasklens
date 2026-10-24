@@ -212,6 +212,59 @@ fn hidden_recording_off_zero_samples_60s() {
     fl.finish();
 }
 
+/// ADR-008 verification: hidden with device history on gives exactly the 1 Hz sources of the
+/// "Not visible, device history on" column, with the engine's own rate tables (ADR-017).
+#[test]
+fn hidden_device_history_keeps_its_1hz_sources() {
+    use tl_engine::workers::{
+        connections::connections_period, cpu, disk::disk_period, gpu_drm::gpu_period,
+        memory::memory_period, net::net_period, processes, sensors::sensors_period,
+    };
+
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    demand
+        .send(demand_with(|d| {
+            d.any_surface_visible = false;
+            d.device_history = true;
+        }))
+        .expect("watch has receivers");
+    let on: [(&str, PeriodFn); 6] = [
+        ("cpu", cpu::cpu_period),
+        ("memory", memory_period),
+        ("disk", disk_period),
+        ("net", net_period),
+        ("sensors", sensors_period),
+        ("gpu", gpu_period),
+    ];
+    let off: [(&str, PeriodFn); 2] = [
+        ("processes", processes::processes_period),
+        ("connections", connections_period),
+    ];
+    let mut handles = Vec::new();
+    let mut logs = Vec::new();
+    for (name, period) in on.iter().chain(off.iter()) {
+        let (handle, log) =
+            spawn_table(&mut fl, io(&updates, &demand, &settings, &control), *period);
+        handles.push(handle);
+        logs.push((*name, log));
+    }
+
+    fl.run_for(Duration::from_millis(59_990), TICK);
+    let every_second: Vec<u64> = (0..60).map(|k| k * 1_000).collect();
+    for (name, log) in &logs[..on.len()] {
+        assert_eq!(times_ms(log, "sample"), every_second, "{name}");
+    }
+    for (name, log) in &logs[on.len()..] {
+        assert_eq!(times_ms(log, "sample"), [0u64; 0], "{name}");
+    }
+
+    for handle in handles {
+        handle.abort();
+    }
+    fl.finish();
+}
+
 #[test]
 fn processes_follow_interval_ms() {
     let mut fl = FakeLab::new();

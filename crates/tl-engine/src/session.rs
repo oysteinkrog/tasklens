@@ -44,6 +44,9 @@ use crate::workers::WorkerSpec;
 use crate::workers::history::{
     HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, run_history,
 };
+use crate::workers::metric_history::{
+    MetricHistorySlot, MetricSink, MetricWorkerConfig, run_metric_history,
+};
 
 /// Wait between a failed session and the next one.
 pub const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -257,6 +260,25 @@ async fn run_session(
         reducer.record_sink = Some(Box::new(HistorySink::new(slot.clone())));
         reducer.history_cmd = Some(HistorySink::new(slot));
     }
+    // ADR-017: device metric history. The low-memory engine runs none (R-152).
+    if ep.config.mode == EngineMode::Full {
+        let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let io = WorkerIo::new(
+            ep.msgs_tx.clone(),
+            ep.demand.clone(),
+            ep.settings.clone(),
+            reducer.control.subscribe(),
+            shared.clone(),
+        );
+        let ctl = SourceController::new(
+            SourceId::MetricHistory,
+            metric_history_factory(&ep.config, ep.boot_id, io, slot.clone()),
+            ep.msgs_tx.clone(),
+        )
+        .with_restart_counts(reducer.health.restart_counts());
+        children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
+        reducer.metric_sink = Some(MetricSink::new(slot));
+    }
     let tick_tx = ep.msgs_tx.clone();
     children.0.push(spawn(cx, move |cx| tick(cx, tick_tx))?);
 
@@ -308,6 +330,24 @@ fn history_factory(
             }
             poll
         })
+    })
+}
+
+/// The `MetricHistory` worker. Each generation makes its own channel and stores its sender in
+/// `slot` while its store is open (ADR-017).
+fn metric_history_factory(
+    config: &EngineConfig,
+    boot: BootId,
+    io: WorkerIo,
+    slot: MetricHistorySlot,
+) -> WorkerFactory {
+    let root = config.state_dir.join("metrics");
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let cfg = MetricWorkerConfig {
+            boot,
+            root: root.clone(),
+        };
+        run_metric_history(cx, io.clone(), slot.clone(), cfg)
     })
 }
 

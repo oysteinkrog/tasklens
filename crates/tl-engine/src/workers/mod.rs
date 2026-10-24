@@ -25,6 +25,7 @@ pub mod kscreen;
 pub mod logind;
 pub mod lowmem;
 pub mod memory;
+pub mod metric_history;
 pub mod net;
 pub mod process_detail;
 pub mod processes;

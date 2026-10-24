@@ -26,8 +26,9 @@ use tl_model::process::{
 };
 use tl_model::series::SampleFlags;
 use tl_model::snapshot::{
-    BatteryDetails, ConnRecord, CpuStaticInfo, DiskDetails, InventorySnapshot, MemoryDetails,
-    NetDetails, ServiceBackend, StartupEntry, UnitDetails, UnitRecord, WindowsSnapshot,
+    BatteryDetails, ConnRecord, CpuStaticInfo, DeviceHistory, DiskDetails, InventorySnapshot,
+    MemoryDetails, NetDetails, ServiceBackend, StartupEntry, UnitDetails, UnitRecord,
+    WindowsSnapshot,
 };
 use tl_model::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, MemoryTotals, NetTotals, SensorReading,
@@ -112,6 +113,9 @@ pub enum SourceUpdate {
     Windows(Box<WindowsSnapshot>),
     /// E30 answer to `HistoryQuery`.
     History(Arc<HistoryView>),
+    /// ADR-017 `MetricHistory`: the answer to `Demand.device_history_range`. The reducer owns
+    /// the header version.
+    DeviceHistory(Arc<DeviceHistory>),
     /// E12 static and slow device rows (R-139 item 7).
     DeviceDetails(DeviceDetailsUpdate),
     /// E29 helper session state (R-150 item 1).
@@ -414,6 +418,9 @@ pub fn source_of(update: &SourceUpdate) -> Option<SourceId> {
         SourceUpdate::Inventory(_) => Some(SourceId::Inventory),
         SourceUpdate::Windows(_) => Some(SourceId::KWin),
         SourceUpdate::History(_) => None,
+        // Published only while a range is shown, so it is not a sample that keeps the source
+        // fresh; the worker reports its own health.
+        SourceUpdate::DeviceHistory(_) => None,
         SourceUpdate::DeviceDetails(details) => Some(match details {
             DeviceDetailsUpdate::Cpu(_) => SourceId::Cpu,
             DeviceDetailsUpdate::Memory(_) => SourceId::Memory,
@@ -681,6 +688,7 @@ mod tests {
             ),
             (SourceUpdate::Windows(Box::default()), Some(SourceId::KWin)),
             (SourceUpdate::History(Arc::default()), None),
+            (SourceUpdate::DeviceHistory(Arc::default()), None),
             (
                 SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Cpu(Arc::default())),
                 Some(SourceId::Cpu),
@@ -745,6 +753,7 @@ mod tests {
                 | SourceUpdate::Inventory(_)
                 | SourceUpdate::Windows(_)
                 | SourceUpdate::History(_)
+                | SourceUpdate::DeviceHistory(_)
                 | SourceUpdate::DeviceDetails(_)
                 | SourceUpdate::Helper(_)
                 | SourceUpdate::Setup(_)

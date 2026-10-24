@@ -7,6 +7,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::actions::{Family, FourTuple, Proto};
+use crate::demand::DeviceHistoryRequest;
 use crate::details::DetailsSnapshot;
 use crate::devices::{DeviceCatalog, NetKind};
 use crate::health::{EngineCaps, HealthSnapshot, HelperState, ManagerState, SourceHealth};
@@ -57,8 +58,10 @@ impl ComponentMask {
     pub const PROCESS_SERIES: Self = Self(1 << 13);
     /// `Snapshot.device_details` (R-139).
     pub const DEVICE_DETAILS: Self = Self(1 << 14);
-    /// All fifteen bits.
-    pub const ALL: Self = Self(0x7FFF);
+    /// `Snapshot.device_history` (ADR-017).
+    pub const DEVICE_HISTORY: Self = Self(1 << 15);
+    /// All sixteen bits.
+    pub const ALL: Self = Self(0xFFFF);
     pub const NONE: Self = Self(0);
 
     /// True when every bit of `other` is set in `self`.
@@ -1513,6 +1516,55 @@ pub struct DeviceDetailsSnapshot {
     pub on_battery: Option<bool>,
 }
 
+// ---- Device metric history ----
+
+/// One point of a stored device series (ADR-017). `mean` is NaN for a gap; `min` and `max` are
+/// then NaN too.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HistPoint {
+    /// Start of the point's bucket on CLOCK_REALTIME.
+    pub t_realtime_ns: i64,
+    pub mean: f32,
+    pub min: f32,
+    pub max: f32,
+}
+
+impl HistPoint {
+    pub fn is_gap(&self) -> bool {
+        self.mean.is_nan()
+    }
+}
+
+/// The device metric history for the Overview ranges (ADR-017, UI-PRF-055, mask bit
+/// `DEVICE_HISTORY`). The `MetricHistory` worker publishes it while `Demand.device_history_range`
+/// is set, and an empty one with `request: None` when the range is cleared.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceHistory {
+    pub header: ComponentHeader,
+    /// The request this answers.
+    pub request: Option<DeviceHistoryRequest>,
+    /// CLOCK_REALTIME minus CLOCK_BOOTTIME of the current boot, to place live samples on the
+    /// same axis.
+    pub realtime_offset_ns: i64,
+    /// Start of the oldest stored point of the served tier, for "since 09:14".
+    pub since_realtime_ns: Option<i64>,
+    /// Bucket width of the points in ns: a whole number of tier points.
+    pub step_ns: u64,
+    /// At most 1,024 min/max-decimated points per series, sorted by `SeriesId`. Only devices of
+    /// the current catalog. Unchanged series keep their `Arc` across publishes.
+    pub series: Arc<[(SeriesId, Arc<[HistPoint]>)]>,
+}
+
+impl DeviceHistory {
+    /// Binary search by id.
+    pub fn get(&self, id: SeriesId) -> Option<&Arc<[HistPoint]>> {
+        self.series
+            .binary_search_by_key(&id, |(sid, _)| *sid)
+            .ok()
+            .map(|i| &self.series[i].1)
+    }
+}
+
 // ---- The snapshot ----
 
 /// One published state of the engine (ADR-003). Unchanged components reuse their `Arc` across
@@ -1545,6 +1597,8 @@ pub struct Snapshot {
     pub process_series: Arc<ProcessSeriesSet>,
     /// P1 and P2, mask bit `DEVICE_DETAILS` (R-139).
     pub device_details: Arc<DeviceDetailsSnapshot>,
+    /// P2, mask bit `DEVICE_HISTORY` (ADR-017).
+    pub device_history: Arc<DeviceHistory>,
 }
 
 impl Snapshot {
@@ -1581,6 +1635,7 @@ impl Snapshot {
             history: Arc::default(),
             process_series: Arc::default(),
             device_details: Arc::default(),
+            device_history: Arc::default(),
         }
     }
 
@@ -1675,6 +1730,11 @@ impl Snapshot {
                 self.device_details.header.version,
                 prev.device_details.header.version,
             ),
+            (
+                ComponentMask::DEVICE_HISTORY,
+                self.device_history.header.version,
+                prev.device_history.header.version,
+            ),
         ];
         let mut mask = ComponentMask::NONE;
         for (bit, now, before) in versions {
@@ -1732,7 +1792,7 @@ mod tests {
     use crate::process::{ProcFlags, ProcState, ProcessMeta};
     use crate::validity::FieldValidity;
 
-    const BITS: [ComponentMask; 15] = [
+    const BITS: [ComponentMask; 16] = [
         ComponentMask::SYSTEM,
         ComponentMask::SERIES,
         ComponentMask::PROCESSES,
@@ -1748,6 +1808,7 @@ mod tests {
         ComponentMask::HISTORY,
         ComponentMask::PROCESS_SERIES,
         ComponentMask::DEVICE_DETAILS,
+        ComponentMask::DEVICE_HISTORY,
     ];
 
     fn view(id: SeriesId) -> Arc<SeriesView> {
@@ -1844,7 +1905,7 @@ mod tests {
             all |= *a;
         }
         assert_eq!(all, ComponentMask::ALL);
-        assert_eq!(ComponentMask::ALL.0, 0x7FFF);
+        assert_eq!(ComponentMask::ALL.0, 0xFFFF);
     }
 
     #[test]
@@ -2421,6 +2482,7 @@ mod tests {
             s.history.header,
             s.process_series.header,
             s.device_details.header,
+            s.device_history.header,
         ];
         for h in headers {
             assert_eq!(h.validity, Validity::WarmingUp);
@@ -2550,5 +2612,41 @@ mod tests {
             next.changed_since(&prev, &mut changed),
             ComponentMask::DEVICE_DETAILS
         );
+    }
+
+    #[test]
+    fn changed_since_device_history() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.device_history).header.version += 1;
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::DEVICE_HISTORY
+        );
+    }
+
+    #[test]
+    fn device_history_get_and_gap() {
+        let point = |mean: f32| HistPoint {
+            t_realtime_ns: 0,
+            mean,
+            min: mean,
+            max: mean,
+        };
+        let a = sid(0, MetricId::CPU_TOTAL);
+        let b = sid(2, MetricId::CPU_TOTAL);
+        let h = DeviceHistory {
+            series: Arc::from([
+                (a, Arc::from([point(1.0)])),
+                (b, Arc::from([point(f32::NAN)])),
+            ]),
+            ..DeviceHistory::default()
+        };
+        assert_eq!(h.get(a).map(|p| p[0].mean), Some(1.0));
+        assert!(h.get(b).is_some_and(|p| p[0].is_gap()));
+        assert!(h.get(sid(1, MetricId::CPU_TOTAL)).is_none());
+        assert_eq!(h.header.validity, Validity::WarmingUp);
+        assert_eq!(h.request, None);
     }
 }

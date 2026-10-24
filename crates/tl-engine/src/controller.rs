@@ -282,4 +282,5 @@ source_names! {
     NetworkManager => "network_manager",
     HistoryRecorder => "history_recorder",
     Journal => "journal",
+    MetricHistory => "metric_history",
 }

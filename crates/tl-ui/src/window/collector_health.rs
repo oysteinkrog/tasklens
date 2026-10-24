@@ -83,6 +83,7 @@ const SOURCE_KEYS: [&str; SourceId::COUNT] = [
     "shell-health-source-network-manager",
     "shell-health-source-history",
     "shell-health-source-journal",
+    "shell-health-source-device-history",
 ];
 
 const STATE_COUNT: usize = 7;

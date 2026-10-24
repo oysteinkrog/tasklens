@@ -528,8 +528,11 @@ impl Source for CpuSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
-        self.per_cpu_wanted
-            .store(d.cpu.wants_per_core() || d.recording, Ordering::Relaxed);
+        // ADR-017 keeps per-core history, so device history reads the cores too (ADR-008).
+        self.per_cpu_wanted.store(
+            d.cpu.wants_per_core() || d.recording || d.device_history,
+            Ordering::Relaxed,
+        );
         self.pressure_wanted.store(
             d.cpu != CpuDemand::Off || d.device_history,
             Ordering::Relaxed,

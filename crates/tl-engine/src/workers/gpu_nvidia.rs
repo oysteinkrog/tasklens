@@ -319,8 +319,9 @@ pub async fn run_with<L: ProbeLink>(
 }
 
 /// `(totals, processes)`. Hidden surfaces stop sampling unless history records GPUs (ADR-008).
+/// Device history keeps the totals only.
 pub fn wanted(d: &Demand) -> (bool, bool) {
-    let totals = (d.any_surface_visible && d.gpus) || d.recording;
+    let totals = (d.any_surface_visible && d.gpus) || d.recording || d.device_history;
     let processes = (d.any_surface_visible && d.gpu_process) || d.recording;
     (totals, processes)
 }
@@ -727,6 +728,13 @@ mod tests {
         assert_eq!(wanted(&demand(false, true, false, false)), (false, false));
         assert_eq!(wanted(&demand(true, true, true, false)), (true, true));
         assert_eq!(wanted(&demand(false, true, true, false)), (false, false));
+        // Hidden with device history on: totals, no processes (ADR-008, ADR-017).
+        let history = Demand {
+            device_history: true,
+            gpu_process: true,
+            ..Demand::default()
+        };
+        assert_eq!(wanted(&history), (true, false));
     }
 
     #[test]

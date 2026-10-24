@@ -62,9 +62,9 @@ const NAME_MAX: usize = 256;
 const GPU_UDEV_KEYS: [&str; 1] = ["ID_MODEL_FROM_DATABASE"];
 
 /// The GPU rate table (ADR-008 row "GPU"): 1 Hz while a GPU page is shown, per-process GPU
-/// values are shown or recording is on.
+/// values are shown, recording or device history is on.
 pub fn gpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.gpus || wants_processes(d) {
+    if d.gpus || d.device_history || wants_processes(d) {
         Some(PERIOD)
     } else {
         None
@@ -867,6 +867,13 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(gpu_period(&recording, &s), Some(Duration::from_secs(1)));
+        // Hidden with device history on: totals at 1 Hz, no process rows (ADR-008, ADR-017).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(gpu_period(&history, &s), Some(Duration::from_secs(1)));
+        assert!(!wants_processes(&history));
     }
 
     #[test]

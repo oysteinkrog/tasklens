@@ -1411,6 +1411,7 @@ shell-health-source-upower = Power
 shell-health-source-network-manager = NetworkManager
 shell-health-source-history = History
 shell-health-source-journal = Journal
+shell-health-source-device-history = Device history
 
 ## tl-app (E33)
 

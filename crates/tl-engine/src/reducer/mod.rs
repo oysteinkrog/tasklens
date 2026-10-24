@@ -41,9 +41,9 @@ use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, InventorySnapshot,
-    ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot, StartupSnapshot,
-    SystemSnapshot, WindowsSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
+    InventorySnapshot, ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot,
+    StartupSnapshot, SystemSnapshot, WindowsSnapshot,
 };
 use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
@@ -52,6 +52,7 @@ use tl_model::validity::Validity;
 use crate::source::WorkerControl;
 use crate::update::EngineMsg;
 use crate::workers::history::HistorySink;
+use crate::workers::metric_history::MetricSink;
 
 pub use devices::InvariantViolation;
 
@@ -107,6 +108,8 @@ pub struct Components {
     pub process_series: Arc<ProcessSeriesSet>,
     /// R-139.
     pub device_details: Arc<DeviceDetailsSnapshot>,
+    /// ADR-017.
+    pub device_history: Arc<DeviceHistory>,
 }
 
 /// Action admission (E11). The reducer holds `None` until E11-A1 installs one.
@@ -149,6 +152,9 @@ pub struct Reducer {
     /// Takes `HistoryQuery` and `HistoryDelete` to the history worker (E30-A2). `None` when the
     /// session runs no history worker.
     pub history_cmd: Option<HistorySink>,
+    /// Takes system samples and the device catalog to the `MetricHistory` worker (ADR-017).
+    /// `None` when the session runs no such worker.
+    pub metric_sink: Option<MetricSink>,
     /// `None` until E11-A1 installs one.
     pub action_gate: Option<Box<dyn ActionGate>>,
     pub events_tx: async_channel::Sender<ActionEvent>,
@@ -179,7 +185,7 @@ pub struct Reducer {
 
 /// The components that carry a `ComponentHeader` and that `build_snapshot` versions itself.
 /// `SERIES` comes from `SeriesStore::publish`; `DEVICES` and `HEALTH` have their own `version`.
-const HEADER_BITS: [ComponentMask; 12] = [
+const HEADER_BITS: [ComponentMask; 13] = [
     ComponentMask::SYSTEM,
     ComponentMask::PROCESSES,
     ComponentMask::TABLE,
@@ -192,6 +198,7 @@ const HEADER_BITS: [ComponentMask; 12] = [
     ComponentMask::HISTORY,
     ComponentMask::PROCESS_SERIES,
     ComponentMask::DEVICE_DETAILS,
+    ComponentMask::DEVICE_HISTORY,
 ];
 
 impl Reducer {
@@ -238,10 +245,12 @@ impl Reducer {
                 history: empty.history,
                 process_series: empty.process_series,
                 device_details: empty.device_details,
+                device_history: empty.device_history,
             },
             control,
             record_sink: None,
             history_cmd: None,
+            metric_sink: None,
             action_gate: None,
             events_tx,
             helper_tx: None,
@@ -347,6 +356,9 @@ impl Reducer {
             if let Some(sink) = self.record_sink.as_deref_mut() {
                 sink.on_device_catalog(&next);
             }
+            if let Some(sink) = self.metric_sink.as_mut() {
+                sink.on_device_catalog(&next);
+            }
             self.components.devices = next;
         }
         if dirty.contains(ComponentMask::HEALTH)
@@ -373,6 +385,7 @@ impl Reducer {
                 ComponentMask::DETAILS => bump(&mut c.details, p),
                 ComponentMask::HISTORY => bump(&mut c.history, p),
                 ComponentMask::PROCESS_SERIES => bump(&mut c.process_series, p),
+                ComponentMask::DEVICE_HISTORY => bump(&mut c.device_history, p),
                 _ => bump(&mut c.device_details, p),
             };
         }
@@ -397,6 +410,7 @@ impl Reducer {
             history: Arc::clone(&c.history),
             process_series: Arc::clone(&c.process_series),
             device_details: Arc::clone(&c.device_details),
+            device_history: Arc::clone(&c.device_history),
         }
     }
 }
@@ -521,6 +535,7 @@ headed!(
     HistoryView,
     ProcessSeriesSet,
     DeviceDetailsSnapshot,
+    DeviceHistory,
 );
 
 /// Makes the header version of `component` at least `published + 1` and returns it. Apply

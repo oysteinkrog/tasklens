@@ -12,6 +12,9 @@
 //! `motion.save_power_on_battery` is on, the merge leaves `cpu_fast` off, so CPU updates drop
 //! from 10 Hz to 1 Hz, and [`PowerSaving`] tells the charts to stop sliding. Both are applied
 //! only when the battery state or the setting changes.
+//!
+//! Device history (ADR-017): `device_history` follows `history.device_metrics`, visible or not.
+//! `device_history_range` comes from the first visible part that sets it.
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -46,6 +49,8 @@ pub struct DemandAggregator {
     hidden: bool,
     /// On battery with `motion.save_power_on_battery` on; mirrored in [`PowerSaving`].
     power_saving: bool,
+    /// `history.device_metrics`, sent as `Demand.device_history`.
+    device_metrics: bool,
 }
 
 /// Save power on battery is in effect: charts do not slide (wlf.32). Set by the
@@ -58,6 +63,11 @@ impl Global for PowerSaving {}
 /// Whether save power on battery is in effect. False before the aggregator sets it.
 pub fn power_saving(cx: &App) -> bool {
     cx.try_global::<PowerSaving>().is_some_and(|p| p.0)
+}
+
+/// `history.device_metrics`. It counts as on (its default) before settings load.
+fn device_metrics_now(cx: &App) -> bool {
+    !cx.has_global::<TlSettings>() || TlSettings::settings(cx).history.device_metrics
 }
 
 /// On battery with the setting on. The setting counts as on (its default) before settings load.
@@ -92,6 +102,11 @@ impl DemandAggregator {
         let settings_hub = hub.clone();
         cx.observe_global::<TlSettings>(move |this, cx| {
             this.sync_power_saving(&settings_hub, cx);
+            let device_metrics = device_metrics_now(cx);
+            if device_metrics != this.device_metrics {
+                this.device_metrics = device_metrics;
+                this.schedule_flush(cx);
+            }
         })
         .detach();
         let power_saving = power_saving_now(hub, cx);
@@ -105,6 +120,7 @@ impl DemandAggregator {
             flush_scheduled: false,
             hidden: hub.read(cx).is_hidden(),
             power_saving,
+            device_metrics: device_metrics_now(cx),
         }
     }
 
@@ -200,6 +216,7 @@ impl DemandAggregator {
         if self.power_saving {
             merged.cpu_fast = false;
         }
+        merged.device_history = self.device_metrics;
         merged
     }
 
@@ -265,6 +282,9 @@ fn merge<'a>(parts: impl Iterator<Item = &'a Demand> + Clone) -> Demand {
         m.tray.nets |= p.tray.nets;
         m.tray.gpus |= p.tray.gpus;
         m.recording |= p.recording;
+        if m.device_history_range.is_none() {
+            m.device_history_range = p.device_history_range;
+        }
     }
     if !m.any_surface_visible {
         return Demand {
@@ -314,7 +334,9 @@ fn union<'a, T: Clone + Eq + Hash + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_model::demand::{ColumnSet, DetailDemand, TrayDemand};
+    use tl_model::demand::{
+        ColumnSet, DetailDemand, DeviceHistoryRequest, DeviceRange, TrayDemand,
+    };
     use tl_model::details::{DetailTab, DetailTarget};
     use tl_model::ids::{ColumnId, GraphTarget, ProcessKey};
     use tl_model::table::{Manager, UnitRef};
@@ -413,6 +435,35 @@ mod tests {
             }
         );
         assert_eq!(merge(std::iter::empty()), Demand::default());
+    }
+
+    #[test]
+    fn device_history_range_first_visible_part() {
+        let day = DeviceHistoryRequest {
+            range: DeviceRange::H24,
+            end_realtime_ns: None,
+        };
+        let week = DeviceHistoryRequest {
+            range: DeviceRange::D7,
+            end_realtime_ns: Some(5),
+        };
+        let a = visible();
+        let b = Demand {
+            device_history_range: Some(day),
+            ..visible()
+        };
+        let c = Demand {
+            device_history_range: Some(week),
+            ..visible()
+        };
+        let m = merge([&a, &b, &c].into_iter());
+        assert_eq!(m.device_history_range, Some(day));
+        // A hidden Overview asks for no range.
+        let hidden = Demand {
+            any_surface_visible: false,
+            ..b
+        };
+        assert_eq!(merge([&hidden].into_iter()).device_history_range, None);
     }
 
     #[test]

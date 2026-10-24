@@ -109,6 +109,7 @@ pub fn source_name(id: SourceId) -> &'static str {
         SourceId::NetworkManager => "NetworkManager",
         SourceId::HistoryRecorder => "History",
         SourceId::Journal => "Journal",
+        SourceId::MetricHistory => "Device history",
     }
 }
 
@@ -136,6 +137,7 @@ fn source_key(id: SourceId) -> &'static str {
         SourceId::NetworkManager => "shell-health-source-network-manager",
         SourceId::HistoryRecorder => "shell-health-source-history",
         SourceId::Journal => "shell-health-source-journal",
+        SourceId::MetricHistory => "shell-health-source-device-history",
     }
 }
 

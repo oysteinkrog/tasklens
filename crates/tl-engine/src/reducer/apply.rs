@@ -23,9 +23,10 @@ use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
-    DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
-    ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
+    DiskDetails, DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
+    ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
+    WindowsSnapshot,
 };
 use tl_model::system::{GpuEngine, GpuTotals, Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
@@ -607,6 +608,14 @@ impl Reducer {
                 self.components.history = Arc::new(next);
                 self.mark(ComponentMask::HISTORY);
             }
+            SourceUpdate::DeviceHistory(history) => {
+                // The worker reuses the series `Arc`s; the reducer owns the version (ADR-003).
+                let mut next = DeviceHistory::clone(&history);
+                next.header.version = 0;
+                next.header.validity = Validity::Valid;
+                self.components.device_history = Arc::new(next);
+                self.mark(ComponentMask::DEVICE_HISTORY);
+            }
             // E29-020: `HEALTH` only on a change, so `health` keeps its `Arc` otherwise.
             SourceUpdate::Helper(HelperUpdate { state, start }) => {
                 if self.health.set_helper(state, start) {
@@ -900,6 +909,10 @@ impl Reducer {
                 Arc::make_mut(&mut c.history).header.validity = validity;
                 ComponentMask::HISTORY
             }
+            SourceId::MetricHistory => {
+                Arc::make_mut(&mut c.device_history).header.validity = validity;
+                ComponentMask::DEVICE_HISTORY
+            }
             _ => return,
         };
         self.mark(bit);
@@ -932,22 +945,26 @@ impl Reducer {
             .ok_or(InvariantViolation("fixed device missing from the catalog"))
     }
 
-    /// Applies one system sample batch, then hands the samples it appended to the record sink in
-    /// one `on_system_sample` call. Without a sink nothing is collected.
+    /// Applies one system sample batch, then hands the samples it appended to the record sink and
+    /// the metric sink in one `on_system_sample` call each. Without a sink nothing is collected.
     fn record_system(
         &mut self,
         t_ns: TimeNs,
         apply: impl FnOnce(&mut Self) -> Result<(), InvariantViolation>,
     ) -> Result<(), InvariantViolation> {
         self.apply_state.batch.clear();
-        self.apply_state.collect = self.record_sink.is_some();
+        self.apply_state.collect = self.record_sink.is_some() || self.metric_sink.is_some();
         let result = apply(self);
         self.apply_state.collect = false;
         result?;
         let batch = &self.apply_state.batch;
-        if let Some(sink) = self.record_sink.as_deref_mut()
-            && !batch.is_empty()
-        {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        if let Some(sink) = self.record_sink.as_deref_mut() {
+            sink.on_system_sample(t_ns, batch);
+        }
+        if let Some(sink) = self.metric_sink.as_mut() {
             sink.on_system_sample(t_ns, batch);
         }
         Ok(())

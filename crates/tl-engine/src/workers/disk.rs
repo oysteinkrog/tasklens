@@ -1,8 +1,8 @@
 //! The `Disk` worker (ADR-004, ADR-008): wraps the tl-collect `DiskSampler` and turns each
 //! `DiskReading` into a `SourceUpdate::Disks(DiskSample)`.
 //!
-//! It samples `/proc/diskstats` at 1 Hz while disks are demanded or history recording is on,
-//! and not at all otherwise. The block devices are enumerated again every 5 s; each enumeration
+//! It samples `/proc/diskstats` at 1 Hz while disks are demanded, history recording or device
+//! history is on, and not at all otherwise. The block devices are enumerated again every 5 s; each enumeration
 //! also sends a full `DeviceList` for `DISKS` and then the sysfs `DiskDetails` (kind, usage,
 //! system disk, swap) through `take_extra` (R-052, PERF-005, PERF-047 to PERF-049). The details
 //! also carry the udev model, interface, WWN and serial, and the Partitions table (PERF-050,
@@ -56,7 +56,7 @@ type StatVfs = Box<dyn FnMut(&str) -> Result<FsStat, CollectError> + Send>;
 
 /// The disk rate table (ADR-008 row "Disks").
 pub fn disk_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.disks || d.recording {
+    if d.disks || d.recording || d.device_history {
         Some(PERIOD)
     } else {
         None
@@ -518,5 +518,12 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(disk_period(&recording, &s), Some(Duration::from_secs(1)));
+
+        // Hidden with device history on (ADR-008, ADR-017).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(disk_period(&history, &s), Some(Duration::from_secs(1)));
     }
 }

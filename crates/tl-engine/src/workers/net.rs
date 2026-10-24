@@ -1,8 +1,8 @@
 //! The `Net` worker (ADR-004, ADR-008): wraps the tl-collect `NetSampler` and turns each
 //! `NetReading` into a `SourceUpdate::Nets(NetSample)`.
 //!
-//! It samples `/proc/net/dev` at 1 Hz while network is demanded or history recording is on, and
-//! not at all otherwise. The interfaces are enumerated again every 5 s; each enumeration also
+//! It samples `/proc/net/dev` at 1 Hz while network is demanded, history recording or device
+//! history is on, and not at all otherwise. The interfaces are enumerated again every 5 s; each enumeration also
 //! sends a full `DeviceList` for `NETS` through `take_extra`, then the sysfs and udev
 //! `NetDetails` when they differ from the last sent set. Loopback never appears (ADR-016, R-052,
 //! PERF-054 to PERF-056). MAC addresses are never logged.
@@ -47,7 +47,7 @@ const NET_UDEV_KEYS: [&str; 2] = ["ID_VENDOR_FROM_DATABASE", "ID_MODEL_FROM_DATA
 
 /// The network rate table (ADR-008 row "Disks, network interfaces").
 pub fn net_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.nets || d.recording {
+    if d.nets || d.recording || d.device_history {
         Some(PERIOD)
     } else {
         None
@@ -495,5 +495,12 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(net_period(&recording, &s), Some(Duration::from_secs(1)));
+
+        // Hidden with device history on (ADR-008, ADR-017).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(net_period(&history, &s), Some(Duration::from_secs(1)));
     }
 }

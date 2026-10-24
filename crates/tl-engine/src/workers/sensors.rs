@@ -1,8 +1,9 @@
 //! The `Sensors` worker (ADR-004, ADR-008, ADR-016): wraps the tl-collect `SensorsSampler` and
 //! turns each `SensorsReading` into a `SourceUpdate::Sensors(SensorSample)`.
 //!
-//! It reads every hwmon temperature and fan at 1 Hz while sensors are demanded: unlike the other
-//! sources, history recording does not keep it on (ADR-008 row "Sensors (hwmon), fans"). The
+//! It reads every hwmon temperature and fan at 1 Hz while sensors are demanded or device history
+//! is on: unlike the other sources, history recording does not keep it on (ADR-008 row "Sensors
+//! (hwmon), fans"). The
 //! chips are enumerated again every 5 s; each enumeration also sends a full `DeviceList` for
 //! `SENSORS | FANS` through `take_extra`. Without demand it reads no values, but it still lists
 //! the chips at start and every 30 s, so the fan and sensor rows exist before anything asks for
@@ -42,9 +43,19 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(30);
 
 /// The sensors rate table (ADR-008 row "Sensors (hwmon), fans"): recording does not keep
-/// sensors on. Without demand only the device list runs, at [`DISCOVERY_PERIOD`].
+/// sensors on, device history does. Without either only the device list runs, at
+/// [`DISCOVERY_PERIOD`].
 pub fn sensors_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    Some(if d.sensors { PERIOD } else { DISCOVERY_PERIOD })
+    Some(if reads_values(d) {
+        PERIOD
+    } else {
+        DISCOVERY_PERIOD
+    })
+}
+
+/// Values are read, not only the chips listed.
+fn reads_values(d: &Demand) -> bool {
+    d.sensors || d.device_history
 }
 
 pub struct SensorsSource {
@@ -132,7 +143,7 @@ impl Source for SensorsSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
-        self.demanded.set(d.sensors);
+        self.demanded.set(reads_values(d));
         sensors_period(d, s)
     }
 
@@ -276,5 +287,12 @@ mod tests {
             sensors_period(&recording, &s),
             Some(Duration::from_secs(30))
         );
+
+        // Hidden with device history on (ADR-008, ADR-017).
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(sensors_period(&history, &s), Some(Duration::from_secs(1)));
     }
 }

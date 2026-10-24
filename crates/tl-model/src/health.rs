@@ -32,13 +32,15 @@ pub enum SourceId {
     NetworkManager = 18,
     HistoryRecorder = 19,
     Journal = 20,
+    /// P2: the device metric history of ADR-017.
+    MetricHistory = 21,
 }
 
 impl SourceId {
-    pub const COUNT: usize = 21;
+    pub const COUNT: usize = 22;
 
     /// Every source, in number order.
-    pub const ALL: [SourceId; 21] = [
+    pub const ALL: [SourceId; 22] = [
         SourceId::Cpu,
         SourceId::Memory,
         SourceId::Disk,
@@ -60,6 +62,7 @@ impl SourceId {
         SourceId::NetworkManager,
         SourceId::HistoryRecorder,
         SourceId::Journal,
+        SourceId::MetricHistory,
     ];
 
     /// The discriminant, used to index `HealthSnapshot::sources`.
@@ -181,7 +184,7 @@ mod tests {
 
     #[test]
     fn source_id_all_and_index() {
-        assert_eq!(SourceId::ALL.len(), 21);
+        assert_eq!(SourceId::ALL.len(), 22);
         assert_eq!(SourceId::ALL.len(), SourceId::COUNT);
         for (pos, id) in SourceId::ALL.iter().enumerate() {
             assert_eq!(id.index(), pos);
@@ -211,6 +214,7 @@ mod tests {
         assert_eq!(SourceId::NetworkManager as u8, 18);
         assert_eq!(SourceId::HistoryRecorder as u8, 19);
         assert_eq!(SourceId::Journal as u8, 20);
+        assert_eq!(SourceId::MetricHistory as u8, 21);
     }
 
     #[test]

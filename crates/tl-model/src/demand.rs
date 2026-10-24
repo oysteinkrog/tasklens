@@ -87,6 +87,40 @@ pub const AFFINITY_TARGETS_MAX: usize = 256;
 pub const UNIT_DETAILS_MAX: usize = 10;
 pub const GRAPH_TARGETS_MAX: usize = 16; // R-154
 
+/// An Overview time range served from the device metric history (UI-PRF-055, ADR-017).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DeviceRange {
+    /// Requested only while paused (UI-PRF-057).
+    M1,
+    /// Requested only while paused (UI-PRF-057).
+    M5,
+    H1,
+    H24,
+    D7,
+}
+
+impl DeviceRange {
+    /// Length of the range in ns: 1 min, 5 min, 1 h, 24 h or 7 d.
+    pub const fn span_ns(self) -> u64 {
+        const S: u64 = 1_000_000_000;
+        match self {
+            DeviceRange::M1 => 60 * S,
+            DeviceRange::M5 => 300 * S,
+            DeviceRange::H1 => 3_600 * S,
+            DeviceRange::H24 => 86_400 * S,
+            DeviceRange::D7 => 7 * 86_400 * S,
+        }
+    }
+}
+
+/// What the Overview asks the device metric history for (ADR-008, ADR-017).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct DeviceHistoryRequest {
+    pub range: DeviceRange,
+    /// The range ends now (`None`) or at this CLOCK_REALTIME time while paused (`Some`).
+    pub end_realtime_ns: Option<i64>,
+}
+
 /// Everything the visible surfaces need. Lists are shared `Arc` slices, so a clone is cheap.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Demand {
@@ -134,6 +168,9 @@ pub struct Demand {
     pub recording: bool,
     /// P2: `history.device_metrics` is on (ADR-017). Independent of visibility.
     pub device_history: bool,
+    /// P2: an Overview range served from the device metric history (UI-PRF-055, UI-PRF-057).
+    /// `None` while no visible Overview shows 1 h, 24 h, 7 d or a paused time.
+    pub device_history_range: Option<DeviceHistoryRequest>,
 }
 
 impl Demand {
@@ -294,6 +331,7 @@ mod tests {
             d.service_cgroup_stats,
             d.connections_all_netns,
             d.recording,
+            d.device_history,
             d.tray.icons_shown,
             d.tray.cpu,
             d.tray.memory,
@@ -310,5 +348,19 @@ mod tests {
         assert!(d.unit_details.is_empty());
         assert!(d.remote_host_cookies.is_empty());
         assert!(d.graph_targets.is_empty());
+        assert_eq!(d.device_history_range, None);
+    }
+
+    #[test]
+    fn device_range_spans() {
+        let secs = [
+            DeviceRange::M1,
+            DeviceRange::M5,
+            DeviceRange::H1,
+            DeviceRange::H24,
+            DeviceRange::D7,
+        ]
+        .map(|r| r.span_ns() / 1_000_000_000);
+        assert_eq!(secs, [60, 300, 3_600, 86_400, 604_800]);
     }
 }
