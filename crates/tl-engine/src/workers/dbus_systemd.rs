@@ -4638,12 +4638,8 @@ mod tests {
         let cfg = EngineConfig::new(EngineMode::Full, root.join("state"))
             .with_sys_root(SysRoot::at(&root));
         let broker = Arc::new(Broker::default());
-        let mut clients = Vec::new();
-        for _ in 0..VISITS {
-            let (server, client) = broker_pair();
-            broker.peers.lock().expect("peers lock").push(server);
-            clients.push(client);
-        }
+        let pairs: Vec<_> = (0..VISITS).map(|_| broker_pair()).collect();
+        let visitor = Arc::clone(&broker);
         let bus = BrokerBus {
             inner: SlowBus {
                 answers: Arc::new(Mutex::new(std::collections::VecDeque::from([
@@ -4669,7 +4665,8 @@ mod tests {
             .state
             .create_task(lab_root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                for client in clients {
+                for (server, client) in pairs {
+                    visitor.peers.lock().expect("peers lock").push(server);
                     let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
                     let rule = zbus::MatchRule::builder()
                         .msg_type(zbus::message::Type::Signal)
