@@ -1238,6 +1238,38 @@ mod mini {
         assert!(max.y > gpui_kit::px(0.), "the list scrolls: {max:?}");
     }
 
+    /// UI-PRF-045 and UI-PRF-011: at the default mini width every card heading is one uncut row,
+    /// and the Memory card keeps its value in that row (tasklens-xdh.27). A network card's wide
+    /// value may take a row of its own.
+    #[gpui_kit::test]
+    fn mini_window_card_heading_is_one_row(cx: &mut TestAppContext) {
+        let _rig = setup(cx);
+        let (mut vcx, view) = open(cx);
+        draw(&mut vcx);
+        let cards: Vec<_> = vcx.read_entity(&view, |v, _| {
+            v.cards()
+                .iter()
+                .map(|c| (c.key.clone(), c.view.clone()))
+                .collect()
+        });
+        let mut memory = false;
+        for (key, card) in cards {
+            let p = vcx
+                .read_entity(&card, |c, _| c.prepared.clone())
+                .expect("the card rendered");
+            assert_eq!(p.layout.heading.rows.len(), 1, "{key:?}");
+            assert!(!p.layout.heading.cut, "{key:?}");
+            if key.kind() == DeviceKind::Memory {
+                memory = true;
+                assert!(
+                    p.layout.value_inline,
+                    "the Memory value is in its heading row"
+                );
+            }
+        }
+        assert!(memory, "the mini window has a Memory card");
+    }
+
     #[gpui_kit::test]
     fn mini_window_single_instance(cx: &mut TestAppContext) {
         let _rig = setup(cx);
