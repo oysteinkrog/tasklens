@@ -798,6 +798,10 @@ impl gpui_kit::Global for EditChrome {}
 /// 4 px gap.
 pub const EDIT_TITLE_RESERVE: f32 = 48.;
 
+/// The left end of a title line that Edit Layout keeps free for the 16 px grip, logical px before
+/// `ui_scale`, measured from the box's left edge (UI-PRF-018).
+pub const EDIT_TITLE_LEAD: f32 = 20.;
+
 /// Whether the box frames reserve the edit controls' space now.
 pub fn edit_chrome(cx: &App) -> bool {
     cx.try_global::<EditChrome>().is_some_and(|e| e.0)
@@ -927,6 +931,11 @@ pub fn box_frame(
     } else {
         px(0.)
     };
+    let title_pad_left = if edit {
+        (px(EDIT_TITLE_LEAD * m.ui_scale) - m.sp[5]).max(px(0.))
+    } else {
+        px(0.)
+    };
     let draws_time_axis = BoxKind::from_frame_id(id) != Some(BoxKind::TopProcs);
     // Each text style goes in first: it replaces the whole text refinement, so the nowrap,
     // ellipsis and colour set after it would otherwise be lost.
@@ -994,6 +1003,7 @@ pub fn box_frame(
                 .gap(m.sp[4])
                 .h(px(TITLE_ROW * m.ui_scale))
                 .mx(m.sp[5])
+                .pl(title_pad_left)
                 .pr(title_pad_right)
                 .child(title_el)
                 .child(line_el)

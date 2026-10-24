@@ -83,6 +83,11 @@ pub fn hide_button_id(kind: BoxKind) -> String {
     format!("perf-overview-hide-{}", kind.key())
 }
 
+/// The debug selector of `kind`'s grip in Edit Layout mode.
+pub fn grip_id(kind: BoxKind) -> String {
+    format!("perf-overview-grip-{}", kind.key())
+}
+
 /// Where a dragged box lands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DropTarget {
@@ -874,6 +879,7 @@ impl OverviewPage {
             let kind = p.kind;
             let b = p.bounds;
             let grip = div()
+                .debug_selector(move || grip_id(kind))
                 .absolute()
                 .left_0()
                 .top_0()

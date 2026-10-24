@@ -5993,6 +5993,47 @@ mod page {
         }
     }
 
+    /// UI-PRF-018: in Edit Layout mode the grip sits left of the title tab and clear of the value
+    /// text, at both smoke sizes.
+    #[gpui_kit::test]
+    fn overview_edit_grip_before_title(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::edit::grip_id;
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            draw(r.vcx);
+            r.edit_layout();
+            draw(r.vcx);
+            let mut checked = 0;
+            for kind in BoxKind::ALL {
+                let box_id = format!("perf-overview-box-{}", kind.key());
+                let tab_id: &'static str = Box::leak(
+                    tl_ui::pages::performance::overview::parts::title_tab_id(&box_id)
+                        .into_boxed_str(),
+                );
+                let value_id: &'static str = Box::leak(
+                    tl_ui::pages::performance::overview::parts::title_value_id(&box_id)
+                        .into_boxed_str(),
+                );
+                let (Some(tab), Some(value)) =
+                    (r.vcx.debug_bounds(tab_id), r.vcx.debug_bounds(value_id))
+                else {
+                    continue;
+                };
+                let grip = r.bounds_of(grip_id(kind));
+                assert!(
+                    grip.right() <= tab.left(),
+                    "{w}x{h} {kind:?}: grip {grip:?} is not left of the title {tab:?}"
+                );
+                assert!(
+                    !grip.intersects(&value),
+                    "{w}x{h} {kind:?}: grip {grip:?} overlaps the value {value:?}"
+                );
+                checked += 1;
+            }
+            assert!(checked >= 3, "{w}x{h}: only {checked} boxes checked");
+        }
+    }
+
     #[gpui_kit::test]
     fn overview_box_reset_and_gear(cx: &mut TestAppContext) {
         let mut r = open_rooted(cx, true, 1200., 900.);
