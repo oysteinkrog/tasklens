@@ -18,12 +18,12 @@ use gpui_kit::base::{
 };
 
 use gpui_kit::{
-    AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask, Context,
-    DismissEvent, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, TextRun,
-    UniformListScrollHandle, WeakEntity, Window, canvas, div, fill, font, point, px, size,
+    AnyElement, AnyView, App, AsyncApp, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask,
+    Context, DismissEvent, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
+    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription,
+    TextRun, UniformListScrollHandle, WeakEntity, Window, canvas, div, fill, font, point, px, size,
     uniform_list,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
@@ -91,6 +91,12 @@ pub const SCROLLBAR_W: f32 = 16.0;
 pub const DEMAND_MAX_IDS: usize = 512;
 /// No scroll anchoring for this long after the last wheel event (UI-PRC-010).
 pub const WHEEL_QUIET: Duration = Duration::from_millis(200);
+/// How long the order stays held after the button is up, so the second press of a double-click
+/// lands on the row of the first.
+pub const PRESS_HOLD_AFTER_UP: Duration = Duration::from_millis(500);
+/// The longest the order stays held when no release arrives (focus moved to another window or a
+/// popup took the mouse-up).
+pub const PRESS_HOLD_MAX: Duration = Duration::from_secs(3);
 
 /// What one table owner supplies. Row indices are positions in the current flattened row list
 /// and are only valid for the current `table_version`; anything kept across frames uses `RowId`.
@@ -346,6 +352,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     /// True from a left press on a row until the button is up. The owner keeps the rows still
     /// meanwhile, so the row under the pointer is the row pressed (UI-PRC-008).
     pub pressed: bool,
+    /// Bumped by every press, so a release timer of an earlier press does nothing.
+    press_gen: u64,
     /// The body rows the last frame built, by flattened index.
     visible_range: Range<usize>,
     /// The top-most visible selectable row of the last frame: its identity, its rows from the
@@ -431,6 +439,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             hover_row: None,
             paused: false,
             pressed: false,
+            press_gen: 0,
             visible_range: 0..0,
             anchor: None,
             last_wheel: None,
@@ -1229,10 +1238,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     ) {
         cx.stop_propagation();
         window.focus(&self.focus, cx);
-        self.pressed = true;
         let Some(ix) = self.delegate.row_index(id) else {
             return;
         };
+        self.pressed = true;
+        self.press_gen += 1;
+        self.release_press_after(PRESS_HOLD_MAX, cx);
         let double = ev.click_count == 2;
         if self.delegate.row_kind(ix) == RowKind::GroupHeader {
             // The first press of a double-click has toggled already; the second does nothing, so
@@ -1267,11 +1278,27 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         cx.notify();
     }
 
-    /// The left button is up, over the table or anywhere else in the window.
+    /// The left button is up, over the table or anywhere else in the window. The hold ends after
+    /// [`PRESS_HOLD_AFTER_UP`] unless another press comes first (a double-click).
     fn release_press(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.pressed) {
-            cx.emit(TreeTableEvent::PressReleased);
+        if self.pressed {
+            self.release_press_after(PRESS_HOLD_AFTER_UP, cx);
         }
+    }
+
+    /// Ends the hold of the current press after `wait`; a later press cancels it.
+    fn release_press_after(&mut self, wait: Duration, cx: &mut Context<Self>) {
+        let gen_at = self.press_gen;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |t, cx| {
+                if t.press_gen == gen_at && std::mem::take(&mut t.pressed) {
+                    cx.emit(TreeTableEvent::PressReleased);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Left press on the body below the last row: nothing selected.

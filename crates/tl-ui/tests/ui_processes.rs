@@ -1706,9 +1706,81 @@ mod page {
         redraw(vcx);
     }
 
-    /// pdu.67: a re-sort between mouse-down and mouse-up keeps the pressed row under the pointer.
+    /// pdu.67: a re-sort while a row is pressed, including the gap between the two presses of a
+    /// double-click, keeps the pressed row under the pointer and selected.
     #[gpui_kit::test]
-    fn resort_waits_for_mouse_up(cx: &mut TestAppContext) {
+    fn resort_waits_for_press_release(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let o = open(cx);
+        publish(&o.engine, rows_500(2, false), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let top = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                let t = page.read(cx).table().read(cx);
+                tl_ui::table::tree_table::TreeTableDelegate::row_id(&t.delegate, 0)
+            })
+        };
+        let selected = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                page.read(cx)
+                    .table()
+                    .read(cx)
+                    .selection
+                    .ids()
+                    .collect::<Vec<_>>()
+            })
+        };
+        let pressed = top(o.vcx);
+        let down = |vcx: &mut VisualTestContext, click_count| {
+            vcx.simulate_event(MouseDownEvent {
+                position: row_at(0),
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+        };
+        let up = |vcx: &mut VisualTestContext, click_count| {
+            vcx.simulate_event(MouseUpEvent {
+                position: row_at(0),
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count,
+            });
+        };
+        down(o.vcx, 1);
+        up(o.vcx, 1);
+        // The re-sort lands between the two presses.
+        publish(&o.engine, rows_500(3, true), 1);
+        redraw(o.vcx);
+        assert_eq!(
+            top(o.vcx),
+            pressed,
+            "the order holds after the first release"
+        );
+        down(o.vcx, 2);
+        assert_eq!(
+            selected(o.vcx),
+            vec![pressed],
+            "the second press hit the pressed row"
+        );
+        up(o.vcx, 2);
+        o.vcx.executor().advance_clock(Duration::from_millis(100));
+        redraw(o.vcx);
+        assert_eq!(top(o.vcx), pressed, "still held shortly after the release");
+        o.vcx.executor().advance_clock(Duration::from_millis(600));
+        redraw(o.vcx);
+        assert_ne!(
+            top(o.vcx),
+            pressed,
+            "the held view is installed after the double-click window"
+        );
+    }
+
+    /// pdu.67: a release that never arrives does not freeze the table.
+    #[gpui_kit::test]
+    fn lost_release_ends_the_hold(cx: &mut TestAppContext) {
         let o = open(cx);
         publish(&o.engine, rows_500(2, false), 1);
         redraw(o.vcx);
@@ -1729,19 +1801,12 @@ mod page {
         });
         publish(&o.engine, rows_500(3, true), 1);
         redraw(o.vcx);
-        assert_eq!(
-            top(o.vcx),
-            pressed,
-            "the order held while the button is down"
-        );
-        o.vcx.simulate_event(MouseUpEvent {
-            position: row_at(0),
-            modifiers: Modifiers::none(),
-            button: MouseButton::Left,
-            click_count: 1,
-        });
+        assert_eq!(top(o.vcx), pressed, "held while the button is down");
+        o.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(4));
         redraw(o.vcx);
-        assert_ne!(top(o.vcx), pressed, "the held view is installed on release");
+        assert_ne!(top(o.vcx), pressed, "the hold timed out");
     }
 
     #[gpui_kit::test]
