@@ -250,8 +250,9 @@ fn hidden_device_history_keeps_its_1hz_sources() {
         logs.push((*name, log));
     }
 
-    fl.run_for(Duration::from_millis(59_990), TICK);
-    let every_second: Vec<u64> = (0..60).map(|k| k * 1_000).collect();
+    // 10 s: nothing reads the update queue, which holds 256 updates.
+    fl.run_for(Duration::from_millis(9_990), TICK);
+    let every_second: Vec<u64> = (0..10).map(|k| k * 1_000).collect();
     for (name, log) in &logs[..on.len()] {
         assert_eq!(times_ms(log, "sample"), every_second, "{name}");
     }
