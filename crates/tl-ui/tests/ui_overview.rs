@@ -5573,6 +5573,98 @@ mod page {
         );
     }
 
+    /// crw.70: in `rows` mode a long model stays on one line inside its header row, and every
+    /// rate cell keeps its whole text, down to a 500 px window.
+    #[gpui_kit::test]
+    fn overview_disk_rows_text_stays_in_row(cx: &mut TestAppContext) {
+        use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails};
+        use tl_model::table::Total;
+        use tl_model::validity::Validity;
+        use tl_ui::pages::performance::overview::disk_box::{
+            DISK_ROW_ID_PREFIX, io_row_id, row_part_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = three_disks(&mut r);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "rows".into(),
+        });
+        let page = r.page.clone();
+        let idxs: Vec<DeviceIdx> = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .disk_box()
+                .read(cx)
+                .rows()
+                .iter()
+                .map(|d| d.idx)
+                .collect()
+        });
+        r.engine.publish_with(|s| {
+            let mut details = DeviceDetailsSnapshot::default();
+            details.header.version = 1;
+            details.disks = idxs
+                .iter()
+                .map(|&idx| {
+                    (
+                        idx,
+                        DiskDetails {
+                            model: Total {
+                                value: Arc::from("HGST HDS724040ALE640 with a very long model"),
+                                validity: Validity::Valid,
+                            },
+                            ..DiskDetails::default()
+                        },
+                    )
+                })
+                .collect();
+            s.device_details = Arc::new(details);
+        });
+        widest_rates(&mut r);
+        let mut shown = 0;
+        for (w, h) in [(500., 900.), (660., 900.), (800., 900.), (1200., 900.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            for k in &keys {
+                let at = format!("{w}x{h} {}", k.0);
+                let row = r.bounds_of(format!("{DISK_ROW_ID_PREFIX}{}", k.0));
+                let model = r.bounds_of(row_part_id(k, "model"));
+                let active = r.bounds_of(row_part_id(k, "active"));
+                assert!(
+                    model.size.height <= row.size.height + px(0.5),
+                    "{at} {model:?}"
+                );
+                assert!(
+                    model.bottom() <= row.bottom() + px(0.5),
+                    "{at} {model:?} {row:?}"
+                );
+                assert!(
+                    model.right() <= active.left() + px(0.5),
+                    "{at} {model:?} {active:?}"
+                );
+                for which in ["read", "write"] {
+                    // A collapsed section has no Read and Write rows.
+                    let id: &'static str = Box::leak(io_row_id(k, which).into_boxed_str());
+                    let Some(line) = r.vcx.debug_bounds(id) else {
+                        continue;
+                    };
+                    let rate = r.bounds_of(format!("{id}-rate"));
+                    shown += 1;
+                    assert!(
+                        rate.right() <= line.right() + px(0.5) && rate.left() >= line.left(),
+                        "{at} {which} {rate:?} outside {line:?}"
+                    );
+                    // "1023.9 MiB/s" at 12 px is wider than the old 76 px column.
+                    assert!(rate.size.width > px(76.), "{at} {which} {rate:?}");
+                    assert!(
+                        rate.size.height <= line.size.height + px(0.5),
+                        "{at} {which}"
+                    );
+                }
+            }
+        }
+        assert!(shown >= 4, "Read and Write rows shown: {shown}");
+    }
+
     #[gpui_kit::test]
     fn overview_net_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{

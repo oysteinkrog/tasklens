@@ -26,7 +26,7 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, relative, size,
+    Subscription, TextStyleRefinement, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -114,9 +114,10 @@ const GRID_BAR_W: f32 = 16.;
 /// The debug selector of the `disk_charts` grid viewport.
 pub const GRID_ID: &str = "perf-overview-disk-grid";
 
-/// The `rows` parts' minimums: the label part keeps the word and rate columns, the sparkline
-/// part a short sparkline. Logical px before `ui_scale`.
-const LABEL_PART_MIN_W: f32 = 128.;
+/// The `rows` parts' minimums: the label part keeps the word column (72 px), the gap and the
+/// widest rate ("1023.9 MiB/s", about 88 px), the sparkline part a short sparkline. Logical px
+/// before `ui_scale`.
+const LABEL_PART_MIN_W: f32 = 168.;
 const SPARK_PART_MIN_W: f32 = 64.;
 
 /// Which parts the box shows (UI-PRF-019).
@@ -831,31 +832,49 @@ impl DiskBox {
 /// The debug selector prefix of a disk section's header, followed by its device key.
 pub const DISK_ROW_ID_PREFIX: &str = "perf-overview-disk-row:";
 
-/// A right-aligned number column: a rate or the active percent.
-fn rate_cell(text: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    let mut d = div()
+/// The debug selector of a part of a disk section's label rows: "model", "active", "read" or
+/// "write".
+pub fn row_part_id(key: &DeviceKey, part: &str) -> String {
+    format!("{DISK_BOX_ID}-row-{part}:{}", key.0)
+}
+
+/// A right-aligned number column: a rate or the active percent. It is `RATE_W` wide at least and
+/// grows to its text, so a rate never wraps or loses its unit (UI-FND-051 rule 3).
+fn rate_cell(id: String, text: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    // The text style first: assigning it later would drop the nowrap and the color.
+    let mut d = div();
+    *d.text_style() = numeric_style(m, m.text.sm);
+    d.debug_selector(move || id)
         .flex_none()
-        .w(px(RATE_W * m.ui_scale))
+        .min_w(px(RATE_W * m.ui_scale))
         .flex()
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(text.clone());
-    *d.text_style() = numeric_style(m, m.text.sm);
-    d.into_any_element()
+        .child(text.clone())
+        .into_any_element()
 }
 
 /// A section header: name, model and active percent. A click opens that disk (crw.44).
 fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    let mut name = div()
+    // The text style goes in first: assigning it later would drop the nowrap, the ellipsis and
+    // the color, and a long model would wrap onto the next row.
+    let mut name = div();
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let name = name
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
         .text_color(theme.text_primary)
         .child(r.name.clone());
-    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
-    let mut model = div()
+    let mut model = div();
+    *model.text_style() = t_sm(m);
+    let model = model
+        .debug_selector({
+            let id = row_part_id(&r.key, "model");
+            move || id
+        })
         .flex_1()
         .min_w_0()
         .overflow_hidden()
@@ -863,7 +882,6 @@ fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(r.model.clone());
-    *model.text_style() = t_sm(m);
     let key = r.key.0.clone();
     let row = div()
         .debug_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"))
@@ -875,7 +893,12 @@ fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .h(px(LABEL_ROW * m.ui_scale))
         .child(name)
         .child(model)
-        .child(rate_cell(&r.active, m, theme));
+        .child(rate_cell(
+            row_part_id(&r.key, "active"),
+            &r.active,
+            m,
+            theme,
+        ));
     opens_device(row, Some(r.key.clone())).into_any_element()
 }
 
@@ -888,7 +911,10 @@ fn io_text_row(
     theme: &TlTheme,
 ) -> AnyElement {
     let s = m.ui_scale;
-    let mut label = div()
+    let rate_id = format!("{id}-rate");
+    let mut label = div();
+    *label.text_style() = t_sm(m);
+    let label = label
         .flex_none()
         .w(px(ROW_LABEL_W * s))
         .overflow_hidden()
@@ -896,7 +922,6 @@ fn io_text_row(
         .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(word.clone());
-    *label.text_style() = t_sm(m);
     div()
         .debug_selector(move || id)
         .flex()
@@ -907,7 +932,7 @@ fn io_text_row(
         .gap(m.sp[4])
         .h(px(LABEL_ROW * s))
         .child(label)
-        .child(rate_cell(rate, m, theme))
+        .child(rate_cell(rate_id, rate, m, theme))
         .into_any_element()
 }
 
@@ -952,10 +977,12 @@ fn cell_head(
 ) -> AnyElement {
     let key = &r.key;
     let one_line = width >= px(HEAD_ONE_LINE_W * m.ui_scale);
-    let part = |id: String, text: SharedString, color| {
-        // Only the name gives way, so the numbers always show whole.
-        div()
-            .debug_selector(move || id)
+    let part = |id: String, text: SharedString, color, style: TextStyleRefinement| {
+        // Only the name gives way, so the numbers always show whole. The text style goes in
+        // first: assigning it later would drop the nowrap and the ellipsis.
+        let mut d = div();
+        *d.text_style() = style;
+        d.debug_selector(move || id)
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -964,18 +991,29 @@ fn cell_head(
             .child(text)
             .flex_shrink_0()
     };
-    let mut name = part(head_id(key, "name"), r.name.clone(), theme.text_primary)
-        .flex_shrink(1.)
-        .flex_1()
-        .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
-    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
-    let mut active = part(head_id(key, "active"), r.active.clone(), theme.text_primary);
-    *active.text_style() = numeric_style(m, m.text.sm);
+    let name = part(
+        head_id(key, "name"),
+        r.name.clone(),
+        theme.text_primary,
+        label_style(m, m.text.sm, FontWeight::MEDIUM),
+    )
+    .flex_shrink(1.)
+    .flex_1()
+    .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
+    let active = part(
+        head_id(key, "active"),
+        r.active.clone(),
+        theme.text_primary,
+        numeric_style(m, m.text.sm),
+    );
     let rate = |which: &str, word: &SharedString, value: &SharedString| {
         let text = rate_text(width, m.ui_scale, word, value);
-        let mut d = part(head_id(key, which), text, theme.text_secondary);
-        *d.text_style() = numeric_style(m, m.text.xs);
-        d
+        part(
+            head_id(key, which),
+            text,
+            theme.text_secondary,
+            numeric_style(m, m.text.xs),
+        )
     };
     let (read, write) = (
         rate("read", &words[0], &r.read),
