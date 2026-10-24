@@ -25,6 +25,7 @@ use tl_ui::components::window_frame::{
 };
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
+use tl_ui::windows::frame::{PwnWindow, spec as pwn_spec};
 
 struct Body;
 
@@ -147,6 +148,26 @@ fn properties_windows_are_normal_not_floating(cx: &mut TestAppContext) {
     let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
     assert_eq!(options.kind, WindowKind::Normal);
     assert_eq!(TlWindowKind::Properties.window_kind(), WindowKind::Normal);
+    // The process and app Properties windows take their kind from the UI-PWN-001 table.
+    for window in [PwnWindow::ProcessProperties, PwnWindow::AppProperties] {
+        assert_eq!(
+            pwn_spec(window).kind.window_kind(),
+            WindowKind::Normal,
+            "{window:?}"
+        );
+    }
+    assert_eq!(
+        pwn_spec(PwnWindow::Run).kind.window_kind(),
+        WindowKind::Floating
+    );
+    assert_eq!(
+        pwn_spec(PwnWindow::HandleSearch).kind.window_kind(),
+        WindowKind::Floating
+    );
+    assert_eq!(
+        pwn_spec(PwnWindow::SetPriority).kind.window_kind(),
+        WindowKind::Dialog
+    );
     assert_eq!(TlWindowKind::Run.window_kind(), WindowKind::Floating);
     assert_eq!(
         TlWindowKind::Tool { resizable: true }.window_kind(),
