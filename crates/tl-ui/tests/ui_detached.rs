@@ -951,10 +951,10 @@ mod mini {
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
-    use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{
         ComponentHeader, FrameGeometry, SeriesSet, WindowEntry, WindowsSnapshot,
     };
