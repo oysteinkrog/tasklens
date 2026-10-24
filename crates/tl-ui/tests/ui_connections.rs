@@ -1218,7 +1218,12 @@ mod page {
                 .is_some_and(|d| d.any_surface_visible && d.connections)
         );
         rig.set_active(false);
-        assert_eq!(rig.engine.demands().last(), Some(&Demand::default()));
+        // Device history follows `history.device_metrics`, visible or not (ADR-017).
+        let hidden = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(rig.engine.demands().last(), Some(&hidden));
         rig.set_active(true);
         let refreshes = rig
             .engine
