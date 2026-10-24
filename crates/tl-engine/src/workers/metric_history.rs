@@ -203,14 +203,13 @@ pub fn finest_tier_at(age_ns: i64) -> Tier {
 
 /// The tier and the `[from, to]` CLOCK_REALTIME span that answer `req` at `now_realtime_ns`. A
 /// live range uses its own tier. A paused range ends at its time (never after now) and uses the
-/// coarser of its own tier and the finest tier that still covers that end.
+/// finest tier that still covers that end (UI-PRF-057 "Paused view").
 pub fn plan(req: DeviceHistoryRequest, now_realtime_ns: i64) -> (Tier, i64, i64) {
-    let natural = range_tier(req.range);
     let (tier, to) = match req.end_realtime_ns {
-        None => (natural, now_realtime_ns),
+        None => (range_tier(req.range), now_realtime_ns),
         Some(end) => {
             let to = end.min(now_realtime_ns);
-            (natural.max(finest_tier_at(now_realtime_ns - to)), to)
+            (finest_tier_at(now_realtime_ns - to), to)
         }
     };
     let from = to.saturating_sub(req.range.span_ns() as i64);
@@ -1032,7 +1031,7 @@ mod tests {
             plan(req(DeviceRange::D7, None), now),
             (Tier::M1, now - 7 * 24 * HOUR, now)
         );
-        // Paused: the coarser of the range's tier and the finest tier that covers the end.
+        // Paused: the finest tier that covers the end, whatever the range.
         let half_hour = now - HOUR / 2;
         assert_eq!(plan(req(DeviceRange::M5, Some(half_hour)), now).0, Tier::S1);
         assert_eq!(
@@ -1043,7 +1042,11 @@ mod tests {
             plan(req(DeviceRange::H1, Some(now - 3 * 24 * HOUR)), now),
             (Tier::M1, now - 73 * HOUR, now - 3 * 24 * HOUR)
         );
-        assert_eq!(plan(req(DeviceRange::D7, Some(half_hour)), now).0, Tier::M1);
+        assert_eq!(plan(req(DeviceRange::D7, Some(half_hour)), now).0, Tier::S1);
+        assert_eq!(
+            plan(req(DeviceRange::H24, Some(now - 2 * HOUR)), now),
+            (Tier::S10, now - 26 * HOUR, now - 2 * HOUR)
+        );
         // A paused end after now is read as now.
         assert_eq!(
             plan(req(DeviceRange::M1, Some(now + HOUR)), now),
