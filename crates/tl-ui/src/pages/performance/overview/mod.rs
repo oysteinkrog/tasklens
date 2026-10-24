@@ -45,6 +45,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::ids::DeviceIdx;
+use tl_model::settings::StatusBarPlacement;
 
 use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;
@@ -56,10 +57,11 @@ use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::splitter::{Drag, Splitter, Target, round_weights, set_weights, splitters};
-use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout};
+use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfSetStatusBar};
 use super::details::KeyValueModel;
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
+use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use super::{DeviceKey, DeviceKind};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
@@ -87,6 +89,31 @@ const SPLITTER_LINE: f32 = 2.;
 
 /// The debug selector of the accent line of the hovered or dragged gap.
 pub const SPLITTER_LINE_ID: &str = "perf-overview-splitter-line";
+
+/// The height of a box's state edge (UI-PRF-054), logical px × ui_scale.
+pub const EDGE_H: f32 = 2.;
+
+/// The debug selector of a box's state edge: `perf-overview-edge-cpu`.
+pub fn edge_id(kind: BoxKind) -> String {
+    format!("perf-overview-edge-{}", kind.key())
+}
+
+/// The "Status bar" submenu items: the value and the `en-US.ftl` key of its word.
+const STATUS_BAR_ITEMS: [(StatusBarPlacement, &str); 4] = [
+    (
+        StatusBarPlacement::Overview,
+        "perf-overview-status-bar-overview",
+    ),
+    (
+        StatusBarPlacement::Performance,
+        "perf-overview-status-bar-performance",
+    ),
+    (
+        StatusBarPlacement::AllTabs,
+        "perf-overview-status-bar-all-tabs",
+    ),
+    (StatusBarPlacement::Off, "perf-overview-status-bar-off"),
+];
 
 /// A gap drag in progress. `changed` is set once a move changed a weight, so a click that
 /// moved nothing saves nothing.
@@ -167,6 +194,8 @@ pub struct OverviewPage {
     edit: Option<EditState>,
     /// The box area's origin in window px from the last paint, for the box drag.
     content_origin: Rc<Cell<Point<Pixels>>>,
+    /// The machine status, for each box's state edge (UI-PRF-054).
+    status: Entity<StatusBar>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -256,6 +285,8 @@ impl OverviewPage {
         subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         subs.push(cx.subscribe(&disk, Self::on_disk_split));
         subs.push(cx.subscribe(&net, Self::on_net_split));
+        let status = status_bar::status_bar(&hub, &demand, cx);
+        subs.push(cx.subscribe(&status, |this, _, _: &EdgesChanged, cx| this.notify(cx)));
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
@@ -294,6 +325,7 @@ impl OverviewPage {
             hover_task: None,
             edit: None,
             content_origin: Rc::default(),
+            status,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -358,6 +390,11 @@ impl OverviewPage {
     /// The hub the boxes read.
     pub fn hub(&self) -> &Entity<SnapshotHub> {
         &self.hub
+    }
+
+    /// The colour of `kind`'s state edge, `None` for a Calm box (UI-PRF-054).
+    pub fn edge_color(&self, kind: BoxKind, cx: &App) -> Option<gpui_kit::Hsla> {
+        state_color(self.status.read(cx).box_state(kind), current(cx))
     }
 
     fn present(&self, kind: BoxKind) -> bool {
@@ -774,10 +811,28 @@ impl DevicePage for OverviewPage {
         SmallVec::new()
     }
 
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let placement = status_bar::placement(cx);
+        let words: SmallVec<[SharedString; 4]> =
+            STATUS_BAR_ITEMS.iter().map(|(_, k)| tr(cx, k)).collect();
         menu.item(
             tr(cx, "perf-overview-edit-layout"),
             Box::new(PerfOverviewEditLayout),
+        )
+        .submenu(
+            tr(cx, "perf-overview-status-bar"),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                for ((value, _), word) in STATUS_BAR_ITEMS.iter().zip(&words) {
+                    menu = menu.radio_item(
+                        word.clone(),
+                        *value == placement,
+                        Box::new(PerfSetStatusBar { placement: *value }),
+                    );
+                }
+                menu
+            },
         )
     }
 
@@ -936,6 +991,21 @@ impl Render for OverviewPage {
                         }),
                     )
                     .child(self.box_element(p.kind));
+                // The state edge over the box's top border (UI-PRF-054).
+                let edge = self.edge_color(kind, cx).map(|color| {
+                    let id = edge_id(kind);
+                    let m = metrics(cx);
+                    div()
+                        .debug_selector(move || id.clone())
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(EDGE_H * m.ui_scale))
+                        .rounded_t(m.radius_card)
+                        .bg(color)
+                });
+                let el = el.children(edge);
                 self.edit_box(p, el, window, cx).into_any_element()
             })
             .collect();

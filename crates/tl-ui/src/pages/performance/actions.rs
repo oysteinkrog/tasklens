@@ -14,7 +14,9 @@ use std::sync::Arc;
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::{Deserialize, Deserializer};
-pub use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph};
+pub use tl_model::settings::{
+    CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph, StatusBarPlacement,
+};
 
 use super::{DeviceKey, DeviceKind};
 
@@ -305,6 +307,25 @@ pub struct PerfFetchPublicIp {
     pub key: DeviceKey,
 }
 
+/// Sets `performance.status_bar` (UI-PRF-054).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetStatusBar {
+    #[serde(deserialize_with = "via::<_, StatusBarPlacementJson, _>")]
+    #[schemars(with = "StatusBarPlacementJson")]
+    pub placement: StatusBarPlacement,
+}
+
+/// Opens the page of `key` from the status bar, switching to the Performance tab first
+/// (UI-PRF-054).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfStatusOpen {
+    pub key: DeviceKey,
+}
+
 /// Reads a model enum through its JSON mirror `M`.
 fn via<'de, D: Deserializer<'de>, M: Deserialize<'de> + Into<T>, T>(d: D) -> Result<T, D::Error> {
     M::deserialize(d).map(Into::into)
@@ -357,6 +378,13 @@ json_mirror!(
     GpuOptionalGraphJson <-> GpuOptionalGraph,
     "lowercase",
     [Power, Clocks]
+);
+
+json_mirror!(
+    /// JSON form of [`StatusBarPlacement`].
+    StatusBarPlacementJson <-> StatusBarPlacement,
+    "snake_case",
+    [Overview, Performance, AllTabs, Off]
 );
 
 /// Binds the Performance rows of canonical table (b).

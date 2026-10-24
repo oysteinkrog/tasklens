@@ -118,6 +118,20 @@ impl CoreSmoothing {
     }
 }
 
+/// `performance.status_bar` (UI-PRF-054, D-030): where the machine status bar shows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusBarPlacement {
+    /// The top of the Overview page.
+    #[default]
+    Overview,
+    /// Above every Performance page.
+    Performance,
+    /// Under the tab strip on every tab.
+    AllTabs,
+    Off,
+}
+
 /// Entries of `performance.gpu_optional_graphs`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -336,6 +350,8 @@ pub struct PerformanceSettings {
     pub network_dynamic_scale: bool,
     /// Smoothing of the Overview core rows (UI-PRF-018, D-024).
     pub overview_core_smoothing: CoreSmoothing,
+    /// Where the machine status bar shows (UI-PRF-054).
+    pub status_bar: StatusBarPlacement,
     /// The old opt-in Top processes switch (crw.45). Read once by [`Settings::clamp`], which
     /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
     #[serde(skip_serializing)]
@@ -758,6 +774,7 @@ impl Default for PerformanceSettings {
             curved_lines: false,
             network_dynamic_scale: true,
             overview_core_smoothing: CoreSmoothing::default(),
+            status_bar: StatusBarPlacement::default(),
             overview_top_processes: false,
             overview: None,
         }
@@ -1733,6 +1750,7 @@ mod tests {
         assert!(!p.curved_lines);
         assert!(p.network_dynamic_scale);
         assert_eq!(p.overview_core_smoothing, CoreSmoothing::Medium);
+        assert_eq!(p.status_bar, StatusBarPlacement::Overview);
         assert!(!p.overview_top_processes);
         assert_eq!(p.overview, None);
 
@@ -2298,6 +2316,22 @@ mod tests {
         s.performance.overview = Some(OverviewLayoutSetting::btop_default());
         let text = toml::to_string(&s).expect("serializes");
         assert!(!text.contains("arrange"), "{text}");
+    }
+
+    #[test]
+    fn status_bar_placement_values() {
+        for (text, want) in [
+            ("overview", StatusBarPlacement::Overview),
+            ("performance", StatusBarPlacement::Performance),
+            ("all_tabs", StatusBarPlacement::AllTabs),
+            ("off", StatusBarPlacement::Off),
+        ] {
+            let (s, changed) = load_toml(&format!("[performance]\nstatus_bar = \"{text}\"\n"));
+            assert!(changed.is_empty(), "{text}");
+            assert_eq!(s.performance.status_bar, want, "{text}");
+            let out = toml::to_string(&s).expect("serializes");
+            assert!(out.contains(&format!("status_bar = \"{text}\"")), "{out}");
+        }
     }
 
     #[test]

@@ -93,6 +93,7 @@ use crate::pages::information::InformationPage;
 use crate::pages::information::actions::CopyInformationAll;
 use crate::pages::information::section::InfoSectionId;
 use crate::pages::performance::details::Template;
+use crate::pages::performance::status_bar::{self as machine_status, Slot, StatusBar};
 use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
@@ -1253,6 +1254,11 @@ pub struct MainWindow {
     pending_pid: Option<PendingPid>,
     /// The page fade-in after a tab switch: start and duration (E20-021).
     fade: Option<(Instant, Duration)>,
+    /// The machine status bar, drawn under the tab strip for `performance.status_bar =
+    /// "all_tabs"` (UI-PRF-054). `None` without a hub.
+    machine_status: Option<Entity<StatusBar>>,
+    /// `performance.status_bar` at the last settings change.
+    status_placement: tl_model::settings::StatusBarPlacement,
     /// The page container's opacity at the last render.
     #[cfg(any(test, feature = "test-hooks"))]
     page_opacity: f32,
@@ -1304,8 +1310,20 @@ impl MainWindow {
         }
 
         let fps = cx.new(FpsOverlay::new);
+        let machine_status = cx
+            .try_global::<GlobalHub>()
+            .map(|h| h.0.clone())
+            .zip(cx.try_global::<GlobalDemand>().map(|d| d.0.clone()))
+            .map(|(hub, demand)| machine_status::status_bar(&hub, &demand, cx));
 
         let mut subs = SmallVec::new();
+        subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
+            let placement = machine_status::placement(cx);
+            if placement != this.status_placement {
+                this.status_placement = placement;
+                cx.notify();
+            }
+        }));
         // First focus starts the Shift-at-launch window (E29-030, R-124, U-43).
         subs.push(
             cx.observe_window_activation(window, |this: &mut Self, window, cx| {
@@ -1466,6 +1484,8 @@ impl MainWindow {
             shift_at_launch: false,
             pending_pid: None,
             fade: None,
+            machine_status,
+            status_placement: machine_status::placement(cx),
             #[cfg(any(test, feature = "test-hooks"))]
             page_opacity: 1.0,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -2576,6 +2596,14 @@ impl Render for MainWindow {
             .flatten()
             .and_then(|p| p.read(cx).summary_view());
         let shell = summary.is_none();
+        // The status bar under the tab strip on every tab (UI-PRF-054).
+        let bar = self.machine_status.clone().filter(|_| {
+            shell && machine_status::shows_in(Slot::Main, self.status_placement, false)
+        });
+        if let Some(status) = &self.machine_status {
+            let handle = bar.is_some().then(|| window.window_handle());
+            status.update(cx, |b, cx| b.set_shown(Slot::Main, handle, cx));
+        }
         // A cached view is laid out at its style size, so the chip gets the slot's full width;
         // the chip itself sizes to its content inside it (max_w_full).
         let chip = AnyView::from(self.status.clone())
@@ -2629,6 +2657,7 @@ impl Render for MainWindow {
                         .cached(StyleRefinement::default().w_full().h(px(TAB_STRIP_H * s))),
                 )
             })
+            .children(bar)
             .when(shell, |el| {
                 el.child(
                     div()

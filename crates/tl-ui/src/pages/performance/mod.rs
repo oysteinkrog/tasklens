@@ -23,6 +23,7 @@ pub mod overview;
 pub mod page;
 pub mod sensors;
 pub mod sidebar;
+pub mod status_bar;
 pub mod summary;
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -49,12 +50,14 @@ use tl_model::system::{SensorKind, SensorReading};
 
 use self::actions::{
     PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
-    PerfSelectVisibleDevice, PerfSetGraphRange, PerfToggleSidebar, PerfToggleSummaryMode,
+    PerfSelectVisibleDevice, PerfSetGraphRange, PerfSetStatusBar, PerfToggleSidebar,
+    PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
 use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
 use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
+use self::status_bar::{Slot, StatusBar};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
@@ -431,7 +434,12 @@ pub struct PerformancePage {
     pub(crate) focus: FocusHandle,
     /// The Details value the open page menu was opened on, for "Copy value".
     clicked_value: Option<SharedString>,
-    _subs: SmallVec<[Subscription; 1]>,
+    /// The machine status bar, drawn above the page panel for the `overview` and `performance`
+    /// placements (UI-PRF-054).
+    status: Entity<StatusBar>,
+    /// `performance.status_bar` at the last render, so a change renders again.
+    status_placement: tl_model::settings::StatusBarPlacement,
+    _subs: SmallVec<[Subscription; 2]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// The last title this page set; the test platform window does not report its title.
@@ -451,6 +459,12 @@ impl PerformancePage {
         let sidebar_focus = sidebar.read(cx).focus.clone();
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&sidebar, Self::on_sidebar));
+        let status = status_bar::status_bar(&hub, &demand, cx);
+        subs.push(cx.observe_global::<TlSettings>(|this, cx| {
+            if status_bar::placement(cx) != this.status_placement {
+                cx.notify();
+            }
+        }));
         let nav_width = TlSettings::state(cx).performance.nav_width;
         let first = sidebar.read(cx).selected().cloned();
         let mut this = Self {
@@ -471,6 +485,8 @@ impl PerformancePage {
             demand,
             focus: cx.focus_handle(),
             clicked_value: None,
+            status,
+            status_placement: status_bar::placement(cx),
             summary: None,
             summary_sub: None,
             leaving: None,
@@ -495,6 +511,10 @@ impl PerformancePage {
             cx.notify();
         }
         self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
+        if !active {
+            self.status
+                .update(cx, |b, cx| b.set_shown(Slot::Performance, None, cx));
+        }
         let page_on = self.page_on();
         if let Some(view) = self.selected_view() {
             update_page(&view, cx, |p, cx| p.set_active(page_on, cx));
@@ -572,6 +592,8 @@ impl PerformancePage {
         if let Some(page) = self.selected_view() {
             update_page(&page, cx, |p, cx| p.set_active(false, cx));
         }
+        self.status
+            .update(cx, |b, cx| b.set_shown(Slot::Performance, None, cx));
         let suffix = tr(cx, "perf-summary-title-suffix");
         let title = format!("{WINDOW_TITLE}{suffix}");
         window.set_window_title(&title);
@@ -814,6 +836,27 @@ impl PerformancePage {
         cx: &mut Context<Self>,
     ) {
         set_graph_range(a.secs, cx);
+    }
+
+    /// `PerfSetStatusBar`: the Overview page menu's "Status bar" submenu (UI-PRF-054).
+    fn on_set_status_bar(&mut self, a: &PerfSetStatusBar, _: &mut Window, cx: &mut Context<Self>) {
+        let placement = a.placement;
+        TlSettings::update(cx, |d| d.settings.performance.status_bar = placement);
+    }
+
+    /// Whether the page panel draws the status bar now: the tab shows a page and
+    /// `performance.status_bar` puts the bar above it.
+    fn shows_status_bar(&self) -> bool {
+        let overview = self
+            .selected
+            .as_ref()
+            .is_some_and(|k| &*k.0 == overview::OVERVIEW_KEY);
+        self.page_on() && status_bar::shows_in(Slot::Performance, self.status_placement, overview)
+    }
+
+    /// The machine status bar, for tests and the main window.
+    pub fn status_bar(&self) -> &Entity<StatusBar> {
+        &self.status
     }
 
     /// The page menu of the shown page at `at` (UI-PRF-015). Its items run on the page.
@@ -1129,6 +1172,11 @@ impl Render for PerformancePage {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         self.follow_page_focus(window, cx);
+        self.status_placement = status_bar::placement(cx);
+        let show_status = self.shows_status_bar();
+        let handle = show_status.then(|| window.window_handle());
+        self.status
+            .update(cx, |b, cx| b.set_shown(Slot::Performance, handle, cx));
         let s = metrics(cx).ui_scale;
         let nav = px(f32::from(self.nav_width) * s);
         let width = self.split.read(cx).container_size();
@@ -1165,6 +1213,17 @@ impl Render for PerformancePage {
             }))
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .children(self.selected_view());
+        // The status bar sits above the page and outside its right-click area (UI-PRF-054).
+        let page = if show_status {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.status.clone())
+                .child(page.flex_1().min_h_0())
+        } else {
+            page
+        };
 
         // While the width animates, the sidebar sits in a clipping box before the split and the
         // split's own sidebar panel is hidden. The page panel keeps its place in the tree.
@@ -1220,6 +1279,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_select_visible_device))
             .on_action(cx.listener(Self::on_toggle_summary))
             .on_action(cx.listener(Self::on_set_graph_range))
+            .on_action(cx.listener(Self::on_set_status_bar))
             .on_action(cx.listener(Self::on_copy_value))
             .on_action(cx.listener(Self::on_copy_device_info))
             .size_full()

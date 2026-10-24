@@ -717,6 +717,59 @@ perf-smart-nvme-power-cycles = Power cycles
 perf-summary-title-suffix = {" "}· Graph Summary
 perf-summary-range-percentage = Percentage
 
+# Machine status bar (UI-PRF-054)
+perf-status-calm = Calm
+perf-status-busy = Busy
+perf-status-pressure = Pressure
+perf-status-hot = Hot
+perf-status-saturated = Saturated
+perf-status-reason = {$state}: {$what} for {$time}
+perf-status-reason-process = {$state}: {$what} for {$time} ({$process})
+perf-status-secs = {$n} s
+perf-status-mins = {$n} min
+perf-status-hours = {$h} h {$m} min
+perf-status-what-cpu = CPU {$v}
+perf-status-what-gpu = GPU {$v}
+perf-status-what-disk = Disk {$v}
+perf-status-what-net = Network {$v}
+perf-status-what-mem-pressure = Memory pressure {$v}
+perf-status-what-mem-stall = Memory stall {$v}
+perf-status-what-swap-in = Swap-in {$v}
+perf-status-what-cpu-throttle = CPU throttling
+perf-status-what-gpu-throttle = GPU throttling
+perf-status-chip-uptime = Uptime
+perf-status-chip-load = Load
+perf-status-chip-cpu = CPU
+perf-status-chip-gpu = GPU
+perf-status-chip-mem-pressure = Memory pressure
+perf-status-chip-swap-in = Swap-in
+perf-status-chip-disk = Disk
+perf-status-pages-s = {$n} pages/s
+perf-status-tip-calm = No CPU, GPU, disk, network or memory value is over its threshold
+perf-status-tip-busy-cpu = CPU usage. Busy above 80% for 30 s
+perf-status-tip-busy-gpu = GPU utilization. Busy above 80% for 30 s
+perf-status-tip-busy-disk = Disk active time. Busy above 80% for 30 s
+perf-status-tip-busy-net = Network use of the link speed. Busy above 80% for 30 s
+perf-status-tip-pressure = Memory pressure (PSI some, 10 s average). Pressure at 5% or more
+perf-status-tip-swap = Pages swapped in per second. Pressure above 500 for 10 s
+perf-status-tip-throttle = The hardware reports thermal throttling
+perf-status-tip-saturated-cpu = CPU usage. Saturated above 95% for 60 s
+perf-status-tip-saturated-mem = Memory stall (PSI full, 10 s average). Saturated at 2% or more
+perf-status-tip-uptime = Time since boot
+perf-status-tip-load = 1-minute load average / logical CPUs
+perf-status-tip-cpu-temp = CPU temperature. Hot at {$t}
+perf-status-tip-gpu-temp = GPU temperature. Hot at {$t}
+perf-status-tip-disk-temp = Hottest disk temperature. Hot at {$t}
+perf-status-tip-no-threshold = Temperature. The device reports no hot threshold
+perf-status-tip-mem-chip = Memory pressure (PSI some, 10 s average). Warning at 5%
+perf-status-tip-swap-chip = Pages swapped in per second. Warning above 500
+perf-status-warnings =
+    { $n ->
+        [one] { $n } warning
+       *[other] { $n } warnings
+    }
+perf-status-warning-row = {$value} (threshold {$threshold})
+
 # Performance Overview page
 perf-overview-title = Overview
 perf-overview-core = C{$n}
@@ -737,6 +790,11 @@ perf-overview-net-peak = Peak
 perf-overview-net-total = Total (since boot)
 perf-overview-box-gpu = GPU
 perf-overview-edit-layout = Edit Layout
+perf-overview-status-bar = Status bar
+perf-overview-status-bar-overview = Overview
+perf-overview-status-bar-performance = Performance tab
+perf-overview-status-bar-all-tabs = Every tab
+perf-overview-status-bar-off = Off
 perf-overview-add-box = Add Box
 perf-overview-reset-layout = Reset Layout
 perf-overview-edit-done = Done
@@ -3277,6 +3335,11 @@ shell-settings-perf-core-smoothing-off = Off
 shell-settings-perf-core-smoothing-low = Low
 shell-settings-perf-core-smoothing-medium = Medium
 shell-settings-perf-core-smoothing-high = High
+shell-settings-perf-status-bar = Machine status bar
+shell-settings-perf-status-bar-overview = Overview
+shell-settings-perf-status-bar-performance = Performance tab
+shell-settings-perf-status-bar-all-tabs = Every tab
+shell-settings-perf-status-bar-off = Off
 shell-settings-perf-memory-composition = Show memory composition
 shell-settings-perf-swap = Show swap usage
 shell-settings-perf-gpu-optional = Optional GPU graphs

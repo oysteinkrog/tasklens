@@ -138,10 +138,26 @@ pub fn page(cx: &mut App) -> PageBuilder {
         ],
     );
     page.dropdown(
-        overview,
+        overview.clone(),
         SettingKey::PerformanceOverviewCoreSmoothing,
         tr(cx, "shell-settings-perf-core-smoothing"),
         &smoothing,
+    );
+    // UI-PRF-054.
+    let status_bar = options(
+        cx,
+        &[
+            ("shell-settings-perf-status-bar-overview", "overview"),
+            ("shell-settings-perf-status-bar-performance", "performance"),
+            ("shell-settings-perf-status-bar-all-tabs", "all_tabs"),
+            ("shell-settings-perf-status-bar-off", "off"),
+        ],
+    );
+    page.dropdown(
+        overview,
+        SettingKey::PerformanceStatusBar,
+        tr(cx, "shell-settings-perf-status-bar"),
+        &status_bar,
     );
 
     for (key, label) in [

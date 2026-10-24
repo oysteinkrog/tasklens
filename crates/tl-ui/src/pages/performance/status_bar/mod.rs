@@ -19,8 +19,8 @@ use std::fmt::Write as _;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, ElementId, Entity, EntityId,
     EventEmitter, FocusHandle, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString, Stateful, Styled as _,
+    Subscription, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -782,7 +782,7 @@ fn pill(
         .flex()
         .flex_row()
         .items_center()
-        .flex_shrink()
+        .flex_shrink(1.)
         .min_w_0()
         .h(px(PILL_H * s))
         .px(m.sp[5])

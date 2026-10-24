@@ -150,7 +150,7 @@ pub struct Reason {
 }
 
 /// One GPU's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuReading {
     pub idx: DeviceIdx,
     pub util_pct: Option<f32>,
@@ -161,7 +161,7 @@ pub struct GpuReading {
 }
 
 /// One disk's values.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiskReading {
     pub idx: DeviceIdx,
     pub active_pct: Option<f32>,
