@@ -2143,6 +2143,45 @@ mod summary {
         assert!(t4.top() > t3.top(), "tile 4 starts the second row");
     }
 
+    /// The drawn grid has the layout's columns at every width. 18 tiles take 5 columns; at a
+    /// width where a tile is not a whole number of pixels (242.8 px at 1278 px, the 1.0.2 smoke
+    /// test), a wrapping row dropped the fifth tile to the next row, so the grid drew 4 columns
+    /// and 5 rows and the last row fell below the window.
+    #[gpui_kit::test]
+    fn summary_tiles_fill_every_column(cx: &mut TestAppContext) {
+        let mut devices = catalog();
+        devices.extend((9..18).map(|i| disk(i, &format!("sd{i}"))));
+        let mut r = open_catalog(cx, 1600., 1000., false, Settings::default(), devices);
+        let view = enter(&mut r);
+        let ids: Vec<&'static str> = (0..18)
+            .map(|i| &*format!("perf-summary-tile-{i}").leak())
+            .collect();
+        for width in 1270..=1290 {
+            r.vcx.simulate_resize(size(px(width as f32), px(1000.)));
+            draw(r.vcx);
+            let (n, l) = r.vcx.read_entity(&view, |v, _| (v.tiles.len(), v.layout()));
+            assert_eq!((n, l.cols, l.rows), (18, 5, 4), "at {width} px");
+            let tile = |r: &mut Rig, i: usize| r.vcx.debug_bounds(ids[i]).expect("tile bounds");
+            for i in 0..n {
+                let (row_first, col_first) =
+                    (tile(&mut r, i - i % l.cols), tile(&mut r, i % l.cols));
+                let t = tile(&mut r, i);
+                assert_eq!(
+                    t.top(),
+                    row_first.top(),
+                    "tile {i} in row {} at {width} px",
+                    i / l.cols
+                );
+                assert_eq!(
+                    t.left(),
+                    col_first.left(),
+                    "tile {i} in column {} at {width} px",
+                    i % l.cols
+                );
+            }
+        }
+    }
+
     #[gpui_kit::test]
     fn summary_tile_grid_for_9(cx: &mut TestAppContext) {
         let mut r = open(cx, 1600., 1000., false);

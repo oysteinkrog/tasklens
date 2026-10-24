@@ -530,6 +530,22 @@ impl Render for SummaryView {
                     }),
                 )
         });
+        // Rows of `cols` tiles. A wrapping row is not used: at a width where a tile is not a
+        // whole number of pixels (242.8 px for 5 columns in 1278 px), the float sum of the row
+        // came out a little wider than the grid and the last tile of each row wrapped.
+        let mut tiles: Vec<_> = tiles.collect();
+        let mut rows = Vec::with_capacity(l.rows);
+        while !tiles.is_empty() {
+            let rest = tiles.split_off(l.cols.min(tiles.len()));
+            rows.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .gap(m.sp[4])
+                    .children(std::mem::replace(&mut tiles, rest)),
+            );
+        }
 
         // The grid measures its box each paint and lays the tiles out again when it moved.
         let this = cx.entity().downgrade();
@@ -548,12 +564,10 @@ impl Render for SummaryView {
             .size_full()
             .p(m.sp[6])
             .flex()
-            .flex_row()
-            .flex_wrap()
-            .content_start()
+            .flex_col()
             .gap(m.sp[4])
             .when_scrolls(l.scrolls)
-            .children(tiles);
+            .children(rows);
         let grid = if self.fade {
             grid.with_animation(
                 ("perf-summary-fade", self.id.as_u64() as usize),
