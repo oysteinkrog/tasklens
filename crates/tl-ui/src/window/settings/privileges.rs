@@ -19,22 +19,24 @@ use crate::window::menus_settings::{TogglePasswordless, passwordless_running};
 
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Privileges);
-    let group = "";
+    let unlock = tr(cx, "shell-settings-group-unlock");
+    let prompts = tr(cx, "shell-settings-group-password-prompts");
+    let helper = tr(cx, "shell-settings-group-helper");
     page.switch(
-        group,
+        unlock,
         SettingKey::PrivilegeUnlockAtLaunch,
         tr(cx, "shell-menu-settings-unlock-at-launch"),
         None,
     );
     page.disable_next(passwordless_running(cx));
     page.action_switch(
-        group,
+        prompts,
         SettingKey::PrivilegePasswordless,
         tr(cx, "shell-menu-settings-passwordless"),
         || Box::new(TogglePasswordless),
     );
     page.button(
-        group,
+        helper.clone(),
         tr(cx, "shell-menu-help-setup"),
         Box::new(OpenAdditionalSetup { focus_row: None }),
         TlButtonKind::Secondary,
@@ -49,7 +51,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
     } else {
         "settings-privileges-helper-not-installed"
     };
-    page.custom(group, &[], tr(cx, key), |_, _| {
+    page.custom(helper, &[], tr(cx, key), |_, _| {
         gpui_kit::Empty.into_any_element()
     });
     page

@@ -350,6 +350,7 @@ pub fn build(
             cx,
             language_submenu,
         )
+        .value(language_current(cx))
         .separator()
         .item(tr(cx, "shell-menu-settings-all"), Box::new(OpenSettings))
         .item(tr(cx, "shell-menu-settings-reset"), Box::new(ResetSettings))
@@ -634,6 +635,16 @@ pub fn language_marks(cx: &App) -> Vec<bool> {
         .chain(SHIPPED_LANGUAGES.map(|(value, _)| value))
         .map(|value| value == current)
         .collect()
+}
+
+/// The name of the language in use, shown after "Language:" in the Settings menu.
+fn language_current(cx: &App) -> SharedString {
+    let key = SHIPPED_LANGUAGES
+        .into_iter()
+        .zip(&language_marks(cx)[1..])
+        .find_map(|((_, key), on)| on.then_some(key))
+        .unwrap_or("shell-menu-settings-system-default");
+    tr(cx, key)
 }
 
 /// Sends the `polkit-rule on|off` setup step for "Skip password prompts" and writes

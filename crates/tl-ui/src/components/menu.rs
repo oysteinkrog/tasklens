@@ -149,6 +149,8 @@ enum Entry {
         label: SharedString,
         menu: Entity<TlMenuPopup>,
         tooltip: Option<SharedString>,
+        /// The text right of the label, before the chevron ([`TlMenu::value`]).
+        value: Option<SharedString>,
     },
     Slider {
         label: SharedString,
@@ -453,9 +455,12 @@ impl TlMenu {
 
     /// A value such as "1,200 RPM" right-aligned after the label of the item added last, in
     /// `text_secondary`. The accessible name is the label, a space and the value. The action and
-    /// the mark do not change. On other rows this does nothing.
+    /// the mark do not change. On a submenu row the value shows before the chevron. On other rows
+    /// this does nothing.
     pub fn value(mut self, text: impl Into<SharedString>) -> Self {
-        if let Some(Entry::Item { value, .. }) = self.entries.last_mut() {
+        if let Some(Entry::Item { value, .. } | Entry::Submenu { value, .. }) =
+            self.entries.last_mut()
+        {
             *value = Some(text.into());
         }
         self
@@ -530,6 +535,7 @@ impl TlMenu {
             label: label.into(),
             menu,
             tooltip: None,
+            value: None,
         });
         self
     }
@@ -793,7 +799,7 @@ impl TlMenuPopup {
                     _ => (None, false),
                 };
                 let value = match e {
-                    Entry::Item { value, .. } => value.clone(),
+                    Entry::Item { value, .. } | Entry::Submenu { value, .. } => value.clone(),
                     _ => None,
                 };
                 let painted = match e {
@@ -1550,9 +1556,25 @@ impl TlMenuPopup {
                 label,
                 menu,
                 tooltip,
+                value,
             } => {
                 let open = self.open_sub == Some(ix);
-                let item = row(Some(label), cx);
+                let name = match value {
+                    Some(value) => SharedString::from(format!("{label} {value}")),
+                    None => label.clone(),
+                };
+                let value = value.clone().map(|value| {
+                    let mut text = div()
+                        .debug_selector(move || format!("TlMenuValue-{ix}"))
+                        .flex_none()
+                        .ml(m.sp[6])
+                        .whitespace_nowrap()
+                        .text_color(t.text_secondary)
+                        .child(value);
+                    *text.text_style() = t_base(m);
+                    text
+                });
+                let item = row(Some(&name), cx);
                 let text = match tooltip {
                     Some(tip) => menu_label(label.clone(), Some(tip.clone()), false, window, cx),
                     None => label_text(label).into_any_element(),
@@ -1562,6 +1584,7 @@ impl TlMenuPopup {
                     .aria_expanded(open)
                     .children(mark_column(Mark::None))
                     .child(text)
+                    .children(value)
                     .child(div().flex_none().ml(m.sp[6]).child(icon(
                         TlIcon::ChevronRight,
                         m.icon.xs,

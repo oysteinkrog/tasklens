@@ -47,7 +47,7 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::Text;
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, FontWeight, Global,
+    Action, AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, size,
 };
@@ -59,6 +59,7 @@ use crate::actions::OpenSettings;
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::checkbox::TlCheckbox;
+use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::slider::{TlSlider, TlSliderEvent};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
@@ -754,10 +755,10 @@ impl PageBuilder {
         on_pick: PickValue,
     ) -> &mut Self {
         let values: Rc<[SettingValue]> = options.iter().map(|(_, v)| v.clone()).collect();
-        let kit_options = options
+        let items: Vec<TlSelectItem> = options
             .iter()
             .enumerate()
-            .map(|(i, (label, _))| (SharedString::from(i.to_string()), label.clone()))
+            .map(|(i, (label, _))| TlSelectItem::new(i.to_string(), label.clone()))
             .collect();
         let read_values = values.clone();
         let pick: PickSetter = Rc::new(move |i, cx| {
@@ -771,22 +772,37 @@ impl PageBuilder {
             options.iter().map(|(label, _)| label.clone()).collect(),
             pick.clone(),
         ));
-        let field = SettingField::dropdown(
-            kit_options,
-            move |cx| {
-                let now = read(cx, key);
-                read_values
-                    .iter()
-                    .position(|v| value_matches(v, &now))
-                    .map(|i| SharedString::from(i.to_string()))
-                    .unwrap_or_default()
-            },
-            move |picked: SharedString, cx| {
+        // A `TlSelect`, not the kit dropdown: its popup is opaque over its whole box.
+        let id = SharedString::from(format!("settings-select-{}", key.as_str()));
+        let field = SettingField::render(move |_, window, cx| {
+            let state = window.use_keyed_state(ElementId::Name(id.clone()), cx, |_, cx| {
+                TlSelectState::new(items.clone(), None, cx)
+            });
+            let now = read(cx, key);
+            let selected = read_values
+                .iter()
+                .position(|v| value_matches(v, &now))
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            state.update(cx, |st, cx| {
+                let same = st.items().len() == items.len()
+                    && st
+                        .items()
+                        .iter()
+                        .zip(&items)
+                        .all(|(a, b)| a.label == b.label);
+                if !same {
+                    st.set_items(items.clone(), cx);
+                }
+                st.set_selected_value(&selected, cx);
+            });
+            let pick = pick.clone();
+            TlSelect::new(ElementId::Name(id.clone()), &state).on_change(move |picked, _, cx| {
                 if let Ok(i) = picked.parse::<usize>() {
                     pick(i, cx);
                 }
-            },
-        );
+            })
+        });
         self.push(group, key, label, None, restart, field)
     }
 
@@ -1217,6 +1233,12 @@ impl PageBuilder {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn banners(&self) -> &[SharedString] {
         &self.banners
+    }
+
+    /// The group titles, in page order. An untitled group has an empty title.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn group_titles(&self) -> Vec<SharedString> {
+        self.groups.iter().map(|(title, _)| title.clone()).collect()
     }
 
     /// The page description, if any.

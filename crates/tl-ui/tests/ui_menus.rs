@@ -899,7 +899,7 @@ const SETTINGS_ROOT: [&str; 29] = [
     "item:Auto-fetch Public IP on launch",
     "item:Open rescue window on critical memory pressure",
     "header:Language",
-    "item:Language:",
+    "item:Language: System default",
     "separator",
     "item:All settings…",
 ];
@@ -1013,6 +1013,19 @@ fn language_submenu_p1(cx: &mut TestAppContext) {
         "the mark is on {current}"
     );
     assert_eq!(marks.iter().filter(|m| **m).count(), 1);
+}
+
+/// The Language row names the language in use (tasklens-bj6.58 d), so the chevron is not bare.
+#[gpui_kit::test]
+fn language_row_shows_current_value(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    assert_eq!(settings(r.cx).general.language, "system");
+    keys(r.cx, "alt-s");
+    assert!(
+        shapes(r.cx).contains(&"item:Language: System default".to_owned()),
+        "{:?}",
+        shapes(r.cx)
+    );
 }
 
 #[gpui_kit::test]

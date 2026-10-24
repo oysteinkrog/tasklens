@@ -84,7 +84,10 @@ pub(super) fn init(cx: &mut App) {
 
 pub fn page(cx: &mut App) -> PageBuilder {
     let mut page = PageBuilder::new(PageId::Advanced);
-    let group = "";
+    let rendering = tr(cx, "shell-settings-group-rendering");
+    let network = tr(cx, "shell-settings-group-network");
+    let debug = tr(cx, "shell-settings-group-debug");
+    let files = tr(cx, "shell-settings-group-files");
     let toast = tr(cx, "shell-toast-gpu-restart");
     let key = SettingKey::RenderingGpu;
     // Only a change of value toasts: picking the GPU already in use needs no restart.
@@ -97,7 +100,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
     });
     let restart = page.restart_note(cx).take_restart();
     page.dropdown_with(
-        group,
+        rendering,
         key,
         tr(cx, "shell-menu-settings-rendering-gpu"),
         &gpu_options(cx),
@@ -105,31 +108,31 @@ pub fn page(cx: &mut App) -> PageBuilder {
         write,
     );
     page.switch(
-        group,
+        network,
         SettingKey::NetworkPublicIpNoticeAccepted,
         tr(cx, "shell-settings-public-ip-notice"),
         None,
     )
     .switch(
-        group,
+        debug,
         SettingKey::DebugShowFps,
         tr(cx, "shell-settings-show-fps"),
         None,
     )
     .button_fn(
-        group,
+        files.clone(),
         tr(cx, "shell-settings-import-taskslinger"),
         TlButtonKind::Secondary,
         import_taskslinger,
     )
     .button(
-        group,
+        files.clone(),
         tr(cx, "shell-settings-open-folder"),
         Box::new(OpenSettingsFolder),
         TlButtonKind::Secondary,
     )
     .button(
-        group,
+        files,
         tr(cx, "shell-menu-settings-reset"),
         Box::new(ResetSettings),
         TlButtonKind::Danger,

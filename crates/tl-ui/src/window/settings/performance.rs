@@ -464,6 +464,7 @@ fn device_list(words: &Rc<ListWords>, window: &mut Window, cx: &mut App) -> AnyE
         let mut name = div()
             .flex_1()
             .min_w_0()
+            .pr(m.sp[3])
             .whitespace_nowrap()
             .overflow_hidden()
             .text_ellipsis()

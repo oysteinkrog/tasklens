@@ -1953,6 +1953,29 @@ fn privileges_setup_button_dispatch(cx: &mut TestAppContext) {
     assert_eq!(opened.get(), 1, "OpenAdditionalSetup dispatched once");
 }
 
+/// The Advanced and Privileges pages group their rows under headings (tasklens-bj6.58 b).
+#[gpui_kit::test]
+fn advanced_and_privileges_rows_have_group_headings(cx: &mut TestAppContext) {
+    setup(cx);
+    for (id, want) in [
+        (
+            PageId::Advanced,
+            vec!["Rendering", "Network", "Debug", "Settings files"],
+        ),
+        (
+            PageId::Privileges,
+            vec!["Unlock", "Password prompts", "Administrator helper"],
+        ),
+    ] {
+        let titles: Vec<String> = page(cx, id)
+            .group_titles()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(titles, want, "{id:?}");
+    }
+}
+
 #[gpui_kit::test]
 fn privileges_page_keys(cx: &mut TestAppContext) {
     setup(cx);

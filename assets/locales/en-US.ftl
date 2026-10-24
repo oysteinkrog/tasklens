@@ -3287,6 +3287,12 @@ shell-settings-lowmem-tooltip = systemd-oomd may end processes before the rescue
 shell-settings-lowmem-tooltip-normal-oom = systemd-oomd may end processes before the rescue window opens. The watcher runs with normal OOM priority.
 shell-settings-device-default = Default
 # Settings window, Advanced page (tasklens-bj6.2, UI-SHL-071).
+shell-settings-group-rendering = Rendering
+shell-settings-group-debug = Debug
+shell-settings-group-files = Settings files
+shell-settings-group-unlock = Unlock
+shell-settings-group-password-prompts = Password prompts
+shell-settings-group-helper = Administrator helper
 shell-settings-public-ip-notice = Do not ask again for public IP fetches
 shell-settings-show-fps = Show FPS
 # Settings window, P4 rows (tasklens-bj6.45, UI-SHL-065, UI-SHL-069, UI-SHL-071).
