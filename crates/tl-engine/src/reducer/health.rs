@@ -38,6 +38,8 @@ struct Entry {
     state: SourceState,
     last_error: Option<Arc<str>>,
     last_ok_ns: Option<TimeNs>,
+    /// The `last_ok_ns` that last marked the snapshot dirty (see `sample_ok`).
+    marked_ok_ns: Option<TimeNs>,
     period_ns: Option<u64>,
     stale: bool,
     /// When `state` last changed. A source that just came back is not stale until a full
@@ -51,6 +53,7 @@ impl Entry {
             state: SourceState::Off,
             last_error: None,
             last_ok_ns: None,
+            marked_ok_ns: None,
             period_ns: None,
             stale: false,
             since_ns: 0,
@@ -128,17 +131,28 @@ impl HealthState {
     }
 
     /// Records fresh data from a source. Called by apply.rs for every data update. Returns true
-    /// when it cleared a stale mark, so the caller marks `HEALTH` for the next publish.
+    /// when the snapshot became dirty, so the caller marks `HEALTH` for the next publish. That
+    /// happens when it cleared a stale mark and when the shown `last_ok_ns` moved on by a
+    /// second or more, so the Collector Health "Last data" age stays current without a publish
+    /// per sample.
     pub fn sample_ok(&mut self, id: SourceId, t_ns: TimeNs, period_ns: u64) -> bool {
         let entry = self.by_id.entry(id).or_insert_with(Entry::new);
         entry.last_ok_ns = Some(t_ns);
         entry.period_ns = Some(period_ns);
-        if !entry.stale {
-            return false;
+        let mut changed = false;
+        if entry.stale {
+            entry.stale = false;
+            changed = true;
         }
-        entry.stale = false;
-        self.dirty = true;
-        true
+        if entry
+            .marked_ok_ns
+            .is_none_or(|m| t_ns.saturating_sub(m) >= 1_000_000_000)
+        {
+            entry.marked_ok_ns = Some(t_ns);
+            changed = true;
+        }
+        self.dirty |= changed;
+        changed
     }
 
     /// Marks running sources stale or fresh. Returns true when any mark changed.
@@ -315,6 +329,24 @@ mod tests {
     }
 
     #[test]
+    fn last_data_time_reaches_the_snapshot() {
+        let mut h = HealthState::new();
+        h.apply(SourceId::Cpu, SourceState::Running, None, T);
+        h.publish().expect("state change");
+        // The first sample publishes its time.
+        assert!(h.sample_ok(SourceId::Cpu, T + 100 * MS, 100 * MS));
+        let snap = h.publish().expect("first data is a change");
+        assert_eq!(snap.get(SourceId::Cpu).last_ok_ns, Some(T + 100 * MS));
+        // Samples inside the same second do not publish.
+        assert!(!h.sample_ok(SourceId::Cpu, T + 200 * MS, 100 * MS));
+        assert!(h.publish().is_none());
+        // A second later the shown time moves on.
+        assert!(h.sample_ok(SourceId::Cpu, T + 1_200 * MS, 100 * MS));
+        let snap = h.publish().expect("age moved a second");
+        assert_eq!(snap.get(SourceId::Cpu).last_ok_ns, Some(T + 1_200 * MS));
+    }
+
+    #[test]
     fn stale_after_threshold_1hz() {
         let mut h = HealthState::new();
         h.apply(SourceId::Memory, SourceState::Running, None, T);
@@ -385,10 +417,13 @@ mod tests {
         assert!(!h.tick(T + 2 * S));
         assert!(h.publish().is_none());
 
-        // Same state and error again is not a change; data updates alone are not either.
+        // Same state and error again is not a change; a data update inside the same second is not
+        // either. One a second later moves the shown last-data time.
         h.apply(SourceId::Disk, SourceState::Running, None, T + 2 * S);
-        h.sample_ok(SourceId::Disk, T + 2 * S, S);
+        h.sample_ok(SourceId::Disk, T + 500 * MS, S);
         assert!(h.publish().is_none());
+        h.sample_ok(SourceId::Disk, T + 2 * S, S);
+        assert!(h.publish().is_some());
     }
 
     #[test]
