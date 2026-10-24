@@ -169,6 +169,11 @@ pub fn cell_id(idx: DeviceIdx) -> String {
     format!("{NET_BOX_ID}-cell:{}", idx.0)
 }
 
+/// The debug selector of the adapter name in an `adapter_charts` cell header.
+pub fn name_id(idx: DeviceIdx) -> String {
+    format!("{NET_BOX_ID}-name:{}", idx.0)
+}
+
 /// The debug selector of the chart area of an adapter's `adapter_charts` cell, below its header.
 pub fn chart_id(idx: DeviceIdx) -> String {
     format!("{NET_BOX_ID}-chart:{}", idx.0)
@@ -1108,6 +1113,10 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .whitespace_nowrap()
         .text_ellipsis()
         .text_color(theme.text_primary)
+        .debug_selector({
+            let idx = a.idx;
+            move || name_id(idx)
+        })
         .child(a.name.clone());
     let mut rates = div();
     *rates.text_style() = numeric_style(m, m.text.sm);

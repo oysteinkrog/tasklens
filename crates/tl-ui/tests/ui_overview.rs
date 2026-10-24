@@ -5683,8 +5683,8 @@ mod page {
                     device: tl_model::ids::DeviceIdx(5),
                     rx_bps: m(1000.),
                     tx_bps: m(100.),
-                    rx_total: 1000 << 30,
-                    tx_total: 900 << 30,
+                    rx_total: 1023 << 40,
+                    tx_total: 1000 << 40,
                     link_speed_mbps: tl_model::system::Metric::default(),
                     state: tl_model::system::LinkState::Up,
                 },
@@ -5720,6 +5720,79 @@ mod page {
                     assert!(
                         total.right() <= frame.right(),
                         "{mode} {width} {id} {total:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// crw.71: in `adapter_charts` a long adapter name stays on one line in its cell header, and
+    /// every counted adapter gets a cell, so no "+n more" line shows after a few adapters.
+    #[gpui_kit::test]
+    fn overview_net_adapter_names_stay_in_cells(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::net_box::{cell_id, name_id};
+        let mut r = open_rooted(cx, true, 1280., 800.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "adapter_charts".into(),
+        });
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let m = tl_model::system::Metric::valid;
+            sys.nets = (5..12)
+                .map(|i| {
+                    (
+                        tl_model::ids::DeviceIdx(i),
+                        tl_model::system::NetTotals {
+                            device: tl_model::ids::DeviceIdx(i),
+                            rx_bps: m(1000.),
+                            tx_bps: m(100.),
+                            rx_total: 1 << 30,
+                            tx_total: 1 << 29,
+                            link_speed_mbps: tl_model::system::Metric::default(),
+                            state: tl_model::system::LinkState::Up,
+                        },
+                    )
+                })
+                .collect();
+            let mut catalog = (*s.devices).clone();
+            let mut devices = catalog.entries.to_vec();
+            for i in 5..12u16 {
+                devices.push(entry(
+                    i,
+                    DeviceIdentity::Net {
+                        netns_ino: 1,
+                        ifindex: u32::from(i),
+                        name: Arc::from(format!("enx00e04c680a{i}-with-a-very-long-adapter-name")),
+                    },
+                    Some(NetKind::Wired),
+                ));
+            }
+            catalog.entries = devices.into();
+            s.devices = Arc::new(catalog);
+        });
+        r.vcx.run_until_parked();
+        let page = r.page.clone();
+        for arrange in ["vertical", "horizontal"] {
+            set_arrange(&mut r, "net", arrange);
+            for (w, h) in [(1280., 800.), (700., 800.), (360., 800.)] {
+                r.vcx.simulate_resize(size(px(w), px(h)));
+                draw(r.vcx);
+                let (idxs, cells) = r.vcx.update(|_, cx| {
+                    let b = page.read(cx).net_box().read(cx);
+                    (b.adapter_idxs(), b.cells())
+                });
+                assert_eq!(idxs.len(), 7, "{arrange} {w}x{h}");
+                assert_eq!(cells, 7, "{arrange} {w}x{h}: no cell dropped into +n more");
+                for idx in idxs {
+                    let cell = r.bounds_of(cell_id(idx));
+                    let name = r.bounds_of(name_id(idx));
+                    // One t_sm row; a wrapped name is two rows tall and draws over the chart.
+                    assert!(name.size.height < px(20.), "{arrange} {w}x{h} {name:?}");
+                    assert!(
+                        name.right() <= cell.right() + px(0.5),
+                        "{arrange} {w}x{h} {name:?} {cell:?}"
                     );
                 }
             }
