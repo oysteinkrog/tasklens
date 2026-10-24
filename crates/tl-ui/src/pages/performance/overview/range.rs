@@ -156,8 +156,9 @@ impl Acc {
 /// newest sample back over the range. History ranges take the min of the stored mins, the mean
 /// of the means and the max of the maxes of the served points (UI-PRF-055); a history that
 /// answers another range gives `None`. Two series are summed where both have a valid value at
-/// the same time, so their min and peak are the sums of the two mins and maxes there. Gaps are
-/// left out.
+/// the same time. In the history the stored min and max of two series need not fall at the same
+/// moment, so their sums are only bounds of the total; there the min, avg and peak of the sum
+/// are taken from the sum of the two means of each point. Gaps are left out.
 pub fn figures(snap: &Snapshot, ids: &[SeriesId], range: OverviewRange) -> Option<Figures> {
     let mut acc = Acc::default();
     if range.from_history() {
@@ -229,7 +230,8 @@ fn history_figures(
                 |p: &HistPoint| p.t_realtime_ns,
                 |x, y| {
                     if !x.is_gap() && !y.is_gap() {
-                        acc.push(x.min + y.min, x.mean + y.mean, x.max + y.max);
+                        let v = x.mean + y.mean;
+                        acc.push(v, v, v);
                     }
                 },
             );
@@ -432,6 +434,34 @@ mod tests {
         let ids = [id(MetricId::NET_RX), id(MetricId::NET_TX)];
         let f = figures(&snap, &ids, OverviewRange::M5).expect("figures");
         assert_eq!((f.min, f.avg, f.peak), (7.0, 7.0, 7.0));
+    }
+
+    #[test]
+    fn history_two_series_sum_the_means_not_the_extrema() {
+        // RX and TX swap between 100 and 0 inside each point: the total stays 100, so the sum
+        // of the stored mins (0) and maxes (200) would report a min and peak that never
+        // happened.
+        let mut snap = Snapshot::empty(BootId(0), 0);
+        snap.device_history = Arc::new(DeviceHistory {
+            request: Some(DeviceHistoryRequest {
+                range: DeviceRange::H1,
+                end_realtime_ns: None,
+            }),
+            series: Arc::from([
+                (
+                    id(MetricId::NET_RX),
+                    Arc::from([point(10, 0.0, 50.0, 100.0), point(20, 0.0, 60.0, 100.0)]),
+                ),
+                (
+                    id(MetricId::NET_TX),
+                    Arc::from([point(10, 0.0, 50.0, 100.0), point(20, 0.0, 40.0, 100.0)]),
+                ),
+            ]),
+            ..DeviceHistory::default()
+        });
+        let ids = [id(MetricId::NET_RX), id(MetricId::NET_TX)];
+        let f = figures(&snap, &ids, OverviewRange::H1).expect("figures");
+        assert_eq!((f.min, f.avg, f.peak), (100.0, 100.0, 100.0));
     }
 
     #[test]
