@@ -28,7 +28,7 @@ use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::status_bar::rules::{ChipKind, MachineState, Tone};
 use tl_ui::pages::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::settings_global::TlSettings;
+use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 
 const NS: u64 = 1_000_000_000;
@@ -215,8 +215,20 @@ mod performance_tab {
         assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "on the Overview");
 
         // `all_tabs` is the main window's slot; `off` draws it nowhere.
-        for placement in [StatusBarPlacement::AllTabs, StatusBarPlacement::Off] {
-            set_placement(r.vcx, placement);
+        // Written as the Settings window's "Machine status bar" dropdown writes them.
+        for (value, placement) in [
+            ("all_tabs", StatusBarPlacement::AllTabs),
+            ("off", StatusBarPlacement::Off),
+        ] {
+            r.vcx.update(|_, cx| {
+                TlSettings::set(
+                    cx,
+                    SettingKey::PerformanceStatusBar,
+                    SettingValue::Str(value.into()),
+                );
+                assert_eq!(TlSettings::settings(cx).performance.status_bar, placement);
+            });
+            draw(r.vcx);
             assert!(r.vcx.debug_bounds(BAR_ID).is_none(), "{placement:?}");
             assert!(!r.shown(), "{placement:?}");
         }

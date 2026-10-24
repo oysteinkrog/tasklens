@@ -774,6 +774,7 @@ fn performance_page_keys(cx: &mut TestAppContext) {
             SettingKey::PerformanceCpuKernel,
             SettingKey::PerformanceCpuSecondaryGraph,
             SettingKey::PerformanceOverviewCoreSmoothing,
+            SettingKey::PerformanceStatusBar,
             SettingKey::PerformanceMemoryComposition,
             SettingKey::PerformanceMemorySwapGraph,
             SettingKey::PerformanceGpuOptionalGraphs,
