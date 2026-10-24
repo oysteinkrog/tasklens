@@ -2,6 +2,14 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-25
+
+### D-032 Network range figures on history ranges
+
+- **Decision**: at 1 h, 24 h and 7 d the Overview Network figures (UI-PRF-055) use the per-point sum of the download and upload means. Min and peak are the smallest and largest of those sums.
+- **Why**: the metric history stores each direction with its own min and max. Adding the two maxima reports a total that may never have happened, and the exact total extremes are not stored. Storing a separate total series would add an engine change for one text line.
+- **Cost**: a total spike shorter than the tier step (10 s at 24 h, 1 min at 7 d) does not show in the figures. The charts still show it, because they draw each point's min and max.
+
 ## 2026-10-24
 
 ### D-031: Properties windows are normal windows
