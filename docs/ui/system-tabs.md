@@ -960,7 +960,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Part | Widget | Size | Colours |
   |---|---|---|---|
-  | Frame | `TlSecondaryWindow` (`WindowKind::Floating`, own gpui-kit Root) | as above | `window_bg` |
+  | Frame | `TlSecondaryWindow` (`WindowKind::Normal`, D-031, own gpui-kit Root) | as above | `window_bg` |
   | Title | "<id> Properties", for example "sshd.service Properties" (spec) | | |
   | Pin | title bar pin (R-073) | | |
   | Tab strip | `TlTabs`, tabs "General", "Log On", "Recovery", "Dependencies", "Logs" | 32 high | `tab_bg`, active `accent` underline per foundation |

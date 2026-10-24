@@ -2,6 +2,16 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-24
+
+### D-031: Properties windows are normal windows
+
+Properties windows (process, service, startup, connection) use `WindowKind::Normal`, not
+`Floating`. A floating Properties window stayed above the main window and covered its menu
+popups, which are drawn inside the main window (tasklens-fut.25). As normal windows, clicking
+the main window raises it above them. The title bar pin (R-073) still keeps one on top when the
+user asks. Tool windows and the Run window stay `Floating`.
+
 ## 2026-10-23
 
 ### D-030: Overview status, history and layout redesign

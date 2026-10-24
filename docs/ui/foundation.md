@@ -859,7 +859,7 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 | Confirmation (`TlDialog::confirm`) | `Dialog` | yes, to its parent | content-sized, width 420, height 140 to 320 | 360 × 120 | no | Cancel |
 | Tool window (Settings, Theme Editor, Shortcuts, Handle Search, About, Additional Setup, Crash Report) | `Floating` | no | per owner | 480 × 320 | yes (About and Crash Report: no) | closes |
 | Run window ("tasklens Run", APP-014) | `Floating` | no | 480 × 248 fixed | 480 × 248 | no | cancels |
-| Properties window (process, service, startup, connection) | `Floating` | no | 900 × 640 (PROC-077); service and others per owner | 640 × 400 | yes | closes |
+| Properties window (process, service, startup, connection) | `Normal` (D-031) | no | 900 × 640 (PROC-077); service and others per owner | 640 × 400 | yes | closes |
 
   Confirmation body (`TlDialog`):
 
