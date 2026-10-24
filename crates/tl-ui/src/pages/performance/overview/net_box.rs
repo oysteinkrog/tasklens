@@ -122,6 +122,9 @@ pub const NET_STACK_SPLITTER_LINE_ID: &str = "perf-overview-net-stack-splitter-l
 pub const NET_SPLITTER_ID: &str = "perf-overview-net-splitter";
 /// The debug selector of the splitter's accent line.
 pub const NET_SPLITTER_LINE_ID: &str = "perf-overview-net-splitter-line";
+/// The debug selectors of the Download and Upload Total values in `stacked` and `columns`.
+pub const DOWN_TOTAL_ID: &str = "perf-overview-net-down-total";
+pub const UP_TOTAL_ID: &str = "perf-overview-net-up-total";
 /// The debug selector of the `combined` chart.
 pub const COMBINED_CHART_ID: &str = "perf-overview-net-combined-chart";
 
@@ -988,27 +991,35 @@ impl NetBox {
     }
 }
 
-/// A row with a label on the left and a value on the right.
+/// A row with a label on the left and a value on the right. `id` is the value's debug selector.
 fn stat_row(
+    id: Option<&'static str>,
     label: &SharedString,
     value: &SharedString,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
-    let mut label_el = div()
+    // Each text style goes in first: assigning it later would drop the nowrap, the ellipsis and
+    // the color, and a long value would wrap onto the next row.
+    let mut label_el = div();
+    *label_el.text_style() = t_xs(m);
+    let label_el = label_el
         .flex_none()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
         .child(label.clone());
-    *label_el.text_style() = t_xs(m);
-    let mut value_el = div()
+    let mut value_el = div();
+    *value_el.text_style() = numeric_style(m, m.text.sm);
+    let mut value_el = value_el
         .min_w_0()
         .whitespace_nowrap()
         .overflow_hidden()
         .text_ellipsis()
         .text_color(theme.text_primary)
         .child(value.clone());
-    *value_el.text_style() = numeric_style(m, m.text.sm);
+    if let Some(id) = id {
+        value_el = value_el.debug_selector(move || id.into());
+    }
     div()
         .flex()
         .flex_row()
@@ -1031,6 +1042,8 @@ struct Column<'a> {
     peak: &'a SharedString,
     total_word: &'a SharedString,
     total: &'a SharedString,
+    /// The debug selector of the Total value.
+    total_id: &'static str,
 }
 
 fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
@@ -1041,7 +1054,7 @@ fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .min_w_0()
         .h_full()
         .gap(m.sp[2])
-        .child(stat_row(c.word, c.rate, m, theme))
+        .child(stat_row(None, c.word, c.rate, m, theme))
         .child(
             div().relative().flex_1().min_h_0().w_full().child(
                 c.chart
@@ -1049,8 +1062,8 @@ fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
                     .cached(StyleRefinement::default().size_full()),
             ),
         )
-        .child(stat_row(c.peak_word, c.peak, m, theme))
-        .child(stat_row(c.total_word, c.total, m, theme))
+        .child(stat_row(None, c.peak_word, c.peak, m, theme))
+        .child(stat_row(Some(c.total_id), c.total_word, c.total, m, theme))
         .into_any_element()
 }
 
@@ -1060,7 +1073,7 @@ fn half(label: &SharedString, value: &SharedString, m: &UiMetrics, theme: &TlThe
         .flex()
         .flex_1()
         .min_w_0()
-        .child(stat_row(label, value, m, theme))
+        .child(stat_row(None, label, value, m, theme))
         .into_any_element()
 }
 
@@ -1198,6 +1211,7 @@ impl NetBox {
                 peak: &self.down_peak_text,
                 total_word: &self.total_word,
                 total: &self.down_total,
+                total_id: DOWN_TOTAL_ID,
             },
             m,
             theme,
@@ -1211,6 +1225,7 @@ impl NetBox {
                 peak: &self.up_peak_text,
                 total_word: &self.total_word,
                 total: &self.up_total,
+                total_id: UP_TOTAL_ID,
             },
             m,
             theme,
@@ -1259,6 +1274,7 @@ impl NetBox {
                 peak: &self.down_peak_text,
                 total_word: &self.total_word,
                 total: &self.down_total,
+                total_id: DOWN_TOTAL_ID,
             },
             m,
             theme,
@@ -1272,6 +1288,7 @@ impl NetBox {
                 peak: &self.up_peak_text,
                 total_word: &self.total_word,
                 total: &self.up_total,
+                total_id: UP_TOTAL_ID,
             },
             m,
             theme,

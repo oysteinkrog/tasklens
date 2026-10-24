@@ -5665,6 +5665,61 @@ mod page {
         assert!(shown >= 4, "Read and Write rows shown: {shown}");
     }
 
+    /// crw.71: at 1280 x 800 the Net box's Total values stay on one row inside the box, in
+    /// `stacked` and in the narrower `columns` mode.
+    #[gpui_kit::test]
+    fn overview_net_totals_stay_on_one_line(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::net_box::{
+            DOWN_TOTAL_ID, NET_BOX_ID, UP_TOTAL_ID,
+        };
+        let mut r = open_rooted(cx, true, 1280., 800.);
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            let m = tl_model::system::Metric::valid;
+            sys.nets = Arc::from([(
+                tl_model::ids::DeviceIdx(5),
+                tl_model::system::NetTotals {
+                    device: tl_model::ids::DeviceIdx(5),
+                    rx_bps: m(1000.),
+                    tx_bps: m(100.),
+                    rx_total: 1000 << 30,
+                    tx_total: 900 << 30,
+                    link_speed_mbps: tl_model::system::Metric::default(),
+                    state: tl_model::system::LinkState::Up,
+                },
+            )]);
+            let mut devices = s.devices.entries.to_vec();
+            devices.push(entry(
+                5,
+                DeviceIdentity::Net {
+                    netns_ino: 1,
+                    ifindex: 5,
+                    name: Arc::from("eth5"),
+                },
+                Some(NetKind::Wired),
+            ));
+            let mut catalog = (*s.devices).clone();
+            catalog.entries = devices.into();
+            s.devices = Arc::new(catalog);
+        });
+        for (mode, arrange) in [("stacked", "vertical"), ("columns", "horizontal")] {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "net".into(),
+                mode: "stacked".into(),
+            });
+            set_arrange(&mut r, "net", arrange);
+            draw(r.vcx);
+            let frame = r.bounds_of(NET_BOX_ID.into());
+            for id in [DOWN_TOTAL_ID, UP_TOTAL_ID] {
+                let total = r.bounds_of(id.into());
+                // One t_sm row; a wrapped value is two rows tall.
+                assert!(total.size.height < px(20.), "{mode} {id} {total:?}");
+                assert!(total.right() <= frame.right(), "{mode} {id} {total:?}");
+            }
+        }
+    }
+
     #[gpui_kit::test]
     fn overview_net_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{
