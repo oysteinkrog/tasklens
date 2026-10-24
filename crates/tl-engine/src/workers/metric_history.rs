@@ -936,7 +936,15 @@ mod tests {
         let offset2 = OFFSET + 1_020 * SEC as i64;
         let t1 = 5 * SEC;
         let mut st = open(dir.path(), 2, offset2, t1);
-        st.set_catalog(catalog(1, vec![entry(7, disk("sda"), "disk:WWN-A", true)]));
+        // Catalog entries sit at their index, so idx 0 to 6 are the logical CPUs.
+        let mut entries: Vec<DeviceEntry> = (0..7)
+            .map(|i| {
+                let identity = DeviceIdentity::CpuLogical { id: i };
+                entry(i, identity, &format!("cpu:{i}"), true)
+            })
+            .collect();
+        entries.push(entry(7, disk("sda"), "disk:WWN-A", true));
+        st.set_catalog(catalog(1, entries));
         st.push(&[(sid(7, MetricId::DISK_READ), sample(t1, 200.0))]);
         st.push(&[(sid(7, MetricId::DISK_READ), sample(t1 + SEC, 201.0))]);
         let now = t1 + 3 * SEC;
