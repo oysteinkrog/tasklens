@@ -133,6 +133,27 @@ fn tool_window_options(cx: &mut TestAppContext) {
     );
 }
 
+/// Process, app, service, startup and connection Properties all use `TlWindowKind::Properties`.
+/// They are `Normal` so the main window's menu popups stack above them (tasklens-fut.25, D-031).
+/// Tool and Run windows stay `Floating`.
+#[gpui_kit::test]
+fn properties_windows_are_normal_not_floating(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let spec = TlWindowSpec::new(
+        TlWindowKind::Properties,
+        "Process Properties",
+        size(px(900.), px(640.)),
+    );
+    let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
+    assert_eq!(options.kind, WindowKind::Normal);
+    assert_eq!(TlWindowKind::Properties.window_kind(), WindowKind::Normal);
+    assert_eq!(TlWindowKind::Run.window_kind(), WindowKind::Floating);
+    assert_eq!(
+        TlWindowKind::Tool { resizable: true }.window_kind(),
+        WindowKind::Floating
+    );
+}
+
 #[gpui_kit::test]
 fn confirmation_is_a_modal_dialog(cx: &mut TestAppContext) {
     setup(cx, Settings::default());

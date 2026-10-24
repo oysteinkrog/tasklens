@@ -186,10 +186,12 @@ pub enum TlWindowKind {
 }
 
 impl TlWindowKind {
-    /// The GPUI window kind.
+    /// The GPUI window kind. Properties windows are `Normal`, so a menu popup of the main window
+    /// stacks above them (D-031). The title bar pin still sets always-on-top.
     pub fn window_kind(self) -> WindowKind {
         match self {
             Self::Confirmation => WindowKind::Dialog,
+            Self::Properties => WindowKind::Normal,
             _ => WindowKind::Floating,
         }
     }
