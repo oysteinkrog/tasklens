@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, App, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
     Subscription, Window, div, px, relative, size,
 };
@@ -43,8 +43,8 @@ use super::parts::{
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
+    ValueFormat, YScale, format_value,
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -408,6 +408,18 @@ fn chart_labels() -> ChartLabels {
     }
 }
 
+/// The labels of the composition chart: `chart_labels` plus a legend of its three bands, in the
+/// stacking order (UI-PRF-019). The chart paints it when it is at least 160 × 100 px.
+fn comp_labels(cx: &App) -> ChartLabels {
+    ChartLabels {
+        legend: KEY_ROWS[..3]
+            .iter()
+            .map(|key| (tr(cx, key), LegendStyle::Solid))
+            .collect(),
+        ..chart_labels()
+    }
+}
+
 /// `part / whole` as a fraction, `None` when `whole` is 0.
 fn fraction(part: u64, whole: u64) -> Option<f32> {
     (whole > 0).then(|| (part as f64 / whole as f64) as f32)
@@ -488,7 +500,7 @@ impl MemBox {
         );
         let comp_chart = box_chart(
             comp_spec(memory, &totals, &colors, &settings, &theme),
-            chart_labels(),
+            comp_labels(cx),
             hub,
             cx,
         );
@@ -812,6 +824,8 @@ impl MemBox {
         for (row, key) in self.rows.iter_mut().zip(KEY_ROWS) {
             row.label = tr(cx, key);
         }
+        let labels = comp_labels(cx);
+        self.comp_chart.update(cx, |v, cx| v.set_labels(labels, cx));
         // "No swap" is translated too.
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_text(&snap.system.memory, true, cx);

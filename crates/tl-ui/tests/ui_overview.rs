@@ -4053,6 +4053,31 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn overview_mem_comp_chart_has_legend(cx: &mut TestAppContext) {
+        use tl_ui::chart::labels::LabelKind;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "memory".into(),
+            mode: "chart".into(),
+        });
+        let page = r.page.clone();
+        let words: Vec<Option<String>> = r.vcx.update(|_, cx| {
+            let chart = page.read(cx).mem_box().read(cx).comp_chart().clone();
+            let chart = chart.read(cx);
+            (0..3)
+                .map(|i| {
+                    chart
+                        .label_cache()
+                        .text(LabelKind::Legend(i))
+                        .map(str::to_owned)
+                })
+                .collect()
+        });
+        let want = ["In use", "Cached", "Available"].map(|w| Some(w.to_owned()));
+        assert_eq!(words, want);
+    }
+
+    #[gpui_kit::test]
     fn overview_gpu_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::gpu_box::{
             GPU_BOX_ID, GPU_SPLITTER_ID, chart_id, engine_cell_id, engine_row_id,

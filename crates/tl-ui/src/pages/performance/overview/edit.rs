@@ -1120,6 +1120,27 @@ mod tests {
     }
 
     #[test]
+    fn middle_third_swaps_at_every_width() {
+        let layout = OverviewLayout::btop_default();
+        for w in (720..=1600).step_by(40) {
+            let p = place(&layout, |_| true, size(px(w as f32), px(900.)), 1.);
+            for b in p.boxes.iter().filter(|b| b.kind != Cpu) {
+                let (left, width) = (f32::from(b.bounds.left()), f32::from(b.bounds.size.width));
+                let y = b.bounds.center().y;
+                // Just inside each edge of the middle third, and at its center.
+                for f in [0.34, 0.5, 0.66] {
+                    assert_eq!(
+                        drop_target(&layout, &p, Cpu, point(px(left + width * f), y)),
+                        Some(DropTarget::Swap(b.kind)),
+                        "window {w}, {:?}, at {f}",
+                        b.kind
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn lone_box_next_to_its_own_row_is_no_target() {
         let mut layout = OverviewLayout::btop_default();
         assert!(apply_drop(&mut layout, Memory, DropTarget::NewRow(1)));
