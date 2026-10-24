@@ -774,8 +774,8 @@ mod tests {
         // 40 s over, peak 30 at second 15, then under. Ends 60 s after the first second under.
         let mut d = EventDetector::new();
         let over = |s: u64| {
-            let v = if s == 15 { 30. } else { 11. };
-            let top = if s < 25 { "java" } else { "chrome" };
+            let v = if s == 115 { 30. } else { 11. };
+            let top = if s < 125 { "java" } else { "chrome" };
             psi(v, Some(top))
         };
         assert!(run_secs(&mut d, 100, 140, over).is_empty());
