@@ -1136,7 +1136,12 @@ impl Render for CpuBox {
         };
         let body: AnyElement = match self.mode {
             CpuMode::Chart => self.chart_part(),
-            CpuMode::Cores => self.rows_part(&m, cx),
+            // The last meter keeps a gap above the "Now" label under the box.
+            CpuMode::Cores => div()
+                .size_full()
+                .pb(m.sp[2])
+                .child(self.rows_part(&m, cx))
+                .into_any_element(),
             CpuMode::CoreCharts => self.core_charts_part(&m, &theme, cx),
             CpuMode::ChartCores => {
                 let chart = self.chart_part();
@@ -1161,7 +1166,7 @@ impl Render for CpuBox {
                     (
                         frame.flex_col(),
                         div().flex_none().h(relative(share)).w_full(),
-                        div().flex_1().min_h_0().w_full(),
+                        div().flex_1().min_h_0().w_full().pb(m.sp[2]),
                     )
                 };
                 div()

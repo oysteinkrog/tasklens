@@ -731,11 +731,18 @@ impl OverviewPage {
         self.notify(cx);
     }
 
-    /// The button went up: the box lands on the drop target, and the layout is saved.
-    pub(super) fn box_drag_up(&mut self, cx: &mut Context<Self>) {
-        let Some(drag) = self.edit.as_mut().and_then(|e| e.drag.take()) else {
+    /// The button went up at `position`: the box lands on the drop target under it, and the
+    /// layout is saved. The last move event can be older than the release (a fast drop), so
+    /// the target is found again here.
+    pub(super) fn box_drag_up(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let origin = self.content_origin.get();
+        let Some(mut drag) = self.edit.as_mut().and_then(|e| e.drag.take()) else {
             return;
         };
+        if drag.moved {
+            drag.pointer = position - origin;
+            drag.target = drop_target(&self.layout, &self.placement, drag.kind, drag.pointer);
+        }
         let mut layout = self.layout.clone();
         match drag.target.filter(|_| drag.moved) {
             Some(target) if apply_drop(&mut layout, drag.kind, target) => self.commit(layout, cx),

@@ -1091,6 +1091,33 @@ mod boxes {
         assert_eq!((layout.cols, layout.rows), (2, 16));
     }
 
+    /// crw.74: stacked below 560 px, the last core meter keeps at least 4 px above the "Now"
+    /// label under the box.
+    #[gpui_kit::test]
+    fn overview_stacked_core_meters_keep_gap_above_now(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::parts::{take_meter_quads, time_axis_label_id};
+        const N: usize = 8;
+        let mut r = open_sized(cx, DeviceIdx(1), N as u16, (400., 516.));
+        take_meter_quads();
+        let pct: Vec<f32> = (0..N).map(|i| 10. + i as f32 * 5.).collect();
+        r.publish_core_series(&pct, &[]);
+        draw(r.vcx);
+        let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
+        let id: &'static str = Box::leak(time_axis_label_id(CPU_BOX_ID, "end").into_boxed_str());
+        let now = r.vcx.debug_bounds(id).expect("Now label");
+        let last = take_meter_quads()
+            .into_iter()
+            .filter(|q| frame.contains(&q.origin) && q.bottom() <= now.top())
+            .map(|q| q.bottom())
+            .fold(px(0.), |a, b| a.max(b));
+        assert!(last > px(0.), "core meters drawn");
+        assert!(
+            now.top() - last >= px(4.),
+            "gap above Now: {:?}",
+            now.top() - last
+        );
+    }
+
     /// D-029: every core row shows its name, sparkline, bar and percent in that order. Rows are
     /// at least 16 px; 32 threads that do not fit one column flow top to bottom into 2 (C0 to
     /// C15, then C16 to C31). A box too short for 4 columns keeps 16 px rows, with the name and
@@ -6248,6 +6275,21 @@ mod page {
         // Disk is now at the top left, under the 40 px toolbar.
         let disk = r.vcx.debug_bounds(box_id(Disk)).expect("disk");
         assert_eq!((f32::from(disk.left()), f32::from(disk.top())), (16., 56.));
+    }
+
+    /// crw.74: the drop lands where the button goes up, even when the last move event was
+    /// over another third of the box.
+    #[gpui_kit::test]
+    fn overview_edit_fast_drop_in_middle_third_swaps(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let disk = r.vcx.debug_bounds(box_id(Disk)).expect("disk");
+        let y = disk.center().y;
+        let left_third = point(disk.left() + disk.size.width * 0.1, y);
+        r.drag_title(Cpu, left_third);
+        r.release(disk.center());
+        assert_eq!(r.kinds(), [vec![Disk, Memory], vec![Gpu, Cpu, Net]]);
     }
 
     #[gpui_kit::test]
