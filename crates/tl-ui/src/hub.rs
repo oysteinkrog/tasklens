@@ -6,10 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AsyncApp, Context, Entity, EventEmitter, Global, WeakEntity};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
-use tl_model::ids::SeriesId;
+use tl_model::ids::{DeviceIdx, SeriesId};
 use tl_model::snapshot::Snapshot;
+use tl_model::system::SensorKind;
+use tl_model::validity::Validity;
 
 pub use tl_model::snapshot::ComponentMask;
 
@@ -36,6 +39,23 @@ pub struct HiddenChanged {
     pub hidden: bool,
 }
 
+/// Chips report -128 °C or exactly 0 °C for a pin with nothing connected.
+pub(crate) fn is_dead_reading(celsius: f32) -> bool {
+    celsius <= -128.0 || celsius == 0.0
+}
+
+/// Adds every temperature sensor with a valid, real reading in `snap` to `live`.
+fn note_live_sensors(live: &mut FxHashSet<DeviceIdx>, snap: &Snapshot) {
+    for (idx, r) in snap.system.sensors.iter() {
+        if r.kind == SensorKind::Temperature
+            && r.value.validity == Validity::Valid
+            && !is_dead_reading(r.value.value)
+        {
+            live.insert(*idx);
+        }
+    }
+}
+
 /// The one entity per app that holds the installed snapshot. Holds exactly one `Arc<Snapshot>`.
 pub struct SnapshotHub {
     client: Arc<dyn EngineClient>,
@@ -46,6 +66,9 @@ pub struct SnapshotHub {
     hidden: bool,
     /// U-3 fallback switch, from `REFRESH_WHILE_HIDDEN`.
     refresh_while_hidden: bool,
+    /// Temperature sensors that have read a real value (not -128 °C or 0 °C) in any installed
+    /// snapshot since the app started. Pages use it to keep a sensor whose history has expired.
+    live_sensors: FxHashSet<DeviceIdx>,
 }
 
 impl EventEmitter<SnapshotChanged> for SnapshotHub {}
@@ -82,13 +105,17 @@ impl SnapshotHub {
         })
         .detach();
 
+        let current = client.latest();
+        let mut live_sensors = FxHashSet::default();
+        note_live_sensors(&mut live_sensors, &current);
         Self {
-            current: client.latest(),
+            current,
             client,
             pending_notify_since: None,
             last_render: None,
             hidden: false,
             refresh_while_hidden: REFRESH_WHILE_HIDDEN,
+            live_sensors,
         }
     }
 
@@ -97,12 +124,18 @@ impl SnapshotHub {
         &self.current
     }
 
+    /// Temperature sensors that have had a real reading since the app started.
+    pub fn live_sensors(&self) -> &FxHashSet<DeviceIdx> {
+        &self.live_sensors
+    }
+
     /// Installs `snap` if its sequence is newer, then emits `SnapshotChanged` when any component
     /// version differs from the installed snapshot. Never notifies views.
     pub fn install(&mut self, snap: Arc<Snapshot>, cx: &mut Context<Self>) {
         if snap.sequence <= self.current.sequence {
             return;
         }
+        note_live_sensors(&mut self.live_sensors, &snap);
         let mut changed_series = SmallVec::new();
         let mask = snap.changed_since(&self.current, &mut changed_series);
         self.current = snap;

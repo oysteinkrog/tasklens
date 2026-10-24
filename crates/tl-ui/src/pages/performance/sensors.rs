@@ -51,7 +51,7 @@ use crate::chart::{
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
 use crate::i18n::tr;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, t_xs};
@@ -590,9 +590,6 @@ pub struct FanPage {
     /// The temperature sensor of the Temperature chart; `None` shows "Choose a sensor".
     sensor: Option<SensorRef>,
     sensor_device: Option<DeviceIdx>,
-    /// Temperature sensors that read a real value since the page was built. The sensor menu
-    /// keeps them when they later read -128 °C or 0 °C.
-    live_sensors: FxHashSet<DeviceIdx>,
     fan_max: Option<u32>,
     pwm: PwmDerived,
     details: KeyValueModel,
@@ -656,7 +653,6 @@ impl FanPage {
             temperature,
             sensor,
             sensor_device,
-            live_sensors: FxHashSet::default(),
             fan_max,
             pwm: PwmDerived::default(),
             details: fan_details_model(),
@@ -754,9 +750,6 @@ impl FanPage {
         if devices {
             changed |= self.sync_sensor(snap, cx);
         }
-        if system {
-            self.note_live_sensors(snap);
-        }
         if system || devices {
             let fan_max = fan_max_of(snap, self.row.idx);
             if fan_max != self.fan_max {
@@ -793,19 +786,6 @@ impl FanPage {
         }
         if changed {
             cx.notify();
-        }
-    }
-
-    /// Adds every temperature sensor with a valid reading that is not -128 °C or 0 °C to
-    /// `live_sensors`.
-    fn note_live_sensors(&mut self, snap: &Snapshot) {
-        for (idx, r) in snap.system.sensors.iter() {
-            if r.kind == SensorKind::Temperature
-                && r.value.validity == Validity::Valid
-                && !is_dead_reading(r.value.value)
-            {
-                self.live_sensors.insert(*idx);
-            }
         }
     }
 
@@ -1040,11 +1020,6 @@ struct FanSensorOption {
     reading: SharedString,
 }
 
-/// Chips report -128 °C or exactly 0 °C for a pin with nothing connected.
-fn is_dead_reading(celsius: f32) -> bool {
-    celsius <= -128.0 || celsius == 0.0
-}
-
 /// True when the sensor's fast or 1 Hz temperature series holds a sample with a real value. The
 /// 1 Hz tier reaches 10 min back, which covers the time before the page was built.
 fn has_history(snap: &Snapshot, device: DeviceIdx) -> bool {
@@ -1060,7 +1035,7 @@ fn has_history(snap: &Snapshot, device: DeviceIdx) -> bool {
 }
 
 /// Every present hwmon temperature sensor in catalog order, without sensors that read a dead
-/// value (-128 °C or 0 °C) and have no history: not in `live` (read a real value since the page
+/// value (-128 °C or 0 °C) and have no history: not in `live` (read a real value since the app
 /// was built) and no real sample in either series tier. The `current` sensor stays so its radio
 /// shows.
 fn fan_sensor_options(
@@ -1181,8 +1156,9 @@ impl DevicePage for FanPage {
     /// read from the newest snapshot once, when the menu opens.
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let key = self.key.clone();
-        let snap = Arc::clone(self.hub.read(cx).current());
-        let options = fan_sensor_options(&snap, self.sensor.as_deref(), &self.live_sensors);
+        let hub = self.hub.read(cx);
+        let snap = Arc::clone(hub.current());
+        let options = fan_sensor_options(&snap, self.sensor.as_deref(), hub.live_sensors());
         let current = self.sensor.clone();
         let none = tr(cx, "perf-fan-sensor-none");
         let rename = Box::new(PerfRenameFan { key: key.clone() });

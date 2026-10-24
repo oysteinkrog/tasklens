@@ -3622,6 +3622,12 @@ mod fan_menu {
 
     /// Seven fans on `nct6797` and twelve hwmon temperature sensors (idx 20 to 31, 48 °C up).
     fn publish_fan_and_sensors(r: &mut Rig) {
+        publish_fan_and_sensors_with(r, &[]);
+    }
+
+    /// As `publish_fan_and_sensors`, with the sensors in `dead` (device idx, °C) reading that
+    /// value from the first snapshot on.
+    fn publish_fan_and_sensors_with(r: &mut Rig, dead: &[(u16, f32)]) {
         r.engine.publish_with(|s| {
             let mut entries = catalog();
             let mut sensors = Vec::new();
@@ -3658,7 +3664,11 @@ mod fan_menu {
                 );
                 e.persistent_key = Arc::from(format!("sensor:{}", sensor_key(n)));
                 entries.push(e);
-                sensors.push(temp(19 + n, 47.6 + f32::from(n)));
+                let celsius = dead
+                    .iter()
+                    .find(|(i, _)| *i == 19 + n)
+                    .map_or(47.6 + f32::from(n), |(_, c)| *c);
+                sensors.push(temp(19 + n, celsius));
             }
             s.devices = Arc::new(DeviceCatalog {
                 version: 2,
@@ -3814,8 +3824,7 @@ mod fan_menu {
                 engine,
                 vcx: &mut vcx,
             };
-            publish_fan_and_sensors(&mut $r);
-            set_readings(&mut $r, $dead);
+            publish_fan_and_sensors_with(&mut $r, $dead);
             select(&mut $r, FAN);
         };
     }
@@ -3974,6 +3983,25 @@ mod fan_menu {
     fn fan_sensor_menu_keeps_sensor_live_earlier_in_session(cx: &mut TestAppContext) {
         rig!(cx, r);
         set_readings(&mut r, &[(20, -128.0), (21, 0.0)]);
+        let labels = sensor_labels(&mut r);
+        assert_eq!(labels.len(), 13, "12 sensors and None: {labels:?}");
+        assert_eq!(labels[0], "nct6797 temp1");
+        assert_eq!(labels[1], "nct6797 temp2");
+    }
+
+    /// A sensor that read a real value before the Fan page was ever built stays listed after it
+    /// turns dead and its history is gone: the hub tracks real readings for the whole app.
+    #[gpui_kit::test]
+    fn fan_sensor_menu_keeps_sensor_live_before_page_opened(cx: &mut TestAppContext) {
+        let (engine, mut vcx, page, _queue) = net_settings::open_root(cx, None);
+        let mut r = Rig {
+            page,
+            engine,
+            vcx: &mut vcx,
+        };
+        publish_fan_and_sensors(&mut r);
+        set_readings(&mut r, &[(20, -128.0), (21, 0.0)]);
+        select(&mut r, FAN);
         let labels = sensor_labels(&mut r);
         assert_eq!(labels.len(), 13, "12 sensors and None: {labels:?}");
         assert_eq!(labels[0], "nct6797 temp1");
