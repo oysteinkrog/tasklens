@@ -569,8 +569,8 @@ fn realtime_offset_ns() -> i64 {
     i64::try_from(real - boot).unwrap_or(0)
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Clears the slot when the generation ends on any path, a panic included, while it still holds
