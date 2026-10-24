@@ -75,6 +75,9 @@ const TITLE_ROW: f32 = 24.;
 /// range (UI-PRF-055, [`RangeText::axis_start`]); this one shows until the page sets it.
 pub const TIME_AXIS_START: &str = "1 minute ago";
 pub const TIME_AXIS_END: &str = "Now";
+/// The min, avg and peak line under a device box's title (UI-PRF-055), logical px before
+/// `ui_scale`: one label row.
+pub const FIGURES_ROW: f32 = LABEL_ROW;
 
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;
@@ -1047,7 +1050,7 @@ pub fn box_frame(
                 let figures = figures
                     .debug_selector(move || figures_id(id))
                     .flex_none()
-                    .h(px(LABEL_ROW * m.ui_scale))
+                    .h(px(FIGURES_ROW * m.ui_scale))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()

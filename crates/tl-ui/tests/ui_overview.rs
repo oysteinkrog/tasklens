@@ -1513,7 +1513,9 @@ mod bottom {
     };
     use tl_ui::pages::performance::overview::layout::Arrange;
     use tl_ui::pages::performance::overview::net_box::NetBox;
-    use tl_ui::pages::performance::overview::parts::{GridFit, fill_grid, time_axis_id};
+    use tl_ui::pages::performance::overview::parts::{
+        FIGURES_ROW, GridFit, fill_grid, time_axis_id,
+    };
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -1908,10 +1910,16 @@ mod bottom {
 
     /// Two GPUs with 3 engines, VRAM and the temperature and power row: each section is
     /// 48 + 5 × 22 = 158 px, the second adds a 22 px heading, with 12 px between: 350 px, the
-    /// body of a 410 px box. Sections take their content height, so neither clips.
+    /// body of a 410 px box plus the range figures row. Sections take their content height, so
+    /// neither clips.
     #[gpui_kit::test]
     fn gpu_box_two_full_sections_at_410(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (410., 200.));
+        let mut r = open(
+            cx,
+            devices("gpu", &[10, 11]),
+            Vec::new(),
+            (410. + FIGURES_ROW, 200.),
+        );
         r.system(|s| {
             let mut t11 = gpu_engines(false);
             t11.device = DeviceIdx(11);
@@ -1951,12 +1959,17 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(6));
     }
 
-    /// Two GPUs at the 220 px row minimum (160 px body): the first section in full with the
-    /// "+1 more" row needs 48 + 6 × 22 = 180 px, so it shows only its busiest engine and
-    /// "+2 more engines": 48 + 5 × 22 = 158 px, above the time axis.
+    /// Two GPUs in a 160 px body (the 220 px row minimum plus the range figures row): the first
+    /// section in full with the "+1 more" row needs 48 + 6 × 22 = 180 px, so it shows only its
+    /// busiest engine and "+2 more engines": 48 + 5 × 22 = 158 px, above the time axis.
     #[gpui_kit::test]
     fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        let mut r = open(
+            cx,
+            devices("gpu", &[10, 11]),
+            Vec::new(),
+            (220. + FIGURES_ROW, 200.),
+        );
         r.system(|s| {
             let mut t10 = gpu_engines(false);
             t10.dec_pct = Metric::valid(50.);
@@ -2005,11 +2018,16 @@ mod bottom {
         );
     }
 
-    /// One GPU at the 220 px row minimum: 3 engines, VRAM and the temperature and power row need
-    /// 158 of the 160 px body, so every engine row shows.
+    /// One GPU in a 160 px body (the 220 px row minimum plus the range figures row): 3 engines,
+    /// VRAM and the temperature and power row need 158 of it, so every engine row shows.
     #[gpui_kit::test]
     fn gpu_box_one_gpu_min_height_all_engines(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (220., 200.));
+        let mut r = open(
+            cx,
+            devices("gpu", &[10]),
+            Vec::new(),
+            (220. + FIGURES_ROW, 200.),
+        );
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
@@ -2661,12 +2679,17 @@ mod bottom {
         );
     }
 
-    /// crw.55: at the 220 px row minimum (body 160, 7 lines) 2 of 3 sections expand, the
-    /// busiest first; at 300 px all 3.
+    /// crw.55: in a 160 px body (7 lines; the 220 px row minimum plus the range figures row) 2
+    /// of 3 sections expand, the busiest first; at 300 px all 3.
     #[gpui_kit::test]
     fn disk_box_collapse_follows_activity(cx: &mut TestAppContext) {
         let idx = [20, 21, 22];
-        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., 220.));
+        let mut r = open(
+            cx,
+            Vec::new(),
+            devices("disk", &idx),
+            (200., 220. + FIGURES_ROW),
+        );
         r.system(|s| s.disks = active_disks(&idx, &[10., 80., 40.]));
         draw(r.vcx);
         assert_eq!(disk_state(&mut r), (3, vec![false, true, true]));
@@ -2692,7 +2715,12 @@ mod bottom {
     #[gpui_kit::test]
     fn disk_box_rows_fit_height(cx: &mut TestAppContext) {
         let idx: Vec<u16> = (0..10).map(|i| 200 + i).collect();
-        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., 600.));
+        let mut r = open(
+            cx,
+            Vec::new(),
+            devices("disk", &idx),
+            (200., 600. + FIGURES_ROW),
+        );
         let (_, disk, _) = r.boxes();
         let state = |r: &mut Rig| {
             r.vcx.update(|_, cx| {
@@ -2706,10 +2734,11 @@ mod bottom {
                 )
             })
         };
-        // 600 px: a 540 px body, 24 lines: 8 headers, "+2 more" and 7 expanded sections.
+        // 600 px and the range figures row: a 540 px body, 24 lines: 8 headers, "+2 more" and 7
+        // expanded sections.
         assert_eq!(state(&mut r), (8, 2, 8, 7, "+2 more".into()));
-        // 200 px: a 140 px body, 6 lines: 5 headers and "+5 more".
-        r.heights(200., 200.);
+        // 200 px and the figures row: a 140 px body, 6 lines: 5 headers and "+5 more".
+        r.heights(200., 200. + FIGURES_ROW);
         assert_eq!(state(&mut r), (8, 2, 5, 0, "+5 more".into()));
     }
 

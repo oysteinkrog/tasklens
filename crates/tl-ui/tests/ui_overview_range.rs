@@ -14,7 +14,9 @@ use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
-use tl_model::settings::{AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, OverviewRange, Settings, StatusBarPlacement, ThemeSettings, UiState,
+};
 use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
@@ -23,8 +25,10 @@ use tl_ui::components::kv_grid;
 use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::overview::range::{HEADER_SWITCH, RangeText, segment_id};
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui::pages::performance::overview::range::{
+    HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id,
+};
+use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -316,8 +320,9 @@ fn point(t: i64, min: f32, mean: f32, max: f32) -> HistPoint {
     }
 }
 
-/// A click on "1 h" in the header switch saves the range, redraws every chart of every box at
-/// one hour, asks for the device history and relabels the time axis.
+/// A click on "1 h" in the status bar's switch (the bar is on the Overview by default) saves the
+/// range, redraws every chart of every box at one hour, asks for the device history and
+/// relabels the time axis. With the bar elsewhere the switch moves to the Overview header.
 #[gpui_kit::test]
 fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -329,7 +334,10 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     let merged = r.vcx.update(|_, cx| demand.read(cx).merged());
     assert_eq!(merged.device_history_range, None, "1 min is live");
 
-    let id: &'static str = Box::leak(segment_id(HEADER_SWITCH, OverviewRange::H1).into_boxed_str());
+    let header: &'static str =
+        Box::leak(segment_id(HEADER_SWITCH, OverviewRange::H24).into_boxed_str());
+    assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(), "one switch");
+    let id: &'static str = Box::leak(segment_id(STATUS_SWITCH, OverviewRange::H1).into_boxed_str());
     click(r.vcx, id);
     let saved = r
         .vcx
@@ -362,6 +370,21 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     );
     for text in range_texts(&mut r) {
         assert_eq!(text.axis_start, "1 hour ago");
+    }
+
+    // The bar off: the Overview header holds the switch.
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            d.settings.performance.status_bar = StatusBarPlacement::Off;
+        });
+    });
+    draw(r.vcx);
+    assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
+    assert!(r.vcx.debug_bounds(id).is_none(), "no status bar");
+    click(r.vcx, header);
+    for chart in box_charts(&mut r) {
+        let range = r.vcx.read_entity(&chart, |c, _| c.spec.range_ns);
+        assert_eq!(range, 86_400 * S);
     }
 }
 

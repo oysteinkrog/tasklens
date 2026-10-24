@@ -90,6 +90,9 @@ const SCROLL_ID: &str = "perf-overview-scroll";
 
 const KEY_TITLE: &str = "perf-overview-title";
 
+/// The debug selector of the Overview header row that holds the range switch.
+pub const RANGE_HEADER_ID: &str = "perf-overview-range-header";
+
 /// How long the pointer rests on a gap before its accent line shows.
 pub const SPLITTER_HOVER_DELAY: Duration = Duration::from_millis(150);
 
@@ -207,6 +210,9 @@ pub struct OverviewPage {
     status: Entity<StatusBar>,
     /// `performance.overview_range` (UI-PRF-055).
     range: OverviewRange,
+    /// `performance.status_bar` is `overview`: the bar holds the range switch, so the page
+    /// draws no header row.
+    bar_on_overview: bool,
     /// The words of the range text: "min { $min }  avg { $avg }  peak { $peak }", "since
     /// { $time }" and the time axis start of each range.
     figures_words: Template,
@@ -312,7 +318,7 @@ impl OverviewPage {
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
             .detach();
 
-        Self {
+        let mut this = Self {
             key,
             layout,
             placement: Placement::default(),
@@ -344,6 +350,7 @@ impl OverviewPage {
             content_origin: Rc::default(),
             status,
             range: range::current_range(cx),
+            bar_on_overview: status_bar::placement(cx) == StatusBarPlacement::Overview,
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
             since_words: Template::new(cx, "perf-overview-since", &["time"]),
             ago_words: range::ago_words(cx),
@@ -352,7 +359,10 @@ impl OverviewPage {
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: Cell::new(0),
-        }
+        };
+        // The boxes start with their range text, so the first sample notifies only its box.
+        this.sync_range(cx);
+        this
     }
 
     /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
@@ -496,6 +506,12 @@ impl OverviewPage {
             self.range = range;
             self.send_demand(cx);
             self.sync_range(cx);
+            self.notify(cx);
+        }
+        let bar_on_overview = status_bar::placement(cx) == StatusBarPlacement::Overview;
+        if bar_on_overview != self.bar_on_overview {
+            self.bar_on_overview = bar_on_overview;
+            self.notify(cx);
         }
         let layout = saved_layout(cx);
         if layout == self.layout || self.drag.is_some() || self.box_dragging() {
@@ -883,6 +899,30 @@ impl OverviewPage {
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }
 
+    /// The Overview header with the time range switch at its right end (UI-PRF-055). `None`
+    /// while the status bar is on the Overview: the bar then carries the switch, so the page
+    /// shows one switch, not two.
+    fn range_header(&self, cx: &App) -> Option<AnyElement> {
+        if self.bar_on_overview {
+            return None;
+        }
+        let m = metrics(cx);
+        Some(
+            div()
+                .debug_selector(|| RANGE_HEADER_ID.into())
+                .flex()
+                .flex_row()
+                .flex_none()
+                .justify_end()
+                .items_center()
+                .w_full()
+                .px(m.sp[5])
+                .pt(m.sp[4])
+                .child(range::range_switch(range::HEADER_SWITCH, cx))
+                .into_any_element(),
+        )
+    }
+
     /// The box view of `kind`, cached so it re-renders only for its own changes.
     fn box_element(&self, kind: BoxKind) -> AnyElement {
         let cached = StyleRefinement::default().size_full();
@@ -909,9 +949,8 @@ impl DevicePage for OverviewPage {
         self.header.clone()
     }
 
-    /// The time range switch (UI-PRF-055).
-    fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
-        smallvec::smallvec![range::range_switch(range::HEADER_SWITCH, cx)]
+    fn toggles(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
+        SmallVec::new()
     }
 
     fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
@@ -1138,7 +1177,9 @@ impl Render for OverviewPage {
             .children(boxes)
             .children(gaps)
             .children(overlays);
-        let Some(toolbar) = self.edit_toolbar(cx) else {
+        let header = self.range_header(cx);
+        let toolbar = self.edit_toolbar(cx);
+        if header.is_none() && toolbar.is_none() {
             let root = div()
                 .id(SCROLL_ID)
                 .relative()
@@ -1152,7 +1193,7 @@ impl Render for OverviewPage {
                 root.child(content)
             }
             .into_any_element();
-        };
+        }
         let body = div()
             .id(SCROLL_ID)
             .relative()
@@ -1165,14 +1206,13 @@ impl Render for OverviewPage {
         } else {
             body.child(content)
         };
-        let root = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .track_focus(&self.focus)
-            .key_context(PERFORMANCE_OVERVIEW_EDIT_CONTEXT)
-            .child(toolbar)
-            .child(body);
+        let root = div().flex().flex_col().size_full().track_focus(&self.focus);
+        let root = if toolbar.is_some() {
+            root.key_context(PERFORMANCE_OVERVIEW_EDIT_CONTEXT)
+        } else {
+            root
+        };
+        let root = root.children(header).children(toolbar).child(body);
         Self::with_actions(root, cx).into_any_element()
     }
 }
