@@ -941,7 +941,19 @@ loop {
     let _ = time::timeout(cx.now(), Duration::from_millis(500), conn.executor().tick()).await;
     if cx.checkpoint().is_err() { break; }
 }
+// Release, with cancellation masked: keep ticking for the owner's last calls until it drops its
+// handle, at most 500 ms, then close the connection and tick until the executor is empty, at
+// most 200 ms.
+while !owner_dropped() && waited() < Duration::from_millis(500) {
+    let _ = time::timeout(cx.now(), Duration::from_millis(20), conn.executor().tick()).await;
+}
+let _ = time::timeout(cx.now(), Duration::from_millis(200), async {
+    let _ = conn.clone().close().await;
+    while !conn.executor().is_empty() { conn.executor().tick().await; }
+}).await;
 ```
+
+The tick task closes the connection on every path out of a generation, whether the owner drops its handle first or the region is cancelled first. A dropped match-rule stream makes zbus queue a `RemoveMatch` task on the connection's own executor, and that task holds a clone of the connection. Without the close, nothing runs that task, the socket stays open, and the bus queues every signal for it against the user's quota until dbus-broker disconnects the user's other peers (y6k.33).
 
 Every zbus call and every signal-stream `next()` is wrapped in `time::timeout` (2 s for reads, ADR-006 for actions), followed by `cx.checkpoint()`. Proxies never outlive their generation. On reconnect a worker re-lists everything (full resync) before applying signals.
 

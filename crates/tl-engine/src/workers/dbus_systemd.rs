@@ -4499,6 +4499,219 @@ mod tests {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 
+    /// A stand-in for dbus-broker's per-user quota. It holds the bus side of other connections of
+    /// the same user. Once more than `QUOTA` of them are open, it cuts every peer of the user,
+    /// the systemd worker's connection among them, and the cut stays.
+    #[derive(Default)]
+    struct Broker {
+        peers: Mutex<Vec<zbus::Connection>>,
+        cut: std::sync::atomic::AtomicBool,
+    }
+
+    impl Broker {
+        const QUOTA: usize = 2;
+
+        fn open_peers(&self) -> usize {
+            let peers = self.peers.lock().expect("peers lock");
+            peers.iter().filter(|p| !p.is_closed()).count()
+        }
+
+        /// True once the broker has cut the user's peers.
+        fn cut(&self) -> bool {
+            use std::sync::atomic::Ordering;
+            if self.open_peers() > Self::QUOTA {
+                self.cut.store(true, Ordering::Release);
+            }
+            self.cut.load(Ordering::Acquire)
+        }
+    }
+
+    /// The worker's signal stream on a bus behind `Broker`: quiet until the broker cuts it.
+    struct BrokerSignals(Arc<Broker>);
+
+    impl UnitSignals for BrokerSignals {
+        async fn next(&mut self, cx: &Cx, d: Duration) -> Result<Option<Signal>, DbusError> {
+            if self.0.cut() {
+                return Err(DbusError::Closed);
+            }
+            QuietSignals { end: false }.next(cx, d).await
+        }
+
+        async fn ready(&mut self) -> Result<Option<Signal>, DbusError> {
+            Ok(None)
+        }
+    }
+
+    /// `SlowBus` behind a `Broker`.
+    struct BrokerBus {
+        inner: SlowBus,
+        broker: Arc<Broker>,
+    }
+
+    impl SystemdBus for BrokerBus {
+        type Signals<'a> = BrokerSignals;
+
+        async fn list(&self, cx: &Cx) -> Result<Listing, DbusError> {
+            self.inner.list(cx).await
+        }
+
+        async fn list_files(&self, cx: &Cx) -> Result<UnitFiles, DbusError> {
+            self.inner.list_files(cx).await
+        }
+
+        async fn fetch_unit(
+            &self,
+            cx: &Cx,
+            name: &str,
+            path: &OwnedObjectPath,
+        ) -> Result<Option<Fetched>, DbusError> {
+            self.inner.fetch_unit(cx, name, path).await
+        }
+
+        async fn load_unit(&self, cx: &Cx, name: &str) -> Result<OwnedObjectPath, DbusError> {
+            self.inner.load_unit(cx, name).await
+        }
+
+        async fn fetch_details(
+            &self,
+            cx: &Cx,
+            path: &OwnedObjectPath,
+            kind: UnitType,
+        ) -> Result<DetailRaw, DbusError> {
+            self.inner.fetch_details(cx, path, kind).await
+        }
+
+        async fn subscribe(&self, _cx: &Cx) -> Result<BrokerSignals, DbusError> {
+            Ok(BrokerSignals(Arc::clone(&self.broker)))
+        }
+    }
+
+    /// A peer-to-peer pair over a socketpair: (bus side, client side for `DbusConn::p2p`).
+    fn broker_pair() -> (zbus::Connection, zbus::Connection) {
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let server = zbus::connection::Builder::async_io_unix_stream(a)
+            .server(zbus::Guid::generate())
+            .expect("server builder")
+            .p2p()
+            .build();
+        let client = zbus::connection::Builder::async_io_unix_stream(b)
+            .p2p()
+            .internal_executor(false)
+            .build();
+        let (server, client) =
+            futures_lite::future::block_on(futures_lite::future::zip(server, client));
+        (
+            server.expect("server connects"),
+            client.expect("client connects"),
+        )
+    }
+
+    /// Advances virtual time by `d` in 20 ms steps. The sockets and the socket close run on real
+    /// threads, so each step also gives them 5 ms of real time.
+    fn pump(lab: &mut LabRuntime, d: Duration) {
+        let step = Duration::from_millis(20);
+        for _ in 0..d.as_millis() / step.as_millis() {
+            advance(lab, step);
+            std::thread::sleep(Duration::from_millis(5));
+            lab.run_until_idle();
+        }
+    }
+
+    /// Regression (y6k.33): each Processes tab visit opened a system bus connection, dropped a
+    /// match-rule stream and then the connection. The `RemoveMatch` task zbus queued kept the
+    /// connection alive with its socket open. The open connections ran the user over its
+    /// dbus-broker quota, the broker cut the user's peers, and the systemd worker lost its bus
+    /// and restarted. Now each dropped connection closes its socket, the broker never cuts, and
+    /// the worker stays in its first generation.
+    #[test]
+    fn leaked_connections_do_not_cut_the_worker() {
+        const VISITS: usize = 4;
+        let mut lab = LabRuntime::new(LabConfig::new(46).max_steps(10_000_000));
+        let (io, mut rx, _control_tx, demand_tx) = worker_io();
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        let root = fixture_root("dbus_systemd_broker");
+        let cfg = EngineConfig::new(EngineMode::Full, root.join("state"))
+            .with_sys_root(SysRoot::at(&root));
+        let broker = Arc::new(Broker::default());
+        let mut clients = Vec::new();
+        for _ in 0..VISITS {
+            let (server, client) = broker_pair();
+            broker.peers.lock().expect("peers lock").push(server);
+            clients.push(client);
+        }
+        let bus = BrokerBus {
+            inner: SlowBus {
+                answers: Arc::new(Mutex::new(std::collections::VecDeque::from([
+                    ListAnswer::Units(&["a.service"]),
+                ]))),
+                lists: Arc::new(Mutex::new(0usize)),
+            },
+            broker: Arc::clone(&broker),
+        };
+        let out = Ended::default();
+        let sink = Arc::clone(&out);
+        let lab_root = lab.state.create_root_region(Budget::INFINITE);
+        let (worker, worker_handle) = lab
+            .state
+            .create_task(lab_root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let outcome = serve(&cx, &io, &cfg, Manager::System, &bus, 0).await;
+                *sink.lock().expect("slot lock") = Some(outcome);
+            })
+            .expect("task is created");
+        // Tab visits 2 s apart: open, drop a match-rule stream, drop the connection.
+        let (visits, _visits_handle) = lab
+            .state
+            .create_task(lab_root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                for client in clients {
+                    let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+                    let rule = zbus::MatchRule::builder()
+                        .msg_type(zbus::message::Type::Signal)
+                        .build();
+                    let stream = conn
+                        .read(
+                            &cx,
+                            zbus::MessageStream::for_match_rule(rule, conn.raw(), Some(8)),
+                        )
+                        .await
+                        .expect("signal stream");
+                    drop(stream);
+                    drop(conn);
+                    time::sleep(cx.now(), Duration::from_secs(2)).await;
+                }
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(worker, 0);
+        lab.scheduler.lock().schedule(visits, 0);
+        lab.run_until_idle();
+        assert_eq!(service_states(&mut rx), vec![(ManagerState::Connected, 1)]);
+
+        pump(&mut lab, Duration::from_secs(2 * VISITS as u64 + 2));
+        assert_eq!(broker.open_peers(), 0, "every dropped connection closed");
+        assert!(!broker.cut(), "the broker never cut the user's peers");
+        assert!(
+            out.lock().expect("slot lock").is_none(),
+            "the first generation runs, no restart"
+        );
+        assert!(
+            service_states(&mut rx).is_empty(),
+            "no Reconnecting, the records stay"
+        );
+
+        worker_handle.abort();
+        pump(&mut lab, SIGNAL_WAIT * 2);
+        let outcome = out.lock().expect("slot lock").take().expect("ended");
+        assert!(matches!(outcome, Outcome::Ok(())), "{outcome:?}");
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     // Cgroups
 
     const BOOT_TEXT: &str = "0123abcd-4567-89ab-cdef-0123456789ab\n";

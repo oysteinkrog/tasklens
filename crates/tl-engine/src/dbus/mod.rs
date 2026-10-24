@@ -2,7 +2,8 @@
 //!
 //! A connection runs with `internal_executor(false)`. A child task ticks its executor, each tick
 //! under `EXECUTOR_TICK`, so the task sees cancellation at least that often. When the owner drops
-//! the `DbusConn`, the task closes the connection (`release`). zbus futures do not
+//! the `DbusConn` or its region is cancelled, the task closes the connection (`release`), so the
+//! socket is closed on every path out of a generation. zbus futures do not
 //! see `Cx` cancellation, so every call goes through `DbusConn::call` or `DbusConn::read`: a
 //! `time::timeout` followed by a checkpoint. Proxies built on a connection must not outlive the
 //! worker generation that made it.
@@ -29,9 +30,12 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
 pub const EXECUTOR_TICK: Duration = Duration::from_millis(500);
 /// The deadline for opening a bus connection.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// The longest the tick task keeps a connection going after its generation ends: first for the
-/// owner's last calls, then to close it (`release`). Shutdown drains the root region for 1 s.
+/// The longest the tick task keeps a connection going for the owner's last calls after its
+/// region is cancelled (`release`).
 pub const RELEASE_WAIT: Duration = Duration::from_millis(500);
+/// The longest `release` takes to close the connection after that. With `RELEASE_WAIT` this
+/// stays under the 1 s that shutdown drains the root region for.
+pub const CLOSE_WAIT: Duration = Duration::from_millis(200);
 /// How often `release` checks whether the owner dropped the `DbusConn`.
 const RELEASE_STEP: Duration = Duration::from_millis(20);
 
@@ -125,8 +129,8 @@ fn drive(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
     })
 }
 
-/// Closes `conn` once its owner dropped the `DbusConn`, within `RELEASE_WAIT`. Runs with
-/// cancellation masked, so its timers still run.
+/// Closes `conn` once its owner dropped the `DbusConn`, or once `RELEASE_WAIT` runs out,
+/// whichever comes first. Runs with cancellation masked, so its timers still run.
 ///
 /// zbus queues a `RemoveMatch` task on the connection's own executor when a match-rule stream
 /// drops, and that task holds a clone of the connection. With no tick task the executor never
@@ -139,11 +143,10 @@ async fn release(cx: &Cx, conn: &zbus::Connection, dropped: &AtomicBool) {
     let start = cx.now();
     let left = || RELEASE_WAIT.saturating_sub(Duration::from_nanos(cx.now().duration_since(start)));
     // A cancelled region stops the tick loop before the owner drops the `DbusConn`. Keep driving
-    // the connection for the owner's last calls (the KWin script unload) until it does.
-    while !dropped.load(Ordering::Acquire) {
-        if left().is_zero() {
-            return;
-        }
+    // the connection for the owner's last calls (the KWin script unload) until it does. An owner
+    // that is still there after `RELEASE_WAIT` gets a closed connection: the task ends here, so
+    // nothing would close it later.
+    while !dropped.load(Ordering::Acquire) && !left().is_zero() {
         let step = RELEASE_STEP.min(left());
         let _ = time::timeout(cx.now(), step, conn.executor().tick()).await;
     }
@@ -153,7 +156,7 @@ async fn release(cx: &Cx, conn: &zbus::Connection, dropped: &AtomicBool) {
             conn.executor().tick().await;
         }
     };
-    let _ = time::timeout(cx.now(), left(), close).await;
+    let _ = time::timeout(cx.now(), CLOSE_WAIT, close).await;
 }
 
 impl DbusConn {
@@ -513,8 +516,9 @@ mod tests {
     /// `RemoveMatch` task that nothing ran. The connection kept itself alive and its socket
     /// stayed open, so the bus kept queueing signals for it until dbus-broker cut the user's
     /// other peers. Dropping the `DbusConn` now closes the socket.
-    #[test]
-    fn dropped_conn_closes_its_socket() {
+    /// A peer-to-peer pair over a socketpair: (server, client). The client is built for
+    /// `DbusConn::p2p`.
+    fn p2p_pair() -> (zbus::Connection, zbus::Connection) {
         let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let server = zbus::connection::Builder::async_io_unix_stream(a)
             .server(zbus::Guid::generate())
@@ -527,23 +531,36 @@ mod tests {
             .build();
         let (server, client) =
             futures_lite::future::block_on(futures_lite::future::zip(server, client));
-        let server = server.expect("server connects");
-        let client = client.expect("client connects");
+        (
+            server.expect("server connects"),
+            client.expect("client connects"),
+        )
+    }
+
+    /// Opens a match-rule stream on `conn` and drops it, so zbus queues a `RemoveMatch` task
+    /// that holds a clone of the connection.
+    async fn drop_a_match_stream(cx: &Cx, conn: &DbusConn) {
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .build();
+        let stream = conn
+            .read(
+                cx,
+                zbus::MessageStream::for_match_rule(rule, conn.raw(), Some(8)),
+            )
+            .await
+            .expect("signal stream");
+        drop(stream);
+    }
+
+    #[test]
+    fn dropped_conn_closes_its_socket() {
+        let (server, client) = p2p_pair();
         let rt = crate::runtime::build_runtime().expect("runtime builds");
         let join = rt.handle().spawn_checked(async move {
             let cx = Cx::current().expect("task has a Cx");
             let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
-            let rule = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .build();
-            let stream = conn
-                .read(
-                    &cx,
-                    zbus::MessageStream::for_match_rule(rule, conn.raw(), Some(8)),
-                )
-                .await
-                .expect("signal stream");
-            drop(stream);
+            drop_a_match_stream(&cx, &conn).await;
             drop(conn);
         });
         rt.block_on(join).expect("task completes");
@@ -552,6 +569,42 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(server.is_closed(), "the peer saw the socket close");
+    }
+
+    /// Regression (y6k.33 review): a region cancelled more than `RELEASE_WAIT` before the owner
+    /// dropped its `DbusConn` ended the tick task without closing the connection, and the later
+    /// drop had no task left to close it. The connection now closes when `RELEASE_WAIT` runs out.
+    #[test]
+    fn cancelled_conn_closes_before_its_owner_drops() {
+        let (server, client) = p2p_pair();
+        let peer = server.clone();
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+            drop_a_match_stream(&cx, &conn).await;
+            // What a cancelled region does to the tick task. The owner keeps the `DbusConn`.
+            conn.tick.abort();
+            let start = cx.now();
+            let waited = || Duration::from_nanos(cx.now().duration_since(start));
+            while !peer.is_closed() && waited() < Duration::from_secs(2) {
+                time::sleep(cx.now(), RELEASE_STEP).await;
+            }
+            let closed = peer.is_closed();
+            let took = waited();
+            drop(conn);
+            (closed, took)
+        });
+        let (closed, took) = rt.block_on(join).expect("task completes");
+        assert!(
+            closed,
+            "the socket closed while the owner still held the DbusConn"
+        );
+        assert!(
+            took >= RELEASE_WAIT,
+            "the owner had RELEASE_WAIT first, took {took:?}"
+        );
+        assert!(server.is_closed());
     }
 
     /// Needs a real session bus. Read-only: it connects and reads its own unique name.
