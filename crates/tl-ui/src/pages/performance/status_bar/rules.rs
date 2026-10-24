@@ -953,6 +953,7 @@ mod tests {
         );
 
         // No sweep running (the last one is 20 s old): no process.
+        run(&mut rules, 31, 49, busy_gpu);
         let mut r = calm(50);
         busy_gpu(&mut r);
         rules.step(&r, Some(&procs));
