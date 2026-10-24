@@ -815,6 +815,10 @@ pub struct HistorySettings {
     pub persist: bool,
     /// Not in menus.
     pub max_disk_mb: u32,
+    /// P2, ADR-017: 7-day device metric history. `false` stops it and deletes `metrics/`.
+    pub device_metrics: bool,
+    /// P2, ADR-017. Not in menus.
+    pub device_metrics_max_mb: u32,
 }
 
 impl Default for HistorySettings {
@@ -824,6 +828,8 @@ impl Default for HistorySettings {
             retention_h: 6,
             persist: true,
             max_disk_mb: 256,
+            device_metrics: true,
+            device_metrics_max_mb: 64,
         }
     }
 }
@@ -1753,6 +1759,8 @@ mod tests {
         assert_eq!(s.history.retention_h, 6);
         assert!(s.history.persist);
         assert_eq!(s.history.max_disk_mb, 256);
+        assert!(s.history.device_metrics);
+        assert_eq!(s.history.device_metrics_max_mb, 64);
 
         assert!(!s.window.close_with_esc);
         assert!(!s.window.always_on_top);

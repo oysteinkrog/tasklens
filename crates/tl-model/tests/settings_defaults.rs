@@ -105,6 +105,8 @@ enabled = false
 retention_h = 6                # 1..=12; menu 1 2 3 4 6 8 12
 persist = true                 # false = delete segments at shutdown
 max_disk_mb = 256              # not in menus
+device_metrics = true          # P2, ADR-017: 7-day device metric history; false stops it and deletes metrics/
+device_metrics_max_mb = 64     # P2, ADR-017; not in menus
 
 [window]
 close_with_esc = false
