@@ -673,11 +673,13 @@ impl Col {
     }
 }
 
+/// One overlay point: realtime, mean, min, max and valid 1 s values.
+type OverlayPoint = (i64, f32, f32, f32, u32);
+
 /// Points and events of the minutes not yet written, laid over a span when it is read.
 #[derive(Default)]
 struct Overlay {
-    /// Per series: time, mean, min, max and valid 1 s values of each point.
-    points: HashMap<SeriesKey, Vec<(i64, f32, f32, f32, u32)>>,
+    points: HashMap<SeriesKey, Vec<OverlayPoint>>,
     events: Vec<RealtimeEvent>,
 }
 
