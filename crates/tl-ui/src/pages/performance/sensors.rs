@@ -1427,6 +1427,7 @@ fn history_spec(
         smooth: false,
         grid,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

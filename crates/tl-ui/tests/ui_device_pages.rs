@@ -814,6 +814,40 @@ mod battery_history {
         }
     }
 
+    /// PERF-023: the history chart takes hover like every large graph. The pointer in the
+    /// middle of the 24 hour plot pins a sample and paints the readout, about 12 hours back.
+    #[gpui_kit::test]
+    fn week_chart_takes_hover(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        publish_battery(&mut r, true, Some(recent(40)));
+        select(&mut r, MOUSE);
+        let p = page(&mut r);
+        let chart = r
+            .vcx
+            .update(|_, cx| p.read(cx).history_chart().cloned().expect("a chart"));
+        assert!(r.vcx.read_entity(&chart, |v, _| v.spec.hover));
+        r.vcx.update(|window, _| window.activate_window());
+        let b = r
+            .vcx
+            .debug_bounds("perf-battery-history")
+            .expect("history chart bounds");
+        r.vcx
+            .simulate_mouse_move(b.center(), None, gpui_kit::Modifiers::none());
+        draw(r.vcx);
+        r.vcx.read_entity(&chart, |v, _| {
+            let h = v.hover_state();
+            assert!(h.hitbox_inserted, "hitbox");
+            assert!(h.pinned_t_ns.is_some(), "pinned");
+            assert!(h.last_box.is_some(), "readout painted");
+            let offset = h.line_text(0).expect("offset line");
+            assert!(
+                offset.starts_with("-11 h") || offset.starts_with("-12 h"),
+                "{offset}"
+            );
+        });
+    }
+
     #[gpui_kit::test]
     fn week_chart_rebuilds_on_history_version(cx: &mut TestAppContext) {
         let mut r = open(cx);

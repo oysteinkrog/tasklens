@@ -2879,6 +2879,12 @@ mod hover {
         out.clear();
         offset_text(0, 60 * S, &mut out);
         assert_eq!(out, "0 s");
+        out.clear();
+        offset_text(50_700 * S, 86_400 * S, &mut out);
+        assert_eq!(out, "-14 h 5 m");
+        out.clear();
+        offset_text(1_800 * S, 86_400 * S, &mut out);
+        assert_eq!(out, "-30 m 0 s");
     }
 
     #[gpui_kit::test]

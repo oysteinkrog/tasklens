@@ -147,11 +147,14 @@ pub fn snap_time(t_ns: u64, grid: SampleGrid) -> u64 {
 
 /// Appends the hover time offset `dt_ns` before the newest sample, rounded to whole seconds:
 /// "-12 s" for ranges up to 60 s, "-4 m 12 s" for 300 and 600 s ("-12 s" below a minute).
-/// "0 s" at the newest sample.
+/// An hour or more, on the 24 hour battery history, reads "-14 h 5 m". "0 s" at the newest
+/// sample.
 pub fn offset_text(dt_ns: u64, range_ns: u64, out: &mut String) {
     let secs = (dt_ns + NS_PER_S / 2) / NS_PER_S;
     if secs == 0 {
         out.push_str("0 s");
+    } else if secs >= 3600 {
+        let _ = write!(out, "-{} h {} m", secs / 3600, secs % 3600 / 60);
     } else if range_ns <= SECONDS_ONLY_MAX_NS || secs < 60 {
         let _ = write!(out, "-{secs} s");
     } else {
