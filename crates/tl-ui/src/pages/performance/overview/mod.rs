@@ -540,7 +540,8 @@ impl OverviewPage {
     /// Works out each device box's min, avg and peak line and the time axis start for the range,
     /// and hands them to the boxes, which notify only when theirs changed (UI-PRF-055). The main
     /// metric is CPU total, memory in use, the first GPU's utilization, the active time of the
-    /// busiest disk and the total throughput of the Network box's adapter.
+    /// busiest disk and the total throughput of the engine's aggregate of the counted interfaces,
+    /// the set the Network box charts.
     fn sync_range(&mut self, cx: &mut Context<Self>) {
         let snap = std::sync::Arc::clone(self.hub.read(cx).current());
         let range = self.range;
@@ -581,12 +582,12 @@ impl OverviewPage {
             .map(|c| id(c.1, MetricId::DISK_ACTIVE))
             .collect();
         let disk = range::busiest(&snap, &disks, range);
-        let net = cards_of(&self.sidebar, DeviceKind::Net, cx)
-            .first()
-            .and_then(|c| {
-                let ids = [id(c.1, MetricId::NET_RX), id(c.1, MetricId::NET_TX)];
-                range::figures(&snap, &ids, range)
-            });
+        let net = net_box::aggregate(&snap.devices);
+        let net = range::figures(
+            &snap,
+            &[id(net, MetricId::NET_RX), id(net, MetricId::NET_TX)],
+            range,
+        );
         let unit = NetFormat::of(cx);
         let net = range::figures_text(words, net, |v, out| {
             format_value(ValueFormat::RateNetwork, v, unit, out);

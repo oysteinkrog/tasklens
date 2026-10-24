@@ -11,7 +11,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
-use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::settings::{
@@ -20,7 +20,7 @@ use tl_model::settings::{
 use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-use tl_ui::chart::ChartView;
+use tl_ui::chart::{ChartView, NetFormat, ValueFormat, format_value};
 use tl_ui::components::kv_grid;
 use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
@@ -443,6 +443,95 @@ fn overview_range_figures_min_avg_peak(cx: &mut TestAppContext) {
         ],
     );
     assert_eq!(range_texts(&mut r)[0].figures, "min 2%  avg 30%  peak 100%");
+}
+
+/// The Network figures are download plus upload of the engine's aggregate of the counted
+/// interfaces, the set the Network box charts, not of the first adapter.
+#[gpui_kit::test]
+fn overview_range_net_figures_use_aggregate(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let mut entries = catalog();
+    entries.push(entry(
+        6,
+        DeviceIdentity::Net {
+            netns_ino: 1,
+            ifindex: 3,
+            name: Arc::from("wlan0"),
+        },
+        Some(NetKind::Wireless),
+    ));
+    entries.push(entry(
+        7,
+        DeviceIdentity::Aggregate(AggregateKind::Nets),
+        None,
+    ));
+    let newest = now_boot_ns();
+    r.engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: 2,
+            entries: Arc::from(entries),
+        });
+        let version = s.series.header.version + 1;
+        let view = |device: u16, metric: MetricId, v: f32| {
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(device),
+                    metric,
+                },
+                version,
+                period_ns: S,
+                samples: Arc::from([Sample::valid(newest - S, v), Sample::valid(newest, v)]),
+            })
+        };
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            series: Arc::from([
+                view(5, MetricId::NET_RX, 1_000.),
+                view(5, MetricId::NET_TX, 0.),
+                view(6, MetricId::NET_RX, 3_000.),
+                view(6, MetricId::NET_TX, 1_000.),
+                view(7, MetricId::NET_RX, 4_000.),
+                view(7, MetricId::NET_TX, 1_000.),
+            ]),
+            slow: Arc::from([]),
+        });
+    });
+    draw(r.vcx);
+    let unit = r.vcx.update(|_, cx| NetFormat::of(cx));
+    let mut rate = String::new();
+    format_value(ValueFormat::RateNetwork, 5_000., unit, &mut rate);
+    assert_eq!(
+        range_texts(&mut r)[4].figures,
+        format!("min {rate}  avg {rate}  peak {rate}")
+    );
+}
+
+/// At 24 h a point whose max is 100 and mean is 5 draws its max: the CPU line reaches the plot
+/// top, so a spike shorter than the 10 s tier step stays visible.
+#[gpui_kit::test]
+fn overview_range_history_draws_point_max(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    set_range(&mut r, OverviewRange::H24);
+    let now = now_realtime();
+    publish_history(
+        &mut r,
+        DeviceRange::H24,
+        now - 30 * 60 * MIN,
+        vec![
+            point(now - 300 * MIN, 5., 5., 5.),
+            point(now - 299 * MIN, 5., 5., 100.),
+            point(now - 298 * MIN, 5., 5., 5.),
+        ],
+    );
+    let chart = box_charts(&mut r)[0].clone();
+    let top = r
+        .vcx
+        .read_entity(&chart, |c, _| c.stroke_top_y())
+        .expect("strokes");
+    assert!(top.abs() <= 1.0, "the line tops out at {top}, not at 100");
 }
 
 /// At 24 h a gap point and a stretch without points both draw as breaks: two runs and the

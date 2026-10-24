@@ -244,7 +244,7 @@ fn section_versions(cx: &gpui_kit::App) -> [u64; 4] {
 }
 
 /// The aggregate net device's idx in `catalog`, `DeviceIdx(u16::MAX)` when it has none.
-fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
+pub(super) fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
     catalog
         .find(&DeviceIdentity::Aggregate(AggregateKind::Nets))
         .map_or(DeviceIdx(u16::MAX), |e| e.idx)

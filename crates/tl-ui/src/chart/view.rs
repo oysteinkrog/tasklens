@@ -604,7 +604,10 @@ impl HistoryClock {
 /// `points` as a series view on CLOCK_REALTIME (UI-PRF-055). A gap point is a gap sample, and a
 /// point more than one and a half steps after the one before it starts a new run, so a stretch
 /// without points (the app not running, the machine off or asleep) draws as a break, not as a
-/// line across it. The version is the component's, so a new publish rebuilds the geometry.
+/// line across it. A valid point is its max a sixth of a step after the bucket start, its min a
+/// third in (each only when it differs from the mean), then its mean at the bucket middle, so a
+/// spike shorter than the step stays visible and the newest sample is still a mean. The version
+/// is the component's, so a new publish rebuilds the geometry.
 fn history_view(id: SeriesId, points: &[HistPoint], hist: &DeviceHistory) -> SeriesView {
     let step = hist.step_ns.max(1);
     let mut samples = Vec::with_capacity(points.len());
@@ -613,16 +616,22 @@ fn history_view(id: SeriesId, points: &[HistPoint], hist: &DeviceHistory) -> Ser
         let Ok(t) = u64::try_from(p.t_realtime_ns) else {
             continue;
         };
-        let mut s = if p.is_gap() {
-            Sample::gap(t)
+        let first = samples.len();
+        if p.is_gap() {
+            samples.push(Sample::gap(t));
         } else {
-            Sample::valid(t, p.mean)
-        };
+            if p.max > p.mean {
+                samples.push(Sample::valid(t + step / 6, p.max));
+            }
+            if p.min < p.mean {
+                samples.push(Sample::valid(t + step / 3, p.min));
+            }
+            samples.push(Sample::valid(t + step / 2, p.mean));
+        }
         if prev.is_some_and(|q| p.t_realtime_ns.saturating_sub(q) as u64 > step + step / 2) {
-            s.flags |= SampleFlags::GAP_BEFORE;
+            samples[first].flags |= SampleFlags::GAP_BEFORE;
         }
         prev = Some(p.t_realtime_ns);
-        samples.push(s);
     }
     SeriesView {
         id,
