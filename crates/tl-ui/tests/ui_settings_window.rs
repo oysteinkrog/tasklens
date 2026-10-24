@@ -1976,6 +1976,23 @@ fn advanced_and_privileges_rows_have_group_headings(cx: &mut TestAppContext) {
     }
 }
 
+/// The dropdowns are `TlSelect`s (opaque popup over its whole box), not the kit dropdown.
+#[gpui_kit::test]
+fn settings_dropdown_is_a_tl_select_with_a_popup(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    assert!(
+        vcx.debug_bounds("TlSelect-settings-select-general.language")
+            .is_some(),
+        "General > Language drawn as a TlSelect"
+    );
+    assert!(vcx.debug_bounds("TlSelect-popup").is_none());
+    click_selector(&mut vcx, "TlSelect-settings-select-general.language".into());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(vcx.debug_bounds("TlSelect-popup").is_some());
+}
+
 #[gpui_kit::test]
 fn privileges_page_keys(cx: &mut TestAppContext) {
     setup(cx);
