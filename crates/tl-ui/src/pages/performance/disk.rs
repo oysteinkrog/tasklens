@@ -205,6 +205,7 @@ pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettin
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

@@ -529,6 +529,7 @@ fn overall_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSp
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -598,6 +599,7 @@ fn secondary_spec(
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -690,6 +692,7 @@ fn base_spec(s: &PageSettingsView) -> ChartSpec {
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

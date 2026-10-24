@@ -241,6 +241,7 @@ fn throughput_spec(device: DeviceIdx, y: YScale, s: &PageSettings, theme: &TlThe
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

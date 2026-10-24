@@ -390,6 +390,7 @@ pub fn speed_spec(
         smooth: s.smooth,
         grid: s.grid.clone(),
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -443,6 +444,7 @@ fn temperature_spec(sensor: Option<DeviceIdx>, s: &PageSettingsView, theme: &TlT
         smooth: s.smooth,
         grid: s.grid.clone(),
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }

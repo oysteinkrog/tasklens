@@ -277,6 +277,7 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         assert_eq!(page.header().0.as_ref(), "Memory");
         for chart in [page.physical(), page.commit(), page.swap()] {
             assert!(!chart.read(cx).spec.series.is_empty());
+            assert!(chart.read(cx).spec.hover, "memory chart takes hover");
         }
         assert_rows(
             page,
@@ -305,6 +306,8 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         assert_eq!(page.header().0.as_ref(), "Disk 0");
         assert!(!page.active_chart().read(cx).spec.series.is_empty());
         assert!(!page.transfer_chart().read(cx).spec.series.is_empty());
+        assert!(page.active_chart().read(cx).spec.hover);
+        assert!(page.transfer_chart().read(cx).spec.hover);
         assert_rows(
             page,
             &[ROW_ACTIVE, ROW_RESPONSE, ROW_READ, ROW_WRITE, ROW_CAPACITY],
@@ -319,6 +322,7 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         let page = net.read(cx);
         assert_eq!(page.header().0.as_ref(), "enp38s0");
         assert_eq!(page.throughput().read(cx).spec.series.len(), 2);
+        assert!(page.throughput().read(cx).spec.hover);
         assert_rows(
             page,
             &[
@@ -341,6 +345,9 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
         assert_eq!(page.engines().read(cx).spec.cells.len(), 3);
         assert!(!page.memory().read(cx).spec.series.is_empty());
         assert!(!page.temperature().read(cx).spec.series.is_empty());
+        assert!(page.engines().read(cx).spec.hover);
+        assert!(page.memory().read(cx).spec.hover);
+        assert!(page.temperature().read(cx).spec.hover);
         assert_rows(
             page,
             &[
@@ -582,7 +589,12 @@ fn build_page_fan_and_battery(cx: &mut TestAppContext) {
     select(&mut r, "fan:nct6797:2");
     select(&mut r, MOUSE);
     let fan = view_of(&mut r, "fan:nct6797:2");
-    assert!(fan.clone().downcast::<FanPage>().is_ok());
+    let fan_page = fan.clone().downcast::<FanPage>().expect("a FanPage");
+    r.vcx.update(|_, cx| {
+        let page = fan_page.read(cx);
+        assert!(page.speed().read(cx).spec.hover);
+        assert!(page.temperature().read(cx).spec.hover);
+    });
     let header = r.vcx.update(|_, cx| header_of(&fan, cx));
     assert_eq!((header.0.as_ref(), header.1.as_ref()), ("Fan 1", "nct6797"));
     let mouse = view_of(&mut r, MOUSE);

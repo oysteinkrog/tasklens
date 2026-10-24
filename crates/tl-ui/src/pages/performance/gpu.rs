@@ -629,6 +629,7 @@ pub fn memory_spec(device: DeviceIdx, shared: bool, total: u64, theme: &TlTheme)
         series: series_list,
         y,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -659,6 +660,7 @@ fn temperature_spec(device: DeviceIdx, theme: &TlTheme) -> ChartSpec {
         }],
         y: YScale::StickyTemp,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -706,6 +708,7 @@ pub fn power_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> Ch
         }],
         y: YScale::StickyUp { hw_max },
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -742,6 +745,7 @@ pub fn clocks_spec(device: DeviceIdx, hw_max: Option<f32>, theme: &TlTheme) -> C
         ],
         y: YScale::StickyUp { hw_max },
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -2529,6 +2533,7 @@ fn placeholder_spec(device: DeviceIdx, theme: &TlTheme) -> ChartSpec {
             ..ChartSeries::default()
         }],
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
@@ -2582,7 +2587,7 @@ fn grid_spec(
         gap: m.sp[4],
         legend: SmallVec::new(),
         value_fmt: ValueFormat::Percent,
-        hover: false,
+        hover: true,
     }
 }
 

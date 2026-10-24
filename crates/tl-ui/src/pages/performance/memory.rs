@@ -243,6 +243,7 @@ fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> Char
         },
         smooth: s.smooth,
         background: ChartBg::Window,
+        hover: true,
         ..ChartSpec::default()
     }
 }
