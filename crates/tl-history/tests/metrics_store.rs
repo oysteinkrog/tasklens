@@ -565,3 +565,171 @@ fn open_skips_bad_files() {
     assert!(s10.join("seg-0000000002.tlm").exists());
     assert_eq!(METRIC_BLOCK_NS, MIN);
 }
+
+/// Boottime seconds of every valid 1 s point stored in the 1 s tier, one entry per stored copy.
+fn stored_seconds(root: &Path) -> Vec<u64> {
+    let mut out = Vec::new();
+    for f in files(root, Tier::S1) {
+        for b in blocks(&f) {
+            for c in &b.columns {
+                for i in (0..c.mean.len()).filter(|&i| c.valid[i / 8] & (1 << (i % 8)) != 0) {
+                    out.push(b.start_t_ns / SEC + i as u64);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// A restart in the middle of a minute writes only the new seconds of that minute. The seconds
+/// loaded back into the ring are on disk already and stay stored once.
+#[test]
+fn restart_mid_minute_stores_each_second_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key("cpu", MetricId::CPU_TOTAL);
+    let (mut a, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = a
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut a, &[slot], 0, 90, |_, s| s as f32);
+    a.close(90 * SEC).unwrap();
+    drop(a);
+
+    // The same boot 10 s later: the ring loads seconds 0 to 89.
+    let (mut b, report) = open(cfg(dir.path(), BOOT_A, OFF), 100 * SEC);
+    assert_eq!(report.ring_points, 90);
+    let slot = b
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut b, &[slot], 100, 180, |_, s| 1000.0 + s as f32);
+    b.close(180 * SEC).unwrap();
+
+    let expected: Vec<u64> = (0..90).chain(100..180).collect();
+    assert_eq!(stored_seconds(dir.path()), expected);
+
+    // Minute 1 has a point in each session's segment: 60 to 89 (mean 74.5) and 100 to 119
+    // (mean 1109.5). The format stores no counts, so the read averages the two points.
+    let span = b
+        .read(Tier::M1, OFF, OFF + 179 * SEC as i64, 180 * SEC)
+        .unwrap();
+    let p = series(&span, &k);
+    assert_eq!(p[0].mean, 29.5);
+    assert_eq!((p[1].mean, p[1].min, p[1].max), (592.0, 60.0, 1119.0));
+    assert_eq!(p[2].mean, 1149.5);
+    let span = b
+        .read(
+            Tier::S1,
+            OFF + 60 * SEC as i64,
+            OFF + 119 * SEC as i64,
+            180 * SEC,
+        )
+        .unwrap();
+    let p = series(&span, &k);
+    assert_eq!((p[29].mean, p[40].mean), (89.0, 1100.0));
+    assert!(p[30..40].iter().all(|p| p.mean.is_nan()));
+}
+
+/// The `Boot` event starts at boottime 0, before the first segment of an engine that started
+/// later in that boot. A read of a range that ends before that segment still finds it.
+#[test]
+fn boot_event_before_its_segment_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key("cpu", MetricId::CPU_TOTAL);
+    let (mut a, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = a
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut a, &[slot], 0, 120, |_, _| 1.0);
+    a.close(120 * SEC).unwrap();
+    drop(a);
+
+    // Boot B is an hour later and the engine starts 10 minutes into it.
+    let off_b = OFF + 3600 * SEC as i64;
+    let (mut b, report) = open(cfg(dir.path(), BOOT_B, off_b), 600 * SEC);
+    assert_eq!(report.previous_boot, Some(BOOT_A));
+    let slot = b
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut b, &[slot], 600, 720, |_, _| 2.0);
+    b.close(720 * SEC).unwrap();
+    drop(b);
+
+    let (mut c, _) = open(cfg(dir.path(), BOOT_B, off_b), 720 * SEC);
+    assert_eq!(c.segments(Tier::M1)[1].1, off_b + 600 * SEC as i64);
+    let span = c
+        .read(
+            Tier::M1,
+            off_b - 30 * MIN as i64,
+            off_b + 5 * MIN as i64,
+            720 * SEC,
+        )
+        .unwrap();
+    assert!(span.series.is_empty());
+    assert_eq!(span.events.len(), 1);
+    assert_eq!(span.events[0].event.kind, EventKind::Boot);
+    assert_eq!(span.events[0].start_realtime_ns, off_b);
+}
+
+/// An event goes into a 1 min block that ends after it starts, so it never starts after the end
+/// of its segment. One that starts after the minute being written waits for a later block.
+#[test]
+fn event_waits_for_a_block_that_ends_after_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = h
+        .register(&Arc::from("cpu"), &Arc::from("CPU"), MetricId::CPU_TOTAL)
+        .unwrap();
+    feed(&mut h, &[slot], 60, 120, |_, _| 1.0);
+    h.push_event(tl_history::metrics::HistEvent {
+        kind: EventKind::Heat,
+        start_t_ns: 121 * SEC,
+        duration_ms: 0,
+        peak: 95.0,
+        device_key: Some(Arc::from("cpu")),
+        process: None,
+    });
+    // Minute 1 is written without the event; no samples come for minute 2.
+    h.tick(122 * SEC).unwrap();
+    let m1 = blocks(&files(dir.path(), Tier::M1)[0]);
+    assert_eq!(m1.len(), 1);
+    assert!(m1[0].events.is_empty());
+    h.tick(182 * SEC).unwrap();
+    let m1 = blocks(&files(dir.path(), Tier::M1)[0]);
+    assert_eq!(m1.len(), 2);
+    assert_eq!(m1[1].start_t_ns, 2 * MIN);
+    assert_eq!(m1[1].events[0].kind, EventKind::Heat);
+    assert!(h.segments(Tier::M1)[0].2 > OFF + 121 * SEC as i64);
+}
+
+/// Retention also runs while no samples come: a segment expires as `tick` goes on, the open
+/// segment of a tier included, and the next block starts a new segment.
+#[test]
+fn retention_runs_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = h
+        .register(&Arc::from("cpu"), &Arc::from("CPU"), MetricId::CPU_TOTAL)
+        .unwrap();
+    feed(&mut h, &[slot], 0, 120, |_, _| 1.0);
+    h.tick(122 * SEC).unwrap();
+    assert_eq!(files(dir.path(), Tier::S1).len(), 1);
+
+    // The segment expires an hour after its last block ends, at 3,720 s. With no samples in
+    // between, retention runs once a minute, so the delete comes at most a minute later.
+    h.tick(3719 * SEC).unwrap();
+    assert_eq!(files(dir.path(), Tier::S1).len(), 1);
+    h.tick(3779 * SEC).unwrap();
+    assert!(files(dir.path(), Tier::S1).is_empty());
+    assert!(h.segments(Tier::S1).is_empty());
+    assert_eq!(files(dir.path(), Tier::S10).len(), 1);
+    assert_eq!(files(dir.path(), Tier::M1).len(), 1);
+
+    feed(&mut h, &[slot], 3800, 3870, |_, _| 2.0);
+    assert_eq!(
+        files(dir.path(), Tier::S1),
+        [dir.path()
+            .join("1s")
+            .join(metric_segment_file_name(OFF_S + 3780))]
+    );
+}

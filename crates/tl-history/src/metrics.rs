@@ -245,8 +245,9 @@ pub enum EventKind {
     Crash,
 }
 
-/// One stored event. `start_t_ns` is CLOCK_BOOTTIME of the boot whose segment holds it. Process
-/// names are `comm` only (ADR-015: no command lines).
+/// One stored event. `start_t_ns` is CLOCK_BOOTTIME of the boot whose segment holds it. It is
+/// stored when it ends, in a block that ends after its start, so it starts between its boot
+/// and the end of its segment. Process names are `comm` only (ADR-015: no command lines).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistEvent {
     pub kind: EventKind,
@@ -611,6 +612,9 @@ struct Series {
     open: Option<(u64, f32)>,
     /// Last closed second; later samples from it are dropped.
     closed: Option<u64>,
+    /// Realtime second after the newest point loaded from disk. Ring points before it are
+    /// already stored, so a minute written after a restart leaves them out.
+    stored_to: i64,
 }
 
 /// Accumulated buckets of one series in a span. Bucket `idx` lives at `idx mod len`.
@@ -892,6 +896,9 @@ pub struct MetricHistory {
     /// Events for the next 1 min block.
     events: Vec<HistEvent>,
     spans: Vec<Span>,
+    /// `tick` applies retention and the cap at this boottime even when it wrote nothing, so
+    /// segments still expire after the samples stop.
+    next_enforce_t_ns: u64,
 }
 
 impl MetricHistory {
@@ -917,6 +924,7 @@ impl MetricHistory {
             gap_pending: [true; 3],
             events: Vec::new(),
             spans: Vec::new(),
+            next_enforce_t_ns: 0,
         };
         let mut report = MetricLoadReport::default();
         for tier in Tier::ALL {
@@ -967,6 +975,7 @@ impl MetricHistory {
                 report.timed_out = true;
                 for s in &mut h.series {
                     s.ring = None;
+                    s.stored_to = i64::MIN;
                 }
                 h.ring_end = i64::MIN;
             }
@@ -1008,6 +1017,8 @@ impl MetricHistory {
                         let t = rt(b.start_t_ns + i as u64 * NS_PER_SEC, offset);
                         let r = t.div_euclid(NS_PER_SEC as i64);
                         if bit(&c.valid, i) && r >= from_s && self.ring_write(idx, r, v) {
+                            let s = &mut self.series[idx];
+                            s.stored_to = s.stored_to.max(r + 1);
                             points += 1;
                         }
                     }
@@ -1032,6 +1043,7 @@ impl MetricHistory {
             ring: None,
             open: None,
             closed: None,
+            stored_to: i64::MIN,
         });
         self.by_key.insert(key.clone(), slot);
         Some(usize::from(slot))
@@ -1165,7 +1177,8 @@ impl MetricHistory {
         ring[r.rem_euclid(RING_SECS as i64) as usize]
     }
 
-    /// The 1 s values of the live series in boottime minute `m`, for each series with one.
+    /// The 1 s values of the live series in boottime minute `m` that are not on disk yet, for
+    /// each series with one.
     fn minute_values(&self, m: u64) -> Vec<(usize, [f32; 60])> {
         let r0 = self.rt_sec(m / NS_PER_SEC);
         let mut out = Vec::new();
@@ -1175,7 +1188,10 @@ impl MetricHistory {
             };
             let mut secs = [f32::NAN; 60];
             for (i, v) in secs.iter_mut().enumerate() {
-                *v = Self::ring_at(ring, self.ring_end, r0 + i as i64);
+                let r = r0 + i as i64;
+                if r >= s.stored_to {
+                    *v = Self::ring_at(ring, self.ring_end, r);
+                }
             }
             if secs.iter().any(|v| !v.is_nan()) {
                 out.push((idx, secs));
@@ -1185,8 +1201,9 @@ impl MetricHistory {
     }
 
     /// Writes every minute that ended `FLUSH_GRACE_NS` or more before `now_t_ns`, applies
-    /// retention and the cap, and drops spans idle for `SPAN_IDLE_NS`. Call it about once a
-    /// second. Returns the first error; the other minutes and tiers go on.
+    /// retention and the cap after a write and at least once a minute, and drops spans idle for
+    /// `SPAN_IDLE_NS`. Call it about once a second. Returns the first error; the other minutes
+    /// and tiers go on.
     pub fn tick(&mut self, now_t_ns: TimeNs) -> Result<(), HistoryError> {
         let cutoff = now_t_ns.saturating_sub(FLUSH_GRACE_NS);
         for idx in 0..self.series.len() {
@@ -1211,14 +1228,20 @@ impl MetricHistory {
         }
         // Events with no minute to ride on get a block of their own.
         let last = minute_of(cutoff);
-        if !self.events.is_empty() && self.pending.is_empty() && last >= METRIC_BLOCK_NS {
+        if self.pending.is_empty()
+            && last >= METRIC_BLOCK_NS
+            && self.events.iter().any(|e| e.start_t_ns < last)
+        {
             wrote = true;
             if let Err(e) = self.flush_minute(last - METRIC_BLOCK_NS) {
                 first_err.get_or_insert(e);
             }
         }
-        if wrote && let Err(e) = self.enforce(now_t_ns) {
-            first_err.get_or_insert(e);
+        if wrote || now_t_ns >= self.next_enforce_t_ns {
+            self.next_enforce_t_ns = now_t_ns.saturating_add(METRIC_BLOCK_NS);
+            if let Err(e) = self.enforce(now_t_ns) {
+                first_err.get_or_insert(e);
+            }
         }
         self.spans
             .retain(|s| now_t_ns.saturating_sub(s.last_used) < SPAN_IDLE_NS);
@@ -1238,7 +1261,8 @@ impl MetricHistory {
             }
         }
         if !self.events.is_empty() {
-            let m = self.written_to.max(minute_of(now_t_ns));
+            let newest = self.events.iter().map(|e| e.start_t_ns).max().unwrap_or(0);
+            let m = self.written_to.max(minute_of(now_t_ns.max(newest)));
             if let Err(e) = self.flush_minute(m) {
                 first_err.get_or_insert(e);
             }
@@ -1265,7 +1289,8 @@ impl MetricHistory {
         w.file.sync_all().map_err(io_err(&path.unwrap_or_default()))
     }
 
-    /// Builds and writes the three blocks of boottime minute `m`.
+    /// Builds and writes the three blocks of boottime minute `m`. Queued events that start
+    /// before the minute ends go into its 1 min block; the others wait for a later one.
     fn flush_minute(&mut self, m: u64) -> Result<(), HistoryError> {
         let mut columns: [Vec<SeriesColumn>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (idx, secs) in self.minute_values(m) {
@@ -1275,7 +1300,10 @@ impl MetricHistory {
             }
         }
         self.written_to = self.written_to.max(m + METRIC_BLOCK_NS);
-        let events = std::mem::take(&mut self.events);
+        let (events, later): (Vec<HistEvent>, Vec<HistEvent>) = std::mem::take(&mut self.events)
+            .into_iter()
+            .partition(|e| e.start_t_ns < m + METRIC_BLOCK_NS);
+        self.events = later;
         let mut first_err = None;
         for (tier, cols) in Tier::ALL.into_iter().zip(columns) {
             let events = if tier == Tier::M1 {
@@ -1419,13 +1447,23 @@ impl MetricHistory {
         Ok(())
     }
 
-    /// Deletes closed segments whose end is a tier retention or more before now, then the
-    /// closed segments with the oldest end, of any tier, while the store is over its cap. Never
-    /// deletes an open segment. A segment whose delete fails stays indexed; the first error is
-    /// returned at the end.
+    /// Deletes the segments whose end is a tier retention or more before now, then the closed
+    /// segments with the oldest end, of any tier, while the store is over its cap. An open
+    /// segment is closed first when it expired (no block for a whole retention), and the next
+    /// block starts a new one; the cap never deletes an open segment. A segment whose delete
+    /// fails stays indexed; the first error is returned at the end.
     fn enforce(&mut self, now_t_ns: TimeNs) -> Result<(), HistoryError> {
         let now_rt = rt(now_t_ns, self.cfg.realtime_offset_ns);
         let mut first_err = None;
+        for tier in Tier::ALL {
+            let expired = self.writers[tier.index()].is_some()
+                && self.segs[tier.index()].last().is_some_and(|s| {
+                    now_rt.saturating_sub(s.end_rt()) >= tier.retention_ns() as i64
+                });
+            if expired && let Err(e) = self.close_writer(tier) {
+                first_err.get_or_insert(e);
+            }
+        }
         let mut remove = |seg: &Seg| match fs::remove_file(&seg.path) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -1544,15 +1582,23 @@ impl MetricHistory {
         let from = lo * step as i64;
         let to = (span.hi() + 1) * step as i64;
         let segs = &self.segs[tier.index()];
+        // An event can start before its segment, at the earliest at its boot (boottime 0), so
+        // the 1 min tier also reads the later segments of a boot that started before `to`, for
+        // their events only.
+        let first_rt = |s: &Seg| match tier {
+            Tier::M1 => s.header.realtime_offset_ns,
+            _ => s.start_rt(),
+        };
         for seg in segs
             .iter()
-            .filter(|s| s.end_rt() > from && s.start_rt() < to)
+            .filter(|s| s.end_rt() > from && first_rt(s) < to)
         {
             let offset = seg.header.realtime_offset_ns;
+            let points = seg.start_rt() < to;
             let mut cols: Vec<Option<usize>> = Vec::new();
             let mut generation = u32::MAX;
             seg.read_blocks(|b, table, g| {
-                if g != generation {
+                if points && g != generation {
                     generation = g;
                     cols = table
                         .iter()
