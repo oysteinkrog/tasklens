@@ -950,11 +950,15 @@ mod mini {
     use tl_model::command::{Command, KWinCommand, Tab};
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
-    use tl_model::ids::DeviceIdx;
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::settings::{
         AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
-    use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::snapshot::{
+        ComponentHeader, FrameGeometry, SeriesSet, WindowEntry, WindowsSnapshot,
+    };
+    use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
     use tl_ui::actions::ToggleMiniWindow;
     use tl_ui::app::{BootSettings, EngineGlobal};
@@ -1243,7 +1247,36 @@ mod mini {
     /// value may take a row of its own.
     #[gpui_kit::test]
     fn mini_window_card_heading_is_one_row(cx: &mut TestAppContext) {
-        let _rig = setup(cx);
+        let rig = setup(cx);
+        // A full Memory value ("54.9%" beside "34.68 GiB / 63.16 GiB"), not the empty rig default.
+        rig.engine.publish_with(|s| {
+            let mem = &mut Arc::make_mut(&mut s.system).memory;
+            mem.validity = Validity::Valid;
+            mem.used = 34_680_000_000;
+            mem.total = 63_160_000_000;
+            let newest = now_boot_ns();
+            let samples: Vec<Sample> = (0..60u64)
+                .map(|k| Sample::valid(newest - (59 - k) * 1_000_000_000, 34.68e9))
+                .collect();
+            let view = Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(1),
+                    metric: MetricId::MEM_USED,
+                },
+                version: 1,
+                period_ns: 1_000_000_000,
+                samples: samples.into(),
+            });
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: 1,
+                    ..ComponentHeader::default()
+                },
+                series: vec![view].into(),
+                slow: Arc::from([]),
+            });
+        });
+        cx.run_until_parked();
         let (mut vcx, view) = open(cx);
         draw(&mut vcx);
         let cards: Vec<_> = vcx.read_entity(&view, |v, _| {
