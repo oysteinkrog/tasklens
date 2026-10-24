@@ -9,6 +9,10 @@
 //! | 10 s | 10 s | 24 h | mean, min and max of the ten 1 s points | 1 h |
 //! | 1 min | 60 s | 7 d | mean of the six 10 s means weighted by valid count, min, max | 24 h |
 //!
+//! The 10 s and 1 min points also store how many valid 1 s values they hold. A read weights each
+//! point by that count, so a minute split by a restart, half in each session's segment, reads as
+//! the mean of all its seconds.
+//!
 //! Layout: `root/1s/`, `root/10s/` and `root/1m/`, each with `seg-<CLOCK_REALTIME start seconds,
 //! 10 digits>.tlm` files. Directories have mode 0700, files 0600. A segment is a 64-byte header
 //! and one frame per 60 s block, `u32 LE length | u32 LE crc32 | zstd frame` of a postcard
@@ -216,6 +220,9 @@ pub struct SeriesColumn {
     pub min: Option<Vec<f32>>,
     /// 10 s and 1 min tiers only.
     pub max: Option<Vec<f32>>,
+    /// Valid 1 s values in each point: 1 to 10 or 1 to 60, 0 for an invalid point. 10 s and
+    /// 1 min tiers only.
+    pub count: Option<Vec<u8>>,
 }
 
 /// One 60 s block. Point `i` of a column is at `start_t_ns + i * point`.
@@ -412,6 +419,15 @@ fn bitmap(n: usize, valid: impl Fn(usize) -> bool) -> Vec<u8> {
     map
 }
 
+/// The valid 1 s values behind point `i`: its stored count, 1 in the 1 s tier, which stores
+/// none, and at least 1 for a valid point.
+fn weight_at(count: &Option<Vec<u8>>, i: usize) -> u32 {
+    count
+        .as_ref()
+        .and_then(|c| c.get(i))
+        .map_or(1, |&n| u32::from(n).max(1))
+}
+
 /// Bucket width for `[from, to]` in `tier`: a whole number of tier points, at least one, and at
 /// most `MAX_POINTS` buckets aligned to multiples of the width (the ADR-012 `bucket_width_ns`
 /// rule).
@@ -432,6 +448,7 @@ fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
             .collect(),
         min: None,
         max: None,
+        count: None,
     };
     let mut n10 = [0u32; 6];
     let mut mean10 = [0f32; 6];
@@ -458,6 +475,7 @@ fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
         mean: mean10.to_vec(),
         min: Some(min10.to_vec()),
         max: Some(max10.to_vec()),
+        count: Some(n10.iter().map(|&n| n as u8).collect()),
     };
     let n: u32 = n10.iter().sum();
     let (mut sum, mut lo, mut hi) = (0f64, f32::NAN, f32::NAN);
@@ -476,6 +494,7 @@ fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
         }],
         min: Some(vec![if n > 0 { lo } else { 0.0 }]),
         max: Some(vec![if n > 0 { hi } else { 0.0 }]),
+        count: Some(vec![n as u8]),
     };
     [s1, s10, m1]
 }
@@ -619,11 +638,12 @@ struct Series {
 
 /// Accumulated buckets of one series in a span. Bucket `idx` lives at `idx mod len`.
 struct Col {
+    /// Sum of each point's mean times its weight.
     sum: Vec<f32>,
     min: Vec<f32>,
     max: Vec<f32>,
-    /// Points in the mean, saturating at 255; later points still count for min and max.
-    n: Vec<u8>,
+    /// Sum of the weights: the valid 1 s values behind the bucket.
+    n: Vec<u32>,
 }
 
 impl Col {
@@ -636,12 +656,11 @@ impl Col {
         }
     }
 
-    /// `f32::min` and `f32::max` ignore NaN, so the first point sets min and max.
-    fn add(&mut self, i: usize, mean: f32, min: f32, max: f32) {
-        if self.n[i] < u8::MAX {
-            self.sum[i] += mean;
-            self.n[i] += 1;
-        }
+    /// Adds a point with `weight` valid 1 s values. `f32::min` and `f32::max` ignore NaN, so the
+    /// first point sets min and max.
+    fn add(&mut self, i: usize, mean: f32, min: f32, max: f32, weight: u32) {
+        self.sum[i] += mean * weight as f32;
+        self.n[i] += weight;
         self.min[i] = self.min[i].min(min);
         self.max[i] = self.max[i].max(max);
     }
@@ -657,7 +676,8 @@ impl Col {
 /// Points and events of the minutes not yet written, laid over a span when it is read.
 #[derive(Default)]
 struct Overlay {
-    points: HashMap<SeriesKey, Vec<(i64, f32, f32, f32)>>,
+    /// Per series: time, mean, min, max and valid 1 s values of each point.
+    points: HashMap<SeriesKey, Vec<(i64, f32, f32, f32, u32)>>,
     events: Vec<RealtimeEvent>,
 }
 
@@ -717,8 +737,19 @@ impl Span {
         self.events.retain(|e| e.start_realtime_ns >= from);
     }
 
-    /// Folds one point. A point outside the span is dropped, unless `slide` and it is newer.
-    fn add(&mut self, col: usize, t_rt: i64, mean: f32, min: f32, max: f32, slide: bool) {
+    /// Folds one point with `weight` valid 1 s values. A point outside the span is dropped,
+    /// unless `slide` and it is newer.
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        col: usize,
+        t_rt: i64,
+        mean: f32,
+        min: f32,
+        max: f32,
+        weight: u32,
+        slide: bool,
+    ) {
         let idx = t_rt.div_euclid(self.step_i());
         if slide && idx > self.hi() {
             self.slide_to(idx);
@@ -727,7 +758,7 @@ impl Span {
             return;
         }
         let p = self.pos(idx);
-        self.cols[col].1.add(p, mean, min, max);
+        self.cols[col].1.add(p, mean, min, max, weight);
     }
 
     fn add_event(&mut self, e: RealtimeEvent, slide: bool) {
@@ -755,8 +786,9 @@ impl Span {
                 let at = |v: &Option<Vec<f32>>| v.as_ref().and_then(|v| v.get(i).copied());
                 let min = at(&c.min).unwrap_or(mean);
                 let max = at(&c.max).unwrap_or(mean);
+                let weight = weight_at(&c.count, i);
                 let t = rt(b.start_t_ns + i as u64 * point, offset);
-                self.add(col, t, mean, min, max, slide);
+                self.add(col, t, mean, min, max, weight, slide);
             }
         }
         for e in &b.events {
@@ -788,18 +820,18 @@ impl Span {
         for key in keys {
             let col = self.keys.get(key).map_or(&empty, |&i| &self.cols[i].1);
             let mut extra: HashMap<i64, (f32, u32, f32, f32)> = HashMap::new();
-            for &(t, mean, min, max) in overlay.points.get(key).into_iter().flatten() {
+            for &(t, mean, min, max, w) in overlay.points.get(key).into_iter().flatten() {
                 let idx = t.div_euclid(step);
                 if in_span(idx) {
                     let e = extra.entry(idx).or_insert((0.0, 0, f32::NAN, f32::NAN));
-                    *e = (e.0 + mean, e.1 + 1, e.2.min(min), e.3.max(max));
+                    *e = (e.0 + mean * w as f32, e.1 + w, e.2.min(min), e.3.max(max));
                 }
             }
             let mut any = false;
             let points: Arc<[MetricPoint]> = (lo..=hi)
                 .map(|idx| {
                     let p = self.pos(idx);
-                    let (mut sum, mut n) = (col.sum[p], u32::from(col.n[p]));
+                    let (mut sum, mut n) = (col.sum[p], col.n[p]);
                     let (mut min, mut max) = (col.min[p], col.max[p]);
                     if let Some(e) = extra.get(&idx) {
                         sum += e.0;
@@ -1200,9 +1232,9 @@ impl MetricHistory {
         out
     }
 
-    /// Writes every minute that ended `FLUSH_GRACE_NS` or more before `now_t_ns`, applies
-    /// retention and the cap after a write and at least once a minute, and drops spans idle for
-    /// `SPAN_IDLE_NS`. Call it about once a second. Returns the first error; the other minutes
+    /// Writes every minute that ended `FLUSH_GRACE_NS` or more before `now_t_ns`, moves the 1 s
+    /// ring up to now, applies retention and the cap after a write and at least once a minute,
+    /// and drops spans idle for `SPAN_IDLE_NS`. Call it about once a second. Returns the first error; the other minutes
     /// and tiers go on.
     pub fn tick(&mut self, now_t_ns: TimeNs) -> Result<(), HistoryError> {
         let cutoff = now_t_ns.saturating_sub(FLUSH_GRACE_NS);
@@ -1236,6 +1268,12 @@ impl MetricHistory {
             if let Err(e) = self.flush_minute(last - METRIC_BLOCK_NS) {
                 first_err.get_or_insert(e);
             }
+        }
+        // Without samples the ring would keep its last hour forever. Every pending minute that is
+        // due was written above; the others are less than a minute old.
+        let now_end = self.rt_sec(now_t_ns / NS_PER_SEC) + 1;
+        if now_end > self.ring_end {
+            self.ring_advance(now_end);
         }
         if wrote || now_t_ns >= self.next_enforce_t_ns {
             self.next_enforce_t_ns = now_t_ns.saturating_add(METRIC_BLOCK_NS);
@@ -1290,10 +1328,16 @@ impl MetricHistory {
     }
 
     /// Builds and writes the three blocks of boottime minute `m`. Queued events that start
-    /// before the minute ends go into its 1 min block; the others wait for a later one.
+    /// before the minute ends go into its 1 min block; the others wait for a later one. A minute
+    /// written before gets a 1 min block with the events only, so no point is stored twice.
     fn flush_minute(&mut self, m: u64) -> Result<(), HistoryError> {
         let mut columns: [Vec<SeriesColumn>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (idx, secs) in self.minute_values(m) {
+        let values = if m + METRIC_BLOCK_NS <= self.written_to {
+            Vec::new()
+        } else {
+            self.minute_values(m)
+        };
+        for (idx, secs) in values {
             let slot = u16::try_from(idx).unwrap_or(u16::MAX);
             for (tier, col) in aggregate(slot, &secs).into_iter().enumerate() {
                 columns[tier].push(col);
@@ -1635,6 +1679,7 @@ impl MetricHistory {
                         mean,
                         at(&col.min).unwrap_or(mean),
                         at(&col.max).unwrap_or(mean),
+                        weight_at(&col.count, i),
                     ));
                 }
             }
@@ -1671,7 +1716,7 @@ impl MetricHistory {
                 let v = Self::ring_at(ring, self.ring_end, r);
                 if !v.is_nan() {
                     let idx = (r * sec).div_euclid(step as i64);
-                    col.add((idx - lo) as usize, v, v, v);
+                    col.add((idx - lo) as usize, v, v, v, 1);
                     any = true;
                 }
             }
@@ -1684,11 +1729,7 @@ impl MetricHistory {
                     let gap = n == 0;
                     MetricPoint {
                         t_realtime_ns: (lo + i as i64) * step as i64,
-                        mean: if gap {
-                            f32::NAN
-                        } else {
-                            col.sum[i] / f32::from(n)
-                        },
+                        mean: if gap { f32::NAN } else { col.sum[i] / n as f32 },
                         min: if gap { f32::NAN } else { col.min[i] },
                         max: if gap { f32::NAN } else { col.max[i] },
                     }

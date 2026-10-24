@@ -609,14 +609,15 @@ fn restart_mid_minute_stores_each_second_once() {
     let expected: Vec<u64> = (0..90).chain(100..180).collect();
     assert_eq!(stored_seconds(dir.path()), expected);
 
-    // Minute 1 has a point in each session's segment: 60 to 89 (mean 74.5) and 100 to 119
-    // (mean 1109.5). The format stores no counts, so the read averages the two points.
+    // Minute 1 has a point in each session's segment: 60 to 89 (30 values, mean 74.5) and 100 to
+    // 119 (20 values, mean 1109.5). The read weights them by those counts:
+    // (30 * 74.5 + 20 * 1109.5) / 50 = 488.5.
     let span = b
         .read(Tier::M1, OFF, OFF + 179 * SEC as i64, 180 * SEC)
         .unwrap();
     let p = series(&span, &k);
     assert_eq!(p[0].mean, 29.5);
-    assert_eq!((p[1].mean, p[1].min, p[1].max), (592.0, 60.0, 1119.0));
+    assert_eq!((p[1].mean, p[1].min, p[1].max), (488.5, 60.0, 1119.0));
     assert_eq!(p[2].mean, 1149.5);
     let span = b
         .read(
@@ -734,4 +735,109 @@ fn retention_runs_without_writes() {
             .join("1s")
             .join(metric_segment_file_name(OFF_S + 3780))]
     );
+}
+
+/// Every valid point of `tier` as (boottime of the point, slot), one entry per stored copy.
+fn stored_points(root: &Path, tier: Tier) -> Vec<(u64, u16)> {
+    let mut out = Vec::new();
+    for f in files(root, tier) {
+        for b in blocks(&f) {
+            for c in &b.columns {
+                for i in (0..c.mean.len()).filter(|&i| c.valid[i / 8] & (1 << (i % 8)) != 0) {
+                    out.push((b.start_t_ns + i as u64 * tier.point_ns(), c.slot));
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// An event queued after its minute was written gets a 1 min block of its own with no points, so
+/// no point of that minute is stored twice in any tier.
+#[test]
+fn event_after_its_minute_was_written_stores_no_point_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = h
+        .register(&Arc::from("cpu"), &Arc::from("CPU"), MetricId::CPU_TOTAL)
+        .unwrap();
+    feed(&mut h, &[slot], 60, 120, |_, s| s as f32);
+    h.tick(122 * SEC).unwrap();
+    assert_eq!(blocks(&files(dir.path(), Tier::M1)[0]).len(), 1);
+
+    // The event starts in minute 1, which is on disk already.
+    h.push_event(tl_history::metrics::HistEvent {
+        kind: EventKind::FullLoad,
+        start_t_ns: 70 * SEC,
+        duration_ms: 50_000,
+        peak: 100.0,
+        device_key: Some(Arc::from("cpu")),
+        process: None,
+    });
+    h.tick(123 * SEC).unwrap();
+    h.tick(124 * SEC).unwrap();
+    h.close(125 * SEC).unwrap();
+
+    for tier in Tier::ALL {
+        let points = stored_points(dir.path(), tier);
+        // One full minute: 60, 6 or 1 points.
+        assert_eq!(points.len(), tier.points_per_block(), "{tier:?}");
+        let mut unique = points.clone();
+        unique.dedup();
+        assert_eq!(unique, points, "{tier:?}");
+    }
+    let m1 = blocks(&files(dir.path(), Tier::M1)[0]);
+    assert_eq!(m1.len(), 2);
+    assert!(m1[1].columns.is_empty());
+    assert_eq!(m1[1].events[0].kind, EventKind::FullLoad);
+    let span = h
+        .read(Tier::M1, OFF, OFF + 119 * SEC as i64, 125 * SEC)
+        .unwrap();
+    let p = series(&span, &key("cpu", MetricId::CPU_TOTAL));
+    assert_eq!((p[1].mean, p[1].min, p[1].max), (89.5, 60.0, 119.0));
+    assert_eq!(span.events.len(), 1);
+}
+
+/// Ticks move the 1 s ring forward while no samples come, so a 1 s read never returns a point
+/// that is more than an hour old.
+#[test]
+fn idle_ticks_age_out_the_ring() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = key("cpu", MetricId::CPU_TOTAL);
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let slot = h
+        .register(&k.device_key, &Arc::from("CPU"), k.metric)
+        .unwrap();
+    feed(&mut h, &[slot], 0, 120, |_, _| 1.0);
+    for sec in 120..=3659 {
+        h.tick(sec * SEC).unwrap();
+    }
+
+    // At 3,659 s the last hour is 60 s to 3,659 s: seconds 0 to 59 are gone, 60 to 119 are left.
+    let first_two_minutes = (OFF, OFF + 119 * SEC as i64);
+    let span = h
+        .read(
+            Tier::S1,
+            first_two_minutes.0,
+            first_two_minutes.1,
+            3659 * SEC,
+        )
+        .unwrap();
+    assert_eq!(span.step_ns, SEC);
+    let p = series(&span, &k);
+    assert!(p[..60].iter().all(|p| p.mean.is_nan()));
+    assert!(p[60..].iter().all(|p| p.mean == 1.0));
+
+    // Two hours on, nothing is left.
+    h.tick(7200 * SEC).unwrap();
+    let span = h
+        .read(
+            Tier::S1,
+            first_two_minutes.0,
+            first_two_minutes.1,
+            7200 * SEC,
+        )
+        .unwrap();
+    assert!(span.series.is_empty());
 }
