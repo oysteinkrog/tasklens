@@ -293,6 +293,72 @@ fn general_memory_and_cpu_percent_one_decimal(cx: &mut TestAppContext) {
     assert_eq!(value(&t, cx, FieldId::CpuPct), "0%");
 }
 
+/// Hovers the value column of `panel` row by row and returns the y of each row that showed a
+/// tooltip.
+fn hover_tooltips(cx: &mut VisualTestContext, panel: Bounds<Pixels>) -> Vec<f32> {
+    let mut shown = Vec::new();
+    let mut y = panel.origin.y + px(19.);
+    while y < panel.bottom() {
+        if hover(cx, panel, y).is_some() {
+            shown.push(f32::from(y));
+        }
+        y += px(26.);
+    }
+    hover_away(cx);
+    shown
+}
+
+/// The bounds of the first tooltip a hover over `panel` shows.
+fn hover_tooltips_at(cx: &mut VisualTestContext, panel: Bounds<Pixels>) -> Bounds<Pixels> {
+    let mut y = panel.origin.y + px(19.);
+    while y < panel.bottom() {
+        if let Some(tip) = hover(cx, panel, y) {
+            hover_away(cx);
+            return tip;
+        }
+        y += px(26.);
+    }
+    panic!("no tooltip in the panel");
+}
+
+/// Rests the pointer on the right end of the row at `y` and returns the tooltip bounds.
+fn hover(cx: &mut VisualTestContext, panel: Bounds<Pixels>, y: Pixels) -> Option<Bounds<Pixels>> {
+    let at = gpui_kit::point(panel.right() - px(30.), y);
+    cx.simulate_mouse_move(at, None, gpui_kit::Modifiers::none());
+    cx.executor()
+        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.debug_bounds("TlTooltip")
+}
+
+fn hover_away(cx: &mut VisualTestContext) {
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(2.), px(690.)),
+        None,
+        gpui_kit::Modifiers::none(),
+    );
+}
+
+/// A value wider than its cell is cut with "…" and a hover shows a tooltip with the full text, so
+/// a cut value can still be read (smoke 1.0.1, 900 px window). The tooltip stays inside the window.
+#[gpui_kit::test]
+fn general_truncated_value_has_tooltip(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    cx.update(|window, _| window.activate_window());
+    cx.simulate_resize(size(px(900.), px(700.)));
+    draw(cx);
+    let [left, _, right] = panels(cx);
+    // Column 1 cuts the scheduling line, the user ids, the flags and the cgroup; column 3 cuts
+    // Net I/O.
+    assert!(hover_tooltips(cx, left).len() >= 4, "column 1 cut values");
+    assert!(!hover_tooltips(cx, right).is_empty(), "column 3 cut value");
+    let net = hover_tooltips_at(cx, right);
+    assert!(net.right() <= px(900.), "tooltip fits the window: {net:?}");
+}
+
 #[gpui_kit::test]
 fn general_three_columns_at_900(cx: &mut TestAppContext) {
     // Body 900 - 2 × 12 = 876 px.
