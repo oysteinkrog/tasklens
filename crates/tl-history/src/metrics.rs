@@ -313,29 +313,53 @@ pub fn decode_metric_block(
     frame: &[u8],
     offset: u64,
 ) -> Result<(MetricBlock, usize), HistoryError> {
-    let Some((prefix, rest)) = frame.split_first_chunk::<FRAME_PREFIX_LEN>() else {
-        return Err(HistoryError::Truncated(offset));
-    };
-    let len = u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
-    let crc = u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]);
-    let Some(compressed) = rest.get(..len) else {
-        return Err(HistoryError::Truncated(offset));
-    };
-    if crc32fast::hash(compressed) != crc {
-        return Err(HistoryError::Crc(offset));
+    FrameDecoder::new()?.decode(frame, offset)
+}
+
+/// Decodes frames with one zstd context and one output buffer, so a read of thousands of
+/// blocks does not set them up again for each block.
+struct FrameDecoder {
+    zstd: zstd::bulk::Decompressor<'static>,
+    raw: Vec<u8>,
+}
+
+impl FrameDecoder {
+    fn new() -> Result<FrameDecoder, HistoryError> {
+        Ok(FrameDecoder {
+            zstd: zstd::bulk::Decompressor::new().map_err(HistoryError::Zstd)?,
+            raw: Vec::new(),
+        })
     }
-    let capacity = match zstd::zstd_safe::get_frame_content_size(compressed) {
-        Ok(Some(n)) if n > MAX_BLOCK_RAW as u64 => {
-            return Err(HistoryError::Zstd(std::io::Error::other(
-                "block exceeds 64 MiB",
-            )));
+
+    fn decode(&mut self, frame: &[u8], offset: u64) -> Result<(MetricBlock, usize), HistoryError> {
+        let Some((prefix, rest)) = frame.split_first_chunk::<FRAME_PREFIX_LEN>() else {
+            return Err(HistoryError::Truncated(offset));
+        };
+        let len = u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
+        let crc = u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]);
+        let Some(compressed) = rest.get(..len) else {
+            return Err(HistoryError::Truncated(offset));
+        };
+        if crc32fast::hash(compressed) != crc {
+            return Err(HistoryError::Crc(offset));
         }
-        Ok(Some(n)) => n as usize,
-        _ => MAX_BLOCK_RAW,
-    };
-    let raw = zstd::bulk::decompress(compressed, capacity).map_err(HistoryError::Zstd)?;
-    let block = postcard::from_bytes(&raw)?;
-    Ok((block, FRAME_PREFIX_LEN + len))
+        let capacity = match zstd::zstd_safe::get_frame_content_size(compressed) {
+            Ok(Some(n)) if n > MAX_BLOCK_RAW as u64 => {
+                return Err(HistoryError::Zstd(std::io::Error::other(
+                    "block exceeds 64 MiB",
+                )));
+            }
+            Ok(Some(n)) => n as usize,
+            _ => MAX_BLOCK_RAW,
+        };
+        self.raw.clear();
+        self.raw.reserve(capacity);
+        self.zstd
+            .decompress_to_buffer(compressed, &mut self.raw)
+            .map_err(HistoryError::Zstd)?;
+        let block = postcard::from_bytes(&self.raw)?;
+        Ok((block, FRAME_PREFIX_LEN + len))
+    }
 }
 
 /// Offsets of the good frames of a whole segment file: every frame from byte 64 up to the first
@@ -412,7 +436,7 @@ fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
     let mut mean10 = [0f32; 6];
     let mut min10 = [0f32; 6];
     let mut max10 = [0f32; 6];
-    for (j, chunk) in secs.chunks_exact(10).enumerate() {
+    for (j, chunk) in secs.as_chunks::<10>().0.iter().enumerate() {
         let mut sum = 0f64;
         let (mut lo, mut hi) = (f32::NAN, f32::NAN);
         for v in chunk.iter().filter(|v| !v.is_nan()) {
@@ -532,13 +556,14 @@ impl Seg {
         mut f: impl FnMut(&MetricBlock, &SlotTable, u32),
     ) -> Result<(), HistoryError> {
         let bytes = fs::read(&self.path).map_err(io_err(&self.path))?;
+        let mut decoder = FrameDecoder::new()?;
         let mut table = SlotTable::new();
         let mut generation = 0u32;
         for &off in &self.frames {
             let Some(frame) = bytes.get(off as usize..) else {
                 break;
             };
-            let Ok((block, _)) = decode_metric_block(frame, off) else {
+            let Ok((block, _)) = decoder.decode(frame, off) else {
                 break;
             };
             if let Some(catalog) = &block.catalog {
