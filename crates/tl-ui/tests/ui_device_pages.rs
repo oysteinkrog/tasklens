@@ -827,7 +827,10 @@ mod battery_history {
             .vcx
             .update(|_, cx| p.read(cx).history_chart().cloned().expect("a chart"));
         assert!(r.vcx.read_entity(&chart, |v, _| v.spec.hover));
+        // The history chart sits below the fold of an 800 px window.
+        r.vcx.simulate_resize(size(px(1280.), px(1600.)));
         r.vcx.update(|window, _| window.activate_window());
+        draw(r.vcx);
         let b = r
             .vcx
             .debug_bounds("perf-battery-history")
