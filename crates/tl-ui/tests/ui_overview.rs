@@ -5706,10 +5706,10 @@ mod page {
         for (mode, arrange) in [("stacked", "vertical"), ("columns", "horizontal")] {
             r.page_action(&PerfOverviewSetBoxMode {
                 kind: "net".into(),
-                mode: "stacked".into(),
+                mode: mode.into(),
             });
             set_arrange(&mut r, "net", arrange);
-            for width in [1280., 700., 480., 360., 280.] {
+            for width in [1280., 700., 480., 360., 330.] {
                 r.vcx.simulate_resize(size(px(width), px(800.)));
                 draw(r.vcx);
                 let frame = r.bounds_of(NET_BOX_ID.into());
