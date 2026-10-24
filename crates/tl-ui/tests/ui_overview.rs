@@ -5709,13 +5709,19 @@ mod page {
                 mode: "stacked".into(),
             });
             set_arrange(&mut r, "net", arrange);
-            draw(r.vcx);
-            let frame = r.bounds_of(NET_BOX_ID.into());
-            for id in [DOWN_TOTAL_ID, UP_TOTAL_ID] {
-                let total = r.bounds_of(id.into());
-                // One t_sm row; a wrapped value is two rows tall.
-                assert!(total.size.height < px(20.), "{mode} {id} {total:?}");
-                assert!(total.right() <= frame.right(), "{mode} {id} {total:?}");
+            for width in [1280., 700., 480., 360., 280.] {
+                r.vcx.simulate_resize(size(px(width), px(800.)));
+                draw(r.vcx);
+                let frame = r.bounds_of(NET_BOX_ID.into());
+                for id in [DOWN_TOTAL_ID, UP_TOTAL_ID] {
+                    let total = r.bounds_of(id.into());
+                    // One t_sm row; a wrapped value is two rows tall.
+                    assert!(total.size.height < px(20.), "{mode} {width} {id} {total:?}");
+                    assert!(
+                        total.right() <= frame.right(),
+                        "{mode} {width} {id} {total:?}"
+                    );
+                }
             }
         }
     }
