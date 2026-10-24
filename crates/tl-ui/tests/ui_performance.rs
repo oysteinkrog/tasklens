@@ -3004,8 +3004,32 @@ mod summary {
         );
     }
 
-    /// Right-click on a tile opens the page menu of its device (UI-PRF-016): the same items as
-    /// the page menu, for the CPU tile and for a Disk tile.
+    /// An entry without its submenu handle, and the entries of its submenu.
+    type Deep = (
+        MenuEntryKind,
+        String,
+        Option<String>,
+        bool,
+        Vec<(MenuEntryKind, String, Option<String>, bool)>,
+    );
+
+    fn deep(r: &mut Rig, list: Vec<Entry>) -> Vec<Deep> {
+        list.into_iter()
+            .map(|(kind, label, tip, checked, sub)| {
+                let sub = sub
+                    .map(|sub| entries_of(r, &sub))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| (e.0, e.1, e.2, e.3))
+                    .collect();
+                (kind, label, tip, checked, sub)
+            })
+            .collect()
+    }
+
+    /// Right-click on a tile opens the full page menu of its device (UI-PRF-016): the same
+    /// entries, marks, tooltips and submenus as the page menu, with only the Graph Summary View
+    /// mark on. The page's own items run on the page.
     #[gpui_kit::test]
     fn summary_tile_right_click_page_menu(cx: &mut TestAppContext) {
         use tl_ui::components::menu::close_context_menu;
@@ -3014,13 +3038,8 @@ mod summary {
         let mut r = open(cx, 1600., 1000., true);
         let at = page_panel(&mut r);
         right_click(r.vcx, at);
-        let page_list = open_menu(&mut r);
-        let page_items: Vec<String> = page_list.iter().map(|e| e.1.clone()).collect();
-        let kernel = page_list
-            .iter()
-            .find(|e| e.1 == "Kernel times")
-            .expect("page item");
-        assert_ne!(kernel.0, MenuEntryKind::Disabled);
+        let list = open_menu(&mut r);
+        let mut page_menu = deep(&mut r, list);
         r.vcx.update(close_context_menu);
         let view = enter(&mut r);
         let tile = r.vcx.debug_bounds("perf-summary-tile-0").expect("CPU tile");
@@ -3030,23 +3049,44 @@ mod summary {
             summary(&mut r).is_some(),
             "right-click does not leave summary mode"
         );
+        assert!(r.vcx.update(|_, cx| view.read(cx).has_menu_page()));
         let list = open_menu(&mut r);
-        let items: Vec<String> = list.iter().map(|e| e.1.clone()).collect();
-        assert_eq!(items, page_items);
-        // No device page is drawn to run the page's own items, so they are disabled.
-        let kernel = list
-            .iter()
-            .find(|e| e.1 == "Kernel times")
-            .expect("page item");
-        assert_eq!(kernel.0, MenuEntryKind::Disabled);
-        assert!(list[1].3, "checked in summary mode");
+        let tile_menu = deep(&mut r, list);
+        assert_eq!(page_menu[1].1, "Graph Summary View");
+        assert!(!page_menu[1].3 && tile_menu[1].3, "checked in summary mode");
+        page_menu[1].3 = true;
+        assert_eq!(tile_menu, page_menu);
 
-        // The items run on the summary view.
+        // "Kernel times" from the tile menu runs on the CPU page.
+        let kernel = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| TlSettings::settings(cx).performance.cpu_kernel)
+        };
+        let before = kernel(&mut r);
+        let pos = tile_menu
+            .iter()
+            .filter(|e| matches!(e.0, MenuEntryKind::Item | MenuEntryKind::Submenu))
+            .position(|e| e.1 == "Kernel times")
+            .expect("Kernel times is enabled");
+        let keys = vec!["down"; pos + 1].join(" ");
+        r.vcx.simulate_keystrokes(&keys);
+        r.vcx.simulate_keystrokes("enter");
+        draw(r.vcx);
+        assert_eq!(kernel(&mut r), !before, "the page toggled kernel times");
+        assert!(summary(&mut r).is_some());
+        assert!(
+            r.vcx
+                .update(|window, cx| open_context_menu(window, cx).is_none()),
+            "the menu closed"
+        );
+        assert!(
+            !r.vcx.update(|_, cx| view.read(cx).has_menu_page()),
+            "the page is drawn only while the menu is open"
+        );
+
+        // The common items still run on the summary view.
         let focus = r.vcx.update(|_, cx| view.read(cx).focus_handle(cx));
-        r.vcx.update(|window, cx| {
-            close_context_menu(window, cx);
-            focus.focus(window, cx);
-        });
+        r.vcx.update(|window, cx| focus.focus(window, cx));
         r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
         draw(r.vcx);
         let ranges: Vec<u64> = r.vcx.update(|_, cx| {

@@ -13,11 +13,11 @@
 use std::cell::Cell;
 
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
-    div, px,
+    Animation, AnimationExt as _, AnyView, AnyWindowHandle, App, AppContext as _, Context,
+    DismissEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
+    SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
@@ -30,6 +30,7 @@ use super::set_graph_range;
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
+use crate::components::menu::TlMenuPopup;
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
@@ -130,6 +131,10 @@ pub struct SummaryView {
     focus: FocusHandle,
     /// The device whose tile menu was opened last; "Copy" in that menu copies its page.
     menu_key: Option<DeviceKey>,
+    /// The device page of the open tile menu, drawn clipped to nothing so the page's own menu
+    /// items reach its action handlers. Cleared when the menu closes.
+    menu_page: Option<AnyView>,
+    _menu_sub: Option<Subscription>,
     /// The tile layout for `size`, in window pixels.
     layout: TileLayout,
     /// The area the layout was made for, from the last paint.
@@ -230,6 +235,8 @@ impl SummaryView {
             selected_on_entry,
             focus: cx.focus_handle(),
             menu_key: None,
+            menu_page: None,
+            _menu_sub: None,
             layout: tile_grid(0, px(0.), px(0.)),
             size: Size::default(),
             label_class: (false, false),
@@ -245,6 +252,29 @@ impl SummaryView {
         };
         this.resize(size, cx);
         this
+    }
+
+    /// Draws `page` with the tile `menu` open, so the menu items run on the page (UI-PRF-016).
+    pub fn set_menu_page(
+        &mut self,
+        page: AnyView,
+        menu: &Entity<TlMenuPopup>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_page = Some(page);
+        self._menu_sub = Some(cx.subscribe(menu, |this, _, _: &DismissEvent, cx| {
+            // The item's action is dispatched to the page's node in the frame drawn now,
+            // so the page can leave from the next frame on.
+            this.menu_page = None;
+            cx.notify();
+        }));
+        cx.notify();
+    }
+
+    /// Whether a tile menu's device page is drawn (tests).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn has_menu_page(&self) -> bool {
+        self.menu_page.is_some()
     }
 
     pub fn layout(&self) -> TileLayout {
@@ -579,6 +609,18 @@ impl Render for SummaryView {
             grid.into_any_element()
         };
 
+        // Laid out at the grid's size and painted into a zero clip: no pixel and no hitbox,
+        // but its focus node and action handlers are in the frame.
+        let menu_page = self.menu_page.clone().map(|page| {
+            div().absolute().size_0().overflow_hidden().child(
+                div()
+                    .absolute()
+                    .w(self.size.width)
+                    .h(self.size.height)
+                    .child(page.cached(StyleRefinement::default().size_full())),
+            )
+        });
+
         div()
             .key_context(PERFORMANCE_SUMMARY_CONTEXT)
             .track_focus(&self.focus)
@@ -594,6 +636,7 @@ impl Render for SummaryView {
             .bg(theme.window_bg)
             .child(measure)
             .child(grid)
+            .children(menu_page)
     }
 }
 

@@ -54,7 +54,7 @@ use self::actions::{
     PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
-use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu, summary_page_menu};
+use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
 use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
 use self::status_bar::{Slot, StatusBar};
@@ -968,8 +968,9 @@ impl PerformancePage {
             .cloned()
     }
 
-    /// The page menu of the device of a summary tile (UI-PRF-016). The summary view is the
-    /// menu's focus, so its items run there.
+    /// The page menu of the device of a summary tile (UI-PRF-016). Its items run on the device
+    /// page, which the summary view draws while the menu is open; the common items bubble on
+    /// to the summary view.
     fn open_summary_menu(
         &mut self,
         key: &DeviceKey,
@@ -980,8 +981,9 @@ impl PerformancePage {
         let (Some(summary), Some(view)) = (self.summary.clone(), self.page_view(key, cx)) else {
             return;
         };
-        let focus = summary.read(cx).focus_handle(cx);
+        let focus = page_focus(&view, cx).unwrap_or_else(|| summary.read(cx).focus_handle(cx));
         let sidebar = self.sidebar.clone();
+        let page = view.clone();
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
             let types = view_types(sidebar.read(cx));
             let ctx = PageMenuCtx {
@@ -989,12 +991,13 @@ impl PerformancePage {
                 ..page_menu_ctx(true, cx)
             };
             let mut slot = Some(menu);
-            update_page(&view, cx, |p, cx| {
+            update_page(&page, cx, |p, cx| {
                 let menu = slot.take().expect("one page");
-                slot = Some(summary_page_menu(menu, p, &ctx, window, cx));
+                slot = Some(page_menu(menu, p, &ctx, window, cx));
             });
             slot.expect("the menu")
         });
+        summary.update(cx, |s, cx| s.set_menu_page(view, &menu, cx));
         open_context_menu_at(at, window, cx, menu);
     }
 
