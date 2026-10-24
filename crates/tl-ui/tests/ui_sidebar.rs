@@ -1716,6 +1716,7 @@ mod sidebar {
                 // No interface is listed yet, and the engine lists them only while they are
                 // demanded (o55.43 j).
                 nets: true,
+                device_history: true,
                 ..Demand::default()
             }
         );

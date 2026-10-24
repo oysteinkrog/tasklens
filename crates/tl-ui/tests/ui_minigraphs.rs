@@ -1708,6 +1708,7 @@ mod panel {
         assert_eq!(want.len(), 2);
         let off_screen = Demand {
             graph_targets: want.clone(),
+            device_history: true,
             ..Demand::default()
         };
 
