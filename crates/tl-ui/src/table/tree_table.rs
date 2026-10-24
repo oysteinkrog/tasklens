@@ -21,9 +21,10 @@ use gpui_kit::{
     AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask, Context,
     DismissEvent, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla, InteractiveElement,
     IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
-    WeakEntity, Window, canvas, div, fill, font, point, px, size, uniform_list,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription, TextRun,
+    UniformListScrollHandle, WeakEntity, Window, canvas, div, fill, font, point, px, size,
+    uniform_list,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
@@ -301,6 +302,9 @@ pub enum TreeTableEvent {
     /// The clipboard write failed. gpui's `write_to_clipboard` reports no error, so the table
     /// cannot emit this yet.
     CopyFailed,
+    /// The left button that went down on a row is up again. Owners that held new rows back
+    /// while [`TlTreeTable::pressed`] was set install them now.
+    PressReleased,
 }
 
 impl<D: TreeTableDelegate> EventEmitter<TreeTableEvent> for TlTreeTable<D> {}
@@ -339,6 +343,9 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     hover_row: Option<usize>,
     /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
+    /// True from a left press on a row until the button is up. The owner keeps the rows still
+    /// meanwhile, so the row under the pointer is the row pressed (UI-PRC-008).
+    pub pressed: bool,
     /// The body rows the last frame built, by flattened index.
     visible_range: Range<usize>,
     /// The top-most visible selectable row of the last frame: its identity, its rows from the
@@ -423,6 +430,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             reorder_esc: None,
             hover_row: None,
             paused: false,
+            pressed: false,
             visible_range: 0..0,
             anchor: None,
             last_wheel: None,
@@ -1221,6 +1229,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     ) {
         cx.stop_propagation();
         window.focus(&self.focus, cx);
+        self.pressed = true;
         let Some(ix) = self.delegate.row_index(id) else {
             return;
         };
@@ -1256,6 +1265,13 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             (false, false) => self.selection.click(id),
         }
         cx.notify();
+    }
+
+    /// The left button is up, over the table or anywhere else in the window.
+    fn release_press(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.pressed) {
+            cx.emit(TreeTableEvent::PressReleased);
+        }
     }
 
     /// Left press on the body below the last row: nothing selected.
@@ -2529,6 +2545,14 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             }))
             // Rows stop the press, so only a press below the last row gets here.
             .on_mouse_down(MouseButton::Left, cx.listener(Self::empty_mouse_down))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.release_press(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.release_press(cx)),
+            )
             // The one context-menu handler; rows do not stop the right press.
             .on_mouse_down(MouseButton::Right, cx.listener(Self::body_right_down))
             .child(list)

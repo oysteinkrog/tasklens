@@ -654,7 +654,7 @@ impl HistoryPage {
                     let text = tr(cx, "processes-toast-copied");
                     push_main_toast(cx, ToastKind::Success, text, None, None);
                 }
-                TreeTableEvent::CopyFailed => {}
+                TreeTableEvent::CopyFailed | TreeTableEvent::PressReleased => {}
             },
         ));
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {

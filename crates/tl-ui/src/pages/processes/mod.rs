@@ -200,9 +200,14 @@ impl ProcessesPage {
         subs.push(cx.observe_global::<UiMetrics>(|this, cx| this.on_metrics(cx)));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         // Ctrl+Shift+C is the table's own TSV copy (ADR-015); the page shows its toast.
-        subs.push(cx.subscribe(&table, |_, _, ev: &TreeTableEvent, cx| {
-            if let TreeTableEvent::CopiedRows { .. } = ev {
-                toast(ToastKind::Success, tr(cx, "processes-toast-copied"), cx);
+        subs.push(cx.subscribe(&table, |this, _, ev: &TreeTableEvent, cx| {
+            match ev {
+                TreeTableEvent::CopiedRows { .. } => {
+                    toast(ToastKind::Success, tr(cx, "processes-toast-copied"), cx);
+                }
+                // Rows held back during the press are installed now.
+                TreeTableEvent::PressReleased => this.on_snapshot(DRAWN, cx),
+                _ => {}
             }
         }));
         // Snapshot installs and selection changes both notify the table.
@@ -397,7 +402,7 @@ impl ProcessesPage {
 
     /// One hub change. Only a change to a drawn part reaches the delegate, and the table is
     /// notified only when the view was built for the current query. While paused only an unsent
-    /// query is retried.
+    /// query is retried. The same holds while a row is pressed (UI-PRC-008).
     fn on_snapshot(&mut self, mask: ComponentMask, cx: &mut Context<Self>) {
         if mask.intersects(ComponentMask::HEALTH) {
             self.refresh_status(false, cx);
@@ -410,6 +415,7 @@ impl ProcessesPage {
             let d = &mut t.delegate;
             d.query_mut().resend_if_unsent(client);
             if paused
+                || t.pressed
                 || !mask.intersects(DRAWN)
                 || snapshot.table.query_generation != d.query().generation()
             {
@@ -421,7 +427,7 @@ impl ProcessesPage {
                 cx.notify();
             }
         });
-        if !paused {
+        if !paused && !self.table.read(cx).pressed {
             self.resolve_jump(cx);
         }
     }

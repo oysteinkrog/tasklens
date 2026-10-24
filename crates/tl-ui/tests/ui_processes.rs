@@ -1706,6 +1706,44 @@ mod page {
         redraw(vcx);
     }
 
+    /// pdu.67: a re-sort between mouse-down and mouse-up keeps the pressed row under the pointer.
+    #[gpui_kit::test]
+    fn resort_waits_for_mouse_up(cx: &mut TestAppContext) {
+        let o = open(cx);
+        publish(&o.engine, rows_500(2, false), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let top = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                let t = page.read(cx).table().read(cx);
+                tl_ui::table::tree_table::TreeTableDelegate::row_id(&t.delegate, 0)
+            })
+        };
+        let pressed = top(o.vcx);
+        o.vcx.simulate_event(MouseDownEvent {
+            position: row_at(0),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        publish(&o.engine, rows_500(3, true), 1);
+        redraw(o.vcx);
+        assert_eq!(
+            top(o.vcx),
+            pressed,
+            "the order held while the button is down"
+        );
+        o.vcx.simulate_event(MouseUpEvent {
+            position: row_at(0),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        redraw(o.vcx);
+        assert_ne!(top(o.vcx), pressed, "the held view is installed on release");
+    }
+
     #[gpui_kit::test]
     fn double_click_toggles_expand_not_properties(cx: &mut TestAppContext) {
         let o = open(cx);
