@@ -3063,7 +3063,10 @@ mod tests {
         );
         assert!(mono(CardFont::Detail, row) <= px(24.));
         // The tooltip has the full model.
-        assert_eq!(&*card_tooltip(&lines, &l), [SharedString::from(full)]);
+        assert_eq!(
+            &*card_tooltip(&lines, &l),
+            [SharedString::from(full.clone())]
+        );
 
         // A model that fits stays whole.
         let l = layout(&lines, 0., 60.);
