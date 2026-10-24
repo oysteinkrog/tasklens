@@ -260,8 +260,9 @@ async fn run_session(
         reducer.record_sink = Some(Box::new(HistorySink::new(slot.clone())));
         reducer.history_cmd = Some(HistorySink::new(slot));
     }
-    // ADR-017: device metric history. The low-memory engine runs none (R-152).
-    if ep.config.mode == EngineMode::Full {
+    // ADR-017: device metric history. A test sink from the hooks turns it off, as it does the
+    // history worker. The low-memory engine runs none (R-152).
+    if ep.hooks.record_sink.is_none() && ep.config.mode == EngineMode::Full {
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
         let io = WorkerIo::new(
             ep.msgs_tx.clone(),
