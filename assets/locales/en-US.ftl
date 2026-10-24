@@ -345,6 +345,7 @@ perf-cpu-kernel-off = Kernel off
 perf-cpu-tip-mode = Graph mode
 perf-cpu-tip-kernel = Show kernel time
 perf-later-version = Available in a later version
+perf-menu-summary-disabled = Open the device page to use this item
 perf-cpu-menu-graph = Graph
 perf-cpu-menu-kernel-times = Kernel times
 perf-cpu-menu-secondary = Secondary graph

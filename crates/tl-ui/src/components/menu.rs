@@ -559,6 +559,44 @@ impl TlMenu {
         self
     }
 
+    /// The number of entries added so far, the `start` of [`TlMenu::disable_from`].
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Turns every action item, submenu and slider added since `start` entries into a disabled
+    /// item with the same label and mark, for a menu whose owner has no handler for them.
+    pub fn disable_from(mut self, start: usize, tooltip: Option<SharedString>) -> Self {
+        for entry in self.entries.iter_mut().skip(start) {
+            let (label, indent, checked) = match entry {
+                Entry::Item {
+                    label,
+                    mark,
+                    indent,
+                    ..
+                } => (
+                    label.clone(),
+                    *indent,
+                    matches!(mark, Mark::Check(true) | Mark::Radio(true)),
+                ),
+                Entry::Painted {
+                    label, selected, ..
+                } => (label.clone(), px(0.), *selected),
+                Entry::Submenu { label, .. } | Entry::Slider { label, .. } => {
+                    (label.clone(), px(0.), false)
+                }
+                _ => continue,
+            };
+            *entry = Entry::Disabled {
+                label,
+                tooltip: tooltip.clone(),
+                indent,
+                checked,
+            };
+        }
+        self
+    }
+
     /// A header row that cannot be selected.
     pub fn header(mut self, label: impl Into<SharedString>) -> Self {
         self.entries.push(Entry::Header(label.into()));

@@ -130,6 +130,29 @@ pub fn page_menu(
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
+    page_menu_in(menu, page, ctx, false, window, cx)
+}
+
+/// [`page_menu`] for a summary tile (UI-PRF-016): the same items, but the page's own items are
+/// disabled, because no device page is drawn in summary mode to run them.
+pub fn summary_page_menu(
+    menu: TlMenu,
+    page: &dyn DevicePage,
+    ctx: &PageMenuCtx,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    page_menu_in(menu, page, ctx, true, window, cx)
+}
+
+fn page_menu_in(
+    menu: TlMenu,
+    page: &dyn DevicePage,
+    ctx: &PageMenuCtx,
+    summary: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
     let menu = if ctx.clicked_value {
         menu.item(tr(cx, "perf-menu-copy-value"), Box::new(PerfCopyValue))
     } else {
@@ -147,7 +170,14 @@ pub fn page_menu(
     };
     let menu = page_menu_common(menu, ctx, window, cx).separator();
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
-    let menu = page.menu_items(menu, window, cx).separator();
+    let start = menu.entry_count();
+    let menu = page.menu_items(menu, window, cx);
+    let menu = if summary {
+        menu.disable_from(start, Some(tr(cx, "perf-menu-summary-disabled")))
+    } else {
+        menu
+    };
+    let menu = menu.separator();
     let menu = match ctx.view_types {
         Some(types) => view_menu(menu, types, window, cx),
         None => menu,

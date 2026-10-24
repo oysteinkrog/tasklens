@@ -1871,7 +1871,19 @@ mod summary {
         width: f32,
         height: f32,
         reduce_motion: bool,
+        settings: Settings,
+    ) -> Rig<'_> {
+        open_catalog(cx, width, height, reduce_motion, settings, catalog())
+    }
+
+    /// [`open_with`] on a catalog of `devices`.
+    fn open_catalog(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+        reduce_motion: bool,
         mut settings: Settings,
+        devices: Vec<DeviceEntry>,
     ) -> Rig<'_> {
         // Instant tab switches (E20-021): frame counts here must not see the switch fade.
         settings.motion.tab_switch_ms = 0;
@@ -1884,7 +1896,7 @@ mod summary {
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
                 version: 1,
-                entries: Arc::from(catalog()),
+                entries: Arc::from(devices),
             });
         });
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -2111,16 +2123,24 @@ mod summary {
         assert_eq!(first, again);
     }
 
-    /// 14 tiles use 4 columns, `ceil(sqrt(14))` (UI-PRF-016), not 5.
+    /// 14 visible devices make 14 tiles in 4 columns and 4 rows, `ceil(sqrt(14))` (UI-PRF-016),
+    /// not 5 columns, through the real sidebar, the tile sync and the first paint.
     #[gpui_kit::test]
     fn summary_tile_grid_for_14(cx: &mut TestAppContext) {
-        let _ = cx;
-        let l = tl_ui::pages::performance::summary::tile_grid(
-            14,
-            gpui_kit::px(1600.),
-            gpui_kit::px(1000.),
+        let mut devices = catalog();
+        devices.extend((9..14).map(|i| disk(i, &format!("sd{i}"))));
+        let mut r = open_catalog(cx, 1600., 1000., false, Settings::default(), devices);
+        let view = enter(&mut r);
+        let n = r.vcx.read_entity(&view, |v, _| v.tiles.len());
+        let l = r.vcx.read_entity(&view, |v, _| v.layout());
+        assert_eq!((n, l.cols, l.rows), (14, 4, 4));
+        let t3 = r.vcx.debug_bounds("perf-summary-tile-3").expect("tile 3");
+        let t4 = r.vcx.debug_bounds("perf-summary-tile-4").expect("tile 4");
+        assert_eq!(
+            t4.left(),
+            r.vcx.debug_bounds("perf-summary-tile-0").unwrap().left()
         );
-        assert_eq!((l.cols, l.rows), (4, 4));
+        assert!(t4.top() > t3.top(), "tile 4 starts the second row");
     }
 
     #[gpui_kit::test]
@@ -2956,8 +2976,12 @@ mod summary {
         let at = page_panel(&mut r);
         right_click(r.vcx, at);
         let page_list = open_menu(&mut r);
-        let page_items: Vec<(MenuEntryKind, String)> =
-            page_list.iter().map(|e| (e.0, e.1.clone())).collect();
+        let page_items: Vec<String> = page_list.iter().map(|e| e.1.clone()).collect();
+        let kernel = page_list
+            .iter()
+            .find(|e| e.1 == "Kernel times")
+            .expect("page item");
+        assert_ne!(kernel.0, MenuEntryKind::Disabled);
         r.vcx.update(close_context_menu);
         let view = enter(&mut r);
         let tile = r.vcx.debug_bounds("perf-summary-tile-0").expect("CPU tile");
@@ -2968,9 +2992,14 @@ mod summary {
             "right-click does not leave summary mode"
         );
         let list = open_menu(&mut r);
-        let items: Vec<(MenuEntryKind, String)> = list.iter().map(|e| (e.0, e.1.clone())).collect();
+        let items: Vec<String> = list.iter().map(|e| e.1.clone()).collect();
         assert_eq!(items, page_items);
-        assert!(items.iter().any(|e| e.1 == "Kernel times"));
+        // No device page is drawn to run the page's own items, so they are disabled.
+        let kernel = list
+            .iter()
+            .find(|e| e.1 == "Kernel times")
+            .expect("page item");
+        assert_eq!(kernel.0, MenuEntryKind::Disabled);
         assert!(list[1].3, "checked in summary mode");
 
         // The items run on the summary view.

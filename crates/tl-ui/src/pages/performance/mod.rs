@@ -54,7 +54,7 @@ use self::actions::{
     PerfToggleSummaryMode,
 };
 use self::details::ClickedValue;
-use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
+use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu, summary_page_menu};
 use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
 use self::status_bar::{Slot, StatusBar};
@@ -991,7 +991,7 @@ impl PerformancePage {
             let mut slot = Some(menu);
             update_page(&view, cx, |p, cx| {
                 let menu = slot.take().expect("one page");
-                slot = Some(page_menu(menu, p, &ctx, window, cx));
+                slot = Some(summary_page_menu(menu, p, &ctx, window, cx));
             });
             slot.expect("the menu")
         });
