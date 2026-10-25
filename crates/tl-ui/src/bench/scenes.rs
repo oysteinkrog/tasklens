@@ -198,8 +198,9 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
     state.performance.nav_width = 252;
     if scene.overview() {
         state.performance.selected_device = DeviceKey::OVERVIEW.to_owned();
+        let unit = settings.performance.overview_row_unit_px;
         settings.performance.overview = (scene == BenchScene::PerfOverviewProcs)
-            .then(tl_model::settings::OverviewLayoutSetting::with_top_procs);
+            .then(|| tl_model::settings::OverviewLayoutSetting::with_top_procs(unit));
     } else {
         // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
         settings

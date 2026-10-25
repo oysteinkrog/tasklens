@@ -258,15 +258,16 @@ fn overview_type_error_keeps_performance() {
     let p = &s.value.performance;
     assert_eq!(p.graph_range_s, 30);
     assert!(p.curved_lines);
-    let rows: Vec<Vec<(&str, f64)>> = p
+    // The valid rows convert to the grid (UI-PRF-056): one 6-row band each, full width.
+    let grid: Vec<(&str, i64, i64)> = p
         .overview
         .as_ref()
         .expect("valid rows kept")
-        .rows
+        .grid
         .iter()
-        .map(|r| r.boxes.iter().map(|b| (b.kind.as_str(), b.width)).collect())
+        .map(|e| (e.kind.as_str(), e.row, e.cols))
         .collect();
-    assert_eq!(rows, [vec![("memory", 0.001)], vec![("net", 1.)]]);
+    assert_eq!(grid, [("memory", 0, 12), ("net", 6, 12)]);
     assert_eq!(logs.matches("WARN").count(), 1, "{logs}");
     assert!(logs.contains("performance.overview"), "{logs}");
     assert!(!logs.contains("bad"), "setting value logged: {logs}");

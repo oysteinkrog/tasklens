@@ -1,38 +1,44 @@
-//! Resizing the Overview boxes by dragging the gaps (UI-PRF-018 "Resizing in normal use", D-023).
+//! Resizing the Overview boxes by dragging the gaps (UI-PRF-056, D-030).
 //!
-//! The gap between two boxes of a row is a vertical splitter; the gap between two rows is a
-//! horizontal one. [`splitters`] finds them in a [`Placement`]. A [`Drag`] holds the two
-//! neighbours' weights, placed sizes and minimums when the button went down, and turns the
-//! pointer position into new weights for those two only: their sum stays, every other weight
-//! stays. There are no splitters in the stacked layout.
+//! The gap between two boxes that share a whole edge is a splitter: vertical between boxes side
+//! by side with the same rows, horizontal between boxes one above the other with the same
+//! columns. [`splitters`] finds them in a [`Placement`]. A [`Drag`] holds the first box's span,
+//! the two boxes' total and their kind minimums when the button went down, and turns the
+//! pointer position into a new span in whole cells: the shared edge moves, the outer edges and
+//! every other box stay. There are no splitters in the stacked layout.
 
 use gpui_kit::{Bounds, Pixels, point, size};
 use smallvec::SmallVec;
-use tl_model::settings::OVERVIEW_WEIGHT_RANGE;
 
 use super::layout::{BoxKind, OverviewLayout, Placement};
 
-/// Which two neighbours a splitter sits between.
+/// Which two boxes a splitter sits between.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
-    /// The boxes left and right of a vertical gap, in one row.
-    Boxes(BoxKind, BoxKind),
-    /// The rows (layout indices) above and below a horizontal gap.
-    Rows(usize, usize),
+    /// The boxes left and right of a vertical gap.
+    Cols(BoxKind, BoxKind),
+    /// The boxes above and below a horizontal gap.
+    Rows(BoxKind, BoxKind),
 }
 
 impl Target {
     /// True for a vertical splitter, which drags along x.
     pub const fn is_vertical(self) -> bool {
-        matches!(self, Self::Boxes(..))
+        matches!(self, Self::Cols(..))
     }
 
     /// The debug selector of the gap: `perf-overview-splitter-col-<left kind>` or
-    /// `perf-overview-splitter-row-<upper row index>`.
+    /// `perf-overview-splitter-row-<upper kind>`.
     pub fn selector(self) -> String {
         match self {
-            Self::Boxes(a, _) => format!("perf-overview-splitter-col-{}", a.key()),
-            Self::Rows(a, _) => format!("perf-overview-splitter-row-{a}"),
+            Self::Cols(a, _) => format!("perf-overview-splitter-col-{}", a.key()),
+            Self::Rows(a, _) => format!("perf-overview-splitter-row-{}", a.key()),
+        }
+    }
+
+    const fn kinds(self) -> (BoxKind, BoxKind) {
+        match self {
+            Self::Cols(a, b) | Self::Rows(a, b) => (a, b),
         }
     }
 }
@@ -44,281 +50,245 @@ pub struct Splitter {
     pub bounds: Bounds<Pixels>,
 }
 
-/// The row of `kind` in `layout`.
-fn row_of(layout: &OverviewLayout, kind: BoxKind) -> Option<usize> {
-    layout
-        .rows
-        .iter()
-        .position(|r| r.boxes.iter().any(|b| b.kind == kind))
-}
-
-/// The splitters of `placement`: one between each two neighbours in a line of boxes, and one
-/// between each two rows. A row that wrapped onto extra lines has no splitter between its lines.
+/// The splitters of `placement`: one between each two placed boxes that share a whole edge.
 pub fn splitters(layout: &OverviewLayout, placement: &Placement) -> SmallVec<[Splitter; 8]> {
     let mut out = SmallVec::new();
     if placement.stacked {
         return out;
     }
-    let left = placement
-        .boxes
-        .iter()
-        .map(|b| b.bounds.left())
-        .fold(None, |m: Option<Pixels>, x| Some(m.map_or(x, |m| m.min(x))));
-    let right = placement
-        .boxes
-        .iter()
-        .map(|b| b.bounds.right())
-        .fold(None, |m: Option<Pixels>, x| Some(m.map_or(x, |m| m.max(x))));
-    let (Some(left), Some(right)) = (left, right) else {
-        return out;
-    };
-    for pair in placement.boxes.windows(2) {
-        let (a, b) = (&pair[0], &pair[1]);
-        let (Some(ra), Some(rb)) = (row_of(layout, a.kind), row_of(layout, b.kind)) else {
-            continue;
-        };
-        if a.bounds.top() == b.bounds.top() {
-            if ra == rb && b.bounds.left() > a.bounds.right() {
+    for pa in &placement.boxes {
+        for pb in &placement.boxes {
+            let (Some(a), Some(b)) = (layout.get(pa.kind), layout.get(pb.kind)) else {
+                continue;
+            };
+            let (ra, rb) = (pa.bounds, pb.bounds);
+            if a.right() == b.col && a.row == b.row && a.rows == b.rows {
                 out.push(Splitter {
-                    target: Target::Boxes(a.kind, b.kind),
+                    target: Target::Cols(a.kind, b.kind),
                     bounds: Bounds::new(
-                        point(a.bounds.right(), a.bounds.top()),
-                        size(b.bounds.left() - a.bounds.right(), a.bounds.size.height),
+                        point(ra.right(), ra.top()),
+                        size(rb.left() - ra.right(), ra.size.height),
+                    ),
+                });
+            } else if a.bottom() == b.row && a.col == b.col && a.cols == b.cols {
+                out.push(Splitter {
+                    target: Target::Rows(a.kind, b.kind),
+                    bounds: Bounds::new(
+                        point(ra.left(), ra.bottom()),
+                        size(ra.size.width, rb.top() - ra.bottom()),
                     ),
                 });
             }
-        } else if ra != rb && b.bounds.top() > a.bounds.bottom() {
-            out.push(Splitter {
-                target: Target::Rows(ra, rb),
-                bounds: Bounds::new(
-                    point(left, a.bounds.bottom()),
-                    size(right - left, b.bounds.top() - a.bounds.bottom()),
-                ),
-            });
         }
     }
     out
 }
 
-/// The placed height of row `row`: the height of its first placed box.
-fn row_height(layout: &OverviewLayout, placement: &Placement, row: usize) -> Option<f32> {
-    placement
-        .boxes
-        .iter()
-        .find(|b| row_of(layout, b.kind) == Some(row))
-        .map(|b| f32::from(b.bounds.size.height))
-}
-
-/// A row's minimum height: the largest minimum of its placed boxes.
-fn row_min_h(layout: &OverviewLayout, placement: &Placement, row: usize, scale: f32) -> f32 {
-    layout.rows[row]
-        .boxes
-        .iter()
-        .filter(|b| placement.boxes.iter().any(|p| p.kind == b.kind))
-        .map(|b| b.kind.min_h() * scale)
-        .fold(0., f32::max)
-}
-
-/// A drag in progress: the two neighbours as they were when the button went down.
+/// A drag in progress: the two boxes as they were when the button went down.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Drag {
     pub target: Target,
     /// The pointer position along the drag axis at the start, px.
     start: f32,
-    /// The two neighbours' weights at the start.
-    weights: (f32, f32),
-    /// Their placed sizes along the axis, px.
-    placed: (f32, f32),
-    /// Their minimum sizes along the axis, px.
-    min: (f32, f32),
+    /// The first box's span along the axis at the start, cells.
+    first: u16,
+    /// Both boxes' spans together, cells.
+    total: u16,
+    /// The first box's smallest and largest span: each side keeps its kind minimum, or its
+    /// start span when that is smaller.
+    lo: u16,
+    hi: u16,
+    /// One cell and its gutter along the axis, px.
+    pitch: f32,
 }
 
 impl Drag {
     /// Starts a drag of `target` with the pointer at `pointer` (x for a vertical splitter, y
-    /// for a horizontal one). `None` when a neighbour is not placed. `scale` is the UI scale.
+    /// for a horizontal one). `None` when a box is not in the layout.
     pub fn start(
         layout: &OverviewLayout,
         placement: &Placement,
         target: Target,
         pointer: f32,
-        scale: f32,
     ) -> Option<Self> {
-        let (weights, placed, min) = match target {
-            Target::Boxes(a, b) => {
-                let row = &layout.rows[row_of(layout, a)?];
-                let weight = |k: BoxKind| row.boxes.iter().find(|s| s.kind == k).map(|s| s.width);
-                let width = |k: BoxKind| {
-                    placement
-                        .boxes
-                        .iter()
-                        .find(|p| p.kind == k)
-                        .map(|p| f32::from(p.bounds.size.width))
-                };
-                (
-                    (weight(a)?, weight(b)?),
-                    (width(a)?, width(b)?),
-                    (a.min_w() * scale, b.min_w() * scale),
-                )
-            }
-            Target::Rows(a, b) => (
-                (layout.rows.get(a)?.height, layout.rows.get(b)?.height),
-                (
-                    row_height(layout, placement, a)?,
-                    row_height(layout, placement, b)?,
-                ),
-                (
-                    row_min_h(layout, placement, a, scale),
-                    row_min_h(layout, placement, b, scale),
-                ),
-            ),
+        let (ka, kb) = target.kinds();
+        let (a, b) = (layout.get(ka)?, layout.get(kb)?);
+        let g = placement.grid;
+        let (min_a, min_b) = (g.min_span(ka), g.min_span(kb));
+        let (first, second, min_a, min_b, pitch) = if target.is_vertical() {
+            (a.cols, b.cols, min_a.0, min_b.0, g.cw + g.gutter)
+        } else {
+            (a.rows, b.rows, min_a.1, min_b.1, g.unit + g.gutter)
         };
+        let total = first + second;
+        let lo = min_a.min(first);
+        let hi = total - min_b.min(second);
         Some(Self {
             target,
             start: pointer,
-            weights,
-            placed,
-            min,
+            first,
+            total,
+            lo,
+            hi: hi.max(lo),
+            pitch,
         })
     }
 
-    /// The new weights of the two neighbours with the pointer at `pointer`. Their sum is the
-    /// start sum. Each side stays at or above its minimum; when both minimums do not fit, the
-    /// start weights come back.
-    pub fn weights_at(&self, pointer: f32) -> (f32, f32) {
-        let total = self.placed.0 + self.placed.1;
-        let lo = self.min.0;
-        let hi = total - self.min.1;
-        if total <= 0. || lo > hi {
-            return self.weights;
+    /// The first box's span with the pointer at `pointer`: the start span plus the whole
+    /// cells the pointer moved, kept between both kind minimums.
+    pub fn span_at(&self, pointer: f32) -> u16 {
+        if self.pitch <= 0. {
+            return self.first;
         }
-        let first = (self.placed.0 + pointer - self.start).clamp(lo, hi);
-        self.split(first / total)
+        let cells = ((pointer - self.start) / self.pitch).round();
+        let span = (f32::from(self.first) + cells).clamp(f32::from(self.lo), f32::from(self.hi));
+        span as u16
     }
 
-    /// Equal sizes for the two neighbours: the start sum split in half.
-    pub fn equal_weights(&self) -> (f32, f32) {
-        self.split(0.5)
-    }
-
-    /// The start sum split at `share` for the first neighbour, kept inside the weight range.
-    fn split(&self, share: f32) -> (f32, f32) {
-        let sum = self.weights.0 + self.weights.1;
-        let (min, max) = OVERVIEW_WEIGHT_RANGE;
-        let (min, max) = (min as f32, max as f32);
-        if sum < 2. * min {
-            return self.weights;
-        }
-        let first = (sum * share).clamp(min, (sum - min).min(max));
-        (first, sum - first)
+    /// The two spans as even as whole cells allow, the first box taking the smaller half.
+    pub fn even_span(&self) -> u16 {
+        (self.total / 2).clamp(self.lo, self.hi)
     }
 }
 
-/// Writes `weights` to the two neighbours of `target`, widths for boxes and heights for rows.
-pub fn set_weights(layout: &mut OverviewLayout, target: Target, weights: (f32, f32)) {
-    match target {
-        Target::Boxes(a, b) => {
-            for row in &mut layout.rows {
-                for s in &mut row.boxes {
-                    if s.kind == a {
-                        s.width = weights.0;
-                    } else if s.kind == b {
-                        s.width = weights.1;
-                    }
-                }
-            }
-        }
-        Target::Rows(a, b) => {
-            if let Some(r) = layout.rows.get_mut(a) {
-                r.height = weights.0;
-            }
-            if let Some(r) = layout.rows.get_mut(b) {
-                r.height = weights.1;
-            }
+/// Gives the first box of `target` `span` cells along the axis and the second box the rest of
+/// their total, moving only the shared edge. Returns whether the layout changed.
+pub fn set_span(layout: &mut OverviewLayout, target: Target, span: u16) -> bool {
+    let (ka, kb) = target.kinds();
+    let (Some(a), Some(b)) = (layout.get(ka), layout.get(kb)) else {
+        return false;
+    };
+    let vertical = target.is_vertical();
+    let (start, first, second) = if vertical {
+        (a.col, a.cols, b.cols)
+    } else {
+        (a.row, a.rows, b.rows)
+    };
+    let total = first + second;
+    let span = span.clamp(1, total.saturating_sub(1).max(1));
+    if span == first || span >= total {
+        return false;
+    }
+    if let Some(a) = layout.get_mut(ka) {
+        if vertical {
+            a.cols = span;
+        } else {
+            a.rows = span;
         }
     }
-}
-
-/// Every weight rounded to 3 decimals, as the profile stores it. A weight never rounds to 0.
-pub fn round_weights(layout: &mut OverviewLayout) {
-    let round = |w: f32| ((w * 1000.).round() / 1000.).max(0.001);
-    for row in &mut layout.rows {
-        row.height = round(row.height);
-        for s in &mut row.boxes {
-            s.width = round(s.width);
+    if let Some(b) = layout.get_mut(kb) {
+        if vertical {
+            b.col = start + span;
+            b.cols = total - span;
+        } else {
+            b.row = start + span;
+            b.rows = total - span;
         }
     }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::performance::overview::layout::place;
+    use crate::pages::performance::overview::layout::{ROW_UNIT_DEFAULT, place};
     use gpui_kit::px;
 
-    fn placed() -> (OverviewLayout, Placement) {
-        let layout = OverviewLayout::btop_default();
-        let placement = place(&layout, |_| true, size(px(1200.), px(900.)), 1.);
-        (layout, placement)
+    fn placed(layout: &OverviewLayout) -> Placement {
+        place(
+            layout,
+            |_| true,
+            size(px(1200.), px(900.)),
+            1.,
+            ROW_UNIT_DEFAULT,
+        )
     }
 
     #[test]
     fn splitters_of_the_default() {
-        let (layout, placement) = placed();
-        let s = splitters(&layout, &placement);
+        let layout = OverviewLayout::grid_default();
+        let s = splitters(&layout, &placed(&layout));
         let targets: Vec<Target> = s.iter().map(|s| s.target).collect();
+        use BoxKind::*;
         assert_eq!(
             targets,
             vec![
-                Target::Boxes(BoxKind::Cpu, BoxKind::Memory),
-                Target::Rows(0, 1),
-                Target::Boxes(BoxKind::Gpu, BoxKind::Disk),
-                Target::Boxes(BoxKind::Disk, BoxKind::Net),
+                Target::Cols(Cpu, Memory),
+                Target::Rows(Memory, Net),
+                Target::Cols(Gpu, Disk),
+                Target::Cols(Disk, Net),
             ]
         );
-        // The CPU/Memory gap is 8 px wide between 789 and 797.
-        assert_eq!(f32::from(s[0].bounds.size.width), 8.);
-        // The row gap spans the boxes' width and is 8 px high.
-        assert_eq!(f32::from(s[1].bounds.size.height), 8.);
-        assert_eq!(f32::from(s[1].bounds.size.width), 1168.);
+        // The CPU/Memory gap is the 6 px gutter, as high as the boxes.
+        assert_eq!(f32::from(s[0].bounds.size.width), 6.);
+        assert_eq!(f32::from(s[0].bounds.size.height), 316.);
+        // Memory over Net: as wide as the two boxes, 6 px high.
+        assert_eq!(f32::from(s[1].bounds.size.height), 6.);
+        assert_eq!(f32::from(s[1].bounds.size.width), 385.);
     }
 
     #[test]
-    fn no_splitters_when_stacked() {
-        let layout = OverviewLayout::btop_default();
-        let placement = place(&layout, |_| true, size(px(600.), px(900.)), 1.);
-        assert!(splitters(&layout, &placement).is_empty());
+    fn no_splitters_when_stacked_or_absent() {
+        let layout = OverviewLayout::grid_default();
+        let stacked = place(
+            &layout,
+            |_| true,
+            size(px(600.), px(900.)),
+            1.,
+            ROW_UNIT_DEFAULT,
+        );
+        assert!(splitters(&layout, &stacked).is_empty());
+        // Without a GPU box there is no GPU/Disk gap.
+        let p = place(
+            &layout,
+            |k| k != BoxKind::Gpu,
+            size(px(1200.), px(900.)),
+            1.,
+            ROW_UNIT_DEFAULT,
+        );
+        assert!(
+            splitters(&layout, &p)
+                .iter()
+                .all(|s| s.target != Target::Cols(BoxKind::Gpu, BoxKind::Disk))
+        );
     }
 
     #[test]
-    fn drag_keeps_the_sum_and_clamps_at_minimums() {
-        let (layout, placement) = placed();
-        let target = Target::Boxes(BoxKind::Cpu, BoxKind::Memory);
-        let drag = Drag::start(&layout, &placement, target, 793., 1.).expect("placed");
-        let (a, b) = drag.weights_at(793. - 100.);
-        assert!((a + b - 3.).abs() < 1e-4);
-        assert!(a < 2. && b > 1.);
-        // Far left: CPU stops at its 280 px minimum (773 px placed, 387 px for Memory).
-        let (a, b) = drag.weights_at(-5000.);
-        assert!((a / (a + b) - 280. / 1160.).abs() < 1e-4);
-        // Far right: Memory stops at 200 px.
-        let (a, b) = drag.weights_at(5000.);
-        assert!((b / (a + b) - 200. / 1160.).abs() < 1e-4);
-    }
+    fn drag_moves_whole_cells_and_clamps_at_kind_minimums() {
+        let layout = OverviewLayout::grid_default();
+        let p = placed(&layout);
+        let target = Target::Cols(BoxKind::Cpu, BoxKind::Memory);
+        let drag = Drag::start(&layout, &p, target, 796.).expect("placed");
+        // A column and its gutter are 97.83 px: under half a cell moves nothing.
+        assert_eq!(drag.span_at(796. + 40.), 8);
+        assert_eq!(drag.span_at(796. - 100.), 7);
+        // CPU keeps 4 columns at 1200 px, Memory 3.
+        assert_eq!(drag.span_at(-5000.), 4);
+        assert_eq!(drag.span_at(5000.), 9);
+        assert_eq!(drag.even_span(), 6);
 
-    #[test]
-    fn equal_weights_halve_the_sum() {
-        let (layout, placement) = placed();
-        let drag = Drag::start(&layout, &placement, Target::Rows(0, 1), 540., 1.).expect("placed");
-        assert_eq!(drag.equal_weights(), (2.5, 2.5));
-    }
+        let mut l = layout.clone();
+        assert!(set_span(&mut l, target, 6));
+        assert!(!set_span(&mut l, target, 6), "same span");
+        let (cpu, mem) = (
+            l.get(BoxKind::Cpu).expect("cpu"),
+            l.get(BoxKind::Memory).expect("memory"),
+        );
+        assert_eq!((cpu.col, cpu.cols, mem.col, mem.cols), (0, 6, 6, 6));
+        assert_eq!(l.validate(), Ok(()));
 
-    #[test]
-    fn round_weights_to_three_decimals() {
-        let mut layout = OverviewLayout::btop_default();
-        layout.rows[0].height = 2.123_456;
-        layout.rows[0].boxes[0].width = 0.000_1;
-        round_weights(&mut layout);
-        assert_eq!(layout.rows[0].height, 2.123);
-        assert_eq!(layout.rows[0].boxes[0].width, 0.001);
+        // A row gap: Memory keeps 6 rows, Net 6.
+        let rows = Target::Rows(BoxKind::Memory, BoxKind::Net);
+        let drag = Drag::start(&layout, &p, rows, 330.).expect("placed");
+        assert_eq!(drag.span_at(330. - 1000.), 6);
+        assert_eq!(drag.span_at(330. + 1000.), 7);
+        let mut l = layout.clone();
+        assert!(set_span(&mut l, rows, 6));
+        let (mem, net) = (
+            l.get(BoxKind::Memory).expect("memory"),
+            l.get(BoxKind::Net).expect("net"),
+        );
+        assert_eq!((mem.rows, net.row, net.rows), (6, 6, 7));
+        assert_eq!(l.validate(), Ok(()));
     }
 }

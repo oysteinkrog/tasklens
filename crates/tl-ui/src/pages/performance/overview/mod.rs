@@ -8,9 +8,9 @@
 //!
 //! The layout comes from `[performance.overview]` (UI-PRF-018), the default when there is none.
 //! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
-//! and only then does the page ask for the process sweep (`process_top`). [`splitter`] resizes
-//! boxes and rows by dragging the gaps; [`edit`] is Edit Layout mode, which moves, hides and
-//! adds boxes. Each box has layout modes (UI-PRF-019): [`box_menu`] is the box menu and the
+//! and only then does the page ask for the process sweep (`process_top`). The boxes sit on the
+//! snap grid of UI-PRF-056. [`splitter`] moves the shared edge of two boxes by dragging the gap
+//! between them; [`edit`] is Edit Layout mode, which hides and adds boxes. Each box has layout modes (UI-PRF-019): [`box_menu`] is the box menu and the
 //! Edit Layout gear, and [`inner_split`] is the one splitter a mode with two parts uses.
 //!
 //! [`range`] is the time range (UI-PRF-055): the switch in the header, the demand for the
@@ -59,12 +59,12 @@ use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
 use self::inner_split::InnerSplitChanged;
-use self::layout::{BoxKind, OverviewLayout, Placement, place};
+use self::layout::{BoxKind, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::range::{RangeText, history_request};
-use self::splitter::{Drag, Splitter, Target, round_weights, set_weights, splitters};
+use self::splitter::{Drag, Splitter, Target, set_span, splitters};
 use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfSetStatusBar};
 use super::details::{KeyValueModel, Template};
 use super::page::DevicePage;
@@ -168,12 +168,23 @@ fn saved_layout(cx: &App) -> OverviewLayout {
     OverviewLayout::from_setting(saved)
 }
 
+/// `performance.overview_row_unit_px`: the grid row height in logical px.
+fn row_unit(cx: &App) -> f32 {
+    if cx.has_global::<TlSettings>() {
+        TlSettings::settings(cx).performance.overview_row_unit_px as f32
+    } else {
+        ROW_UNIT_DEFAULT
+    }
+}
+
 /// The Overview page.
 pub struct OverviewPage {
     key: DeviceKey,
     layout: OverviewLayout,
     placement: Placement,
     area: Size<Pixels>,
+    /// `performance.overview_row_unit_px`, logical px.
+    row_unit: f32,
     cpu: Entity<CpuBox>,
     mem: Entity<MemBox>,
     gpu: Entity<GpuBox>,
@@ -322,6 +333,7 @@ impl OverviewPage {
             key,
             layout,
             placement: Placement::default(),
+            row_unit: row_unit(cx),
             area: size(px(0.), px(0.)),
             cpu,
             mem,
@@ -460,6 +472,7 @@ impl OverviewPage {
             },
             self.area,
             s,
+            self.row_unit,
         );
     }
 
@@ -513,11 +526,19 @@ impl OverviewPage {
             self.bar_on_overview = bar_on_overview;
             self.notify(cx);
         }
-        let layout = saved_layout(cx);
-        if layout == self.layout || self.drag.is_some() || self.box_dragging() {
+        if self.drag.is_some() {
             return;
         }
-        self.set_layout(layout, cx);
+        let unit = row_unit(cx);
+        let layout = saved_layout(cx);
+        if layout != self.layout {
+            self.row_unit = unit;
+            self.set_layout(layout, cx);
+        } else if unit != self.row_unit {
+            self.row_unit = unit;
+            self.relayout(cx);
+            self.notify(cx);
+        }
     }
 
     /// A new snapshot: the boxes' range text follows the series and the device history. The
@@ -735,26 +756,26 @@ impl OverviewPage {
         })
     }
 
-    /// Button down on a gap: a double-click gives the two neighbours equal sizes and saves; a
-    /// single press starts a drag.
+    /// Button down on a gap: a double-click splits the two spans as evenly as whole cells allow
+    /// and saves; a single press starts a drag.
     fn splitter_down(&mut self, target: Target, ev: &MouseDownEvent, cx: &mut Context<Self>) {
-        let scale = metrics(cx).ui_scale;
         let Some(drag) = Drag::start(
             &self.layout,
             &self.placement,
             target,
             Self::axis(target, ev.position),
-            scale,
         ) else {
             return;
         };
         cx.stop_propagation();
         if ev.click_count >= 2 {
             self.drag = None;
-            let weights = drag.equal_weights();
-            set_weights(&mut self.layout, target, weights);
-            self.apply_layout(cx);
-            self.save_layout(cx);
+            if set_span(&mut self.layout, target, drag.even_span()) {
+                self.apply_layout(cx);
+                self.save_layout(cx);
+            } else {
+                self.notify(cx);
+            }
         } else {
             self.drag = Some(ActiveDrag {
                 drag,
@@ -764,17 +785,18 @@ impl OverviewPage {
         }
     }
 
-    /// The pointer moved while a gap is held: the two neighbours take new weights and the page
-    /// places again.
+    /// The pointer moved while a gap is held: the shared edge snaps to the nearest whole cell
+    /// and the page places again when it moved.
     fn splitter_move(&mut self, position: gpui_kit::Point<Pixels>, cx: &mut Context<Self>) {
         let Some(active) = &mut self.drag else {
             return;
         };
         let (drag, target) = (active.drag, active.drag.target);
-        let weights = drag.weights_at(Self::axis(target, position));
-        set_weights(&mut self.layout, target, weights);
-        active.changed = true;
-        self.apply_layout(cx);
+        let span = drag.span_at(Self::axis(target, position));
+        if set_span(&mut self.layout, target, span) {
+            active.changed = true;
+            self.apply_layout(cx);
+        }
     }
 
     /// The button went up: the drag ends and a changed layout is saved to the profile.
@@ -783,15 +805,14 @@ impl OverviewPage {
             return;
         };
         if active.changed {
-            round_weights(&mut self.layout);
-            self.apply_layout(cx);
             self.save_layout(cx);
+            self.notify(cx);
         } else {
             self.notify(cx);
         }
     }
 
-    /// Places the page again after a weight change.
+    /// Places the page again after a span change.
     fn apply_layout(&mut self, cx: &mut Context<Self>) {
         self.relayout(cx);
         self.notify(cx);
@@ -802,12 +823,7 @@ impl OverviewPage {
         if !cx.has_global::<TlSettings>() {
             return;
         }
-        let mut setting = self.layout.to_setting();
-        let round = |w: &mut f64| *w = (*w * 1000.).round() / 1000.;
-        for row in &mut setting.rows {
-            round(&mut row.height);
-            row.boxes.iter_mut().for_each(|b| round(&mut b.width));
-        }
+        let setting = self.layout.to_setting();
         TlSettings::update(cx, |d| d.settings.performance.overview = Some(setting));
     }
 
@@ -1051,8 +1067,6 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_reset_layout))
             .on_action(cx.listener(Self::on_add_box))
             .on_action(cx.listener(Self::on_hide_box))
-            .on_action(cx.listener(Self::on_move_box))
-            .on_action(cx.listener(Self::on_resize_box))
             .on_action(cx.listener(Self::on_set_box_mode))
             .on_action(cx.listener(Self::on_set_box_arrange))
             .on_action(cx.listener(Self::on_set_box_power))
@@ -1074,7 +1088,6 @@ impl Render for OverviewPage {
         let this = cx.entity().downgrade();
         let this_move = this.clone();
         let dragging = self.drag.is_some();
-        let box_dragging = self.box_dragging();
         let measure = canvas(
             move |bounds, _, cx| {
                 // After the frame: a notify during the frame is lost, so the page would keep
@@ -1085,48 +1098,37 @@ impl Render for OverviewPage {
                 });
             },
             move |_, _, window, _| {
-                if !dragging && !box_dragging {
+                if !dragging {
                     return;
                 }
-                // The held gap or box follows the pointer wherever it goes.
+                // The held gap follows the pointer wherever it goes.
                 let moved = this_move.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if !phase.bubble() {
                         return;
                     }
                     let _ = moved.update(cx, |p, cx| {
-                        match (e.pressed_button == Some(MouseButton::Left), box_dragging) {
-                            (true, false) => p.splitter_move(e.position, cx),
-                            (true, true) => p.box_drag_move(e.position, cx),
-                            (false, false) => p.splitter_up(cx),
-                            (false, true) => p.box_drag_up(e.position, cx),
+                        if e.pressed_button == Some(MouseButton::Left) {
+                            p.splitter_move(e.position, cx);
+                        } else {
+                            p.splitter_up(cx);
                         }
                     });
                 });
                 let released = this_move.clone();
-                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                     if phase.bubble() {
-                        let _ = released.update(cx, |p, cx| {
-                            if box_dragging {
-                                p.box_drag_up(e.position, cx);
-                            } else {
-                                p.splitter_up(cx);
-                            }
-                        });
+                        let _ = released.update(cx, |p, cx| p.splitter_up(cx));
                     }
                 });
             },
         )
         .absolute()
         .inset_0();
-        let gaps: SmallVec<[AnyElement; 8]> = if box_dragging {
-            SmallVec::new()
-        } else {
-            splitters(&self.layout, &self.placement)
-                .into_iter()
-                .map(|s| self.gap_element(s, cx))
-                .collect()
-        };
+        let gaps: SmallVec<[AnyElement; 8]> = splitters(&self.layout, &self.placement)
+            .into_iter()
+            .map(|s| self.gap_element(s, cx))
+            .collect();
         let boxes: SmallVec<[AnyElement; 8]> = self
             .placement
             .boxes

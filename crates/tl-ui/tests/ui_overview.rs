@@ -3005,8 +3005,8 @@ mod page {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{
-        AppearanceSettings, OverviewBoxSetting, OverviewLayoutSetting, OverviewRowSetting,
-        Settings, ThemeSettings, UiState,
+        AppearanceSettings, OverviewGridSetting, OverviewLayoutSetting, Settings, ThemeSettings,
+        UiState,
     };
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
@@ -3029,11 +3029,10 @@ mod page {
         CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, POWER_SPLITTER_ID,
         POWER_STRIP_ID, core_chart_id,
     };
-    use tl_ui::pages::performance::overview::edit::{
-        DROP_LINE_ID, DROP_SWAP_ID, GHOST_ID, GHOST_VALUE_ID, TOOLBAR_ID, hide_button_id,
-        title_handle_id,
+    use tl_ui::pages::performance::overview::edit::{TOOLBAR_ID, hide_button_id, title_handle_id};
+    use tl_ui::pages::performance::overview::layout::{
+        Arrange, BoxKind, GridBox, OverviewLayout, ROW_UNIT_DEFAULT, place,
     };
-    use tl_ui::pages::performance::overview::layout::{Arrange, BoxKind, OverviewLayout, place};
     use tl_ui::pages::performance::overview::mem_box::MEM_SPLITTER_ID;
     use tl_ui::pages::performance::overview::net_box::NET_STACK_SPLITTER_ID;
     use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
@@ -3402,13 +3401,14 @@ mod page {
     }
 
     #[gpui_kit::test]
-    fn overview_places_boxes_btop_default(cx: &mut TestAppContext) {
+    fn overview_places_boxes_grid_default(cx: &mut TestAppContext) {
         let r = open(cx, true, 1200., 900.);
         let want = place(
-            &OverviewLayout::btop_default(),
+            &OverviewLayout::grid_default(),
             |_| true,
             size(px(1200.), px(900.)),
             1.,
+            ROW_UNIT_DEFAULT,
         );
         assert_eq!(want.boxes.len(), 5);
         for p in &want.boxes {
@@ -3427,9 +3427,10 @@ mod page {
             r.vcx.debug_bounds(box_id(BoxKind::Gpu)).is_none(),
             "no GPU box"
         );
-        for kind in [BoxKind::Disk, BoxKind::Net] {
+        // UI-PRF-056: the GPU cells stay empty; Disk and Net keep their columns.
+        for (kind, x, w) in [(BoxKind::Disk, 407., 386.), (BoxKind::Net, 799., 385.)] {
             let b = r.vcx.debug_bounds(box_id(kind)).expect("box drawn");
-            assert_eq!(b.size.width, px(580.), "{kind:?}");
+            assert_eq!((b.left(), b.size.width), (px(x), px(w)), "{kind:?}");
         }
     }
 
@@ -3686,106 +3687,94 @@ mod page {
         }
     }
 
-    fn widths(layout: &OverviewLayout, row: usize) -> Vec<f32> {
-        layout.rows[row].boxes.iter().map(|b| b.width).collect()
+    /// (col, row, cols, rows) of `kind` in the page's layout.
+    fn cells(r: &mut Rig, kind: BoxKind) -> (u16, u16, u16, u16) {
+        let b = r.layout().get(kind).expect("placed");
+        (b.col, b.row, b.cols, b.rows)
     }
 
+    /// UI-PRF-056: a gap between two boxes that share a whole edge moves that edge in whole
+    /// cells, clamped at both kind minimums; double-click splits the spans evenly.
     #[gpui_kit::test]
-    fn overview_gap_drag_moves_weight_between_neighbours(cx: &mut TestAppContext) {
+    fn overview_grid_gap_drag_moves_shared_edge(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         let start = center(r.gap("perf-overview-splitter-col-cpu"));
         r.press(start, 1);
+        // Under half a cell (97.8 px with the gutter) nothing moves.
+        r.move_to(point(start.x - px(40.), start.y));
+        assert_eq!(cells(&mut r, BoxKind::Cpu), (0, 0, 8, 7));
         r.move_to(point(start.x - px(100.), start.y));
-        let layout = r.layout();
-        let w = widths(&layout, 0);
-        assert!(w[0] < 2. && w[1] > 1., "weights {w:?}");
-        assert!((w[0] + w[1] - 3.).abs() < 1e-3, "the sum stays: {w:?}");
-        assert_eq!(widths(&layout, 1), vec![1., 1., 1.], "other boxes stay");
-        assert_eq!((layout.rows[0].height, layout.rows[1].height), (3., 2.));
-        // CPU lost 100 px and Memory has it: 773 - 100 and 387 + 100, within a px of rounding.
-        let page = r.page.clone();
-        let placed = r.vcx.update(|_, cx| page.read(cx).placement().clone());
-        let width = |kind| {
-            f32::from(
-                placed
-                    .boxes
-                    .iter()
-                    .find(|b| b.kind == kind)
-                    .expect("placed")
-                    .bounds
-                    .size
-                    .width,
-            )
-        };
-        assert!(
-            (width(BoxKind::Cpu) - 673.).abs() <= 1.5,
-            "{}",
-            width(BoxKind::Cpu)
-        );
-        assert!((width(BoxKind::Memory) - 487.).abs() <= 1.5);
-        // A drag past the minimum stops at it: CPU 280 px.
+        assert_eq!(cells(&mut r, BoxKind::Cpu), (0, 0, 7, 7));
+        assert_eq!(cells(&mut r, BoxKind::Memory), (7, 0, 5, 7));
+        for kind in [BoxKind::Gpu, BoxKind::Disk, BoxKind::Net] {
+            assert_eq!(
+                r.layout().get(kind),
+                OverviewLayout::grid_default().get(kind),
+                "{kind:?} stays"
+            );
+        }
+        // The boxes follow at once, on the grid.
+        let cpu = r.vcx.debug_bounds(box_id(BoxKind::Cpu)).expect("cpu");
+        let mem = r.vcx.debug_bounds(box_id(BoxKind::Memory)).expect("memory");
+        assert_eq!(cpu.size.width, px(679.));
+        assert_eq!(mem.left() - cpu.right(), px(6.));
+        // A drag past the minimum stops at it: CPU keeps 4 columns at 1200 px, Memory 3.
         r.move_to(point(px(0.), start.y));
-        let page = r.page.clone();
-        let placed = r.vcx.update(|_, cx| page.read(cx).placement().clone());
-        let cpu = placed
-            .boxes
-            .iter()
-            .find(|b| b.kind == BoxKind::Cpu)
-            .expect("cpu");
-        assert_eq!(f32::from(cpu.bounds.size.width), 280.);
-        r.release(point(px(0.), start.y));
-    }
+        assert_eq!(cells(&mut r, BoxKind::Cpu), (0, 0, 4, 7));
+        r.move_to(point(px(5000.), start.y));
+        assert_eq!(cells(&mut r, BoxKind::Memory), (9, 0, 3, 7));
+        r.release(point(px(5000.), start.y));
 
-    #[gpui_kit::test]
-    fn overview_row_gap_double_click_equalizes(cx: &mut TestAppContext) {
-        let mut r = open(cx, true, 1200., 900.);
-        let at = center(r.gap("perf-overview-splitter-row-0"));
-        r.press(at, 2);
-        let layout = r.layout();
-        assert_eq!((layout.rows[0].height, layout.rows[1].height), (2.5, 2.5));
-        assert_eq!(widths(&layout, 0), vec![2., 1.], "boxes keep their widths");
-        // The double-click saves at once.
-        assert_eq!(
-            OverviewLayout::from_setting(r.saved().as_ref()),
-            layout,
-            "saved at once"
-        );
-        // A vertical gap equalizes its two boxes only.
+        // A double-click splits the 12 columns as evenly as whole cells allow, and saves at
+        // once.
         let at = center(r.gap("perf-overview-splitter-col-cpu"));
         r.press(at, 2);
         r.release(at);
-        assert_eq!(widths(&r.layout(), 0), vec![1.5, 1.5]);
+        assert_eq!(cells(&mut r, BoxKind::Cpu), (0, 0, 6, 7));
+        assert_eq!(cells(&mut r, BoxKind::Memory), (6, 0, 6, 7));
+        assert_eq!(
+            OverviewLayout::from_setting(r.saved().as_ref()),
+            r.layout(),
+            "saved at once"
+        );
+        assert_eq!(r.layout().validate(), Ok(()));
+        // Memory no longer shares a whole edge with Net, and CPU never did with GPU: no row
+        // gaps.
+        for id in [
+            "perf-overview-splitter-row-memory",
+            "perf-overview-splitter-row-cpu",
+        ] {
+            assert!(r.vcx.debug_bounds(id).is_none(), "{id}");
+        }
     }
 
     #[gpui_kit::test]
     fn overview_layout_saved_after_drag(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         assert_eq!(r.saved(), None);
-        let start = center(r.gap("perf-overview-splitter-row-0"));
+        let start = center(r.gap("perf-overview-splitter-row-memory"));
         r.press(start, 1);
-        r.move_to(point(start.x, start.y + px(37.)));
-        r.move_to(point(start.x, start.y + px(61.)));
+        r.move_to(point(start.x, start.y - px(30.)));
+        r.move_to(point(start.x, start.y - px(46.)));
         assert_eq!(r.saved(), None, "nothing is saved during the drag");
-        let layout = r.layout();
-        assert!(layout.rows[0].height > 3. && layout.rows[1].height < 2.);
-        r.release(point(start.x, start.y + px(61.)));
+        assert_eq!(cells(&mut r, BoxKind::Memory), (8, 0, 4, 6));
+        r.release(point(start.x, start.y - px(46.)));
         let saved = r.saved().expect("saved when the drag ends");
-        let layout = r.layout();
-        assert_eq!(OverviewLayout::from_setting(Some(&saved)), layout);
-        // Weights are stored with 3 decimals.
-        for row in &saved.rows {
-            assert_eq!(row.height, (row.height * 1000.).round() / 1000.);
-        }
+        assert_eq!(OverviewLayout::from_setting(Some(&saved)), r.layout());
+        // The grid is written, with whole cells.
+        let net = saved.grid.iter().find(|e| e.kind == "net").expect("net");
+        assert_eq!((net.col, net.row, net.cols, net.rows), (8, 6, 4, 7));
+        assert!(saved.rows.is_empty());
         // A click that moves nothing saves nothing more: the settings stay as they are.
         let before = saved;
-        let again = center(r.gap("perf-overview-splitter-row-0"));
+        let again = center(r.gap("perf-overview-splitter-row-memory"));
         r.press(again, 1);
         r.release(again);
         assert_eq!(r.saved(), Some(before));
     }
 
     fn cpu_split_of(setting: &Option<tl_model::settings::OverviewLayoutSetting>) -> Option<f64> {
-        setting.as_ref().and_then(|s| s.rows[0].boxes[0].split)
+        setting.as_ref().and_then(|s| s.grid[0].split)
     }
 
     /// The layout's CPU split.
@@ -3811,8 +3800,8 @@ mod page {
         let saved = r.saved();
         assert_eq!(cpu_split_of(&saved), Some(f64::from(split)));
         assert_eq!(OverviewLayout::from_setting(saved.as_ref()), r.layout());
-        // Weights and the other box do not change.
-        assert_eq!(widths(&r.layout(), 0), vec![2., 1.]);
+        // The boxes keep their cells.
+        assert_eq!(r.layout().boxes, OverviewLayout::grid_default().boxes);
 
         // A drag far to the right stops where the core rows keep a 188 px column.
         let at = center(r.gap(CPU_SPLITTER_ID));
@@ -3857,8 +3846,8 @@ mod page {
         // A saved value reloads into the layout and the gap.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                layout.rows[0].boxes[0].split = Some(0.6);
+                let mut layout = OverviewLayoutSetting::grid_default();
+                layout.grid[0].split = Some(0.6);
                 d.settings.performance.overview = Some(layout);
             });
         });
@@ -3926,7 +3915,7 @@ mod page {
 
     /// The CPU box's saved `power` and `power_split`.
     fn saved_power(r: &mut Rig) -> (bool, Option<f64>) {
-        let b = r.saved().map(|s| s.rows[0].boxes[0].clone());
+        let b = r.saved().map(|s| s.grid[0].clone());
         b.map_or((false, None), |b| (b.power, b.power_split))
     }
 
@@ -4047,7 +4036,7 @@ mod page {
             kind: "memory".into(),
             on: true,
         });
-        assert_eq!(r.saved().map(|s| s.rows[0].boxes[1].power), Some(false));
+        assert_eq!(r.saved().map(|s| s.grid[1].power), Some(false));
     }
 
     #[gpui_kit::test]
@@ -4347,9 +4336,9 @@ mod page {
 
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                let net = layout.rows[1]
-                    .boxes
+                let mut layout = OverviewLayoutSetting::grid_default();
+                let net = layout
+                    .grid
                     .iter_mut()
                     .find(|b| b.kind == "net")
                     .expect("a Net box");
@@ -4362,9 +4351,9 @@ mod page {
 
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                let gpu = layout.rows[1]
-                    .boxes
+                let mut layout = OverviewLayoutSetting::grid_default();
+                let gpu = layout
+                    .grid
                     .iter_mut()
                     .find(|b| b.kind == "gpu")
                     .expect("a GPU box");
@@ -4510,11 +4499,10 @@ mod page {
 
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
+                let mut layout = OverviewLayoutSetting::grid_default();
                 let disk = layout
-                    .rows
+                    .grid
                     .iter_mut()
-                    .flat_map(|row| row.boxes.iter_mut())
                     .find(|b| b.kind == "disk")
                     .expect("a Disk box");
                 disk.mode = Some("rows".to_owned());
@@ -4852,9 +4840,8 @@ mod page {
     /// The Disk box's saved `arrange`.
     fn saved_disk_arrange(r: &mut Rig) -> Option<String> {
         r.saved().and_then(|s| {
-            s.rows
+            s.grid
                 .into_iter()
-                .flat_map(|row| row.boxes)
                 .find(|b| b.kind == "disk")
                 .and_then(|b| b.arrange)
         })
@@ -4997,11 +4984,10 @@ mod page {
         // A saved value wins over the default.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
+                let mut layout = OverviewLayoutSetting::grid_default();
                 let disk = layout
-                    .rows
+                    .grid
                     .iter_mut()
-                    .flat_map(|row| row.boxes.iter_mut())
                     .find(|b| b.kind == "disk")
                     .expect("a Disk box");
                 disk.arrange = Some("horizontal".to_owned());
@@ -5017,7 +5003,7 @@ mod page {
             kind: "disk".into(),
         });
         assert_eq!(shown(&mut r), Arrange::Vertical);
-        assert_eq!(r.saved(), Some(OverviewLayoutSetting::btop_default()));
+        assert_eq!(r.saved(), Some(OverviewLayoutSetting::grid_default()));
 
         // A mode without the choice has no Arrange submenu and ignores the action.
         r.page_action(&PerfOverviewSetBoxMode {
@@ -5073,9 +5059,8 @@ mod page {
     /// The saved `arrange` of the box `kind`.
     fn saved_arrange(r: &mut Rig, kind: &str) -> Option<String> {
         r.saved().and_then(|s| {
-            s.rows
+            s.grid
                 .into_iter()
-                .flat_map(|row| row.boxes)
                 .find(|b| b.kind == kind)
                 .and_then(|b| b.arrange)
         })
@@ -5174,8 +5159,8 @@ mod page {
         // A saved split places the stacked parts.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                let cpu = &mut layout.rows[0].boxes[0];
+                let mut layout = OverviewLayoutSetting::grid_default();
+                let cpu = &mut layout.grid[0];
                 cpu.mode = Some("chart_cores".into());
                 cpu.arrange = Some("vertical".into());
                 cpu.split = Some(0.6);
@@ -5456,11 +5441,10 @@ mod page {
         // A saved value wins over the default.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
+                let mut layout = OverviewLayoutSetting::grid_default();
                 let net = layout
-                    .rows
+                    .grid
                     .iter_mut()
-                    .flat_map(|row| row.boxes.iter_mut())
                     .find(|b| b.kind == "net")
                     .expect("a Net box");
                 net.mode = Some("adapter_charts".to_owned());
@@ -5990,12 +5974,14 @@ mod page {
     #[gpui_kit::test]
     fn overview_inner_split_drag_and_reset(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
-        // CPU and Memory share the row equally, so in the CPU body the 120 px chart minimum is
+        // CPU and Memory share the top 12 columns equally, so in the CPU body the 120 px chart minimum is
         // above the 20% floor.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                layout.rows[0].boxes[0].width = 1.;
+                let mut layout = OverviewLayoutSetting::grid_default();
+                layout.grid[0].cols = 6;
+                layout.grid[1].col = 6;
+                layout.grid[1].cols = 6;
                 d.settings.performance.overview = Some(layout);
             });
         });
@@ -6126,8 +6112,8 @@ mod page {
         let mut r = open_rooted(cx, true, 1200., 900.);
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                layout.rows[0].boxes[0].split = Some(0.6);
+                let mut layout = OverviewLayoutSetting::grid_default();
+                layout.grid[0].split = Some(0.6);
                 d.settings.performance.overview = Some(layout);
             });
         });
@@ -6142,7 +6128,7 @@ mod page {
         // Reset Box: the default mode and split, saved.
         r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
         assert_eq!(cpu_split(&mut r), 0.4);
-        assert_eq!(r.saved(), Some(OverviewLayoutSetting::btop_default()));
+        assert_eq!(r.saved(), Some(OverviewLayoutSetting::grid_default()));
 
         // No gear outside Edit Layout mode; in it, one per box, left of Hide box.
         assert!(r.vcx.debug_bounds("perf-overview-gear-cpu").is_none());
@@ -6153,10 +6139,9 @@ mod page {
             assert!(gear.right() <= hide.left(), "{kind:?}: {gear:?} {hide:?}");
             assert!(gear.top() >= r.bounds_of(title_handle_id(kind)).top());
         }
-        // The gear opens the box's modes, the shown one selected, and starts no box drag.
+        // The gear opens the box's modes, the shown one selected.
         let at = center(r.bounds_of(gear_id(BoxKind::Cpu)));
         r.press(at, 1);
-        assert_eq!(r.page_box_drag(), None, "no box drag");
         r.release(at);
         let items: Vec<(String, bool)> = r.vcx.update(|window, cx| {
             let menu = tl_ui::components::menu::open_context_menu(window, cx)
@@ -6224,36 +6209,23 @@ mod page {
             draw(self.vcx);
         }
 
-        fn page_box_drag(&mut self) -> Option<BoxKind> {
-            let page = self.page.clone();
-            self.vcx
-                .update(|_, cx| page.read(cx).box_drag().map(|d| d.kind))
-        }
-
         fn editing(&mut self) -> bool {
             let page = self.page.clone();
             self.vcx.update(|_, cx| page.read(cx).is_editing())
         }
 
-        fn kinds(&mut self) -> Vec<Vec<BoxKind>> {
+        /// The placed kinds in reading order.
+        fn kinds(&mut self) -> Vec<BoxKind> {
             self.layout()
-                .rows
+                .reading_order()
                 .iter()
-                .map(|r| r.boxes.iter().map(|b| b.kind).collect())
+                .map(|b| b.kind)
                 .collect()
         }
 
         fn bounds_of(&mut self, id: String) -> gpui_kit::Bounds<gpui_kit::Pixels> {
             let id: &'static str = Box::leak(id.into_boxed_str());
             self.vcx.debug_bounds(id).expect(id)
-        }
-
-        /// Drags `kind` by the middle of its title line to `to`, through one point halfway.
-        fn drag_title(&mut self, kind: BoxKind, to: gpui_kit::Point<gpui_kit::Pixels>) {
-            let from = center(self.bounds_of(title_handle_id(kind)));
-            self.press(from, 1);
-            self.move_to(point((from.x + to.x) / 2., (from.y + to.y) / 2.));
-            self.move_to(to);
         }
 
         /// A click on `kind`'s Hide box button.
@@ -6264,9 +6236,12 @@ mod page {
         }
     }
 
+    /// UI-PRF-056: the toolbar and handles show in Edit Layout; Hide box frees the cells and
+    /// Add Box puts the kind at its kind minimum in the first free place.
     #[gpui_kit::test]
-    fn overview_edit_drag_swaps_boxes(cx: &mut TestAppContext) {
+    fn overview_edit_hide_and_add_box(cx: &mut TestAppContext) {
         use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        use tl_ui::pages::performance::actions::PerfOverviewAddBox;
         let mut r = open(cx, true, 1200., 900.);
         assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
         r.edit_layout();
@@ -6278,69 +6253,33 @@ mod page {
             let hide = r.bounds_of(hide_button_id(kind));
             assert_eq!(f32::from(hide.size.width), 16.);
         }
-        let disk = center(r.vcx.debug_bounds(box_id(Disk)).expect("disk"));
-        r.drag_title(Cpu, disk);
-        assert!(r.vcx.debug_bounds(DROP_SWAP_ID).is_some(), "swap border");
-        // The preview is the CPU frame at the box's size with the box's key value on its title
-        // line, without charts or rows.
-        let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
-        let ghost = r.vcx.debug_bounds(GHOST_ID).expect("the dragged copy");
-        assert_eq!(ghost.size, cpu.size);
-        let page = r.page.clone();
-        let value = r
-            .vcx
-            .update(|_, cx| page.read(cx).cpu_box().read(cx).text().1.clone());
-        assert!(!value.is_empty(), "the CPU box shows a value");
-        let value_el = r.vcx.debug_bounds(GHOST_VALUE_ID).expect("ghost value");
-        assert!(f32::from(value_el.size.width) > 0.);
-        assert!(value_el.top() >= ghost.top() && value_el.bottom() <= ghost.top() + px(25.));
-        assert_eq!(r.saved(), None, "nothing is saved during the drag");
-        r.release(disk);
-        assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
-        assert_eq!(r.kinds(), [vec![Disk, Memory], vec![Gpu, Cpu, Net]]);
-        let layout = r.layout();
-        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
+        r.hide(Gpu);
+        assert_eq!(r.kinds(), [Cpu, Memory, Disk, Net]);
+        assert_eq!(
+            r.layout().get(Disk),
+            OverviewLayout::grid_default().get(Disk),
+            "the others keep their cells"
+        );
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        r.page_action(&PerfOverviewAddBox {
+            kind: "processes".into(),
+        });
+        assert_eq!(
+            r.layout().get(BoxKind::TopProcs),
+            Some(GridBox {
+                kind: BoxKind::TopProcs,
+                col: 0,
+                row: 7,
+                cols: 4,
+                rows: 7
+            }),
+            "4 × 7 fits GPU's old cells and the row under them"
+        );
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
         assert!(r.editing(), "the mode stays on");
-        // Disk is now at the top left, under the 40 px toolbar.
-        let disk = r.vcx.debug_bounds(box_id(Disk)).expect("disk");
-        assert_eq!((f32::from(disk.left()), f32::from(disk.top())), (16., 56.));
-    }
-
-    /// crw.74: the drop lands where the button goes up, even when the last move event was
-    /// over another third of the box.
-    #[gpui_kit::test]
-    fn overview_edit_fast_drop_in_middle_third_swaps(cx: &mut TestAppContext) {
-        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
-        let mut r = open(cx, true, 1200., 900.);
-        r.edit_layout();
-        let disk = r.vcx.debug_bounds(box_id(Disk)).expect("disk");
-        let y = disk.center().y;
-        let left_third = point(disk.left() + disk.size.width * 0.1, y);
-        r.drag_title(Cpu, left_third);
-        r.release(disk.center());
-        assert_eq!(r.kinds(), [vec![Disk, Memory], vec![Gpu, Cpu, Net]]);
-    }
-
-    #[gpui_kit::test]
-    fn overview_edit_drop_between_rows_makes_row(cx: &mut TestAppContext) {
-        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
-        let mut r = open(cx, true, 1200., 900.);
-        r.edit_layout();
-        let gap = center(r.gap("perf-overview-splitter-row-0"));
-        r.drag_title(Memory, gap);
-        let line = r.vcx.debug_bounds(DROP_LINE_ID).expect("drop line");
-        assert_eq!(f32::from(line.size.height), 3.);
-        assert!(r.vcx.debug_bounds(DROP_SWAP_ID).is_none());
-        r.release(gap);
-        assert_eq!(r.kinds(), [vec![Cpu], vec![Memory], vec![Gpu, Disk, Net]]);
-        let layout = r.layout();
-        let heights: Vec<f32> = layout.rows.iter().map(|r| r.height).collect();
-        assert_eq!(heights, [3., 1., 2.], "the new row has height 1");
-        assert_eq!(layout.rows[1].boxes[0].width, 1.);
-        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
         // Reset Layout restores the default and keeps the mode on.
         r.page_action(&PerfOverviewResetLayout);
-        assert_eq!(r.layout(), OverviewLayout::btop_default());
+        assert_eq!(r.layout(), OverviewLayout::grid_default());
         assert!(r.editing());
     }
 
@@ -6350,25 +6289,26 @@ mod page {
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
                 d.settings.performance.overview = Some(OverviewLayoutSetting {
-                    rows: vec![OverviewRowSetting {
-                        height: 1.,
-                        boxes: ["cpu", "memory"]
-                            .map(|kind| OverviewBoxSetting {
-                                kind: kind.into(),
-                                width: 1.,
-                                ..OverviewBoxSetting::default()
-                            })
-                            .to_vec(),
-                    }],
+                    grid: [("cpu", 0), ("memory", 6)]
+                        .map(|(kind, col)| OverviewGridSetting {
+                            kind: kind.into(),
+                            col,
+                            row: 0,
+                            cols: 6,
+                            rows: 7,
+                            ..OverviewGridSetting::default()
+                        })
+                        .to_vec(),
+                    rows: Vec::new(),
                 });
             });
         });
         draw(r.vcx);
         r.edit_layout();
         r.hide(BoxKind::Memory);
-        assert_eq!(r.kinds(), [vec![BoxKind::Cpu]]);
+        assert_eq!(r.kinds(), [BoxKind::Cpu]);
         r.hide(BoxKind::Cpu);
-        assert_eq!(r.kinds(), [vec![BoxKind::Cpu]], "the last box stays");
+        assert_eq!(r.kinds(), [BoxKind::Cpu], "the last box stays");
         let queue = r.toasts.clone().expect("a toast queue");
         let shown = r.vcx.update(|_, cx| queue.read(cx).visible_texts());
         assert_eq!(shown, ["At least one box must stay on the Overview page"]);
@@ -6381,21 +6321,18 @@ mod page {
 
     #[gpui_kit::test]
     fn overview_edit_esc_leaves_mode(cx: &mut TestAppContext) {
-        use BoxKind::{Cpu, Disk, Gpu, Net};
+        use BoxKind::{Cpu, Disk};
         let mut r = open(cx, true, 1200., 900.);
         r.vcx.update(|_, cx| {
             tl_ui::actions::bind_keys_global(cx);
             bind_keys_performance(cx);
         });
         r.edit_layout();
-        // A press on a title line focuses that box; Alt+Left moves it one slot.
+        // A press on a title line focuses that box and changes nothing.
         let title = center(r.bounds_of(title_handle_id(Disk)));
         r.press(title, 1);
         r.release(title);
-        assert_eq!(r.saved(), None, "a click without a move changes nothing");
-        r.vcx.simulate_keystrokes("alt-left");
-        draw(r.vcx);
-        assert_eq!(r.kinds()[1], [Disk, Gpu, Net]);
+        assert_eq!(r.saved(), None, "a click changes nothing");
         r.vcx.simulate_keystrokes("escape");
         draw(r.vcx);
         assert!(!r.editing());
@@ -6417,7 +6354,11 @@ mod page {
                 .debug_bounds("perf-overview-splitter-col-cpu")
                 .is_none()
         );
-        assert!(r.vcx.debug_bounds("perf-overview-splitter-row-0").is_none());
+        assert!(
+            r.vcx
+                .debug_bounds("perf-overview-splitter-row-memory")
+                .is_none()
+        );
     }
 }
 
@@ -7059,8 +7000,8 @@ mod wired {
         // Reset Box after a saved split: the default split, saved.
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                let mut layout = OverviewLayoutSetting::btop_default();
-                layout.rows[0].boxes[0].split = Some(0.6);
+                let mut layout = OverviewLayoutSetting::grid_default();
+                layout.grid[0].split = Some(0.6);
                 d.settings.performance.overview = Some(layout);
             });
         });
@@ -7070,7 +7011,7 @@ mod wired {
         r.vcx.simulate_keystrokes("down down enter");
         draw(r.vcx);
         assert_eq!(cpu_split(&mut r), Some(0.4));
-        assert_eq!(saved(&mut r), Some(OverviewLayoutSetting::btop_default()));
+        assert_eq!(saved(&mut r), Some(OverviewLayoutSetting::grid_default()));
 
         // A right-click in the box body keeps the plain page menu.
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("the CPU box");
@@ -7534,7 +7475,9 @@ mod wired {
     fn set_top_procs(r: &mut Rig, on: bool) {
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
-                d.settings.performance.overview = on.then(OverviewLayoutSetting::with_top_procs);
+                let unit = d.settings.performance.overview_row_unit_px;
+                d.settings.performance.overview =
+                    on.then(|| OverviewLayoutSetting::with_top_procs(unit));
             });
         });
         draw(r.vcx);

@@ -410,6 +410,9 @@ pub struct PerformanceSettings {
     pub status_bar: StatusBarPlacement,
     /// The range of every Overview chart (UI-PRF-055).
     pub overview_range: OverviewRange,
+    /// The height of one Overview grid row, logical px (UI-PRF-056), in
+    /// [`OVERVIEW_ROW_UNIT_RANGE`].
+    pub overview_row_unit_px: u32,
     /// The old opt-in Top processes switch (crw.45). Read once by [`Settings::clamp`], which
     /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
     #[serde(skip_serializing)]
@@ -435,16 +438,111 @@ pub const OVERVIEW_BOX_KINDS: [&str; 6] = ["cpu", "memory", "gpu", "disk", "net"
 /// matches the 3 decimals a weight is written with, so a saved layout always reloads.
 pub const OVERVIEW_WEIGHT_RANGE: (f64, f64) = (0.001, 1000.);
 
-/// `[performance.overview]` (UI-PRF-018): rows top to bottom, each with its boxes left to right.
-/// Weights are shares, not pixels. `tl-ui` turns this into its layout.
+/// The Overview grid's columns (UI-PRF-056).
+pub const OVERVIEW_GRID_COLS: i64 = 12;
+
+/// The grid row a saved entry may reach at most. Far below any real layout; it keeps a
+/// hand-edited row number from making the page millions of px tall.
+pub const OVERVIEW_GRID_ROWS_MAX: i64 = 1000;
+
+/// `performance.overview_row_unit_px`: the default and the accepted range (UI-PRF-056).
+pub const OVERVIEW_ROW_UNIT_DEFAULT: u32 = 40;
+pub const OVERVIEW_ROW_UNIT_RANGE: (u32, u32) = (24, 80);
+
+/// The smallest span of any box: 3 columns and 4 rows (UI-PRF-056).
+pub const OVERVIEW_MIN_SPAN: (i64, i64) = (3, 4);
+
+/// Each kind's smallest width and height in logical px (UI-PRF-018, UI-PRF-056), in
+/// [`OVERVIEW_BOX_KINDS`] order.
+pub const OVERVIEW_KIND_MIN: [(&str, u32, u32); 6] = [
+    ("cpu", 280, 280),
+    ("memory", 200, 220),
+    ("gpu", 200, 220),
+    ("disk", 200, 220),
+    ("net", 200, 220),
+    ("processes", 280, 260),
+];
+
+/// The grid rows `kind` spans at least with rows of `unit` px: `max(4, ceil(min_h / unit))`.
+/// An unknown kind has the 4-row floor.
+pub fn overview_min_rows(kind: &str, unit: u32) -> i64 {
+    let min_h = OVERVIEW_KIND_MIN
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map_or(0, |&(_, _, h)| h);
+    i64::from(min_h.div_ceil(unit.max(1))).max(OVERVIEW_MIN_SPAN.1)
+}
+
+/// `[performance.overview]` (UI-PRF-056): the boxes on a 12-column grid, each with its cells
+/// and its own keys. `tl-ui` turns this into its layout. `rows` is the UI-PRF-018 row layout:
+/// loading converts it to `grid` once when `grid` is missing, and it is never written.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewLayoutSetting {
     #[serde(deserialize_with = "loose_vec")]
+    pub grid: Vec<OverviewGridSetting>,
+    #[serde(skip_serializing, deserialize_with = "loose_vec")]
     pub rows: Vec<OverviewRowSetting>,
 }
 
-/// One Overview row: its share of the page height and its boxes.
+/// One Overview box on the grid (UI-PRF-056): a kind from [`OVERVIEW_BOX_KINDS`], its top left
+/// cell, its span, and the box keys of UI-PRF-019. The numbers are `i64` so a negative or
+/// mistyped value loads and is dropped with its entry.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverviewGridSetting {
+    #[serde(deserialize_with = "loose")]
+    pub kind: String,
+    #[serde(deserialize_with = "loose")]
+    pub col: i64,
+    #[serde(deserialize_with = "loose")]
+    pub row: i64,
+    #[serde(deserialize_with = "loose")]
+    pub cols: i64,
+    #[serde(deserialize_with = "loose")]
+    pub rows: i64,
+    /// The box's layout mode, an id from [`OVERVIEW_BOX_MODES`] for its kind (UI-PRF-019, D-025).
+    /// `None` is the kind's default mode.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub mode: Option<String>,
+    /// The share of the first part in a mode with two parts, in [`OVERVIEW_SPLIT_RANGE`]
+    /// (UI-PRF-019). `None` is the mode's default split.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_split",
+        deserialize_with = "loose_some"
+    )]
+    pub split: Option<f64>,
+    /// How a mode with several charts of one kind or two parts places them, an id from
+    /// [`OVERVIEW_ARRANGES`] (UI-PRF-019 "Arrange", D-027). `None` is the mode's default.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub arrange: Option<String>,
+    /// Whether the CPU box shows its power draw strip (UI-PRF-019 "Power draw strip", D-028).
+    /// Only the CPU box has it; written only when on.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "loose")]
+    pub power: bool,
+    /// The strip's share of the box body, in [`OVERVIEW_POWER_SPLIT_RANGE`]. `None` is the
+    /// default 0.25.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_split",
+        deserialize_with = "loose_some"
+    )]
+    pub power_split: Option<f64>,
+    /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
+    /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
+    /// Only the GPU box has it; written only when not empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "loose")]
+    pub hidden: Vec<String>,
+}
+
+/// One UI-PRF-018 Overview row: its share of the page height and its boxes.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewRowSetting {
@@ -454,8 +552,9 @@ pub struct OverviewRowSetting {
     pub boxes: Vec<OverviewBoxSetting>,
 }
 
-/// One Overview box: a kind from [`OVERVIEW_BOX_KINDS`] and its share of the row width. The
-/// kind is a string so an unknown kind drops only this box, not the whole section.
+/// One UI-PRF-018 Overview box: a kind from [`OVERVIEW_BOX_KINDS`] and its share of the row
+/// width, with the box keys its grid entry takes over. The kind is a string so an unknown kind
+/// drops only this box, not the whole section.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverviewBoxSetting {
@@ -580,6 +679,13 @@ impl Unreadable for bool {
     }
 }
 
+impl Unreadable for i64 {
+    /// Below every valid cell and span.
+    fn unreadable() -> Self {
+        -1
+    }
+}
+
 impl Unreadable for String {
     /// Not a kind.
     fn unreadable() -> Self {
@@ -610,6 +716,15 @@ impl Unreadable for OverviewBoxSetting {
     }
 }
 
+impl Unreadable for OverviewGridSetting {
+    fn unreadable() -> Self {
+        Self {
+            kind: String::unreadable(),
+            ..Self::default()
+        }
+    }
+}
+
 impl Unreadable for OverviewRowSetting {
     fn unreadable() -> Self {
         Self {
@@ -622,7 +737,8 @@ impl Unreadable for OverviewRowSetting {
 impl Unreadable for OverviewLayoutSetting {
     fn unreadable() -> Self {
         Self {
-            rows: vec![OverviewRowSetting::unreadable()],
+            grid: vec![OverviewGridSetting::unreadable()],
+            rows: Vec::new(),
         }
     }
 }
@@ -666,9 +782,9 @@ where
 }
 
 impl OverviewLayoutSetting {
-    /// The default layout: CPU (width 2) and Memory on a row of height 3, then GPU, Disk and Net
-    /// on a row of height 2.
-    pub fn btop_default() -> Self {
+    /// The UI-PRF-018 default rows: CPU (width 2) and Memory on a row of height 3, then GPU,
+    /// Disk and Net on a row of height 2. Loading converts them to [`Self::grid_default`].
+    pub fn rows_default() -> Self {
         let row = |height, boxes: &[(&str, f64)]| OverviewRowSetting {
             height,
             boxes: boxes
@@ -681,6 +797,7 @@ impl OverviewLayoutSetting {
                 .collect(),
         };
         Self {
+            grid: Vec::new(),
             rows: vec![
                 row(3., &[("cpu", 2.), ("memory", 1.)]),
                 row(2., &[("gpu", 1.), ("disk", 1.), ("net", 1.)]),
@@ -688,25 +805,84 @@ impl OverviewLayoutSetting {
         }
     }
 
-    /// The default plus a third row of height 2 with Top processes, the layout an old
-    /// `overview_top_processes = true` migrates to.
-    pub fn with_top_procs() -> Self {
-        let mut layout = Self::btop_default();
-        layout.rows.push(OverviewRowSetting {
-            height: 2.,
-            boxes: vec![OverviewBoxSetting {
-                kind: "processes".to_owned(),
-                width: 1.,
-                ..OverviewBoxSetting::default()
-            }],
+    /// The default grid (UI-PRF-056): CPU 8 × 7 and Memory 4 × 7 on top, then GPU, Disk and
+    /// Net 4 × 6 each from row 7.
+    pub fn grid_default() -> Self {
+        let cell = |kind: &str, col, row, cols, rows| OverviewGridSetting {
+            kind: kind.to_owned(),
+            col,
+            row,
+            cols,
+            rows,
+            ..OverviewGridSetting::default()
+        };
+        Self {
+            grid: vec![
+                cell("cpu", 0, 0, 8, 7),
+                cell("memory", 8, 0, 4, 7),
+                cell("gpu", 0, 7, 4, 6),
+                cell("disk", 4, 7, 4, 6),
+                cell("net", 8, 7, 4, 6),
+            ],
+            rows: Vec::new(),
+        }
+    }
+
+    /// The default grid plus Top processes over all 12 columns under it, `max(4, ceil(260 /
+    /// unit))` rows high: the layout an old `overview_top_processes = true` migrates to.
+    pub fn with_top_procs(unit: u32) -> Self {
+        let mut layout = Self::grid_default();
+        let top = layout
+            .grid
+            .iter()
+            .map(|e| e.row + e.rows)
+            .max()
+            .unwrap_or(0);
+        layout.grid.push(OverviewGridSetting {
+            kind: "processes".to_owned(),
+            col: 0,
+            row: top,
+            cols: OVERVIEW_GRID_COLS,
+            rows: overview_min_rows("processes", unit),
+            ..OverviewGridSetting::default()
         });
         layout
+    }
+
+    /// Converts `rows` to `grid` when `grid` is missing, then drops unknown and repeated
+    /// kinds, entries outside the 12 columns or past [`OVERVIEW_GRID_ROWS_MAX`], spans below 1,
+    /// entries that overlap an earlier one, and invalid box keys. `rows` is emptied. Returns
+    /// `true` when it dropped or clamped anything.
+    pub fn drop_invalid(&mut self, unit: u32) -> bool {
+        let mut changed = false;
+        if self.grid.is_empty() && !self.rows.is_empty() {
+            changed |= self.drop_invalid_rows();
+            self.grid = grid_from_rows(&self.rows, unit, &mut changed);
+        }
+        self.rows.clear();
+        let mut kept: Vec<OverviewGridSetting> = Vec::with_capacity(self.grid.len());
+        for mut entry in std::mem::take(&mut self.grid) {
+            let kind = OVERVIEW_BOX_KINDS
+                .iter()
+                .copied()
+                .find(|k| *k == entry.kind)
+                .filter(|k| !kept.iter().any(|e| e.kind == *k))
+                .filter(|_| entry.in_grid() && !kept.iter().any(|e| e.overlaps(&entry)));
+            let Some(kind) = kind else {
+                changed = true;
+                continue;
+            };
+            changed |= entry.drop_invalid_mode(kind);
+            kept.push(entry);
+        }
+        self.grid = kept;
+        changed
     }
 
     /// Drops unknown and repeated kinds, weights that are NaN, infinite, zero or negative, and
     /// rows left with no box. Clamps the other weights into [`OVERVIEW_WEIGHT_RANGE`]. Returns
     /// `true` when it dropped or clamped anything.
-    pub fn drop_invalid(&mut self) -> bool {
+    fn drop_invalid_rows(&mut self) -> bool {
         let mut changed = false;
         let mut seen: Vec<&'static str> = Vec::new();
         self.rows.retain_mut(|row| {
@@ -725,7 +901,6 @@ impl OverviewLayoutSetting {
                     return false;
                 };
                 changed |= clamped;
-                changed |= b.drop_invalid_mode(kind);
                 seen.push(kind);
                 true
             });
@@ -739,21 +914,113 @@ impl OverviewLayoutSetting {
     }
 }
 
-impl OverviewBoxSetting {
-    /// Moves a CPU `cpu_split` into `split`, and drops a mode that `kind` does not have, a
-    /// split outside [`OVERVIEW_SPLIT_RANGE`], an `arrange` not in [`OVERVIEW_ARRANGES`], a
-    /// `power_split` outside [`OVERVIEW_POWER_SPLIT_RANGE`] and `power` keys on a box that is not
-    /// the CPU box
-    /// (UI-PRF-019). Returns `true` when it dropped anything; the move alone is not a change.
+/// The grid of a valid row layout (UI-PRF-056): each row becomes a band `max(4, ceil(min_h /
+/// unit))` grid rows high under the one before, where `min_h` is the largest kind minimum
+/// height in the row. A box is `round(weight × 12 / sum of the row's weights)` columns wide,
+/// left to right, and the last box takes the rest. A box under 3 columns then takes columns
+/// one at a time from the widest box in its row. The conversion has no page width, so 3
+/// columns is the kind minimum here. The box keys move over; a CPU `cpu_split` becomes
+/// `split`, and `cpu_split` on another kind sets `changed`.
+fn grid_from_rows(
+    rows: &[OverviewRowSetting],
+    unit: u32,
+    changed: &mut bool,
+) -> Vec<OverviewGridSetting> {
+    let mut grid = Vec::new();
+    let mut top = 0;
+    for row in rows {
+        let band = row
+            .boxes
+            .iter()
+            .map(|b| overview_min_rows(&b.kind, unit))
+            .max()
+            .unwrap_or(OVERVIEW_MIN_SPAN.1);
+        let sum: f64 = row.boxes.iter().map(|b| b.width).sum();
+        let mut cols: Vec<i64> = row
+            .boxes
+            .iter()
+            .map(|b| (b.width * OVERVIEW_GRID_COLS as f64 / sum).round() as i64)
+            .collect();
+        if let Some((last, rest)) = cols.split_last_mut() {
+            *last = OVERVIEW_GRID_COLS - rest.iter().sum::<i64>();
+        }
+        // More than 4 boxes cannot all have 3 columns; then every box keeps at least 1.
+        raise_to(&mut cols, OVERVIEW_MIN_SPAN.0);
+        raise_to(&mut cols, 1);
+        let mut col = 0;
+        for (b, cols) in row.boxes.iter().zip(cols) {
+            let mut split = b.split;
+            if let Some(legacy) = b.cpu_split {
+                if b.kind == "cpu" {
+                    split = split.or(Some(legacy));
+                } else {
+                    *changed = true;
+                }
+            }
+            grid.push(OverviewGridSetting {
+                kind: b.kind.clone(),
+                col,
+                row: top,
+                cols,
+                rows: band,
+                mode: b.mode.clone(),
+                split,
+                arrange: b.arrange.clone(),
+                power: b.power,
+                power_split: b.power_split,
+                hidden: b.hidden.clone(),
+            });
+            col += cols;
+        }
+        top += band;
+    }
+    grid
+}
+
+/// Moves columns one at a time from the widest entry (the first of equals) to the first entry
+/// under `min`, while some entry has more than `min`.
+fn raise_to(cols: &mut [i64], min: i64) {
+    while let Some(low) = cols.iter().position(|&c| c < min) {
+        let widest = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c > min)
+            .max_by_key(|&(i, c)| (*c, std::cmp::Reverse(i)))
+            .map(|(i, _)| i);
+        let Some(widest) = widest else {
+            break;
+        };
+        cols[widest] -= 1;
+        cols[low] += 1;
+    }
+}
+
+impl OverviewGridSetting {
+    /// Inside the 12 columns and [`OVERVIEW_GRID_ROWS_MAX`] rows, with spans of at least 1.
+    fn in_grid(&self) -> bool {
+        self.col >= 0
+            && self.row >= 0
+            && self.cols >= 1
+            && self.rows >= 1
+            && self.col.saturating_add(self.cols) <= OVERVIEW_GRID_COLS
+            && self.row.saturating_add(self.rows) <= OVERVIEW_GRID_ROWS_MAX
+    }
+
+    /// Whether the two entries share a cell. Both are inside the grid.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.col < other.col + other.cols
+            && other.col < self.col + self.cols
+            && self.row < other.row + other.rows
+            && other.row < self.row + self.rows
+    }
+
+    /// Drops a mode that `kind` does not have, a split outside [`OVERVIEW_SPLIT_RANGE`], an
+    /// `arrange` not in [`OVERVIEW_ARRANGES`], a `power_split` outside
+    /// [`OVERVIEW_POWER_SPLIT_RANGE`], `power` keys on a box that is not the CPU box, and
+    /// `hidden` on a box that is not the GPU box (UI-PRF-019). Returns `true` when it dropped
+    /// anything.
     fn drop_invalid_mode(&mut self, kind: &str) -> bool {
         let mut changed = false;
-        if let Some(legacy) = self.cpu_split.take() {
-            if kind == "cpu" {
-                self.split = self.split.or(Some(legacy));
-            } else {
-                changed = true;
-            }
-        }
         if self
             .mode
             .as_deref()
@@ -834,6 +1101,7 @@ impl Default for PerformanceSettings {
             overview_core_smoothing: CoreSmoothing::default(),
             status_bar: StatusBarPlacement::default(),
             overview_range: OverviewRange::default(),
+            overview_row_unit_px: OVERVIEW_ROW_UNIT_DEFAULT,
             overview_top_processes: false,
             overview: None,
         }
@@ -1616,26 +1884,36 @@ impl Settings {
             self.services.unit_types = UnitType::DEFAULT_SHOWN.to_vec();
             c.push("services.unit_types");
         }
+        let (min, max) = OVERVIEW_ROW_UNIT_RANGE;
+        clamp_key(
+            &mut self.performance.overview_row_unit_px,
+            (min, max, 1),
+            "performance.overview_row_unit_px",
+            c,
+        );
         self.performance.migrate_overview(c);
         changed
     }
 }
 
 impl PerformanceSettings {
-    /// A profile with `overview_top_processes = true` and no `overview` gets the default plus a
-    /// Top processes row; the old key is then cleared and never written. An invalid part of
-    /// `overview` is dropped and [`OVERVIEW_KEY`] is pushed to `changed` once, for one `warn!`
-    /// line from the load step; with nothing valid left the layout is the default.
+    /// A profile with `overview_top_processes = true` and no `overview` gets the default grid
+    /// plus a Top processes band; the old key is then cleared and never written. A UI-PRF-018
+    /// row layout converts to the grid once (UI-PRF-056). An invalid part of `overview` is
+    /// dropped and [`OVERVIEW_KEY`] is pushed to `changed` once, for one `warn!` line from the
+    /// load step; with nothing valid left the layout is the default. Runs after
+    /// `overview_row_unit_px` is clamped.
     fn migrate_overview(&mut self, changed: &mut Vec<&'static str>) {
+        let unit = self.overview_row_unit_px;
         if self.overview_top_processes && self.overview.is_none() {
-            self.overview = Some(OverviewLayoutSetting::with_top_procs());
+            self.overview = Some(OverviewLayoutSetting::with_top_procs(unit));
         }
         self.overview_top_processes = false;
         if let Some(layout) = &mut self.overview {
-            if layout.drop_invalid() {
+            if layout.drop_invalid(unit) {
                 changed.push(OVERVIEW_KEY);
             }
-            if layout.rows.is_empty() {
+            if layout.grid.is_empty() {
                 self.overview = None;
             }
         }
@@ -1811,6 +2089,7 @@ mod tests {
         assert_eq!(p.overview_core_smoothing, CoreSmoothing::Medium);
         assert_eq!(p.status_bar, StatusBarPlacement::Overview);
         assert!(!p.overview_top_processes);
+        assert_eq!(p.overview_row_unit_px, 40);
         assert_eq!(p.overview, None);
 
         assert!(s.fans.is_empty());
@@ -2193,12 +2472,25 @@ mod tests {
         (s, changed)
     }
 
-    /// One `cpu` box in a one-row layout, with `extra` added to its entry.
+    /// One `cpu` box on the grid, with `extra` added to its entry.
     fn cpu_entry(extra: &str) -> String {
+        format!(
+            "[performance.overview]\ngrid = [{{ kind = \"cpu\", col = 0, row = 0, cols = 12, \
+             rows = 7, {extra} }}]\n"
+        )
+    }
+
+    /// One `cpu` box in a one-row UI-PRF-018 layout, with `extra` added to its entry.
+    fn cpu_row_entry(extra: &str) -> String {
         format!(
             "[performance.overview]\nrows = [{{ height = 1.0, boxes = [{{ kind = \"cpu\", \
              width = 1.0, {extra} }}] }}]\n"
         )
+    }
+
+    /// The saved grid's first entry.
+    fn first(s: &Settings) -> &OverviewGridSetting {
+        &s.performance.overview.as_ref().expect("overview").grid[0]
     }
 
     #[test]
@@ -2206,7 +2498,7 @@ mod tests {
         // `power` and `power_split` load, and are written only when not the default.
         let (s, changed) = load_toml(&cpu_entry("power = true, power_split = 0.3"));
         assert!(changed.is_empty(), "{changed:?}");
-        let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+        let b = first(&s);
         assert_eq!((b.power, b.power_split), (true, Some(0.3)));
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("power = true"), "{text}");
@@ -2220,7 +2512,7 @@ mod tests {
         // A split out of range or of the wrong type loads as the default.
         for v in ["0.05", "0.6", "\"x\""] {
             let (s, changed) = load_toml(&cpu_entry(&format!("power = true, power_split = {v}")));
-            let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+            let b = first(&s);
             assert_eq!((b.power, b.power_split), (true, None), "{v}");
             assert!(!changed.is_empty(), "{v}");
         }
@@ -2228,7 +2520,7 @@ mod tests {
         let text = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"memory\", \
                     width = 1.0, power = true, power_split = 0.3 }] }]\n";
         let (s, changed) = load_toml(text);
-        let b = &s.performance.overview.as_ref().expect("overview").rows[0].boxes[0];
+        let b = first(&s);
         assert_eq!((b.power, b.power_split), (false, None));
         assert!(!changed.is_empty());
     }
@@ -2237,23 +2529,23 @@ mod tests {
     fn overview_cpu_split_saved_and_clamped() {
         // A split is written with 3 decimals on its box entry and loads back.
         let mut s = Settings::default();
-        let mut layout = OverviewLayoutSetting::btop_default();
-        layout.rows[0].boxes[0].split = Some(0.456_789);
+        let mut layout = OverviewLayoutSetting::grid_default();
+        layout.grid[0].split = Some(0.456_789);
         s.performance.overview = Some(layout);
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("split = 0.457"), "{text}");
         assert!(!text.contains("cpu_split"), "{text}");
         let (back, changed) = load_toml(&text);
         assert!(changed.is_empty(), "{changed:?}");
-        let rows = back.performance.overview.expect("saved").rows;
-        assert_eq!(rows[0].boxes[0].split, Some(0.457));
-        assert_eq!(rows[0].boxes[1].split, None);
+        let grid = back.performance.overview.expect("saved").grid;
+        assert_eq!(grid[0].split, Some(0.457));
+        assert_eq!(grid[1].split, None);
         // The default layout writes no split and no mode.
         let mut s = Settings::default();
-        s.performance.overview = Some(OverviewLayoutSetting::btop_default());
+        s.performance.overview = Some(OverviewLayoutSetting::grid_default());
         let text = toml::to_string(&s).expect("serializes");
         let (_, overview) = text
-            .split_once("[[performance.overview.rows]]")
+            .split_once("[[performance.overview.grid]]")
             .expect("an overview section");
         // Up to the next plain `[section]`; the overview's own tables start with `[[`.
         let overview = overview
@@ -2266,29 +2558,28 @@ mod tests {
             "{overview}"
         );
 
-        // The crw.63 `cpu_split` loads as `split` without a log line, and is written as `split`.
-        let (s, changed) = load_toml(&cpu_entry("cpu_split = 0.6"));
+        // The crw.63 `cpu_split` of a row layout loads as `split` without a log line, and is
+        // written as `split` on the grid entry.
+        let (s, changed) = load_toml(&cpu_row_entry("cpu_split = 0.6"));
         assert!(changed.is_empty(), "{changed:?}");
-        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
-        assert_eq!((b.split, b.cpu_split), (Some(0.6), None));
+        assert_eq!(first(&s).split, Some(0.6));
         let text = toml::to_string(&s).expect("serializes");
         assert!(
             text.contains("split = 0.6") && !text.contains("cpu_split"),
             "{text}"
         );
         // A saved `split` wins over an old `cpu_split`.
-        let (s, _) = load_toml(&cpu_entry("split = 0.3, cpu_split = 0.6"));
-        let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
-        assert_eq!(b.split, Some(0.3));
+        let (s, _) = load_toml(&cpu_row_entry("split = 0.3, cpu_split = 0.6"));
+        assert_eq!(first(&s).split, Some(0.3));
 
         // Out of range and not a number load as the default, with one log line.
-        for key in ["split", "cpu_split"] {
-            for v in ["0.1", "0.9", "\"x\"", "nan"] {
-                let (s, changed) = load_toml(&cpu_entry(&format!("{key} = {v}")));
-                assert_eq!(changed, ["performance.overview"], "{key} {v}");
-                let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
-                assert_eq!((b.split, b.cpu_split), (None, None), "{key} {v}");
-            }
+        for v in ["0.1", "0.9", "\"x\"", "nan"] {
+            let (s, changed) = load_toml(&cpu_entry(&format!("split = {v}")));
+            assert_eq!(changed, ["performance.overview"], "split {v}");
+            assert_eq!(first(&s).split, None, "split {v}");
+            let (s, changed) = load_toml(&cpu_row_entry(&format!("cpu_split = {v}")));
+            assert_eq!(changed, ["performance.overview"], "cpu_split {v}");
+            assert_eq!(first(&s).split, None, "cpu_split {v}");
         }
         // `split` is per box; an old `cpu_split` on another kind is dropped.
         let (s, changed) = load_toml(
@@ -2297,8 +2588,8 @@ mod tests {
              { kind = \"net\", width = 1.0, split = 0.7 }] }]\n",
         );
         assert_eq!(changed, ["performance.overview"]);
-        let boxes = &s.performance.overview.expect("kept").rows[0].boxes;
-        let splits: Vec<_> = boxes.iter().map(|b| b.split).collect();
+        let grid = &s.performance.overview.expect("kept").grid;
+        let splits: Vec<_> = grid.iter().map(|b| b.split).collect();
         assert_eq!(splits, [Some(0.5), None, Some(0.7)]);
     }
 
@@ -2307,7 +2598,7 @@ mod tests {
         // A mode of the box's kind loads and is written back.
         let (s, changed) = load_toml(&cpu_entry("mode = \"core_charts\""));
         assert!(changed.is_empty(), "{changed:?}");
-        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+        let b = first(&s);
         assert_eq!(b.mode.as_deref(), Some("core_charts"));
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("mode = \"core_charts\""), "{text}");
@@ -2316,7 +2607,7 @@ mod tests {
         for v in ["\"bogus\"", "\"engine_charts\"", "3", "\"\""] {
             let (s, changed) = load_toml(&cpu_entry(&format!("mode = {v}, split = 0.5")));
             assert_eq!(changed, ["performance.overview"], "{v}");
-            let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+            let b = first(&s);
             assert_eq!((b.kind.as_str(), b.mode.as_deref()), ("cpu", None), "{v}");
             assert_eq!(b.split, Some(0.5), "{v}");
         }
@@ -2336,13 +2627,13 @@ mod tests {
         };
         let (s, changed) = load_toml(&entry("gpu"));
         assert!(changed.is_empty(), "{changed:?}");
-        let b = &s.performance.overview.as_ref().unwrap().rows[0].boxes[0];
+        let b = first(&s);
         assert_eq!(b.hidden, ["Copy", "Nope"]);
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("hidden = [\"Copy\", \"Nope\"]"), "{text}");
         let (s, changed) = load_toml(&entry("disk"));
         assert!(!changed.is_empty());
-        let b = &s.performance.overview.as_ref().unwrap().rows[0].boxes[0];
+        let b = first(&s);
         assert!(b.hidden.is_empty());
     }
 
@@ -2352,7 +2643,7 @@ mod tests {
         for v in OVERVIEW_ARRANGES {
             let (s, changed) = load_toml(&cpu_entry(&format!("arrange = \"{v}\"")));
             assert!(changed.is_empty(), "{v} {changed:?}");
-            let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+            let b = first(&s);
             assert_eq!(b.arrange.as_deref(), Some(v));
             let text = toml::to_string(&s).expect("serializes");
             assert!(text.contains(&format!("arrange = \"{v}\"")), "{text}");
@@ -2362,7 +2653,7 @@ mod tests {
         for v in ["\"diagonal\"", "\"\"", "2", "true"] {
             let (s, changed) = load_toml(&cpu_entry(&format!("arrange = {v}, split = 0.5")));
             assert_eq!(changed, ["performance.overview"], "{v}");
-            let b = &s.performance.overview.expect("kept").rows[0].boxes[0];
+            let b = first(&s);
             assert_eq!(
                 (b.kind.as_str(), b.arrange.as_deref()),
                 ("cpu", None),
@@ -2372,7 +2663,7 @@ mod tests {
         }
         // The default layout writes no arrange.
         let mut s = Settings::default();
-        s.performance.overview = Some(OverviewLayoutSetting::btop_default());
+        s.performance.overview = Some(OverviewLayoutSetting::grid_default());
         let text = toml::to_string(&s).expect("serializes");
         assert!(!text.contains("arrange"), "{text}");
     }
@@ -2426,50 +2717,160 @@ mod tests {
                    width = 1.0, mode = \"chart_engines\" }] }]\n";
         let (s, changed) = load_toml(gpu);
         assert!(changed.is_empty(), "{changed:?}");
-        let b = &s.performance.overview.as_ref().expect("kept").rows[0].boxes[0];
+        let b = first(&s);
         assert_eq!(b.mode.as_deref(), Some("chart_engines"));
     }
 
     #[test]
     fn overview_layout_roundtrip() {
         let mut s = Settings::default();
-        let mut layout = OverviewLayoutSetting::btop_default();
-        layout.rows[0].height = 2.123_456;
-        layout.rows[0].boxes[0].width = 1. / 3.;
-        s.performance.overview = Some(layout);
+        let mut layout = OverviewLayoutSetting::grid_default();
+        layout.grid[0].split = Some(0.5);
+        layout.grid[1].mode = Some("charts".to_owned());
+        s.performance.overview = Some(layout.clone());
         let text = toml::to_string(&s).expect("serializes");
-        assert!(text.contains("[[performance.overview.rows]]"), "{text}");
+        assert!(text.contains("[[performance.overview.grid]]"), "{text}");
+        assert!(!text.contains("rows = ["), "{text}");
         assert!(!text.contains("overview_top_processes"), "{text}");
         let (back, changed) = load_toml(&text);
         assert!(changed.is_empty(), "{changed:?}");
-        let rows = &back.performance.overview.as_ref().expect("saved").rows;
-        // Weights are written with 3 decimals.
-        assert_eq!(rows[0].height, 2.123);
-        assert_eq!(rows[0].boxes[0].width, 0.333);
-        let kinds: Vec<&str> = rows
-            .iter()
-            .flat_map(|r| r.boxes.iter().map(|b| b.kind.as_str()))
-            .collect();
-        assert_eq!(kinds, ["cpu", "memory", "gpu", "disk", "net"]);
+        assert_eq!(back.performance.overview, Some(layout));
 
         // The spec's inline form loads too; a missing table is the default.
-        let (inline, _) = load_toml(
-            "[performance.overview]\nrows = [{ height = 3.0, boxes = [{ kind = \"cpu\", width = \
-             2.0 }, { kind = \"memory\", width = 1.0 }] }, { height = 2.0, boxes = [{ kind = \
-             \"gpu\", width = 1.0 }, { kind = \"disk\", width = 1.0 }, { kind = \"net\", width = \
-             1.0 }] }]\n",
+        let (inline, changed) = load_toml(
+            "[performance.overview]\ngrid = [{ kind = \"cpu\", col = 0, row = 0, cols = 8, rows \
+             = 7 }, { kind = \"memory\", col = 8, row = 0, cols = 4, rows = 7 }, { kind = \
+             \"gpu\", col = 0, row = 7, cols = 4, rows = 6 }, { kind = \"disk\", col = 4, row = \
+             7, cols = 4, rows = 6 }, { kind = \"net\", col = 8, row = 7, cols = 4, rows = 6 }]\n",
         );
+        assert!(changed.is_empty(), "{changed:?}");
         assert_eq!(
             inline.performance.overview,
-            Some(OverviewLayoutSetting::btop_default())
+            Some(OverviewLayoutSetting::grid_default())
         );
         assert_eq!(load_toml("").0.performance.overview, None);
     }
 
     #[test]
+    fn overview_grid_converts_rows() {
+        // UI-PRF-056: the UI-PRF-018 default rows give exactly the default grid, with no log
+        // line, and the next save writes `grid` only.
+        let mut s = Settings::default();
+        s.performance.overview = Some(OverviewLayoutSetting::rows_default());
+        assert!(s.clamp().is_empty());
+        assert_eq!(
+            s.performance.overview,
+            Some(OverviewLayoutSetting::grid_default())
+        );
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("[[performance.overview.grid]]"), "{text}");
+        assert!(
+            !text.contains("overview.rows") && !text.contains("boxes"),
+            "{text}"
+        );
+
+        let cells = |text: &str| -> Vec<(String, [i64; 4])> {
+            let (s, changed) = load_toml(text);
+            assert!(changed.is_empty(), "{changed:?}");
+            s.performance
+                .overview
+                .expect("converted")
+                .grid
+                .into_iter()
+                .map(|e| (e.kind, [e.col, e.row, e.cols, e.rows]))
+                .collect()
+        };
+        let cell = |kind: &str, c: [i64; 4]| (kind.to_owned(), c);
+        // A row band is max(4, ceil(min_h / unit)) high with the row's largest minimum, and the
+        // boxes keep their keys. 1:4 gives CPU round(2.4) = 2 columns, raised to 3 from Memory.
+        assert_eq!(
+            cells(
+                "[performance]\noverview_row_unit_px = 24\n[performance.overview]\nrows = [{ \
+                 height = 1.0, boxes = [{ kind = \"cpu\", width = 1.0 }, { kind = \"memory\", \
+                 width = 4.0 }] }, { height = 1.0, boxes = [{ kind = \"net\", width = 1.0 }] }]\n"
+            ),
+            [
+                cell("cpu", [0, 0, 3, 12]),
+                cell("memory", [3, 0, 9, 12]),
+                cell("net", [0, 12, 12, 10]),
+            ]
+        );
+        // At 80 px a row is never under 4 grid rows. Five equal boxes: 2 columns each and the
+        // last takes the rest, then the first takes one back from the widest.
+        assert_eq!(
+            cells(
+                "[performance]\noverview_row_unit_px = 80\n[performance.overview]\nrows = [{ \
+                 height = 1.0, boxes = [{ kind = \"memory\", width = 1.0 }, { kind = \"gpu\", \
+                 width = 1.0 }, { kind = \"disk\", width = 1.0 }, { kind = \"net\", width = 1.0 \
+                 }, { kind = \"processes\", width = 1.0 }] }]\n"
+            ),
+            [
+                cell("memory", [0, 0, 3, 4]),
+                cell("gpu", [3, 0, 2, 4]),
+                cell("disk", [5, 0, 2, 4]),
+                cell("net", [7, 0, 2, 4]),
+                cell("processes", [9, 0, 3, 4]),
+            ]
+        );
+        // A saved grid wins over old rows, which are dropped.
+        let (s, _) = load_toml(&format!(
+            "{}rows = [{{ height = 1.0, boxes = [{{ kind = \"net\", width = 1.0 }}] }}]\n",
+            cpu_entry("")
+        ));
+        let layout = s.performance.overview.expect("kept");
+        assert_eq!(layout.grid.len(), 1);
+        assert!(layout.rows.is_empty());
+    }
+
+    #[test]
+    fn overview_row_unit_clamps() {
+        assert_eq!(
+            PerformanceSettings::default().overview_row_unit_px,
+            OVERVIEW_ROW_UNIT_DEFAULT
+        );
+        for (v, want) in [(10, 24), (24, 24), (55, 55), (80, 80), (500, 80)] {
+            let (s, changed) = load_toml(&format!("[performance]\noverview_row_unit_px = {v}\n"));
+            assert_eq!(s.performance.overview_row_unit_px, want, "{v}");
+            assert_eq!(changed.is_empty(), v == want, "{v}: {changed:?}");
+        }
+        assert_eq!(overview_min_rows("cpu", 40), 7);
+        assert_eq!(overview_min_rows("net", 40), 6);
+        assert_eq!(overview_min_rows("cpu", 80), 4);
+        assert_eq!(overview_min_rows("processes", 24), 11);
+    }
+
+    #[test]
     fn overview_layout_drops_unknown_kind() {
+        // UI-PRF-056: an entry outside the 12 columns, with a span below 1 or overlapping an
+        // earlier entry is dropped with one log line, as are unknown and repeated kinds.
         let (s, changed) = load_toml(
-            "[performance]\ngraph_range_s = 30\n[performance.overview]\nrows = [\
+            "[performance]\ngraph_range_s = 30\n[performance.overview]\ngrid = [\
+             { kind = \"cpu\", col = 0, row = 0, cols = 8, rows = 7 },\
+             { kind = \"fans\", col = 8, row = 0, cols = 4, rows = 7 },\
+             { kind = \"cpu\", col = 8, row = 0, cols = 4, rows = 7 },\
+             { kind = \"memory\", col = 10, row = 0, cols = 4, rows = 7 },\
+             { kind = \"gpu\", col = 8, row = 0, cols = 0, rows = 7 },\
+             { kind = \"disk\", col = 4, row = 6, cols = 4, rows = 6 },\
+             { kind = \"net\", col = 8, row = -1, cols = 4, rows = 6 },\
+             { kind = \"processes\", col = 0, row = 995, cols = 12, rows = 6 },\
+             { kind = \"memory\", col = 8, row = 0, cols = 4, rows = 7 }]\n",
+        );
+        // The rest of [performance] is kept.
+        assert_eq!(s.performance.graph_range_s, 30);
+        assert_eq!(changed, ["performance.overview"], "one log line");
+        let kinds: Vec<String> = s
+            .performance
+            .overview
+            .expect("valid entries kept")
+            .grid
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, ["cpu", "memory"]);
+
+        // An old row layout drops the same way before it converts.
+        let (s, changed) = load_toml(
+            "[performance.overview]\nrows = [\
              { height = 3.0, boxes = [{ kind = \"cpu\", width = 2.0 }, { kind = \"fans\", width \
              = 1.0 }, { kind = \"cpu\", width = 1.0 }, { kind = \"net\", width = -1.0 }, { kind = \"gpu\", width = 1e39 }] },\
              { height = 2.0, boxes = [{ kind = \"bogus\", width = 1.0 }] },\
@@ -2477,43 +2878,56 @@ mod tests {
              { height = 1.0, boxes = [{ kind = \"memory\", width = inf }, { kind = \"disk\", \
              width = 1.0 }] }]\n",
         );
-        // The rest of [performance] is kept.
-        assert_eq!(s.performance.graph_range_s, 30);
         assert_eq!(changed, ["performance.overview"], "one log line");
-        let layout = s.performance.overview.expect("valid rows kept");
-        let rows: Vec<(f64, Vec<&str>)> = layout
-            .rows
-            .iter()
-            .map(|r| (r.height, r.boxes.iter().map(|b| b.kind.as_str()).collect()))
+        let grid: Vec<(String, i64, i64)> = s
+            .performance
+            .overview
+            .expect("valid rows kept")
+            .grid
+            .into_iter()
+            .map(|e| (e.kind, e.row, e.cols))
             .collect();
-        // 1e39 is clamped to 1000, not dropped.
-        assert_eq!(rows, [(3., vec!["cpu", "gpu"]), (1., vec!["disk"])]);
-        assert_eq!(layout.rows[0].boxes[1].width, 1000.);
+        // 1e39 is clamped to 1000, not dropped: GPU takes 9 columns, CPU keeps 3.
+        assert_eq!(
+            grid,
+            [
+                ("cpu".to_owned(), 0, 3),
+                ("gpu".to_owned(), 0, 9),
+                ("disk".to_owned(), 7, 12)
+            ]
+        );
 
         // Nothing valid left: the default.
-        let (s, changed) = load_toml(
+        for text in [
             "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"fans\", width \
              = 1.0 }] }]\n",
-        );
-        assert_eq!(s.performance.overview, None);
-        assert_eq!(changed, ["performance.overview"]);
+            "[performance.overview]\ngrid = [{ kind = \"cpu\", col = 0, row = 0, cols = 13, \
+             rows = 7 }]\n",
+        ] {
+            let (s, changed) = load_toml(text);
+            assert_eq!(s.performance.overview, None, "{text}");
+            assert_eq!(changed, ["performance.overview"], "{text}");
+        }
     }
 
     #[test]
     fn overview_weights_clamp_to_range() {
-        // Tiny and huge weights clamp into 0.001..=1000 with one warn line.
+        // Tiny and huge row weights clamp into 0.001..=1000 with one warn line, then convert.
         let (s, changed) = load_toml(
             "[performance.overview]\nrows = [{ height = 1e-50, boxes = [{ kind = \"cpu\", width \
              = 1e38 }, { kind = \"memory\", width = 1e-50 }] }, { height = 1e38, boxes = [{ kind \
              = \"net\", width = 0.0004 }] }]\n",
         );
         assert_eq!(changed, ["performance.overview"], "one log line");
-        let rows = s.performance.overview.expect("clamped, not dropped").rows;
-        let weights: Vec<(f64, Vec<f64>)> = rows
+        let cols: Vec<i64> = s
+            .performance
+            .overview
+            .expect("clamped, not dropped")
+            .grid
             .iter()
-            .map(|r| (r.height, r.boxes.iter().map(|b| b.width).collect()))
+            .map(|e| e.cols)
             .collect();
-        assert_eq!(weights, [(0.001, vec![1000., 0.001]), (1000., vec![0.001])]);
+        assert_eq!(cols, [9, 3, 12]);
 
         // Weights in range are left alone and log nothing.
         let (_, changed) = load_toml(
@@ -2521,19 +2935,6 @@ mod tests {
              = 1000 }] }]\n",
         );
         assert!(changed.is_empty(), "{changed:?}");
-
-        // A weight of 0.0004 in memory is saved as 0.001, so the saved layout reloads.
-        let mut s = Settings::default();
-        let mut layout = OverviewLayoutSetting::btop_default();
-        layout.rows[0].height = 0.0004;
-        layout.rows[1].boxes[0].width = 5000.;
-        s.performance.overview = Some(layout);
-        let text = toml::to_string(&s).expect("serializes");
-        let (back, changed) = load_toml(&text);
-        assert!(changed.is_empty(), "{changed:?}");
-        let rows = back.performance.overview.expect("saved").rows;
-        assert_eq!(rows[0].height, 0.001);
-        assert_eq!(rows[1].boxes[0].width, 1000.);
     }
 
     #[test]
@@ -2541,30 +2942,51 @@ mod tests {
         // A value of the wrong type drops the part it is in; the rest of [performance] loads.
         let (s, changed) = load_toml(
             "[performance]\ngraph_range_s = 30\ncurved_lines = true\n[performance.overview]\n\
+             grid = [{ kind = \"cpu\", col = \"left\", row = 0, cols = 8, rows = 7 }, \
+             { kind = \"memory\", col = 8, row = 0, cols = 4, rows = 7 }, \
+             { kind = 5, col = 0, row = 7, cols = 4, rows = 6 }, \"box\", 7, \
+             { kind = \"net\", col = 8, row = 7, cols = 4.5, rows = 6 }, \
+             { kind = \"disk\", col = 4, row = 7, cols = 4, rows = 6 }]\n",
+        );
+        assert_eq!(s.performance.graph_range_s, 30);
+        assert!(s.performance.curved_lines);
+        assert_eq!(changed, ["performance.overview"], "one log line");
+        let kinds: Vec<String> = s
+            .performance
+            .overview
+            .expect("valid entries kept")
+            .grid
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, ["memory", "disk"]);
+
+        // The same in an old row layout, which then converts.
+        let (s, changed) = load_toml(
+            "[performance.overview]\n\
              rows = [{ height = 3.0, boxes = [{ kind = \"cpu\", width = \"bad\" }, { kind = \
              \"memory\", width = 1.0 }, { kind = 5, width = 1.0 }, \"box\"] }, \
              { height = \"tall\", boxes = [{ kind = \"gpu\", width = 1.0 }] }, \
              { height = 1.0, boxes = \"none\" }, 7, \
              { height = 2.0, boxes = [{ kind = \"net\", width = 2 }] }]\n",
         );
-        assert_eq!(s.performance.graph_range_s, 30);
-        assert!(s.performance.curved_lines);
         assert_eq!(changed, ["performance.overview"], "one log line");
-        let layout = s.performance.overview.expect("valid rows kept");
-        let rows: Vec<(f64, Vec<(&str, f64)>)> = layout
-            .rows
-            .iter()
-            .map(|r| {
-                let boxes = r.boxes.iter().map(|b| (b.kind.as_str(), b.width)).collect();
-                (r.height, boxes)
-            })
+        let grid: Vec<(String, i64)> = s
+            .performance
+            .overview
+            .expect("valid rows kept")
+            .grid
+            .into_iter()
+            .map(|e| (e.kind, e.row))
             .collect();
-        assert_eq!(rows, [(3., vec![("memory", 1.)]), (2., vec![("net", 2.)])]);
+        assert_eq!(grid, [("memory".to_owned(), 0), ("net".to_owned(), 6)]);
 
-        // Rows or the whole table of the wrong type: the default, with the warn line.
+        // The grid, the rows or the whole table of the wrong type: the default, with the warn
+        // line.
         for text in [
             "[performance]\ngraph_range_s = 30\noverview = 5\n",
             "[performance]\ngraph_range_s = 30\n[performance.overview]\nrows = \"x\"\n",
+            "[performance]\ngraph_range_s = 30\n[performance.overview]\ngrid = \"x\"\n",
         ] {
             let (s, changed) = load_toml(text);
             assert_eq!(s.performance.graph_range_s, 30, "{text}");
@@ -2579,22 +3001,33 @@ mod tests {
         assert!(changed.is_empty(), "{changed:?}");
         assert!(!s.performance.overview_top_processes);
         let layout = s.performance.overview.clone().expect("migrated");
-        assert_eq!(layout, OverviewLayoutSetting::with_top_procs());
-        let last = layout.rows.last().expect("a third row");
-        assert_eq!(last.height, 2.);
-        assert_eq!(last.boxes[0].kind, "processes");
+        assert_eq!(layout, OverviewLayoutSetting::with_top_procs(40));
+        // UI-PRF-056: a band of max(4, ceil(260 / unit)) rows over all 12 columns under the
+        // default grid.
+        let last = layout.grid.last().expect("a Top processes entry");
+        assert_eq!(last.kind, "processes");
+        assert_eq!((last.col, last.row, last.cols, last.rows), (0, 13, 12, 7));
+        assert_eq!(
+            &layout.grid[..5],
+            &OverviewLayoutSetting::grid_default().grid[..]
+        );
         // The old key is not written, so the migration runs once.
         let text = toml::to_string(&s).expect("serializes");
         assert!(!text.contains("overview_top_processes"), "{text}");
         assert_eq!(load_toml(&text).0, s);
+        // The band follows the row unit.
+        let (s, _) =
+            load_toml("[performance]\noverview_top_processes = true\noverview_row_unit_px = 24\n");
+        let last = s.performance.overview.expect("migrated").grid[5].clone();
+        assert_eq!((last.row, last.rows), (13, 11));
 
         // A saved layout wins over the old key.
-        let (s, _) = load_toml(
-            "[performance]\noverview_top_processes = true\n[performance.overview]\nrows = [{ \
-             height = 1.0, boxes = [{ kind = \"cpu\", width = 1.0 }] }]\n",
-        );
-        let rows = s.performance.overview.expect("kept").rows;
-        assert_eq!(rows.len(), 1);
+        let (s, _) = load_toml(&format!(
+            "[performance]\noverview_top_processes = true\n{}",
+            cpu_entry("")
+        ));
+        let grid = s.performance.overview.expect("kept").grid;
+        assert_eq!(grid.len(), 1);
         // Off: no layout, the default.
         let (s, _) = load_toml("[performance]\noverview_top_processes = false\n");
         assert_eq!(s.performance.overview, None);
