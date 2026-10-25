@@ -31,7 +31,6 @@ use tl_model::system::{LinkState, Metric, SensorKind, SensorReading};
 use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
-use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::actions::PerfSelectDevice;
 use super::details::Template;
@@ -44,7 +43,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
-use crate::text::ellipsis::{ELLIPSIS, middle_ellipsis};
+use crate::text::ellipsis::ELLIPSIS;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -78,6 +77,8 @@ const FOCUS_RING_ALPHA: f32 = 0.5;
 
 /// Between two values on one line. A line wraps after the dot, so a row never starts with it.
 const SEP: &str = "\u{a0}· ";
+/// The dot of [`SEP`], left out at the end of a row it does not fit.
+const DOT: &str = "\u{a0}·";
 /// Between a number and its unit: a value never breaks across it (UI-PRF-059).
 const NBSP: char = '\u{a0}';
 /// Between the disk kind and its mount.
@@ -226,8 +227,9 @@ pub struct CardLines {
     pub line2: SharedString,
     /// Line 2 in `accent`: a connected interface's rate (R-055).
     pub line2_accent: bool,
-    /// Line 2 stays on one row, cut in the middle when it is too long: a disk's model
-    /// (tasklens-crw.75 leader decision, over the UI-PRF-011 2-row rule). The tooltip has it whole.
+    /// Line 2 stays on one row, cut after its last whole piece that fits when it is too long: a
+    /// disk's model (tasklens-crw.75 leader decision, over the UI-PRF-011 2-row rule). The tooltip
+    /// has it whole.
     pub line2_one_row: bool,
     /// Line 1 wraps at every " · " to as many rows as it needs and is not cut after 2 rows: the
     /// Overview card's list of boxes (UI-PRF-059).
@@ -402,14 +404,6 @@ fn glue_units(out: &mut String, start: usize) {
         out.truncate(start);
         out.push_str(&glued);
     }
-}
-
-/// Splits a value text at the no-break space (or the plain space of a template) into the number
-/// and the unit.
-fn split_value(text: &str) -> Option<(&str, &str)> {
-    let at = text.rfind([NBSP, ' '])?;
-    let sep = text[at..].chars().next()?;
-    Some((&text[..at], &text[at + sep.len_utf8()..]))
 }
 
 /// An optional part such as a temperature: left out when there is no sensor (Unsupported) or no
@@ -921,7 +915,7 @@ pub struct CardRow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CardLineLayout {
     pub rows: SmallVec<[CardRow; 2]>,
-    /// The line did not fit: its last row is cut in the middle and the tooltip has the full line.
+    /// The line did not fit: its last row ends in "…" and the tooltip has the full line.
     pub cut: bool,
 }
 
@@ -931,9 +925,10 @@ pub struct CardTextLayout {
     pub heading: CardLineLayout,
     /// The value fits after the last heading row. Otherwise it has a row of its own under it.
     pub value_inline: bool,
-    /// The value is wider than the text column even on its own row, as on an edit-mode card at
-    /// nav_width 180: it takes 2 rows, the number on the first and the unit on the second.
-    pub value_split: bool,
+    /// The value is wider than the text column even on its own row, as a network rate at
+    /// nav_width 180: its row shows "…" and the tooltip has the value. A number never splits from
+    /// its unit (UI-PRF-059).
+    pub value_cut: bool,
     pub line1: CardLineLayout,
     pub line2: CardLineLayout,
 }
@@ -943,8 +938,6 @@ impl CardTextLayout {
     pub fn text_height(&self) -> f32 {
         let value_row = if self.value_inline {
             0.0
-        } else if self.value_split {
-            2.0 * HEADING_LINE_H
         } else {
             HEADING_LINE_H
         };
@@ -967,13 +960,14 @@ pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
     (card_w - px(2.0 * s) - m.sp[5] - px((CARD_GRAPH_W + CARD_TEXT_GAP) * s)).max(Pixels::ZERO)
 }
 
-/// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
-/// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
-/// line whose first word does not fit is cut in the middle on one row, and so is line 2 when
-/// [`CardLines::line2_one_row`] is set. Line 1 takes as many rows as it needs when
-/// [`CardLines::line1_all_rows`] is set. The value goes `gap`
-/// after the last heading row when `value_w` fits there, else on a row of its own, and on 2 rows
-/// (number, then unit) when it is wider than `text_w`; a value is never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
+/// Lays out the card text in a column `text_w` wide (UI-PRF-011, UI-PRF-059). Each line wraps
+/// at " · " or between words to at most 2 rows; a number and its unit are one piece and never
+/// split. When a piece is wider than the column, or the line runs out of rows, the row ends in
+/// "…" after the last whole piece that fits. Line 2 has one row when
+/// [`CardLines::line2_one_row`] is set, and line 1 as many rows as it needs when
+/// [`CardLines::line1_all_rows`] is set. The value goes `gap` after the last heading row when
+/// `value_w` fits there, else on a row of its own, which shows "…" when `value_w` is wider than
+/// `text_w`. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
 pub fn card_text_layout(
     lines: &CardLines,
@@ -996,7 +990,7 @@ pub fn card_text_layout(
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
     });
     let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= text_w;
-    let value_split = !value_inline && value_w > text_w;
+    let value_cut = !value_inline && value_w > text_w;
     let line1 = wrap_line(
         &lines.line1,
         &lines.line1_locks,
@@ -1018,7 +1012,7 @@ pub fn card_text_layout(
     CardTextLayout {
         heading,
         value_inline,
-        value_split,
+        value_cut,
         line1,
         line2,
     }
@@ -1054,9 +1048,25 @@ fn space_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         })
 }
 
+/// One place a line may wrap: the row before it ends at `end`, or at `bare` before the dot of a
+/// " · " when the dot does not fit; the next row starts at `next`.
+struct Break {
+    end: usize,
+    bare: usize,
+    next: usize,
+}
+
+fn breaks(text: &str) -> impl Iterator<Item = Break> + '_ {
+    space_breaks(text).map(move |(end, next)| {
+        let bare = text[..end].strip_suffix(DOT).map_or(end, str::len);
+        Break { end, bare, next }
+    })
+}
+
 /// `text` in at most `max_rows` rows of `max` (see [`card_text_layout`]). Each row but the last
-/// is the widest that ends before a run of spaces; the last row takes the rest, cut in the
-/// middle when it is too wide. A lock at the end of the text belongs to the last row.
+/// is the widest that ends at a break, with the dot of a " · " when it fits; the next row starts
+/// after the spaces. When the rest does not fit the last row, or its first piece does not fit a
+/// row, that row is cut by [`cut_row`]. A lock at the end of the text belongs to the last row.
 fn wrap_line(
     text: &SharedString,
     locks: &[u16],
@@ -1088,21 +1098,23 @@ fn wrap_line(
             });
             return CardLineLayout { rows, cut: false };
         }
-        // The widest row that ends before a run of spaces; the next row starts after the run.
-        // The last row has no break, so it is cut.
         let mut best = None;
-        let last = rows.len() + 1 >= max_rows;
-        for (end, next) in space_breaks(rest).take_while(|_| !last) {
-            let w = measure(font, &rest[..end]) + lock_w * lock_count(&rest_locks, 0, next) as f32;
-            if w > max {
+        if rows.len() + 1 < max_rows {
+            for b in breaks(rest) {
+                let locks_w = lock_w * lock_count(&rest_locks, 0, b.next) as f32;
+                if measure(font, &rest[..b.end]) + locks_w <= max {
+                    best = Some((b.end, b.next));
+                    continue;
+                }
+                if b.bare < b.end && measure(font, &rest[..b.bare]) + locks_w <= max {
+                    best = Some((b.bare, b.next));
+                }
                 break;
             }
-            best = Some((end, next));
         }
         let Some((end, next)) = best else {
-            let (row, cut) = cut_row(rest, &rest_locks, font, max, lock_w, measure);
-            rows.push(row);
-            return CardLineLayout { rows, cut };
+            rows.push(cut_row(rest, &rest_locks, font, max, lock_w, measure));
+            return CardLineLayout { rows, cut: true };
         };
         rows.push(CardRow {
             text: SharedString::from(rest[..end].to_owned()),
@@ -1112,9 +1124,9 @@ fn wrap_line(
     }
 }
 
-/// `text` on one row of `max`, cut in the middle. A lock in the cut-out part goes with it. The
-/// bool is false when the text is kept whole, which [`middle_ellipsis`] does when the cut would
-/// remove fewer than 2 characters.
+/// `text` on one row of `max`: the whole pieces that fit, then "…" (UI-PRF-059). A piece ends at
+/// a break, before the dot of a " · ". The row is "…" alone when not even the first piece fits.
+/// A lock in the kept text stays with it.
 fn cut_row(
     text: &str,
     locks: &[u16],
@@ -1122,88 +1134,33 @@ fn cut_row(
     max: Pixels,
     lock_w: Pixels,
     measure: &mut impl FnMut(CardFont, &str) -> Pixels,
-) -> (CardRow, bool) {
-    let budget = (max - lock_w * locks.len() as f32).max(Pixels::ZERO);
-    let mut width = |s: &str| measure(font, s);
-    let out = middle_ellipsis(text, budget, &mut width);
-    let points = if width(&out) <= budget {
-        cut_points(text, &out)
-    } else {
-        Some(balanced_cut(text, budget, &mut width))
-    };
-    let Some((head, tail)) = points else {
-        let row = CardRow {
-            text: out,
-            locks: LockOffsets::from_slice(locks),
-        };
-        return (row, false);
-    };
-    let mut out = String::with_capacity(head + ELLIPSIS.len_utf8() + text.len() - tail);
-    out.push_str(&text[..head]);
-    out.push(ELLIPSIS);
-    out.push_str(&text[tail..]);
-    let out = SharedString::from(out);
-    let shift = head + ELLIPSIS.len_utf8();
-    let locks = locks
-        .iter()
-        .map(|&at| usize::from(at))
-        .filter_map(|at| {
-            if at <= head {
-                Some(at)
-            } else {
-                (at >= tail).then(|| at - tail + shift)
-            }
-        })
-        .map(|at| u16::try_from(at).unwrap_or(u16::MAX))
-        .collect();
-    (CardRow { text: out, locks }, true)
-}
-
-/// The middle cut for text that [`middle_ellipsis`] cannot fit in `max`: it keeps up to 12
-/// characters of the end whole, more than a narrow card has room for. This keeps graphemes from
-/// the start and the end in turn while they fit. Returns the end of the kept start and the start
-/// of the kept end, as byte offsets into `text`.
-fn balanced_cut(
-    text: &str,
-    max: Pixels,
-    measure: &mut impl FnMut(&str) -> Pixels,
-) -> (usize, usize) {
-    let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+) -> CardRow {
     let mut buf = [0u8; 4];
-    let mut budget = max - measure(ELLIPSIS.encode_utf8(&mut buf));
-    // Graphemes `..head` and `tail..` are kept.
-    let (mut head, mut tail) = (0, graphemes.len());
-    let mut front = true;
-    while head < tail {
-        let w = measure(graphemes[if front { head } else { tail - 1 }].1);
-        if w > budget {
+    let ellipsis_w = measure(font, ELLIPSIS.encode_utf8(&mut buf));
+    let mut keep = None;
+    for b in breaks(text) {
+        let kept_locks = locks
+            .iter()
+            .filter(|&&at| usize::from(at) <= b.bare)
+            .count();
+        if measure(font, &text[..b.bare]) + lock_w * kept_locks as f32 + ellipsis_w > max {
             break;
         }
-        budget -= w;
-        if front {
-            head += 1;
-        } else {
-            tail -= 1;
-        }
-        front = !front;
+        keep = Some(b.bare);
     }
-    let at = |i: usize| graphemes.get(i).map_or(text.len(), |(byte, _)| *byte);
-    (at(head), at(tail))
-}
-
-/// Where [`middle_ellipsis`] cut `text` into `out`: the end of the kept start and the start of
-/// the kept end, as byte offsets into `text`. `None` when `out` is `text` whole.
-fn cut_points(text: &str, out: &str) -> Option<(usize, usize)> {
-    if out == text {
-        return None;
+    let end = keep.unwrap_or(0);
+    let mut out = String::with_capacity(end + ELLIPSIS.len_utf8());
+    out.push_str(&text[..end]);
+    out.push(ELLIPSIS);
+    let locks = locks
+        .iter()
+        .copied()
+        .filter(|&at| keep.is_some_and(|end| usize::from(at) <= end))
+        .collect();
+    CardRow {
+        text: SharedString::from(out),
+        locks,
     }
-    let ellipsis = ELLIPSIS.len_utf8();
-    out.match_indices(ELLIPSIS).find_map(|(head, _)| {
-        let tail = text.len().checked_sub(out.len() - head - ellipsis)?;
-        let same_head = text.get(..head) == Some(&out[..head]);
-        let same_tail = text.get(tail..) == Some(&out[head + ellipsis..]);
-        (tail >= head && same_head && same_tail).then_some((head, tail))
-    })
 }
 
 /// Per-character advances of the card fonts, by character, font, size and window scale. A line
@@ -1408,16 +1365,22 @@ impl StaleTimer {
     }
 }
 
-/// The tooltip lines: the full text of each cut line, then the owner's tooltip (the Memory
-/// commit note, a network adapter and connection). An owner tooltip that only repeats line 1
-/// shows only when line 1 is cut. Empty when there is nothing to show.
-pub fn card_tooltip(lines: &CardLines, layout: &CardTextLayout) -> SmallVec<[SharedString; 3]> {
+/// The tooltip lines: the full text of each cut line and of a cut `value`, then the owner's
+/// tooltip (the Memory commit note, a network adapter and connection). An owner tooltip that
+/// only repeats line 1 shows only when line 1 is cut. Empty when there is nothing to show.
+pub fn card_tooltip(
+    lines: &CardLines,
+    layout: &CardTextLayout,
+    value: Option<&CardValue>,
+) -> SmallVec<[SharedString; 3]> {
     let mut out: SmallVec<[SharedString; 3]> = SmallVec::new();
-    for (text, line) in [
-        (&lines.heading, &layout.heading),
-        (&lines.line1, &layout.line1),
-        (&lines.line2, &layout.line2),
-    ] {
+    if layout.heading.cut {
+        out.push(lines.heading.clone());
+    }
+    if let Some(v) = value.filter(|v| layout.value_cut && v.validity != Validity::Restricted) {
+        out.push(v.text.clone());
+    }
+    for (text, line) in [(&lines.line1, &layout.line1), (&lines.line2, &layout.line2)] {
         if line.cut {
             out.push(text.clone());
         }
@@ -1665,26 +1628,12 @@ impl DeviceCard {
                     });
                 px(f32::from(w).ceil())
             });
-            // The narrowest the value can be drawn: its widest part when it splits into number
-            // and unit rows.
-            let value_min_w = value.as_ref().map_or(Pixels::ZERO, |v| {
-                let mut part_w = |t: &str| match split_value(t) {
-                    Some((number, unit)) => {
-                        measure(CardFont::Value, number).max(measure(CardFont::Value, unit))
-                    }
-                    None => measure(CardFont::Value, t),
-                };
-                let w = v
-                    .templates
-                    .iter()
-                    .fold(part_w(&v.text), |w, t| w.max(part_w(t)));
-                px(f32::from(w).ceil())
-            });
             // The graph has one fixed size (UI-PRF-059). The top card leaves the edit button's
             // column free, as if the button were part of the card, unless the value would then
-            // not fit (at the least nav_width).
+            // not fit where it fits without it (at the least nav_width).
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
-            let clear = if top && card_text_width(self.width - edit_w, &m) >= value_min_w {
+            let fits = |w: Pixels| card_text_width(w, &m) >= value_w;
+            let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
                 edit_w
             } else {
                 Pixels::ZERO
@@ -1737,7 +1686,7 @@ impl RenderOnce for DeviceCard {
         let inline = value
             .as_ref()
             .filter(|_| layout.value_inline)
-            .map(|v| value_element(v, v.text.clone(), 0, &key, &m, &theme));
+            .map(|v| value_element(v, v.text.clone(), &key, &m, &theme));
         let text_key = key.0.clone();
         let mut text = div()
             .debug_selector(move || format!("perf-card-text:{text_key}"))
@@ -1764,27 +1713,21 @@ impl RenderOnce for DeviceCard {
                 &m,
             ));
         if let Some(v) = value.as_ref().filter(|_| !layout.value_inline) {
-            // Split at the last space: the number on the first row, the unit on the second. A
-            // text with no space (a glyph word, the lock) stays on the first row.
-            let parts = match split_value(&v.text).filter(|_| layout.value_split) {
-                Some((number, unit)) => [
-                    Some(SharedString::from(number.to_owned())),
-                    Some(SharedString::from(unit.to_owned())),
-                ],
-                None => [Some(v.text.clone()), None],
+            // A value wider than the column shows "…"; a number never splits from its unit.
+            let shown = if layout.value_cut {
+                SharedString::new_static("…")
+            } else {
+                v.text.clone()
             };
-            let rows = if layout.value_split { 2 } else { 1 };
-            for (i, part) in parts.into_iter().take(rows).enumerate() {
-                text = text.child(
-                    div()
-                        .debug_selector(|| "perf-card-value-row".into())
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .h(px(HEADING_LINE_H * s))
-                        .children(part.map(|t| value_element(v, t, i, &key, &m, &theme))),
-                );
-            }
+            text = text.child(
+                div()
+                    .debug_selector(|| "perf-card-value-row".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(HEADING_LINE_H * s))
+                    .child(value_element(v, shown, &key, &m, &theme)),
+            );
         }
         text = text
             .child(line_rows(
@@ -1813,7 +1756,7 @@ impl RenderOnce for DeviceCard {
                 None,
                 &m,
             ));
-        let mut tip = card_tooltip(&lines, &layout);
+        let mut tip = card_tooltip(&lines, &layout, value.as_ref());
         if !tip.is_empty() {
             let state = HoverTooltip::state(
                 ElementId::NamedChild(std::sync::Arc::new(id.clone()), "tooltip".into()),
@@ -1969,19 +1912,18 @@ fn line_rows(
     col.into_any_element()
 }
 
-/// Value row `row` showing `text`, all or part of `v`: tabular `t_lg` 600 in its validity
-/// colour, or the lock icon when Restricted.
+/// The value showing `text`, the text of `v` or "…": tabular `t_lg` 600 in its validity colour,
+/// or the lock icon when Restricted.
 fn value_element(
     v: &CardValue,
     text: SharedString,
-    row: usize,
     key: &DeviceKey,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
     let value_key = key.0.clone();
     let mut el = div()
-        .debug_selector(move || format!("perf-card-row:{value_key}:value:{row}"))
+        .debug_selector(move || format!("perf-card-row:{value_key}:value:0"))
         .flex()
         .flex_none()
         .items_center();
@@ -2125,7 +2067,7 @@ mod tests {
             ]
         );
         assert!(!l.line1.cut);
-        assert!(card_tooltip(&ov, &l).is_empty());
+        assert!(card_tooltip(&ov, &l, None).is_empty());
         // 18 + 5 × 16 + 16 = 114 of text, 8 px above and below and the border.
         assert_eq!(l.card_height(1.0), px(132.));
         // Other cards keep the 2-row rule for line 1.
@@ -2832,20 +2774,30 @@ mod tests {
             InventorySnapshot::default(),
             DeviceDetailsSnapshot::default(),
         );
-        let line2 = lines(&input(DeviceKind::Cpu, &cpu, &s)).line2;
-        assert_eq!(&*line2, "3901\u{a0}MHz\u{a0}· 55\u{a0}°C");
+        let cpu_lines = lines(&input(DeviceKind::Cpu, &cpu, &s));
+        let line2 = &cpu_lines.line2;
+        assert_eq!(&**line2, "3901\u{a0}MHz\u{a0}· 55\u{a0}°C");
         assert_eq!(
-            space_breaks(&line2).count(),
+            space_breaks(line2).count(),
             1,
             "wraps only after the dot: {line2:?}"
         );
+        // "3901 MHz ·" is 10 wide, "3901 MHz" 8 and "55 °C" 5.
+        let l = layout(&cpu_lines, 0., 10.);
+        assert_eq!(rows(&l.line2), ["3901\u{a0}MHz\u{a0}·", "55\u{a0}°C"]);
+        // The dot that does not fit is left out; the next row starts with the next value.
+        let l = layout(&cpu_lines, 0., 9.);
+        assert_eq!(rows(&l.line2), ["3901\u{a0}MHz", "55\u{a0}°C"]);
+        assert!(!l.line2.cut);
+        // A value wider than the column is not cut in the middle: the row is "…".
+        let l = layout(&cpu_lines, 0., 7.);
+        assert_eq!(rows(&l.line2), ["…"]);
+        assert!(l.line2.cut);
+        assert!(card_tooltip(&cpu_lines, &l, None).contains(line2));
         // Plain spaces in a value text turn into no-break spaces; words keep theirs.
         let mut out = String::from("Commit 69.0% of limit 12 GiB");
         glue_units(&mut out, "Commit 69.0% of limit".len());
         assert_eq!(out, "Commit 69.0% of limit 12\u{a0}GiB");
-        assert_eq!(split_value("12\u{a0}GiB"), Some(("12", "GiB")));
-        assert_eq!(split_value("1023.9 KiB/s"), Some(("1023.9", "KiB/s")));
-        assert_eq!(split_value("50%"), None);
     }
 
     #[test]
@@ -2908,7 +2860,7 @@ mod tests {
         assert!(!l.heading.cut && !l.line1.cut && !l.line2.cut);
         assert_eq!(l.card_height(1.0), px(80.));
         assert_eq!(l.card_height(1.5), px(120.));
-        assert!(card_tooltip(&lines, &l).is_empty());
+        assert!(card_tooltip(&lines, &l, None).is_empty());
     }
 
     #[test]
@@ -2943,7 +2895,7 @@ mod tests {
     }
 
     #[test]
-    fn card_text_layout_middle_cut_past_two_rows() {
+    fn card_text_layout_cuts_after_the_last_whole_word() {
         let name = "NVIDIA GeForce RTX 4090 Laptop GPU 16 GB";
         assert_eq!(name.len(), 40);
         let lines = CardLines {
@@ -2951,8 +2903,8 @@ mod tests {
             ..card_text("GPU 0", name, "52 °C")
         };
         let l = layout(&lines, 6., 16.);
-        // Row 2 keeps the last 12 characters (middle_ellipsis) and as much of the start as fits.
-        assert_eq!(rows(&l.line1), ["NVIDIA GeForce", "RTX…op GPU 16 GB"]);
+        // Row 2 keeps the whole words that fit with the "…" after them.
+        assert_eq!(rows(&l.line1), ["NVIDIA GeForce", "RTX 4090 Laptop…"]);
         assert!(l.line1.cut);
         assert!(
             l.line1
@@ -2960,27 +2912,28 @@ mod tests {
                 .iter()
                 .all(|r| mono(CardFont::Detail, &r.text) <= px(16.))
         );
-        assert_eq!(&*card_tooltip(&lines, &l), [SharedString::from(name)]);
+        assert_eq!(&*card_tooltip(&lines, &l, None), [SharedString::from(name)]);
         // 18 + 2 × 16 + 16 = 66 of text, 8 px above and below and the border.
         assert_eq!(l.card_height(1.0), px(84.));
     }
 
     #[test]
-    fn card_text_layout_cuts_a_name_without_spaces() {
-        // middle_ellipsis keeps 12 characters of the end, which do not fit 10 px: the balanced
-        // cut keeps both ends instead.
-        let l = layout(&card_text("enp0s20f0u1u2u3", "Ethernet", ""), 0., 10.);
-        assert_eq!(rows(&l.heading), ["enp0s…u2u3"]);
+    fn card_text_layout_cuts_a_word_wider_than_the_column_whole() {
+        // A word wider than the column is one piece: no part of it fits, so the row is "…".
+        let lines = card_text("enp0s20f0u1u2u3", "Ethernet", "");
+        let l = layout(&lines, 0., 10.);
+        assert_eq!(rows(&l.heading), ["…"]);
         assert!(l.heading.cut);
-        let l = layout(&card_text("enp0s20f0u1u2u3", "Ethernet", ""), 0., 14.);
-        assert_eq!(rows(&l.heading), ["e…0s20f0u1u2u3"]);
-        // A path keeps its last component.
+        assert_eq!(
+            &*card_tooltip(&lines, &l, None),
+            [SharedString::from("enp0s20f0u1u2u3")]
+        );
         let l = layout(
             &card_text("Disk 0", "NVMe - /run/media/oystein/Backup", ""),
             0.,
             20.,
         );
-        assert_eq!(rows(&l.line1), ["NVMe -", "/run/media/o…/Backup"]);
+        assert_eq!(rows(&l.line1), ["NVMe -", "…"]);
         assert!(l.line1.cut);
     }
 
@@ -3008,18 +2961,29 @@ mod tests {
     }
 
     #[test]
-    fn card_text_layout_splits_a_value_wider_than_the_column() {
-        // "1023.9 KiB/s" is 12 wide; the column is 10.
+    fn card_text_layout_cuts_a_value_wider_than_the_column() {
+        // "1023.9 KiB/s" is 12 wide; the column is 10. The value keeps one row, which shows "…";
+        // it never splits into a number row and a unit row.
         let lines = card_text("eth0", "Ethernet", "R: 0 B/s");
+        let value = CardValue {
+            text: SharedString::from("1023.9\u{a0}KiB/s"),
+            validity: Validity::Valid,
+            templates: &[],
+        };
         let l = layout(&lines, 12., 10.);
-        assert!(!l.value_inline && l.value_split);
-        // 18 + 2 × 18 + 2 × 16.
-        assert_eq!(l.text_height(), 86.);
-        assert_eq!(l.card_height(1.0), px(104.));
-        // A value that fits its own row keeps one row.
-        let l = layout(&lines, 10., 10.);
-        assert!(!l.value_inline && !l.value_split);
+        assert!(!l.value_inline && l.value_cut);
+        // 18 + 18 + 2 × 16.
         assert_eq!(l.text_height(), 68.);
+        assert_eq!(l.card_height(1.0), px(86.));
+        assert_eq!(
+            &*card_tooltip(&lines, &l, Some(&value)),
+            [value.text.clone()]
+        );
+        // A value that fits its own row is drawn whole.
+        let l = layout(&lines, 10., 10.);
+        assert!(!l.value_inline && !l.value_cut);
+        assert_eq!(l.text_height(), 68.);
+        assert!(card_tooltip(&lines, &l, Some(&value)).is_empty());
     }
 
     #[test]
@@ -3037,22 +3001,33 @@ mod tests {
         assert_eq!(&l.line2.rows[1].locks[..], [11]);
         assert!(!l.line2.cut);
 
-        // Cut: the lock at the end stays at the end of the cut row.
+        // Cut: the lock at the end goes with the cut-off part.
         let text = "Samsung SSD 990 PRO 2TB NVMe M.2 · ";
         let lines = CardLines {
             line2_locks: smallvec![text.len() as u16],
             ..card_text("Disk 0", "NVMe", text)
         };
         let l = layout(&lines, 0., 14.);
-        let last = &l.line2.rows[1];
+        assert_eq!(rows(&l.line2), ["Samsung SSD", "990 PRO 2TB…"]);
         assert!(l.line2.cut);
-        assert_eq!(&last.locks[..], [last.text.len() as u16]);
-        assert!(mono(CardFont::Detail, &last.text) + px(2.) <= px(14.));
+        assert!(l.line2.rows[1].locks.is_empty());
+
+        // A lock in the kept part stays: "[lock] · Samsung…" on the one row of a disk's line 2.
+        let text = "\u{a0}· Samsung SSD 990 PRO";
+        let lines = CardLines {
+            line2_locks: smallvec![0],
+            line2_one_row: true,
+            ..card_text("Disk 0", "NVMe", text)
+        };
+        let l = layout(&lines, 0., 14.);
+        assert_eq!(rows(&l.line2), ["\u{a0}· Samsung…"]);
+        assert_eq!(&l.line2.rows[0].locks[..], [0]);
+        assert!(mono(CardFont::Detail, &l.line2.rows[0].text) + px(2.) <= px(14.));
     }
 
     #[test]
     fn card_text_layout_keeps_a_disk_model_on_one_row() {
-        // tasklens-crw.75: a long disk model is one row cut in the middle, not 2 rows.
+        // tasklens-crw.75: a long disk model is one row, not 2 rows, cut after a whole word.
         let disk = disk_entry();
         let mut s = disk_snap(&[Some("/")], Metric::valid(41.0));
         let model = "Western Digital WD Black SN850X NVMe SSD 4TB";
@@ -3069,16 +3044,11 @@ mod tests {
         let l = layout(&lines, 0., 24.);
         assert_eq!(l.line2.rows.len(), 1, "{:?}", l.line2);
         assert!(l.line2.cut);
-        let row = &l.line2.rows[0].text;
-        assert!(row.contains(ELLIPSIS), "{row}");
-        assert!(
-            row.starts_with("Western") && row.ends_with("41\u{a0}°C"),
-            "{row}"
-        );
-        assert!(mono(CardFont::Detail, row) <= px(24.));
+        assert_eq!(rows(&l.line2), ["Western Digital WD…"]);
+        assert!(mono(CardFont::Detail, &l.line2.rows[0].text) <= px(24.));
         // The tooltip has the full model.
         assert_eq!(
-            &*card_tooltip(&lines, &l),
+            &*card_tooltip(&lines, &l, None),
             [SharedString::from(full.clone())]
         );
 

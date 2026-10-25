@@ -26,8 +26,8 @@ use tl_ui::chart::{ChartSpec, ValueFormat};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::performance::actions::PerfSelectDevice;
 use tl_ui::pages::performance::card::{
-    CARD_CHART_BG, CardLines, CardPrepared, CardTextInput, CardWords, DeviceCard, card_chart_grid,
-    card_chart_labels, card_lines, card_tooltip,
+    CARD_CHART_BG, CardLineLayout, CardLines, CardPrepared, CardTextInput, CardWords, DeviceCard,
+    card_chart_grid, card_chart_labels, card_lines, card_tooltip,
 };
 use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, is_visible, sidebar_order,
@@ -292,10 +292,10 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
 }
 
 /// crw.57 AC: a 40-character GPU name on a card of the default width (nav_width 252 less 2 ×
-/// sp4) wraps to 2 rows. The rest of the name is cut in the middle, and the tooltip has the full
-/// name. 18 + 2 × 16 + 16 px of text still fit the least card height.
+/// sp4) wraps to 2 rows. Row 2 ends in "…" after the last whole word that fits (UI-PRF-059), and
+/// the tooltip has the full name. 18 + 2 × 16 + 16 px of text still fit the least card height.
 #[gpui_kit::test]
-fn card_long_gpu_name_wraps_then_middle_cut(cx: &mut TestAppContext) {
+fn card_long_gpu_name_wraps_then_ends_in_ellipsis(cx: &mut TestAppContext) {
     assert_eq!(LONG_GPU.chars().count(), 40);
     let gpu = DeviceEntry {
         display_name: Arc::from(LONG_GPU),
@@ -327,12 +327,15 @@ fn card_long_gpu_name_wraps_then_middle_cut(cx: &mut TestAppContext) {
     let line1 = &prepared.layout.line1;
     assert!(line1.cut);
     assert_eq!(line1.rows.len(), 2);
-    assert!(LONG_GPU.starts_with(&*line1.rows[0].text), "{line1:?}");
-    assert!(line1.rows[1].text.contains('\u{2026}'), "{line1:?}");
-    // The device icon (UI-PRF-058) leaves a narrower column, so less of the name's end shows.
-    assert!(line1.rows[1].text.ends_with("16 GB"), "{line1:?}");
+    let kept = line1.rows[1]
+        .text
+        .strip_suffix('\u{2026}')
+        .expect("ends in …");
+    let shown = format!("{} {kept}", line1.rows[0].text);
+    // Whole words: the next character of the name is the space before the first cut word.
+    assert!(LONG_GPU.starts_with(&format!("{shown} ")), "{line1:?}");
     assert_eq!(
-        &*card_tooltip(&lines, &prepared.layout),
+        &*card_tooltip(&lines, &prepared.layout, prepared.value.as_ref()),
         [SharedString::from(LONG_GPU)]
     );
     assert_eq!(prepared.height, px(84.));
@@ -1166,10 +1169,10 @@ mod sidebar {
             }
             above = Some(col);
         }
-        // The GPU name wraps, then is cut in the middle.
+        // The GPU name wraps, then ends in "…" after a whole word.
         let line1 = prepared(&mut r, GPU).layout.line1;
         assert!(line1.cut && line1.rows.len() == 2, "{line1:?}");
-        assert!(line1.rows[1].text.ends_with("GB"), "{line1:?}");
+        assert!(line1.rows[1].text.ends_with('\u{2026}'), "{line1:?}");
     }
 
     /// Every value row of every card lies inside its text column.
@@ -1342,11 +1345,11 @@ mod sidebar {
         });
     }
 
-    /// UI-PRF-059, as drawn: the CPU line 2 "3901 MHz · 55 °C" breaks only after the dot, so no
+    /// UI-PRF-059, as drawn: the CPU line 2 "3901 MHz · 55 °C" breaks only at the dot, so no
     /// row ends in a number whose unit is on the next row, and the Overview line 1 wraps at every
-    /// " · " to as many rows as it needs instead of being cut in the middle. The test font draws
-    /// every character 0.6 em wide: at nav_width 200 the CPU line takes 2 rows, at 252 the
-    /// Overview line takes 3.
+    /// " · " to as many rows as it needs instead of being cut. The test font draws every
+    /// character 0.6 em wide: at nav_width 180 "3901 MHz ·" is wider than the 60 px column, so
+    /// the row leaves the dot out; at 200 the CPU line takes 2 rows, at 252 the Overview line 3.
     #[gpui_kit::test]
     fn card_rows_break_only_between_values(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1365,18 +1368,24 @@ mod sidebar {
         let overview_full = "CPU\u{a0}· Memory\u{a0}· GPU\u{a0}· Disk\u{a0}· Network";
         assert_eq!(lines(&mut r, "cpu").line2, cpu_full);
         assert_eq!(lines(&mut r, OVERVIEW).line1, overview_full);
+        let cpu_two = ["3901\u{a0}MHz\u{a0}·", "55\u{a0}°C"];
+        let cpu_bare = ["3901\u{a0}MHz", "55\u{a0}°C"];
         for (w, cpu_rows, overview_rows) in [
-            (180., None, 5),
-            (200., Some(2), 5),
-            (252., Some(1), 3),
-            (400., Some(1), 2),
+            (180., &cpu_bare[..], 5),
+            (200., &cpu_two[..], 5),
+            (252., &[cpu_full][..], 3),
+            (400., &[cpu_full][..], 2),
         ] {
             r.host_w.set(w);
             r.vcx.update(|window, _| window.refresh());
             draw(r.vcx);
+            let cpu_line = prepared(&mut r, "cpu").layout.line2;
+            let cpu_drawn: Vec<&str> = cpu_line.rows.iter().map(|row| &*row.text).collect();
+            assert_eq!(cpu_drawn, cpu_rows, "width {w}");
+            assert!(!cpu_line.cut, "width {w}: {cpu_drawn:?}");
             for (key, name, full, want) in [
-                ("cpu", "line2", cpu_full, cpu_rows),
-                (OVERVIEW, "line1", overview_full, Some(overview_rows)),
+                ("cpu", "line2", cpu_full, cpu_rows.len()),
+                (OVERVIEW, "line1", overview_full, overview_rows),
             ] {
                 let layout = prepared(&mut r, key).layout;
                 let line = if name == "line1" {
@@ -1397,16 +1406,13 @@ mod sidebar {
                     r.vcx.debug_bounds(past).is_none(),
                     "width {w}: {key} {rows:?}"
                 );
-                // At nav_width 180, "3901 MHz ·" alone is wider than the 60 px column.
-                let Some(want) = want else {
-                    assert!(line.cut, "width {w}: {key} {rows:?}");
-                    continue;
-                };
                 assert!(!line.cut, "width {w}: {key} {rows:?}");
                 assert_eq!(rows.len(), want, "width {w}: {key} {rows:?}");
-                assert_eq!(rows.join(" "), full, "width {w}: {key}");
-                for row in &rows[..rows.len() - 1] {
-                    assert!(row.ends_with('·'), "width {w}: {key} {rows:?}");
+                if key == OVERVIEW {
+                    assert_eq!(rows.join(" "), full, "width {w}: {key}");
+                    for row in &rows[..rows.len() - 1] {
+                        assert!(row.ends_with('·'), "width {w}: {key} {rows:?}");
+                    }
                 }
             }
         }
@@ -1430,10 +1436,11 @@ mod sidebar {
         assert!(cpu.layout.value_inline);
     }
 
-    /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
-    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s".
+    /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", is wider than the 60 px text
+    /// column at the least nav_width (180). It is not split into a number row and a unit row
+    /// (UI-PRF-059): its one row shows "…" inside the column and the tooltip has the value.
     #[gpui_kit::test]
-    fn widest_network_byte_rate_fits_at_nav_width_180(cx: &mut TestAppContext) {
+    fn widest_network_byte_rate_at_nav_width_180_shows_ellipsis(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
         settings.motion.animations = false;
         settings.units.network = NetworkUnit::Bytes;
@@ -1471,9 +1478,167 @@ mod sidebar {
         draw(r.vcx);
         draw(r.vcx);
 
-        let value = prepared(&mut r, "net:eth0").value.expect("value");
+        let p = prepared(&mut r, "net:eth0");
+        let value = p.value.as_ref().expect("value");
         assert_eq!(&*value.text, "1023.9\u{a0}KiB/s");
+        assert!(
+            !p.layout.value_inline && p.layout.value_cut,
+            "{:?}",
+            p.layout
+        );
+        let lines = lines(&mut r, "net:eth0");
+        assert!(card_tooltip(&lines, &p.layout, Some(value)).contains(&value.text));
+        assert!(
+            r.vcx
+                .debug_bounds("perf-card-row:net:eth0:value:1")
+                .is_none(),
+            "one value row"
+        );
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
+    }
+
+    /// Unit words that end a value. A row that starts with one split a value from its number.
+    const UNITS: &[&str] = &[
+        "%", "°C", "MHz", "GHz", "B/s", "KiB/s", "MiB/s", "GiB/s", "bps", "Kbps", "Mbps", "Gbps",
+        "B", "KiB", "MiB", "GiB", "TiB", "GB", "TB", "RPM", "W",
+    ];
+
+    /// UI-PRF-059 on the drawn rows of one card line, `full` being the line before layout: each
+    /// row is drawn; no row starts with a unit or a dot; the rows are the line's pieces in order
+    /// and whole (the last piece of a row may leave out its " ·"); and a cut line ends in "…"
+    /// right after its last whole piece.
+    fn assert_whole_pieces(
+        r: &mut Rig,
+        what: &str,
+        (key, name): (&str, &str),
+        full: &str,
+        line: &CardLineLayout,
+    ) {
+        let rows = line.rows.len();
+        for i in 0..=rows {
+            let drawn = r
+                .vcx
+                .debug_bounds(sel(format!("perf-card-row:{key}:{name}:{i}")));
+            assert_eq!(drawn.is_some(), i < rows, "{what} {key} {name} row {i}");
+        }
+        let source: Vec<&str> = full.split(' ').filter(|p| !p.is_empty()).collect();
+        let mut at = 0;
+        for (i, row) in line.rows.iter().enumerate() {
+            let mut text = &*row.text;
+            if line.cut && i + 1 == rows {
+                text = text.strip_suffix('\u{2026}').unwrap_or_else(|| {
+                    panic!("{what} {key} {name}: the cut row {text:?} ends in …")
+                });
+            }
+            let first = text.split([' ', '\u{a0}']).next().unwrap_or_default();
+            assert!(
+                !UNITS.contains(&first) && !text.starts_with('·'),
+                "{what} {key} {name}: row {i} {text:?} starts with a unit or a dot"
+            );
+            let pieces: Vec<&str> = text.split(' ').filter(|p| !p.is_empty()).collect();
+            for (j, piece) in pieces.iter().enumerate() {
+                let want = source.get(at).copied().unwrap_or_default();
+                let bare = want.strip_suffix("\u{a0}·");
+                let whole = *piece == want || (j + 1 == pieces.len() && bare == Some(*piece));
+                assert!(
+                    whole,
+                    "{what} {key} {name}: row {i} {text:?} cuts {want:?} of {full:?}"
+                );
+                at += 1;
+            }
+        }
+        if !line.cut {
+            assert_eq!(
+                at,
+                source.len(),
+                "{what} {key} {name}: {line:?} of {full:?}"
+            );
+        }
+    }
+
+    /// tasklens-crw.95 leader decision, on the drawn rows of every card at nav_width 180 and
+    /// 252, outside and in edit mode: no row starts with a unit, no row cuts a value, and a cut
+    /// line ends in "…" after a whole piece. A value wider than the column has one row that
+    /// shows "…", with the value in the tooltip. At nav_width 180 the CPU line 2 keeps both
+    /// values whole on 2 rows, and the 1023.9 KiB/s rate shows "…".
+    #[gpui_kit::test]
+    fn card_value_unit_not_split_as_drawn(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        settings.units.network = NetworkUnit::Bytes;
+        settings.units.network_auto_scale = true;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version = 50;
+            sys.cpu.freq_mhz = Metric::valid(3901);
+            sys.cpu.temp_c = Metric::valid(55.0);
+            s.system = Arc::new(sys);
+        });
+        // 1023.9 × 1024 bytes per second.
+        publish_eth0_rx(&mut r, 1_048_473.6);
+        let mut cut_values = 0;
+        for w in [180., 252.] {
+            r.host_w.set(w);
+            r.vcx.update(|window, _| window.refresh());
+            draw(r.vcx);
+            draw(r.vcx);
+            let cpu = prepared(&mut r, "cpu").layout.line2;
+            let cpu_rows: Vec<&str> = cpu.rows.iter().map(|row| &*row.text).collect();
+            assert!(!cpu.cut, "nav_width {w}: {cpu_rows:?}");
+            if w == 180. {
+                assert_eq!(cpu_rows, ["3901\u{a0}MHz", "55\u{a0}°C"]);
+                assert!(prepared(&mut r, "net:eth0").layout.value_cut);
+            }
+            for edit in [false, true] {
+                if edit {
+                    enter_edit(&mut r);
+                    draw(r.vcx);
+                    draw(r.vcx);
+                }
+                let what = format!("nav_width {w}, edit {edit}");
+                for key in keys(&mut r) {
+                    let p = prepared(&mut r, &key);
+                    let full = lines(&mut r, &key);
+                    for (name, text, line) in [
+                        ("heading", &full.heading, &p.layout.heading),
+                        ("line1", &full.line1, &p.layout.line1),
+                        ("line2", &full.line2, &p.layout.line2),
+                    ] {
+                        assert_whole_pieces(&mut r, &what, (&key, name), text, line);
+                    }
+                    let one = r
+                        .vcx
+                        .debug_bounds(sel(format!("perf-card-row:{key}:value:0")));
+                    let two = r
+                        .vcx
+                        .debug_bounds(sel(format!("perf-card-row:{key}:value:1")));
+                    assert!(two.is_none(), "{what} {key}: one value row");
+                    let Some(v) = p.value.as_ref() else {
+                        continue;
+                    };
+                    assert!(one.is_some(), "{what} {key}: value drawn");
+                    if p.layout.value_cut {
+                        cut_values += 1;
+                        let tip = card_tooltip(&full, &p.layout, Some(v));
+                        assert!(tip.contains(&v.text), "{what} {key}: {tip:?}");
+                    } else if let Some(row) = one {
+                        let col = text_column(&mut r, &key);
+                        assert!(inside(row, col), "{what} {key} value {row:?} in {col:?}");
+                    }
+                }
+                if edit {
+                    r.vcx
+                        .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
+                    draw(r.vcx);
+                }
+            }
+        }
+        assert!(
+            cut_values > 0,
+            "the 1023.9 KiB/s rate is cut at nav_width 180"
+        );
     }
 
     /// Publishes one eth0 download series whose newest sample is `bps` bytes per second.
