@@ -3659,6 +3659,15 @@ mod page {
                 .update(|_, cx| TlSettings::settings(cx).performance.overview.clone())
         }
 
+        /// Sets `performance.overview_row_unit_px`: on the grid the box heights follow the row
+        /// unit, not the window height (UI-PRF-056).
+        fn set_row_unit(&mut self, unit: u32) {
+            self.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.performance.overview_row_unit_px = unit);
+            });
+            draw(self.vcx);
+        }
+
         fn press(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>, click_count: usize) {
             self.vcx.simulate_event(MouseDownEvent {
                 button: MouseButton::Left,
@@ -3928,6 +3937,8 @@ mod page {
         use tl_model::snapshot::RaplState;
         use tl_ui::pages::performance::overview::parts::core_spark_id;
         let mut r = open_rooted(cx, true, 1200., 900.);
+        // A 456 px CPU box, so the strip takes its default 25% of the body.
+        r.set_row_unit(60);
         let power = |r: &mut Rig, on: bool| {
             r.page_action(&PerfOverviewSetBoxPower {
                 kind: "cpu".into(),
@@ -4641,12 +4652,17 @@ mod page {
                 .collect()
         });
         assert!(!engines.is_empty());
-        // The GPU and Disk boxes share the second row at the same size.
+        // The GPU and Disk boxes share the second band at the same span: the same height, and
+        // widths within the 1 px of edge rounding.
         let (gpu, disk) = (
             r.bounds_of(GPU_BOX_ID.into()),
             r.bounds_of(DISK_BOX_ID.into()),
         );
-        assert_eq!(gpu.size, disk.size);
+        assert_eq!(gpu.size.height, disk.size.height);
+        assert!(
+            (gpu.size.width - disk.size.width).abs() <= px(1.),
+            "{gpu:?} {disk:?}"
+        );
         // A chart area sits at the bottom of its cell, below the header and the gap.
         let chart_in = |chart: gpui_kit::Bounds<gpui_kit::Pixels>,
                         cell: gpui_kit::Bounds<gpui_kit::Pixels>,
@@ -4954,9 +4970,8 @@ mod page {
         let moved = r.bounds_of(cell_id(&keys[2]));
         assert!(moved.left() < cs[2].left(), "{moved:?} from {:?}", cs[2]);
 
-        // Automatic: the mode's grid, here two columns, saved as `auto`.
-        r.vcx.simulate_resize(size(px(1200.), px(560.)));
-        draw(r.vcx);
+        // Automatic: the mode's grid, here two columns in a 222 px box, saved as `auto`.
+        r.set_row_unit(32);
         pick_arrange(&mut r, BoxKind::Disk, "Automatic");
         assert_eq!(shown(&mut r), Arrange::Auto);
         let (grid, cs, fit) = cells(&mut r, Arrange::Auto);
@@ -5085,6 +5100,8 @@ mod page {
     #[gpui_kit::test]
     fn overview_arrange_cpu_vertical_horizontal_auto(cx: &mut TestAppContext) {
         let mut r = open_rooted(cx, true, 1200., 900.);
+        // A 456 px CPU box, tall enough for stacked parts and a 60 px drag.
+        r.set_row_unit(60);
         let page = r.page.clone();
         let side = |r: &mut Rig| {
             r.vcx
@@ -5876,6 +5893,8 @@ mod page {
             COMBINED_CHART_ID, NET_BOX_ID, NET_SPLITTER_ID, NET_STACK_SPLITTER_ID, cell_id,
         };
         let mut r = open_rooted(cx, true, 1200., 900.);
+        // A 390 px Net box, so the stacked charts keep 120 px on each side of the splitter.
+        r.set_row_unit(60);
         let page = r.page.clone();
         let set = |r: &mut Rig, mode: &str| {
             r.page_action(&PerfOverviewSetBoxMode {

@@ -6,12 +6,13 @@
 //! owns its view. [`OverviewPage`] places the box views and sends one demand part while it is
 //! shown.
 //!
-//! The layout comes from `[performance.overview]` (UI-PRF-018), the default when there is none.
+//! The layout comes from `[performance.overview]` (UI-PRF-056), the default when there is none.
 //! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
 //! and only then does the page ask for the process sweep (`process_top`). The boxes sit on the
 //! snap grid of UI-PRF-056. [`splitter`] moves the shared edge of two boxes by dragging the gap
-//! between them; [`edit`] is Edit Layout mode, which hides and adds boxes. Each box has layout modes (UI-PRF-019): [`box_menu`] is the box menu and the
-//! Edit Layout gear, and [`inner_split`] is the one splitter a mode with two parts uses.
+//! between them; [`edit`] is Edit Layout mode, which hides and adds boxes. Each box has layout
+//! modes (UI-PRF-019): [`box_menu`] is the box menu and the Edit Layout gear, and
+//! [`inner_split`] is the one splitter a mode with two parts uses.
 //!
 //! [`range`] is the time range (UI-PRF-055): the switch in the header, the demand for the
 //! device metric history, and the min, avg and peak line and time axis start of each box, which
@@ -806,10 +807,8 @@ impl OverviewPage {
         };
         if active.changed {
             self.save_layout(cx);
-            self.notify(cx);
-        } else {
-            self.notify(cx);
         }
+        self.notify(cx);
     }
 
     /// Places the page again after a span change.
