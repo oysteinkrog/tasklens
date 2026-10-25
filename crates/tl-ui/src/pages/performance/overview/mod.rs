@@ -920,13 +920,10 @@ impl OverviewPage {
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }
 
-    /// The Overview header with the time range switch at its right end (UI-PRF-055). `None`
-    /// while the status bar is on the Overview: the bar then carries the switch, so the page
-    /// shows one switch, not two.
-    fn range_header(&self, cx: &App) -> Option<AnyElement> {
-        if self.bar_on_overview {
-            return None;
-        }
+    /// The Overview header: the page title, and the time range switch at its right end
+    /// (UI-PRF-055). While the status bar is on the Overview the bar carries the switch, so the
+    /// page shows one switch, not two; the title stays.
+    fn range_header(&self, cx: &App) -> AnyElement {
         let m = metrics(cx);
         let theme = current(cx);
         // The page title at the left, with the Lucide layout-grid icon in `text_secondary`.
@@ -948,21 +945,20 @@ impl OverviewPage {
                     .text_color(theme.text_primary)
                     .child(self.header.0.clone()),
             );
-        Some(
-            div()
-                .debug_selector(|| RANGE_HEADER_ID.into())
-                .flex()
-                .flex_row()
-                .flex_none()
-                .justify_between()
-                .items_center()
-                .w_full()
-                .px(m.sp[5])
-                .pt(m.sp[4])
-                .child(title)
-                .child(range::range_switch(range::HEADER_SWITCH, cx))
-                .into_any_element(),
-        )
+        let switch = (!self.bar_on_overview).then(|| range::range_switch(range::HEADER_SWITCH, cx));
+        div()
+            .debug_selector(|| RANGE_HEADER_ID.into())
+            .flex()
+            .flex_row()
+            .flex_none()
+            .justify_between()
+            .items_center()
+            .w_full()
+            .px(m.sp[5])
+            .pt(m.sp[4])
+            .child(title)
+            .children(switch)
+            .into_any_element()
     }
 
     /// The box view of `kind`, cached so it re-renders only for its own changes.
@@ -1222,21 +1218,6 @@ impl Render for OverviewPage {
             .children(overlays);
         let header = self.range_header(cx);
         let toolbar = self.edit_toolbar(cx);
-        if header.is_none() && toolbar.is_none() {
-            let root = div()
-                .id(SCROLL_ID)
-                .relative()
-                .size_full()
-                .track_focus(&self.focus)
-                .child(measure);
-            let root = Self::with_actions(root, cx);
-            return if self.placement.scrolls {
-                root.overflow_y_scroll().child(content)
-            } else {
-                root.child(content)
-            }
-            .into_any_element();
-        }
         let body = div()
             .id(SCROLL_ID)
             .relative()
@@ -1255,7 +1236,7 @@ impl Render for OverviewPage {
         } else {
             root
         };
-        let root = root.children(header).children(toolbar).child(body);
+        let root = root.child(header).children(toolbar).child(body);
         Self::with_actions(root, cx).into_any_element()
     }
 }

@@ -1342,6 +1342,76 @@ mod sidebar {
         });
     }
 
+    /// UI-PRF-059, as drawn: the CPU line 2 "3901 MHz · 55 °C" breaks only after the dot, so no
+    /// row ends in a number whose unit is on the next row, and the Overview line 1 wraps at every
+    /// " · " to as many rows as it needs instead of being cut in the middle. The test font draws
+    /// every character 0.6 em wide: at nav_width 200 the CPU line takes 2 rows, at 252 the
+    /// Overview line takes 3.
+    #[gpui_kit::test]
+    fn card_rows_break_only_between_values(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version = 50;
+            sys.cpu.freq_mhz = Metric::valid(3901);
+            sys.cpu.temp_c = Metric::valid(55.0);
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        let cpu_full = "3901\u{a0}MHz\u{a0}· 55\u{a0}°C";
+        let overview_full = "CPU\u{a0}· Memory\u{a0}· GPU\u{a0}· Disk\u{a0}· Network";
+        assert_eq!(lines(&mut r, "cpu").line2, cpu_full);
+        assert_eq!(lines(&mut r, OVERVIEW).line1, overview_full);
+        for (w, cpu_rows, overview_rows) in [
+            (180., None, 5),
+            (200., Some(2), 5),
+            (252., Some(1), 3),
+            (400., Some(1), 2),
+        ] {
+            r.host_w.set(w);
+            r.vcx.update(|window, _| window.refresh());
+            draw(r.vcx);
+            for (key, name, full, want) in [
+                ("cpu", "line2", cpu_full, cpu_rows),
+                (OVERVIEW, "line1", overview_full, Some(overview_rows)),
+            ] {
+                let layout = prepared(&mut r, key).layout;
+                let line = if name == "line1" {
+                    layout.line1
+                } else {
+                    layout.line2
+                };
+                let rows: Vec<&str> = line.rows.iter().map(|row| &*row.text).collect();
+                for i in 0..rows.len() {
+                    let id = sel(format!("perf-card-row:{key}:{name}:{i}"));
+                    assert!(
+                        r.vcx.debug_bounds(id).is_some(),
+                        "width {w}: {key} row {i} drawn"
+                    );
+                }
+                let past = sel(format!("perf-card-row:{key}:{name}:{}", rows.len()));
+                assert!(
+                    r.vcx.debug_bounds(past).is_none(),
+                    "width {w}: {key} {rows:?}"
+                );
+                // At nav_width 180, "3901 MHz ·" alone is wider than the 60 px column.
+                let Some(want) = want else {
+                    assert!(line.cut, "width {w}: {key} {rows:?}");
+                    continue;
+                };
+                assert!(!line.cut, "width {w}: {key} {rows:?}");
+                assert_eq!(rows.len(), want, "width {w}: {key} {rows:?}");
+                assert_eq!(rows.join(" "), full, "width {w}: {key}");
+                for row in &rows[..rows.len() - 1] {
+                    assert!(row.ends_with('·'), "width {w}: {key} {rows:?}");
+                }
+            }
+        }
+    }
+
     /// A card that is not first leaves no room for the edit button: moved below Memory, the CPU
     /// card keeps its value next to the heading.
     #[gpui_kit::test]

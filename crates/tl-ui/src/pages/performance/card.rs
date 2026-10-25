@@ -229,6 +229,9 @@ pub struct CardLines {
     /// Line 2 stays on one row, cut in the middle when it is too long: a disk's model
     /// (tasklens-crw.75 leader decision, over the UI-PRF-011 2-row rule). The tooltip has it whole.
     pub line2_one_row: bool,
+    /// Line 1 wraps at every " · " to as many rows as it needs and is not cut after 2 rows: the
+    /// Overview card's list of boxes (UI-PRF-059).
+    pub line1_all_rows: bool,
     /// The full line 1; network cards use the adapter name and add the NetworkManager
     /// connection on a second line.
     pub tooltip: Option<SharedString>,
@@ -285,6 +288,8 @@ pub fn update_card_lines(
     write_line1(input, scratch, &mut locks);
     changed |= keep_or_set(&mut lines.line1, scratch);
     changed |= set_if_changed(&mut lines.line1_locks, &locks);
+    let all_rows = input.kind == DeviceKind::Overview;
+    changed |= set_if_changed(&mut lines.line1_all_rows, &all_rows);
 
     scratch.clear();
     locks.clear();
@@ -965,7 +970,8 @@ pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
 /// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
 /// line whose first word does not fit is cut in the middle on one row, and so is line 2 when
-/// [`CardLines::line2_one_row`] is set. The value goes `gap`
+/// [`CardLines::line2_one_row`] is set. Line 1 takes as many rows as it needs when
+/// [`CardLines::line1_all_rows`] is set. The value goes `gap`
 /// after the last heading row when `value_w` fits there, else on a row of its own, and on 2 rows
 /// (number, then unit) when it is wider than `text_w`; a value is never cut. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
@@ -981,7 +987,7 @@ pub fn card_text_layout(
         &lines.heading,
         &[],
         CardFont::Heading,
-        true,
+        2,
         text_w,
         lock_w,
         measure,
@@ -995,7 +1001,7 @@ pub fn card_text_layout(
         &lines.line1,
         &lines.line1_locks,
         CardFont::Detail,
-        true,
+        if lines.line1_all_rows { usize::MAX } else { 2 },
         text_w,
         lock_w,
         measure,
@@ -1004,7 +1010,7 @@ pub fn card_text_layout(
         &lines.line2,
         &lines.line2_locks,
         CardFont::Detail,
-        !lines.line2_one_row,
+        if lines.line2_one_row { 1 } else { 2 },
         text_w,
         lock_w,
         measure,
@@ -1048,13 +1054,14 @@ fn space_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
         })
 }
 
-/// `text` in at most 2 rows of `max`, or 1 row when `wrap` is false (see [`card_text_layout`]).
-/// A lock at the end of the text belongs to the last row.
+/// `text` in at most `max_rows` rows of `max` (see [`card_text_layout`]). Each row but the last
+/// is the widest that ends before a run of spaces; the last row takes the rest, cut in the
+/// middle when it is too wide. A lock at the end of the text belongs to the last row.
 fn wrap_line(
     text: &SharedString,
     locks: &[u16],
     font: CardFont,
-    wrap: bool,
+    max_rows: usize,
     max: Pixels,
     lock_w: Pixels,
     measure: &mut impl FnMut(CardFont, &str) -> Pixels,
@@ -1069,41 +1076,39 @@ fn wrap_line(
             cut: false,
         };
     }
-    // The widest row 1 that ends before a run of spaces; row 2 starts after the run. A line
-    // that does not wrap has no break, so it is cut on one row.
-    let mut best = None;
-    for (end, next) in space_breaks(text).take_while(|_| wrap) {
-        let w = measure(font, &text[..end]) + lock_w * lock_count(locks, 0, next) as f32;
-        if w > max {
-            break;
+    let mut rows = SmallVec::new();
+    let mut start = 0;
+    loop {
+        let rest = &text[start..];
+        let rest_locks = row_locks(locks, start, len + 1);
+        if measure(font, rest) + lock_w * rest_locks.len() as f32 <= max {
+            rows.push(CardRow {
+                text: SharedString::from(rest.to_owned()),
+                locks: rest_locks,
+            });
+            return CardLineLayout { rows, cut: false };
         }
-        best = Some((end, next));
-    }
-    let Some((end, next)) = best else {
-        let (row, cut) = cut_row(text, locks, font, max, lock_w, measure);
-        return CardLineLayout {
-            rows: smallvec![row],
-            cut,
+        // The widest row that ends before a run of spaces; the next row starts after the run.
+        // The last row has no break, so it is cut.
+        let mut best = None;
+        let last = rows.len() + 1 >= max_rows;
+        for (end, next) in space_breaks(rest).take_while(|_| !last) {
+            let w = measure(font, &rest[..end]) + lock_w * lock_count(&rest_locks, 0, next) as f32;
+            if w > max {
+                break;
+            }
+            best = Some((end, next));
+        }
+        let Some((end, next)) = best else {
+            let (row, cut) = cut_row(rest, &rest_locks, font, max, lock_w, measure);
+            rows.push(row);
+            return CardLineLayout { rows, cut };
         };
-    };
-    let row1 = CardRow {
-        text: SharedString::from(text[..end].to_owned()),
-        locks: row_locks(locks, 0, next),
-    };
-    let rest = &text[next..];
-    let rest_locks = row_locks(locks, next, len + 1);
-    let (row2, cut) = if measure(font, rest) + lock_w * rest_locks.len() as f32 <= max {
-        let row = CardRow {
-            text: SharedString::from(rest.to_owned()),
-            locks: rest_locks,
-        };
-        (row, false)
-    } else {
-        cut_row(rest, &rest_locks, font, max, lock_w, measure)
-    };
-    CardLineLayout {
-        rows: smallvec![row1, row2],
-        cut,
+        rows.push(CardRow {
+            text: SharedString::from(rest[..end].to_owned()),
+            locks: row_locks(&rest_locks, 0, next),
+        });
+        start += next;
     }
 }
 
@@ -2094,6 +2099,37 @@ mod tests {
                 ""
             )
         );
+    }
+
+    /// UI-PRF-059: the Overview line 1 wraps at every " · " to as many rows as it needs, and is
+    /// never cut in the middle when each part fits a row.
+    #[test]
+    fn card_text_layout_overview_line1_wraps_at_every_dot() {
+        let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let s = snap(
+            cpu_system(Metric::valid(4631), Metric::valid(52.0)),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let ov = lines(&input(DeviceKind::Overview, &cpu, &s));
+        assert!(ov.line1_all_rows);
+        let l = layout(&ov, 0., 10.);
+        assert_eq!(
+            rows(&l.line1),
+            [
+                "CPU\u{a0}·",
+                "Memory\u{a0}·",
+                "GPU\u{a0}·",
+                "Disk\u{a0}·",
+                "Network"
+            ]
+        );
+        assert!(!l.line1.cut);
+        assert!(card_tooltip(&ov, &l).is_empty());
+        // 18 + 5 × 16 + 16 = 114 of text, 8 px above and below and the border.
+        assert_eq!(l.card_height(1.0), px(132.));
+        // Other cards keep the 2-row rule for line 1.
+        assert!(!lines(&input(DeviceKind::Cpu, &cpu, &s)).line1_all_rows);
     }
 
     #[test]

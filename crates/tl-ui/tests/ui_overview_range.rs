@@ -365,7 +365,13 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
 
     let header: &'static str =
         Box::leak(segment_id(HEADER_SWITCH, OverviewRange::H24).into_boxed_str());
-    assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(), "one switch");
+    // The bar carries the switch: the header keeps the title and its icon, without a switch.
+    assert!(r.vcx.debug_bounds(header).is_none(), "one switch");
+    assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
+    assert!(
+        r.vcx.debug_bounds(TITLE_ICON_ID).is_some(),
+        "layout-grid icon before the title with the bar on the Overview"
+    );
     let id: &'static str = Box::leak(segment_id(STATUS_SWITCH, OverviewRange::H1).into_boxed_str());
     click(r.vcx, id);
     let saved = r
