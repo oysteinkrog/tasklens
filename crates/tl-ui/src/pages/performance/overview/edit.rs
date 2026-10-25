@@ -567,7 +567,8 @@ impl OverviewPage {
         }
     }
 
-    /// Hides `kind`, or refuses with a toast when it is the only box shown.
+    /// Hides `kind`, or refuses with a toast when it is the only box shown. A box drag in
+    /// progress ends without a change first, so a later move cannot bring the box back.
     fn hide_box(&mut self, kind: BoxKind, window: &mut Window, cx: &mut Context<Self>) {
         if !self.placement.boxes.iter().any(|b| b.kind != kind) {
             let text = tr(cx, "perf-overview-toast-last-box");
@@ -579,13 +580,14 @@ impl OverviewPage {
             return;
         }
         let mut layout = self.layout.clone();
-        if !hide(&mut layout, kind) {
-            return;
+        if let Some(drag) = self.edit.as_mut().and_then(|e| e.drag.take()) {
+            layout.boxes = drag.start_boxes().iter().copied().collect();
         }
-        if self
-            .edit
-            .as_ref()
-            .is_some_and(|e| e.focus_of(kind).is_focused(window))
+        if hide(&mut layout, kind)
+            && self
+                .edit
+                .as_ref()
+                .is_some_and(|e| e.focus_of(kind).is_focused(window))
         {
             window.focus(&self.focus, cx);
         }

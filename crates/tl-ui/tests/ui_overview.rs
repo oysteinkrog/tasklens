@@ -6423,6 +6423,48 @@ mod page {
         assert_eq!(r.saved(), saved);
     }
 
+    /// Delete during a title drag hides the dragged box and ends the drag: the other boxes go
+    /// back to their cells, and a later move or release does not bring the box back.
+    #[gpui_kit::test]
+    fn overview_edit_delete_during_drag_hides_box(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Gpu};
+        let mut r = open(cx, true, 1200., 900.);
+        r.vcx.update(|_, cx| {
+            tl_ui::actions::bind_keys_global(cx);
+            bind_keys_performance(cx);
+        });
+        r.edit_layout();
+        let before = r.layout();
+        let from = center(r.bounds_of(title_handle_id(Cpu)));
+        r.press(from, 1);
+        r.move_to(point(from.x, from.y + px(150.)));
+        assert_eq!(
+            cells(&mut r, Gpu),
+            (0, 10, 4, 6),
+            "GPU pushed down mid-drag"
+        );
+        r.vcx.simulate_keystrokes("delete");
+        draw(r.vcx);
+        let hidden = r.layout();
+        assert!(!hidden.has(Cpu));
+        let rest: Vec<GridBox> = before
+            .boxes
+            .iter()
+            .copied()
+            .filter(|b| b.kind != Cpu)
+            .collect();
+        assert_eq!(hidden.boxes.as_slice(), rest.as_slice());
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), hidden);
+        assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
+        // The button is still down: a move to another cell and the release change nothing.
+        r.move_to(point(from.x + px(200.), from.y + px(300.)));
+        assert_eq!(r.layout(), hidden);
+        r.release(point(from.x + px(200.), from.y + px(300.)));
+        assert_eq!(r.layout(), hidden);
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), hidden);
+        assert!(r.editing(), "the mode stays on");
+    }
+
     /// UI-PRF-056: the bottom-right corner handle resizes in whole cells; a double-click sets
     /// the box to its kind minimum.
     #[gpui_kit::test]
