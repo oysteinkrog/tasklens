@@ -1205,6 +1205,14 @@ mod sidebar {
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(&*value.text, "100.0%");
         assert_values_inside(&mut r, "nav_width 180");
+        enter_edit(&mut r);
+        draw(r.vcx);
+        let col = text_column(&mut r, "cpu");
+        assert!(col.size.width > px(40.), "edit text column at 180: {col:?}");
+        assert_values_inside(&mut r, "edit mode at nav_width 180");
+        r.vcx
+            .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
+        draw(r.vcx);
 
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
@@ -1393,8 +1401,19 @@ mod sidebar {
         let value = prepared(&mut r, "net:eth0").value.expect("value");
         assert_eq!(&*value.text, "1023.9\u{a0}KiB/s");
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
-        // An edit-mode card at nav_width 180 is 96 px wide, less than the fixed 80 px graph and
-        // its inset and gap: it has no text column (open question for the leader).
+        // An edit-mode card at nav_width 180 is 96 px wide: it drops its graph, so the text keeps
+        // the whole inner width.
+        enter_edit(&mut r);
+        draw(r.vcx);
+        assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
+        let col = text_column(&mut r, "net:eth0");
+        assert!(col.size.width > px(40.), "edit text column {col:?}");
+        assert!(
+            r.vcx
+                .debug_bounds(sel("perf-card-graph:net:eth0".into()))
+                .is_none(),
+            "no graph on a narrow edit card"
+        );
     }
 
     /// Publishes one eth0 download series whose newest sample is `bps` bytes per second.

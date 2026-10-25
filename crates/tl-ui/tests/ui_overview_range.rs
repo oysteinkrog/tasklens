@@ -28,7 +28,9 @@ use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::overview::range::{
     HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id,
 };
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID};
+use tl_ui::pages::performance::overview::{
+    OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID, TITLE_ICON_ID,
+};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -407,6 +409,10 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     });
     draw(r.vcx);
     assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
+    assert!(
+        r.vcx.debug_bounds(TITLE_ICON_ID).is_some(),
+        "layout-grid icon before the title"
+    );
     assert!(r.vcx.debug_bounds(id).is_none(), "no status bar");
     click(r.vcx, header);
     for chart in box_charts(&mut r) {

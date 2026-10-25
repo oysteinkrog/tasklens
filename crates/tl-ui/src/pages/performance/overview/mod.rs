@@ -74,6 +74,7 @@ use super::sidebar::DeviceSidebar;
 use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{NetFormat, ValueFormat, format_value};
+use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
@@ -94,6 +95,9 @@ const KEY_TITLE: &str = "perf-overview-title";
 
 /// The debug selector of the Overview header row that holds the range switch.
 pub const RANGE_HEADER_ID: &str = "perf-overview-range-header";
+
+/// The debug selector of the layout-grid icon before the Overview page title.
+pub const TITLE_ICON_ID: &str = "perf-overview-title-icon";
 
 /// How long the pointer rests on a gap before its accent line shows.
 pub const SPLITTER_HOVER_DELAY: Duration = Duration::from_millis(150);
@@ -924,17 +928,38 @@ impl OverviewPage {
             return None;
         }
         let m = metrics(cx);
+        let theme = current(cx);
+        // The page title at the left, with the Lucide layout-grid icon in `text_secondary`.
+        let title = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(m.sp[3])
+            .child(
+                div()
+                    .debug_selector(|| TITLE_ICON_ID.into())
+                    .flex_none()
+                    .child(icon(TlIcon::LayoutGrid, m.icon.lg, theme.text_secondary)),
+            )
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(theme.text_primary)
+                    .child(self.header.0.clone()),
+            );
         Some(
             div()
                 .debug_selector(|| RANGE_HEADER_ID.into())
                 .flex()
                 .flex_row()
                 .flex_none()
-                .justify_end()
+                .justify_between()
                 .items_center()
                 .w_full()
                 .px(m.sp[5])
                 .pt(m.sp[4])
+                .child(title)
                 .child(range::range_switch(range::HEADER_SWITCH, cx))
                 .into_any_element(),
         )
