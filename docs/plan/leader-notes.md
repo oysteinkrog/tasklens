@@ -973,3 +973,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-25 D-033 (owner request): tasklens-crw.95 Overview sidebar icon for alignment, tasklens-crw.96 box gaps and inner splitters resize only in Edit Layout. Both queued.
 - 2026-10-25 crw.91 closed: stacked history charts draw band means (D-032 amended), everything else fixed.
 - 2026-10-25 D-034 spacing pass from the home screenshot: crw.95 rescoped (fixed sidebar graph size, no card icons), tasklens-crw.97 box chrome and padding, tasklens-crw.98 chart label rows. Reference images in ~/work/tasklens-ref/spacing.
+- 2026-10-25: crw.93 held twice (Delete, then Reset Layout during a drag restored old boxes). Decision: one end_drag called by every layout-changing action, regression test per action; requeued.
