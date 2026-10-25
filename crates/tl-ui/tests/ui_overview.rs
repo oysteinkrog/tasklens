@@ -6624,6 +6624,56 @@ mod page {
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), reset);
     }
 
+    /// Alt+Shift+Left during a title drag ends the drag: the held box goes back to its cells
+    /// and then shrinks one column, and a later move or release keeps that.
+    #[gpui_kit::test]
+    fn overview_edit_resize_key_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.bind_keys();
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| {
+            r.vcx.simulate_keystrokes("alt-shift-left");
+            draw(r.vcx);
+        });
+        let cpu = after.get(BoxKind::Cpu).expect("placed");
+        assert_eq!((cpu.col, cpu.row, cpu.cols, cpu.rows), (0, 0, 7, 7));
+        for kind in [BoxKind::Memory, BoxKind::Gpu, BoxKind::Disk, BoxKind::Net] {
+            assert_eq!(after.get(kind), before.get(kind), "{kind:?} stays");
+        }
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
+    }
+
+    /// Alt+Shift+Left on a focused box during a gap drag ends the gap drag: the shared edge
+    /// goes back, the box shrinks one column, and a later move or release keeps that.
+    #[gpui_kit::test]
+    fn overview_edit_resize_key_during_gap_drag(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Memory};
+        let mut r = open(cx, true, 1200., 900.);
+        r.bind_keys();
+        r.edit_layout();
+        // A quick click on the Disks title gives Disks focus.
+        let title = center(r.bounds_of(title_handle_id(Disk)));
+        r.press(title, 1);
+        r.release(title);
+        assert_eq!(cells(&mut r, Disk), (4, 7, 4, 6));
+        let start = center(r.gap("perf-overview-splitter-col-cpu"));
+        r.press(start, 1);
+        r.move_to(point(start.x - px(100.), start.y));
+        assert_eq!(cells(&mut r, Cpu), (0, 0, 7, 7));
+        r.vcx.simulate_keystrokes("alt-shift-left");
+        draw(r.vcx);
+        let after = r.layout();
+        assert_eq!(cells(&mut r, Cpu), (0, 0, 8, 7), "the gap drag ended");
+        assert_eq!(cells(&mut r, Memory), (8, 0, 4, 7));
+        assert_eq!(cells(&mut r, Disk), (4, 7, 3, 6), "the key acted");
+        r.move_to(point(start.x - px(300.), start.y));
+        assert_eq!(r.layout(), after, "a move after the key changes nothing");
+        r.release(point(start.x - px(300.), start.y));
+        assert_eq!(r.layout(), after, "the release changes nothing");
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
+    }
+
     /// UI-PRF-056: the bottom-right corner handle resizes in whole cells; a double-click sets
     /// the box to its kind minimum.
     #[gpui_kit::test]

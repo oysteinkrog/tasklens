@@ -537,7 +537,7 @@ impl OverviewPage {
         cx: &mut Context<Self>,
     ) {
         let target = self
-            .key_target(window)
+            .key_target(window, cx)
             .and_then(|k| moved_by(&self.layout, k, a.dx.into(), a.dy.into()));
         self.key_edit(target, cx);
     }
@@ -551,21 +551,21 @@ impl OverviewPage {
         cx: &mut Context<Self>,
     ) {
         let target = self
-            .key_target(window)
+            .key_target(window, cx)
             .and_then(|k| grown_by(&self.layout, k, a.dw.into(), a.dh.into()));
         self.key_edit(target, cx);
     }
 
-    /// The focused box for a move or resize key: none in the stacked layout or during a drag.
-    fn key_target(&mut self, window: &Window) -> Option<BoxKind> {
-        let stacked = self.placement.stacked;
-        let edit = self.edit.as_mut()?;
-        if stacked || edit.drag.as_ref().is_some_and(|d| d.target.is_some()) {
+    /// The focused box for a move or resize key, none in the stacked layout. A box drag or a
+    /// gap drag in progress ends without a change first, so the key acts on the boxes as they
+    /// were at the press and a later move or release cannot undo it.
+    fn key_target(&mut self, window: &Window, cx: &mut App) -> Option<BoxKind> {
+        if self.placement.stacked {
             return None;
         }
-        // A press that has not moved is a click, not a drag.
-        edit.drag = None;
-        edit.focused(window)
+        let kind = self.edit.as_ref()?.focused(window)?;
+        self.end_drag(cx);
+        Some(kind)
     }
 
     /// Puts a box on `target`'s cells and saves.
