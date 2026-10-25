@@ -4,10 +4,15 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-25
 
-### D-033 Overview sidebar icon, and resizing only in Edit Layout
+### D-034 Performance tab spacing pass
 
-- **Decision** (owner request 2026-10-25): the Overview sidebar card gets an icon (Lucide `layout-grid`, `text_secondary`), so its text lines up with the device cards. The gaps between Overview boxes and the splitters inside boxes resize only in Edit Layout; outside it they do nothing.
-- **Why**: the Overview card had no icon, so its text started further left than every card under it. Resizing on every gap made it easy to change the layout by accident.
+- **Decision** (owner request 2026-10-25): tidy the Performance tab's margins and alignment as UI-PRF-059 sets out. Box titles move inside the border, box padding is equal on both sides, chart labels get their own rows, overflowing lists show whole rows only, and sidebar card text shares one left edge and never splits a value from its unit.
+- **Why**: on the home PC at 1920 × 1200 the tick labels sat on the chart data, "Power draw" overlapped its scale label, the box title tabs broke the border, padding was 12 px on the left and 24 px on the right, and sidebar text split "55 °C" across lines. A GPT Image mockup and a Codex review of the screenshot agreed on these points.
+
+### D-033 Sidebar cards without icons, and resizing only in Edit Layout
+
+- **Decision** (owner requests 2026-10-25): sidebar cards have no device icon column, and every card's graph has one fixed size (UI-PRF-059), so the Overview card's text lines up with the device cards. The gaps between Overview boxes and the splitters inside boxes resize only in Edit Layout; outside it they do nothing.
+- **Why**: the Overview card had no icon, so its text started further left than every card under it, and the graphs had different widths. The icons repeat what the graph colour already shows. Resizing on every gap made it easy to change the layout by accident.
 - **Not changed**: the splitter between the sidebar and the page keeps working at all times.
 
 ### D-032 Network range figures on history ranges

@@ -671,7 +671,7 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 ### UI-PRF-058 Performance tab visual polish
 
 - **Implements**: D-030. Applies to the Overview boxes, every device page header and the sidebar cards.
-- **Icons**: a 20 px device icon left of each box title and page title, and 16 px on sidebar cards: `cpu`, `memory-stick`, `gpu-card`, `hard-drive`, `network`, `fan`, `battery` (Lucide where it has one, else an app SVG), tinted in the device graph colour. The Overview sidebar card and the Overview page title get Lucide `layout-grid` in `text_secondary`, so the Overview card's heading and lines start at the same x as every device card's (D-033).
+- **Icons**: a 20 px device icon left of each box title and page title, and 16 px on sidebar cards: `cpu`, `memory-stick`, `gpu-card`, `hard-drive`, `network`, `fan`, `battery` (Lucide where it has one, else an app SVG), tinted in the device graph colour. Sidebar cards have no icon (D-033): the graph colour marks the device. The Overview page title gets Lucide `layout-grid` in `text_secondary`.
 - **Title values**: the main value at the right of a box title and of a page header uses `t_lg` (16 px) 600 `tnum`, up from the `t_md` 400 of UI-PRF-017 (`t_xl` stays reserved, UI-FND-003); the secondary line (`3500 MHz · 78 °C`) stays `t_sm`. The 24 px box title line still holds a 16 px line at line height 1.3 (21 px).
 - **Depth and glow**: boxes get the menu-level shadow of UI-FND-003 (`BoxShadow { offset (0, 2), blur 8, spread 0, color derived.shadow }`, so it scales with `appearance.shadow_intensity_pct` and is not drawn at 0) and a 1 px inner highlight; a radial glow in the device colour at 6% behind each chart's last 10% of width; the newest data point gets a 4 px dot in the line colour with a 2 px halo at 30%. The glow and the halo drop under reduced motion (`App::reduce_motion()` or `motion.animations = false`); the dot stays.
 - **Legends and ticks**: the CPU total chart gets a legend under it ("Total" line colour, "Kernel" dashed); every chart wide enough (≥ 320 px) gets x ticks at quarter points of the range ("45 s", "30 s", "15 s" or "45 m", "30 m", "15 m" and so on) and y ticks at 25% steps for percent scales.
@@ -681,6 +681,19 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 ---
 
 ## Part C: device pages
+
+### UI-PRF-059 Performance tab spacing pass
+
+- **Implements**: D-034 (owner request 2026-10-25, from a screenshot of 1.0.5 at 1920 × 1200 and a GPT Image mockup). Changes UI-PRF-017 (box frame), UI-PRF-011 (card text) and UI-PRF-058. Reference images (kept out of the repo because they show the owner's disks): `~/work/tasklens-ref/spacing/spacing-before.png` and `spacing-mockup.png`; the mockup shows the direction, not exact pixels.
+- **Box title inside the box**: the title tab of UI-PRF-017 goes. The 24 px title line sits inside the border, `sp4` below the top border, with the icon, title, summary and value on one row; the border is unbroken.
+- **Box padding**: body padding is 12 px on the left and the right (the right side measured 24 px in 1.0.5), and 12 px at the bottom. Gaps between boxes stay `sp3`.
+- **Status row**: the status bar's first item starts at the same x as the boxes' left border.
+- **Chart label rows**: every Overview chart with x ticks reserves an 18 px row below the plot for them; ticks never draw over data. A chart with a title or a scale label (the "100%" or "100 W" corner label) reserves a 20 px row above the plot for both, title left and scale label right, so they never overlap. Charts too short for both rows drop the ticks first, then the scale label.
+- **Lists that overflow**: the Disks box (and any box list with "+n more") shows only whole rows; a row that would be cut moves into the "+n more" count.
+- **CPU core rows**: 18 px apart, with a 16 px gutter between the total chart and the core list.
+- **Sidebar cards**: every card, the Overview card included, draws its graph at one fixed size, 80 × 48 px, whatever the card height or `nav_width`; a card without a graph keeps an empty 80 px slot so text still lines up. No card has a device icon (D-033). The text starts 10 px after the graph, at the same x on every card. Vertical padding 8 px. A value never breaks from its unit or across " · ": the number and unit are joined by a no-break space (U+00A0), and a line wraps only at " · " or between words of a name. The Overview card's line 1 is "CPU · Memory · GPU · Disk · Network", so it wraps at the separators instead of being cut in the middle.
+- **Tests**: `overview_box_title_inside_border`, `overview_box_padding_equal`, `status_row_aligned_with_boxes`, `chart_ticks_in_own_row` (no tick label rectangle intersects the plot), `chart_title_and_scale_label_disjoint`, `box_list_shows_whole_rows`, `card_value_unit_not_split`, `card_text_left_edge_shared`, plus updated Overview goldens at 1920 × 1200 and 1280 × 800 in both themes. Each bead checks the result on the hidden display and attaches a screenshot.
+- **Phase**: P2.
 
 ### UI-PRF-020 Device page frame
 
