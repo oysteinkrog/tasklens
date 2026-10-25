@@ -237,6 +237,21 @@ fn box_charts(r: &mut Rig) -> Vec<Entity<ChartView>> {
     })
 }
 
+/// One chart that each device box draws in its default mode: CPU, Memory, Disk, Network. The
+/// GPU box's default mode draws one chart per engine, and the fixture GPU has no engines.
+fn drawn_charts(r: &mut Rig) -> Vec<Entity<ChartView>> {
+    let page = overview(r);
+    r.vcx.update(|_, cx| {
+        let page = page.read(cx);
+        vec![
+            page.cpu_box().read(cx).total_chart().clone(),
+            page.mem_box().read(cx).sparks()[0].clone(),
+            page.disk_box().read(cx).rows()[0].pair_chart.clone(),
+            page.net_box().read(cx).down_chart().clone(),
+        ]
+    })
+}
+
 /// The range text of each device box: CPU, Memory, GPU, Disk, Network.
 fn range_texts(r: &mut Rig) -> Vec<RangeText> {
     let page = overview(r);
@@ -594,14 +609,9 @@ fn overview_range_boot_marker(cx: &mut TestAppContext) {
         ],
         &[now - 300 * MIN],
     );
-    for (i, chart) in box_charts(&mut r).into_iter().enumerate() {
-        // The GPU box's default mode draws one chart per engine, and this GPU has no engines,
-        // so its section chart is not drawn.
-        if i == 2 {
-            continue;
-        }
+    for (i, chart) in drawn_charts(&mut r).into_iter().enumerate() {
         let marks = r.vcx.read_entity(&chart, |c, _| c.last_boot_marks.get());
-        assert_eq!(marks, 1, "one boot marker on box chart {i}");
+        assert_eq!(marks, 1, "one boot marker on drawn chart {i}");
     }
     set_range(&mut r, OverviewRange::M1);
     draw(r.vcx);
