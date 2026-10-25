@@ -10,7 +10,8 @@
 //! [`procs_box`] is the opt-in Top processes box: it is built only while the layout places it,
 //! and only then does the page ask for the process sweep (`process_top`). The boxes sit on the
 //! snap grid of UI-PRF-056. [`splitter`] moves the shared edge of two boxes by dragging the gap
-//! between them; [`edit`] is Edit Layout mode, which hides and adds boxes. Each box has layout
+//! between them; [`edit`] is Edit Layout mode, which moves, resizes, hides and adds boxes. Each
+//! box has layout
 //! modes (UI-PRF-019): [`box_menu`] is the box menu and the Edit Layout gear, and
 //! [`inner_split`] is the one splitter a mode with two parts uses.
 //!
@@ -527,7 +528,7 @@ impl OverviewPage {
             self.bar_on_overview = bar_on_overview;
             self.notify(cx);
         }
-        if self.drag.is_some() {
+        if self.drag.is_some() || self.box_drag().is_some() {
             return;
         }
         let unit = row_unit(cx);
@@ -1066,6 +1067,8 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_reset_layout))
             .on_action(cx.listener(Self::on_add_box))
             .on_action(cx.listener(Self::on_hide_box))
+            .on_action(cx.listener(Self::on_move_box))
+            .on_action(cx.listener(Self::on_resize_box))
             .on_action(cx.listener(Self::on_set_box_mode))
             .on_action(cx.listener(Self::on_set_box_arrange))
             .on_action(cx.listener(Self::on_set_box_power))
@@ -1087,6 +1090,7 @@ impl Render for OverviewPage {
         let this = cx.entity().downgrade();
         let this_move = this.clone();
         let dragging = self.drag.is_some();
+        let box_dragging = self.box_drag().is_some();
         let measure = canvas(
             move |bounds, _, cx| {
                 // After the frame: a notify during the frame is lost, so the page would keep
@@ -1097,37 +1101,49 @@ impl Render for OverviewPage {
                 });
             },
             move |_, _, window, _| {
-                if !dragging {
+                if !dragging && !box_dragging {
                     return;
                 }
-                // The held gap follows the pointer wherever it goes.
+                // The held gap, title line or corner follows the pointer wherever it goes.
                 let moved = this_move.clone();
                 window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
                     if !phase.bubble() {
                         return;
                     }
                     let _ = moved.update(cx, |p, cx| {
-                        if e.pressed_button == Some(MouseButton::Left) {
-                            p.splitter_move(e.position, cx);
-                        } else {
-                            p.splitter_up(cx);
+                        match (e.pressed_button == Some(MouseButton::Left), box_dragging) {
+                            (true, false) => p.splitter_move(e.position, cx),
+                            (false, false) => p.splitter_up(cx),
+                            (true, true) => p.box_drag_move(e.position, cx),
+                            (false, true) => p.box_drag_up(e.position, cx),
                         }
                     });
                 });
                 let released = this_move.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
                     if phase.bubble() {
-                        let _ = released.update(cx, |p, cx| p.splitter_up(cx));
+                        let _ = released.update(cx, |p, cx| {
+                            if box_dragging {
+                                p.box_drag_up(e.position, cx);
+                            } else {
+                                p.splitter_up(cx);
+                            }
+                        });
                     }
                 });
             },
         )
         .absolute()
         .inset_0();
-        let gaps: SmallVec<[AnyElement; 8]> = splitters(&self.layout, &self.placement)
-            .into_iter()
-            .map(|s| self.gap_element(s, cx))
-            .collect();
+        // A box drag moves the boxes under the pointer, so the gaps are not splitters then.
+        let gaps: SmallVec<[AnyElement; 8]> = if box_dragging {
+            SmallVec::new()
+        } else {
+            splitters(&self.layout, &self.placement)
+                .into_iter()
+                .map(|s| self.gap_element(s, cx))
+                .collect()
+        };
         let boxes: SmallVec<[AnyElement; 8]> = self
             .placement
             .boxes

@@ -698,6 +698,11 @@ impl GridMetrics {
         f32::from(rows) * self.unit + f32::from(rows.saturating_sub(1)) * self.gutter
     }
 
+    /// The bounds of `b`'s cells, every edge rounded to a whole px.
+    pub fn bounds(&self, b: GridBox) -> Bounds<Pixels> {
+        snapped(self.x(b.col), self.y(b.row), self.w(b.cols), self.h(b.rows))
+    }
+
     /// `kind`'s smallest span (UI-PRF-056): `max(3, ceil(min_w / cw))` columns, at most 12, and
     /// `max(4, ceil(min_h / unit))` rows.
     pub fn min_span(&self, kind: BoxKind) -> (u16, u16) {
@@ -791,7 +796,7 @@ pub fn place(
 
     let mut bottom: f32 = 0.;
     for b in &shown {
-        let bounds = snapped(grid.x(b.col), grid.y(b.row), grid.w(b.cols), grid.h(b.rows));
+        let bounds = grid.bounds(*b);
         bottom = bottom.max(f32::from(bounds.bottom()));
         placement.boxes.push(PlacedBox {
             kind: b.kind,

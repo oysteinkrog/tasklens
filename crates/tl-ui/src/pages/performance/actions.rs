@@ -75,8 +75,7 @@ pub struct PerfOverviewAddBox {
     pub kind: Arc<str>,
 }
 
-/// Moves the focused Overview box one slot left or right (`dx`), or to the row above or below
-/// (`dy`).
+/// Moves the focused Overview box one grid cell left or right (`dx`), or up or down (`dy`).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]
@@ -85,7 +84,8 @@ pub struct PerfOverviewMoveBox {
     pub dy: i8,
 }
 
-/// Shrinks (−1) or grows (1) the focused Overview box's width (`dw`) or row height (`dh`).
+/// Shrinks (−1) or grows (1) the focused Overview box by one grid cell at its right edge (`dw`)
+/// or bottom edge (`dh`).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]

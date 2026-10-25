@@ -3029,7 +3029,9 @@ mod page {
         CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, POWER_SPLITTER_ID,
         POWER_STRIP_ID, core_chart_id,
     };
-    use tl_ui::pages::performance::overview::edit::{TOOLBAR_ID, hide_button_id, title_handle_id};
+    use tl_ui::pages::performance::overview::edit::{
+        GHOST_ID, TOOLBAR_ID, corner_id, hide_button_id, title_handle_id,
+    };
     use tl_ui::pages::performance::overview::layout::{
         Arrange, BoxKind, GridBox, OverviewLayout, ROW_UNIT_DEFAULT, place,
     };
@@ -6363,6 +6365,147 @@ mod page {
         // The boxes are back at the page top.
         let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
         assert_eq!(f32::from(cpu.top()), 16.);
+    }
+
+    /// UI-PRF-056: a box moves by its title line in whole cells. The ghost outline shows the
+    /// target cells, the other boxes make room while the button is down, and the layout is
+    /// saved when it goes up, at the cells under the pointer then.
+    #[gpui_kit::test]
+    fn overview_edit_drag_moves_box_with_ghost(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let from = center(r.bounds_of(title_handle_id(Cpu)));
+        r.press(from, 1);
+        assert!(
+            r.vcx.debug_bounds(GHOST_ID).is_none(),
+            "no ghost before a move"
+        );
+        // 150 px is 3 rows of 46 px: CPU at row 3, GPU and Disk pushed below it.
+        r.move_to(point(from.x, from.y + px(150.)));
+        assert_eq!(cells(&mut r, Cpu), (0, 3, 8, 7));
+        assert_eq!(cells(&mut r, Gpu), (0, 10, 4, 6));
+        let ghost = r.vcx.debug_bounds(GHOST_ID).expect("ghost");
+        assert_eq!(ghost, r.vcx.debug_bounds(box_id(Cpu)).expect("cpu"));
+        assert_eq!(r.saved(), None, "nothing is saved during the drag");
+        // The button goes up 6 rows down, past the last move: GPU and Disk close up into
+        // CPU's space and CPU goes under them.
+        r.release(point(from.x, from.y + px(276.)));
+        assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
+        assert_eq!(cells(&mut r, Gpu), (0, 0, 4, 6));
+        assert_eq!(cells(&mut r, Disk), (4, 0, 4, 6));
+        assert_eq!(cells(&mut r, Cpu), (0, 6, 8, 7));
+        assert_eq!(cells(&mut r, Memory), (8, 0, 4, 7));
+        assert_eq!(cells(&mut r, Net), (8, 7, 4, 6));
+        assert_eq!(r.layout().validate(), Ok(()));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        assert!(r.editing(), "the mode stays on");
+        let gpu = r.vcx.debug_bounds(box_id(Gpu)).expect("gpu");
+        let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
+        assert_eq!(cpu.top() - gpu.bottom(), px(6.));
+
+        // Esc during a drag leaves the mode and puts the boxes back.
+        r.vcx.update(|_, cx| {
+            tl_ui::actions::bind_keys_global(cx);
+            bind_keys_performance(cx);
+        });
+        let saved = r.saved();
+        let before = r.layout();
+        let from = center(r.bounds_of(title_handle_id(Net)));
+        r.press(from, 1);
+        r.move_to(point(from.x - px(400.), from.y));
+        assert_eq!(cells(&mut r, Net).0, 4);
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        r.release(point(from.x - px(400.), from.y));
+        assert!(!r.editing());
+        assert_eq!(r.layout(), before);
+        assert_eq!(r.saved(), saved);
+    }
+
+    /// UI-PRF-056: the bottom-right corner handle resizes in whole cells; a double-click sets
+    /// the box to its kind minimum.
+    #[gpui_kit::test]
+    fn overview_edit_corner_resizes_box(cx: &mut TestAppContext) {
+        use BoxKind::{Disk, Net};
+        let mut r = open(cx, true, 1200., 900.);
+        assert!(r.vcx.debug_bounds("perf-overview-corner-net").is_none());
+        r.edit_layout();
+        let net = r.vcx.debug_bounds(box_id(Net)).expect("net");
+        let corner = r.bounds_of(corner_id(Net));
+        assert_eq!(
+            (corner.right(), corner.bottom()),
+            (net.right(), net.bottom())
+        );
+        assert_eq!(f32::from(corner.size.width), 12.);
+        // Down 1.1 rows and left 1.5 columns: one more row and two fewer columns, at the
+        // kind minimum of 3 columns.
+        let from = center(corner);
+        r.press(from, 1);
+        r.move_to(point(from.x, from.y + px(20.)));
+        assert_eq!(cells(&mut r, Net), (8, 7, 4, 6), "under half a cell");
+        r.move_to(point(from.x - px(147.), from.y + px(50.)));
+        assert_eq!(cells(&mut r, Net), (8, 7, 3, 7));
+        assert_eq!(r.saved(), None);
+        r.release(point(from.x - px(147.), from.y + px(50.)));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        let net = r.vcx.debug_bounds(box_id(Net)).expect("net");
+        assert_eq!(f32::from(net.size.height), 7. * 40. + 6. * 6.);
+        // A double-click on the corner sets the kind minimum, 3 × 6 at 1200 px, and saves.
+        let at = center(r.bounds_of(corner_id(Net)));
+        r.press(at, 2);
+        r.release(at);
+        assert_eq!(cells(&mut r, Net), (8, 7, 3, 6));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        assert_eq!(cells(&mut r, Disk), (4, 7, 4, 6), "Disk keeps its cells");
+    }
+
+    /// UI-PRF-056: with a box focused, Alt+arrow keys move it one cell and Alt+Shift+arrow
+    /// keys grow or shrink it one cell at its right or bottom edge.
+    #[gpui_kit::test]
+    fn overview_edit_keys_move_and_resize(cx: &mut TestAppContext) {
+        use BoxKind::{Disk, Gpu};
+        let mut r = open(cx, true, 1200., 900.);
+        r.vcx.update(|_, cx| {
+            tl_ui::actions::bind_keys_global(cx);
+            bind_keys_performance(cx);
+        });
+        r.edit_layout();
+        let title = center(r.bounds_of(title_handle_id(Disk)));
+        r.press(title, 1);
+        r.release(title);
+        // Disk one column left onto GPU's last column: GPU moves down below it.
+        r.vcx.simulate_keystrokes("alt-left");
+        draw(r.vcx);
+        assert_eq!(cells(&mut r, Disk), (3, 7, 4, 6));
+        assert_eq!(cells(&mut r, Gpu), (0, 13, 4, 6));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        r.vcx.simulate_keystrokes("alt-shift-down");
+        draw(r.vcx);
+        assert_eq!(cells(&mut r, Disk), (3, 7, 4, 7));
+        assert_eq!(cells(&mut r, Gpu), (0, 14, 4, 6));
+        // Shrinking stops at the kind minimum of 3 columns.
+        r.vcx.simulate_keystrokes("alt-shift-left");
+        r.vcx.simulate_keystrokes("alt-shift-left");
+        draw(r.vcx);
+        assert_eq!(cells(&mut r, Disk), (3, 7, 3, 7));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        assert_eq!(r.layout().validate(), Ok(()));
+    }
+
+    /// The stacked layout below 720 px has no resize handles, and a title drag moves nothing.
+    #[gpui_kit::test]
+    fn overview_edit_stacked_has_no_box_drags(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 600., 900.);
+        r.edit_layout();
+        assert!(r.vcx.debug_bounds("perf-overview-corner-cpu").is_none());
+        let from = center(r.bounds_of(title_handle_id(BoxKind::Net)));
+        r.press(from, 1);
+        r.move_to(point(from.x, from.y - px(600.)));
+        r.release(point(from.x, from.y - px(600.)));
+        assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
+        assert_eq!(r.layout(), OverviewLayout::grid_default());
+        assert_eq!(r.saved(), None);
     }
 
     #[gpui_kit::test]
