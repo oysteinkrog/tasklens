@@ -51,24 +51,19 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
-/// Mini graph width, × ui_scale. A card too narrow to hold it and the widest value makes the
-/// graph narrower ([`card_graph_width`]).
-pub const CARD_GRAPH_W: f32 = 116.0;
-/// Narrowest mini graph, × ui_scale. With less room the card draws no graph and the text
-/// column takes the whole card.
-const CARD_GRAPH_MIN_W: f32 = 40.0;
-/// Narrowest text column the graph leaves, × ui_scale, when the card's values are narrower. It
-/// holds a whole heading word such as "Aggregate".
-const CARD_TEXT_MIN_W: f32 = 80.0;
+/// Mini graph width, × ui_scale. Every card draws its graph at this size (UI-PRF-059).
+pub const CARD_GRAPH_W: f32 = 80.0;
 /// Mini graph height, × ui_scale.
-pub const CARD_GRAPH_H: f32 = 56.0;
+pub const CARD_GRAPH_H: f32 = 48.0;
+/// Gap between the graph and the text column, × ui_scale (UI-PRF-059).
+const CARD_TEXT_GAP: f32 = 10.0;
 
 /// Heading line height, × ui_scale.
 const HEADING_LINE_H: f32 = 18.0;
 /// Line 1 and line 2 height, × ui_scale.
 const DETAIL_LINE_H: f32 = 16.0;
-/// Space above and below the text column, × ui_scale (sp2).
-const TEXT_PAD_Y: f32 = 4.0;
+/// Space above and below the text column, × ui_scale (UI-PRF-059).
+const TEXT_PAD_Y: f32 = 8.0;
 /// Width of the sidebar's edit button, a 24 px `TlButton` sm, × ui_scale. It sits over the top
 /// card's top right corner, so that card keeps a column this wide plus sp3 free at its right.
 const EDIT_BUTTON_W: f32 = 24.0;
@@ -81,8 +76,10 @@ const DIM_OPACITY: f32 = 0.6;
 const PRESSED_ALPHA: f32 = 0.6;
 const FOCUS_RING_ALPHA: f32 = 0.5;
 
-/// Between two values on one line.
-const SEP: &str = " · ";
+/// Between two values on one line. A line wraps after the dot, so a row never starts with it.
+const SEP: &str = "\u{a0}· ";
+/// Between a number and its unit: a value never breaks across it (UI-PRF-059).
+const NBSP: char = '\u{a0}';
 /// Between the disk kind and its mount.
 const KIND_SEP: &str = " - ";
 // The arrows of the two-rate network line, each with a no-break space after it.
@@ -367,10 +364,47 @@ fn value(
     write: impl FnOnce(&mut String),
 ) {
     match validity {
-        Validity::Valid | Validity::Stale => write(out),
+        Validity::Valid | Validity::Stale => {
+            let start = out.len();
+            write(out);
+            glue_units(out, start);
+        }
         Validity::Restricted => locks.push(u16::try_from(out.len()).unwrap_or(u16::MAX)),
         other => out.push_str(&copy_text(other, &SharedString::default())),
     }
+}
+
+/// Turns the space between a number and its unit in `out[start..]` into a no-break space, so a
+/// card line never wraps inside "55 °C" or "3901 MHz" (UI-PRF-059).
+fn glue_units(out: &mut String, start: usize) {
+    let tail = &out[start..];
+    let mut glued = String::new();
+    let mut prev = None;
+    let mut chars = tail.chars().peekable();
+    let mut changed = false;
+    while let Some(c) = chars.next() {
+        let after_digit = prev.is_some_and(|p: char| p.is_ascii_digit());
+        let before_unit = chars.peek().is_some_and(|n| n.is_alphabetic() || *n == '°');
+        if c == ' ' && after_digit && before_unit {
+            glued.push(NBSP);
+            changed = true;
+        } else {
+            glued.push(c);
+        }
+        prev = Some(c);
+    }
+    if changed {
+        out.truncate(start);
+        out.push_str(&glued);
+    }
+}
+
+/// Splits a value text at the no-break space (or the plain space of a template) into the number
+/// and the unit.
+fn split_value(text: &str) -> Option<(&str, &str)> {
+    let at = text.rfind([NBSP, ' '])?;
+    let sep = text[at..].chars().next()?;
+    Some((&text[..at], &text[at + sep.len_utf8()..]))
 }
 
 /// An optional part such as a temperature: left out when there is no sensor (Unsupported) or no
@@ -429,7 +463,7 @@ fn write_line1(input: &CardTextInput, out: &mut String, locks: &mut LockOffsets)
     let entry = input.entry;
     let w = input.words;
     match input.kind {
-        DeviceKind::Overview => out.push_str(&w.overview_line1),
+        DeviceKind::Overview => out.push_str(&w.overview_line1.replace(" · ", SEP)),
         DeviceKind::Cpu => {
             let p = &snap.inventory.processor.name;
             out.push_str(shown(&p.value, p.validity).unwrap_or(&*w.unknown_processor));
@@ -921,45 +955,11 @@ impl CardTextLayout {
     }
 }
 
-/// The width the device icon takes at the left of a card (UI-PRF-058): the 16 px icon and the
-/// card's sp4 gap after it. Zero for the Overview card, which has no icon.
-pub fn card_icon_column(key: &DeviceKey, m: &UiMetrics) -> Pixels {
-    if key.kind().icon().is_some() {
-        m.icon.md + m.sp[4]
-    } else {
-        Pixels::ZERO
-    }
-}
-
-/// The text column the graph must leave: the widest value, and at least [`CARD_TEXT_MIN_W`].
-pub fn card_text_floor(value_w: Pixels, m: &UiMetrics) -> Pixels {
-    value_w.max(px(CARD_TEXT_MIN_W * m.ui_scale))
-}
-
-/// The mini graph width of a card `card_w` wide: [`CARD_GRAPH_W`], or less so that the text
-/// column is at least `text_min` (the card's widest value) wide. Zero, no graph, when less than
-/// [`CARD_GRAPH_MIN_W`] is left.
-pub fn card_graph_width(card_w: Pixels, text_min: Pixels, m: &UiMetrics) -> Pixels {
+/// The text column width of a card `card_w` wide: less the 1 px border on both sides, the sp5
+/// inset, and the fixed graph with its gap (UI-PRF-059).
+pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
     let s = m.ui_scale;
-    let room = card_w - px(2.0 * s) - m.sp[5] - m.sp[4] - text_min;
-    let w = room.min(px(CARD_GRAPH_W * s));
-    if w < px(CARD_GRAPH_MIN_W * s) {
-        Pixels::ZERO
-    } else {
-        w
-    }
-}
-
-/// The text column width of a card `card_w` wide with a `graph_w` graph: less the 1 px border
-/// on both sides, the sp5 inset, and the graph with the sp4 gap after it.
-pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels {
-    let s = m.ui_scale;
-    let graph = if graph_w > Pixels::ZERO {
-        graph_w + m.sp[4]
-    } else {
-        Pixels::ZERO
-    };
-    (card_w - px(2.0 * s) - m.sp[5] - graph).max(Pixels::ZERO)
+    (card_w - px(2.0 * s) - m.sp[5] - px((CARD_GRAPH_W + CARD_TEXT_GAP) * s)).max(Pixels::ZERO)
 }
 
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
@@ -1262,6 +1262,7 @@ impl CardValue {
             Validity::Valid | Validity::Stale => {
                 let mut out = String::new();
                 format_value(fmt, v, net, &mut out);
+                glue_units(&mut out, 0);
                 SharedString::from(out)
             }
             Validity::Restricted => SharedString::default(),
@@ -1346,11 +1347,6 @@ pub struct CardPrepared {
     pub layout: CardTextLayout,
     pub value: Option<CardValue>,
     pub height: Pixels,
-    /// The mini graph width, zero when the card has no room for one ([`card_graph_width`]).
-    pub graph_w: Pixels,
-    /// Whether the card draws its device icon: every device card does, unless the value would
-    /// not fit next to it. The Overview card has none.
-    pub icon: bool,
     /// The column the top card leaves free at its right for the sidebar's edit button.
     pub clear: Pixels,
 }
@@ -1667,7 +1663,7 @@ impl DeviceCard {
             // The narrowest the value can be drawn: its widest part when it splits into number
             // and unit rows.
             let value_min_w = value.as_ref().map_or(Pixels::ZERO, |v| {
-                let mut part_w = |t: &str| match t.rsplit_once(' ') {
+                let mut part_w = |t: &str| match split_value(t) {
                     Some((number, unit)) => {
                         measure(CardFont::Value, number).max(measure(CardFont::Value, unit))
                     }
@@ -1679,46 +1675,20 @@ impl DeviceCard {
                     .fold(part_w(&v.text), |w, t| w.max(part_w(t)));
                 px(f32::from(w).ceil())
             });
-            // Every device card shows its icon (UI-PRF-058); on a narrow card the graph gives
-            // way first, down to none (UI-PRF-011). Only a card too narrow for the value next to
-            // the icon even without a graph, below the least nav_width, drops the icon: a value is
-            // never cut.
-            let floor = card_text_floor(value_w, &m);
-            let icon_w = card_icon_column(&self.key, &m);
-            let icon = icon_w > Pixels::ZERO
-                && card_text_width(self.width - icon_w, Pixels::ZERO, &m) >= value_min_w;
-            let inner_w = if icon {
-                self.width - icon_w
-            } else {
-                self.width
-            };
-            // The top card leaves the edit button's column free, as if the button were part of
-            // the card, unless the value would then not fit (again below the least nav_width).
+            // The graph has one fixed size (UI-PRF-059). The top card leaves the edit button's
+            // column free, as if the button were part of the card, unless the value would then
+            // not fit (at the least nav_width).
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
-            let clear = if top && card_text_width(inner_w - edit_w, Pixels::ZERO, &m) >= value_min_w
-            {
+            let clear = if top && card_text_width(self.width - edit_w, &m) >= value_min_w {
                 edit_w
             } else {
                 Pixels::ZERO
             };
-            let inner_w = inner_w - clear;
-            // On a card with the icon, the graph narrows so the value stays in the heading row
-            // when it can, rather than taking a row of its own and growing the card. The Overview
-            // card has no icon and keeps its value row.
-            let inline_floor = card_text_floor(
-                px(f32::from(measure(CardFont::Heading, &self.lines.heading)).ceil())
-                    + m.sp[3]
-                    + value_w,
-                &m,
-            );
-            let graph_w = match card_graph_width(inner_w, inline_floor, &m) {
-                w if icon && w > Pixels::ZERO && value_w > Pixels::ZERO => w,
-                _ => card_graph_width(inner_w, floor, &m),
-            };
+            let inner_w = self.width - clear;
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
-                card_text_width(inner_w, graph_w, &m),
+                card_text_width(inner_w, &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1728,8 +1698,6 @@ impl DeviceCard {
                 layout,
                 value,
                 height,
-                graph_w,
-                icon,
                 clear,
             });
         }
@@ -1751,13 +1719,10 @@ impl RenderOnce for DeviceCard {
             layout,
             value,
             height,
-            graph_w,
-            icon: show_icon,
             clear,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
-        let icon_kind = key.kind();
         let cursor = if self.pointer {
             CursorStyle::PointingHand
         } else {
@@ -1796,7 +1761,7 @@ impl RenderOnce for DeviceCard {
         if let Some(v) = value.as_ref().filter(|_| !layout.value_inline) {
             // Split at the last space: the number on the first row, the unit on the second. A
             // text with no space (a glyph word, the lock) stays on the first row.
-            let parts = match v.text.rsplit_once(' ').filter(|_| layout.value_split) {
+            let parts = match split_value(&v.text).filter(|_| layout.value_split) {
                 Some((number, unit)) => [
                     Some(SharedString::from(number.to_owned())),
                     Some(SharedString::from(unit.to_owned())),
@@ -1858,17 +1823,13 @@ impl RenderOnce for DeviceCard {
             text = HoverTooltip::attach(&state, text, DELAY_CONTROL, content.build(), window, cx);
         }
 
-        // A card with no room for a graph keeps the chart mounted, 0 px wide, out of the row and
-        // unpainted. The chart's notify then still reaches the cached card, so the value updates.
-        let mut graph = div()
-            .debug_selector(|| "perf-card-graph".into())
+        let graph_key = key.0.clone();
+        let graph = div()
+            .debug_selector(move || format!("perf-card-graph:{graph_key}"))
             .flex_none()
-            .w(graph_w)
+            .w(px(CARD_GRAPH_W * s))
             .h(px(CARD_GRAPH_H * s))
             .child(self.chart.cached(StyleRefinement::default().size_full()));
-        if graph_w == Pixels::ZERO {
-            graph = graph.absolute().invisible();
-        }
 
         let pressed = theme.row_selected.opacity(PRESSED_ALPHA);
         let hover = theme.row_hover;
@@ -1881,7 +1842,7 @@ impl RenderOnce for DeviceCard {
             .h(height)
             .pl(m.sp[5])
             .pr(clear)
-            .gap(m.sp[4])
+            .gap(px(CARD_TEXT_GAP * s))
             .bg(theme.list_bg)
             .border(px(s))
             .border_color(theme.divider)
@@ -1892,12 +1853,6 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .children(icon_kind.icon().filter(|_| show_icon).map(|name| {
-                div()
-                    .debug_selector(|| "perf-card-icon".into())
-                    .flex_none()
-                    .child(icon(name, m.icon.md, icon_kind.icon_color(&theme)))
-            }))
             .child(graph)
             .child(text);
         if opacity < 1.0 {
@@ -2133,7 +2088,11 @@ mod tests {
         let l = lines(&input(DeviceKind::Overview, &cpu, &s));
         assert_eq!(
             strs(&l),
-            ("Overview", "CPU, memory, GPU, disk, network", "")
+            (
+                "Overview",
+                "CPU\u{a0}· Memory\u{a0}· GPU\u{a0}· Disk\u{a0}· Network",
+                ""
+            )
         );
     }
 
@@ -2153,7 +2112,7 @@ mod tests {
             (
                 "CPU",
                 "AMD Ryzen 7 7800X3D 8-Core Processor",
-                "4631 MHz · 52 °C"
+                "4631\u{a0}MHz\u{a0}· 52\u{a0}°C"
             )
         );
         assert!(!l.line2_accent && !l.disconnected);
@@ -2169,7 +2128,10 @@ mod tests {
             inv.clone(),
             DeviceDetailsSnapshot::default(),
         );
-        assert_eq!(lines(&input(DeviceKind::Cpu, &cpu, &s)).line2, "4631 MHz");
+        assert_eq!(
+            lines(&input(DeviceKind::Cpu, &cpu, &s)).line2,
+            "4631\u{a0}MHz"
+        );
 
         // A failed temperature shows its glyph word in place of the value only.
         let s = snap(
@@ -2179,7 +2141,7 @@ mod tests {
         );
         assert_eq!(
             lines(&input(DeviceKind::Cpu, &cpu, &s)).line2,
-            "4631 MHz · !"
+            "4631\u{a0}MHz\u{a0}· !"
         );
 
         // Nothing reported yet.
@@ -2209,7 +2171,11 @@ mod tests {
         let l = lines(&input(DeviceKind::Memory, &mem, &s));
         assert_eq!(
             strs(&l),
-            ("Memory", "34.68 GiB / 63.16 GiB", "Commit 244.3% of limit")
+            (
+                "Memory",
+                "34.68\u{a0}GiB / 63.16\u{a0}GiB",
+                "Commit 244.3% of limit"
+            )
         );
         assert_eq!(
             l.tooltip.as_deref(),
@@ -2443,7 +2409,11 @@ mod tests {
         });
         assert_eq!(
             strs(&l),
-            ("Disk 1", "NVMe - /", "Samsung SSD 990 PRO 2TB · 41 °C")
+            (
+                "Disk 1",
+                "NVMe - /",
+                "Samsung SSD 990 PRO 2TB\u{a0}· 41\u{a0}°C"
+            )
         );
 
         // No "/": the first mount.
@@ -2461,7 +2431,7 @@ mod tests {
         // Restricted temperature: the model, the separator, then a lock at the line end.
         let s = disk_snap(&[], Metric::with(Validity::Restricted));
         let l = lines(&input(DeviceKind::Disk, &disk, &s));
-        assert_eq!(l.line2, "Samsung SSD 990 PRO 2TB · ");
+        assert_eq!(l.line2, "Samsung SSD 990 PRO 2TB\u{a0}· ");
         assert_eq!(&l.line2_locks[..], &[l.line2.len() as u16]);
     }
 
@@ -2556,7 +2526,7 @@ mod tests {
             fan_temp: Some(DeviceIdx(5)),
             ..input(DeviceKind::Fan, &fan, &s)
         });
-        assert_eq!(strs(&l), ("CPU fan", "CPU fan", "45 °C"));
+        assert_eq!(strs(&l), ("CPU fan", "CPU fan", "45\u{a0}°C"));
 
         // Battery: kind word, vendor and model, percentage and state.
         let mouse = entry(
@@ -2577,7 +2547,7 @@ mod tests {
         let l = lines(&input(DeviceKind::Battery, &mouse, &s));
         assert_eq!(
             strs(&l),
-            ("Mouse", "Logitech MX Master 3", "85.0% · Discharging")
+            ("Mouse", "Logitech MX Master 3", "85.0%\u{a0}· Discharging")
         );
         let s = snap(
             SystemSnapshot::default(),
@@ -2699,7 +2669,7 @@ mod tests {
             DeviceDetailsSnapshot::default(),
         );
         let l = lines(&input(DeviceKind::Gpu, &gpu, &s));
-        assert_eq!(strs(&l), ("GPU 0", "AMD Radeon RX 7900 XTX", "52 °C"));
+        assert_eq!(strs(&l), ("GPU 0", "AMD Radeon RX 7900 XTX", "52\u{a0}°C"));
 
         totals.temp_c = Metric::with(Validity::Unsupported);
         sys.gpus = Arc::from(vec![(DeviceIdx(9), totals)]);
@@ -2807,31 +2777,39 @@ mod tests {
     }
 
     #[test]
-    fn card_graph_leaves_a_heading_word_for_a_card_without_a_value() {
+    fn card_text_width_leaves_the_fixed_graph() {
         let m = crate::theme::metrics::compute(&Default::default(), 0);
-        // An edit-mode aggregate card has no value: the text column still holds "Aggregate".
-        let floor = card_text_floor(Pixels::ZERO, &m);
-        assert_eq!(floor, px(CARD_TEXT_MIN_W));
-        let graph = card_graph_width(px(164.), floor, &m);
-        assert!(card_text_width(px(164.), graph, &m) >= px(CARD_TEXT_MIN_W));
-        // A wider value still wins.
-        assert_eq!(card_text_floor(px(96.), &m), px(96.));
+        // nav_width 252 less sp4 on each side: 236 less border, sp5 inset, 80 graph, 10 gap.
+        assert_eq!(card_text_width(px(236.), &m), px(132.));
+        // nav_width 180.
+        assert_eq!(card_text_width(px(164.), &m), px(60.));
+        assert_eq!(card_text_width(px(20.), &m), Pixels::ZERO);
     }
 
+    /// UI-PRF-059: a value never breaks from its unit, and a line wraps only at " · " or
+    /// between words.
     #[test]
-    fn card_graph_width_leaves_room_for_the_widest_value() {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
-        let value = px(80.);
-        // 252 less sp4 on each side: the full graph, 98 px of text.
-        assert_eq!(card_graph_width(px(236.), value, &m), px(CARD_GRAPH_W));
-        assert_eq!(card_text_width(px(236.), px(CARD_GRAPH_W), &m), px(98.));
-        // nav_width 180: the graph gives way to the value.
-        let graph = card_graph_width(px(164.), value, &m);
-        assert_eq!(graph, px(62.));
-        assert_eq!(card_text_width(px(164.), graph, &m), value);
-        // Too narrow for the least graph: the text takes the card.
-        assert_eq!(card_graph_width(px(120.), value, &m), Pixels::ZERO);
-        assert_eq!(card_text_width(px(120.), Pixels::ZERO, &m), px(106.));
+    fn card_value_unit_not_split() {
+        let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let s = snap(
+            cpu_system(Metric::valid(3901), Metric::valid(55.0)),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let line2 = lines(&input(DeviceKind::Cpu, &cpu, &s)).line2;
+        assert_eq!(&*line2, "3901\u{a0}MHz\u{a0}· 55\u{a0}°C");
+        assert_eq!(
+            space_breaks(&line2).count(),
+            1,
+            "wraps only after the dot: {line2:?}"
+        );
+        // Plain spaces in a value text turn into no-break spaces; words keep theirs.
+        let mut out = String::from("Commit 69.0% of limit 12 GiB");
+        glue_units(&mut out, "Commit 69.0% of limit".len());
+        assert_eq!(out, "Commit 69.0% of limit 12\u{a0}GiB");
+        assert_eq!(split_value("12\u{a0}GiB"), Some(("12", "GiB")));
+        assert_eq!(split_value("1023.9 KiB/s"), Some(("1023.9", "KiB/s")));
+        assert_eq!(split_value("50%"), None);
     }
 
     #[test]
@@ -2924,8 +2902,8 @@ mod tests {
         assert!(!l.line1.cut);
         // An empty line keeps its row.
         assert_eq!(rows(&l.line2), [""]);
-        // 18 + 2 × 16 + 16 + 10 = 76: still the least height.
-        assert_eq!(l.card_height(1.0), px(80.));
+        // 18 + 2 × 16 + 16 = 66 of text, 8 px above and below and the border.
+        assert_eq!(l.card_height(1.0), px(84.));
     }
 
     #[test]
@@ -2947,8 +2925,8 @@ mod tests {
                 .all(|r| mono(CardFont::Detail, &r.text) <= px(16.))
         );
         assert_eq!(&*card_tooltip(&lines, &l), [SharedString::from(name)]);
-        // 18 + 2 × 16 + 16 + 10 = 76.
-        assert_eq!(l.card_height(1.0), px(80.));
+        // 18 + 2 × 16 + 16 = 66 of text, 8 px above and below and the border.
+        assert_eq!(l.card_height(1.0), px(84.));
     }
 
     #[test]
@@ -2978,11 +2956,11 @@ mod tests {
         assert!(!l.value_inline, "18 + 1 + 6 > 20");
         // 18 + 18 + 2 × 16.
         assert_eq!(l.text_height(), 68.);
-        assert_eq!(l.card_height(1.0), px(80.));
+        assert_eq!(l.card_height(1.0), px(86.));
         // No value: nothing to place.
         assert!(layout(&lines, 0., 20.).value_inline);
 
-        // Seven rows grow the card: 2 × 18 + 18 + 4 × 16 + 10.
+        // Seven rows grow the card: 2 × 18 + 18 + 4 × 16 = 118 of text, plus 18.
         let tall = card_text("Aggregate graphics", "aaaa bbbb cccc", "dddd eeee ffff");
         let l = layout(&tall, 6., 10.);
         assert_eq!(rows(&l.heading), ["Aggregate", "graphics"]);
@@ -2990,7 +2968,7 @@ mod tests {
         assert_eq!(rows(&l.line1), ["aaaa bbbb", "cccc"]);
         assert_eq!(rows(&l.line2), ["dddd eeee", "ffff"]);
         assert_eq!(l.text_height(), 118.);
-        assert_eq!(l.card_height(1.0), px(128.));
+        assert_eq!(l.card_height(1.0), px(136.));
     }
 
     #[test]
@@ -3001,7 +2979,7 @@ mod tests {
         assert!(!l.value_inline && l.value_split);
         // 18 + 2 × 18 + 2 × 16.
         assert_eq!(l.text_height(), 86.);
-        assert_eq!(l.card_height(1.0), px(96.));
+        assert_eq!(l.card_height(1.0), px(104.));
         // A value that fits its own row keeps one row.
         let l = layout(&lines, 10., 10.);
         assert!(!l.value_inline && !l.value_split);
@@ -3048,7 +3026,7 @@ mod tests {
         all.disks = Arc::from(vec![(DeviceIdx(3), details)]);
         s.device_details = Arc::new(all);
         let lines = lines(&input(DeviceKind::Disk, &disk, &s));
-        let full = format!("{model} · 41 °C");
+        let full = format!("{model}\u{a0}· 41\u{a0}°C");
         assert_eq!(lines.line2, full.as_str());
         assert!(lines.line2_one_row);
 
@@ -3058,7 +3036,7 @@ mod tests {
         let row = &l.line2.rows[0].text;
         assert!(row.contains(ELLIPSIS), "{row}");
         assert!(
-            row.starts_with("Western") && row.ends_with("41 °C"),
+            row.starts_with("Western") && row.ends_with("41\u{a0}°C"),
             "{row}"
         );
         assert!(mono(CardFont::Detail, row) <= px(24.));

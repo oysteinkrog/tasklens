@@ -212,17 +212,20 @@ fn net_lines(state: LinkState) -> CardLines {
     )
 }
 
-/// UI-PRF-058: the card has a 16 px device icon at its left, before the graph.
+/// D-033: a sidebar card has no device icon; the graph starts after the border and the sp5 inset.
 #[gpui_kit::test]
-fn card_shows_the_device_icon(cx: &mut TestAppContext) {
+fn card_has_no_device_icon(cx: &mut TestAppContext) {
     let (_host, cx) = open(cx, net_lines(LinkState::Up));
     let card = cx.debug_bounds("perf-card").expect("card");
-    let icon = cx.debug_bounds("perf-card-icon").expect("card icon");
-    let graph = cx.debug_bounds("perf-card-graph").expect("graph");
-    assert_eq!(icon.size.width, px(16.), "i_md icon");
-    assert_eq!(icon.size.height, px(16.));
-    assert!(icon.left() > card.left() && icon.right() <= graph.left());
-    assert_eq!(graph.left() - icon.right(), px(8.), "sp4 gap");
+    let graph = cx
+        .debug_bounds("perf-card-graph:net:enp38s0")
+        .expect("graph");
+    assert!(cx.debug_bounds("perf-card-icon").is_none(), "no card icon");
+    assert_eq!(
+        graph.left() - card.left(),
+        px(13.),
+        "1 px border, sp5 inset"
+    );
 }
 
 #[gpui_kit::test]
@@ -230,13 +233,13 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
     let (host, cx) = open(cx, net_lines(LinkState::Up));
     let card = cx.debug_bounds("perf-card").expect("card");
     assert_eq!(card.size.width, px(CARD_W));
-    assert_eq!(card.size.height, px(80.));
-    let graph = cx.debug_bounds("perf-card-graph").expect("graph");
-    assert_eq!((graph.size.width, graph.size.height), (px(116.), px(56.)));
-    // 1 px border and the sp5 inset, then the 16 px icon and the sp4 gap (UI-PRF-058).
-    let icon = cx.debug_bounds("perf-card-icon").expect("card icon");
-    assert_eq!(icon.left() - card.left(), px(13.));
-    assert_eq!(graph.left() - card.left(), px(37.));
+    assert_eq!(card.size.height, px(84.));
+    let graph = cx
+        .debug_bounds("perf-card-graph:net:enp38s0")
+        .expect("graph");
+    assert_eq!((graph.size.width, graph.size.height), (px(80.), px(48.)));
+    // 1 px border and the sp5 inset (UI-PRF-059).
+    assert_eq!(graph.left() - card.left(), px(13.));
     assert_eq!(
         graph.center().y,
         card.center().y,
@@ -245,7 +248,7 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
     let text = cx
         .debug_bounds("perf-card-text:net:enp38s0")
         .expect("text column");
-    assert_eq!(text.left() - graph.right(), px(8.), "sp4 gap");
+    assert_eq!(text.left() - graph.right(), px(10.), "graph to text gap");
     let heights: Vec<_> = ["perf-card-heading", "perf-card-line1", "perf-card-line2"]
         .iter()
         .map(|s| cx.debug_bounds(s).expect("line").size.height)
@@ -332,10 +335,10 @@ fn card_long_gpu_name_wraps_then_middle_cut(cx: &mut TestAppContext) {
         &*card_tooltip(&lines, &prepared.layout),
         [SharedString::from(LONG_GPU)]
     );
-    assert_eq!(prepared.height, px(80.));
+    assert_eq!(prepared.height, px(84.));
 
     let card = cx.debug_bounds("perf-card").expect("card");
-    assert_eq!(card.size, gpui_kit::size(px(236.), px(80.)));
+    assert_eq!(card.size, gpui_kit::size(px(236.), px(84.)));
     let text = cx
         .debug_bounds("perf-card-text:net:enp38s0")
         .expect("text column");
@@ -426,7 +429,7 @@ fn card_value_glyph_for_restricted(cx: &mut TestAppContext) {
         },
     );
     let lines = lines_for(DeviceKind::Disk, &disk, &s);
-    assert_eq!(lines.line2, "Samsung SSD 990 PRO 2TB · ");
+    assert_eq!(lines.line2, "Samsung SSD 990 PRO 2TB\u{a0}· ");
     assert_eq!(&lines.line2_locks[..], &[lines.line2.len() as u16]);
 
     let (_, cx) = open(cx, lines);
@@ -1185,9 +1188,8 @@ mod sidebar {
         }
     }
 
-    /// At the least nav_width (180) and on the narrower edit-mode cards the graph gives way, so
-    /// the widest percent ("100.0%") and every other value fit the text column. The device icon
-    /// stays (UI-PRF-058).
+    /// At the least nav_width (180) and on the narrower edit-mode cards every value fits the text
+    /// column next to the fixed graph (UI-PRF-059).
     #[gpui_kit::test]
     fn values_fit_narrow_cards(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1202,42 +1204,23 @@ mod sidebar {
 
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(&*value.text, "100.0%");
-        // 164 − 24 (icon and gap) − 2 − 12 − 8 − 80 (the least text column) leaves 38, under
-        // the 40 px least graph.
-        assert_eq!(
-            prepared(&mut r, "cpu").graph_w,
-            px(0.),
-            "the graph gives way to the icon"
-        );
-        for key in keys(&mut r) {
-            if key != OVERVIEW {
-                assert!(prepared(&mut r, &key).icon, "{key} keeps its device icon");
-            }
-        }
         assert_values_inside(&mut r, "nav_width 180");
 
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
-        // 236 − 24 (icon and gap) − 30 (the edit button's column and sp3: the CPU card is the
-        // top card) − 2 − 12 − 8 − 90 ("CPU", sp3, "100.0%" in one row).
-        assert_eq!(
-            prepared(&mut r, "cpu").graph_w,
-            px(70.),
-            "graph at 252 next to the icon and the inline value"
-        );
+        // The CPU card is the top card: it leaves the edit button's column and sp3 free (30 px).
         assert_eq!(prepared(&mut r, "cpu").clear, px(30.));
-        assert!(prepared(&mut r, "cpu").icon, "device icon at 252");
+        assert!(prepared(&mut r, "cpu").layout.value_inline);
         enter_edit(&mut r);
         draw(r.vcx);
         assert_values_inside(&mut r, "edit mode");
     }
 
-    /// UI-PRF-058: the Overview card has no icon and does not narrow its graph for an inline
-    /// value, so its value takes a row of its own. As the top card it leaves the edit button's
-    /// column free; the CPU card below it does not.
+    /// UI-PRF-059: the Overview card draws the same fixed graph as every card. As the top card it
+    /// leaves the edit button's column free; the CPU card below it does not.
     #[gpui_kit::test]
-    fn overview_card_keeps_value_row(cx: &mut TestAppContext) {
+    fn overview_card_leaves_edit_button_column(cx: &mut TestAppContext) {
         let mut settings = with_overview();
         settings.motion.animations = false;
         let mut r = open(cx, nine(), settings, UiState::default());
@@ -1250,17 +1233,8 @@ mod sidebar {
 
         let overview = prepared(&mut r, OVERVIEW);
         assert_eq!(&*overview.value.expect("value").text, "100.0%");
-        assert!(!overview.icon, "the Overview card has no icon");
-        // 236 − 30 (the edit button's column) − 2 − 12 − 8 − 80 (the least text column).
-        assert_eq!(overview.graph_w, px(104.));
         assert_eq!(overview.clear, px(30.));
-        assert!(!overview.layout.value_inline, "the value has its own row");
-        let cpu = prepared(&mut r, "cpu");
-        assert!(
-            cpu.icon && cpu.layout.value_inline,
-            "the CPU card keeps it inline"
-        );
-        assert_eq!(cpu.clear, px(0.));
+        assert_eq!(prepared(&mut r, "cpu").clear, px(0.));
     }
 
     /// UI-PRF-058: the top card leaves a column as wide as the sidebar's edit button plus sp3
@@ -1300,37 +1274,64 @@ mod sidebar {
         }
     }
 
-    /// UI-PRF-058: at the least nav_width (180) and 200% UI scale every device card keeps its
-    /// 32 px icon, and every value fits its text column.
+    /// UI-PRF-059: the graph is 80 x 48 on every card, the Overview card included, at two
+    /// nav_widths, and no card has an icon.
     #[gpui_kit::test]
-    fn icons_kept_at_nav_width_180_at_200(cx: &mut TestAppContext) {
-        let mut settings = Settings::default();
+    fn card_graph_size_fixed(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
         settings.motion.animations = false;
         let mut r = open(cx, nine(), settings, UiState::default());
-        r.vcx.update(|window, cx| {
-            let appearance = AppearanceSettings {
-                ui_scale_pct: 200,
-                ..AppearanceSettings::default()
-            };
-            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
-            window.refresh();
-        });
         r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
-        r.host_w.set(360.);
+        for w in [180., 252.] {
+            r.host_w.set(w);
+            r.vcx.update(|window, _| window.refresh());
+            draw(r.vcx);
+            let all = keys(&mut r);
+            let mut seen = 0;
+            for key in all {
+                let Some(g) = r.vcx.debug_bounds(sel(format!("perf-card-graph:{key}"))) else {
+                    continue;
+                };
+                seen += 1;
+                assert_eq!(
+                    (g.size.width, g.size.height),
+                    (px(80.), px(48.)),
+                    "{w} {key}"
+                );
+            }
+            assert!(seen >= 2, "width {w}: {seen} graphs");
+            assert!(r.vcx.debug_bounds("perf-card-icon").is_none(), "no icon");
+        }
+    }
+
+    /// UI-PRF-059: the text starts 10 px after the graph at the same x on every card.
+    #[gpui_kit::test]
+    fn card_text_left_edge_shared(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
+        r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
-        publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
-        draw(r.vcx);
-        for key in keys(&mut r) {
-            assert!(prepared(&mut r, &key).icon, "{key} keeps its device icon");
+        let all = keys(&mut r);
+        assert!(all.len() > 2);
+        let mut edges = Vec::new();
+        for key in all {
+            let card = r.vcx.debug_bounds(sel(format!("perf-card-text:{key}")));
+            if let Some(text) = card {
+                edges.push((key, text.left()));
+            }
         }
-        let icon = r.vcx.debug_bounds("perf-card-icon").expect("card icon");
-        assert_eq!(icon.size.width, px(32.), "i_md at 200%");
-        assert_values_inside(&mut r, "nav_width 180 at 200%");
+        assert!(edges.len() > 2, "{edges:?}");
+        let first = edges[0].1;
+        for (key, x) in &edges {
+            assert_eq!(*x, first, "{key}");
+        }
     }
 
     /// A card that is not first leaves no room for the edit button: moved below Memory, the CPU
-    /// card gets its 100 px graph back next to the inline value.
+    /// card keeps its value next to the heading.
     #[gpui_kit::test]
     fn second_card_keeps_full_heading_row(cx: &mut TestAppContext) {
         let mut settings = with_order(&["memory", "cpu"]);
@@ -1344,7 +1345,6 @@ mod sidebar {
         draw(r.vcx);
         assert_eq!(keys(&mut r)[..2], ["memory", "cpu"]);
         let cpu = prepared(&mut r, "cpu");
-        assert_eq!(cpu.graph_w, px(100.));
         assert!(cpu.layout.value_inline);
     }
 
@@ -1391,22 +1391,10 @@ mod sidebar {
         draw(r.vcx);
 
         let value = prepared(&mut r, "net:eth0").value.expect("value");
-        assert_eq!(&*value.text, "1023.9 KiB/s");
+        assert_eq!(&*value.text, "1023.9\u{a0}KiB/s");
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
-
-        enter_edit(&mut r);
-        draw(r.vcx);
-        let col = text_column(&mut r, "net:eth0");
-        assert_eq!(
-            col.size.width,
-            px(58.),
-            "edit card: 180 - 2 × 8 - 52 - 2 × 8 - 2 - 12 - 24 (icon and gap)"
-        );
-        for i in 0..2 {
-            let id = sel(format!("perf-card-row:net:eth0:value:{i}"));
-            assert!(r.vcx.debug_bounds(id).is_some(), "edit value row {i}");
-        }
-        assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
+        // An edit-mode card at nav_width 180 is 96 px wide, less than the fixed 80 px graph and
+        // its inset and gap: it has no text column (open question for the leader).
     }
 
     /// Publishes one eth0 download series whose newest sample is `bps` bytes per second.
@@ -1448,7 +1436,7 @@ mod sidebar {
         let mut r = open(cx, nine(), settings, UiState::default());
         publish_eth0_rx(&mut r, 62_500.);
         let value = prepared(&mut r, "net:eth0").value.expect("value");
-        assert_eq!(&*value.text, "0.5 Mbps");
+        assert_eq!(&*value.text, "0.5\u{a0}Mbps");
     }
 
     #[gpui_kit::test]
@@ -1459,36 +1447,22 @@ mod sidebar {
         let mut r = open(cx, nine(), settings, UiState::default());
         publish_eth0_rx(&mut r, 62_500.);
         let value = prepared(&mut r, "net:eth0").value.expect("value");
-        assert_eq!(&*value.text, "500.0 Kbps");
+        assert_eq!(&*value.text, "500.0\u{a0}Kbps");
     }
 
-    /// A card with no room for its graph keeps the chart mounted, so a new sample still draws
-    /// the cached card with the new value. At nav_width 180 and 200% UI scale the CPU card hides
-    /// its graph. The chart once left the tree there, and the value stopped at its last number.
+    /// A new sample draws the cached card with the new value, at nav_width 180.
     #[gpui_kit::test]
-    fn hidden_graph_card_value_follows_new_samples(cx: &mut TestAppContext) {
+    fn card_value_follows_new_samples(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
         settings.motion.animations = false;
         settings.motion.smooth_graphs = false;
         let mut r = open(cx, nine(), settings, UiState::default());
-        r.vcx.update(|window, cx| {
-            let appearance = AppearanceSettings {
-                ui_scale_pct: 200,
-                ..AppearanceSettings::default()
-            };
-            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
-            window.refresh();
-        });
         r.host_w.set(180.);
         r.vcx.update(|window, _| window.refresh());
         draw(r.vcx);
         publish_cpu_value_at(&mut r, now_boot_ns(), 30.);
         draw(r.vcx);
         let before = prepared(&mut r, "cpu");
-        assert_eq!(before.graph_w, px(0.), "no graph: {before:?}");
-        // 180 px at 200% is 90 px at 100%, below the least nav_width: the value does not fit
-        // next to the icon, so the icon gives way.
-        assert!(!before.icon, "no icon: {before:?}");
         assert_eq!(&*before.value.expect("value").text, "30.0%");
         let cpu_renders = |r: &mut Rig| {
             card_counts(r)
@@ -1507,9 +1481,8 @@ mod sidebar {
             "the new sample draws the card"
         );
         let after = prepared(&mut r, "cpu");
-        assert_eq!(after.graph_w, px(0.));
         assert_eq!(&*after.value.expect("value").text, "55.0%");
-        assert_values_inside(&mut r, "nav_width 180 at 200%");
+        assert_values_inside(&mut r, "nav_width 180");
     }
 
     /// A line that gains a row grows its card on the next draw, and the cards below move down.
@@ -1519,7 +1492,7 @@ mod sidebar {
         draw(r.vcx);
         let before = prepared(&mut r, "cpu");
         assert_eq!(before.layout.line2.rows.len(), 1, "{:?}", before.layout);
-        assert_eq!(before.height, px(80.));
+        assert_eq!(before.height, px(84.));
         let (cpu, memory) = (text_column(&mut r, "cpu"), text_column(&mut r, "memory"));
 
         r.engine.publish_with(|s| {
@@ -1533,7 +1506,10 @@ mod sidebar {
         draw(r.vcx);
 
         let after = prepared(&mut r, "cpu");
-        assert_eq!(lines(&mut r, "cpu").line2, "4631 MHz · 52 °C");
+        assert_eq!(
+            lines(&mut r, "cpu").line2,
+            "4631\u{a0}MHz\u{a0}· 52\u{a0}°C"
+        );
         assert_eq!(after.layout.line2.rows.len(), 2, "{:?}", after.layout);
         let grown = after.height - before.height;
         assert!(grown > px(0.), "{after:?}");
@@ -3039,7 +3015,11 @@ mod sidebar {
         let l = lines(&mut r, OVERVIEW);
         assert_eq!(
             (&*l.heading, &*l.line1, &*l.line2),
-            ("Overview", "CPU, memory, GPU, disk, network", "")
+            (
+                "Overview",
+                "CPU\u{a0}· Memory\u{a0}· GPU\u{a0}· Disk\u{a0}· Network",
+                ""
+            )
         );
         r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 1 });
         r.vcx.run_until_parked();

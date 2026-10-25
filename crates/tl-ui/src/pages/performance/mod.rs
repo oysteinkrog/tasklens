@@ -168,7 +168,8 @@ impl DeviceKey {
 }
 
 impl DeviceKind {
-    /// The device icon of UI-PRF-058. The Overview has none.
+    /// The device icon of UI-PRF-058 for box titles and page headers. Sidebar cards draw none
+    /// (D-033). The Overview has none.
     pub const fn icon(self) -> Option<TlIcon> {
         match self {
             Self::Overview => None,
