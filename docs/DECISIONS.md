@@ -4,6 +4,12 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-25
 
+### D-033 Overview sidebar icon, and resizing only in Edit Layout
+
+- **Decision** (owner request 2026-10-25): the Overview sidebar card gets an icon (Lucide `layout-grid`, `text_secondary`), so its text lines up with the device cards. The gaps between Overview boxes and the splitters inside boxes resize only in Edit Layout; outside it they do nothing.
+- **Why**: the Overview card had no icon, so its text started further left than every card under it. Resizing on every gap made it easy to change the layout by accident.
+- **Not changed**: the splitter between the sidebar and the page keeps working at all times.
+
 ### D-032 Network range figures on history ranges
 
 - **Decision**: at 1 h, 24 h and 7 d the Overview Network figures (UI-PRF-055) use the per-point sum of the download and upload means. Min and peak are the smallest and largest of those sums.

@@ -970,3 +970,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-24 night review: o55.47 icon tints, 8fx.42 three store bugs, crw.89 reserved warning slot, crw.75 one-line disk model: requeued with fixes. o55.45 '-' accepted per PERF-050, requeued. gma.48 closed (already fixed, tests kept). fut.25 waits for the owner (popup vs Properties window kind).
 - 2026-10-24 D-031: Properties windows are Normal, not Floating (owner choice for fut.25). fut.25 requeued.
 - 2026-10-25 crw.91 held: Network figures must use the aggregate set the box charts; history Network min/peak from per-point sums of means accepted (D-032); history charts draw stored min and max. Requeued.
+- 2026-10-25 D-033 (owner request): tasklens-crw.95 Overview sidebar icon for alignment, tasklens-crw.96 box gaps and inner splitters resize only in Edit Layout. Both queued.
