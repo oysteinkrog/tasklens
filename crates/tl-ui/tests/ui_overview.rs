@@ -3037,7 +3037,9 @@ mod page {
     };
     use tl_ui::pages::performance::overview::mem_box::MEM_SPLITTER_ID;
     use tl_ui::pages::performance::overview::net_box::NET_STACK_SPLITTER_ID;
-    use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
+    use tl_ui::pages::performance::overview::{
+        BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
+    };
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
     use tl_ui::settings_global::TlSettings;
@@ -3405,17 +3407,22 @@ mod page {
     #[gpui_kit::test]
     fn overview_places_boxes_grid_default(cx: &mut TestAppContext) {
         let r = open(cx, true, 1200., 900.);
+        // The page title row sits above the boxes, also with the status bar on the Overview.
+        let header = r.vcx.debug_bounds(RANGE_HEADER_ID).expect("title row");
+        let top = header.bottom();
         let want = place(
             &OverviewLayout::grid_default(),
             |_| true,
-            size(px(1200.), px(900.)),
+            size(px(1200.), px(900.) - top),
             1.,
             ROW_UNIT_DEFAULT,
         );
         assert_eq!(want.boxes.len(), 5);
         for p in &want.boxes {
             let got = r.vcx.debug_bounds(box_id(p.kind)).expect("box drawn");
-            assert_eq!(got, p.bounds, "{:?}", p.kind);
+            let mut at = p.bounds;
+            at.origin.y += top;
+            assert_eq!(got, at, "{:?}", p.kind);
         }
         assert!(box_id(BoxKind::Cpu).starts_with(BOX_ID_PREFIX));
         let placed = r.vcx.update(|_, cx| r.page.read(cx).placement().clone());
@@ -6362,9 +6369,10 @@ mod page {
         // Out of the mode, Esc goes to the global rule.
         r.vcx.simulate_keystrokes("escape");
         assert_eq!(r.escapes.get(), 1);
-        // The boxes are back at the page top.
+        // The boxes are back under the page title row.
+        let header = r.vcx.debug_bounds(RANGE_HEADER_ID).expect("title row");
         let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
-        assert_eq!(f32::from(cpu.top()), 16.);
+        assert_eq!(cpu.top(), header.bottom() + px(16.));
     }
 
     /// UI-PRF-056: a box moves by its title line in whole cells. The ghost outline shows the
