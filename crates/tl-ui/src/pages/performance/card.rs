@@ -962,25 +962,6 @@ pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
     (card_w - px(2.0 * s) - m.sp[5] - px((CARD_GRAPH_W + CARD_TEXT_GAP) * s)).max(Pixels::ZERO)
 }
 
-/// The least text column an edit-mode card keeps next to its graph, × ui_scale.
-const EDIT_TEXT_MIN_W: f32 = 40.0;
-
-/// Whether a card draws its graph. Always, except an edit-mode card so narrow (nav_width 180
-/// leaves 96 px next to the drag handle and checkbox) that the fixed graph would leave under
-/// `EDIT_TEXT_MIN_W` for text: that card drops the graph and gives its width to the text.
-fn card_shows_graph(card_w: Pixels, edit_mode: bool, m: &UiMetrics) -> bool {
-    !edit_mode || card_text_width(card_w, m) >= px(EDIT_TEXT_MIN_W * m.ui_scale)
-}
-
-/// The text column of a card: [`card_text_width`], or the whole inner width without the graph.
-fn card_column_width(card_w: Pixels, edit_mode: bool, m: &UiMetrics) -> Pixels {
-    if card_shows_graph(card_w, edit_mode, m) {
-        card_text_width(card_w, m)
-    } else {
-        (card_w - px(2.0 * m.ui_scale) - m.sp[5]).max(Pixels::ZERO)
-    }
-}
-
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011). Each line wraps at spaces to
 /// at most 2 rows, and what does not fit row 2 is cut in the middle ([`middle_ellipsis`]). A
 /// line whose first word does not fit is cut in the middle on one row, and so is line 2 when
@@ -1698,9 +1679,7 @@ impl DeviceCard {
             // column free, as if the button were part of the card, unless the value would then
             // not fit (at the least nav_width).
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
-            let clear = if top
-                && card_column_width(self.width - edit_w, self.edit_mode, &m) >= value_min_w
-            {
+            let clear = if top && card_text_width(self.width - edit_w, &m) >= value_min_w {
                 edit_w
             } else {
                 Pixels::ZERO
@@ -1709,7 +1688,7 @@ impl DeviceCard {
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
-                card_column_width(inner_w, self.edit_mode, &m),
+                card_text_width(inner_w, &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1844,7 +1823,6 @@ impl RenderOnce for DeviceCard {
             text = HoverTooltip::attach(&state, text, DELAY_CONTROL, content.build(), window, cx);
         }
 
-        let show_graph = card_shows_graph(self.width, self.edit_mode, &m);
         let graph_key = key.0.clone();
         let graph = div()
             .debug_selector(move || format!("perf-card-graph:{graph_key}"))
@@ -1875,7 +1853,7 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .children(show_graph.then_some(graph))
+            .child(graph)
             .child(text);
         if opacity < 1.0 {
             card = card.opacity(opacity);

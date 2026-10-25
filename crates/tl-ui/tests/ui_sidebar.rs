@@ -1188,8 +1188,8 @@ mod sidebar {
         }
     }
 
-    /// At the least nav_width (180) and on the narrower edit-mode cards every value fits the text
-    /// column next to the fixed graph (UI-PRF-059).
+    /// At the least nav_width (180), and on the narrower edit-mode cards at 252, every value fits
+    /// the text column next to the fixed graph (UI-PRF-059).
     #[gpui_kit::test]
     fn values_fit_narrow_cards(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1205,14 +1205,6 @@ mod sidebar {
         let value = prepared(&mut r, "cpu").value.expect("value");
         assert_eq!(&*value.text, "100.0%");
         assert_values_inside(&mut r, "nav_width 180");
-        enter_edit(&mut r);
-        draw(r.vcx);
-        let col = text_column(&mut r, "cpu");
-        assert!(col.size.width > px(40.), "edit text column at 180: {col:?}");
-        assert_values_inside(&mut r, "edit mode at nav_width 180");
-        r.vcx
-            .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
-        draw(r.vcx);
 
         r.host_w.set(252.);
         r.vcx.update(|window, _| window.refresh());
@@ -1282,10 +1274,9 @@ mod sidebar {
         }
     }
 
-    /// UI-PRF-059: the graph is 80 x 48 on every card, the Overview card included, at two
-    /// nav_widths, and no card has an icon.
-    #[gpui_kit::test]
-    fn card_graph_size_fixed(cx: &mut TestAppContext) {
+    /// Runs `check` at nav_width 180 and 252, each outside and in edit mode, with every card of
+    /// [`nine`] and the Overview card in view.
+    fn at_each_width_and_mode(cx: &mut TestAppContext, mut check: impl FnMut(&mut Rig, &str)) {
         let mut settings = with_overview();
         settings.motion.animations = false;
         let mut r = open(cx, nine(), settings, UiState::default());
@@ -1294,48 +1285,61 @@ mod sidebar {
             r.host_w.set(w);
             r.vcx.update(|window, _| window.refresh());
             draw(r.vcx);
-            let all = keys(&mut r);
-            let mut seen = 0;
-            for key in all {
-                let Some(g) = r.vcx.debug_bounds(sel(format!("perf-card-graph:{key}"))) else {
-                    continue;
-                };
-                seen += 1;
-                assert_eq!(
-                    (g.size.width, g.size.height),
-                    (px(80.), px(48.)),
-                    "{w} {key}"
-                );
-            }
-            assert!(seen >= 2, "width {w}: {seen} graphs");
-            assert!(r.vcx.debug_bounds("perf-card-icon").is_none(), "no icon");
+            check(&mut r, &format!("nav_width {w}"));
+            enter_edit(&mut r);
+            draw(r.vcx);
+            check(&mut r, &format!("edit mode at nav_width {w}"));
+            r.vcx
+                .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
+            draw(r.vcx);
         }
     }
 
-    /// UI-PRF-059: the text starts 10 px after the graph at the same x on every card.
+    /// UI-PRF-059: every card, the Overview card included, draws an 80 x 48 graph at nav_width
+    /// 180 and 252, outside and in edit mode, and no card has an icon.
+    #[gpui_kit::test]
+    fn card_graph_size_fixed(cx: &mut TestAppContext) {
+        at_each_width_and_mode(cx, |r, what| {
+            let all = keys(r);
+            assert!(all.len() >= 10, "{what}: {all:?}");
+            assert_eq!(all[0], OVERVIEW, "{what}");
+            for key in all {
+                let g = r
+                    .vcx
+                    .debug_bounds(sel(format!("perf-card-graph:{key}")))
+                    .unwrap_or_else(|| panic!("{what}: {key} has no graph"));
+                assert_eq!(
+                    (g.size.width, g.size.height),
+                    (px(80.), px(48.)),
+                    "{what} {key}"
+                );
+            }
+            assert!(
+                r.vcx.debug_bounds("perf-card-icon").is_none(),
+                "{what}: no icon"
+            );
+        });
+    }
+
+    /// UI-PRF-059: the text starts 10 px after the graph, at the same x on every card, at
+    /// nav_width 180 and 252, outside and in edit mode.
     #[gpui_kit::test]
     fn card_text_left_edge_shared(cx: &mut TestAppContext) {
-        let mut settings = with_overview();
-        settings.motion.animations = false;
-        let mut r = open(cx, nine(), settings, UiState::default());
-        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
-        r.host_w.set(252.);
-        r.vcx.update(|window, _| window.refresh());
-        draw(r.vcx);
-        let all = keys(&mut r);
-        assert!(all.len() > 2);
-        let mut edges = Vec::new();
-        for key in all {
-            let card = r.vcx.debug_bounds(sel(format!("perf-card-text:{key}")));
-            if let Some(text) = card {
-                edges.push((key, text.left()));
+        at_each_width_and_mode(cx, |r, what| {
+            let all = keys(r);
+            assert!(all.len() >= 10, "{what}: {all:?}");
+            let mut first = None;
+            for key in all {
+                let text = text_column(r, &key);
+                let graph = r
+                    .vcx
+                    .debug_bounds(sel(format!("perf-card-graph:{key}")))
+                    .unwrap_or_else(|| panic!("{what}: {key} has no graph"));
+                assert_eq!(text.left() - graph.right(), px(10.), "{what} {key}");
+                let first = *first.get_or_insert(text.left());
+                assert_eq!(text.left(), first, "{what} {key}");
             }
-        }
-        assert!(edges.len() > 2, "{edges:?}");
-        let first = edges[0].1;
-        for (key, x) in &edges {
-            assert_eq!(*x, first, "{key}");
-        }
+        });
     }
 
     /// A card that is not first leaves no room for the edit button: moved below Memory, the CPU
@@ -1357,8 +1361,7 @@ mod sidebar {
     }
 
     /// The widest IEC rate before the unit steps up, "1023.9 KiB/s", fits a network card at the
-    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s". The edit-mode
-    /// card there has an 82 px text column even with no graph, so the value takes 2 rows.
+    /// least nav_width (180). The text column once kept room only for "999.9 KiB/s".
     #[gpui_kit::test]
     fn widest_network_byte_rate_fits_at_nav_width_180(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1401,19 +1404,6 @@ mod sidebar {
         let value = prepared(&mut r, "net:eth0").value.expect("value");
         assert_eq!(&*value.text, "1023.9\u{a0}KiB/s");
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
-        // An edit-mode card at nav_width 180 is 96 px wide: it drops its graph, so the text keeps
-        // the whole inner width.
-        enter_edit(&mut r);
-        draw(r.vcx);
-        assert_values_inside(&mut r, "edit mode at nav_width 180, 1023.9 KiB/s");
-        let col = text_column(&mut r, "net:eth0");
-        assert!(col.size.width > px(40.), "edit text column {col:?}");
-        assert!(
-            r.vcx
-                .debug_bounds(sel("perf-card-graph:net:eth0".into()))
-                .is_none(),
-            "no graph on a narrow edit card"
-        );
     }
 
     /// Publishes one eth0 download series whose newest sample is `bps` bytes per second.
