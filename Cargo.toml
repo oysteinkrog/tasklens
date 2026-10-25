@@ -94,6 +94,7 @@ opt-level = 1
 debug = "line-tables-only"   # keeps target/ small; backtraces keep file and line
 [profile.dev.package."*"]
 opt-level = 2                 # GPUI and wgpu are too slow at opt-level 0 for UI work
+debug = false                 # dependency debuginfo was most of each 424 MiB tl-ui test binary
 
 [profile.release]
 opt-level = 3
