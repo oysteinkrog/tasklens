@@ -187,7 +187,7 @@ fn close_up(boxes: &mut [GridBox], held: usize, blocks: bool) {
         boxes[i].row = boxes
             .iter()
             .enumerate()
-            .filter(|&(j, p)| j != i && (j != held || blocks))
+            .filter(|&(j, _)| j != i && (j != held || blocks))
             .filter(|(_, p)| p.col < b.right() && b.col < p.right())
             .map(|(_, p)| p.bottom())
             .filter(|&bottom| bottom <= b.row)
