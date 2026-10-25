@@ -576,7 +576,8 @@ fn overview_range_gap_draws_break(cx: &mut TestAppContext) {
     );
 }
 
-/// A boot inside the range draws a boot marker on every box chart; the live ranges draw none.
+/// A boot inside the range draws a boot marker on every drawn box chart; the live ranges draw
+/// none.
 #[gpui_kit::test]
 fn overview_range_boot_marker(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -593,9 +594,14 @@ fn overview_range_boot_marker(cx: &mut TestAppContext) {
         ],
         &[now - 300 * MIN],
     );
-    for chart in box_charts(&mut r) {
+    for (i, chart) in box_charts(&mut r).into_iter().enumerate() {
+        // The GPU box's default mode draws one chart per engine, and this GPU has no engines,
+        // so its section chart is not drawn.
+        if i == 2 {
+            continue;
+        }
         let marks = r.vcx.read_entity(&chart, |c, _| c.last_boot_marks.get());
-        assert_eq!(marks, 1, "one boot marker on each box chart");
+        assert_eq!(marks, 1, "one boot marker on box chart {i}");
     }
     set_range(&mut r, OverviewRange::M1);
     draw(r.vcx);
