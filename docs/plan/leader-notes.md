@@ -974,3 +974,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-25 crw.91 closed: stacked history charts draw band means (D-032 amended), everything else fixed.
 - 2026-10-25 D-034 spacing pass from the home screenshot: crw.95 rescoped (fixed sidebar graph size, no card icons), tasklens-crw.97 box chrome and padding, tasklens-crw.98 chart label rows. Reference images in ~/work/tasklens-ref/spacing.
 - 2026-10-25: crw.93 held twice (Delete, then Reset Layout during a drag restored old boxes). Decision: one end_drag called by every layout-changing action, regression test per action; requeued.
+- 2026-10-25: crw.95 held twice (narrow cards split numbers from units, cut CPU values mid-value). Decision: number+unit never split; wrap at ' · ' or words; overflow ends in '…' after the last whole piece, full text in tooltip; graph 80x48 at all widths; rendered-row tests at 180 and 252; requeued.
