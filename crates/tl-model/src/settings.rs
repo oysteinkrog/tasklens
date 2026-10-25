@@ -475,14 +475,39 @@ pub fn overview_min_rows(kind: &str, unit: u32) -> i64 {
 
 /// `[performance.overview]` (UI-PRF-056): the boxes on a 12-column grid, each with its cells
 /// and its own keys. `tl-ui` turns this into its layout. `rows` is the UI-PRF-018 row layout:
-/// loading converts it to `grid` once when `grid` is missing, and it is never written.
+/// loading converts it to `grid` once when `grid` is missing, and it is never written. A saved
+/// `grid` key, even `grid = []`, drops `rows` on load.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "OverviewLayoutRaw")]
 pub struct OverviewLayoutSetting {
-    #[serde(deserialize_with = "loose_vec")]
     pub grid: Vec<OverviewGridSetting>,
-    #[serde(skip_serializing, deserialize_with = "loose_vec")]
+    #[serde(skip_serializing)]
     pub rows: Vec<OverviewRowSetting>,
+}
+
+/// `[performance.overview]` as read, with `grid` `None` when the key is missing.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct OverviewLayoutRaw {
+    #[serde(deserialize_with = "loose_vec_some")]
+    grid: Option<Vec<OverviewGridSetting>>,
+    #[serde(deserialize_with = "loose_vec")]
+    rows: Vec<OverviewRowSetting>,
+}
+
+impl From<OverviewLayoutRaw> for OverviewLayoutSetting {
+    fn from(raw: OverviewLayoutRaw) -> Self {
+        match raw.grid {
+            Some(grid) => Self {
+                grid,
+                rows: Vec::new(),
+            },
+            None => Self {
+                grid: Vec::new(),
+                rows: raw.rows,
+            },
+        }
+    }
 }
 
 /// One Overview box on the grid (UI-PRF-056): a kind from [`OVERVIEW_BOX_KINDS`], its top left
@@ -760,6 +785,14 @@ where
     T: Deserialize<'de> + Unreadable,
 {
     loose(d).map(Some)
+}
+
+fn loose_vec_some<'de, D, T>(d: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Unreadable,
+{
+    loose_vec(d).map(Some)
 }
 
 /// A list where each item of the wrong type is unreadable on its own. A value that is not a
@@ -2820,6 +2853,13 @@ mod tests {
         let layout = s.performance.overview.expect("kept");
         assert_eq!(layout.grid.len(), 1);
         assert!(layout.rows.is_empty());
+        // `grid = []` is a saved grid too: the rows do not convert and the layout is the
+        // default.
+        let (s, _) = load_toml(
+            "[performance.overview]\ngrid = []\nrows = [{ height = 1.0, boxes = [{ kind = \
+             \"net\", width = 1.0 }] }]\n",
+        );
+        assert_eq!(s.performance.overview, None);
     }
 
     #[test]

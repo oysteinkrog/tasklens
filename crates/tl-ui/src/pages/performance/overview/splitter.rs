@@ -94,8 +94,8 @@ pub struct Drag {
     first: u16,
     /// Both boxes' spans together, cells.
     total: u16,
-    /// The first box's smallest and largest span: each side keeps its kind minimum, or its
-    /// start span when that is smaller.
+    /// The first box's smallest and largest span: each side keeps its kind minimum. When the
+    /// two minimums do not fit in the total, a side under its minimum keeps its start span.
     lo: u16,
     hi: u16,
     /// One cell and its gutter along the axis, px.
@@ -121,8 +121,11 @@ impl Drag {
             (a.rows, b.rows, min_a.1, min_b.1, g.unit + g.gutter)
         };
         let total = first + second;
-        let lo = min_a.min(first);
-        let hi = total - min_b.min(second);
+        let (lo, hi) = if min_a + min_b <= total {
+            (min_a, total - min_b)
+        } else {
+            (min_a.min(first), total - min_b.min(second))
+        };
         Some(Self {
             target,
             start: pointer,
@@ -290,5 +293,27 @@ mod tests {
         );
         assert_eq!((mem.rows, net.row, net.rows), (6, 6, 7));
         assert_eq!(l.validate(), Ok(()));
+    }
+
+    #[test]
+    fn drag_raises_a_box_under_its_kind_minimum() {
+        // CPU saved at 2 columns, under its 4-column minimum at 1200 px. The two minimums fit
+        // in the 12 columns, so any drag ends with CPU at 4 or more.
+        let target = Target::Cols(BoxKind::Cpu, BoxKind::Memory);
+        let mut layout = OverviewLayout::grid_default();
+        assert!(set_span(&mut layout, target, 2));
+        let drag = Drag::start(&layout, &placed(&layout), target, 200.).expect("placed");
+        assert_eq!(drag.span_at(200.), 4);
+        assert_eq!(drag.span_at(-5000.), 4);
+        assert_eq!(drag.span_at(5000.), 9);
+
+        // At a 24 px row unit Memory and Net need 10 rows each, more than their 13. Neither
+        // shrinks: Memory keeps 7 rows, under its minimum, and Net keeps 6.
+        let layout = OverviewLayout::grid_default();
+        let p = place(&layout, |_| true, size(px(1200.), px(900.)), 1., 24.);
+        let rows = Target::Rows(BoxKind::Memory, BoxKind::Net);
+        let drag = Drag::start(&layout, &p, rows, 200.).expect("placed");
+        assert_eq!(drag.span_at(-5000.), 7);
+        assert_eq!(drag.span_at(5000.), 7);
     }
 }
