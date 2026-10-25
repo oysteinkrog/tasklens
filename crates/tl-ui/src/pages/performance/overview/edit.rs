@@ -27,8 +27,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, v_flex};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Div, FocusHandle, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, SharedString, Styled as _,
-    Window, canvas, div, prelude::FluentBuilder as _, px,
+    MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels, Point, SharedString,
+    Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::settings::OVERVIEW_GRID_ROWS_MAX;
@@ -533,11 +533,14 @@ impl OverviewPage {
     }
 
     /// The focused box for a move or resize key: none in the stacked layout or during a drag.
-    fn key_target(&self, window: &Window) -> Option<BoxKind> {
-        let edit = self.edit.as_ref()?;
-        if self.placement.stacked || edit.drag.is_some() {
+    fn key_target(&mut self, window: &Window) -> Option<BoxKind> {
+        let stacked = self.placement.stacked;
+        let edit = self.edit.as_mut()?;
+        if stacked || edit.drag.as_ref().is_some_and(|d| d.target.is_some()) {
             return None;
         }
+        // A press that has not moved is a click, not a drag.
+        edit.drag = None;
         edit.focused(window)
     }
 
@@ -653,14 +656,15 @@ impl OverviewPage {
 
     /// The button went up at `position`: the drag ends where the pointer is, and a changed
     /// layout is saved. The last move event can be older than the release (a fast drop), so
-    /// the target is found again here.
-    pub(super) fn box_drag_up(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// the target is found again here. `None` is a move without the button, whose release was
+    /// not seen: the drag ends where the last move left it.
+    pub(super) fn box_drag_up(&mut self, position: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         let scale = metrics(cx).ui_scale;
         let grid = self.placement.grid;
         let Some(mut drag) = self.edit.as_mut().and_then(|e| e.drag.take()) else {
             return;
         };
-        if let Some(boxes) = drag.update(position, &grid, scale) {
+        if let Some(boxes) = position.and_then(|at| drag.update(at, &grid, scale)) {
             self.layout.boxes = boxes;
             self.relayout(cx);
         }
@@ -807,6 +811,14 @@ impl OverviewPage {
                                 this.handle_down(kind, Grab::Resize, ev, window, cx);
                             }),
                         )
+                        // A quick click can go up before the next frame puts the window's
+                        // release handler in place.
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                                this.box_drag_up(Some(ev.position), cx);
+                            }),
+                        )
                         .child(
                             div()
                                 .absolute()
@@ -886,6 +898,12 @@ impl OverviewPage {
                         MouseButton::Left,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                             this.handle_down(kind, Grab::Move, ev, window, cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseUpEvent, _, cx| {
+                            this.box_drag_up(Some(ev.position), cx);
                         }),
                     )
                     // The handle occludes the box below, so the box menu is named here.

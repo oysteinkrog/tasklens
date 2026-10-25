@@ -6471,9 +6471,23 @@ mod page {
             bind_keys_performance(cx);
         });
         r.edit_layout();
+        // A quick click: the button goes up before the next frame, so only the title line
+        // sees the release. The box takes focus and no drag is left pending.
         let title = center(r.bounds_of(title_handle_id(Disk)));
-        r.press(title, 1);
-        r.release(title);
+        r.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: title,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        r.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: title,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        draw(r.vcx);
         // Disk one column left onto GPU's last column: GPU moves down below it.
         r.vcx.simulate_keystrokes("alt-left");
         draw(r.vcx);
@@ -6491,6 +6505,19 @@ mod page {
         assert_eq!(cells(&mut r, Disk), (3, 7, 3, 7));
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
         assert_eq!(r.layout().validate(), Ok(()));
+
+        // A press whose release was never seen: a later move without the button ends it where
+        // it was, and the box does not jump to the pointer.
+        let before = r.layout();
+        let title = center(r.bounds_of(title_handle_id(Disk)));
+        r.press(title, 1);
+        r.vcx
+            .simulate_mouse_move(point(px(100.), px(800.)), None, Modifiers::none());
+        draw(r.vcx);
+        assert_eq!(r.layout(), before);
+        r.vcx.simulate_keystrokes("alt-right");
+        draw(r.vcx);
+        assert_eq!(cells(&mut r, Disk), (4, 7, 3, 7), "no drag is left pending");
     }
 
     /// The stacked layout below 720 px has no resize handles, and a title drag moves nothing.

@@ -1115,7 +1115,7 @@ impl Render for OverviewPage {
                             (true, false) => p.splitter_move(e.position, cx),
                             (false, false) => p.splitter_up(cx),
                             (true, true) => p.box_drag_move(e.position, cx),
-                            (false, true) => p.box_drag_up(e.position, cx),
+                            (false, true) => p.box_drag_up(None, cx),
                         }
                     });
                 });
@@ -1124,7 +1124,7 @@ impl Render for OverviewPage {
                     if phase.bubble() {
                         let _ = released.update(cx, |p, cx| {
                             if box_dragging {
-                                p.box_drag_up(e.position, cx);
+                                p.box_drag_up(Some(e.position), cx);
                             } else {
                                 p.splitter_up(cx);
                             }
