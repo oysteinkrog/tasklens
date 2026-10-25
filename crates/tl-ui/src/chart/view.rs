@@ -912,7 +912,8 @@ mod tests {
         };
         let mut cache = ChartCache::default();
         geometry::build(&input, &mut cache, &mut geometry::Scratch::default());
-        // The three means sum to 60 of 100, so the top band's line sits at y 40.
+        // The three means sum to 60 of 100, so the top band's line sits at y 40 (its stroke
+        // vertices half the 1 px line width off it).
         let top = cache
             .strokes
             .iter()
@@ -921,7 +922,7 @@ mod tests {
             .reduce(f32::min)
             .expect("strokes");
         assert!(
-            (top - 40.0).abs() < 0.5,
+            (top - 40.0).abs() <= 1.0,
             "the bands top out at y {top}, not 40"
         );
     }
