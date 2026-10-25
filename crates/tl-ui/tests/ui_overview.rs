@@ -6473,6 +6473,157 @@ mod page {
         assert!(r.editing(), "the mode stays on");
     }
 
+    impl Rig<'_> {
+        /// Holds CPU's title line 3 rows down, runs `action`, then moves the pointer to another
+        /// cell and lets go. Returns the layout right after `action`, and checks that the move
+        /// and the release keep it.
+        fn drag_through(&mut self, action: impl FnOnce(&mut Self)) -> OverviewLayout {
+            let before = self.layout();
+            let from = center(self.bounds_of(title_handle_id(BoxKind::Cpu)));
+            self.press(from, 1);
+            self.move_to(point(from.x, from.y + px(150.)));
+            assert_ne!(self.layout(), before, "the boxes move during the drag");
+            action(self);
+            let after = self.layout();
+            assert!(self.vcx.debug_bounds(GHOST_ID).is_none(), "the ghost goes");
+            let to = point(from.x + px(200.), from.y + px(300.));
+            self.move_to(to);
+            assert_eq!(
+                self.layout(),
+                after,
+                "a move after the action changes nothing"
+            );
+            self.release(to);
+            assert_eq!(self.layout(), after, "the release changes nothing");
+            after
+        }
+
+        fn bind_keys(&mut self) {
+            self.vcx.update(|_, cx| {
+                tl_ui::actions::bind_keys_global(cx);
+                bind_keys_performance(cx);
+            });
+        }
+    }
+
+    /// Reset Layout during a title drag ends the drag: the default layout stays and is saved.
+    #[gpui_kit::test]
+    fn overview_edit_reset_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        r.hide(BoxKind::Net);
+        let after = r.drag_through(|r| r.page_action(&PerfOverviewResetLayout));
+        assert_eq!(after, OverviewLayout::grid_default());
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
+        assert!(r.editing(), "the mode stays on");
+    }
+
+    /// Add Box during a title drag ends the drag: the boxes go back to their cells and the new
+    /// box joins them.
+    #[gpui_kit::test]
+    fn overview_edit_add_box_during_drag(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfOverviewAddBox;
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| {
+            r.page_action(&PerfOverviewAddBox {
+                kind: "processes".into(),
+            })
+        });
+        assert!(after.has(BoxKind::TopProcs));
+        let rest: Vec<GridBox> = after
+            .boxes
+            .iter()
+            .copied()
+            .filter(|b| b.kind != BoxKind::TopProcs)
+            .collect();
+        assert_eq!(rest.as_slice(), before.boxes.as_slice());
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
+    }
+
+    /// Done during a title drag leaves the mode and puts the boxes back, unsaved.
+    #[gpui_kit::test]
+    fn overview_edit_done_during_drag(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfOverviewEditDone;
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| r.page_action(&PerfOverviewEditDone));
+        assert_eq!(after, before);
+        assert!(!r.editing());
+        assert_eq!(r.saved(), None);
+    }
+
+    /// Esc during a title drag leaves the mode and puts the boxes back, unsaved.
+    #[gpui_kit::test]
+    fn overview_edit_escape_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.bind_keys();
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| {
+            r.vcx.simulate_keystrokes("escape");
+            draw(r.vcx);
+        });
+        assert_eq!(after, before);
+        assert!(!r.editing());
+        assert_eq!(r.saved(), None);
+        assert_eq!(r.escapes.get(), 0, "Esc did not reach the global Esc rule");
+    }
+
+    /// Window focus loss during a title drag puts the boxes back, unsaved; the mode stays on.
+    #[gpui_kit::test]
+    fn overview_edit_focus_loss_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.vcx.update(|window, _| window.activate_window());
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| {
+            r.vcx.deactivate_window();
+            draw(r.vcx);
+        });
+        assert_eq!(after, before);
+        assert_eq!(r.saved(), None);
+        assert!(r.editing(), "the mode stays on");
+    }
+
+    /// Switching page during a title drag puts the boxes back, unsaved.
+    #[gpui_kit::test]
+    fn overview_edit_page_switch_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.set_active(true);
+        r.edit_layout();
+        let before = r.layout();
+        let after = r.drag_through(|r| {
+            r.set_active(false);
+            draw(r.vcx);
+        });
+        assert_eq!(after, before);
+        assert_eq!(r.saved(), None);
+    }
+
+    /// Reset Layout during a gap drag ends the drag: a later move or release does not move the
+    /// shared edge of the default layout.
+    #[gpui_kit::test]
+    fn overview_edit_reset_during_gap_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
+        r.hide(BoxKind::Net);
+        let start = center(r.gap("perf-overview-splitter-col-cpu"));
+        r.press(start, 1);
+        r.move_to(point(start.x - px(100.), start.y));
+        assert_eq!(cells(&mut r, BoxKind::Cpu), (0, 0, 7, 7));
+        r.page_action(&PerfOverviewResetLayout);
+        let reset = OverviewLayout::grid_default();
+        assert_eq!(r.layout(), reset);
+        r.move_to(point(start.x - px(300.), start.y));
+        assert_eq!(r.layout(), reset);
+        r.release(point(start.x - px(300.), start.y));
+        assert_eq!(r.layout(), reset);
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), reset);
+    }
+
     /// UI-PRF-056: the bottom-right corner handle resizes in whole cells; a double-click sets
     /// the box to its kind minimum.
     #[gpui_kit::test]

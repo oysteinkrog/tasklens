@@ -61,7 +61,7 @@ use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
 use self::inner_split::InnerSplitChanged;
-use self::layout::{BoxKind, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place};
+use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
@@ -138,6 +138,8 @@ const STATUS_BAR_ITEMS: [(StatusBarPlacement, &str); 4] = [
 struct ActiveDrag {
     drag: Drag,
     changed: bool,
+    /// The boxes when the button went down, for [`OverviewPage::end_drag`].
+    start: SmallVec<[GridBox; 8]>,
 }
 
 /// (key, device, heading) of each live GPU or disk card, in sidebar order.
@@ -236,6 +238,8 @@ pub struct OverviewPage {
     since_words: Template,
     ago_words: [SharedString; 5],
     _subs: SmallVec<[Subscription; 4]>,
+    /// Window focus loss ends a drag, for the window of the last render.
+    _activation: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -373,6 +377,7 @@ impl OverviewPage {
             since_words: Template::new(cx, "perf-overview-since", &["time"]),
             ago_words: range::ago_words(cx),
             _subs: subs,
+            _activation: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -786,6 +791,7 @@ impl OverviewPage {
             self.drag = Some(ActiveDrag {
                 drag,
                 changed: false,
+                start: self.layout.boxes.clone(),
             });
             self.notify(cx);
         }
@@ -1047,6 +1053,7 @@ impl DevicePage for OverviewPage {
         if active {
             self.send_demand(cx);
         } else {
+            self.end_drag(cx);
             let id = self.id;
             self.demand.update(cx, |d, cx| d.remove(id, cx));
         }
@@ -1107,6 +1114,11 @@ impl Render for OverviewPage {
         if self.window != Some(handle) {
             self.window = Some(handle);
             self.send_demand(cx);
+            self._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.end_drag(cx);
+                }
+            }));
         }
         let this = cx.entity().downgrade();
         let this_move = this.clone();

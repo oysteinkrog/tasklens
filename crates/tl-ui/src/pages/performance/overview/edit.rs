@@ -15,7 +15,10 @@
 //! ([`settle`]). So a box dragged down by the height of the boxes under it ends up below them.
 //! A ghost outline shows the target cells during a drag, and the layout follows the pointer, so
 //! the boxes move out of the way before the button goes up. The layout is saved when the drag
-//! ends. The stacked layout below 720 px has no box drags.
+//! ends. Every action that changes the layout during a drag, and leaving the mode, the page or
+//! the window's focus, first ends the drag without a change ([`OverviewPage::end_drag`]), so a
+//! later move or release cannot bring the old boxes back. The stacked layout below 720 px has
+//! no box drags.
 //!
 //! The functions on [`OverviewLayout`] here are pure, so the rules are tested without a window.
 //! [`EditState`] and the `OverviewPage` methods hold the view side.
@@ -441,25 +444,45 @@ impl OverviewPage {
     }
 
     /// `PerfOverviewEditDone` (Done, Esc): turns the mode off. Focus on a box goes to the page.
-    /// A box drag in progress ends without a change.
+    /// A drag in progress ends without a change.
     pub(super) fn on_edit_done(
         &mut self,
         _: &PerfOverviewEditDone,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.edit.is_none() {
+            return;
+        }
+        self.end_drag(cx);
         let Some(edit) = self.edit.take() else {
             return;
         };
         if edit.focused(window).is_some() {
             window.focus(&self.focus, cx);
         }
-        if let Some(drag) = &edit.drag {
-            self.layout.boxes = drag.start_boxes().iter().copied().collect();
-            self.relayout(cx);
-        }
         self.set_edit_chrome(false, cx);
         self.notify(cx);
+    }
+
+    /// Ends a box drag or a gap drag in progress without a change: the boxes go back to their
+    /// cells at the press, nothing is saved, and a later move or release does nothing. Every
+    /// action that changes the layout calls this first, as do leaving the mode, leaving the
+    /// page and window focus loss. Returns whether a drag ended.
+    pub(super) fn end_drag(&mut self, cx: &mut App) -> bool {
+        let box_drag = self.edit.as_mut().and_then(|e| e.drag.take());
+        let gap_drag = self.drag.take();
+        let start = match (box_drag, gap_drag) {
+            (Some(drag), _) => drag.boxes,
+            (None, Some(active)) => active.start,
+            (None, None) => return false,
+        };
+        if self.layout.boxes != start {
+            self.layout.boxes = start;
+            self.relayout(cx);
+        }
+        cx.notify(self.id);
+        true
     }
 
     /// Tells the box frames whether the edit controls take the right end of the title line, and
@@ -484,6 +507,7 @@ impl OverviewPage {
         cx: &mut Context<Self>,
     ) {
         if self.edit.is_some() {
+            self.end_drag(cx);
             self.commit(OverviewLayout::grid_default(), cx);
         }
     }
@@ -498,6 +522,7 @@ impl OverviewPage {
         let Some(kind) = BoxKind::from_key(&a.kind).filter(|_| self.edit.is_some()) else {
             return;
         };
+        self.end_drag(cx);
         let mut layout = self.layout.clone();
         if add(&mut layout, kind, &self.placement.grid) {
             self.commit(layout, cx);
@@ -567,8 +592,8 @@ impl OverviewPage {
         }
     }
 
-    /// Hides `kind`, or refuses with a toast when it is the only box shown. A box drag in
-    /// progress ends without a change first, so a later move cannot bring the box back.
+    /// Hides `kind`, or refuses with a toast when it is the only box shown. A drag in progress
+    /// ends without a change first, so a later move cannot bring the box back.
     fn hide_box(&mut self, kind: BoxKind, window: &mut Window, cx: &mut Context<Self>) {
         if !self.placement.boxes.iter().any(|b| b.kind != kind) {
             let text = tr(cx, "perf-overview-toast-last-box");
@@ -579,10 +604,8 @@ impl OverviewPage {
             }
             return;
         }
+        self.end_drag(cx);
         let mut layout = self.layout.clone();
-        if let Some(drag) = self.edit.as_mut().and_then(|e| e.drag.take()) {
-            layout.boxes = drag.start_boxes().iter().copied().collect();
-        }
         if hide(&mut layout, kind)
             && self
                 .edit
