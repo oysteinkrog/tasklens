@@ -468,21 +468,20 @@ impl OverviewPage {
     /// Ends a box drag or a gap drag in progress without a change: the boxes go back to their
     /// cells at the press, nothing is saved, and a later move or release does nothing. Every
     /// action that changes the layout calls this first, as do leaving the mode, leaving the
-    /// page and window focus loss. Returns whether a drag ended.
-    pub(super) fn end_drag(&mut self, cx: &mut App) -> bool {
+    /// page and window focus loss.
+    pub(super) fn end_drag(&mut self, cx: &mut App) {
         let box_drag = self.edit.as_mut().and_then(|e| e.drag.take());
         let gap_drag = self.drag.take();
         let start = match (box_drag, gap_drag) {
             (Some(drag), _) => drag.boxes,
             (None, Some(active)) => active.start,
-            (None, None) => return false,
+            (None, None) => return,
         };
         if self.layout.boxes != start {
             self.layout.boxes = start;
             self.relayout(cx);
         }
         cx.notify(self.id);
-        true
     }
 
     /// Tells the box frames whether the edit controls take the right end of the title line, and
