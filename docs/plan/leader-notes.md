@@ -971,3 +971,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-24 D-031: Properties windows are Normal, not Floating (owner choice for fut.25). fut.25 requeued.
 - 2026-10-25 crw.91 held: Network figures must use the aggregate set the box charts; history Network min/peak from per-point sums of means accepted (D-032); history charts draw stored min and max. Requeued.
 - 2026-10-25 D-033 (owner request): tasklens-crw.95 Overview sidebar icon for alignment, tasklens-crw.96 box gaps and inner splitters resize only in Edit Layout. Both queued.
+- 2026-10-25 crw.91 closed: stacked history charts draw band means (D-032 amended), everything else fixed.
