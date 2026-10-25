@@ -244,10 +244,11 @@ impl ChartView {
             self.history = Some(HistoryClock::of(hist));
             self.boots = Arc::clone(&hist.boots);
             self.tier_fallback = false;
+            let stack = self.spec.stack;
             self.series.clear();
             self.series.extend(self.spec.series.iter().map(|s| {
                 let points = hist.get(s.id).filter(|_| s.process.is_none())?;
-                Some(Arc::new(history_view(s.id, points, hist)))
+                Some(Arc::new(history_view(s.id, points, hist, stack)))
             }));
             return;
         }
@@ -606,9 +607,17 @@ impl HistoryClock {
 /// without points (the app not running, the machine off or asleep) draws as a break, not as a
 /// line across it. A valid point is its max a sixth of a step after the bucket start, its min a
 /// third in (each only when it differs from the mean), then its mean at the bucket middle, so a
-/// spike shorter than the step stays visible and the newest sample is still a mean. The version
-/// is the component's, so a new publish rebuilds the geometry.
-fn history_view(id: SeriesId, points: &[HistPoint], hist: &DeviceHistory) -> SeriesView {
+/// spike shorter than the step stays visible and the newest sample is still a mean. With `stack`
+/// a valid point is its mean only: the stacked bands sum each series' samples per period slot,
+/// so extrema would add a series to itself, and the maxima of different series need not happen
+/// together (the bands could top the total). The version is the component's, so a new publish
+/// rebuilds the geometry.
+fn history_view(
+    id: SeriesId,
+    points: &[HistPoint],
+    hist: &DeviceHistory,
+    stack: bool,
+) -> SeriesView {
     let step = hist.step_ns.max(1);
     let mut samples = Vec::with_capacity(points.len());
     let mut prev: Option<i64> = None;
@@ -620,10 +629,10 @@ fn history_view(id: SeriesId, points: &[HistPoint], hist: &DeviceHistory) -> Ser
         if p.is_gap() {
             samples.push(Sample::gap(t));
         } else {
-            if p.max > p.mean {
+            if !stack && p.max > p.mean {
                 samples.push(Sample::valid(t + step / 6, p.max));
             }
-            if p.min < p.mean {
+            if !stack && p.min < p.mean {
                 samples.push(Sample::valid(t + step / 3, p.min));
             }
             samples.push(Sample::valid(t + step / 2, p.mean));
@@ -758,6 +767,7 @@ mod tests {
     use tl_model::series::Sample;
 
     use super::*;
+    use crate::chart::ChartSeries;
 
     fn view(metric: MetricId, samples: Vec<Sample>) -> Option<Arc<SeriesView>> {
         Some(Arc::new(SeriesView {
@@ -832,5 +842,87 @@ mod tests {
         assert_eq!(newest_valid_sum(&empty), None);
         assert_eq!(newest_valid_sum(&[]), None);
         assert!(!newest_all_valid(&[]));
+    }
+
+    /// A stacked history chart (the Memory composition) draws each point's mean only. With the
+    /// max and min as well, a band added its own extrema into one period slot, so the bands
+    /// above it rose and the composition could top the total.
+    #[test]
+    fn stacked_history_draws_means_only() {
+        const STEP: u64 = 10_000_000_000;
+        let hist = DeviceHistory {
+            step_ns: STEP,
+            ..DeviceHistory::default()
+        };
+        let t0 = 1_000 * STEP as i64;
+        let points: Vec<HistPoint> = (0..6i64)
+            .map(|i| HistPoint {
+                t_realtime_ns: t0 + i * STEP as i64,
+                mean: 20.0,
+                min: 10.0,
+                max: 30.0,
+            })
+            .collect();
+        let views: Vec<SeriesView> = [
+            MetricId::MEM_USED,
+            MetricId::MEM_CACHED,
+            MetricId::MEM_AVAILABLE,
+        ]
+        .map(|metric| {
+            let id = SeriesId {
+                device: DeviceIdx(1),
+                metric,
+            };
+            history_view(id, &points, &hist, true)
+        })
+        .into();
+        for v in &views {
+            assert_eq!(v.samples.len(), points.len(), "one sample per point");
+        }
+        // Unstacked, the same points keep their max and min.
+        let id = views[0].id;
+        assert_eq!(history_view(id, &points, &hist, false).samples.len(), 18);
+
+        let line = gpui_kit::hsla(0.0, 1.0, 0.5, 1.0);
+        let series: Vec<(ChartSeries, Option<&SeriesView>)> = views
+            .iter()
+            .map(|v| {
+                let spec = ChartSeries {
+                    line,
+                    ..ChartSeries::default()
+                };
+                (spec, Some(v))
+            })
+            .collect();
+        let newest = views[0].samples.last().expect("samples").t_ns;
+        let input = geometry::BuildInput {
+            series: &series,
+            map: geometry::TimeMap {
+                anchor_ns: newest,
+                right_edge_ns: newest,
+                range_ns: 6 * STEP,
+                plot_width: 600.0,
+            },
+            plot_height: 100.0,
+            y_min: 0.0,
+            y_max: 100.0,
+            now_boot_ns: newest,
+            stack: true,
+            curved: false,
+        };
+        let mut cache = ChartCache::default();
+        geometry::build(&input, &mut cache, &mut geometry::Scratch::default());
+        // The three means sum to 60 of 100, so the top band's line sits at y 40.
+        let top = cache
+            .strokes
+            .iter()
+            .flat_map(|s| s.path.vertices.iter())
+            .map(|v| f32::from(v.xy_position.y))
+            .reduce(f32::min)
+            .expect("strokes");
+        assert!(
+            (top - 40.0).abs() < 0.5,
+            "the bands top out at y {top}, not 40"
+        );
     }
 }
