@@ -20,7 +20,7 @@ dark = "Default Dark"
 [appearance]
 ui_scale_pct = 100             # 75..=200, step 5
 row_height_pct = 100           # 80..=150, step 5
-decorations = "client"         # client | server  (label "Use system title bar"; restart)
+decorations = "server"         # client | server  (label "Use system title bar"; restart)
 rounded_corners = true
 heat_coloring = true
 heat_intensity_pct = 50        # 0..=100

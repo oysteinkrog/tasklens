@@ -41,11 +41,12 @@ pub enum StartTab {
 }
 
 /// `appearance.decorations` (R-021). Label "Use system title bar"; a change needs a restart.
+/// Server is the default (D-035): KWin draws the title bar. A file that says `"client"` keeps it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Decorations {
-    #[default]
     Client,
+    #[default]
     Server,
 }
 
@@ -265,7 +266,7 @@ impl Default for AppearanceSettings {
         Self {
             ui_scale_pct: 100,
             row_height_pct: 100,
-            decorations: Decorations::Client,
+            decorations: Decorations::Server,
             rounded_corners: true,
             heat_coloring: true,
             heat_intensity_pct: 50,
@@ -2006,7 +2007,7 @@ mod tests {
 
         assert_eq!(s.appearance.ui_scale_pct, 100);
         assert_eq!(s.appearance.row_height_pct, 100);
-        assert_eq!(s.appearance.decorations, Decorations::Client);
+        assert_eq!(s.appearance.decorations, Decorations::Server);
         assert!(s.appearance.rounded_corners);
         assert!(s.appearance.heat_coloring);
         assert_eq!(s.appearance.heat_intensity_pct, 50);
@@ -2503,6 +2504,22 @@ mod tests {
         let mut s: Settings = toml::from_str(text).expect("valid TOML");
         let changed = s.clamp();
         (s, changed)
+    }
+
+    /// D-035: a file without the key gets server decorations, and a file that says "client"
+    /// keeps client ones.
+    #[test]
+    fn decorations_key_missing_is_server_and_client_is_kept() {
+        let (s, changed) = load_toml("[appearance]\nui_scale_pct = 100\n");
+        assert_eq!(s.appearance.decorations, Decorations::Server);
+        assert!(changed.is_empty());
+
+        let (s, _) = load_toml("");
+        assert_eq!(s.appearance.decorations, Decorations::Server);
+
+        let (s, changed) = load_toml("[appearance]\ndecorations = \"client\"\n");
+        assert_eq!(s.appearance.decorations, Decorations::Client);
+        assert!(changed.is_empty());
     }
 
     /// One `cpu` box on the grid, with `extra` added to its entry.
