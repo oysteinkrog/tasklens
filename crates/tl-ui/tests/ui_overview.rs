@@ -6130,6 +6130,9 @@ mod page {
     fn overview_inner_split_escape_during_drag(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
         r.bind_keys();
+        // Edit Layout draws a taller title row, so the gap sits lower there: the place to come
+        // back to is the one outside it.
+        let rest = r.gap(CPU_SPLITTER_ID);
         r.edit_layout();
         let before = r.gap(CPU_SPLITTER_ID);
         let at = center(before);
@@ -6148,15 +6151,11 @@ mod page {
         r.move_to(to);
         assert_eq!(
             r.gap(CPU_SPLITTER_ID),
-            before,
+            rest,
             "a move after Esc changes nothing"
         );
         r.release(to);
-        assert_eq!(
-            r.gap(CPU_SPLITTER_ID),
-            before,
-            "the release changes nothing"
-        );
+        assert_eq!(r.gap(CPU_SPLITTER_ID), rest, "the release changes nothing");
         assert!(
             r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).is_none(),
             "no accent line"
