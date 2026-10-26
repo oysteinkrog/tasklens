@@ -19,7 +19,7 @@ use tl_model::command::Command;
 use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
+use tl_model::settings::{Decorations, NetworkUnit, Settings, StartTab, UiState};
 use tl_model::table::TableMode;
 use tl_ui::actions::{OpenAdditionalSetup, OpenSettings};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -150,15 +150,20 @@ const E21_P2_KEYS: &[SettingKey] = &[
 /// `TasklensUi::init` with a persist counter and the test page. Returns the engine and the
 /// number of persist calls.
 fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Rc<Cell<u32>>) {
+    // The window is checked with the kit title bar and the client frame. The default is server
+    // decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
+    setup_with(cx, settings)
+}
+
+/// `setup` with the given settings.
+fn setup_with(cx: &mut TestAppContext, settings: Settings) -> (Arc<FakeEngine>, Rc<Cell<u32>>) {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
     let persists = Rc::new(Cell::new(0));
     let count = persists.clone();
-    // The window is checked with the kit title bar and the client frame. The default is server
-    // decorations (D-035).
-    let mut settings = Settings::default();
-    settings.appearance.decorations = tl_model::settings::Decorations::Client;
     let init = UiInit {
         settings,
         state: UiState::default(),
@@ -239,9 +244,7 @@ fn settings_window_size_and_sidebar(cx: &mut TestAppContext) {
     setup(cx);
     let (_, mut vcx) = open(cx, 1);
     let viewport = vcx.update(|window, _| window.viewport_size());
-    let extra = tl_ui::components::window_frame::client_frame_extra(
-        tl_model::settings::Decorations::Client,
-    );
+    let extra = tl_ui::components::window_frame::client_frame_extra(Decorations::Client);
     assert_eq!(viewport, size(px(900.) + extra, px(640.) + extra));
     assert_eq!(SIDEBAR_W, 220.);
     assert!(vcx.debug_bounds("SettingsWindowBody").is_some());
@@ -251,6 +254,51 @@ fn settings_window_size_and_sidebar(cx: &mut TestAppContext) {
 fn settings_esc_closes(cx: &mut TestAppContext) {
     setup(cx);
     let (frame, mut vcx) = open(cx, 1);
+    drop(frame);
+    let handle = settings_window(cx).expect("open");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(!is_open(cx, handle), "Esc closes the window");
+}
+
+/// Default settings draw no kit title bar (D-035): the Settings window keeps its 900 x 640 size
+/// with no frame, the pin sits in the content's top-right corner, the "Use system title bar"
+/// switch reads on and Esc still closes the window.
+#[gpui_kit::test]
+fn settings_window_server_decorations_by_default(cx: &mut TestAppContext) {
+    setup_with(cx, Settings::default());
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
+        Decorations::Server
+    );
+    // The switch is on when the stored value is "server" (`PageBuilder::str_switch`).
+    let stored = cx.update(|cx| {
+        serde_json::to_value(TlSettings::settings(cx))
+            .expect("settings serialize")
+            .pointer("/appearance/decorations")
+            .cloned()
+    });
+    assert_eq!(stored, Some(serde_json::json!("server")));
+    assert!(
+        page(cx, PageId::Appearance)
+            .keys()
+            .contains(&SettingKey::AppearanceDecorations)
+    );
+
+    let (frame, mut vcx) = open(cx, 1);
+    assert!(!vcx.read(|cx| frame.read(cx).has_title_bar()));
+    assert!(vcx.debug_bounds("TlWindowTitleBar").is_none());
+    let viewport = vcx.update(|window, _| window.viewport_size());
+    assert_eq!(viewport, size(px(900.), px(640.)));
+    let body = vcx.debug_bounds("SettingsWindowBody").expect("body drawn");
+    let content = vcx.debug_bounds("TlWindowContent").expect("content drawn");
+    assert_eq!(content.top(), px(0.), "the content starts at the top");
+    assert_eq!(body.size.width, px(900.));
+    let pin = vcx.debug_bounds("TlWindowPin").expect("pin drawn");
+    assert_eq!(pin.size, size(px(24.), px(24.)));
+    assert_eq!(pin.top(), content.top() + px(8.));
+    assert_eq!(pin.right(), content.right() - px(8.));
+
     drop(frame);
     let handle = settings_window(cx).expect("open");
     vcx.simulate_keystrokes("escape");
@@ -1444,13 +1492,13 @@ fn page_builder_str_switch_restart_toast(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(
         cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
-        tl_model::settings::Decorations::Server
+        Decorations::Server
     );
     assert_eq!(window_toasts(&mut vcx), ["Restart to apply"]);
     vcx.update(|_, cx| page.set_bool(SettingKey::AppearanceDecorations, false, cx));
     assert_eq!(
         cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
-        tl_model::settings::Decorations::Client
+        Decorations::Client
     );
 }
 
@@ -2051,7 +2099,7 @@ fn settings_restart_toast(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     assert_eq!(
         cx.update(|cx| TlSettings::settings(cx).appearance.decorations),
-        tl_model::settings::Decorations::Server
+        Decorations::Server
     );
     assert_eq!(
         window_toasts(&mut vcx),
