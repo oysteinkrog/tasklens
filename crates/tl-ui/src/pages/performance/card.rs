@@ -2977,7 +2977,7 @@ mod tests {
         assert_eq!(l.card_height(1.0), px(86.));
         assert_eq!(
             &*card_tooltip(&lines, &l, Some(&value)),
-            [value.text.clone()]
+            [SharedString::from("1023.9\u{a0}KiB/s")]
         );
         // A value that fits its own row is drawn whole.
         let l = layout(&lines, 10., 10.);
