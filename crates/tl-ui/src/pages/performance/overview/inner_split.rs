@@ -8,7 +8,8 @@
 //! ([`SplitAxis::Column`]).
 //!
 //! The gap resizes only in Edit Layout (D-033). Outside it the gap only marks its place: no
-//! cursor, no accent line, and drags and double-clicks do nothing.
+//! cursor, no accent line, and drags and double-clicks do nothing. Leaving Edit Layout during a
+//! drag ends the drag without a change: the split goes back to where it was, unsaved.
 //!
 //! [`InnerSplit`] is plain state inside the box view. The box draws its two parts with the
 //! first taking [`InnerSplit::share`] of the body, and adds [`InnerSplit::probe`] and
@@ -117,6 +118,8 @@ struct SplitDrag {
     gap: f32,
     start: f32,
     start_share: f32,
+    /// The share as saved when the button went down, which a cancelled drag goes back to.
+    saved: f32,
     /// True once a move changed the share.
     changed: bool,
 }
@@ -269,14 +272,32 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
                 gap: f32::from(gap),
                 start: axis.along(ev.position),
                 start_share: self.share(axis, gap, metrics(cx).ui_scale),
+                saved: self.share,
                 changed: false,
             });
         }
         cx.notify();
     }
 
+    /// Ends a drag in progress without a change: the share goes back to the one at the press
+    /// and nothing is saved. Returns whether a drag was in progress.
+    fn cancel(&mut self) -> bool {
+        let Some(drag) = self.drag.take() else {
+            return false;
+        };
+        self.share = drag.saved;
+        true
+    }
+
     /// The pointer moved while the gap is held.
     fn moved<V: 'static>(&mut self, position: Point<Pixels>, cx: &mut Context<V>) {
+        // Edit Layout ended before this render dropped the handlers (D-033).
+        if !edit_chrome(cx) {
+            if self.cancel() {
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = &mut self.drag else {
             return;
         };
@@ -302,6 +323,12 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
 
     /// The button went up: the drag ends and a changed share goes to the page to be saved.
     fn up<V: EventEmitter<E>>(&mut self, cx: &mut Context<V>) {
+        if !edit_chrome(cx) {
+            if self.cancel() {
+                cx.notify();
+            }
+            return;
+        }
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -359,7 +386,12 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
             SplitAxis::Column => el.left_0().right_0().top(relative(share)).h(gap),
         };
         if !edit_chrome(cx) {
-            // No hit area, so no hover leave either: the hover ends here.
+            // No hit area, so no hover leave either: the hover ends here, as does a drag. The
+            // parts of this render still sit at the dragged share, so one more render follows.
+            if self.cancel() {
+                let view = cx.entity_id();
+                cx.defer(move |cx| cx.notify(view));
+            }
             self.hover = false;
             self.hover_shown = false;
             self.hover_task = None;
@@ -407,7 +439,8 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
     ) -> impl IntoElement + use<V, E> {
         let body = Rc::clone(&self.body);
         let view = cx.entity().downgrade();
-        let dragging = self.drag.is_some();
+        // Outside Edit Layout a drag left over from it follows the pointer no more (D-033).
+        let dragging = self.drag.is_some() && edit_chrome(cx);
         // A fixed second part depends on the body length, so a new length needs one more render.
         let fixed = self.default_second_px.is_some() && self.share == self.default;
         let id = cx.entity_id();

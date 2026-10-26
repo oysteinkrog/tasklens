@@ -6124,6 +6124,47 @@ mod page {
         }
     }
 
+    /// D-033: Esc during an inner splitter drag leaves Edit Layout and ends the drag: the split
+    /// goes back to where it was, and a later move or release neither moves nor saves it.
+    #[gpui_kit::test]
+    fn overview_inner_split_escape_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.bind_keys();
+        r.edit_layout();
+        let before = r.gap(CPU_SPLITTER_ID);
+        let at = center(before);
+        r.press(at, 1);
+        r.move_to(point(at.x - px(120.), at.y - px(120.)));
+        assert_ne!(
+            r.gap(CPU_SPLITTER_ID),
+            before,
+            "the gap moves during the drag"
+        );
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(!r.editing());
+        assert_eq!(r.escapes.get(), 0, "Esc did not reach the global Esc rule");
+        let to = point(at.x + px(200.), at.y + px(200.));
+        r.move_to(to);
+        assert_eq!(
+            r.gap(CPU_SPLITTER_ID),
+            before,
+            "a move after Esc changes nothing"
+        );
+        r.release(to);
+        assert_eq!(
+            r.gap(CPU_SPLITTER_ID),
+            before,
+            "the release changes nothing"
+        );
+        assert!(
+            r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).is_none(),
+            "no accent line"
+        );
+        assert_eq!(r.layout(), OverviewLayout::grid_default(), "split kept");
+        assert_eq!(r.saved(), None, "nothing saved");
+    }
+
     /// UI-PRF-019, D-029: in Edit Layout mode the title value ends before the gear and the hide
     /// button of every box, at both smoke sizes.
     #[gpui_kit::test]
