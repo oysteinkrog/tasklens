@@ -17,8 +17,8 @@ use gpui_kit::component::h_flex;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, CursorStyle, ElementId, Entity, EntityId, Font, FontWeight,
     Global, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Task,
-    TextRun, WeakEntity, Window, black, div, font, px,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, Task, TextRun, WeakEntity, Window, black, div, font, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -1447,6 +1447,9 @@ pub struct CardView {
     sidebar: EntityId,
     /// Draws the card again when its Valid value turns Stale.
     stale: StaleTimer,
+    /// Draws the card again when the chart notifies while its graph is not drawn. A drawn graph
+    /// is a child view, so its notify already draws the card.
+    chart_watch: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// Whole-card paint callbacks. A cached paint replay does not increment this counter.
@@ -1479,6 +1482,7 @@ impl CardView {
             height,
             sidebar,
             stale: StaleTimer::default(),
+            chart_watch: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1560,6 +1564,11 @@ impl Render for CardView {
         }
         self.stale
             .arm(stale_at, |this: &mut Self| &mut this.stale, cx);
+        if prepared.graph {
+            self.chart_watch = None;
+        } else if self.chart_watch.is_none() {
+            self.chart_watch = Some(cx.observe(&self.chart, |_, _, cx| cx.notify()));
+        }
 
         #[cfg(any(test, feature = "test-hooks"))]
         {

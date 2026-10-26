@@ -1854,6 +1854,46 @@ mod sidebar {
         assert_values_inside(&mut r, "nav_width 180");
     }
 
+    /// An edit card at nav_width 180 draws no graph, so the chart is not its child view. A new
+    /// sample still draws the card with the new value.
+    #[gpui_kit::test]
+    fn edit_card_without_graph_follows_new_samples(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        settings.motion.smooth_graphs = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.host_w.set(180.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        enter_edit(&mut r);
+        publish_cpu_value_at(&mut r, now_boot_ns(), 30.);
+        draw(r.vcx);
+        let before = prepared(&mut r, "cpu");
+        assert!(
+            !before.graph,
+            "an edit card at nav_width 180 draws no graph"
+        );
+        assert_eq!(&*before.value.expect("value").text, "30.0%");
+        let cpu_renders = |r: &mut Rig| {
+            card_counts(r)
+                .into_iter()
+                .find(|(key, ..)| key == "cpu")
+                .map(|(_, renders, _)| renders)
+                .expect("cpu card")
+        };
+        let renders = cpu_renders(&mut r);
+
+        publish_cpu_value_at(&mut r, now_boot_ns(), 55.);
+
+        assert_eq!(
+            cpu_renders(&mut r),
+            renders + 1,
+            "the new sample draws the card"
+        );
+        let after = prepared(&mut r, "cpu");
+        assert_eq!(&*after.value.expect("value").text, "55.0%");
+    }
+
     /// A line that gains a row grows its card on the next draw, and the cards below move down.
     #[gpui_kit::test]
     fn height_change_relays_out_sidebar(cx: &mut TestAppContext) {
