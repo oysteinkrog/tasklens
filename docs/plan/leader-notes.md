@@ -976,3 +976,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-25: crw.93 held twice (Delete, then Reset Layout during a drag restored old boxes). Decision: one end_drag called by every layout-changing action, regression test per action; requeued.
 - 2026-10-25: crw.95 held twice (narrow cards split numbers from units, cut CPU values mid-value). Decision: number+unit never split; wrap at ' · ' or words; overflow ends in '…' after the last whole piece, full text in tooltip; graph 80x48 at all widths; rendered-row tests at 180 and 252; requeued.
 - 2026-10-26: D-035 system title bar is the default (owner request); bead wrew7 filed and queued.
+- 2026-10-26: crw.95 question (edit cards at 180 px have no text room): option B, edit-mode cards that cannot fit text drop the graph; normal view keeps 80x48 everywhere. Stopped the lane's stale check unit (old 19.2 GiB estimate blocked the queue). Requeued.
