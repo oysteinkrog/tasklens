@@ -402,7 +402,9 @@ fn card_value_glyph_for_restricted(cx: &mut TestAppContext) {
     let details = DiskDetails {
         kind: Arc::from("NVMe"),
         model: Total {
-            value: Arc::from("Samsung SSD 990 PRO 2TB"),
+            // Short enough that the one-row disk line keeps the lock: a cut line ends in "…"
+            // after its last whole piece (UI-PRF-059), which would leave the lock out.
+            value: Arc::from("Samsung 990"),
             validity: Validity::Valid,
         },
         ..DiskDetails::default()
@@ -432,7 +434,7 @@ fn card_value_glyph_for_restricted(cx: &mut TestAppContext) {
         },
     );
     let lines = lines_for(DeviceKind::Disk, &disk, &s);
-    assert_eq!(lines.line2, "Samsung SSD 990 PRO 2TB\u{a0}· ");
+    assert_eq!(lines.line2, "Samsung 990\u{a0}· ");
     assert_eq!(&lines.line2_locks[..], &[lines.line2.len() as u16]);
 
     let (_, cx) = open(cx, lines);
@@ -1299,18 +1301,24 @@ mod sidebar {
     }
 
     /// UI-PRF-059: every card, the Overview card included, draws an 80 x 48 graph at nav_width
-    /// 180 and 252, outside and in edit mode, and no card has an icon.
+    /// 180 and 252, outside and in edit mode, and no card has an icon. The one exception, by
+    /// leader decision on tasklens-crw.95: an edit card at nav_width 180 is 96 px, which would
+    /// leave an 8 px text column, so it draws no graph.
     #[gpui_kit::test]
     fn card_graph_size_fixed(cx: &mut TestAppContext) {
         at_each_width_and_mode(cx, |r, what| {
             let all = keys(r);
             assert!(all.len() >= 10, "{what}: {all:?}");
             assert_eq!(all[0], OVERVIEW, "{what}");
+            let graphs = what != "edit mode at nav_width 180";
             for key in all {
-                let g = r
-                    .vcx
-                    .debug_bounds(sel(format!("perf-card-graph:{key}")))
-                    .unwrap_or_else(|| panic!("{what}: {key} has no graph"));
+                let g = r.vcx.debug_bounds(sel(format!("perf-card-graph:{key}")));
+                assert_eq!(prepared(r, &key).graph, graphs, "{what} {key}");
+                let Some(g) = g else {
+                    assert!(!graphs, "{what}: {key} has no graph");
+                    continue;
+                };
+                assert!(graphs, "{what}: {key} draws a graph");
                 assert_eq!(
                     (g.size.width, g.size.height),
                     (px(80.), px(48.)),
@@ -1325,7 +1333,8 @@ mod sidebar {
     }
 
     /// UI-PRF-059: the text starts 10 px after the graph, at the same x on every card, at
-    /// nav_width 180 and 252, outside and in edit mode.
+    /// nav_width 180 and 252, outside and in edit mode. The edit cards at nav_width 180 draw no
+    /// graph, so their text starts sp5 (12 px) inside the 1 px border, also at one x.
     #[gpui_kit::test]
     fn card_text_left_edge_shared(cx: &mut TestAppContext) {
         at_each_width_and_mode(cx, |r, what| {
@@ -1334,11 +1343,12 @@ mod sidebar {
             let mut first = None;
             for key in all {
                 let text = text_column(r, &key);
-                let graph = r
-                    .vcx
-                    .debug_bounds(sel(format!("perf-card-graph:{key}")))
-                    .unwrap_or_else(|| panic!("{what}: {key} has no graph"));
-                assert_eq!(text.left() - graph.right(), px(10.), "{what} {key}");
+                match r.vcx.debug_bounds(sel(format!("perf-card-graph:{key}"))) {
+                    Some(graph) => {
+                        assert_eq!(text.left() - graph.right(), px(10.), "{what} {key}");
+                    }
+                    None => assert_eq!(what, "edit mode at nav_width 180", "{key}"),
+                }
                 let first = *first.get_or_insert(text.left());
                 assert_eq!(text.left(), first, "{what} {key}");
             }
@@ -1349,7 +1359,9 @@ mod sidebar {
     /// row ends in a number whose unit is on the next row, and the Overview line 1 wraps at every
     /// " · " to as many rows as it needs instead of being cut. The test font draws every
     /// character 0.6 em wide: at nav_width 180 "3901 MHz ·" is wider than the 60 px column, so
-    /// the row leaves the dot out; at 200 the CPU line takes 2 rows, at 252 the Overview line 3.
+    /// the row leaves the dot out; at 200 the CPU line takes 2 rows and the Overview line 4, with
+    /// "GPU · Disk" (72 px) on one row of 80 px and its dot left out; at 252 the Overview line
+    /// takes 3.
     #[gpui_kit::test]
     fn card_rows_break_only_between_values(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1372,7 +1384,7 @@ mod sidebar {
         let cpu_bare = ["3901\u{a0}MHz", "55\u{a0}°C"];
         for (w, cpu_rows, overview_rows) in [
             (180., &cpu_bare[..], 5),
-            (200., &cpu_two[..], 5),
+            (200., &cpu_two[..], 4),
             (252., &[cpu_full][..], 3),
             (400., &[cpu_full][..], 2),
         ] {
@@ -1409,10 +1421,20 @@ mod sidebar {
                 assert!(!line.cut, "width {w}: {key} {rows:?}");
                 assert_eq!(rows.len(), want, "width {w}: {key} {rows:?}");
                 if key == OVERVIEW {
-                    assert_eq!(rows.join(" "), full, "width {w}: {key}");
-                    for row in &rows[..rows.len() - 1] {
-                        assert!(row.ends_with('·'), "width {w}: {key} {rows:?}");
-                    }
+                    // Every row but the last ends at a dot, or leaves out a dot that did not fit.
+                    let last = rows.len() - 1;
+                    let whole: Vec<String> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| {
+                            if i == last || row.ends_with('·') {
+                                (*row).to_owned()
+                            } else {
+                                format!("{row}\u{a0}·")
+                            }
+                        })
+                        .collect();
+                    assert_eq!(whole.join(" "), full, "width {w}: {key} {rows:?}");
                 }
             }
         }
@@ -1495,6 +1517,41 @@ mod sidebar {
             "one value row"
         );
         assert_values_inside(&mut r, "nav_width 180, 1023.9 KiB/s");
+        let col = text_column(&mut r, "net:eth0");
+        let row = r
+            .vcx
+            .debug_bounds("perf-card-row:net:eth0:value:0")
+            .expect("value row");
+        assert_row_drawn("1023.9 KiB/s", row, col, ("\u{2026}", 16., 0), false);
+    }
+
+    /// tasklens-crw.95 review: the value keeps room for "999.9 Mbps" (96 px), which does not fit
+    /// the 60 px text column at nav_width 180, but a value that fits is drawn whole on its own
+    /// row: "0 Mbps" is 57.6 px.
+    #[gpui_kit::test]
+    fn narrow_card_draws_a_value_that_fits_whole(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(900.)));
+        r.host_w.set(180.);
+        r.vcx.update(|window, _| window.refresh());
+        draw(r.vcx);
+        publish_eth0_rx(&mut r, 0.);
+        let p = prepared(&mut r, "net:eth0");
+        let value = p.value.as_ref().expect("value");
+        assert_eq!(&*value.text, "0\u{a0}Mbps");
+        assert!(
+            !p.layout.value_inline && !p.layout.value_cut,
+            "{:?}",
+            p.layout
+        );
+        let row = r
+            .vcx
+            .debug_bounds("perf-card-row:net:eth0:value:0")
+            .expect("value row");
+        let col = text_column(&mut r, "net:eth0");
+        assert_row_drawn("0 Mbps", row, col, (&value.text, 16., 0), false);
     }
 
     /// Unit words that end a value. A row that starts with one split a value from its number.
@@ -1503,23 +1560,65 @@ mod sidebar {
         "B", "KiB", "MiB", "GiB", "TiB", "GB", "TB", "RPM", "W",
     ];
 
-    /// UI-PRF-059 on the drawn rows of one card line, `full` being the line before layout: each
-    /// row is drawn; no row starts with a unit or a dot; the rows are the line's pieces in order
-    /// and whole (the last piece of a row may leave out its " ·"); and a cut line ends in "…"
-    /// right after its last whole piece.
+    /// The width the test font draws `text` at `size` px: 0.6 em per character, and 12 px per
+    /// lock icon.
+    fn test_font_width(text: &str, size: f32, locks: usize) -> f32 {
+        text.chars().count() as f32 * 0.6 * size + 12. * locks as f32
+    }
+
+    /// The drawn row `row` shows `text`: it is as wide as `text` in the test font (wider when
+    /// `trailing`, the inline value after the last heading row, is on it), and it lies inside the
+    /// card's text column, so the overflow clip hides none of it.
+    fn assert_row_drawn(
+        what: &str,
+        row: Bounds<Pixels>,
+        col: Bounds<Pixels>,
+        (text, size, locks): (&str, f32, usize),
+        trailing: bool,
+    ) {
+        let want = test_font_width(text, size, locks);
+        let w = f32::from(row.size.width);
+        let fits = if trailing {
+            w + 1. >= want
+        } else {
+            (w - want).abs() <= 1.
+        };
+        assert!(
+            fits && (w > 0. || text.is_empty()),
+            "{what}: {text:?} drawn {w} px wide, want {want}"
+        );
+        assert!(inside(row, col), "{what}: {text:?} {row:?} in {col:?}");
+    }
+
+    /// UI-PRF-059 on the drawn rows of one card line, `full` being the line before layout, in
+    /// the card font `size` px: each row is drawn, shows its text and lies inside the text
+    /// column; no row starts with a unit or a dot; the rows are the line's pieces in order and
+    /// whole (the last piece of a row may leave out its " ·"); and a cut line ends in "…" right
+    /// after its last whole piece. `trailing` is set when the inline value follows the last row.
     fn assert_whole_pieces(
         r: &mut Rig,
         what: &str,
         (key, name): (&str, &str),
         full: &str,
         line: &CardLineLayout,
+        (size, trailing): (f32, bool),
     ) {
         let rows = line.rows.len();
+        let col = text_column(r, key);
         for i in 0..=rows {
             let drawn = r
                 .vcx
                 .debug_bounds(sel(format!("perf-card-row:{key}:{name}:{i}")));
             assert_eq!(drawn.is_some(), i < rows, "{what} {key} {name} row {i}");
+            if let (Some(bounds), Some(row)) = (drawn, line.rows.get(i)) {
+                assert_row_drawn(
+                    &format!("{what} {key} {name} row {i}"),
+                    bounds,
+                    col,
+                    (&row.text, size, row.locks.len()),
+                    trailing && i + 1 == rows,
+                );
+            }
         }
         let source: Vec<&str> = full.split(' ').filter(|p| !p.is_empty()).collect();
         let mut at = 0;
@@ -1560,7 +1659,8 @@ mod sidebar {
     /// 252, outside and in edit mode: no row starts with a unit, no row cuts a value, and a cut
     /// line ends in "…" after a whole piece. A value wider than the column has one row that
     /// shows "…", with the value in the tooltip. At nav_width 180 the CPU line 2 keeps both
-    /// values whole on 2 rows, and the 1023.9 KiB/s rate shows "…".
+    /// values whole on 2 rows, and the 1023.9 KiB/s rate shows "…". Every row lies inside its
+    /// card's text column: an edit card at nav_width 180 draws no graph, so it has one.
     #[gpui_kit::test]
     fn card_value_unit_not_split_as_drawn(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1600,13 +1700,24 @@ mod sidebar {
                 let what = format!("nav_width {w}, edit {edit}");
                 for key in keys(&mut r) {
                     let p = prepared(&mut r, &key);
+                    assert_eq!(p.graph, !(edit && w == 180.), "{what} {key}: graph");
+                    let col = text_column(&mut r, &key);
+                    assert!(col.size.width >= px(16.), "{what} {key}: {col:?}");
                     let full = lines(&mut r, &key);
-                    for (name, text, line) in [
-                        ("heading", &full.heading, &p.layout.heading),
-                        ("line1", &full.line1, &p.layout.line1),
-                        ("line2", &full.line2, &p.layout.line2),
+                    let inline = p.value.is_some() && p.layout.value_inline;
+                    for (name, text, line, size, trailing) in [
+                        ("heading", &full.heading, &p.layout.heading, 14., inline),
+                        ("line1", &full.line1, &p.layout.line1, 12., false),
+                        ("line2", &full.line2, &p.layout.line2, 12., false),
                     ] {
-                        assert_whole_pieces(&mut r, &what, (&key, name), text, line);
+                        assert_whole_pieces(
+                            &mut r,
+                            &what,
+                            (&key, name),
+                            text,
+                            line,
+                            (size, trailing),
+                        );
                     }
                     let one = r
                         .vcx
@@ -1618,15 +1729,29 @@ mod sidebar {
                     let Some(v) = p.value.as_ref() else {
                         continue;
                     };
-                    assert!(one.is_some(), "{what} {key}: value drawn");
-                    if p.layout.value_cut {
+                    let one = one.unwrap_or_else(|| panic!("{what} {key}: value drawn"));
+                    // A cut value draws "…" alone; the tooltip has the value.
+                    let shown = if p.layout.value_cut {
                         cut_values += 1;
                         let tip = card_tooltip(&full, &p.layout, Some(v));
                         assert!(tip.contains(&v.text), "{what} {key}: {tip:?}");
-                    } else if let Some(row) = one {
-                        let col = text_column(&mut r, &key);
-                        assert!(inside(row, col), "{what} {key} value {row:?} in {col:?}");
-                    }
+                        "\u{2026}"
+                    } else {
+                        &*v.text
+                    };
+                    let (shown, locks) = if v.validity == Validity::Restricted {
+                        ("", 1)
+                    } else {
+                        (shown, 0)
+                    };
+                    let col = text_column(&mut r, &key);
+                    assert_row_drawn(
+                        &format!("{what} {key} value"),
+                        one,
+                        col,
+                        (shown, 16., locks),
+                        false,
+                    );
                 }
                 if edit {
                     r.vcx

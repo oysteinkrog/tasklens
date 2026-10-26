@@ -925,9 +925,9 @@ pub struct CardTextLayout {
     pub heading: CardLineLayout,
     /// The value fits after the last heading row. Otherwise it has a row of its own under it.
     pub value_inline: bool,
-    /// The value is wider than the text column even on its own row, as a network rate at
-    /// nav_width 180: its row shows "…" and the tooltip has the value. A number never splits from
-    /// its unit (UI-PRF-059).
+    /// The value as it reads now is wider than the text column even on its own row, as
+    /// "1023.9 KiB/s" at nav_width 180: its row shows "…" and the tooltip has the value. A number
+    /// never splits from its unit (UI-PRF-059).
     pub value_cut: bool,
     pub line1: CardLineLayout,
     pub line2: CardLineLayout,
@@ -960,18 +960,41 @@ pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
     (card_w - px(2.0 * s) - m.sp[5] - px((CARD_GRAPH_W + CARD_TEXT_GAP) * s)).max(Pixels::ZERO)
 }
 
+/// The least text column, × ui_scale, an edit-mode card keeps next to its graph: room for "…"
+/// in the value font.
+const EDIT_TEXT_MIN_W: f32 = 16.0;
+
+/// Whether a card `card_w` wide draws its graph. Always outside edit mode (UI-PRF-059). In edit
+/// mode a card whose text column would be narrower than [`EDIT_TEXT_MIN_W`] draws none and gives
+/// its text the whole card: at nav_width 180 the drag handle and switch leave the card 96 px.
+pub fn card_shows_graph(card_w: Pixels, edit_mode: bool, m: &UiMetrics) -> bool {
+    !edit_mode || card_text_width(card_w, m) >= px(EDIT_TEXT_MIN_W * m.ui_scale)
+}
+
+/// The text column of a card: [`card_text_width`] with the graph, else the whole width inside
+/// the border and the sp5 inset.
+fn card_column_width(card_w: Pixels, graph: bool, m: &UiMetrics) -> Pixels {
+    if graph {
+        card_text_width(card_w, m)
+    } else {
+        (card_w - px(2.0 * m.ui_scale) - m.sp[5]).max(Pixels::ZERO)
+    }
+}
+
 /// Lays out the card text in a column `text_w` wide (UI-PRF-011, UI-PRF-059). Each line wraps
 /// at " · " or between words to at most 2 rows; a number and its unit are one piece and never
 /// split. When a piece is wider than the column, or the line runs out of rows, the row ends in
 /// "…" after the last whole piece that fits. Line 2 has one row when
 /// [`CardLines::line2_one_row`] is set, and line 1 as many rows as it needs when
 /// [`CardLines::line1_all_rows`] is set. The value goes `gap` after the last heading row when
-/// `value_w` fits there, else on a row of its own, which shows "…" when `value_w` is wider than
+/// `value_w`, the room it keeps for its widest text, fits there, else on a row of its own. That
+/// row shows "…" only when `live_w`, the width of the value as it reads now, is wider than
 /// `text_w`. `measure` returns the width of a string in a card font; `lock_w` is the width of
 /// one lock icon.
 pub fn card_text_layout(
     lines: &CardLines,
     value_w: Pixels,
+    live_w: Pixels,
     text_w: Pixels,
     gap: Pixels,
     lock_w: Pixels,
@@ -990,7 +1013,7 @@ pub fn card_text_layout(
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
     });
     let value_inline = value_w == Pixels::ZERO || last_w + gap + value_w <= text_w;
-    let value_cut = !value_inline && value_w > text_w;
+    let value_cut = !value_inline && live_w > text_w;
     let line1 = wrap_line(
         &lines.line1,
         &lines.line1_locks,
@@ -1311,6 +1334,8 @@ pub struct CardPrepared {
     pub height: Pixels,
     /// The column the top card leaves free at its right for the sidebar's edit button.
     pub clear: Pixels,
+    /// The card draws its graph ([`card_shows_graph`]).
+    pub graph: bool,
 }
 
 impl CardPrepared {
@@ -1617,32 +1642,36 @@ impl DeviceCard {
                 advances.style_version = m.style_version;
             }
             let mut measure = |f: CardFont, s: &str| advances.width(s, f, &m, window);
-            // The widest text of the format, or the live text when it is wider still. Rounded
-            // up to a whole pixel, as layout rounds up the text box.
-            let value_w = value.as_ref().map_or(Pixels::ZERO, |v| {
+            // The live text, and the room kept for the widest text of the format or the live
+            // text when it is wider still. Rounded up to a whole pixel, as layout rounds up the
+            // text box.
+            let (value_w, live_w) = value.as_ref().map_or((Pixels::ZERO, Pixels::ZERO), |v| {
+                let live = measure(CardFont::Value, &v.text);
                 let w = v
                     .templates
                     .iter()
-                    .fold(measure(CardFont::Value, &v.text), |w, t| {
-                        w.max(measure(CardFont::Value, t))
-                    });
-                px(f32::from(w).ceil())
+                    .fold(live, |w, t| w.max(measure(CardFont::Value, t)));
+                (px(f32::from(w).ceil()), px(f32::from(live).ceil()))
             });
             // The graph has one fixed size (UI-PRF-059). The top card leaves the edit button's
             // column free, as if the button were part of the card, unless the value would then
             // not fit where it fits without it (at the least nav_width).
+            let edit_mode = self.edit_mode;
+            let column = |w: Pixels| card_column_width(w, card_shows_graph(w, edit_mode, &m), &m);
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
-            let fits = |w: Pixels| card_text_width(w, &m) >= value_w;
+            let fits = |w: Pixels| column(w) >= value_w;
             let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
                 edit_w
             } else {
                 Pixels::ZERO
             };
             let inner_w = self.width - clear;
+            let graph = card_shows_graph(inner_w, edit_mode, &m);
             let layout = card_text_layout(
                 &self.lines,
                 value_w,
-                card_text_width(inner_w, &m),
+                live_w,
+                card_column_width(inner_w, graph, &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1653,6 +1682,7 @@ impl DeviceCard {
                 value,
                 height,
                 clear,
+                graph,
             });
         }
         self.prepared.as_ref().expect("prepared above")
@@ -1674,6 +1704,7 @@ impl RenderOnce for DeviceCard {
             value,
             height,
             clear,
+            graph: show_graph,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
@@ -1801,7 +1832,7 @@ impl RenderOnce for DeviceCard {
             .on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(PerfSelectDevice { key: key.clone() }), cx);
             })
-            .child(graph)
+            .children(show_graph.then_some(graph))
             .child(text);
         if opacity < 1.0 {
             card = card.opacity(opacity);
@@ -2764,6 +2795,22 @@ mod tests {
         assert_eq!(card_text_width(px(20.), &m), Pixels::ZERO);
     }
 
+    /// Leader decision on tasklens-crw.95: only an edit-mode card whose text column would be
+    /// under 16 px drops its graph, and its text then has the whole card.
+    #[test]
+    fn card_shows_graph_drops_it_only_on_narrow_edit_cards() {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        // The edit card at nav_width 180: 96 px leaves an 8 px column next to the graph.
+        assert!(card_shows_graph(px(96.), false, &m));
+        assert!(!card_shows_graph(px(96.), true, &m));
+        assert_eq!(card_column_width(px(96.), false, &m), px(82.));
+        // 120 px leaves exactly 16 px, which keeps the graph.
+        assert!(card_shows_graph(px(120.), true, &m));
+        assert!(!card_shows_graph(px(119.), true, &m));
+        assert_eq!(card_column_width(px(120.), true, &m), px(16.));
+        assert!(card_shows_graph(px(20.), false, &m));
+    }
+
     /// UI-PRF-059: a value never breaks from its unit, and a line wraps only at " · " or
     /// between words.
     #[test]
@@ -2840,9 +2887,22 @@ mod tests {
         }
     }
 
-    /// `card_text_layout` with a 1 px gap and a 2 px lock.
+    /// `card_text_layout` with a 1 px gap and a 2 px lock, the value reading its widest text.
     fn layout(lines: &CardLines, value_w: f32, text_w: f32) -> CardTextLayout {
-        card_text_layout(lines, px(value_w), px(text_w), px(1.), px(2.), &mut mono)
+        live_layout(lines, value_w, value_w, text_w)
+    }
+
+    /// `card_text_layout` with a 1 px gap and a 2 px lock.
+    fn live_layout(lines: &CardLines, value_w: f32, live_w: f32, text_w: f32) -> CardTextLayout {
+        card_text_layout(
+            lines,
+            px(value_w),
+            px(live_w),
+            px(text_w),
+            px(1.),
+            px(2.),
+            &mut mono,
+        )
     }
 
     fn rows(line: &CardLineLayout) -> Vec<&str> {
@@ -2984,6 +3044,26 @@ mod tests {
         assert!(!l.value_inline && !l.value_cut);
         assert_eq!(l.text_height(), 68.);
         assert!(card_tooltip(&lines, &l, Some(&value)).is_empty());
+    }
+
+    #[test]
+    fn card_text_layout_cuts_a_value_by_its_live_text() {
+        // The rate keeps room for "1023.9 KiB/s" (12 wide), which does not fit the 10 px
+        // column. While it reads "0 B/s" (5 wide) its own row draws it whole; only a live text
+        // wider than the column shows "…".
+        let lines = card_text("eth0", "Ethernet", "R: 0 B/s");
+        let value = CardValue {
+            text: SharedString::from("0\u{a0}B/s"),
+            validity: Validity::Valid,
+            templates: &[],
+        };
+        let l = live_layout(&lines, 12., 5., 10.);
+        assert!(!l.value_inline && !l.value_cut);
+        assert!(card_tooltip(&lines, &l, Some(&value)).is_empty());
+        let l = live_layout(&lines, 12., 12., 10.);
+        assert!(!l.value_inline && l.value_cut);
+        // Both keep the value on its own row, so the rows do not move as the value changes.
+        assert_eq!(l.text_height(), 68.);
     }
 
     #[test]
