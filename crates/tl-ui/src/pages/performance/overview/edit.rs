@@ -461,6 +461,10 @@ impl OverviewPage {
         if edit.focused(window).is_some() {
             window.focus(&self.focus, cx);
         }
+        // The gaps lose their hit areas, so no hover leave comes: the hover ends here.
+        self.hover = None;
+        self.hover_shown = false;
+        self.hover_task = None;
         self.set_edit_chrome(false, cx);
         self.notify(cx);
     }

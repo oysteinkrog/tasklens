@@ -3032,6 +3032,7 @@ mod page {
     use tl_ui::pages::performance::overview::edit::{
         GHOST_ID, TOOLBAR_ID, corner_id, hide_button_id, title_handle_id,
     };
+    use tl_ui::pages::performance::overview::inner_split::hit_selector;
     use tl_ui::pages::performance::overview::layout::{
         Arrange, BoxKind, GridBox, OverviewLayout, ROW_UNIT_DEFAULT, place,
     };
@@ -3716,6 +3717,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_grid_gap_drag_moves_shared_edge(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         let start = center(r.gap("perf-overview-splitter-col-cpu"));
         r.press(start, 1);
         // Under half a cell (97.8 px with the gutter) nothing moves.
@@ -3769,6 +3771,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_layout_saved_after_drag(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         assert_eq!(r.saved(), None);
         let start = center(r.gap("perf-overview-splitter-row-memory"));
         r.press(start, 1);
@@ -3805,6 +3808,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_cpu_split_drag_moves_split(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         let start = center(r.gap(CPU_SPLITTER_ID));
         let before = r.gap(CPU_SPLITTER_ID).left();
         r.press(start, 1);
@@ -3836,6 +3840,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_cpu_split_double_click_resets(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         let start = center(r.gap(CPU_SPLITTER_ID));
         r.press(start, 1);
         r.move_to(point(start.x - px(80.), start.y));
@@ -3855,6 +3860,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_cpu_split_saved_and_clamped(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         let start = center(r.gap(CPU_SPLITTER_ID));
         r.press(start, 1);
         r.move_to(point(px(-5000.), start.y));
@@ -3948,6 +3954,7 @@ mod page {
         let mut r = open_rooted(cx, true, 1200., 900.);
         // A 456 px CPU box, so the strip takes its default 25% of the body.
         r.set_row_unit(60);
+        r.edit_layout();
         let power = |r: &mut Rig, on: bool| {
             r.page_action(&PerfOverviewSetBoxPower {
                 kind: "cpu".into(),
@@ -4399,6 +4406,7 @@ mod page {
         };
         use tl_ui::pages::performance::overview::parts::time_axis_id;
         let mut r = open_rooted(cx, true, 1280., 800.);
+        r.edit_layout();
         r.page_action(&PerfOverviewSetBoxMode {
             kind: "gpu".into(),
             mode: "chart_engines".into(),
@@ -5111,6 +5119,7 @@ mod page {
         let mut r = open_rooted(cx, true, 1200., 900.);
         // A 456 px CPU box, tall enough for stacked parts and a 60 px drag.
         r.set_row_unit(60);
+        r.edit_layout();
         let page = r.page.clone();
         let side = |r: &mut Rig| {
             r.vcx
@@ -6014,6 +6023,7 @@ mod page {
             });
         });
         draw(r.vcx);
+        r.edit_layout();
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box");
         assert!(frame.size.width >= px(560.), "side by side: {frame:?}");
         let pad = r
@@ -6059,6 +6069,59 @@ mod page {
         let w = chart_w(r.gap(CPU_SPLITTER_ID));
         let body = f32::from(frame.size.width) - 2. - 2. * pad;
         assert!((w - 0.4 * body).abs() <= 1.5, "chart {w} of {body}");
+    }
+
+    impl Rig<'_> {
+        /// Whether the gap `id` has its hit area, which carries the resize cursor.
+        fn has_hit_area(&mut self, id: &str) -> bool {
+            let hit: &'static str = Box::leak(hit_selector(id).into_boxed_str());
+            self.vcx.debug_bounds(hit).is_some()
+        }
+
+        /// A hover past the accent line delay, a drag along both axes and a double-click on
+        /// the middle of the gap `id`.
+        fn hover_drag_and_double_click(&mut self, id: &'static str) {
+            let at = center(self.gap(id));
+            self.vcx.simulate_mouse_move(at, None, Modifiers::none());
+            draw(self.vcx);
+            self.vcx
+                .executor()
+                .advance_clock(Duration::from_millis(150));
+            draw(self.vcx);
+            self.press(at, 1);
+            let to = point(at.x - px(120.), at.y - px(120.));
+            self.move_to(to);
+            self.release(to);
+            self.press(at, 2);
+            self.release(at);
+        }
+    }
+
+    /// D-033: outside Edit Layout an inner splitter has no hit area, so no resize cursor and no
+    /// accent line, and a drag or a double-click leaves the split where it was.
+    #[gpui_kit::test]
+    fn overview_inner_split_inert_outside_edit(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        // The default layout's two-part modes: CPU chart and core rows, the Memory rows, and
+        // the stacked Net charts.
+        let ids = [CPU_SPLITTER_ID, MEM_SPLITTER_ID, NET_STACK_SPLITTER_ID];
+        for id in ids {
+            assert!(!r.has_hit_area(id), "{id}: no hit area");
+            let before = r.gap(id);
+            r.hover_drag_and_double_click(id);
+            assert!(
+                r.vcx.debug_bounds(CPU_SPLITTER_LINE_ID).is_none(),
+                "{id}: no accent line"
+            );
+            assert_eq!(r.gap(id), before, "{id} stays");
+        }
+        assert_eq!(r.layout(), OverviewLayout::grid_default(), "splits kept");
+        assert_eq!(r.saved(), None, "nothing saved");
+        // In Edit Layout the same splitters have their hit areas.
+        r.edit_layout();
+        for id in ids {
+            assert!(r.has_hit_area(id), "{id}: hit area in Edit Layout");
+        }
     }
 
     /// UI-PRF-019, D-029: in Edit Layout mode the title value ends before the gear and the hide
@@ -6204,6 +6267,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_gap_accent_line_after_150ms(cx: &mut TestAppContext) {
         let mut r = open(cx, true, 1200., 900.);
+        r.edit_layout();
         let at = center(r.gap("perf-overview-splitter-col-cpu"));
         r.vcx.simulate_mouse_move(at, None, Modifiers::none());
         draw(r.vcx);
@@ -6219,6 +6283,32 @@ mod page {
             .simulate_mouse_move(point(px(2.), px(2.)), None, Modifiers::none());
         draw(r.vcx);
         assert!(r.vcx.debug_bounds("perf-overview-splitter-line").is_none());
+    }
+
+    /// D-033: outside Edit Layout a gap between boxes has no hit area, so no resize cursor and no
+    /// accent line, and a drag or a double-click leaves the boxes on their cells.
+    #[gpui_kit::test]
+    fn overview_gap_inert_outside_edit(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let ids = [
+            "perf-overview-splitter-col-cpu",
+            "perf-overview-splitter-row-memory",
+        ];
+        for id in ids {
+            assert!(!r.has_hit_area(id), "{id}: no hit area");
+            r.hover_drag_and_double_click(id);
+            assert!(
+                r.vcx.debug_bounds("perf-overview-splitter-line").is_none(),
+                "{id}: no accent line"
+            );
+        }
+        assert_eq!(r.layout(), OverviewLayout::grid_default(), "spans kept");
+        assert_eq!(r.saved(), None, "nothing saved");
+        // In Edit Layout the same gaps have their hit areas.
+        r.edit_layout();
+        for id in ids {
+            assert!(r.has_hit_area(id), "{id}: hit area in Edit Layout");
+        }
     }
 
     impl Rig<'_> {

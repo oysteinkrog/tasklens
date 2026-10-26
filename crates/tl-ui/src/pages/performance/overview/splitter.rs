@@ -5,7 +5,8 @@
 //! columns. [`splitters`] finds them in a [`Placement`]. A [`Drag`] holds the first box's span,
 //! the two boxes' total and their kind minimums when the button went down, and turns the
 //! pointer position into a new span in whole cells: the shared edge moves, the outer edges and
-//! every other box stay. There are no splitters in the stacked layout.
+//! every other box stay. There are no splitters in the stacked layout. The page draws a gap's
+//! hit area only in Edit Layout (D-033); outside it the gaps do nothing.
 
 use gpui_kit::{Bounds, Pixels, point, size};
 use smallvec::SmallVec;

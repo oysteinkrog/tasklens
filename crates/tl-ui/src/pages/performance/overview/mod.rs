@@ -13,7 +13,8 @@
 //! between them; [`edit`] is Edit Layout mode, which moves, resizes, hides and adds boxes. Each
 //! box has layout
 //! modes (UI-PRF-019): [`box_menu`] is the box menu and the Edit Layout gear, and
-//! [`inner_split`] is the one splitter a mode with two parts uses.
+//! [`inner_split`] is the one splitter a mode with two parts uses. The gaps and the inner
+//! splitters resize only in Edit Layout (D-033).
 //!
 //! [`range`] is the time range (UI-PRF-055): the switch in the header, the demand for the
 //! device metric history, and the min, avg and peak line and time axis start of each box, which
@@ -60,7 +61,7 @@ use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
-use self::inner_split::InnerSplitChanged;
+use self::inner_split::{InnerSplitChanged, hit_selector};
 use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
@@ -866,21 +867,29 @@ impl OverviewPage {
         self.notify(cx);
     }
 
-    /// The hit area of one gap, with its cursor, its handlers and its accent line.
-    fn gap_element(&self, s: Splitter, cx: &mut Context<Self>) -> AnyElement {
+    /// One gap. In Edit Layout (`live`) it holds the hit area with its cursor, its handlers and
+    /// its accent line; outside it the gap only marks its place (D-033).
+    fn gap_element(&self, s: Splitter, live: bool, cx: &mut Context<Self>) -> AnyElement {
         let target = s.target;
         let vertical = target.is_vertical();
-        let dragging = self.drag.as_ref().map(|a| a.drag.target);
-        let lit = dragging == Some(target)
-            || (dragging.is_none() && self.hover == Some(target) && self.hover_shown);
         let gap = div()
-            .id(SharedString::from(target.selector()))
             .debug_selector(move || target.selector())
             .absolute()
             .left(s.bounds.left())
             .top(s.bounds.top())
             .w(s.bounds.size.width)
-            .h(s.bounds.size.height)
+            .h(s.bounds.size.height);
+        if !live {
+            return gap.into_any_element();
+        }
+        let dragging = self.drag.as_ref().map(|a| a.drag.target);
+        let lit = dragging == Some(target)
+            || (dragging.is_none() && self.hover == Some(target) && self.hover_shown);
+        let hit = div()
+            .id(SharedString::from(target.selector()))
+            .debug_selector(move || hit_selector(&target.selector()))
+            .absolute()
+            .inset_0()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
@@ -890,13 +899,13 @@ impl OverviewPage {
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.splitter_hover(target, *hovered, cx);
             }));
-        let gap = if vertical {
-            gap.cursor_ew_resize()
+        let hit = if vertical {
+            hit.cursor_ew_resize()
         } else {
-            gap.cursor_ns_resize()
+            hit.cursor_ns_resize()
         };
         if !lit {
-            return gap.into_any_element();
+            return gap.child(hit).into_any_element();
         }
         let line = div()
             .debug_selector(|| SPLITTER_LINE_ID.into())
@@ -909,7 +918,7 @@ impl OverviewPage {
             let y = (f32::from(s.bounds.size.height) - SPLITTER_LINE) / 2.;
             line.top(px(y)).left_0().right_0().h(px(SPLITTER_LINE))
         };
-        gap.child(line).into_any_element()
+        gap.child(hit.child(line)).into_any_element()
     }
 
     fn notify(&self, cx: &mut Context<Self>) {
@@ -1169,12 +1178,13 @@ impl Render for OverviewPage {
         .absolute()
         .inset_0();
         // A box drag moves the boxes under the pointer, so the gaps are not splitters then.
+        let live = self.is_editing();
         let gaps: SmallVec<[AnyElement; 8]> = if box_dragging {
             SmallVec::new()
         } else {
             splitters(&self.layout, &self.placement)
                 .into_iter()
-                .map(|s| self.gap_element(s, cx))
+                .map(|s| self.gap_element(s, live, cx))
                 .collect()
         };
         let boxes: SmallVec<[AnyElement; 8]> = self

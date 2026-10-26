@@ -7,6 +7,9 @@
 //! side by side get a vertical gap ([`SplitAxis::Row`]), stacked parts a horizontal one
 //! ([`SplitAxis::Column`]).
 //!
+//! The gap resizes only in Edit Layout (D-033). Outside it the gap only marks its place: no
+//! cursor, no accent line, and drags and double-clicks do nothing.
+//!
 //! [`InnerSplit`] is plain state inside the box view. The box draws its two parts with the
 //! first taking [`InnerSplit::share`] of the body, and adds [`InnerSplit::probe`] and
 //! [`InnerSplit::gap`] over the body. Both take a `fn` that finds the splitter in the box, so
@@ -24,6 +27,7 @@ use gpui_kit::{
 };
 
 use super::layout::SPLIT_RANGE;
+use super::parts::edit_chrome;
 use crate::theme::{current, metrics};
 
 /// The smallest part when a mode sets no other minimum, logical px.
@@ -34,6 +38,12 @@ const HOVER_DELAY: Duration = Duration::from_millis(150);
 
 /// The accent line in the gap, logical px.
 const LINE_W: f32 = 2.;
+
+/// The debug selector of a gap's hit area, which only Edit Layout draws: the gap's selector
+/// with `-hit`. The hit area carries the resize cursor and the handlers.
+pub fn hit_selector(gap: &str) -> String {
+    format!("{gap}-hit")
+}
 
 /// How the two parts sit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -331,10 +341,11 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         cx.notify();
     }
 
-    /// The gap's hit area with its cursor, handlers and accent line, absolutely placed in the
-    /// body at the first part's `share` along `axis`. `gap` is the gap in px.
+    /// The gap, absolutely placed in the body at the first part's `share` along `axis`. `gap`
+    /// is the gap in px. In Edit Layout it holds the hit area with its cursor, handlers and
+    /// accent line; outside it the gap only marks its place (D-033).
     pub fn gap<V: EventEmitter<E>>(
-        &self,
+        &mut self,
         axis: SplitAxis,
         share: f32,
         gap: Pixels,
@@ -342,10 +353,23 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         cx: &mut Context<V>,
     ) -> AnyElement {
         let (id, line_id) = (self.id, self.line_id);
-        let el = div()
+        let el = div().debug_selector(move || id.into()).absolute();
+        let el = match axis {
+            SplitAxis::Row => el.top_0().bottom_0().left(relative(share)).w(gap),
+            SplitAxis::Column => el.left_0().right_0().top(relative(share)).h(gap),
+        };
+        if !edit_chrome(cx) {
+            // No hit area, so no hover leave either: the hover ends here.
+            self.hover = false;
+            self.hover_shown = false;
+            self.hover_task = None;
+            return el.into_any_element();
+        }
+        let hit = div()
             .id(id)
-            .debug_selector(move || id.into())
+            .debug_selector(move || hit_selector(id))
             .absolute()
+            .inset_0()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, ev: &MouseDownEvent, _, cx| {
@@ -355,22 +379,12 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
             .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
                 this(v).hovered(*hovered, this, cx);
             }));
-        let el = match axis {
-            SplitAxis::Row => el
-                .top_0()
-                .bottom_0()
-                .left(relative(share))
-                .w(gap)
-                .cursor_ew_resize(),
-            SplitAxis::Column => el
-                .left_0()
-                .right_0()
-                .top(relative(share))
-                .h(gap)
-                .cursor_ns_resize(),
+        let hit = match axis {
+            SplitAxis::Row => hit.cursor_ew_resize(),
+            SplitAxis::Column => hit.cursor_ns_resize(),
         };
         if !(self.drag.is_some() || (self.hover && self.hover_shown)) {
-            return el.into_any_element();
+            return el.child(hit).into_any_element();
         }
         let offset = px((f32::from(gap) - LINE_W) / 2.);
         let line = div()
@@ -381,7 +395,7 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
             SplitAxis::Row => line.top_0().bottom_0().left(offset).w(px(LINE_W)),
             SplitAxis::Column => line.left_0().right_0().top(offset).h(px(LINE_W)),
         };
-        el.child(line).into_any_element()
+        el.child(hit.child(line)).into_any_element()
     }
 
     /// A canvas over the body that keeps its bounds and, while the gap is held, follows the
