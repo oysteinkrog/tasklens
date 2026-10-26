@@ -13,7 +13,7 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -1027,8 +1027,12 @@ fn setup_about(cx: &mut TestAppContext) -> Arc<FakeEngine> {
         licenses_json: LICENSES_JSON,
     };
     env.logs_dir = "/home/u/.local/state/tasklens/logs".into();
+    // The window is checked with the kit title bar and the client frame. The default is server
+    // decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
     let init = UiInit {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         themes_json: None,
         persist: Box::new(|_, _| {}),
@@ -1303,7 +1307,7 @@ mod reset_settings {
         WindowHandle, div, px, size,
     };
     use tl_model::client::EngineClient;
-    use tl_model::settings::{Settings, UiState};
+    use tl_model::settings::{Decorations, Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::{
@@ -1332,11 +1336,13 @@ mod reset_settings {
         pcx: VisualTestContext,
     }
 
-    /// Settings with scale 150, the light theme and a 2 s refresh; state with a saved column
-    /// width and window size.
+    /// Settings with scale 150, the light theme, a 2 s refresh and client decorations (the
+    /// confirmation is checked inside the client frame); state with a saved column width and
+    /// window size.
     fn changed() -> (Settings, UiState) {
         let mut settings = Settings::default();
         settings.appearance.ui_scale_pct = 150;
+        settings.appearance.decorations = Decorations::Client;
         settings.theme.active = "Default Light".to_owned();
         settings.processes.interval_ms = 2000;
         let mut state = UiState::default();

@@ -66,7 +66,7 @@ mod window {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
-    use tl_model::settings::{Settings, UiState};
+    use tl_model::settings::{Decorations, Settings, UiState};
     use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::components::window_frame::{TestClientFrame, client_frame_extra, frame_bottom};
@@ -114,8 +114,12 @@ mod window {
         let mut env = AppEnv::test();
         env.run_history = Some(Box::new(store.clone()));
         let (_tx, rx) = async_channel::bounded(4);
+        // The window is checked with the kit title bar and the client frame. The default is
+        // server decorations (D-035).
+        let mut settings = Settings::default();
+        settings.appearance.decorations = Decorations::Client;
         let init = UiInit {
-            settings: Settings::default(),
+            settings,
             state: UiState::default(),
             themes_json: None,
             persist: Box::new(|_, _| {}),
@@ -232,7 +236,7 @@ mod window {
     fn run_window_shows_all_content_and_toast_clears_the_input(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(TestClientFrame));
         let mut rig = setup(cx, &["firefox"]);
-        let extra = client_frame_extra(Settings::default().appearance.decorations);
+        let extra = client_frame_extra(Decorations::Client);
         draw(&mut rig.run);
         let window = rig.run.update(|window, _| window.bounds());
         assert_eq!(window.size, size(px(480.) + extra, px(248.) + extra));

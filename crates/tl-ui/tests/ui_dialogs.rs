@@ -62,6 +62,14 @@ fn setup(cx: &mut TestAppContext, settings: Settings) -> Arc<FakeEngine> {
     engine
 }
 
+/// Settings with client decorations, for tests of the kit title bar. The default is server
+/// decorations (D-035), which draw no title bar.
+fn client_settings() -> Settings {
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
+    settings
+}
+
 fn set_windows_validity(cx: &mut TestAppContext, engine: &FakeEngine, validity: Validity) {
     engine.publish_with(|s| {
         let windows = Arc::make_mut(&mut s.windows);
@@ -105,7 +113,7 @@ fn tool(title: &str) -> TlWindowSpec {
 
 #[gpui_kit::test]
 fn tool_window_options(cx: &mut TestAppContext) {
-    setup(cx, Settings::default());
+    setup(cx, client_settings());
     let spec = tool("tasklens Settings").key(WindowKey::Settings);
     let options = cx.update(|cx| window_options(&spec, Decorations::Client, cx));
     assert_eq!(options.kind, WindowKind::Floating);
@@ -276,7 +284,7 @@ fn record_toggles(cx: &mut TestAppContext) -> Rc<RefCell<Vec<ToggleAlwaysOnTop>>
 
 #[gpui_kit::test]
 fn pin_dispatches_toggle(cx: &mut TestAppContext) {
-    let engine = setup(cx, Settings::default());
+    let engine = setup(cx, client_settings());
     set_windows_validity(cx, &engine, Validity::Valid);
     let dispatched = record_toggles(cx);
     let (_, mut vcx, frame) = open(cx, tool("Settings").key(WindowKey::Settings));
@@ -366,7 +374,7 @@ fn narrow_title_ends_with_ellipsis() {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
     let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text_system);
     let cx = &mut cx;
-    setup(cx, Settings::default());
+    setup(cx, client_settings());
     let long = "tasklens Properties of a process with a very long name that cannot fit into \
                 the title bar of a narrow window at all";
     let spec = TlWindowSpec::new(TlWindowKind::Properties, long, size(px(320.), px(400.)));
@@ -585,7 +593,7 @@ fn checkbox_comes_first_and_reports_its_value(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn result_called_once_on_window_close(cx: &mut TestAppContext) {
-    setup(cx, Settings::default());
+    setup(cx, client_settings());
     let mut o = open_dialog(cx, skip_confirm());
     let close = o
         .vcx

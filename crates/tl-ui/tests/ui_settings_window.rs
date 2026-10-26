@@ -155,8 +155,12 @@ fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Rc<Cell<u32>>) {
     let (_tx, rx) = async_channel::bounded(4);
     let persists = Rc::new(Cell::new(0));
     let count = persists.clone();
+    // The window is checked with the kit title bar and the client frame. The default is server
+    // decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = tl_model::settings::Decorations::Client;
     let init = UiInit {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         themes_json: None,
         persist: Box::new(move |_, _| count.set(count.get() + 1)),

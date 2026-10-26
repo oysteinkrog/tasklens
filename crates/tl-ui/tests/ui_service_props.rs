@@ -24,7 +24,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::health::HelperState;
 use tl_model::journal::{JournalAccess, JournalControl, JournalEntry, JournalError, JournalEvent};
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::snapshot::{
     DepEntry, PidIds, RecoveryKeySet, RecoverySettings, Relation, ServiceBackend, ServiceStatus,
     StartupType, UnitDetails, UnitRecord,
@@ -130,8 +130,12 @@ fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
+    // The window is checked with the kit title bar and the client frame. The default is server
+    // decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
     let init = UiInit {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         themes_json: None,
         persist: Box::new(|_, _| {}),
@@ -378,7 +382,7 @@ fn service_props_demand_unit_details(cx: &mut TestAppContext) {
     });
     let scale = cx.update(|cx| tl_ui::theme::metrics(cx).ui_scale);
     let extra = f32::from(tl_ui::components::window_frame::client_frame_extra(
-        tl_model::settings::Decorations::Client,
+        Decorations::Client,
     ));
     assert_eq!(
         (width, height),

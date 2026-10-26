@@ -23,7 +23,7 @@ use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     LowMemGroup, LowMemoryInfo, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
 };
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::GlobalActionTracker;
@@ -41,8 +41,11 @@ const SECOND: u64 = 1_000_000_000;
 
 fn ui_init() -> UiInit {
     let (_tx, rx) = async_channel::bounded(4);
+    // The window is checked with the kit title bar. The default is server decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
     UiInit {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         themes_json: None,
         persist: Box::new(|_, _| {}),

@@ -2446,7 +2446,7 @@ mod props {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
-    use tl_model::settings::{Settings, UiState};
+    use tl_model::settings::{Decorations, Settings, UiState};
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
@@ -2472,8 +2472,12 @@ mod props {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let (_tx, rx) = async_channel::bounded(4);
+        // The window is checked with the kit title bar and the client frame. The default is
+        // server decorations (D-035).
+        let mut settings = Settings::default();
+        settings.appearance.decorations = Decorations::Client;
         let init = UiInit {
-            settings: Settings::default(),
+            settings,
             state: UiState::default(),
             themes_json: None,
             persist: Box::new(|_, _| {}),

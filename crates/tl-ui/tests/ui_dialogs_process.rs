@@ -15,7 +15,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::details::AffinityInfo;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -37,8 +37,12 @@ fn setup(cx: &mut TestAppContext) -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let (_tx, rx) = async_channel::bounded(4);
+    // The dialogs here are checked with the kit title bar and the client frame. The default is
+    // server decorations (D-035).
+    let mut settings = Settings::default();
+    settings.appearance.decorations = Decorations::Client;
     let init = UiInit {
-        settings: Settings::default(),
+        settings,
         state: UiState::default(),
         themes_json: None,
         persist: Box::new(|_, _| {}),
