@@ -2,6 +2,14 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-26
+
+### D-035 The system title bar is the default
+
+- **Decision** (owner request 2026-10-26): `appearance.decorations` defaults to `"server"`. KWin draws the title bar with the standard minimize, maximize and close buttons, and tasklens shows its menus, toolbar and pin in the 28 px menu row under it (UI-SHL-006). This applies to every tasklens window. The client-drawn title bar (UI-SHL-003) stays available: turning off Settings > "Use system title bar" brings it back after a restart. This replaces the default set in D-006.
+- **Why**: the owner prefers the standard system window chrome over tasklens drawing its own.
+- **Existing settings files**: a file that already says `decorations = "client"` keeps it. Only new installs and files without the key get the new default.
+
 ## 2026-10-25
 
 ### D-034 Performance tab spacing pass
@@ -243,7 +251,7 @@ Not on the Memory page, the Information tab or in any copy text. The udev serial
 
 The default is a client-drawn title bar in TaskSlinger's layout: menus and toolbar beside the
 caption buttons. A setting switches to the KWin title bar. This overrides the lower-risk
-server-side suggestion in the GPUI research.
+server-side suggestion in the GPUI research. D-035 (2026-10-26) makes the KWin title bar the default instead.
 
 ### D-005: The name is tasklens and the repo stays private
 

@@ -125,6 +125,8 @@ WindowOptions {
 
 ### UI-SHL-003 Client-drawn title bar layout
 
+This is the mode with "Use system title bar" off. The default is the server mode in UI-SHL-006 (D-035).
+
 - **Implements**: APP-001, APP-002, APP-008, D-006, R-031, PERF-014, PROC-016.
 - **Anatomy** (height 34, bg `titlebar`; x positions measured on `processes.png` at 1360 px width):
 
@@ -208,6 +210,7 @@ WindowOptions {
 
 ### UI-SHL-006 Server-decorations variant ("Use system title bar")
 
+- **Default**: this is the default mode (D-035). `appearance.decorations` defaults to `"server"`, and "Use system title bar" is on in a new install. UI-SHL-003 is the mode with the setting off.
 - **Implements**: APP-001 (server mode), R-021, ADR-010 (predetermined fallback), APP-023 (restart rule).
 - **Conflict note**: APP-001 puts menus and toolbar in a 28 px row under the KWin title bar, then the tab strip. ADR-010 says the tab strip is the first row. APP-001 is the later, more specific text and keeps the menus reachable; this entry follows APP-001 [C].
 - **Anatomy** (`appearance.decorations = "server"`, or a compositor without xdg-decoration that forces server):

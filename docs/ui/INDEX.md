@@ -385,7 +385,7 @@ named show its effects) or "dropped" (the merged spec's verdict).
 
 | ID | Title | Verdict | Phase | UI entries |
 |---|---|---|---|---|
-| APP-001 | Window decorations (client-drawn title bar by default) | BUILD | P1 | UI-SHL-001, UI-SHL-002, UI-SHL-003, UI-SHL-004, UI-SHL-006 |
+| APP-001 | Window decorations (system title bar by default, D-035) | BUILD | P1 | UI-SHL-001, UI-SHL-002, UI-SHL-003, UI-SHL-004, UI-SHL-006 |
 | APP-002 | Title bar layout and toolbar | ADAPT | P1 | UI-FND-010, UI-SHL-003, UI-SHL-004, UI-SHL-010 |
 | APP-003 | Shield: unlock privileged actions | ADAPT | P3 | UI-FND-028, UI-SHL-010, UI-SHL-011 |
 | APP-004 | Hide system processes button | ADAPT | P1 | UI-SHL-012 |
