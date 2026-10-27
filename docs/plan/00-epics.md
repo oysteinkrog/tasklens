@@ -648,25 +648,26 @@ tl-ops, written by E29-009 and used by E11-020 (R-168).
 | `src/pages/information/mod.rs`, `src/pages/information/{section,sections,copy,filter,actions}.rs` | E28 | owner only |
 | `src/tray_bridge.rs` | E31 | owner only |
 | `src/bench/mod.rs`, `src/bench/{scenes,synth,stats,engine}.rs` | E01 | chain edit: E30 adds the `history-scrub` scene file `src/bench/history_scrub.rs` and its `mod` line, depends on E01-A1 |
-| `tests/ui_components.rs`, `tests/render_gallery.rs`, `tests/golden/*.png` | E15 | chain edit: E16 adds its component cases and goldens, depends on E15-A3 |
-| `tests/ui_hub.rs`, `tests/ui_demand.rs`, `tests/ui_actions.rs`, `tests/ui_toasts.rs`, `tests/ui_dialogs.rs` | E16 | owner only |
-| `tests/ui_theme.rs`, `tests/render_theme.rs` | E17 | owner only |
-| `tests/ui_tree_table.rs`, `tests/ui_selection.rs`, `tests/ui_columns.rs`, `tests/render_table.rs` | E18 | owner only |
-| `tests/ui_chart.rs`, `tests/chart_geometry.rs`, `tests/ui_anim.rs`, `tests/render_chart.rs` | E19 | owner only |
-| `tests/ui_shell.rs`, `tests/ui_keymap.rs` (`keymap_matches_table_b`), `tests/ui_focus.rs` | E20 | owner only |
-| `tests/ui_menus.rs`, `tests/ui_settings_window.rs`, `tests/ui_shell_windows.rs` | E21 | owner only |
-| `tests/ui_processes.rs`, `tests/ui_process_menu.rs`, `tests/ui_process_cells.rs`, `tests/golden/copy_*.txt` | E22 | owner only |
-| `tests/ui_props.rs`, `tests/ui_dialogs_process.rs`, `tests/ui_run.rs`, `tests/ui_handle_search.rs` | E23 | owner only |
-| `tests/ui_performance.rs`, `tests/ui_sidebar.rs`, `tests/ui_cpu_page.rs` | E24 | owner only |
-| `tests/ui_device_pages.rs` | E25 | owner only |
-| `tests/ui_minigraphs.rs`, `tests/ui_detached.rs` | E26 | owner only |
-| `tests/ui_sys_table.rs`, `tests/ui_services.rs`, `tests/ui_service_props.rs` | E27 | owner only |
-| `tests/ui_startup.rs`, `tests/ui_connections.rs`, `tests/ui_information.rs` | E28 | owner only |
-| `tests/ui_setup_window.rs`, `tests/ui_shield.rs` | E29 | owner only |
-| `tests/ui_history.rs` | E30 | owner only |
-| `tests/ui_tray_bridge.rs` | E31 | owner only |
-| `tests/ui_low_memory.rs` | E32 | owner only |
-| `tests/bench_scenes.rs` | E01 | owner only |
+| `tests/ui/main.rs` (all tl-ui integration tests build as one binary, `--test ui`) | E16 | chain edit: a tl-ui epic that adds a test file adds its `mod` line |
+| `tests/ui/components.rs`, `tests/ui/render_gallery.rs`, `tests/golden/*.png` | E15 | chain edit: E16 adds its component cases and goldens, depends on E15-A3 |
+| `tests/ui/hub.rs`, `tests/ui/demand.rs`, `tests/ui/actions.rs`, `tests/ui/toasts.rs`, `tests/ui/dialogs.rs` | E16 | owner only |
+| `tests/ui/theme.rs`, `tests/ui/render_theme.rs` | E17 | owner only |
+| `tests/ui/tree_table.rs`, `tests/ui/selection.rs`, `tests/ui/columns.rs`, `tests/ui/render_table.rs` | E18 | owner only |
+| `tests/ui/chart.rs`, `tests/ui/chart_geometry.rs`, `tests/ui/anim.rs`, `tests/ui/render_chart.rs` | E19 | owner only |
+| `tests/ui/shell.rs`, `tests/ui/keymap.rs` (`keymap_matches_table_b`), `tests/ui/focus.rs` | E20 | owner only |
+| `tests/ui/menus.rs`, `tests/ui/settings_window.rs`, `tests/ui/shell_windows.rs` | E21 | owner only |
+| `tests/ui/processes.rs`, `tests/ui/process_menu.rs`, `tests/ui/process_cells.rs`, `tests/golden/copy_*.txt` | E22 | owner only |
+| `tests/ui/props.rs`, `tests/ui/dialogs_process.rs`, `tests/ui/run.rs`, `tests/ui/handle_search.rs` | E23 | owner only |
+| `tests/ui/performance.rs`, `tests/ui/sidebar.rs`, `tests/ui/cpu_page.rs` | E24 | owner only |
+| `tests/ui/device_pages.rs` | E25 | owner only |
+| `tests/ui/minigraphs.rs`, `tests/ui/detached.rs` | E26 | owner only |
+| `tests/ui/sys_table.rs`, `tests/ui/services.rs`, `tests/ui/service_props.rs` | E27 | owner only |
+| `tests/ui/startup.rs`, `tests/ui/connections.rs`, `tests/ui/information.rs` | E28 | owner only |
+| `tests/ui/setup_window.rs`, `tests/ui/shield.rs` | E29 | owner only |
+| `tests/ui/history.rs` | E30 | owner only |
+| `tests/ui/tray_bridge.rs` | E31 | owner only |
+| `tests/ui/low_memory.rs` | E32 | owner only |
+| `tests/ui/bench_scenes.rs` | E01 | owner only |
 
 ### `crates/tl-app`
 

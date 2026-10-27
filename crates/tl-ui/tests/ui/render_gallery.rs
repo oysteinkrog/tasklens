@@ -3,7 +3,7 @@
 //! `TL_UPDATE_GOLDEN=1` rewrites them. Reduced motion is forced on by the harness, so animations
 //! show their end state. Captures are at device scale 2.0 (R-291).
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test render_gallery`.
+//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_gallery::`.
 
 #![cfg(feature = "render-tests")]
 
@@ -22,7 +22,7 @@ const ANIMATED_BUDGET: usize = 2;
 
 #[test]
 fn gallery_pages_match_goldens() {
-    run_on_lavapipe("gallery_pages_match_goldens", || {
+    run_on_lavapipe("render_gallery::gallery_pages_match_goldens", || {
         let mut harness = RenderHarness::new();
         let mut failures = Vec::new();
         for (scale, suffix) in [(1.0, "1_0"), (1.1, "1_1")] {

@@ -1,4 +1,4 @@
-//! Headless screenshot helpers and the golden-image compare for `tests/render_*.rs` (ADR-013,
+//! Headless screenshot helpers and the golden-image compare for `tests/ui/render_*.rs` (ADR-013,
 //! R-291).
 //!
 //! `RenderHarness` draws a view with GPUI's `HeadlessAppContext` and the wgpu headless renderer.

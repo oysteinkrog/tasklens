@@ -2,8 +2,8 @@
 //! two kit widgets, rendered on lavapipe for both built-in themes at `ui_scale` 1.0 and 1.1 and
 //! compared with `tests/golden/theme_<name>_<scale>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test render_theme`. The
-//! render helpers live in `tl_ui::testing`, which needs `test-hooks` (R-291).
+//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_theme::`.
+//! The render helpers live in `tl_ui::testing`, which needs `test-hooks` (R-291).
 
 #![cfg(feature = "render-tests")]
 
@@ -125,28 +125,28 @@ fn check(theme: &str, scale: f32, name: &str) {
 
 #[test]
 fn default_dark_scale_1_0() {
-    run_on_lavapipe("default_dark_scale_1_0", || {
+    run_on_lavapipe("render_theme::default_dark_scale_1_0", || {
         check("Default Dark", 1.0, "theme_default_dark_1_0")
     });
 }
 
 #[test]
 fn default_dark_scale_1_1() {
-    run_on_lavapipe("default_dark_scale_1_1", || {
+    run_on_lavapipe("render_theme::default_dark_scale_1_1", || {
         check("Default Dark", 1.1, "theme_default_dark_1_1")
     });
 }
 
 #[test]
 fn default_light_scale_1_0() {
-    run_on_lavapipe("default_light_scale_1_0", || {
+    run_on_lavapipe("render_theme::default_light_scale_1_0", || {
         check("Default Light", 1.0, "theme_default_light_1_0")
     });
 }
 
 #[test]
 fn default_light_scale_1_1() {
-    run_on_lavapipe("default_light_scale_1_1", || {
+    run_on_lavapipe("render_theme::default_light_scale_1_1", || {
         check("Default Light", 1.1, "theme_default_light_1_1")
     });
 }

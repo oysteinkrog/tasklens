@@ -3196,7 +3196,7 @@ mod prc014 {
             .count()
     }
 
-    // ---- Handle Search fixtures (copied from ui_handle_search.rs, trimmed) ----
+    // ---- Handle Search fixtures (copied from handle_search.rs, trimmed) ----
 
     struct HsRig {
         engine: Arc<FakeEngine>,

@@ -1,5 +1,6 @@
 //! Component gallery (UI-FND-030, ADR-013, R-138): one window with a page per shared component,
-//! for review by eye and as the host of the golden-image render tests (`tests/render_gallery.rs`).
+//! for review by eye and as the host of the golden-image render tests
+//! (`tests/ui/render_gallery.rs`).
 //!
 //! Each page draws every variant and state twice, side by side: the left half in Default Dark and
 //! the right half in Default Light. The gallery does not switch the global theme. It builds the

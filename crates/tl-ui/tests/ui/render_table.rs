@@ -6,7 +6,7 @@
 //! The 60 px and RTL cases also have a `TestAppContext` half with the real text system: the
 //! Name tooltip holds the full name, and the count run stays right of the RTL run.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test render_table`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_table::`.
 
 #![cfg(feature = "render-tests")]
 
@@ -367,14 +367,14 @@ fn check_validity_rows(scale: f32, name: &str) {
 
 #[test]
 fn validity_rows_scale_100() {
-    run_on_lavapipe("validity_rows_scale_100", || {
+    run_on_lavapipe("render_table::validity_rows_scale_100", || {
         check_validity_rows(1.0, "table_validity_rows_100")
     });
 }
 
 #[test]
 fn validity_rows_scale_110() {
-    run_on_lavapipe("validity_rows_scale_110", || {
+    run_on_lavapipe("render_table::validity_rows_scale_110", || {
         check_validity_rows(1.1, "table_validity_rows_110")
     });
 }
@@ -515,9 +515,10 @@ fn tooltip_text_width(cx: &mut VisualTestContext, text: &'static str) -> Pixels 
 
 #[test]
 fn name_column_60px_ellipsis_and_tooltip() {
-    run_on_lavapipe("name_column_60px_ellipsis_and_tooltip", || {
-        check_small("table_name_60px", NARROW_NAME_W, narrow_delegate)
-    });
+    run_on_lavapipe(
+        "render_table::name_column_60px_ellipsis_and_tooltip",
+        || check_small("table_name_60px", NARROW_NAME_W, narrow_delegate),
+    );
 
     // TestAppContext half: the cut name is shorter than the full name, and the row tooltip
     // holds the full name.
@@ -587,7 +588,7 @@ fn rtl_name_in_ltr_cell() {
     }
     let count = RTL_NAME.find('(').expect("count run")..RTL_NAME.len();
     let hebrew = 0..RTL_NAME.find(' ').expect("space before the count");
-    run_on_lavapipe("rtl_name_in_ltr_cell", || {
+    run_on_lavapipe("render_table::rtl_name_in_ltr_cell", || {
         check_small("table_rtl_name", RTL_NAME_W, rtl_delegate)
     });
 

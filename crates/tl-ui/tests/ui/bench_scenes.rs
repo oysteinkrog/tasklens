@@ -594,8 +594,8 @@ fn work(scene: &tl_ui::bench::scenes::SceneWindow, cx: &mut VisualTestContext) -
 }
 
 /// Diagnostic for tasklens-wlf.27 and wlf.28, not a gate: how much chart work one redraw asks
-/// for in `static` and `perf-cpu`, counted in the test platform (no GPU). Run with
-/// `cargo test -p tl-ui --features bench --test bench_scenes redraw_work -- --ignored --nocapture`.
+/// for in `static` and `perf-cpu`, counted in the test platform (no GPU). Run with `cargo test
+/// -p tl-ui --features bench --test ui -- bench_scenes::redraw_work --ignored --nocapture`.
 fn redraw_work(cx: &mut TestAppContext, scene_kind: BenchScene) {
     cx.executor().allow_parking();
     {

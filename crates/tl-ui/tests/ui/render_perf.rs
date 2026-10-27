@@ -2,7 +2,7 @@
 //! 1280 × 800, ui_scale 1.0, in the Default Dark and Default Light themes, compared with
 //! `tests/golden/perf_<page>_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test render_perf`.
+//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_perf::`.
 
 #![cfg(feature = "render-tests")]
 
@@ -279,28 +279,28 @@ fn blank_up_time(img: &mut image::RgbaImage) {
 
 #[test]
 fn overview_dark() {
-    run_on_lavapipe("overview_dark", || {
+    run_on_lavapipe("render_perf::overview_dark", || {
         check(Page::Overview, "Default Dark", "perf_overview_dark")
     });
 }
 
 #[test]
 fn overview_light() {
-    run_on_lavapipe("overview_light", || {
+    run_on_lavapipe("render_perf::overview_light", || {
         check(Page::Overview, "Default Light", "perf_overview_light")
     });
 }
 
 #[test]
 fn cpu_page_dark() {
-    run_on_lavapipe("cpu_page_dark", || {
+    run_on_lavapipe("render_perf::cpu_page_dark", || {
         check(Page::Cpu, "Default Dark", "perf_cpu_dark")
     });
 }
 
 #[test]
 fn cpu_page_light() {
-    run_on_lavapipe("cpu_page_light", || {
+    run_on_lavapipe("render_perf::cpu_page_light", || {
         check(Page::Cpu, "Default Light", "perf_cpu_light")
     });
 }

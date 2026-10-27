@@ -7,7 +7,7 @@
 //! fixed phase of a 60 s boundary a little in the future, so the chart is never stale while it
 //! renders and the 6 s grid lines land on the same pixels on every run.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test render_chart`.
+//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_chart::`.
 
 #![cfg(feature = "render-tests")]
 
@@ -293,28 +293,28 @@ fn check_grid(scale: f32, name: &str) {
 
 #[test]
 fn render_chart_gap_and_spike_1_0() {
-    run_on_lavapipe("render_chart_gap_and_spike_1_0", || {
+    run_on_lavapipe("render_chart::render_chart_gap_and_spike_1_0", || {
         check_chart(1.0, "chart_gap_spike_100")
     });
 }
 
 #[test]
 fn render_chart_gap_and_spike_1_1() {
-    run_on_lavapipe("render_chart_gap_and_spike_1_1", || {
+    run_on_lavapipe("render_chart::render_chart_gap_and_spike_1_1", || {
         check_chart(1.1, "chart_gap_spike_110")
     });
 }
 
 #[test]
 fn render_cpu_grid_16_1_0() {
-    run_on_lavapipe("render_cpu_grid_16_1_0", || {
+    run_on_lavapipe("render_chart::render_cpu_grid_16_1_0", || {
         check_grid(1.0, "cpu_grid_16_100")
     });
 }
 
 #[test]
 fn render_cpu_grid_16_1_1() {
-    run_on_lavapipe("render_cpu_grid_16_1_1", || {
+    run_on_lavapipe("render_chart::render_cpu_grid_16_1_1", || {
         check_grid(1.1, "cpu_grid_16_110")
     });
 }

@@ -1373,7 +1373,7 @@ mod tests {
     use tl_model::devices::DeviceEntry;
 
     /// The icon and tint of each kind, for box titles and page headers. Sidebar cards draw no
-    /// icon (D-033); `card_has_no_device_icon` in tests/ui_sidebar.rs checks that.
+    /// icon (D-033); `card_has_no_device_icon` in tests/ui/sidebar.rs checks that.
     #[test]
     fn polish_icons_per_kind() {
         let mut theme = crate::theme::tests::test_theme(crate::theme::ThemeMode::Dark);
