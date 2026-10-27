@@ -360,9 +360,10 @@ impl ChartView {
         }
     }
 
-    /// Shows the scale ceiling ("100%", "16.00 GiB", "8 MiB/s") as one small line in the
-    /// plot's top-left corner, on plots from 32 px tall (Overview boxes, TMOG). It takes the
-    /// place of the axis max label.
+    /// Shows the scale ceiling ("100%", "16.00 GiB", "8 MiB/s") as one small line in place of
+    /// the axis max label (Overview boxes, TMOG). The chart then keeps a title row above its
+    /// plot, with the heading at the left and the ceiling at the right, and a row below it for
+    /// the x ticks (`labels::LabelRows`, UI-PRF-059).
     pub fn set_compact_scale(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.compact_scale != on {
             self.compact_scale = on;

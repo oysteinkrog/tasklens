@@ -28,7 +28,7 @@ use tl_model::time::now_boot_ns;
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint};
-use super::labels::{self, LabelPaint, NetFormat};
+use super::labels::{self, LabelPaint, LabelRows, NetFormat};
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
 use crate::anim::AnimationDriver;
@@ -97,12 +97,12 @@ impl Element for ChartElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Hitbox> {
-        let hitbox = self
-            .view
-            .read(cx)
-            .spec
-            .hover
-            .then(|| window.insert_hitbox(bounds.inset(px(1.0)), HitboxBehavior::Normal));
+        let ui_scale = cx.global::<UiMetrics>().ui_scale;
+        let view = self.view.read(cx);
+        let hitbox = view.spec.hover.then(|| {
+            let (frame, _) = frame_of(view, bounds, ui_scale);
+            window.insert_hitbox(frame.inset(px(1.0)), HitboxBehavior::Normal)
+        });
         #[cfg(any(test, feature = "test-hooks"))]
         self.view
             .update(cx, |v, _| v.hover.hitbox_inserted = hitbox.is_some());
@@ -153,7 +153,7 @@ impl Element for ChartElement {
         }
 
         if let Some(hitbox) = hitbox.clone() {
-            register_hover_events(&self.view, hitbox, bounds, &out, env.scale_factor, window);
+            register_hover_events(&self.view, hitbox, &out, env.scale_factor, window);
         }
     }
 }
@@ -164,13 +164,11 @@ impl Element for ChartElement {
 fn register_hover_events(
     view: &Entity<ChartView>,
     hitbox: Hitbox,
-    bounds: Bounds<Pixels>,
     out: &PaintOut,
     sf: f32,
     window: &mut Window,
 ) {
-    let plot = bounds.inset(px(1.0));
-    let (map, grid) = (out.map, out.grid);
+    let (plot, map, grid) = (out.plot, out.map, out.grid);
     let entity = view.clone();
     window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
         if !phase.bubble() {
@@ -201,6 +199,21 @@ fn register_hover_events(
     }
 }
 
+/// The chart's frame inside `bounds`, and the label rows outside it: an Overview chart (compact
+/// scale) keeps a title row above and a tick row below (UI-PRF-059); any other chart fills
+/// `bounds`.
+fn frame_of(
+    view: &ChartView,
+    bounds: Bounds<Pixels>,
+    ui_scale: f32,
+) -> (Bounds<Pixels>, Option<LabelRows>) {
+    if !view.compact_scale {
+        return (bounds, None);
+    }
+    let rows = LabelRows::of(bounds, view.labels.heading.is_some(), ui_scale);
+    (rows.frame(bounds), Some(rows))
+}
+
 /// Per-paint inputs read from the window and the app before the view is borrowed.
 struct PaintEnv {
     scale_factor: f32,
@@ -217,6 +230,8 @@ struct PaintEnv {
 
 struct PaintOut {
     moving: bool,
+    /// The plot of this paint, for the hover listeners.
+    plot: Bounds<Pixels>,
     /// Paint-time mapping, for the hover listeners.
     map: TimeMap,
     /// A hover pin survived this paint.
@@ -243,7 +258,8 @@ fn paint_view(
     // A chart that reads the device metric history runs on CLOCK_REALTIME (UI-PRF-055).
     let history = view.history;
     let now = history.map_or(env.now, |h| h.right_edge_ns(env.now));
-    let plot = bounds.inset(px(1.0));
+    let (frame, rows) = frame_of(view, bounds, env.metrics.ui_scale);
+    let plot = frame.inset(px(1.0));
     let pw = (f32::from(plot.size.width) * sf).round().max(0.0) as u32;
     let ph = (f32::from(plot.size.height) * sf).round().max(0.0) as u32;
 
@@ -401,7 +417,7 @@ fn paint_view(
     };
     let gp = GridPaint {
         plot,
-        box_bounds: bounds,
+        box_bounds: frame,
         map: &map,
         dx: px(dx),
         scale_factor: sf,
@@ -421,13 +437,14 @@ fn paint_view(
         value_text: value_text.as_deref(),
         axis_text: (has_data && !axis_text.is_empty()).then_some(axis_text.as_str()),
         compact_scale,
+        rows,
         metrics: &env.metrics,
         theme: &env.theme,
         network_unit: env.network_unit,
         clock_right_ns: history.map(|_| right_edge),
     };
 
-    grid::paint_background(window, bounds, env.theme.graph.chart_bg, radius);
+    grid::paint_background(window, frame, env.theme.graph.chart_bg, radius);
 
     #[cfg(any(test, feature = "test-hooks"))]
     view.path_colors.borrow_mut().clear();
@@ -451,6 +468,7 @@ fn paint_view(
         hover_state.clear();
         return PaintOut {
             moving: false,
+            plot,
             map,
             pinned: false,
             grid: sample_grid,
@@ -489,7 +507,7 @@ fn paint_view(
         };
         window.with_content_mask(Some(ContentMask { bounds: plot }), |window| {
             let live =
-                newest_marks && matches!(state, ChartState::Live) && grid::newest_marks_fit(bounds);
+                newest_marks && matches!(state, ChartState::Live) && grid::newest_marks_fit(frame);
             if live {
                 grid::paint_newest_glow(window, plot, gp.outline_color, env.reduce_motion);
             }
@@ -521,7 +539,7 @@ fn paint_view(
 
     if spec.hover {
         let hp = HoverPaint {
-            box_bounds: bounds,
+            box_bounds: frame,
             plot,
             flip_right: plot.right(),
             map,
@@ -552,6 +570,7 @@ fn paint_view(
 
     PaintOut {
         moving,
+        plot,
         map,
         pinned: hover_state.pinned_t_ns.is_some(),
         grid: sample_grid,

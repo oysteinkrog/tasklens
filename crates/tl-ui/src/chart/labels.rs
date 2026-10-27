@@ -27,8 +27,11 @@ use crate::theme::{TlTheme, UiMetrics};
 
 const NS_PER_S: u64 = 1_000_000_000;
 
-/// Label row height at 100% (`chart_label_row`).
-pub(crate) const LABEL_ROW: f32 = 18.0;
+/// Label row height at 100% (`chart_label_row`). The x tick row under an Overview plot has this
+/// height (UI-PRF-059).
+pub const LABEL_ROW: f32 = 18.0;
+/// The title row above an Overview plot at 100% (UI-PRF-059).
+pub const TITLE_ROW: f32 = 20.0;
 /// Legend swatch size and spacing at 100%.
 const SWATCH_W: f32 = 12.0;
 const SWATCH_H: f32 = 2.0;
@@ -166,7 +169,17 @@ pub struct PaintedLabel {
     pub kind: LabelKind,
     pub origin: gpui_kit::Point<Pixels>,
     pub width: Pixels,
+    /// The row the label is centred in.
+    pub height: Pixels,
     pub color: Hsla,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl PaintedLabel {
+    /// The label's rectangle: its width over the row it is centred in.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        Bounds::new(self.origin, size(self.width, self.height))
+    }
 }
 
 /// Shaped label text kept between frames (ADR-009 rule 10).
@@ -185,6 +198,9 @@ pub struct LabelCache {
     /// Labels painted by the last paint, in paint order.
     #[cfg(any(test, feature = "test-hooks"))]
     pub painted: SmallVec<[PaintedLabel; 8]>,
+    /// The plot of the last paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub plot: Bounds<Pixels>,
 }
 
 impl LabelCache {
@@ -209,12 +225,14 @@ impl LabelCache {
         kind: LabelKind,
         origin: gpui_kit::Point<Pixels>,
         width: Pixels,
+        height: Pixels,
         color: Hsla,
     ) {
         self.painted.push(PaintedLabel {
             kind,
             origin,
             width,
+            height,
             color,
         });
     }
@@ -242,6 +260,58 @@ impl LabelCache {
     }
 }
 
+/// The rows an Overview chart keeps outside its plot (UI-PRF-059): a title row above it for the
+/// heading, the value and the scale label, and a tick row below it for the x ticks, so no label
+/// draws over data.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct LabelRows {
+    /// The title row's height; 0 when the chart has none.
+    pub top: Pixels,
+    /// The tick row's height; 0 when the ticks are dropped.
+    pub bottom: Pixels,
+    /// Whether the scale label shows at the right of the title row.
+    pub scale: bool,
+}
+
+impl LabelRows {
+    /// The rows of a chart in `bounds` at `ui_scale` `s`; `heading` says whether it has a title.
+    /// The x ticks need a box at least `TICKS_MIN_BOX_W` wide. A chart too short for both rows
+    /// over a `MIN_PLOT_H` plot drops the ticks first. One too short for the title row over a
+    /// `COMPACT_MIN_PLOT_H` plot then drops the scale label, and the title row with it when
+    /// there is no heading.
+    pub fn of(bounds: Bounds<Pixels>, heading: bool, s: f32) -> Self {
+        // The plot is the frame less its 1 px outline on each side.
+        let plot_h = |top: f32, bottom: f32| f32::from(bounds.size.height) - top - bottom - 2.0;
+        let mut top = TITLE_ROW * s;
+        let mut bottom = if f32::from(bounds.size.width) >= TICKS_MIN_BOX_W * s {
+            LABEL_ROW * s
+        } else {
+            0.0
+        };
+        if plot_h(top, bottom) < MIN_PLOT_H * s {
+            bottom = 0.0;
+        }
+        let scale = plot_h(top, 0.0) >= COMPACT_MIN_PLOT_H * s;
+        if !scale && !heading {
+            top = 0.0;
+        }
+        Self {
+            top: px(top),
+            bottom: px(bottom),
+            scale,
+        }
+    }
+
+    /// The chart's frame inside `bounds`: everything between the two rows.
+    pub fn frame(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        let h = (bounds.size.height - self.top - self.bottom).max(px(0.));
+        Bounds::new(
+            point(bounds.left(), bounds.top() + self.top),
+            size(bounds.size.width, h),
+        )
+    }
+}
+
 /// Inputs of one label paint.
 pub struct LabelPaint<'a> {
     pub box_bounds: Bounds<Pixels>,
@@ -255,9 +325,12 @@ pub struct LabelPaint<'a> {
     pub value_text: Option<&'a str>,
     /// Axis max text from `scale::compute`, `None` when the scale has none.
     pub axis_text: Option<&'a str>,
-    /// Draw the scale ceiling small in the plot's top-left corner in place of the axis max
-    /// (`ChartView::set_compact_scale`).
+    /// Draw the scale ceiling small in place of the axis max (`ChartView::set_compact_scale`):
+    /// at the right of the title row with `rows`, else in the plot's top-left corner.
     pub compact_scale: bool,
+    /// The title and tick rows of an Overview chart, outside `plot` and inside `box_bounds`.
+    /// `None` draws every label inside the box, over the plot.
+    pub rows: Option<LabelRows>,
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
     pub network_unit: NetFormat,
@@ -284,15 +357,24 @@ pub fn paint(
     scratch: &mut String,
 ) {
     #[cfg(any(test, feature = "test-hooks"))]
-    cache.painted.clear();
+    {
+        cache.painted.clear();
+        cache.plot = p.plot;
+    }
 
     let m = p.metrics;
     let s = m.ui_scale;
     let pad = m.sp[3];
     let row = px(LABEL_ROW * s);
     let b = p.box_bounds;
-    let row1 = b.top() + pad;
-    let row2 = row1 + row;
+    // The heading and value line: the title row above an Overview plot, flush with the chart's
+    // sides, or the first row inside the box.
+    let (title_y, title_h, inset) = match p.rows {
+        Some(r) => (b.top(), r.top, px(0.)),
+        None => (b.top() + pad, row, pad),
+    };
+    let title_row = title_h > px(0.);
+    let row2 = b.top() + pad + row;
     let tall = f32::from(p.plot.size.height) >= MIN_PLOT_H * s;
     let wide = f32::from(b.size.width) >= MIN_BOX_W * s;
     let secondary = LineStyle {
@@ -301,9 +383,13 @@ pub fn paint(
         color: p.theme.text_secondary,
         tnum: false,
     };
+    // Where the text at the left of the title line ends, and where the text at its right
+    // starts: the scale label goes between them.
+    let mut left_end = b.left();
+    let mut right_start = b.right() - inset;
 
     // Heading.
-    if let Some(heading) = &p.labels.heading {
+    if let Some(heading) = p.labels.heading.as_ref().filter(|_| title_row) {
         let style = LineStyle {
             size: m.text.sm,
             weight: FontWeight::MEDIUM,
@@ -312,13 +398,15 @@ pub fn paint(
         };
         let shaped = cache.heading.sync(window, heading, style);
         cache.shaped(shaped);
-        let origin = point(b.left() + pad, row1);
-        paint_line(window, cx, &cache.heading, origin, row);
+        let origin = point(b.left() + inset, title_y);
+        paint_line(window, cx, &cache.heading, origin, title_h);
+        left_end = origin.x + cache.heading.width();
         #[cfg(any(test, feature = "test-hooks"))]
         cache.record(
             LabelKind::Heading,
             origin,
             cache.heading.width(),
+            title_h,
             style.color,
         );
     }
@@ -326,7 +414,7 @@ pub fn paint(
     // Value.
     if let Some((v, validity)) = p
         .value
-        .filter(|_| p.labels.value_align != ValueAlign::Hidden)
+        .filter(|_| title_row && p.labels.value_align != ValueAlign::Hidden)
     {
         let left = p.labels.value_align == ValueAlign::Left;
         let weight = if left {
@@ -337,11 +425,11 @@ pub fn paint(
         if validity == Validity::Restricted {
             let icon = m.icon.xs;
             let x = if left {
-                b.left() + pad
+                b.left() + inset
             } else {
-                b.right() - pad - icon
+                b.right() - inset - icon
             };
-            let bounds = Bounds::new(point(x, row1 + (row - icon) / 2.0), size(icon, icon));
+            let bounds = Bounds::new(point(x, title_y + (title_h - icon) / 2.0), size(icon, icon));
             let _ = window.paint_svg(
                 bounds,
                 TlIcon::Lock.path(),
@@ -350,8 +438,19 @@ pub fn paint(
                 p.theme.text_secondary,
                 cx,
             );
+            if left {
+                left_end = left_end.max(x + icon);
+            } else {
+                right_start = x;
+            }
             #[cfg(any(test, feature = "test-hooks"))]
-            cache.record(LabelKind::Lock, bounds.origin, icon, p.theme.text_secondary);
+            cache.record(
+                LabelKind::Lock,
+                bounds.origin,
+                icon,
+                icon,
+                p.theme.text_secondary,
+            );
         } else {
             scratch.clear();
             let color = match validity {
@@ -388,19 +487,26 @@ pub fn paint(
             };
             let shaped = cache.value.sync(window, scratch, style);
             cache.shaped(shaped);
+            let w = cache.value.width();
             let x = if left {
-                b.left() + pad
+                b.left() + inset
             } else {
-                b.right() - pad - cache.value.width()
+                b.right() - inset - w
             };
-            let origin = point(x, row1);
-            paint_line(window, cx, &cache.value, origin, row);
+            let origin = point(x, title_y);
+            paint_line(window, cx, &cache.value, origin, title_h);
+            if left {
+                left_end = left_end.max(x + w);
+            } else {
+                right_start = x;
+            }
             #[cfg(any(test, feature = "test-hooks"))]
-            cache.record(LabelKind::Value, origin, cache.value.width(), color);
+            cache.record(LabelKind::Value, origin, w, title_h, color);
         }
     }
 
-    // Legend: row 2, horizontal, or one item per row when the box is narrow.
+    // Legend: in the plot's top-left corner of an Overview chart, else row 2, horizontal, or one
+    // item per row when the box is narrow.
     if !p.labels.legend.is_empty() && tall && wide {
         let stack = f32::from(b.size.width) < LEGEND_STACK_BELOW_W * s;
         let colors = |i: usize| {
@@ -409,7 +515,10 @@ pub fn paint(
                 .get(i)
                 .map_or(p.theme.text_secondary, |s| s.line)
         };
-        let origin = point(b.left() + pad, row2);
+        let origin = match p.rows {
+            Some(_) => point(p.plot.left() + m.sp[2], p.plot.top() + m.sp[1]),
+            None => point(b.left() + pad, row2),
+        };
         paint_legend(
             window,
             cx,
@@ -423,10 +532,15 @@ pub fn paint(
         );
     }
 
-    // Compact scale: the ceiling in the plot's top-left corner, on plots from 32 px. A fixed
+    // Compact scale: at the right of the title row, left of a right-aligned value and clear of
+    // the heading, or without rows in the plot's top-left corner on plots from 32 px. A fixed
     // scale has no axis text, so its ceiling is formatted here.
     let has_data = matches!(p.state, ChartState::Live | ChartState::Stale { .. });
-    if p.compact_scale && f32::from(p.plot.size.height) >= COMPACT_MIN_PLOT_H * s {
+    let scale_room = match p.rows {
+        Some(r) => r.scale && title_row,
+        None => f32::from(p.plot.size.height) >= COMPACT_MIN_PLOT_H * s,
+    };
+    if p.compact_scale && scale_room {
         let fixed = match p.spec.y {
             YScale::Fixed { max, .. } => Some(max),
             YScale::FixedTotal(total) if total > 0.0 => Some(total),
@@ -448,15 +562,31 @@ pub fn paint(
             };
             let shaped = cache.axis_max.sync(window, text, style);
             cache.shaped(shaped);
-            let origin = point(p.plot.left() + m.sp[2], p.plot.top() + m.sp[1]);
-            paint_line(window, cx, &cache.axis_max, origin, row);
-            #[cfg(any(test, feature = "test-hooks"))]
-            cache.record(
-                LabelKind::AxisMax,
-                origin,
-                cache.axis_max.width(),
-                style.color,
-            );
+            let w = cache.axis_max.width();
+            let at = match p.rows {
+                Some(_) => {
+                    // A value at the right keeps a gap; the label is left out where it would
+                    // reach the heading.
+                    let end = if right_start < b.right() {
+                        right_start - m.sp[4]
+                    } else {
+                        right_start
+                    };
+                    let x = end - w;
+                    let clear = if left_end > b.left() {
+                        left_end + m.sp[4]
+                    } else {
+                        b.left()
+                    };
+                    (x >= clear).then_some((point(x, title_y), title_h))
+                }
+                None => Some((point(p.plot.left() + m.sp[2], p.plot.top() + m.sp[1]), row)),
+            };
+            if let Some((origin, h)) = at {
+                paint_line(window, cx, &cache.axis_max, origin, h);
+                #[cfg(any(test, feature = "test-hooks"))]
+                cache.record(LabelKind::AxisMax, origin, w, h, style.color);
+            }
         }
     }
 
@@ -474,19 +604,28 @@ pub fn paint(
             LabelKind::AxisMax,
             origin,
             cache.axis_max.width(),
+            row,
             secondary.color,
         );
     }
-    // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale. Like every
-    // label they need a plot at least MIN_PLOT_H tall, or they would collide with the rows above.
-    if tall && f32::from(b.size.width) >= TICKS_MIN_BOX_W * s {
-        let ticks = LineStyle {
-            tnum: true,
-            ..secondary
-        };
-        // The range label owns the bottom row when it shows.
-        let range_shown = wide && !p.labels.range_word.is_empty();
-        let x_row = b.bottom() - pad - row - if range_shown { row } else { px(0.) };
+    // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale. The x
+    // ticks of an Overview chart sit in its tick row. Without rows, like every label, they need
+    // a plot at least MIN_PLOT_H tall, or they would collide with the rows above, and the range
+    // label owns the bottom row when it shows.
+    let ticks_wide = f32::from(b.size.width) >= TICKS_MIN_BOX_W * s;
+    let x_row = match p.rows {
+        Some(r) => (r.bottom > px(0.)).then_some((b.bottom() - r.bottom, r.bottom)),
+        None => (tall && ticks_wide).then(|| {
+            let range_shown = wide && !p.labels.range_word.is_empty();
+            let y = b.bottom() - pad - row - if range_shown { row } else { px(0.) };
+            (y, row)
+        }),
+    };
+    let ticks = LineStyle {
+        tnum: true,
+        ..secondary
+    };
+    if let Some((y, h)) = x_row {
         for i in 0..TICK_COUNT {
             scratch.clear();
             match p.clock_right_ns {
@@ -497,33 +636,33 @@ pub fn paint(
             cache.shaped(shaped);
             let w = cache.x_ticks[i].width();
             let frac = (i + 1) as f32 / (TICK_COUNT + 1) as f32;
-            let origin = point(p.plot.left() + p.plot.size.width * frac - w / 2.0, x_row);
-            paint_line(window, cx, &cache.x_ticks[i], origin, row);
+            let origin = point(p.plot.left() + p.plot.size.width * frac - w / 2.0, y);
+            paint_line(window, cx, &cache.x_ticks[i], origin, h);
             #[cfg(any(test, feature = "test-hooks"))]
-            cache.record(LabelKind::XTick(i), origin, w, ticks.color);
+            cache.record(LabelKind::XTick(i), origin, w, h, ticks.color);
         }
-        if is_percent_scale(p.spec, p.labels) {
-            for i in 0..TICK_COUNT {
-                scratch.clear();
-                y_tick_label(i, scratch);
-                let shaped = cache.y_ticks[i].sync(window, scratch, ticks);
-                cache.shaped(shaped);
-                let w = cache.y_ticks[i].width();
-                // 25% sits at three quarters of the height, 75% at one quarter.
-                let frac = (TICK_COUNT - i) as f32 / (TICK_COUNT + 1) as f32;
-                let origin = point(
-                    p.plot.right() - m.sp[2] - w,
-                    p.plot.top() + p.plot.size.height * frac + px(1.0),
-                );
-                paint_line(window, cx, &cache.y_ticks[i], origin, row);
-                #[cfg(any(test, feature = "test-hooks"))]
-                cache.record(LabelKind::YTick(i), origin, w, ticks.color);
-            }
+    }
+    if tall && ticks_wide && is_percent_scale(p.spec, p.labels) {
+        for i in 0..TICK_COUNT {
+            scratch.clear();
+            y_tick_label(i, scratch);
+            let shaped = cache.y_ticks[i].sync(window, scratch, ticks);
+            cache.shaped(shaped);
+            let w = cache.y_ticks[i].width();
+            // 25% sits at three quarters of the height, 75% at one quarter.
+            let frac = (TICK_COUNT - i) as f32 / (TICK_COUNT + 1) as f32;
+            let origin = point(
+                p.plot.right() - m.sp[2] - w,
+                p.plot.top() + p.plot.size.height * frac + px(1.0),
+            );
+            paint_line(window, cx, &cache.y_ticks[i], origin, row);
+            #[cfg(any(test, feature = "test-hooks"))]
+            cache.record(LabelKind::YTick(i), origin, w, row, ticks.color);
         }
     }
 
-    // Range label: bottom-left.
-    if tall && wide && !p.labels.range_word.is_empty() {
+    // Range label: bottom-left. An Overview chart has none: its box draws the time axis.
+    if p.rows.is_none() && tall && wide && !p.labels.range_word.is_empty() {
         scratch.clear();
         range_label(&p.labels.range_word, p.spec.range_ns, scratch);
         let shaped = cache.range.sync(window, scratch, secondary);
@@ -535,6 +674,7 @@ pub fn paint(
             LabelKind::Range,
             origin,
             cache.range.width(),
+            row,
             secondary.color,
         );
     }
@@ -585,7 +725,7 @@ pub(crate) fn paint_legend(
         paint_line(window, cx, &cache.legend[i], origin, row);
         let width = cache.legend[i].width();
         #[cfg(any(test, feature = "test-hooks"))]
-        cache.record(LabelKind::Legend(i), origin, width, secondary.color);
+        cache.record(LabelKind::Legend(i), origin, width, row, secondary.color);
         if stack {
             y += row;
         } else {

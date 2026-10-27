@@ -7154,6 +7154,48 @@ mod page {
         assert_eq!(r.saved(), None);
     }
 
+    /// UI-PRF-059: the CPU and Network charts draw their x ticks in an 18 px row under the plot,
+    /// so no tick label sits on data, and the CPU chart keeps a 16 px gutter to the core rows.
+    #[gpui_kit::test]
+    fn chart_ticks_in_own_row(cx: &mut TestAppContext) {
+        use tl_ui::chart::labels::LabelKind;
+        let mut r = open(cx, true, 1920., 1200.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "net".into(),
+            mode: "combined".into(),
+        });
+        r.cpu_tick();
+        draw(r.vcx);
+        let page = r.page.clone();
+        let charts = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            [
+                ("cpu", p.cpu_box().read(cx).total_chart().clone()),
+                ("net", p.net_box().read(cx).combined_chart().clone()),
+            ]
+        });
+        for (name, chart) in charts {
+            r.vcx.update(|_, cx| {
+                let c = chart.read(cx).label_cache();
+                for i in 0..3 {
+                    let tick = c
+                        .painted(LabelKind::XTick(i))
+                        .unwrap_or_else(|| panic!("{name}: tick {i} painted"));
+                    let tick = tick.bounds();
+                    assert_eq!(tick.size.height, px(18.), "{name}: an 18 px row");
+                    assert!(
+                        !tick.intersects(&c.plot),
+                        "{name}: tick {i} {tick:?} on the plot {:?}",
+                        c.plot
+                    );
+                    assert!(tick.top() > c.plot.bottom(), "{name}: under the plot");
+                }
+            });
+        }
+        let gutter = r.gap(CPU_SPLITTER_ID);
+        assert_eq!(gutter.size.width, px(16.), "chart to core rows: {gutter:?}");
+    }
+
     #[gpui_kit::test]
     fn overview_stacked_layout_has_no_splitters(cx: &mut TestAppContext) {
         let r = open(cx, true, 600., 900.);

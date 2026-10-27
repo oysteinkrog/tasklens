@@ -1236,10 +1236,11 @@ mod labels {
     use tl_model::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
     use tl_model::validity::Validity;
     use tl_ui::chart::labels::{
-        LabelCache, LabelKind, LabelPaint, format_value, paint, range_label,
+        LabelCache, LabelKind, LabelPaint, LabelRows, format_value, paint, range_label,
     };
     use tl_ui::chart::{
         ChartLabels, ChartSeries, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat,
+        YScale,
     };
     use tl_ui::theme::{TlTheme, UiMetrics, current};
 
@@ -1255,6 +1256,8 @@ mod labels {
         state: ChartState,
         value: Option<(f32, Validity)>,
         axis_text: Option<&'static str>,
+        /// Paint as an Overview chart: compact scale, title row and tick row (UI-PRF-059).
+        overview: bool,
     }
 
     fn input(w: f32, h: f32) -> Input {
@@ -1273,6 +1276,7 @@ mod labels {
             state: ChartState::Live,
             value: None,
             axis_text: None,
+            overview: false,
         }
     }
 
@@ -1299,16 +1303,22 @@ mod labels {
                     let metrics = *cx.global::<UiMetrics>();
                     let theme: Arc<TlTheme> = current(cx).clone();
                     let box_bounds = Bounds::new(point(px(0.), px(0.)), size(px(i.w), px(i.h)));
+                    // An Overview chart's plot sits between its rows, as `ChartElement` lays it.
+                    let rows = i.overview.then(|| {
+                        LabelRows::of(box_bounds, i.labels.heading.is_some(), metrics.ui_scale)
+                    });
+                    let frame = rows.map_or(box_bounds, |r| r.frame(box_bounds));
                     let p = LabelPaint {
                         box_bounds,
-                        plot: box_bounds.inset(px(1.)),
+                        plot: frame.inset(px(1.)),
                         labels: &i.labels,
                         spec: &i.spec,
                         state: &i.state,
                         value: i.value,
                         value_text: None,
                         axis_text: i.axis_text,
-                        compact_scale: false,
+                        compact_scale: i.overview,
+                        rows,
                         metrics: &metrics,
                         theme: &theme,
                         network_unit: NetworkUnit::Bits.into(),
@@ -1590,6 +1600,99 @@ mod labels {
         r.set(|i| i.labels.value_align = ValueAlign::Hidden);
         r.draw();
         assert!(r.cache.borrow().painted.is_empty());
+    }
+
+    /// An Overview chart's power strip: "Power draw" at the left of the title row, the value at
+    /// its right and the "100 W" scale label left of the value (UI-PRF-059). None of them
+    /// overlaps another or the plot, and a box too narrow for all three drops the scale label.
+    #[gpui_kit::test]
+    fn chart_title_and_scale_label_disjoint(cx: &mut TestAppContext) {
+        let mut i = input(600., 120.);
+        i.overview = true;
+        i.labels.heading = Some("Power draw".into());
+        i.labels.value_fmt = ValueFormat::Watts;
+        i.labels.range_word = "".into();
+        i.spec.y = YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        };
+        i.value = Some((82.2, Validity::Valid));
+        let mut r = rig(cx, i);
+        r.draw();
+        {
+            let c = r.cache.borrow();
+            assert_eq!(c.text(LabelKind::AxisMax), Some("100 W"));
+            let heading = c.painted(LabelKind::Heading).expect("heading").bounds();
+            let value = c.painted(LabelKind::Value).expect("value").bounds();
+            let scale = c.painted(LabelKind::AxisMax).expect("scale label").bounds();
+            for (a, b) in [(heading, scale), (scale, value), (heading, value)] {
+                assert!(!a.intersects(&b), "{a:?} overlaps {b:?}");
+            }
+            for label in [heading, value, scale] {
+                assert!(
+                    !label.intersects(&c.plot),
+                    "{label:?} on the plot {:?}",
+                    c.plot
+                );
+            }
+            assert!(heading.left() < scale.left() && scale.right() < value.left());
+            assert_eq!(heading.top(), px(0.), "title row at the top");
+            assert_eq!(c.plot.top(), px(21.), "plot under the 20 px title row");
+        }
+
+        // 140 px holds "Power draw" and "82.2 W" but not the scale label between them.
+        r.set(|i| i.w = 140.);
+        r.draw();
+        let c = r.cache.borrow();
+        assert!(c.painted(LabelKind::Heading).is_some());
+        assert!(c.painted(LabelKind::Value).is_some());
+        assert!(c.painted(LabelKind::AxisMax).is_none(), "no room: dropped");
+    }
+
+    /// A chart too short for both label rows drops the ticks first, then the scale label
+    /// (UI-PRF-059). Without a heading the title row goes with the scale label.
+    #[gpui_kit::test]
+    fn chart_short_drops_ticks_then_scale(cx: &mut TestAppContext) {
+        let at = |w: f32, h: f32| Bounds::new(point(px(0.), px(0.)), size(px(w), px(h)));
+        // 200 px: both rows over a 160 px plot.
+        let r = LabelRows::of(at(600., 200.), false, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(18.), true));
+        // 130 px: both rows would leave a 90 px plot, under 100. The ticks go.
+        let r = LabelRows::of(at(600., 130.), false, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(0.), true));
+        // 50 px: the title row would leave a 28 px plot, under 32. The scale label goes, and
+        // with no heading the row too.
+        let r = LabelRows::of(at(600., 50.), false, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(0.), false));
+        let r = LabelRows::of(at(600., 50.), true, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(0.), false));
+        // Under 320 px wide there are no ticks at any height.
+        let r = LabelRows::of(at(300., 400.), false, 1.0);
+        assert_eq!((r.top, r.bottom), (px(20.), px(0.)));
+
+        // The paint follows the rows.
+        let mut i = input(600., 200.);
+        i.overview = true;
+        i.labels.range_word = "".into();
+        i.spec.y = YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        };
+        let mut r = rig(cx, i);
+        let drawn = |r: &mut Rig| {
+            r.draw();
+            let c = r.cache.borrow();
+            (
+                c.painted(LabelKind::XTick(0)).is_some(),
+                c.painted(LabelKind::AxisMax).is_some(),
+            )
+        };
+        assert_eq!(drawn(&mut r), (true, true), "200 px: ticks and scale");
+        r.set(|i| i.h = 130.);
+        assert_eq!(drawn(&mut r), (false, true), "130 px: the ticks go first");
+        r.set(|i| i.h = 50.);
+        assert_eq!(drawn(&mut r), (false, false), "50 px: then the scale label");
+        assert_eq!(r.cache.borrow().plot.top(), px(1.), "no title row");
     }
 
     #[test]
