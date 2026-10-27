@@ -1961,17 +1961,20 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(6));
     }
 
-    /// Two GPUs in a 160 px body (a 220 px box plus the range figures row and the space above
-    /// the title, UI-PRF-059): the first section in full with the "+1 more" row needs
-    /// 48 + 6 × 22 = 180 px, so it shows only its busiest engine and "+2 more engines":
-    /// 48 + 5 × 22 = 158 px, above the time axis.
+    /// Two GPUs at the 220 px minimum (plus the range figures row): the body is 152 px, 8 px
+    /// less than before the title moved inside the border (UI-PRF-059). The first section in
+    /// full with the "+1 more" row needs 48 + 6 × 22 = 180 px, and with only its busiest engine
+    /// and "+2 more engines" 48 + 5 × 22 = 158 px. That row would be cut, so the busiest engine
+    /// joins the count too: "+3 more engines", VRAM, temperature and power and "+1 more" are
+    /// 48 + 4 × 22 = 136 px, whole rows above the time axis. At a 160 px body the busiest engine
+    /// row fits again.
     #[gpui_kit::test]
     fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
             devices("gpu", &[10, 11]),
             Vec::new(),
-            (220. + FIGURES_ROW + TITLE_TOP, 200.),
+            (220. + FIGURES_ROW, 200.),
         );
         r.system(|s| {
             let mut t10 = gpu_engines(false);
@@ -1982,16 +1985,49 @@ mod bottom {
         });
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
-        let (shown, collapsed, more, engines_more) = r.vcx.update(|_, cx| {
-            let g = gpu.read(cx);
-            (
-                g.shown(),
-                g.collapsed(),
-                g.shown_more_text().to_string(),
-                g.sections()[0].engines_more.to_string(),
-            )
-        });
-        assert_eq!((shown, collapsed), (1, true));
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                (
+                    g.shown(),
+                    g.collapsed(),
+                    g.busiest_shown(),
+                    g.shown_more_text().to_string(),
+                    g.sections()[0].engines_more.to_string(),
+                    g.sections()[0].engines_more_all.to_string(),
+                )
+            })
+        };
+        let (shown, collapsed, busiest, more, _, engines_more_all) = state(&mut r);
+        assert_eq!((shown, collapsed, busiest), (1, true, false));
+        assert_eq!(
+            (more.as_str(), engines_more_all.as_str()),
+            ("+1 more", "+3 more engines")
+        );
+        for key in ["gpu", "enc", "dec"] {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
+                "{key}"
+            );
+        }
+        let rows = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(
+            rows.bottom() <= axis.top(),
+            "rows end at {:?}, the time axis starts at {:?}",
+            rows.bottom(),
+            axis.top()
+        );
+        assert_eq!(
+            f32::from(rows.size.height),
+            rows_h(4),
+            "\"+3 more engines\", VRAM, temperature and power, \"+1 more\""
+        );
+
+        // A 160 px body: the busiest engine and "+2 more engines" fit.
+        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        let (shown, collapsed, busiest, more, engines_more, _) = state(&mut r);
+        assert_eq!((shown, collapsed, busiest), (1, true, true));
         assert_eq!(
             (more.as_str(), engines_more.as_str()),
             ("+1 more", "+2 more engines")
@@ -2008,12 +2044,7 @@ mod bottom {
         }
         let rows = r.bounds(rows_id(0));
         let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(
-            rows.bottom() <= axis.top(),
-            "rows end at {:?}, the time axis starts at {:?}",
-            rows.bottom(),
-            axis.top()
-        );
+        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
         assert_eq!(
             f32::from(rows.size.height),
             rows_h(5),
@@ -2021,22 +2052,35 @@ mod bottom {
         );
     }
 
-    /// One GPU in a 160 px body (a 220 px box plus the range figures row and the space above the
-    /// title, UI-PRF-059): 3 engines, VRAM and the temperature and power row need 158 of it, so
-    /// every engine row shows.
+    /// One GPU at the 220 px minimum (plus the range figures row), a 152 px body: 3 engines,
+    /// VRAM and the temperature and power row need 48 + 5 × 22 = 158 px, so the section shows
+    /// its busiest engine and "+2 more engines" (136 px), whole rows above the time axis
+    /// (UI-PRF-059). A 160 px body shows every engine row.
     #[gpui_kit::test]
-    fn gpu_box_one_gpu_min_height_all_engines(cx: &mut TestAppContext) {
+    fn gpu_box_one_gpu_min_height_whole_rows(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
             devices("gpu", &[10]),
             Vec::new(),
-            (220. + FIGURES_ROW + TITLE_TOP, 200.),
+            (220. + FIGURES_ROW, 200.),
         );
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
-        let collapsed = r.vcx.update(|_, cx| gpu.read(cx).collapsed());
-        assert!(!collapsed);
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                (g.collapsed(), g.busiest_shown())
+            })
+        };
+        assert_eq!(state(&mut r), (true, true));
+        let rows = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
+        assert_eq!(f32::from(rows.size.height), rows_h(4));
+
+        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        assert_eq!(state(&mut r).0, false);
         for key in ["gpu", "enc", "dec"] {
             assert!(
                 r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_some(),
@@ -5802,11 +5846,12 @@ mod page {
         }
     }
 
-    /// crw.71: in `adapter_charts` a long adapter name stays on one line in its cell header, and
-    /// every counted adapter gets a cell, so no "+n more" line shows after a few adapters.
+    /// crw.71: in `adapter_charts` a long adapter name stays on one line in its cell header.
+    /// Only whole cells show, inside the grid; the adapters left out are in "+n more"
+    /// (UI-PRF-059, which replaces crw.71's every adapter in a cell).
     #[gpui_kit::test]
     fn overview_net_adapter_names_stay_in_cells(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::net_box::{cell_id, name_id};
+        use tl_ui::pages::performance::overview::net_box::{GRID_ID, cell_id, name_id};
         let mut r = open_rooted(cx, true, 1280., 800.);
         r.page_action(&PerfOverviewSetBoxMode {
             kind: "net".into(),
@@ -5860,9 +5905,15 @@ mod page {
                     (b.adapter_idxs(), b.cells())
                 });
                 assert_eq!(idxs.len(), 7, "{arrange} {w}x{h}");
-                assert_eq!(cells, 7, "{arrange} {w}x{h}: no cell dropped into +n more");
-                for idx in idxs {
+                assert!((1..=7).contains(&cells), "{arrange} {w}x{h}: {cells} cells");
+                let grid = r.bounds_of(GRID_ID.into());
+                for idx in idxs.into_iter().take(cells) {
                     let cell = r.bounds_of(cell_id(idx));
+                    assert!(
+                        cell.bottom() <= grid.bottom() + px(0.5)
+                            && cell.right() <= grid.right() + px(0.5),
+                        "{arrange} {w}x{h}: {cell:?} cut by {grid:?}"
+                    );
                     let name = r.bounds_of(name_id(idx));
                     // One t_sm row; a wrapped name is two rows tall and draws over the chart.
                     assert!(name.size.height < px(20.), "{arrange} {w}x{h} {name:?}");

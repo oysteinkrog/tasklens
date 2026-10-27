@@ -170,6 +170,9 @@ pub struct GpuSection {
     pub engines: SmallVec<[EngineRow; 4]>,
     /// "+n more engines" for every engine but the busiest, shown when the rows do not fit.
     pub engines_more: SharedString,
+    /// "+n more engines" for every engine, shown when the busiest engine's row does not fit
+    /// either (UI-PRF-059).
+    pub engines_more_all: SharedString,
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
@@ -465,6 +468,9 @@ struct Fit {
     sections: usize,
     /// The first section shows only its busiest engine and a "+n more engines" row.
     collapsed: bool,
+    /// A collapsed section keeps its busiest engine's row. When that row would be cut, it
+    /// joins "+n more engines" too (UI-PRF-059).
+    busiest: bool,
     /// The engine rows draw their meters (see `meter_fits`).
     meters: bool,
 }
@@ -472,14 +478,21 @@ struct Fit {
 impl Fit {
     /// The layout class for `class_probe`.
     fn class(self) -> u32 {
-        self.sections as u32 | u32::from(self.collapsed) << 2 | u32::from(self.meters) << 3
+        self.sections as u32
+            | u32::from(self.collapsed) << 2
+            | u32::from(self.meters) << 3
+            | u32::from(self.busiest) << 4
     }
 }
 
-/// The engine rows a section draws: all of them, or the busiest and "+n more engines" when
-/// `collapsed` and there are more than two.
-fn engine_lines(engines: usize, collapsed: bool) -> usize {
-    if collapsed { engines.min(2) } else { engines }
+/// The engine rows a section draws: all of them, or, when `collapsed` and there are more than
+/// two, the busiest (when `busiest`) and "+n more engines".
+fn engine_lines(engines: usize, collapsed: bool, busiest: bool) -> usize {
+    match (collapsed, busiest) {
+        (false, _) => engines,
+        (true, true) => engines.min(2),
+        (true, false) => engines.min(1),
+    }
 }
 
 /// The content height of a section, in px: its heading row (`heading`), a `MIN_CHART_H` chart
@@ -495,8 +508,9 @@ fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
 /// What fits a body of `body` (everything before the first paint). `rows` has each section's
 /// body rows and `total` counts every GPU; those without a section get a "+n more" row under the
 /// last section. Both sections show only when both fit in full. Otherwise one section shows, and
-/// when its rows do not fit, only its busiest engine and "+n more engines". `side` is the
-/// chart's share of the width when it sits beside the rows (Side by side).
+/// when its rows do not fit, only its busiest engine and "+n more engines". When even that is
+/// cut, the busiest engine joins "+n more engines" (UI-PRF-059). `side` is the chart's share of
+/// the width when it sits beside the rows (Side by side).
 fn fit(
     body: Size<Pixels>,
     rows: &[SectionRows],
@@ -516,29 +530,37 @@ fn fit(
         return Fit {
             sections: count,
             collapsed: false,
+            busiest: true,
             meters,
         };
     }
     let (_, _, section_gap) = spacing(m);
     let more = |shown: usize| usize::from(total > shown);
     let h = f32::from(body.height);
-    let lines = |r: SectionRows, collapsed: bool| engine_lines(r.engines, collapsed) + r.rest;
+    let lines = |r: SectionRows, collapsed: bool, busiest: bool| {
+        engine_lines(r.engines, collapsed, busiest) + r.rest
+    };
     if count >= 2 {
-        let two = section_h(lines(rows[0], false), false, side, m)
+        let two = section_h(lines(rows[0], false, true), false, side, m)
             + section_gap
-            + section_h(lines(rows[1], false) + more(2), true, side, m);
+            + section_h(lines(rows[1], false, true) + more(2), true, side, m);
         if h >= two {
             return Fit {
                 sections: 2,
                 collapsed: false,
+                busiest: true,
                 meters,
             };
         }
     }
-    let full = section_h(lines(rows[0], false) + more(1), false, side, m);
+    let one = |collapsed: bool, busiest: bool| {
+        section_h(lines(rows[0], collapsed, busiest) + more(1), false, side, m)
+    };
+    let collapsed = h < one(false, true) && rows[0].engines > 2;
     Fit {
         sections: 1,
-        collapsed: h < full && rows[0].engines > 2,
+        collapsed,
+        busiest: !collapsed || h >= one(true, true),
         meters,
     }
 }
@@ -604,6 +626,7 @@ pub struct GpuBox {
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
     collapsed: bool,
+    busiest: bool,
     meters: bool,
     settings: ChartSettings,
     settings_versions: [u64; 3],
@@ -647,6 +670,7 @@ impl GpuBox {
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
             collapsed: false,
+            busiest: true,
             meters: true,
             settings: ChartSettings::read(cx),
             settings_versions: chart_section_versions(cx),
@@ -823,6 +847,11 @@ impl GpuBox {
         self.collapsed
     }
 
+    /// Whether a collapsed first section kept its busiest engine's row in the last render.
+    pub fn busiest_shown(&self) -> bool {
+        self.busiest
+    }
+
     /// Whether the last render drew the engine rows' meters.
     pub fn meters(&self) -> bool {
         self.meters
@@ -901,6 +930,7 @@ impl GpuBox {
                         value: SharedString::default(),
                         engines: SmallVec::new(),
                         engines_more: SharedString::default(),
+                        engines_more_all: SharedString::default(),
                         vram: MeterRow {
                             label: tr(cx, KEY_VRAM),
                             value: SharedString::default(),
@@ -977,7 +1007,8 @@ impl GpuBox {
                 };
                 rows.push(row);
             }
-            self.sections[i].engines_more = more_engines(rows.len(), cx);
+            self.sections[i].engines_more = more_engines(rows.len().saturating_sub(1), cx);
+            self.sections[i].engines_more_all = more_engines(rows.len(), cx);
             self.sections[i].engines = rows;
         }
         changed
@@ -1125,7 +1156,8 @@ impl GpuBox {
             for e in &mut s.engines {
                 e.meter.label = tr(cx, e.name);
             }
-            s.engines_more = more_engines(s.engines.len(), cx);
+            s.engines_more = more_engines(s.engines.len().saturating_sub(1), cx);
+            s.engines_more_all = more_engines(s.engines.len(), cx);
             let labels = chart_labels(range.clone());
             s.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         }
@@ -1146,9 +1178,8 @@ impl GpuBox {
     }
 }
 
-/// "+n more engines" for a section with `engines` engine rows: all but the busiest.
-fn more_engines(engines: usize, cx: &App) -> SharedString {
-    let n = engines.saturating_sub(1);
+/// "+n more engines" for `n` engine rows left out.
+fn more_engines(n: usize, cx: &App) -> SharedString {
     tr_args(cx, KEY_MORE_ENGINES, &[("n", FluentValue::from(n))])
 }
 
@@ -1375,6 +1406,7 @@ impl GpuBox {
         let shown = fit(body_size, &rows, total, share_at, m);
         self.shown = shown.sections;
         self.collapsed = shown.collapsed;
+        self.busiest = shown.busiest;
         self.meters = shown.meters;
         let more = self.shown_more_text();
         let with_rows = mode == GpuMode::ChartEngines;
@@ -1385,7 +1417,7 @@ impl GpuBox {
         let len = f32::from(body_size.height);
         let lines: SmallVec<[usize; MAX_GPUS]> = (0..shown.sections)
             .map(|i| {
-                engine_lines(rows[i].engines, shown.collapsed && i == 0)
+                engine_lines(rows[i].engines, shown.collapsed && i == 0, shown.busiest)
                     + rows[i].rest
                     + usize::from(i + 1 == shown.sections && !more.is_empty())
             })
@@ -1465,10 +1497,13 @@ impl GpuBox {
                 .w_full()
                 .gap(m.sp[2]);
             if with_rows {
-                if collapsed && section.engines.len() > 2 {
+                if collapsed && section.engines.len() > 2 && shown.busiest {
                     section_rows = section_rows
                         .child(engine(&section.engines[busiest(&section.engines)]))
                         .child(text_row(&section.engines_more, m, theme));
+                } else if collapsed && section.engines.len() > 2 {
+                    section_rows =
+                        section_rows.child(text_row(&section.engines_more_all, m, theme));
                 } else {
                     section_rows = section_rows.children(section.engines.iter().map(engine));
                 }
@@ -1554,6 +1589,7 @@ impl GpuBox {
         let shown = charts_fit(arrange, self.body.get(), &engines, total, vram, m);
         self.shown = shown.sections;
         self.collapsed = false;
+        self.busiest = true;
         self.meters = meter_fits(self.body.get().width, m);
         let more = self.shown_more_text();
         let min = cell_min(m);
