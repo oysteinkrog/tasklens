@@ -6923,6 +6923,23 @@ mod page {
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
     }
 
+    /// Alt+Right during a title drag ends the drag: the held box goes back to row 0 and then
+    /// moves one column right, and a later move or release keeps that.
+    #[gpui_kit::test]
+    fn overview_edit_move_key_during_drag(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.bind_keys();
+        r.edit_layout();
+        let after = r.drag_through(|r| {
+            r.vcx.simulate_keystrokes("alt-right");
+            draw(r.vcx);
+        });
+        let cpu = after.get(BoxKind::Cpu).expect("placed");
+        assert_eq!((cpu.col, cpu.row, cpu.cols, cpu.rows), (1, 0, 8, 7));
+        assert_eq!(after.validate(), Ok(()));
+        assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), after);
+    }
+
     /// Alt+Shift+Left on a focused box during a gap drag ends the gap drag: the shared edge
     /// goes back, the box shrinks one column, and a later move or release keeps that.
     #[gpui_kit::test]
