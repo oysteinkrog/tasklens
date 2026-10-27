@@ -1603,7 +1603,7 @@ mod labels {
     }
 
     /// An Overview chart's power strip: "Power draw" at the left of the title row, the value at
-    /// its right and the "100 W" scale label left of the value (UI-PRF-059). None of them
+    /// its right and the "100.0 W" scale label left of the value (UI-PRF-059). None of them
     /// overlaps another or the plot, and a box too narrow for all three drops the scale label.
     #[gpui_kit::test]
     fn chart_title_and_scale_label_disjoint(cx: &mut TestAppContext) {
@@ -1621,7 +1621,7 @@ mod labels {
         r.draw();
         {
             let c = r.cache.borrow();
-            assert_eq!(c.text(LabelKind::AxisMax), Some("100 W"));
+            assert_eq!(c.text(LabelKind::AxisMax), Some("100.0 W"));
             let heading = c.painted(LabelKind::Heading).expect("heading").bounds();
             let value = c.painted(LabelKind::Value).expect("value").bounds();
             let scale = c.painted(LabelKind::AxisMax).expect("scale label").bounds();

@@ -7159,13 +7159,21 @@ mod page {
     #[gpui_kit::test]
     fn chart_ticks_in_own_row(cx: &mut TestAppContext) {
         use tl_ui::chart::labels::LabelKind;
+        use tl_ui::pages::performance::overview::net_box::COMBINED_CHART_ID;
         let mut r = open(cx, true, 1920., 1200.);
+        // 70 px rows: the Network box is tall enough for a chart with both label rows.
+        r.set_row_unit(70);
         r.page_action(&PerfOverviewSetBoxMode {
             kind: "net".into(),
             mode: "combined".into(),
         });
         r.cpu_tick();
         draw(r.vcx);
+        let net = r.gap(COMBINED_CHART_ID);
+        assert!(
+            net.size.width >= px(320.) && net.size.height >= px(140.),
+            "room for ticks: {net:?}"
+        );
         let page = r.page.clone();
         let charts = r.vcx.update(|_, cx| {
             let p = page.read(cx);
