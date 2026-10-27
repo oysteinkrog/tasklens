@@ -64,8 +64,8 @@ const PART_GAP: f32 = 4.;
 const CORE_METER_MIN_W: f32 = 16.;
 /// The space above and below a core sparkline in its row, logical px before `ui_scale`.
 const CORE_SPARK_INSET: f32 = 2.;
-/// The lowest core row, logical px before `ui_scale` (D-029).
-const MIN_ROW_H: f32 = 16.;
+/// The core row pitch, logical px before `ui_scale`: one label row (UI-PRF-059).
+const CORE_ROW_H: f32 = LABEL_ROW;
 /// The narrowest core cell: the name and the percent with their gap. Logical px before
 /// `ui_scale`.
 const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
@@ -399,9 +399,7 @@ pub struct CoreBarsLayout {
     pub rows: usize,
     pub cell_w: Pixels,
     pub row_h: Pixels,
-    /// True when the rows are lower than 18 px and share the height equally.
-    pub squeezed: bool,
-    /// True when 16 px rows do not fit in 4 columns: the rows scroll under a scrollbar.
+    /// True when 18 px rows do not fit in 4 columns: the rows scroll under a scrollbar.
     pub scrolls: bool,
     pub fit: CoreCellFit,
 }
@@ -412,7 +410,6 @@ impl CoreBarsLayout {
     pub fn class(&self) -> u32 {
         (self.cols.min(0x3ff) as u32)
             | ((self.rows.min(0xfff) as u32) << 10)
-            | (u32::from(self.squeezed) << 22)
             | (u32::from(self.scrolls) << 23)
             | ((self.fit as u32) << 24)
     }
@@ -441,20 +438,19 @@ const CORE_SPARK_TAIL_W: f32 = PART_GAP + CORE_METER_MIN_W + PART_GAP + PCT_W;
 /// percent with their 3 gaps.
 const CORE_SPARK_MIN_CELL_W: f32 = NAME_W + CORE_SPARK_MIN_W + PCT_W + 3. * PART_GAP;
 
-/// The grid for `n` cores in `w × h` (D-029): one column of rows at least 16 px high, or the
-/// fewest equal columns (at most 4) that fit them. When 16 px rows do not fit in 4 columns the
-/// rows stay 16 px and scroll, with room for the scrollbar. Rows are 18 px when they fit and
-/// share the height down to 16 px when not. A cell never gets narrower than its name and
-/// percent, so a narrow part takes fewer columns and scrolls sooner.
+/// The grid for `n` cores in `w × h` (D-029, UI-PRF-059): one column of 18 px rows, or the
+/// fewest equal columns (at most 4) that fit them. When 18 px rows do not fit in 4 columns the
+/// rows stay 18 px and scroll, with room for the scrollbar. A cell never gets narrower than its
+/// name and percent, so a narrow part takes fewer columns and scrolls sooner.
 pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsLayout {
     let n = n.max(1);
     let gap = CELL_GAP * scale;
     let (w, h) = (f32::from(w).max(0.), f32::from(h).max(0.));
-    let min_row = MIN_ROW_H * scale;
+    let row_h = CORE_ROW_H * scale;
     let max_cols = |w: f32| {
         (((w + gap) / (CELL_MIN_W * scale + gap)).floor() as usize).clamp(1, MAX_CORE_COLS)
     };
-    let fits = |cols: usize| n.div_ceil(cols) as f32 * min_row <= h + 1e-3;
+    let fits = |cols: usize| n.div_ceil(cols) as f32 * row_h <= h + 1e-3;
     let (w, cols, scrolls) = match (1..=max_cols(w)).find(|&c| fits(c)) {
         Some(cols) => (w, cols, false),
         None => {
@@ -466,14 +462,6 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
     // The fewest columns for those rows, so no column is left empty.
     let cols = n.div_ceil(rows);
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
-    let full_row = LABEL_ROW * scale;
-    let (row_h, squeezed) = if scrolls {
-        (min_row, false)
-    } else if rows as f32 * full_row <= h + 1e-3 {
-        (full_row, false)
-    } else {
-        ((h / rows as f32).max(min_row), true)
-    };
     let fit = if cell_w >= CORE_FULL_W * scale {
         CoreCellFit::Full
     } else if cell_w >= CORE_NO_GHZ_W * scale {
@@ -490,7 +478,6 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
         rows,
         cell_w: px(cell_w),
         row_h: px(row_h),
-        squeezed,
         scrolls,
         fit,
     }
@@ -578,12 +565,13 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
     let inset = px(CORE_SPARK_INSET * s);
     let tail = px(CORE_SPARK_TAIL_W * s);
     for r in 0..l.rows {
-        let mut row = div().flex().flex_row().w_full().gap(px(CELL_GAP * s));
-        row = if l.squeezed {
-            row.flex_1().min_h(px(MIN_ROW_H * s))
-        } else {
-            row.flex_none().h(l.row_h)
-        };
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .gap(px(CELL_GAP * s))
+            .flex_none()
+            .h(l.row_h);
         for c in 0..l.cols {
             let i = c * l.rows + r;
             let mut cell = div().relative().flex_1().min_w_0().h_full();

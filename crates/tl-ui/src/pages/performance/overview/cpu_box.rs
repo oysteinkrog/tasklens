@@ -1,5 +1,5 @@
 //! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one row per
-//! logical CPU (crw.53): name, sparkline, meter, percent and GHz. The rows are at least 16 px high
+//! logical CPU (crw.53): name, sparkline, meter, percent and GHz. The rows are 18 px high
 //! and flow top to bottom into up to 4 columns, then scroll (D-029).
 //!
 //! The core rows show a moving average of each core's `CPU_TOTAL` (UI-PRF-018, D-024), and the

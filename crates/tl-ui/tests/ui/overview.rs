@@ -21,31 +21,33 @@ fn meter_fill_width_rounds_to_physical_px() {
     assert_eq!(meter_fill_w(f32::NAN, px(101.), sf), px(0.));
 }
 
-/// D-029: rows at least 16 px high in the fewest columns that fit them, at most 4, then the
-/// rows scroll. Rows are 18 px when they fit.
+/// D-029, UI-PRF-059: 18 px rows in the fewest columns that fit them, at most 4, then the rows
+/// scroll.
 #[test]
 fn core_bars_layout_32_cores() {
     let l = core_bars_layout(32, px(776.), px(600.), 1.);
     assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(18.)));
-    assert!(!l.squeezed && !l.scrolls);
-    // One column at 16 px still fits: the rows share the height.
+    assert!(!l.scrolls);
+    // 32 rows of 18 px need 576 px: a lower part takes the fewest columns that fit.
     let l = core_bars_layout(32, px(776.), px(520.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(16.25)));
-    assert!(l.squeezed && !l.scrolls);
-    // Too low for one column: the fewest columns that fit.
+    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(18.)));
+    assert!(!l.scrolls);
     let l = core_bars_layout(32, px(776.), px(400.), 1.);
     assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(18.)));
     let l = core_bars_layout(32, px(776.), px(200.), 1.);
     assert_eq!((l.cols, l.rows), (3, 11));
-    let l = core_bars_layout(32, px(776.), px(128.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(16.)));
+    let l = core_bars_layout(32, px(776.), px(144.), 1.);
+    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(18.)));
     assert!(!l.scrolls);
-    // Not even 4 columns fit: 16 px rows that scroll, with 16 px kept for the scrollbar.
+    // Not even 4 columns fit: 18 px rows that scroll, with 16 px kept for the scrollbar.
+    let l = core_bars_layout(32, px(776.), px(143.), 1.);
+    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(18.)));
+    assert!(l.scrolls);
     let l = core_bars_layout(32, px(776.), px(50.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(16.)));
+    assert_eq!((l.cols, l.rows, l.row_h), (4, 8, px(18.)));
     assert!(l.scrolls);
     assert_eq!(l.cell_w, px((760. - 24.) / 4.));
-    assert_eq!(l.content_h(), px(128.));
+    assert_eq!(l.content_h(), px(144.));
     // No column is left empty: 9 cores in 3 rows take 3 columns, not 4.
     let l = core_bars_layout(9, px(776.), px(40.), 1.);
     assert_eq!((l.cols, l.rows), (3, 3));
@@ -53,6 +55,23 @@ fn core_bars_layout_32_cores() {
     let l = core_bars_layout(8, px(150.), px(60.), 1.);
     assert_eq!((l.cols, l.rows, l.cell_w), (1, 8, px(134.)));
     assert!(l.scrolls);
+}
+
+/// UI-PRF-059: core rows are 18 px apart at every part height, core count and scale; they
+/// never shrink to share the height, and scrolling rows keep the same pitch.
+#[test]
+fn core_rows_always_18px_apart() {
+    for scale in [1., 1.5] {
+        for n in [1, 4, 8, 12, 16, 24, 32, 64, 128] {
+            for h in (0..=1200).step_by(7) {
+                let l = core_bars_layout(n, px(776.), px(h as f32), scale);
+                assert_eq!(l.row_h, px(18. * scale), "{n} cores in {h} px at {scale}x");
+                if !l.scrolls {
+                    assert!(l.content_h() <= px(h as f32 + 1e-3), "{n} in {h}: {l:?}");
+                }
+            }
+        }
+    }
 }
 
 /// D-029: C0 to C15 fill the first column top to bottom, C16 to C31 the second.
@@ -74,7 +93,7 @@ fn core_rows_fit_32_threads_at_1200x900() {
     assert_eq!((l.cols, l.rows), (2, 16));
     assert_eq!(l.cell_w, px(215.));
     assert_eq!(l.row_h, px(18.));
-    assert!(!l.squeezed && !l.scrolls);
+    assert!(!l.scrolls);
     assert_eq!(l.fit, CoreCellFit::Full);
     assert_eq!(
         core_cell(&l, 1.),
@@ -1039,7 +1058,7 @@ mod boxes {
         assert!(r.vcx.update(|_, cx| cpu.read(cx).side_by_side()));
         assert_eq!((layout.cols, layout.rows), (2, 16));
         assert_eq!(layout.row_h, px(18.));
-        assert!(!layout.squeezed && !layout.scrolls);
+        assert!(!layout.scrolls);
         assert_eq!(layout.fit, CoreCellFit::Full);
         assert_eq!(sparks.len(), usize::from(N));
 
@@ -1121,9 +1140,9 @@ mod boxes {
     }
 
     /// D-029: every core row shows its name, sparkline, bar and percent in that order. Rows are
-    /// at least 16 px; 32 threads that do not fit one column flow top to bottom into 2 (C0 to
-    /// C15, then C16 to C31). A box too short for 4 columns keeps 16 px rows, with the name and
-    /// percent, and scrolls.
+    /// 18 px apart (UI-PRF-059); 32 threads that do not fit one column flow top to bottom into 2
+    /// (C0 to C15, then C16 to C31). A box too short for 4 columns keeps 18 px rows, with the
+    /// name and percent, and scrolls.
     #[gpui_kit::test]
     fn overview_core_rows_name_spark_columns(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::parts::{
@@ -1188,7 +1207,7 @@ mod boxes {
             );
         }
 
-        // Too short for 4 columns of 16 px rows: the rows scroll, name and percent stay.
+        // Too short for 4 columns of 18 px rows: the rows scroll, name and percent stay.
         // The update draws the window itself, so the old labels go first.
         take_core_labels();
         r.vcx.simulate_resize(size(px(800.), px(440.)));
@@ -1202,7 +1221,7 @@ mod boxes {
         draw(r.vcx);
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
         assert!(layout.scrolls, "{layout:?}");
-        assert_eq!((layout.cols, layout.rows, layout.row_h), (4, 8, px(16.)));
+        assert_eq!((layout.cols, layout.rows, layout.row_h), (4, 8, px(18.)));
         let view = r
             .vcx
             .debug_bounds(CORE_ROWS_SCROLL_ID)
@@ -1210,7 +1229,7 @@ mod boxes {
         assert!(view.size.height < layout.content_h(), "{view:?}");
         let labels = last_labels();
         assert_eq!(labels.len(), N);
-        assert_eq!(labels[1].name.y - labels[0].name.y, px(16.));
+        assert_eq!(labels[1].name.y - labels[0].name.y, px(18.));
         assert_eq!(
             labels[8].name.y, labels[0].name.y,
             "C8 tops the second column"
