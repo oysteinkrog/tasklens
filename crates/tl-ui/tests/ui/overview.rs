@@ -834,8 +834,10 @@ mod boxes {
         let host = r.host.clone();
         let leak = |id: String| -> &'static str { Box::leak(id.into_boxed_str()) };
         // (box width, box height, sparkline width): one-line rows at 800 px, the 1200 x 900
-        // default (384 x 516, a 358 px body) and a 720 px page (224 x 280, a 198 px body, 128 px text part and the 8 px splitter).
-        for (w, h, spark_w) in [(800., 300., 96.), (384., 516., 96.), (224., 280., 58.)] {
+        // default (384 x 516, a 358 px body) and a 720 px page (224 x 288, a 198 px body, 128 px text part and the 8 px splitter).
+        // The 720 px page box is 280 px plus the 8 px above the title (UI-PRF-059), so its
+        // body stays 202 px high and the five two-line rows (196 px) fit.
+        for (w, h, spark_w) in [(800., 300., 96.), (384., 516., 96.), (224., 288., 58.)] {
             r.vcx.update(|_, cx| {
                 host.update(cx, |hst, cx| {
                     hst.mem_w = w;
@@ -1514,7 +1516,7 @@ mod bottom {
     use tl_ui::pages::performance::overview::layout::Arrange;
     use tl_ui::pages::performance::overview::net_box::NetBox;
     use tl_ui::pages::performance::overview::parts::{
-        FIGURES_ROW, GridFit, fill_grid, time_axis_id,
+        FIGURES_ROW, GridFit, TITLE_TOP, fill_grid, time_axis_id,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -1910,15 +1912,15 @@ mod bottom {
 
     /// Two GPUs with 3 engines, VRAM and the temperature and power row: each section is
     /// 48 + 5 × 22 = 158 px, the second adds a 22 px heading, with 12 px between: 350 px, the
-    /// body of a 410 px box plus the range figures row. Sections take their content height, so
-    /// neither clips.
+    /// body of a 410 px box plus the range figures row and the space above the title
+    /// (UI-PRF-059). Sections take their content height, so neither clips.
     #[gpui_kit::test]
     fn gpu_box_two_full_sections_at_410(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
             devices("gpu", &[10, 11]),
             Vec::new(),
-            (410. + FIGURES_ROW, 200.),
+            (410. + FIGURES_ROW + TITLE_TOP, 200.),
         );
         r.system(|s| {
             let mut t11 = gpu_engines(false);
@@ -1949,7 +1951,7 @@ mod bottom {
         let second = r.bounds(engine_row_id(1, "gpu"));
         assert!(first.bottom() < second.top(), "{first:?} above {second:?}");
 
-        r.heights(409., 200.);
+        r.heights(409. + FIGURES_ROW + TITLE_TOP, 200.);
         assert_eq!(
             state(&mut r),
             (1, false),
@@ -1959,16 +1961,17 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(6));
     }
 
-    /// Two GPUs in a 160 px body (the 220 px row minimum plus the range figures row): the first
-    /// section in full with the "+1 more" row needs 48 + 6 × 22 = 180 px, so it shows only its
-    /// busiest engine and "+2 more engines": 48 + 5 × 22 = 158 px, above the time axis.
+    /// Two GPUs in a 160 px body (a 220 px box plus the range figures row and the space above
+    /// the title, UI-PRF-059): the first section in full with the "+1 more" row needs
+    /// 48 + 6 × 22 = 180 px, so it shows only its busiest engine and "+2 more engines":
+    /// 48 + 5 × 22 = 158 px, above the time axis.
     #[gpui_kit::test]
     fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
             devices("gpu", &[10, 11]),
             Vec::new(),
-            (220. + FIGURES_ROW, 200.),
+            (220. + FIGURES_ROW + TITLE_TOP, 200.),
         );
         r.system(|s| {
             let mut t10 = gpu_engines(false);
@@ -2018,15 +2021,16 @@ mod bottom {
         );
     }
 
-    /// One GPU in a 160 px body (the 220 px row minimum plus the range figures row): 3 engines,
-    /// VRAM and the temperature and power row need 158 of it, so every engine row shows.
+    /// One GPU in a 160 px body (a 220 px box plus the range figures row and the space above the
+    /// title, UI-PRF-059): 3 engines, VRAM and the temperature and power row need 158 of it, so
+    /// every engine row shows.
     #[gpui_kit::test]
     fn gpu_box_one_gpu_min_height_all_engines(cx: &mut TestAppContext) {
         let mut r = open(
             cx,
             devices("gpu", &[10]),
             Vec::new(),
-            (220. + FIGURES_ROW, 200.),
+            (220. + FIGURES_ROW + TITLE_TOP, 200.),
         );
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
@@ -4635,6 +4639,13 @@ mod page {
         more_disks(r, 1)
     }
 
+    /// How many `disk_charts` cells the Disk box shows; the rest are in "+n more".
+    fn shown_disks(r: &mut Rig) -> usize {
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.read(cx).disk_box().read(cx).shown())
+    }
+
     /// Places the Disk box's `disk_charts` cells as `arrange` says, as the Arrange items do.
     fn set_disk_arrange(r: &mut Rig, arrange: &str) {
         r.page_action(&PerfOverviewSetBoxArrange {
@@ -4708,8 +4719,10 @@ mod page {
             .map(|k| chart_in(r.bounds_of(chart_id(k)), r.bounds_of(cell_id(k)), "disk"))
             .collect();
         for &chart in &disk_charts {
+            // Up to 1.75 times: with the 8 px above the box title (UI-PRF-059) the charts
+            // measure 50 px (Disk) and 29 px (GPU).
             assert!(
-                chart >= 0.6 * gpu_chart && chart <= 1.67 * gpu_chart,
+                chart >= 0.6 * gpu_chart && chart <= 1.75 * gpu_chart,
                 "disk chart {chart} px, GPU chart {gpu_chart} px with {} engines",
                 engines.len()
             );
@@ -4820,9 +4833,9 @@ mod page {
 
     /// D-027: the Disk box's `disk_charts` cells go in one column by default, in one row or in
     /// the mode's grid by the Arrange choice, each an equal share of the box. When the cells do
-    /// not fit, only whole cells show and the rest join "+n more" (UI-PRF-059). The choice saves and reloads, a saved value
-    /// wins over the default, and Reset Box gives the column back. The Net box's Arrange items
-    /// switch between `stacked` and `columns`.
+    /// not fit, only whole cells show and the rest join "+n more" (UI-PRF-059). The choice saves
+    /// and reloads, a saved value wins over the default, and Reset Box gives the column back.
+    /// The Net box's Arrange items switch between `stacked` and `columns`.
     #[gpui_kit::test]
     fn overview_arrange_vertical_horizontal_auto(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::disk_box::{
@@ -4831,6 +4844,9 @@ mod page {
         use tl_ui::pages::performance::overview::parts::arrange_grid;
         let mut r = open_rooted(cx, true, 1800., 900.);
         let keys = three_disks(&mut r);
+        // A 282 px Disk box: at the default 40 px row unit its 270 px leaves a 184 px grid,
+        // below the 188 px three 60 px cells need, so the third disk would join "+1 more".
+        r.set_row_unit(42);
         let page = r.page.clone();
         let shown = |r: &mut Rig| {
             r.vcx
@@ -5588,7 +5604,8 @@ mod page {
         for (w, h) in [(1200., 900.), (1200., 560.), (900., 560.)] {
             r.vcx.simulate_resize(size(px(w), px(h)));
             draw(r.vcx);
-            for k in &keys {
+            // Cells that do not fit whole are in "+n more" (UI-PRF-059).
+            for k in keys.iter().take(shown_disks(&mut r)) {
                 let cell = assert_head_fits(&mut r, k, &format!("{w}x{h}"));
                 widths.push(f32::from(cell.size.width));
             }
@@ -5618,7 +5635,8 @@ mod page {
             for h in [560., 900.] {
                 r.vcx.simulate_resize(size(px(w), px(h)));
                 draw(r.vcx);
-                for k in &keys {
+                // Cells that do not fit whole are in "+n more" (UI-PRF-059).
+                for k in keys.iter().take(shown_disks(&mut r)) {
                     let cell = assert_head_fits(&mut r, k, &format!("{w}x{h}"));
                     assert!(cell.size.width >= px(CELL_MIN_W), "{w}x{h} {cell:?}");
                     widths.push(f32::from(cell.size.width));
@@ -6206,7 +6224,8 @@ mod page {
             }
             r.edit_layout();
             draw(r.vcx);
-            for (kind, _, [row, ..]) in &boxes {
+            // The Edit Layout toolbar moves the boxes down, so measure the title lines again.
+            for (kind, _, [row]) in &box_parts(&mut r, [title_row_id]) {
                 let mid = row.center().y;
                 for (name, ctl) in [
                     ("grip", r.bounds_of(grip_id(*kind))),
