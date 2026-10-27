@@ -1980,21 +1980,33 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(6));
     }
 
-    /// Two GPUs at the 220 px minimum (plus the range figures row): the body is 152 px, 8 px
-    /// less than before the title moved inside the border (UI-PRF-059). The first section in
-    /// full with the "+1 more" row needs 48 + 6 × 22 = 180 px, and with only its busiest engine
-    /// and "+2 more engines" 48 + 5 × 22 = 158 px. That row would be cut, so the busiest engine
-    /// joins the count too: "+3 more engines", VRAM, temperature and power and "+1 more" are
-    /// 48 + 4 × 22 = 136 px, whole rows above the time axis. At a 160 px body the busiest engine
-    /// row fits again.
+    /// The first GPU section's rows end above the time axis, and are `n` rows high.
+    fn assert_rows_above_axis(r: &mut Rig, n: usize, what: &str) {
+        let rows = r.bounds(rows_id(0));
+        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        assert!(
+            rows.bottom() <= axis.top(),
+            "{what}: rows end at {:?}, the time axis starts at {:?}",
+            rows.bottom(),
+            axis.top()
+        );
+        assert_eq!(f32::from(rows.size.height), rows_h(n), "{what}");
+    }
+
+    /// Two GPUs with 3 engines, VRAM and the temperature and power row (UI-PRF-019 GPU fit,
+    /// UI-PRF-059). The body is the box minus 68 px and minus 18 px for the range figures row.
+    /// The first section in full with the "+1 more" row needs 48 + 6 × 22 = 180 px, with its
+    /// busiest engine and "+2 more engines" 158 px, and with "+3 more engines" 136 px.
+    /// - 220 px box, 134 px body: "+3 more engines", VRAM and "+1 more" (114 px); the
+    ///   temperature and power row gives way.
+    /// - 220 px plus the figures row, 152 px body: "+3 more engines", VRAM, temperature and
+    ///   power and "+1 more" (136 px).
+    /// - 160 px body: the busiest engine and "+2 more engines" fit (158 px).
+    /// - 100 px body, below the kind minimum: VRAM gives way too, so "+3 more engines" and
+    ///   "+1 more" are 92 px.
     #[gpui_kit::test]
     fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
-        let mut r = open(
-            cx,
-            devices("gpu", &[10, 11]),
-            Vec::new(),
-            (220. + FIGURES_ROW, 200.),
-        );
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
         r.system(|s| {
             let mut t10 = gpu_engines(false);
             t10.dec_pct = Metric::valid(50.);
@@ -2008,45 +2020,43 @@ mod bottom {
             r.vcx.update(|_, cx| {
                 let g = gpu.read(cx);
                 (
-                    g.shown(),
-                    g.collapsed(),
-                    g.busiest_shown(),
+                    (g.shown(), g.collapsed(), g.busiest_shown(), g.cut_rows()),
                     g.shown_more_text().to_string(),
                     g.sections()[0].engines_more.to_string(),
                     g.sections()[0].engines_more_all.to_string(),
                 )
             })
         };
-        let (shown, collapsed, busiest, more, _, engines_more_all) = state(&mut r);
-        assert_eq!((shown, collapsed, busiest), (1, true, false));
+        let no_engine_rows = |r: &mut Rig, what: &str| {
+            for key in ["gpu", "enc", "dec"] {
+                assert!(
+                    r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
+                    "{what}: {key}"
+                );
+            }
+        };
+
+        let (fit, more, _, engines_more_all) = state(&mut r);
+        assert_eq!(fit, (1, true, false, 1), "220 px");
         assert_eq!(
             (more.as_str(), engines_more_all.as_str()),
             ("+1 more", "+3 more engines")
         );
-        for key in ["gpu", "enc", "dec"] {
-            assert!(
-                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
-                "{key}"
-            );
-        }
-        let rows = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(
-            rows.bottom() <= axis.top(),
-            "rows end at {:?}, the time axis starts at {:?}",
-            rows.bottom(),
-            axis.top()
-        );
-        assert_eq!(
-            f32::from(rows.size.height),
-            rows_h(4),
-            "\"+3 more engines\", VRAM, temperature and power, \"+1 more\""
+        no_engine_rows(&mut r, "220 px");
+        assert_rows_above_axis(&mut r, 3, "220 px: \"+3 more engines\", VRAM, \"+1 more\"");
+
+        r.heights(220. + FIGURES_ROW, 200.);
+        assert_eq!(state(&mut r).0, (1, true, false, 0), "152 px body");
+        no_engine_rows(&mut r, "152 px body");
+        assert_rows_above_axis(
+            &mut r,
+            4,
+            "152 px body: \"+3 more engines\", VRAM, temperature and power, \"+1 more\"",
         );
 
-        // A 160 px body: the busiest engine and "+2 more engines" fit.
         r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
-        let (shown, collapsed, busiest, more, engines_more, _) = state(&mut r);
-        assert_eq!((shown, collapsed, busiest), (1, true, true));
+        let (fit, more, engines_more, _) = state(&mut r);
+        assert_eq!(fit, (1, true, true, 0), "160 px body");
         assert_eq!(
             (more.as_str(), engines_more.as_str()),
             ("+1 more", "+2 more engines")
@@ -2061,42 +2071,41 @@ mod bottom {
                 "{key}"
             );
         }
-        let rows = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
-        assert_eq!(
-            f32::from(rows.size.height),
-            rows_h(5),
-            "busiest engine, \"+2 more engines\", VRAM, temperature and power, \"+1 more\""
+        assert_rows_above_axis(
+            &mut r,
+            5,
+            "160 px body: busiest engine, \"+2 more engines\", VRAM, temperature and power, \
+             \"+1 more\"",
         );
+
+        r.heights(100. + 68. + FIGURES_ROW, 200.);
+        assert_eq!(state(&mut r).0, (1, true, false, 2), "100 px body");
+        assert_rows_above_axis(&mut r, 2, "100 px body: \"+3 more engines\", \"+1 more\"");
     }
 
-    /// One GPU at the 220 px minimum (plus the range figures row), a 152 px body: 3 engines,
-    /// VRAM and the temperature and power row need 48 + 5 × 22 = 158 px, so the section shows
-    /// its busiest engine and "+2 more engines" (136 px), whole rows above the time axis
-    /// (UI-PRF-059). A 160 px body shows every engine row.
+    /// One GPU with 3 engines, VRAM and the temperature and power row: 158 px in full, 136 px
+    /// with the busiest engine and "+2 more engines", 114 px with "+3 more engines".
+    /// - 220 px box, 134 px body: "+3 more engines", VRAM, temperature and power.
+    /// - 220 px plus the figures row, 152 px body: the busiest engine and "+2 more engines".
+    /// - 160 px body: every engine row.
     #[gpui_kit::test]
     fn gpu_box_one_gpu_min_height_whole_rows(cx: &mut TestAppContext) {
-        let mut r = open(
-            cx,
-            devices("gpu", &[10]),
-            Vec::new(),
-            (220. + FIGURES_ROW, 200.),
-        );
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (220., 200.));
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
         let state = |r: &mut Rig| {
             r.vcx.update(|_, cx| {
                 let g = gpu.read(cx);
-                (g.collapsed(), g.busiest_shown())
+                (g.collapsed(), g.busiest_shown(), g.cut_rows())
             })
         };
-        assert_eq!(state(&mut r), (true, true));
-        let rows = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
-        assert_eq!(f32::from(rows.size.height), rows_h(4));
+        assert_eq!(state(&mut r), (true, false, 0), "220 px");
+        assert_rows_above_axis(&mut r, 3, "220 px");
+
+        r.heights(220. + FIGURES_ROW, 200.);
+        assert_eq!(state(&mut r), (true, true, 0), "152 px body");
+        assert_rows_above_axis(&mut r, 4, "152 px body");
 
         r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
         assert!(!state(&mut r).0, "a 160 px body: not collapsed");
@@ -2106,9 +2115,61 @@ mod bottom {
                 "{key}"
             );
         }
-        let rows = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
+        assert_rows_above_axis(&mut r, 5, "160 px body");
+    }
+
+    /// Two GPUs with 2 engines each (3D / Compute and a shared Video Encode/Decode), VRAM and
+    /// the temperature and power row: a GPU with two engines collapses too (UI-PRF-019 GPU
+    /// fit). The first section in full with "+1 more" needs 48 + 5 × 22 = 158 px, with
+    /// "+2 more engines" 136 px.
+    /// - 220 px box, 134 px body: "+2 more engines", VRAM and "+1 more".
+    /// - 152 px body: "+2 more engines", VRAM, temperature and power and "+1 more".
+    /// - 160 px body: both engine rows.
+    #[gpui_kit::test]
+    fn gpu_box_two_engines_collapse(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        r.system(|s| {
+            let mut t11 = gpu_engines(true);
+            t11.device = DeviceIdx(11);
+            s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(true)), (DeviceIdx(11), t11)]);
+        });
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                (g.shown(), g.collapsed(), g.busiest_shown(), g.cut_rows())
+            })
+        };
+        let (engines, more_all) = r.vcx.update(|_, cx| {
+            let s = &gpu.read(cx).sections()[0];
+            (s.engines.len(), s.engines_more_all.to_string())
+        });
+        assert_eq!((engines, more_all.as_str()), (2, "+2 more engines"));
+
+        assert_eq!(state(&mut r), (1, true, false, 1), "220 px");
+        for key in ["gpu", "enc"] {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
+                "220 px: {key}"
+            );
+        }
+        assert_rows_above_axis(&mut r, 3, "220 px");
+
+        r.heights(220. + FIGURES_ROW, 200.);
+        assert_eq!(state(&mut r), (1, true, false, 0), "152 px body");
+        assert_rows_above_axis(&mut r, 4, "152 px body");
+
+        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        let (shown, collapsed, _, cut) = state(&mut r);
+        assert_eq!((shown, collapsed, cut), (1, false, 0), "160 px body");
+        for key in ["gpu", "enc"] {
+            assert!(
+                r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_some(),
+                "160 px body: {key}"
+            );
+        }
+        assert_rows_above_axis(&mut r, 5, "160 px body");
     }
 
     /// At the supported 720 px page width a GPU box is 224 px wide with a 198 px body: too
