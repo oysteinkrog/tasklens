@@ -1502,9 +1502,8 @@ mod bottom {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, ScrollDelta,
-        ScrollWheelEvent, SharedString, StyleRefinement, Styled as _, TestAppContext,
-        VisualTestContext, Window, div, point, px, size,
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
@@ -2555,7 +2554,8 @@ mod bottom {
     }
 
     /// D-026: the engine grid fills the box with equal cells and the VRAM row below; when the
-    /// cells do not fit at 120 × 48 px the grid scrolls and the VRAM row stays in the body.
+    /// cells do not fit at 120 × 48 px only whole cells show, the rest join "+n more engines"
+    /// (UI-PRF-059), and the VRAM row stays in the body.
     #[gpui_kit::test]
     fn overview_grid_cells_fill_box(cx: &mut TestAppContext) {
         let keys = ["render", "compute", "copy", "video", "video-enhance"];
@@ -2605,36 +2605,54 @@ mod bottom {
             check_vram(&mut r, grid);
         }
 
-        // 500 × 150: the grid scrolls with the cells at 48 px, the VRAM row stays.
+        // 500 × 180: the cells do not all fit. Only whole cells show, the rest join
+        // "+n more engines" and nothing scrolls (UI-PRF-059), in each Arrange choice.
         r.gpu_width(500.);
-        r.heights(150., 200.);
-        let (grid, cells, fit) = grid_cells(&mut r, &keys);
-        assert!(fit.scrolls);
-        assert_eq!(fit.cell.height, px(48.));
-        let last = *cells.last().expect("cells");
-        assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
-        for c in &cells {
+        r.heights(180., 200.);
+        let (gpu, _, _) = r.boxes();
+        for arrange in [Arrange::Auto, Arrange::Vertical, Arrange::Horizontal] {
+            r.vcx
+                .update(|_, cx| gpu.update(cx, |g, cx| g.set_arrange(arrange, cx)));
+            draw(r.vcx);
+            let (drawn, more) = r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                (g.shown_cells(0), g.sections()[0].cells_more.to_string())
+            });
             assert!(
-                c.right() <= grid.right() - px(16.),
-                "{c:?} clear of the scrollbar"
+                (1..keys.len()).contains(&drawn),
+                "{arrange:?}: {drawn} cells"
             );
+            assert_eq!(
+                more,
+                format!("+{} more engines", keys.len() - drawn),
+                "{arrange:?}"
+            );
+            let grid = r.bounds(grid_id(0));
+            for (i, k) in keys.iter().enumerate() {
+                let cell = r.vcx.debug_bounds(leak(engine_cell_id(0, k)));
+                if i >= drawn {
+                    assert!(cell.is_none(), "{arrange:?}: cell {i} left out");
+                    continue;
+                }
+                let c = cell.unwrap_or_else(|| panic!("{arrange:?}: cell {i}"));
+                assert!(
+                    c.left() >= grid.left()
+                        && c.right() <= grid.right()
+                        && c.top() >= grid.top()
+                        && c.bottom() <= grid.bottom(),
+                    "{arrange:?}: {c:?} whole in {grid:?}"
+                );
+                assert!(
+                    c.size.width >= px(120.) || arrange == Arrange::Vertical,
+                    "{arrange:?}: {c:?}"
+                );
+                assert!(
+                    c.size.height >= px(48.) || arrange == Arrange::Horizontal,
+                    "{arrange:?}: {c:?}"
+                );
+            }
+            check_vram(&mut r, grid);
         }
-        check_vram(&mut r, grid);
-        r.vcx.simulate_event(ScrollWheelEvent {
-            position: grid.center(),
-            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
-            ..Default::default()
-        });
-        draw(r.vcx);
-        let scrolled = r.bounds(engine_cell_id(0, keys[keys.len() - 1]));
-        assert!(
-            scrolled.top() < last.top(),
-            "{scrolled:?} scrolled up from {last:?}"
-        );
-        assert!(
-            scrolled.bottom() <= grid.bottom() + px(1.),
-            "{scrolled:?} in {grid:?}"
-        );
     }
 
     #[test]

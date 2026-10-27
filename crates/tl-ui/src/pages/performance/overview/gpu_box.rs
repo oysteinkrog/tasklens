@@ -16,8 +16,9 @@
 //! UI-PRF-019 gives the box three modes. `engine_charts`, the default since D-026, shows one
 //! chart per engine of the GPU page's grid (3D, Copy, Video Encode, Video Decode, Compute and the
 //! rest the GPU reports), then the VRAM row. The grid fills the box: `parts::fill_grid` picks the
-//! column count that gives the largest equal cells of at least 120 × 48 px, and when they do not
-//! fit the grid scrolls with a scrollbar while the VRAM row stays put. `chart_engines` is the
+//! column count that gives the largest equal cells of at least 120 × 48 px. Only whole cells
+//! show: when they do not all fit, the cells that would be cut join a "+n more engines" row
+//! under the grid (`parts::list_fit`, UI-PRF-059) and the VRAM row stays put. `chart_engines` is the
 //! layout above, with an inner splitter under the first section's chart, clamped so every
 //! engine row and the VRAM row stay in the body. `chart` is the utilization chart and the VRAM
 //! row only.
@@ -50,8 +51,8 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
 use super::parts::{
-    ChartSettings, GridFit, MIN_CHART_H, SPARK_GRID, arrange_grid, arrange_min_h, box_chart,
-    box_frame, chart_section_versions, class_probe, edit_chrome, grid_cells, meter_fits,
+    ChartSettings, ListFit, MIN_CHART_H, SPARK_GRID, arrange_min_h, box_chart, box_frame,
+    chart_section_versions, class_probe, edit_chrome, grid_cells, list_fit, meter_fits,
     spark_chart, spark_row,
 };
 use super::range::RangeText;
@@ -107,9 +108,6 @@ pub const GPU_SPLITTER_LINE_ID: &str = "perf-overview-gpu-splitter-line";
 /// The smallest engine chart cell of `engine_charts`, logical px (D-026).
 pub const CELL_MIN_W: f32 = 120.;
 pub const CELL_MIN_H: f32 = 48.;
-
-/// The width an `engine_charts` grid keeps for its scrollbar when it scrolls, logical px.
-const GRID_BAR_W: f32 = 16.;
 
 /// The narrowest rows part beside the chart in `chart_engines` Side by side, logical px: the
 /// VRAM row's 72 px label, its two 12 px gaps and 136 px for the widest value
@@ -175,6 +173,10 @@ pub struct GpuSection {
     /// "+n more engines" for every engine, shown when the busiest engine's row does not fit
     /// either (UI-PRF-059).
     pub engines_more_all: SharedString,
+    /// `engine_charts`: "+n more engines" for the cells left out of the grid (UI-PRF-059), and
+    /// the count it was formatted for (0 for none yet).
+    pub cells_more: SharedString,
+    cells_more_n: usize,
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
@@ -407,11 +409,12 @@ fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
     }
 }
 
-/// What `engine_charts` shows: how many sections, and each shown section's grid.
+/// What `engine_charts` shows: how many sections, and each shown section's grid with the
+/// number of whole cells it shows.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct ChartsFit {
     sections: usize,
-    grids: [GridFit; MAX_GPUS],
+    grids: [ListFit; MAX_GPUS],
 }
 
 impl ChartsFit {
@@ -443,7 +446,9 @@ fn charts_fixed_h(engines: usize, lines: usize, vram: bool, heading: bool, m: &U
 
 /// What `engine_charts` fits in `body`. Both sections show when both grids fit at the smallest
 /// cells, else the first with "+n more" for the others. The spare height goes to the grids in
-/// equal parts, and each grid fills its part (`arrange_grid`). A grid that does not fit scrolls.
+/// equal parts, and each grid fills its part (`list_fit`). A grid shows only whole cells: the
+/// cells that would be cut are left out, and a "+n more engines" row takes its height from the
+/// grid's part (UI-PRF-059).
 fn charts_fit(
     arrange: Arrange,
     body: Size<Pixels>,
@@ -455,12 +460,12 @@ fn charts_fit(
     let count = engines.len().min(MAX_GPUS);
     let mut fit = ChartsFit {
         sections: count,
-        grids: [GridFit::default(); MAX_GPUS],
+        grids: [ListFit::default(); MAX_GPUS],
     };
     if count == 0 {
         return fit;
     }
-    let (_, gap, section_gap) = spacing(m);
+    let (row, gap, section_gap) = spacing(m);
     let (min, gap_px) = (cell_min(m), px(gap));
     let min_grid =
         |i: usize| f32::from(arrange_min_h(arrange, engines[i], body.width, min, gap_px));
@@ -485,16 +490,20 @@ fn charts_fit(
         .sum::<f32>()
         + (n - 1) as f32 * section_gap;
     let spare = (f32::from(body.height) - needed) / n as f32;
-    let bar = px(GRID_BAR_W * m.ui_scale);
     for (i, grid) in fit.grids.iter_mut().enumerate().take(n) {
-        let h = (min_grid(i) + spare).max(0.);
-        *grid = arrange_grid(
+        let h = min_grid(i) + spare;
+        // A part with no height shows no cell; `list_fit` reads an empty area as the first paint.
+        if body.height > px(0.) && h <= 0. {
+            continue;
+        }
+        *grid = list_fit(
             arrange,
             engines[i],
-            size(body.width, px(h)),
+            engines[i],
+            size(body.width, px(h.max(0.))),
             min,
             gap_px,
-            bar,
+            px(row + gap),
         );
     }
     fit
@@ -677,6 +686,8 @@ pub struct GpuBox {
     /// The body size of the last paint and what the last render showed.
     body: Rc<Cell<Size<Pixels>>>,
     shown: usize,
+    /// `engine_charts`: the whole cells each shown section's grid drew.
+    cells: [usize; MAX_GPUS],
     collapsed: bool,
     busiest: bool,
     cut: usize,
@@ -722,6 +733,7 @@ impl GpuBox {
             box_hidden: Vec::new(),
             body: Rc::new(Cell::new(size(px(0.), px(0.)))),
             shown: 0,
+            cells: [0; MAX_GPUS],
             collapsed: false,
             busiest: true,
             cut: 0,
@@ -895,6 +907,11 @@ impl GpuBox {
         self.shown
     }
 
+    /// How many whole engine cells section `i`'s grid drew in the last `engine_charts` render.
+    pub fn shown_cells(&self, i: usize) -> usize {
+        self.cells.get(i).copied().unwrap_or(0)
+    }
+
     /// Whether the last render showed only the first section's busiest engine and "+n more
     /// engines".
     pub fn collapsed(&self) -> bool {
@@ -991,6 +1008,8 @@ impl GpuBox {
                         engines: SmallVec::new(),
                         engines_more: SharedString::default(),
                         engines_more_all: SharedString::default(),
+                        cells_more: SharedString::default(),
+                        cells_more_n: 0,
                         vram: MeterRow {
                             label: tr(cx, KEY_VRAM),
                             value: SharedString::default(),
@@ -1218,6 +1237,7 @@ impl GpuBox {
             }
             s.engines_more = more_engines(s.engines.len().saturating_sub(1), cx);
             s.engines_more_all = more_engines(s.engines.len(), cx);
+            s.cells_more_n = 0;
             let labels = chart_labels(range.clone());
             s.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         }
@@ -1644,7 +1664,8 @@ impl GpuBox {
     }
 
     /// `engine_charts`: per section a grid of engine charts that fills its part of the body,
-    /// then the VRAM row. A grid that does not fit scrolls under a scrollbar.
+    /// then the VRAM row. A grid shows only whole cells; the cells left out join a "+n more
+    /// engines" row under it (UI-PRF-059).
     fn charts_body(
         &mut self,
         m: &UiMetrics,
@@ -1660,6 +1681,15 @@ impl GpuBox {
         let vram = !self.vram_hidden();
         let shown = charts_fit(arrange, self.body.get(), &engines, total, vram, m);
         self.shown = shown.sections;
+        for (i, section) in self.sections.iter_mut().enumerate().take(shown.sections) {
+            let drawn = shown.grids[i].shown.min(engines[i]);
+            let left = engines[i] - drawn;
+            self.cells[i] = drawn;
+            if left > 0 && left != section.cells_more_n {
+                section.cells_more = more_engines(left, cx);
+                section.cells_more_n = left;
+            }
+        }
         self.collapsed = false;
         self.busiest = true;
         self.cut = 0;
@@ -1699,14 +1729,16 @@ impl GpuBox {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
             let cells = grid_cells(
-                &fit,
+                &fit.grid,
                 section
                     .engines
                     .iter()
-                    .map(|e| engine_cell(i, e, fit.cell, m, theme)),
+                    .take(fit.shown)
+                    .map(|e| engine_cell(i, e, fit.grid.cell, m, theme)),
                 m.sp[2],
                 grid_id(i),
             );
+            let left_out = fit.shown < engines[i];
             let grid = div()
                 .debug_selector(move || grid_id(i))
                 .flex_1()
@@ -1721,6 +1753,9 @@ impl GpuBox {
                 .flex_none()
                 .w_full()
                 .gap(m.sp[2]);
+            if left_out {
+                rest = rest.child(text_row(&section.cells_more, m, theme));
+            }
             if vram {
                 rest = rest.child(spark_row(&section.vram, None, self.meters, m, theme));
             }
@@ -1730,7 +1765,7 @@ impl GpuBox {
             if !section.engines.is_empty() {
                 col = col.child(grid);
             }
-            if vram || (last && !more.is_empty()) {
+            if left_out || vram || (last && !more.is_empty()) {
                 col = col.child(rest);
             }
             body = body.child(col);
