@@ -2562,12 +2562,13 @@ mod bottom {
         let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (344., 200.));
         intel_gpu(&mut r);
         set_gpu_mode(&mut r, "engine_charts");
-        let check_vram = |r: &mut Rig, grid: gpui_kit::Bounds<gpui_kit::Pixels>| {
+        // The rows under the grid: the VRAM row, with "+n more engines" above it when `rows` is 2.
+        let check_vram = |r: &mut Rig, grid: gpui_kit::Bounds<gpui_kit::Pixels>, rows: f32| {
             let vram = r.bounds(vram_id(0));
             let axis = r.bounds(time_axis_id(GPU_BOX_ID));
             assert!(grid.bottom() <= vram.top(), "{grid:?} above {vram:?}");
             assert!(vram.bottom() <= axis.top(), "{vram:?} above {axis:?}");
-            assert_eq!(f32::from(vram.size.height), 18.);
+            assert_eq!(f32::from(vram.size.height), 18. * rows + 4. * (rows - 1.));
         };
 
         // 500 × 344: every cell inside the grid, which ends 4 px above the VRAM row.
@@ -2602,7 +2603,7 @@ mod bottom {
                 first.top() - grid.top() < px(1.) && first.left() - grid.left() < px(1.),
                 "{first:?} at the grid's top left {grid:?}"
             );
-            check_vram(&mut r, grid);
+            check_vram(&mut r, grid, 1.);
         }
 
         // 500 × 180: the cells do not all fit. Only whole cells show, the rest join
@@ -2651,7 +2652,7 @@ mod bottom {
                     "{arrange:?}: {c:?}"
                 );
             }
-            check_vram(&mut r, grid);
+            check_vram(&mut r, grid, 2.);
         }
     }
 
