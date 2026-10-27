@@ -1368,9 +1368,9 @@ mod sidebar {
     /// row ends in a number whose unit is on the next row, and the Overview line 1 wraps at every
     /// " · " to as many rows as it needs instead of being cut. The test font draws every
     /// character 0.6 em wide: at nav_width 180 "3901 MHz ·" is wider than the 60 px column, so
-    /// the row leaves the dot out; at 200 the CPU line takes 2 rows and the Overview line 4, with
-    /// "GPU · Disk" (72 px) on one row of 80 px and its dot left out; at 252 the Overview line
-    /// takes 3.
+    /// the row leaves the dot out; at 200 the CPU line takes 2 rows and the Overview line 5: "GPU ·
+    /// Disk" (72 px) would fit a row of 80 px only by leaving out the dot after Disk, so the row
+    /// ends at "GPU ·" instead; at 252 the Overview line takes 3.
     #[gpui_kit::test]
     fn card_rows_break_only_between_values(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1393,7 +1393,7 @@ mod sidebar {
         let cpu_bare = ["3901\u{a0}MHz", "55\u{a0}°C"];
         for (w, cpu_rows, overview_rows) in [
             (180., &cpu_bare[..], 5),
-            (200., &cpu_two[..], 4),
+            (200., &cpu_two[..], 5),
             (252., &[cpu_full][..], 3),
             (400., &[cpu_full][..], 2),
         ] {
