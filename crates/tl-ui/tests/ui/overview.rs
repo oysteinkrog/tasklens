@@ -2080,7 +2080,7 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(4));
 
         r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
-        assert_eq!(state(&mut r).0, false);
+        assert!(!state(&mut r).0, "a 160 px body: not collapsed");
         for key in ["gpu", "enc", "dec"] {
             assert!(
                 r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_some(),
