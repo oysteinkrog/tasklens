@@ -183,7 +183,7 @@ fn core_cell_shrinks_spark_then_meter() {
     assert_eq!(fit, CoreCellFit::NoSpark);
     assert_eq!((c.meter_w, c.pct_right), (px(0.), px(72.)));
     // UI scale widens every part.
-    let l = core_bars_layout(32, px(2. * (4. * 188. + 24.)), px(256.), 2.);
+    let l = core_bars_layout(32, px(2. * (4. * 188. + 24.)), px(288.), 2.);
     assert_eq!((l.cols, l.fit), (4, CoreCellFit::Full));
 }
 
