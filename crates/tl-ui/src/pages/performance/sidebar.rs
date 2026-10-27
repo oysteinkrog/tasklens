@@ -542,6 +542,12 @@ pub struct DeviceSidebar {
     /// Edit cards are not cached [`CardView`]s, so the sidebar draws them again when the first
     /// Valid value among them turns Stale.
     edit_stale: StaleTimer,
+    /// Observes, by chart, the chart of each edit card that draws no graph, so a new sample draws
+    /// the sidebar again. A drawn graph is a child view, so its notify already does.
+    edit_chart_watch: FxHashMap<EntityId, Subscription>,
+    /// What each edit card measured in the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    edit_prepared: FxHashMap<DeviceKey, super::card::CardPrepared>,
     pub(crate) hub: Entity<SnapshotHub>,
     pub(crate) demand: Entity<DemandAggregator>,
     id: EntityId,
@@ -611,6 +617,9 @@ impl DeviceSidebar {
             edit_leaving: false,
             edit_generation: 0,
             edit_stale: StaleTimer::default(),
+            edit_chart_watch: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            edit_prepared: FxHashMap::default(),
             hub,
             demand,
             id,
@@ -740,6 +749,15 @@ impl DeviceSidebar {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn edit_stale_at_for_test(&self) -> Option<u64> {
         self.edit_stale.at()
+    }
+
+    /// What the edit card `key` measured in the last render, if it was drawn.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn edit_card_prepared_for_test(
+        &self,
+        key: &DeviceKey,
+    ) -> Option<super::card::CardPrepared> {
+        self.edit_prepared.get(key).cloned()
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -1137,6 +1155,18 @@ impl DeviceSidebar {
                 v.set_spec(spec, cx);
                 v.set_labels(card_chart_labels(fmt), cx);
             });
+        }
+    }
+
+    /// Keeps one observer on each chart in `charts`, the edit cards that draw no graph, and drops
+    /// the others.
+    fn watch_edit_charts(&mut self, charts: Vec<Entity<ChartView>>, cx: &mut Context<Self>) {
+        self.edit_chart_watch
+            .retain(|id, _| charts.iter().any(|chart| chart.entity_id() == *id));
+        for chart in charts {
+            self.edit_chart_watch
+                .entry(chart.entity_id())
+                .or_insert_with(|| cx.observe(&chart, |_, _, cx| cx.notify()));
         }
     }
 
@@ -1818,6 +1848,10 @@ impl Render for DeviceSidebar {
         let edit_present = self.edit_mode || self.edit_leaving;
         // The earliest stale deadline of a Valid edit card value.
         let mut edit_stale_at: Option<u64> = None;
+        // The charts of the edit cards that draw no graph.
+        let mut unseen_charts: Vec<Entity<ChartView>> = Vec::new();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let mut edit_prepared = FxHashMap::default();
         let content: AnyElement = if edit_present {
             let entering = self.edit_mode;
             let animate_edit = animations_on(cx);
@@ -1976,9 +2010,13 @@ impl Render for DeviceSidebar {
                             width: edit_card_w,
                             prepared: None,
                         };
-                        let stale_at = device_card
-                            .prepare(window, cx)
-                            .stale_at(card.chart.read(cx));
+                        let prepared = device_card.prepare(window, cx);
+                        let stale_at = prepared.stale_at(card.chart.read(cx));
+                        if !prepared.graph {
+                            unseen_charts.push(card.chart.clone());
+                        }
+                        #[cfg(any(test, feature = "test-hooks"))]
+                        edit_prepared.insert(card.row.key.clone(), prepared.clone());
                         edit_stale_at = match (edit_stale_at, stale_at) {
                             (Some(a), Some(b)) => Some(a.min(b)),
                             (a, b) => a.or(b),
@@ -2150,6 +2188,11 @@ impl Render for DeviceSidebar {
         };
         self.edit_stale
             .arm(edit_stale_at, |this: &mut Self| &mut this.edit_stale, cx);
+        self.watch_edit_charts(unseen_charts, cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.edit_prepared = edit_prepared;
+        }
 
         // The cards have a fixed width: measure the sidebar each paint and redraw when it moved.
         let measured = Rc::clone(&self.card_width);

@@ -1106,11 +1106,19 @@ mod sidebar {
     }
 
     /// What the card of `key` measured on its last render.
+    /// What the card `key` measured in the last render: the edit card in edit mode, else the
+    /// cached card view.
     fn prepared(r: &mut Rig, key: &str) -> CardPrepared {
         let sidebar = r.sidebar.clone();
         let key = DeviceKey(Arc::from(key));
         r.vcx.update(|_, cx| {
-            let view = sidebar.read(cx).card(&key).expect("card").view.clone();
+            let sidebar = sidebar.read(cx);
+            if sidebar.edit_mode() {
+                return sidebar
+                    .edit_card_prepared_for_test(&key)
+                    .expect("edit card rendered");
+            }
+            let view = sidebar.card(&key).expect("card").view.clone();
             view.read(cx).prepared.clone().expect("card rendered")
         })
     }
@@ -1855,8 +1863,8 @@ mod sidebar {
         assert_values_inside(&mut r, "nav_width 180");
     }
 
-    /// An edit card at nav_width 180 draws no graph, so the chart is not its child view. A new
-    /// sample still draws the card with the new value.
+    /// An edit card at nav_width 180 draws no graph, so the chart is not a child view of the
+    /// sidebar. A new sample still notifies the sidebar, which draws the card with the new value.
     #[gpui_kit::test]
     fn edit_card_without_graph_follows_new_samples(cx: &mut TestAppContext) {
         let mut settings = Settings::default();
@@ -1875,22 +1883,17 @@ mod sidebar {
             "an edit card at nav_width 180 draws no graph"
         );
         assert_eq!(&*before.value.expect("value").text, "30.0%");
-        let cpu_renders = |r: &mut Rig| {
-            card_counts(r)
-                .into_iter()
-                .find(|(key, ..)| key == "cpu")
-                .map(|(_, renders, _)| renders)
-                .expect("cpu card")
-        };
-        let renders = cpu_renders(&mut r);
+        let notified = Rc::new(Cell::new(0u32));
+        let sidebar = r.sidebar.clone();
+        let count = Rc::clone(&notified);
+        r.vcx.update(|_, cx| {
+            cx.observe(&sidebar, move |_, _| count.set(count.get() + 1))
+                .detach()
+        });
 
         publish_cpu_value_at(&mut r, now_boot_ns(), 55.);
 
-        assert_eq!(
-            cpu_renders(&mut r),
-            renders + 1,
-            "the new sample draws the card"
-        );
+        assert!(notified.get() > 0, "the new sample notifies the sidebar");
         let after = prepared(&mut r, "cpu");
         assert_eq!(&*after.value.expect("value").text, "55.0%");
     }
