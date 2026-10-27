@@ -978,3 +978,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-26: D-035 system title bar is the default (owner request); bead wrew7 filed and queued.
 - 2026-10-26: crw.95 question (edit cards at 180 px have no text room): option B, edit-mode cards that cannot fit text drop the graph; normal view keeps 80x48 everywhere. Stopped the lane's stale check unit (old 19.2 GiB estimate blocked the queue). Requeued.
 - 2026-10-26: build queue: stopped 4 orphan lane checks, runner down to 1 lane, lane checks limited to one small job (one clippy, at most 3 test targets, --test-threads=4, no full suite). Filed ccu0y: merge ~60 tl-ui test binaries into one.
+- 2026-10-27: ccu0y closed (one ui test binary, mold kept 0.6 s vs 1.1 s link); its 4 failing tests belong to crw.95. Runner stopped 03:22 on the Claude weekly limit; restart scheduled 14:05.
