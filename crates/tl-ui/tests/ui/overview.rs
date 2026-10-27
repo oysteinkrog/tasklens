@@ -113,7 +113,7 @@ fn core_rows_fit_32_threads_at_1200x900() {
 #[test]
 fn core_cell_shrinks_spark_then_meter() {
     let cell = |w: f32| {
-        let l = core_bars_layout(32, px(w), px(128.), 1.);
+        let l = core_bars_layout(32, px(w), px(144.), 1.);
         assert_eq!(l.cols, 4);
         (l.fit, core_cell(&l, 1.))
     };
