@@ -455,9 +455,9 @@ impl PlatformTextSystem for RecordingText {
     }
 }
 
-const REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSans-Regular.ttf");
-const MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/NotoSans-Medium.ttf");
-const SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/NotoSans-SemiBold.ttf");
+const REGULAR: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Regular.ttf");
+const MEDIUM: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-Medium.ttf");
+const SEMIBOLD: &[u8] = include_bytes!("../../../../assets/fonts/NotoSans-SemiBold.ttf");
 
 /// A plain test: it needs its own text system. System fonts can hold a Noto Sans Medium, so the
 /// test checks the faces `init_low_memory` adds, not the faces the text system resolves.

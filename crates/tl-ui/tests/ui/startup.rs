@@ -1924,7 +1924,7 @@ mod page {
     fn startup_copy_block_golden(cx: &mut TestAppContext) {
         let mut rig = flow_rig(cx, vec![discord()], &[0]);
         rig.dispatch(Box::new(CopyDetails));
-        let expected = include_str!("golden/startup_copy_block.txt").trim_end_matches('\n');
+        let expected = include_str!("../golden/startup_copy_block.txt").trim_end_matches('\n');
         assert_eq!(rig.clipboard().as_deref(), Some(expected));
         assert!(
             rig.toast_texts().iter().any(|t| t == "Copied to clipboard"),

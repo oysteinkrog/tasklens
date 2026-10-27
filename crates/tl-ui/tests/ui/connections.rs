@@ -1056,7 +1056,7 @@ mod page {
         );
         rig.select(&[1]);
         rig.dispatch(CopyDetails);
-        let expected = include_str!("golden/conn_copy_block.txt").trim_end_matches('\n');
+        let expected = include_str!("../golden/conn_copy_block.txt").trim_end_matches('\n');
         assert_eq!(rig.clipboard().as_deref(), Some(expected));
         assert_eq!(
             rig.copy_toasts().last().map(String::as_str),
