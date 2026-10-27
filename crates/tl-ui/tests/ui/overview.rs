@@ -5417,7 +5417,9 @@ mod page {
     /// value wins over the default.
     #[gpui_kit::test]
     fn overview_arrange_net_adapter_charts(cx: &mut TestAppContext) {
-        let mut r = open_rooted(cx, true, 1200., 900.);
+        // 1800 px wide, so two 200 px cells fit side by side in the Net body: only whole cells
+        // show (UI-PRF-059), and at 1200 px the second would join "+1 more".
+        let mut r = open_rooted(cx, true, 1800., 900.);
         let page = r.page.clone();
         let shown = |r: &mut Rig| {
             r.vcx
