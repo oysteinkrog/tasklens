@@ -28,7 +28,7 @@ use tl_ui::components::menu::{context_menu_layer, open_context_menu};
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::net::{NetPage, THROUGHPUT_ID};
+use tl_ui::pages::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
@@ -157,6 +157,8 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         TlSettings::init(cx);
         tl_ui::actions::register_global_handlers(cx);
         tl_ui::components::menu::bind_keys(cx);
+        // No Network settings link, whatever XDG_CURRENT_DESKTOP the test runs under.
+        cx.set_global(NetSettingsDesktop(None));
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
