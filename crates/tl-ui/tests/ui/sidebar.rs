@@ -609,6 +609,7 @@ fn aggregate_card_lines() {
     assert_eq!((&*l.line1, &*l.line2), ("3 disks", "NVMe"));
 }
 
+#[allow(clippy::module_inception, reason = "keeps the test names")]
 mod sidebar {
     use gpui_kit::Focusable as _;
     use tl_model::demand::{CpuDemand, Demand};
