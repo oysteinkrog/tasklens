@@ -1087,9 +1087,10 @@ fn breaks(text: &str) -> impl Iterator<Item = Break> + '_ {
 }
 
 /// `text` in at most `max_rows` rows of `max` (see [`card_text_layout`]). Each row but the last
-/// is the widest that ends at a break, with the dot of a " · " when it fits; the next row starts
-/// after the spaces. When the rest does not fit the last row, or its first piece does not fit a
-/// row, that row is cut by [`cut_row`]. A lock at the end of the text belongs to the last row.
+/// is the widest that ends at a break, with the dot of a " · ", or without the dot when that is
+/// the only way its first piece fits; the next row starts after the spaces. When the rest does
+/// not fit the last row, or its first piece does not fit a row, that row is cut by [`cut_row`].
+/// A lock at the end of the text belongs to the last row.
 fn wrap_line(
     text: &SharedString,
     locks: &[u16],
@@ -1129,7 +1130,12 @@ fn wrap_line(
                     best = Some((b.end, b.next));
                     continue;
                 }
-                if b.bare < b.end && measure(font, &rest[..b.bare]) + locks_w <= max {
+                // Without its dot only when no earlier break fits, so no row drops a dot it
+                // could keep by wrapping sooner.
+                if best.is_none()
+                    && b.bare < b.end
+                    && measure(font, &rest[..b.bare]) + locks_w <= max
+                {
                     best = Some((b.bare, b.next));
                 }
                 break;
