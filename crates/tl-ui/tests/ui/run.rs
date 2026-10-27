@@ -105,8 +105,15 @@ mod window {
         view: Entity<RunWindow>,
     }
 
-    /// App globals with `history` in the store, the main window, and the Run window.
+    /// App globals with `history` in the store, the main window, and the Run window. The window
+    /// is checked with the kit title bar and the client frame. The default is server decorations
+    /// (D-035).
     fn setup(cx: &mut TestAppContext, history: &[&str]) -> Rig {
+        setup_with(cx, history, Decorations::Client)
+    }
+
+    /// `setup` with `decorations` as `appearance.decorations`.
+    fn setup_with(cx: &mut TestAppContext, history: &[&str], decorations: Decorations) -> Rig {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let store = Shared::default();
@@ -114,10 +121,8 @@ mod window {
         let mut env = AppEnv::test();
         env.run_history = Some(Box::new(store.clone()));
         let (_tx, rx) = async_channel::bounded(4);
-        // The window is checked with the kit title bar and the client frame. The default is
-        // server decorations (D-035).
         let mut settings = Settings::default();
-        settings.appearance.decorations = Decorations::Client;
+        settings.appearance.decorations = decorations;
         let init = UiInit {
             settings,
             state: UiState::default(),
@@ -260,6 +265,37 @@ mod window {
             toast.bottom() <= input.top() || toast.top() >= input.bottom(),
             "{toast:?} covers {input:?}"
         );
+    }
+
+    /// Under server decorations (D-035) the Run window draws no kit title bar and no caption
+    /// buttons: the window is the 480 x 248 spec with no frame, the 24 px pin sits 8 px in from
+    /// the content's top-right corner, the footer ends inside the window and Esc cancels.
+    #[gpui_kit::test]
+    fn run_window_server_decorations(cx: &mut TestAppContext) {
+        let mut rig = setup_with(cx, &[], Decorations::Server);
+        draw(&mut rig.run);
+        assert!(rig.run.debug_bounds("TlWindowTitleBar").is_none());
+        for caption in [
+            "TlWindowCaption-minimize",
+            "TlWindowCaption-maximize",
+            "TlWindowCaption-close",
+        ] {
+            assert!(rig.run.debug_bounds(caption).is_none(), "{caption}");
+        }
+        let window = rig.run.update(|window, _| window.bounds());
+        assert_eq!(window.size, size(px(480.), px(248.)));
+        let content = rig.run.debug_bounds("TlWindowContent").expect("content");
+        assert_eq!(content.top(), px(0.), "the content starts at the top");
+        let pin = rig.run.debug_bounds("TlWindowPin").expect("pin");
+        assert_eq!(pin.size, size(px(24.), px(24.)));
+        assert_eq!(pin.top(), content.top() + px(8.));
+        assert_eq!(pin.right(), content.right() - px(8.));
+        let footer = rig.run.debug_bounds("RunFooter").expect("footer");
+        assert!(footer.bottom() <= window.size.height, "{footer:?}");
+
+        rig.run.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(find_run(cx).is_none(), "Esc cancels the window");
     }
 
     #[gpui_kit::test]

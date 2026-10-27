@@ -258,9 +258,9 @@ fn settings_esc_closes(cx: &mut TestAppContext) {
     assert!(!is_open(cx, handle), "Esc closes the window");
 }
 
-/// Default settings draw no kit title bar (D-035): the Settings window keeps its 900 x 640 size
-/// with no frame, the pin sits in the content's top-right corner, the "Use system title bar"
-/// switch reads on and Esc still closes the window.
+/// Default settings draw no kit title bar and no caption buttons (D-035): the Settings window
+/// keeps its 900 x 640 size with no frame, the pin sits in the content's top-right corner, the
+/// "Use system title bar" switch reads on and Esc still closes the window.
 #[gpui_kit::test]
 fn settings_window_server_decorations_by_default(cx: &mut TestAppContext) {
     setup_with(cx, Settings::default());
@@ -285,6 +285,13 @@ fn settings_window_server_decorations_by_default(cx: &mut TestAppContext) {
     let (frame, mut vcx) = open(cx, 1);
     assert!(!vcx.read(|cx| frame.read(cx).has_title_bar()));
     assert!(vcx.debug_bounds("TlWindowTitleBar").is_none());
+    for caption in [
+        "TlWindowCaption-minimize",
+        "TlWindowCaption-maximize",
+        "TlWindowCaption-close",
+    ] {
+        assert!(vcx.debug_bounds(caption).is_none(), "{caption}");
+    }
     let viewport = vcx.update(|window, _| window.viewport_size());
     assert_eq!(viewport, size(px(900.), px(640.)));
     let body = vcx.debug_bounds("SettingsWindowBody").expect("body drawn");

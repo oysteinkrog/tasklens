@@ -1779,6 +1779,47 @@ mod window {
         );
     }
 
+    /// Under default server decorations (D-035) process Properties draws no kit title bar and no
+    /// caption buttons: the window is the 900 x 640 spec with no frame, the 24 px pin sits 8 px
+    /// in from the content's top-right corner and Esc closes the window.
+    #[gpui_kit::test]
+    fn props_server_decorations(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+
+        assert!(vcx.debug_bounds("TlWindowTitleBar").is_none());
+        for caption in [
+            "TlWindowCaption-minimize",
+            "TlWindowCaption-maximize",
+            "TlWindowCaption-close",
+        ] {
+            assert!(vcx.debug_bounds(caption).is_none(), "{caption}");
+        }
+        let window = vcx.update(|window, _| window.bounds().size);
+        assert_eq!(window, size(px(900.), px(640.)));
+        let content = vcx.debug_bounds("TlWindowContent").expect("content");
+        assert_eq!(content.top(), px(0.), "the content starts at the top");
+        assert_eq!(content.size.width, px(900.));
+        let pin = vcx.debug_bounds("TlWindowPin").expect("pin");
+        assert_eq!(pin.size, size(px(24.), px(24.)));
+        assert_eq!(pin.top(), content.top() + px(8.));
+        assert_eq!(pin.right(), content.right() - px(8.));
+
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(
+            !cx.update(|cx| cx
+                .windows()
+                .iter()
+                .any(|w| w.window_id() == handle.window_id())),
+            "Esc closes the window"
+        );
+    }
+
     /// Pinning Process or App Properties sends `KeepAbove` for that window's caption. Their
     /// frames carry the registry key: without it the pin only changed its look, which the old
     /// `Floating` kind hid (tasklens-fut.25, R-073, D-031).

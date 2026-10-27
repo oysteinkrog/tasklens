@@ -346,6 +346,47 @@ fn server_decorations_pin_fallback(cx: &mut TestAppContext) {
     assert_eq!(pin.right(), content.right() - px(8.));
 }
 
+/// Under default server decorations (D-035) a confirmation draws no kit title bar and no
+/// caption buttons: it is 420 px wide with no frame, the 24 px pin sits 8 px in from the
+/// content's top-right corner, Cancel and the action end inside the window and Esc cancels.
+#[gpui_kit::test]
+fn confirmation_server_decorations(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, reset_confirm());
+    assert!(o.vcx.debug_bounds("TlWindowTitleBar").is_none());
+    for caption in [
+        "TlWindowCaption-minimize",
+        "TlWindowCaption-maximize",
+        "TlWindowCaption-close",
+    ] {
+        assert!(o.vcx.debug_bounds(caption).is_none(), "{caption}");
+    }
+    let window = o.vcx.update(|window, _| window.bounds().size);
+    assert_eq!(window.width, px(420.));
+    assert!(
+        window.height >= px(140.) && window.height <= px(320.),
+        "{window:?}"
+    );
+    let content = o.vcx.debug_bounds("TlWindowContent").expect("content");
+    assert_eq!(content.top(), px(0.), "the content starts at the top");
+    let pin = o.vcx.debug_bounds("TlWindowPin").expect("pin");
+    assert_eq!(pin.size, size(px(24.), px(24.)));
+    assert_eq!(pin.top(), content.top() + px(8.));
+    assert_eq!(pin.right(), content.right() - px(8.));
+    for button in ["TlDialogCancel", "TlDialogAction"] {
+        let b = o.vcx.debug_bounds(button).expect(button);
+        assert!(
+            b.right() <= window.width && b.bottom() <= window.height,
+            "{button} {b:?} in {window:?}"
+        );
+    }
+
+    o.vcx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(*o.results.borrow(), [DialogResult::Cancelled]);
+    assert!(!is_open(cx, o.handle), "Esc closes the window");
+}
+
 #[gpui_kit::test]
 fn secondary_window_has_own_toasts(cx: &mut TestAppContext) {
     setup(cx, Settings::default());
