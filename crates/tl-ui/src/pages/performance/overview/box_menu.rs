@@ -19,6 +19,7 @@ use gpui_kit::{
 
 use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind};
+use super::parts::TITLE_TOP;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -401,7 +402,8 @@ impl OverviewPage {
         div()
             .debug_selector(move || id.clone())
             .absolute()
-            .top_0()
+            // On the title line, below the border and the space above the title.
+            .top(px(1. + TITLE_TOP * s))
             .bottom_0()
             .right(px(GEAR_RIGHT * s))
             .flex()

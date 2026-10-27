@@ -12,7 +12,8 @@
 //!
 //! UI-PRF-019 gives the box three modes. `disk_charts` is the default (D-026): a grid of one
 //! chart per disk, read and write as two lines. The cells are equal, at least 160 × 60 px, and
-//! fill the box; when they do not fit the grid scrolls. Its Arrange choice (D-027) puts the
+//! fill the box; cells that do not fit whole are left out and counted in "+n more"
+//! (UI-PRF-059). Its Arrange choice (D-027) puts the
 //! cells in one column (the default), one row, or that grid. `rows` is the layout above with a
 //! vertical splitter between the label part (headers, words and rates) and the sparkline part.
 //! `total_chart` is one chart of the summed read and write rates.
@@ -42,8 +43,8 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
-    ChartSettings, GridFit, SPARK_GRID, arrange_grid, box_chart, box_frame, chart_section_versions,
-    class_probe, edit_chrome, grid_cells, opens_device, spark_chart,
+    ChartSettings, ListFit, SPARK_GRID, box_chart, box_frame, chart_section_versions, class_probe,
+    edit_chrome, grid_cells, list_fit, opens_device, spark_chart,
 };
 use super::range::RangeText;
 use crate::chart::labels::LABEL_ROW;
@@ -108,9 +109,6 @@ pub const HEAD_LABEL_W: f32 = 200.;
 
 /// The width a `disk_charts` cell header keeps for the disk name, logical px.
 const HEAD_NAME_MIN_W: f32 = 48.;
-
-/// The width a `disk_charts` grid keeps for its scrollbar when it scrolls, logical px.
-const GRID_BAR_W: f32 = 16.;
 
 /// The debug selector of the `disk_charts` grid viewport.
 pub const GRID_ID: &str = "perf-overview-disk-grid";
@@ -345,31 +343,25 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
     size(px(CELL_MIN_W * m.ui_scale), px(CELL_MIN_H * m.ui_scale))
 }
 
-/// The `disk_charts` grid for `rows` cells in `body`, placed as `arrange` says
-/// (`arrange_grid`). Every disk gets a cell; the "+n more" line for disks past `MAX_DISK_ROWS`
-/// takes its height from the body first. Before the first paint the body is empty and the fit
-/// is one column or one row.
+/// The `disk_charts` grid for `rows` cells in `body`, placed as `arrange` says (`list_fit`).
+/// Only whole cells show (UI-PRF-059); a disk past `MAX_DISK_ROWS` or a cell that would be cut
+/// is counted in the "+n more" line, which takes its height from the body first. Before the
+/// first paint the body is empty and every disk gets a cell.
 fn disk_fit(
     arrange: Arrange,
     body: Size<Pixels>,
     rows: usize,
     total: usize,
     m: &UiMetrics,
-) -> GridFit {
-    let gap = f32::from(m.sp[2]);
-    let more = if total > rows {
-        LABEL_ROW * m.ui_scale + gap
-    } else {
-        0.
-    };
-    let area = size(body.width, px((f32::from(body.height) - more).max(0.)));
-    arrange_grid(
+) -> ListFit {
+    list_fit(
         arrange,
         rows,
-        area,
+        total,
+        body,
         cell_min(m),
         m.sp[2],
-        px(GRID_BAR_W * m.ui_scale),
+        px(LABEL_ROW * m.ui_scale) + m.sp[2],
     )
 }
 
@@ -1200,7 +1192,7 @@ impl DiskBox {
     }
 
     /// `disk_charts`: one read and write chart per disk that fill the body in one column, one
-    /// row or a grid. Cells that do not fit scroll under a scrollbar.
+    /// row or a grid. Only whole cells show; the disks left out join "+n more" (UI-PRF-059).
     fn charts_body(
         &mut self,
         m: &UiMetrics,
@@ -1211,15 +1203,16 @@ impl DiskBox {
         let total = rows + self.more;
         let arrange = self.arrange;
         let fit = disk_fit(arrange, self.body.get(), rows, total, m);
-        self.shown = rows;
-        self.cells = rows;
+        self.shown = fit.shown;
+        self.cells = fit.shown;
         self.expanded = 0;
         let words = [self.read_word.clone(), self.write_word.clone()];
         let cells = grid_cells(
-            &fit,
+            &fit.grid,
             self.rows
                 .iter()
-                .map(|r| chart_cell(r, fit.cell, &words, m, theme)),
+                .take(fit.shown)
+                .map(|r| chart_cell(r, fit.grid.cell, &words, m, theme)),
             m.sp[2],
             GRID_ID,
         );

@@ -1,6 +1,7 @@
 //! Performance tab goldens (UI-PRF-058, tasklens-o55.47): the Overview and the CPU page at
 //! 1280 × 800, ui_scale 1.0, in the Default Dark and Default Light themes, compared with
-//! `tests/golden/perf_<page>_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
+//! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
+//! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_perf::`.
 
@@ -255,10 +256,14 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
 }
 
 fn check(page: Page, theme: &str, name: &str) {
+    check_at(page, theme, name, WIDTH, HEIGHT);
+}
+
+fn check_at(page: Page, theme: &str, name: &str, width: f32, height: f32) {
     let mut harness = RenderHarness::new();
     harness.set_theme(theme);
     harness.set_scale(1.0);
-    let mut img = harness.render(size(px(WIDTH), px(HEIGHT)), |_, cx| build(page, cx));
+    let mut img = harness.render(size(px(width), px(height)), |_, cx| build(page, cx));
     if matches!(page, Page::Cpu) {
         blank_up_time(&mut img);
     }
@@ -288,6 +293,32 @@ fn overview_dark() {
 fn overview_light() {
     run_on_lavapipe("render_perf::overview_light", || {
         check(Page::Overview, "Default Light", "perf_overview_light")
+    });
+}
+
+#[test]
+fn overview_1920_dark() {
+    run_on_lavapipe("render_perf::overview_1920_dark", || {
+        check_at(
+            Page::Overview,
+            "Default Dark",
+            "perf_overview_1920_dark",
+            1920.,
+            1200.,
+        )
+    });
+}
+
+#[test]
+fn overview_1920_light() {
+    run_on_lavapipe("render_perf::overview_1920_light", || {
+        check_at(
+            Page::Overview,
+            "Default Light",
+            "perf_overview_1920_light",
+            1920.,
+            1200.,
+        )
     });
 }
 

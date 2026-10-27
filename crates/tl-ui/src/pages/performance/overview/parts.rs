@@ -71,6 +71,9 @@ const MIN_ROW_H: f32 = 16.;
 const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
 /// The box title row, logical px before `ui_scale`.
 const TITLE_ROW: f32 = 24.;
+/// The space between a box's top border and its title row, logical px before `ui_scale`
+/// (`sp4`, UI-PRF-059).
+pub const TITLE_TOP: f32 = 8.;
 /// The two labels on the one time axis shared by every device box. The start label follows the
 /// range (UI-PRF-055, [`RangeText::axis_start`]); this one shows until the page sets it.
 pub const TIME_AXIS_START: &str = "1 minute ago";
@@ -828,9 +831,9 @@ pub fn title_line_id(box_id: &str) -> String {
     format!("{box_id}-title-line")
 }
 
-/// The debug selector of the title tab inset into a box's top border.
-pub fn title_tab_id(box_id: &str) -> String {
-    format!("{box_id}-title-tab")
+/// The debug selector of a box's device icon and title at the left of its title line.
+pub fn title_name_id(box_id: &str) -> String {
+    format!("{box_id}-title-name")
 }
 
 /// The debug selector of the one time axis below a device box's charts.
@@ -849,7 +852,7 @@ pub fn figures_id(box_id: &str) -> String {
     format!("{box_id}-figures")
 }
 
-/// The debug selector of a box's device icon in its title tab: the box id with `-title-icon`.
+/// The debug selector of a box's device icon in its title line: the box id with `-title-icon`.
 pub fn title_icon_id(box_id: &str) -> String {
     format!("{box_id}-title-icon")
 }
@@ -862,7 +865,7 @@ pub fn title_value_style(m: &UiMetrics) -> gpui_kit::TextStyleRefinement {
     }
 }
 
-/// The 20 px device icon in a box's title tab, tinted in the device colour (UI-PRF-058).
+/// The 20 px device icon in a box's title line, tinted in the device colour (UI-PRF-058).
 fn box_icon(id: &'static str, m: &UiMetrics, theme: &TlTheme) -> Option<impl IntoElement> {
     let kind = BoxKind::from_frame_id(id)?;
     let device = match kind {
@@ -917,8 +920,9 @@ fn box_highlight(m: &UiMetrics) -> Div {
 const HIGHLIGHT_ALPHA: f32 = 0.06;
 
 /// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its 24 px title
-/// line sits in the top border: an accent title tab, a one-line summary that ellipsizes and the
-/// headline value at the right. A device box has the range figures under it and the time axis
+/// line sits inside the border, `TITLE_TOP` below it (UI-PRF-059): the icon and title, a one-line
+/// summary that ellipsizes and the headline value at the right. Title and body are 12 px in
+/// from the left and right borders, and the body ends 12 px above the bottom border. A device box has the range figures under it and the time axis
 /// below `body`, both from `range` (UI-PRF-055). `body` fills the rest. A click on the title
 /// line opens `target`'s page.
 #[allow(
@@ -955,19 +959,11 @@ pub fn box_frame(
     let mut title_el = div();
     *title_el.text_style() = t_md(m);
     let title_el = title_el
-        .debug_selector(move || title_tab_id(id))
+        .debug_selector(move || title_name_id(id))
         .h_full()
         .flex()
         .items_center()
         .flex_none()
-        .px(m.sp[4])
-        .bg(theme.list_bg)
-        .border_l_1()
-        .border_r_1()
-        .border_b_1()
-        .border_color(accent)
-        .rounded_bl(m.radius_small)
-        .rounded_br(m.radius_small)
         .whitespace_nowrap()
         .gap(m.sp[3])
         .text_color(theme.text_primary)
@@ -1015,6 +1011,7 @@ pub fn box_frame(
                 .items_center()
                 .gap(m.sp[4])
                 .h(px(TITLE_ROW * m.ui_scale))
+                .mt(px(TITLE_TOP * m.ui_scale))
                 .mx(m.sp[5])
                 .pl(title_pad_left)
                 .pr(title_pad_right)
@@ -1345,6 +1342,63 @@ pub fn arrange_grid(
                 scrolls_x,
             }
         }
+    }
+}
+
+/// The cells of a box list with a "+n more" line (UI-PRF-059): the grid and how many cells it
+/// shows.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ListFit {
+    pub grid: GridFit,
+    pub shown: usize,
+}
+
+impl ListFit {
+    /// A layout class for [`class_probe`]: the grid's class and the number of cells shown.
+    pub fn class(&self) -> u32 {
+        let mut h = FxHasher::default();
+        (self.grid.class(), self.shown).hash(&mut h);
+        h.finish() as u32
+    }
+}
+
+/// Lays out `n` cells of a list of `total` items in `body`, as `arrange` says, showing only
+/// whole cells (UI-PRF-059). When `total > n`, or when some cells do not fit at `min`, the
+/// "+n more" line takes `more_h` from the body first. Cells that do not fit whole are left out
+/// and counted in "+n more", so the grid never scrolls. Before the first paint the body is
+/// empty and every cell shows.
+pub fn list_fit(
+    arrange: Arrange,
+    n: usize,
+    total: usize,
+    body: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Pixels,
+    more_h: Pixels,
+) -> ListFit {
+    let less = |by: Pixels| size(body.width, (body.height - by).max(px(0.)));
+    let more = if total > n { more_h } else { px(0.) };
+    let grid = arrange_grid(arrange, n, less(more), min, gap, px(0.));
+    if body.height == px(0.) || (!grid.scrolls && !grid.scrolls_x) {
+        return ListFit { grid, shown: n };
+    }
+    let area = less(more_h);
+    let (w, h, g) = (
+        f32::from(area.width),
+        f32::from(area.height),
+        f32::from(gap),
+    );
+    let (min_w, min_h) = (f32::from(min.width), f32::from(min.height));
+    let fits = |len: f32, min: f32| ((len + g) / (min + g) + 1e-3).floor().max(0.) as usize;
+    let cap = match arrange {
+        Arrange::Auto => grid_max_cols(n, w, min_w, g) * fits(h, min_h),
+        Arrange::Vertical => fits(h, min_h),
+        Arrange::Horizontal => fits(w, min_w),
+    };
+    let shown = cap.min(n);
+    ListFit {
+        grid: arrange_grid(arrange, shown, area, min, gap, px(0.)),
+        shown,
     }
 }
 

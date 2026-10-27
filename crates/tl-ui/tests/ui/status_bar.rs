@@ -254,6 +254,21 @@ mod performance_tab {
         let _ = &r.engine;
     }
 
+    /// UI-PRF-059: the pill, the bar's first item, starts at the x of the Overview boxes' left
+    /// border, at both smoke sizes.
+    #[gpui_kit::test]
+    fn status_row_aligned_with_boxes(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::cpu_box::CPU_BOX_ID;
+        let r = &mut open(cx);
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            let pill = r.vcx.debug_bounds(PILL_ID).expect("pill");
+            let cpu = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box");
+            assert_eq!(pill.left(), cpu.left(), "{w}x{h}: {pill:?} over {cpu:?}");
+        }
+    }
+
     /// One row at 900 px and wider, never wrapping; below 900 px the chips take a second row.
     #[gpui_kit::test]
     fn status_bar_wraps_below_900(cx: &mut TestAppContext) {

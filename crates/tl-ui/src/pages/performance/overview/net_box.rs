@@ -44,8 +44,8 @@ use super::disk_box::more_line;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
-    ChartSettings, GridFit, arrange_grid, box_chart, box_frame, chart_section_versions,
-    class_probe, edit_chrome, grid_cells,
+    ChartSettings, ListFit, box_chart, box_frame, chart_section_versions, class_probe, edit_chrome,
+    grid_cells, list_fit,
 };
 use super::range::RangeText;
 use crate::chart::labels::LABEL_ROW;
@@ -108,9 +108,6 @@ pub const ARRANGE: &[(&str, ArrangeChoice)] = &[
 /// The smallest `adapter_charts` cell, logical px before `ui_scale`.
 const GRID_CELL_MIN_W: f32 = 200.;
 const GRID_CELL_MIN_H: f32 = 80.;
-
-/// The width an `adapter_charts` grid keeps for its scrollbar when it scrolls, logical px.
-const GRID_BAR_W: f32 = 16.;
 
 /// The debug selector of the `adapter_charts` grid viewport.
 pub const GRID_ID: &str = "perf-overview-net-grid";
@@ -1163,31 +1160,25 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
     )
 }
 
-/// The `adapter_charts` grid for `rows` cells in `body`, placed as `arrange` says
-/// (`arrange_grid`). Every counted adapter gets a cell; the "+n more" line for adapters past
-/// `MAX_ADAPTER_CELLS` takes its height from the body first. Before the first paint the body is
-/// empty and the fit is one column or one row.
+/// The `adapter_charts` grid for `rows` cells in `body`, placed as `arrange` says (`list_fit`).
+/// Only whole cells show (UI-PRF-059); an adapter past `MAX_ADAPTER_CELLS` or a cell that would
+/// be cut is counted in the "+n more" line, which takes its height from the body first. Before
+/// the first paint the body is empty and every adapter gets a cell.
 fn charts_fit(
     arrange: Arrange,
     body: Size<Pixels>,
     rows: usize,
     total: usize,
     m: &UiMetrics,
-) -> GridFit {
-    let gap = f32::from(m.sp[2]);
-    let more = if total > rows {
-        LABEL_ROW * m.ui_scale + gap
-    } else {
-        0.
-    };
-    let area = size(body.width, px((f32::from(body.height) - more).max(0.)));
-    arrange_grid(
+) -> ListFit {
+    list_fit(
         arrange,
         rows,
-        area,
+        total,
+        body,
         cell_min(m),
         m.sp[2],
-        px(GRID_BAR_W * m.ui_scale),
+        px(LABEL_ROW * m.ui_scale) + m.sp[2],
     )
 }
 
@@ -1400,7 +1391,7 @@ impl NetBox {
     }
 
     /// `adapter_charts`: one combined chart per counted adapter in one column, one row or a
-    /// grid. Cells that do not fit scroll under a scrollbar.
+    /// grid. Only whole cells show; the adapters left out join "+n more" (UI-PRF-059).
     fn charts_body(
         &mut self,
         m: &UiMetrics,
@@ -1411,12 +1402,13 @@ impl NetBox {
         let total = rows + self.extra;
         let arrange = self.arrange;
         let fit = charts_fit(arrange, self.body.get(), rows, total, m);
-        self.cells = rows;
+        self.cells = fit.shown;
         let cells = grid_cells(
-            &fit,
+            &fit.grid,
             self.adapters
                 .iter()
-                .map(|a| chart_cell(a, fit.cell, m, theme)),
+                .take(fit.shown)
+                .map(|a| chart_cell(a, fit.grid.cell, m, theme)),
             m.sp[2],
             GRID_ID,
         );
@@ -1436,7 +1428,7 @@ impl NetBox {
                     .overflow_hidden()
                     .child(cells),
             );
-        let more = self.more_text(rows, cx);
+        let more = self.more_text(fit.shown, cx);
         if !more.is_empty() {
             body = body.child(more_line(more, m, theme));
         }

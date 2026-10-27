@@ -40,6 +40,7 @@ use super::actions::{PerfSelectDevice, PerfStatusOpen};
 use super::overview::OVERVIEW_KEY;
 use super::overview::layout::BoxKind;
 use super::overview::range::{STATUS_SWITCH, current_range, range_switch};
+use super::page::PAGE_PAD;
 use super::{DeviceKey, PerformancePage};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -946,7 +947,10 @@ impl Render for StatusBar {
             .gap(m.sp[3])
             .w_full()
             .min_h(px(BAR_H * s))
-            .p(m.sp[4])
+            // The page's side padding, so the pill starts at the Overview boxes' left border
+            // (UI-PRF-059).
+            .py(m.sp[4])
+            .px(px(PAGE_PAD * s))
             .overflow_hidden()
             .bg(theme.toolbar)
             .border_b_1()

@@ -4760,68 +4760,6 @@ mod page {
         }
     }
 
-    /// D-026: when eight disks do not fit at 60 px, the Disk grid scrolls under a scrollbar
-    /// and the cells keep their minimum size.
-    #[gpui_kit::test]
-    fn overview_disk_grid_scrolls(cx: &mut TestAppContext) {
-        use gpui_kit::{ScrollDelta, ScrollWheelEvent};
-        use tl_ui::pages::performance::overview::disk_box::{
-            CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
-        };
-        let mut r = open_rooted(cx, true, 1200., 900.);
-        let keys = more_disks(&mut r, 6);
-        r.page_action(&PerfOverviewSetBoxMode {
-            kind: "disk".into(),
-            mode: "disk_charts".into(),
-        });
-        set_disk_arrange(&mut r, "auto");
-        // The first window where the eight cells overflow the Disk grid and the grid shows on
-        // screen. A narrow window stacks the boxes, so the Disk box is below the window there.
-        let mut seen = Vec::new();
-        let mut found = None;
-        for (w, h) in [(1200., 560.), (1200., 640.), (1000., 560.), (1400., 600.)] {
-            r.vcx.simulate_resize(size(px(w), px(h)));
-            draw(r.vcx);
-            let grid = r.bounds_of(GRID_ID.into());
-            let last = r.bounds_of(cell_id(&keys[keys.len() - 1]));
-            seen.push((w, h, grid));
-            if last.bottom() > grid.bottom() && grid.bottom() <= px(h) {
-                found = Some(grid);
-                break;
-            }
-        }
-        let grid =
-            found.unwrap_or_else(|| panic!("no window scrolls the grid on screen: {seen:?}"));
-        let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
-        for c in &cs {
-            assert_eq!(c.size, cs[0].size, "equal cells");
-            assert_eq!(c.size.height, px(CELL_MIN_H), "{c:?}");
-            assert!(c.size.width >= px(CELL_MIN_W), "{c:?}");
-            assert!(
-                c.right() <= grid.right() - px(16.),
-                "{c:?} clear of the scrollbar in {grid:?}"
-            );
-        }
-        let last = *cs.last().expect("cells");
-        assert!(last.bottom() > grid.bottom(), "{last:?} below {grid:?}");
-        let at = center(grid);
-        r.vcx.simulate_event(ScrollWheelEvent {
-            position: at,
-            delta: ScrollDelta::Pixels(point(px(0.), px(-200.))),
-            ..Default::default()
-        });
-        draw(r.vcx);
-        let scrolled = r.bounds_of(cell_id(&keys[keys.len() - 1]));
-        assert!(
-            scrolled.top() < last.top(),
-            "{scrolled:?} scrolled up from {last:?}"
-        );
-        assert!(
-            scrolled.bottom() <= grid.bottom() + px(1.),
-            "{scrolled:?} in {grid:?}"
-        );
-    }
-
     /// The labels of `kind`'s gear menu, and the label, mark and action of each item of its
     /// Arrange submenu (empty without one). Edit Layout mode must be on.
     #[allow(clippy::type_complexity, reason = "test helper")]
@@ -4881,13 +4819,12 @@ mod page {
     }
 
     /// D-027: the Disk box's `disk_charts` cells go in one column by default, in one row or in
-    /// the mode's grid by the Arrange choice, each an equal share of the box and scrolling in
-    /// its direction when the cells do not fit. The choice saves and reloads, a saved value
+    /// the mode's grid by the Arrange choice, each an equal share of the box. When the cells do
+    /// not fit, only whole cells show and the rest join "+n more" (UI-PRF-059). The choice saves and reloads, a saved value
     /// wins over the default, and Reset Box gives the column back. The Net box's Arrange items
     /// switch between `stacked` and `columns`.
     #[gpui_kit::test]
     fn overview_arrange_vertical_horizontal_auto(cx: &mut TestAppContext) {
-        use gpui_kit::{ScrollDelta, ScrollWheelEvent};
         use tl_ui::pages::performance::overview::disk_box::{
             CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
         };
@@ -4899,12 +4836,19 @@ mod page {
             r.vcx
                 .update(|_, cx| page.read(cx).disk_box().read(cx).arrange())
         };
-        // The cells, checked against the helper's fit for the measured grid.
+        // The cells shown, checked against the helper's fit for the measured grid.
         let cells = |r: &mut Rig, arrange: Arrange| {
             let grid = r.bounds_of(GRID_ID.into());
+            let n = r
+                .vcx
+                .update(|_, cx| page.read(cx).disk_box().read(cx).shown());
             let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
-            let fit = arrange_grid(arrange, keys.len(), grid.size, min, px(4.), px(16.));
-            let cs: Vec<_> = keys.iter().map(|k| r.bounds_of(cell_id(k))).collect();
+            let fit = arrange_grid(arrange, n, grid.size, min, px(4.), px(0.));
+            let cs: Vec<_> = keys
+                .iter()
+                .take(n)
+                .map(|k| r.bounds_of(cell_id(k)))
+                .collect();
             for c in &cs {
                 assert_eq!(c.size, fit.cell, "{arrange:?}: {c:?} in {grid:?}");
             }
@@ -4923,6 +4867,7 @@ mod page {
         assert_eq!(r.layout().arrange(BoxKind::Disk), Some(Arrange::Vertical));
         assert_eq!(shown(&mut r), Arrange::Vertical);
         let (grid, cs, fit) = cells(&mut r, Arrange::Vertical);
+        assert_eq!(cs.len(), 3, "{cs:?} in {grid:?}");
         assert!(col(&cs) && !fit.scrolls, "{cs:?} in {grid:?}");
         assert!(grid.right() - cs[0].right() < px(1.), "{cs:?} in {grid:?}");
         assert!(
@@ -4954,6 +4899,7 @@ mod page {
         pick_arrange(&mut r, BoxKind::Disk, "Side by side");
         assert_eq!(shown(&mut r), Arrange::Horizontal);
         let (grid, cs, fit) = cells(&mut r, Arrange::Horizontal);
+        assert_eq!(cs.len(), 3, "{cs:?} in {grid:?}");
         assert!(row(&cs) && !fit.scrolls_x, "{cs:?} in {grid:?}");
         assert!(
             grid.bottom() - cs[0].bottom() < px(1.),
@@ -4966,26 +4912,24 @@ mod page {
         let (_, items) = gear_menu(&mut r, BoxKind::Disk);
         assert!(items[2].1 && !items[1].1, "Side by side selected");
 
-        // In a narrower window the row does not fit at 160 px: it scrolls sideways at the
-        // minimum width, clear of the scrollbar, and the wheel moves it.
+        // In a narrower window the row does not fit at 160 px: the whole cells fill the row and
+        // the third disk joins "+1 more".
         r.vcx.simulate_resize(size(px(1200.), px(900.)));
         draw(r.vcx);
         let (grid, cs, fit) = cells(&mut r, Arrange::Horizontal);
-        assert!(row(&cs) && fit.scrolls_x, "{cs:?} in {grid:?}");
-        assert_eq!(cs[0].size.width, px(CELL_MIN_W));
         assert!(
-            cs[0].bottom() <= grid.bottom() - px(16.),
-            "{cs:?} clear of the bar"
+            (1..3).contains(&cs.len()) && row(&cs) && !fit.scrolls_x,
+            "{cs:?} in {grid:?}"
         );
-        assert!(cs[2].right() > grid.right(), "{cs:?} past {grid:?}");
-        r.vcx.simulate_event(ScrollWheelEvent {
-            position: center(grid),
-            delta: ScrollDelta::Pixels(point(px(-200.), px(0.))),
-            ..Default::default()
-        });
-        draw(r.vcx);
-        let moved = r.bounds_of(cell_id(&keys[2]));
-        assert!(moved.left() < cs[2].left(), "{moved:?} from {:?}", cs[2]);
+        assert!(cs[0].size.width >= px(CELL_MIN_W), "{cs:?}");
+        assert!(
+            cs.last().is_some_and(|c| c.right() <= grid.right()),
+            "{cs:?} in {grid:?}"
+        );
+        let more = r
+            .vcx
+            .update(|_, cx| page.read(cx).disk_box().read(cx).shown_more_text());
+        assert_eq!(more.as_ref(), format!("+{} more", 3 - cs.len()));
 
         // Automatic: the mode's grid, here two columns in a 222 px box, saved as `auto`.
         r.set_row_unit(32);
@@ -4998,14 +4942,22 @@ mod page {
         let layout = r.layout();
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), layout);
 
-        // Stack vertically in that window: the column scrolls at the minimum height.
+        // Stack vertically in that window: the whole cells fill the column, the rest join
+        // "+n more", and no scrollbar space is kept.
         pick_arrange(&mut r, BoxKind::Disk, "Stack vertically");
         let (grid, cs, fit) = cells(&mut r, Arrange::Vertical);
-        assert!(col(&cs) && fit.scrolls, "{cs:?} in {grid:?}");
-        assert_eq!(cs[0].size.height, px(CELL_MIN_H));
         assert!(
-            cs[0].right() <= grid.right() - px(16.),
-            "{cs:?} clear of the bar"
+            cs.len() < 3 && col(&cs) && !fit.scrolls,
+            "{cs:?} in {grid:?}"
+        );
+        assert!(
+            cs.iter()
+                .all(|c| c.size.height >= px(CELL_MIN_H) && c.bottom() <= grid.bottom()),
+            "{cs:?} in {grid:?}"
+        );
+        assert!(
+            cs.iter().all(|c| grid.right() - c.right() < px(1.)),
+            "{cs:?} in {grid:?}"
         );
         assert_eq!(
             saved_disk_arrange(&mut r),
@@ -6197,7 +6149,204 @@ mod page {
         }
     }
 
-    /// UI-PRF-018: in Edit Layout mode the grip sits left of the title tab and clear of the value
+    /// The bounds of each device box frame drawn and of its parts named by `parts`, in
+    /// `BoxKind::ALL` order.
+    fn box_parts<const N: usize>(
+        r: &mut Rig,
+        parts: [fn(&str) -> String; N],
+    ) -> Vec<(
+        BoxKind,
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        [gpui_kit::Bounds<gpui_kit::Pixels>; N],
+    )> {
+        let mut out = Vec::new();
+        for kind in BoxKind::ALL {
+            if kind == BoxKind::TopProcs {
+                continue;
+            }
+            let box_id = box_id(kind);
+            let Some(frame) = r.vcx.debug_bounds(box_id) else {
+                continue;
+            };
+            let found = parts.map(|part| r.bounds_of(part(box_id)));
+            out.push((kind, frame, found));
+        }
+        out
+    }
+
+    /// UI-PRF-059: every box's title line sits inside the border, 8 px under the 1 px top border,
+    /// with the icon and title in it and the body below it. In Edit Layout mode the grip, gear
+    /// and Hide box button sit on that line.
+    #[gpui_kit::test]
+    fn overview_box_title_inside_border(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::edit::grip_id;
+        use tl_ui::pages::performance::overview::parts::{figures_id, title_name_id, title_row_id};
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            draw(r.vcx);
+            let boxes = box_parts(&mut r, [title_row_id, title_name_id, figures_id]);
+            assert_eq!(boxes.len(), 5, "{w}x{h}: every device box drawn");
+            for (kind, frame, [row, name, figures]) in &boxes {
+                assert_eq!(
+                    row.top() - frame.top(),
+                    px(9.),
+                    "{w}x{h} {kind:?}: {row:?} in {frame:?}"
+                );
+                assert_eq!(row.size.height, px(24.), "{w}x{h} {kind:?}");
+                assert!(
+                    name.top() >= row.top()
+                        && name.bottom() <= row.bottom()
+                        && name.left() >= frame.left() + px(1.),
+                    "{w}x{h} {kind:?}: {name:?} in {row:?}"
+                );
+                assert!(
+                    figures.top() >= row.bottom(),
+                    "{w}x{h} {kind:?}: body {figures:?} below the title {row:?}"
+                );
+            }
+            r.edit_layout();
+            draw(r.vcx);
+            for (kind, _, [row, ..]) in &boxes {
+                let mid = row.center().y;
+                for (name, ctl) in [
+                    ("grip", r.bounds_of(grip_id(*kind))),
+                    ("gear", r.bounds_of(gear_id(*kind))),
+                    ("hide", r.bounds_of(hide_button_id(*kind))),
+                ] {
+                    assert!(
+                        (ctl.center().y - mid).abs() <= px(1.),
+                        "{w}x{h} {kind:?}: {name} {ctl:?} off the title line {row:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// UI-PRF-059: the title line and the body are 12 px in from the left and the right border
+    /// of every box, and the body ends 12 px above the bottom border. A `disk_charts` list that
+    /// does not fit keeps no scrollbar space, so its cells end 12 px from the right border too.
+    #[gpui_kit::test]
+    fn overview_box_padding_equal(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, cell_id};
+        use tl_ui::pages::performance::overview::parts::{time_axis_id, title_row_id};
+        // The 1 px border and the 12 px padding.
+        let inset = px(13.);
+        for (w, h) in [(1920., 1200.), (1280., 800.)] {
+            let mut r = open_rooted(cx, true, w, h);
+            draw(r.vcx);
+            let boxes = box_parts(&mut r, [title_row_id, time_axis_id]);
+            assert_eq!(boxes.len(), 5, "{w}x{h}: every device box drawn");
+            for (kind, frame, [row, axis]) in &boxes {
+                for (part, b) in [("title", row), ("body", axis)] {
+                    assert_eq!(
+                        b.left() - frame.left(),
+                        inset,
+                        "{w}x{h} {kind:?} {part} left: {b:?} in {frame:?}"
+                    );
+                    assert_eq!(
+                        frame.right() - b.right(),
+                        inset,
+                        "{w}x{h} {kind:?} {part} right: {b:?} in {frame:?}"
+                    );
+                }
+                assert_eq!(
+                    frame.bottom() - axis.bottom(),
+                    inset,
+                    "{w}x{h} {kind:?} bottom: {axis:?} in {frame:?}"
+                );
+            }
+        }
+        let mut r = open_rooted(cx, true, 1200., 560.);
+        let keys = more_disks(&mut r, 6);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "disk_charts".into(),
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let shown = r
+            .vcx
+            .update(|_, cx| page.read(cx).disk_box().read(cx).shown());
+        assert!(
+            (1..keys.len()).contains(&shown),
+            "{shown} of {} cells",
+            keys.len()
+        );
+        let frame = r.bounds_of(DISK_BOX_ID.into());
+        let cell = r.bounds_of(cell_id(&keys[0]));
+        // Cells are whole px wide, so up to 1 px is left over.
+        let right = frame.right() - cell.right();
+        assert!(
+            right >= inset && right < inset + px(1.),
+            "{cell:?} ends {right:?} from the right of {frame:?}"
+        );
+    }
+
+    /// UI-PRF-059: the Disk box `disk_charts` cells show only whole: in each Arrange choice, a
+    /// cell that would be cut is left out and counted in "+n more", and nothing scrolls.
+    #[gpui_kit::test]
+    fn box_list_shows_whole_rows(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{
+            CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
+        };
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = more_disks(&mut r, 6);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "disk_charts".into(),
+        });
+        let page = r.page.clone();
+        for arrange in ["vertical", "auto", "horizontal"] {
+            set_disk_arrange(&mut r, arrange);
+            let mut cut = false;
+            for (w, h) in [(1200., 560.), (1200., 640.), (1000., 560.), (1800., 900.)] {
+                r.vcx.simulate_resize(size(px(w), px(h)));
+                draw(r.vcx);
+                let (shown, more) = r.vcx.update(|_, cx| {
+                    let d = page.read(cx).disk_box().read(cx);
+                    (d.shown(), d.shown_more_text().to_string())
+                });
+                let grid = r.bounds_of(GRID_ID.into());
+                for (i, key) in keys.iter().enumerate() {
+                    let id: &'static str = Box::leak(cell_id(key).into_boxed_str());
+                    let cell = r.vcx.debug_bounds(id);
+                    if i >= shown {
+                        assert!(cell.is_none(), "{arrange} {w}x{h}: cell {i} left out");
+                        continue;
+                    }
+                    let c = cell.unwrap_or_else(|| panic!("{arrange} {w}x{h}: cell {i}"));
+                    assert!(
+                        c.top() >= grid.top()
+                            && c.left() >= grid.left()
+                            && c.bottom() <= grid.bottom()
+                            && c.right() <= grid.right(),
+                        "{arrange} {w}x{h}: cell {i} {c:?} whole in {grid:?}"
+                    );
+                    assert!(
+                        c.size.width >= px(CELL_MIN_W) || arrange == "vertical",
+                        "{arrange} {w}x{h}: {c:?}"
+                    );
+                    assert!(
+                        c.size.height >= px(CELL_MIN_H) || arrange == "horizontal",
+                        "{arrange} {w}x{h}: {c:?}"
+                    );
+                }
+                if shown < keys.len() {
+                    cut = true;
+                    assert_eq!(
+                        more,
+                        format!("+{} more", keys.len() - shown),
+                        "{arrange} {w}x{h}"
+                    );
+                } else {
+                    assert_eq!(more, "", "{arrange} {w}x{h}");
+                }
+            }
+            assert!(cut, "{arrange}: some window leaves cells out");
+        }
+    }
+
+    /// UI-PRF-018: in Edit Layout mode the grip sits left of the title and clear of the value
     /// text, at both smoke sizes.
     #[gpui_kit::test]
     fn overview_edit_grip_before_title(cx: &mut TestAppContext) {
@@ -6211,7 +6360,7 @@ mod page {
             for kind in BoxKind::ALL {
                 let box_id = format!("perf-overview-box-{}", kind.key());
                 let tab_id: &'static str = Box::leak(
-                    tl_ui::pages::performance::overview::parts::title_tab_id(&box_id)
+                    tl_ui::pages::performance::overview::parts::title_name_id(&box_id)
                         .into_boxed_str(),
                 );
                 let value_id: &'static str = Box::leak(
@@ -6971,8 +7120,8 @@ mod wired {
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
     use tl_ui::pages::performance::overview::parts::{
-        TIME_AXIS_END, TIME_AXIS_START, box_accent, time_axis_id, time_axis_label_id, title_row_id,
-        title_tab_id,
+        TIME_AXIS_END, TIME_AXIS_START, box_accent, figures_id, time_axis_id, time_axis_label_id,
+        title_name_id, title_row_id,
     };
     use tl_ui::pages::performance::overview::procs_box::{
         PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
@@ -7765,20 +7914,21 @@ mod wired {
         ] {
             let frame = r.vcx.debug_bounds(id).expect("box frame");
             let row_id: &'static str = Box::leak(title_row_id(id).into_boxed_str());
-            let tab_id: &'static str = Box::leak(title_tab_id(id).into_boxed_str());
+            let name_id: &'static str = Box::leak(title_name_id(id).into_boxed_str());
             let row = r.vcx.debug_bounds(row_id).expect("title line");
-            let tab = r.vcx.debug_bounds(tab_id).expect("inset title tab");
+            let name = r.vcx.debug_bounds(name_id).expect("title name");
+            // UI-PRF-059: the 1 px border, then 8 px, then the title line.
             let row_inset = row.top() - frame.top();
-            let tab_inset = tab.top() - frame.top();
+            let name_inset = name.top() - frame.top();
             assert!(
-                (px(0.)..=px(1.)).contains(&row_inset),
+                (px(9.)..=px(10.)).contains(&row_inset),
                 "{id}: title line inset is {row_inset:?}"
             );
             assert!(
-                (px(0.)..=px(1.)).contains(&tab_inset),
-                "{id}: title tab inset is {tab_inset:?}"
+                (px(9.)..=px(10.)).contains(&name_inset),
+                "{id}: title name inset is {name_inset:?}"
             );
-            assert_eq!(tab.size.height, row.size.height, "{id}: full title height");
+            assert_eq!(name.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
             let axis_id = selector_id(time_axis_id(id));
             let axis_start_id = selector_id(time_axis_label_id(id, "start"));
@@ -8084,10 +8234,13 @@ mod wired {
         let procs = procs_box(&mut r).expect("the Top processes box");
         assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_some(), "placed");
         let title_row = selector_id(title_row_id(PROCS_BOX_ID));
-        let title_tab = selector_id(title_tab_id(PROCS_BOX_ID));
+        let title_name = selector_id(title_name_id(PROCS_BOX_ID));
         let time_axis = selector_id(time_axis_id(PROCS_BOX_ID));
         assert!(r.vcx.debug_bounds(title_row).is_some(), "shared title line");
-        assert!(r.vcx.debug_bounds(title_tab).is_some(), "shared title tab");
+        assert!(
+            r.vcx.debug_bounds(title_name).is_some(),
+            "shared title name"
+        );
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         assert_eq!(box_accent(PROCS_BOX_ID, &theme), theme.graph.cpu_line);
         assert!(
