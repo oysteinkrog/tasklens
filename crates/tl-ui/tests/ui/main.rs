@@ -10,6 +10,7 @@ mod bench_scenes;
 mod chart;
 mod chart_geometry;
 mod columns;
+mod common;
 mod components;
 mod connections;
 mod cpu_page;

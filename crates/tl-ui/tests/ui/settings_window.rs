@@ -36,6 +36,8 @@ use tl_ui::window::settings::{
     PageBuilder, PageId, SIDEBAR_W, SettingsWindow, TestPages, all_pages,
 };
 
+use super::common::is_open;
+
 struct Parent;
 
 impl Render for Parent {
@@ -211,11 +213,6 @@ fn open(cx: &mut TestAppContext, times: usize) -> (Entity<Frame>, VisualTestCont
     vcx.run_until_parked();
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     (frame, vcx)
-}
-
-fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
-    let id = handle.window_id();
-    cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
 }
 
 #[gpui_kit::test]

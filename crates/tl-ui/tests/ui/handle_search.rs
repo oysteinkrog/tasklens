@@ -18,7 +18,7 @@ use tl_model::actions::{
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
-use tl_model::health::{HelperStartOutcome, HelperState};
+use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
@@ -40,6 +40,8 @@ use tl_ui::windows::actions::{HandleSearchEndProcess, HandleSearchEndTask};
 use tl_ui::windows::handle_search::{
     HANDLE_HIT_CAP, HandleSearchOpenLocation, HandleSearchWindow, SearchStatus, open_handle_search,
 };
+
+use super::common::{actions_sent, publish_helper, searches};
 
 struct Rig {
     engine: Arc<FakeEngine>,
@@ -106,19 +108,6 @@ fn status(rig: &mut Rig) -> String {
         .read(|cx| rig.view.read(cx).status_text(cx).to_string())
 }
 
-fn searches(engine: &FakeEngine) -> Vec<(SearchId, bool)> {
-    engine
-        .commands()
-        .into_iter()
-        .filter_map(|c| match c {
-            Command::HandleSearch {
-                search, privileged, ..
-            } => Some((search, privileged)),
-            _ => None,
-        })
-        .collect()
-}
-
 fn hit() -> HandleHit {
     HandleHit {
         key: ProcessKey {
@@ -163,21 +152,6 @@ fn publish(cx: &mut TestAppContext, engine: &FakeEngine, state: Arc<HandleSearch
         let d = Arc::make_mut(&mut s.details);
         d.handle_search = Some(state);
         d.header.version += 1;
-    });
-    cx.run_until_parked();
-}
-
-fn publish_helper(
-    cx: &mut TestAppContext,
-    engine: &FakeEngine,
-    helper: HelperState,
-    start: Option<(u64, HelperStartOutcome)>,
-) {
-    engine.publish_with(|s| {
-        let health = Arc::make_mut(&mut s.health);
-        health.helper = helper;
-        health.helper_start = start;
-        health.version += 1;
     });
     cx.run_until_parked();
 }
@@ -511,17 +485,6 @@ fn confirm_dialog(mut vcx: VisualTestContext) {
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-}
-
-fn actions_sent(engine: &FakeEngine) -> Vec<ActionRequest> {
-    engine
-        .commands()
-        .into_iter()
-        .filter_map(|c| match c {
-            Command::Action(request) => Some(request),
-            _ => None,
-        })
-        .collect()
 }
 
 fn target_pids(r: &ActionRequest) -> Vec<u32> {

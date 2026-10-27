@@ -11,12 +11,8 @@ use gpui_kit::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::health::{HelperStartOutcome, HelperState};
-use tl_model::ids::ProcessKey;
-use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::ProcessSnapshot;
-use tl_model::time::BootId;
-use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::shield::{EndHelperSession, StartHelperSession};
 use tl_ui::components::toast::ToastQueue;
@@ -28,8 +24,7 @@ use tl_ui::windows::actions::HandleSearchAll;
 use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::open_process_properties;
 
-const CANCELLED: &str = "Authentication cancelled";
-const FAILED: &str = "Could not start the privileged helper";
+use super::common::{CANCELLED, FAILED, key, publish_helper, record, sent, starts_sent};
 
 /// App globals and the main window on Processes, active.
 fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
@@ -60,29 +55,6 @@ fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
     (engine, main)
 }
 
-fn publish_helper(
-    cx: &mut TestAppContext,
-    engine: &FakeEngine,
-    helper: HelperState,
-    start: Option<(u64, HelperStartOutcome)>,
-) {
-    engine.publish_with(|s| {
-        let health = Arc::make_mut(&mut s.health);
-        health.helper = helper;
-        health.helper_start = start;
-        health.version += 1;
-    });
-    cx.run_until_parked();
-}
-
-fn sent(engine: &FakeEngine, f: fn(&Command) -> bool) -> usize {
-    engine.commands().iter().filter(|c| f(c)).count()
-}
-
-fn starts_sent(engine: &FakeEngine) -> usize {
-    sent(engine, |c| matches!(c, Command::StartHelperSession))
-}
-
 fn requester(cx: &mut TestAppContext) -> Option<AnyWindowHandle> {
     cx.update(|cx| cx.global::<GlobalHelperFlow>().0.read(cx).requester())
 }
@@ -98,57 +70,6 @@ fn main_toasts(cx: &mut TestAppContext) -> Vec<String> {
             .map(|t| t.to_string())
             .collect()
     })
-}
-
-fn record(pid: u32) -> ProcessRecord {
-    let a = |s: &str| Arc::<str>::from(s);
-    ProcessRecord {
-        key: key(pid),
-        ppid: 1,
-        uid: 1000,
-        meta: Arc::new(ProcessMeta {
-            comm: a("demo"),
-            name: a("demo"),
-            exe: None,
-            cmdline: None,
-            user: a("u"),
-            cgroup: None,
-            app_id: None,
-            icon: None,
-            description: None,
-            desktop_path: None,
-            search_lower: a("demo"),
-        }),
-        group: GroupKind::System.key(),
-        state: ProcState::Sleeping,
-        flags: ProcFlags::empty(),
-        nice: 0,
-        threads: 1,
-        cpu_pct: 0.0,
-        rss_anon_bytes: 0,
-        rss_bytes: 0,
-        pss_bytes: 0,
-        uss_bytes: 0,
-        swap_bytes: 0,
-        io_read_bps: 0.0,
-        io_write_bps: 0.0,
-        net_rx_bps: 0.0,
-        net_tx_bps: 0.0,
-        gpu_util_pct: 0.0,
-        gpu_mem_bytes: 0,
-        euid: None,
-        net_shared: false,
-        cancelled_write_bps: 0.0,
-        validity: FieldValidity::all(Validity::Valid),
-    }
-}
-
-fn key(pid: u32) -> ProcessKey {
-    ProcessKey {
-        start_ticks: 100,
-        boot_id: BootId(0),
-        pid,
-    }
 }
 
 /// Opens the Process Properties window for `pid` and activates it.

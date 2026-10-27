@@ -27,6 +27,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
 use tl_ui::windows::frame::{PwnWindow, spec as pwn_spec};
 
+use super::common::{is_open, window_count};
+
 struct Body;
 
 impl Render for Body {
@@ -96,11 +98,6 @@ fn open(
 
 fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
-}
-
-fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
-    let id = handle.window_id();
-    cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
 }
 
 fn tool(title: &str) -> TlWindowSpec {
@@ -723,10 +720,6 @@ fn unit(name: &str) -> tl_model::table::UnitRef {
         manager: tl_model::table::Manager::System,
         name: name.into(),
     }
-}
-
-fn window_count(cx: &mut TestAppContext) -> usize {
-    cx.update(|cx| cx.windows().len())
 }
 
 #[gpui_kit::test]

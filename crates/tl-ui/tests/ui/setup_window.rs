@@ -28,6 +28,8 @@ use tl_ui::window::setup::{
     row_status,
 };
 
+use super::common::{toasts, window_count};
+
 struct Parent;
 
 impl Render for Parent {
@@ -594,18 +596,6 @@ fn clipboard(cx: &mut TestAppContext) -> Option<String> {
     cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()))
 }
 
-fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
-    vcx.update(|window, cx| {
-        ToastQueue::of_window(window, cx)
-            .expect("toast queue")
-            .read(cx)
-            .visible_texts()
-            .iter()
-            .map(|t| t.to_string())
-            .collect()
-    })
-}
-
 fn copy_command(cx: &mut TestAppContext, vcx: &mut VisualTestContext, step: SetupStep) {
     let w = content(cx);
     vcx.update(|window, cx| w.update(cx, |w, cx| w.copy_command(step, window, cx)));
@@ -716,10 +706,6 @@ fn press_run(cx: &mut TestAppContext, vcx: &mut VisualTestContext, step: SetupSt
     let w = content(cx);
     vcx.update(|_, cx| w.update(cx, |w, cx| w.press_run(step, cx)));
     vcx.run_until_parked();
-}
-
-fn window_count(cx: &mut TestAppContext) -> usize {
-    cx.update(|cx| cx.windows().len())
 }
 
 #[gpui_kit::test]

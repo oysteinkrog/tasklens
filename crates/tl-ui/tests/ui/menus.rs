@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionState, LaunchWhat};
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, SetupPhase, SetupRun, SetupState, SetupStep, Tab};
+use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
 use tl_model::settings::{
     AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
 };
@@ -51,6 +51,8 @@ use tl_ui::window::menus_file::SystemMonitor;
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
+
+use super::common::{passwordless, publish_polkit};
 
 const FILE_BUTTON: &str = "TlMenuBarButton-shell-menubar-file";
 const VIEW_BUTTON: &str = "TlMenuBarButton-shell-menubar-view";
@@ -2912,28 +2914,6 @@ fn polkit_steps(engine: &FakeEngine) -> Vec<bool> {
             _ => None,
         })
         .collect()
-}
-
-/// Publishes `health.setup.run` for the polkit rule step.
-fn publish_polkit(engine: &FakeEngine, seq: u64, on: bool, phase: SetupPhase) {
-    engine.publish_with(|s| {
-        let mut health = (*s.health).clone();
-        health.version += 1;
-        health.setup = Arc::new(SetupState {
-            status: None,
-            run: Some(SetupRun {
-                seq,
-                step: SetupStep::PolkitRule { on },
-                phase,
-                output: Arc::from(""),
-            }),
-        });
-        s.health = Arc::new(health);
-    });
-}
-
-fn passwordless(cx: &mut TestAppContext) -> bool {
-    cx.update(|cx| TlSettings::settings(cx).privilege.passwordless)
 }
 
 fn queue_texts(cx: &mut TestAppContext, queue: &Entity<ToastQueue>) -> Vec<String> {

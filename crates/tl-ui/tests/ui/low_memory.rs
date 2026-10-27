@@ -28,7 +28,6 @@ use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::GlobalActionTracker;
 use tl_ui::app::{AppEnv, OpenHooks, TasklensUi, UiExit, UiExitSlot, UiInit, start_for_test};
-use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -36,6 +35,8 @@ use tl_ui::theme::current;
 use tl_ui::window::settings::{PageId, all_pages};
 use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
+
+use super::common::{is_open, toasts};
 
 const SECOND: u64 = 1_000_000_000;
 
@@ -128,11 +129,6 @@ fn focus_list(vcx: &mut VisualTestContext, view: &gpui_kit::Entity<LowMemoryWind
 
 fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
-}
-
-fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
-    let id = handle.window_id();
-    cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
 }
 
 fn header_texts(
@@ -833,18 +829,6 @@ fn click(vcx: &mut VisualTestContext, selector: &'static str) {
     let bounds = vcx.debug_bounds(selector).expect("drawn");
     vcx.simulate_click(bounds.center(), Modifiers::none());
     vcx.run_until_parked();
-}
-
-fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
-    vcx.update(|window, cx| {
-        ToastQueue::of_window(window, cx)
-            .expect("toast queue")
-            .read(cx)
-            .visible_texts()
-            .iter()
-            .map(|t| t.to_string())
-            .collect()
-    })
 }
 
 /// Sends the engine's summary for request `req`.

@@ -23,6 +23,8 @@ use tl_ui::pages::processes::confirm::{
 };
 use tl_ui::testing::fake_engine::FakeEngine;
 
+use super::common::is_open;
+
 struct Body;
 
 impl Render for Body {
@@ -59,11 +61,6 @@ fn setup(cx: &mut TestAppContext) {
 
 fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
-}
-
-fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
-    let id = handle.window_id();
-    cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
 }
 
 struct Opened {
