@@ -1,2 +1,8 @@
 [alias]
 xtask = "run -p xtask --"
+
+# mold links the tl-ui test binary in about 0.6 s against 1.1 s for rust-lld, at the same
+# 1.5 GiB peak (tasklens-ccu0y). makepkg sets RUSTFLAGS, which overrides this, so release
+# packages still link with the default linker.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
