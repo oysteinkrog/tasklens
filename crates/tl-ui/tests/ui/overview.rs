@@ -7120,7 +7120,7 @@ mod wired {
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
     use tl_ui::pages::performance::overview::parts::{
-        TIME_AXIS_END, TIME_AXIS_START, box_accent, figures_id, time_axis_id, time_axis_label_id,
+        TIME_AXIS_END, TIME_AXIS_START, box_accent, time_axis_id, time_axis_label_id,
         title_name_id, title_row_id,
     };
     use tl_ui::pages::performance::overview::procs_box::{
