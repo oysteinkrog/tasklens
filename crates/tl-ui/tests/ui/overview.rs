@@ -9048,7 +9048,10 @@ mod sweep {
         let mut ids = vec![];
         match kind {
             BoxKind::Memory => {
-                ids.extend([mem_box::MEM_USED_CHART_ID.to_owned()]);
+                ids.extend([
+                    mem_box::MEM_USED_CHART_ID.to_owned(),
+                    mem_box::MEM_COMP_CHART_ID.to_owned(),
+                ]);
                 for i in 0..5 {
                     ids.extend([
                         mem_box::row_id(i),
@@ -9073,6 +9076,7 @@ mod sweep {
                 }
             }
             BoxKind::Disk => {
+                ids.push(disk_box::TOTAL_CHART_ID.to_owned());
                 for (n, _) in devices("disk", &[20, 21, 22]).iter().enumerate() {
                     let key = DeviceKey(Arc::from(format!("disk{n}")));
                     ids.push(format!("{}{}", disk_box::DISK_ROW_ID_PREFIX, key.0));
@@ -9238,9 +9242,10 @@ mod sweep {
         }
     }
 
-    /// For every box kind and every mode, at heights from the kind minimum down to 0 in 2 px steps
-    /// and widths 200 to 600 px in 20 px steps: no row or text crosses the time-axis band or the
-    /// box edge, and every drawn value keeps its unit (UI-PRF-017, UI-PRF-019).
+    /// For every box kind and every mode, at 600 x 400 px and at heights from the kind minimum
+    /// down to 0 in 2 px steps and widths 200 to 600 px in 20 px steps: no row or text crosses
+    /// the time-axis band or the box edge, and every drawn value keeps its unit (UI-PRF-017,
+    /// UI-PRF-019).
     #[gpui_kit::test]
     fn overview_boxes_never_draw_into_time_axis(cx: &mut TestAppContext) {
         let engine = FakeEngine::new();
@@ -9343,120 +9348,120 @@ mod sweep {
                     let boxed = host.read(cx).boxed.clone();
                     boxed.set_mode(mode.id, cx);
                 });
-                let mut h = kind.min_h();
-                while h >= 0. {
-                    for w in (200..=600).step_by(20) {
-                        let w = w as f32;
-                        vcx.update(|_, cx| {
-                            host.update(cx, |host, cx| {
-                                host.w = w;
-                                host.h = h;
-                                cx.notify();
+                // A tall box first, so each mode shows its body values once: at the kind minimum
+                // the part minimums can leave a text part no room for a whole row. Then the
+                // sweep.
+                let sweep = (0..=kind.min_h() as u32 / 2).rev().flat_map(|n| {
+                    (200..=600u32)
+                        .step_by(20)
+                        .map(move |w| (w as f32, n as f32 * 2.))
+                });
+                for (w, h) in std::iter::once((600., 400.)).chain(sweep) {
+                    vcx.update(|_, cx| {
+                        host.update(cx, |host, cx| {
+                            host.w = w;
+                            host.h = h;
+                            cx.notify();
+                        })
+                    });
+                    draw(vcx);
+                    // Only the settled frame counts: the first frame after a resize may
+                    // still use the old size class. A refresh paints every view again, so
+                    // each value is logged once.
+                    let _ = take_fit_texts();
+                    let _ = take_core_labels();
+                    vcx.update(|window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                    });
+                    let texts = take_fit_texts();
+                    let core_rows = take_core_labels();
+                    let what = format!("{} {} at {w} x {h}", kind.key(), mode.id);
+                    let Some(frame) = vcx.debug_bounds(frame_id) else {
+                        failures.push(&what, "no box", String::new());
+                        continue;
+                    };
+                    // Inside the 1 px border, above the time axis when the box draws one.
+                    let mut inner = Bounds::new(
+                        frame.origin + gpui_kit::point(px(1.), px(1.)),
+                        size(frame.size.width - px(2.), frame.size.height - px(2.)),
+                    );
+                    if let Some(axis) = vcx.debug_bounds(axis_id) {
+                        let bottom = inner.bottom().min(axis.top());
+                        inner.size.height = (bottom - inner.top()).max(px(0.));
+                    }
+                    let title = vcx.debug_bounds(title_id);
+                    let areas: Vec<Area> = area_ids
+                        .iter()
+                        .filter_map(|(id, content)| {
+                            Some(Area {
+                                bounds: vcx.debug_bounds(id)?,
+                                content: content.clone(),
                             })
-                        });
-                        draw(vcx);
-                        // Only the settled frame counts: the first frame after a resize may
-                        // still use the old size class. A refresh paints every view again, so
-                        // each value is logged once.
-                        let _ = take_fit_texts();
-                        let _ = take_core_labels();
-                        vcx.update(|window, cx| {
-                            window.refresh();
-                            window.draw(cx).clear(cx);
-                        });
-                        let texts = take_fit_texts();
-                        let core_rows = take_core_labels();
-                        let what = format!("{} {} at {w} x {h}", kind.key(), mode.id);
-                        let Some(frame) = vcx.debug_bounds(frame_id) else {
-                            failures.push(&what, "no box", String::new());
-                            continue;
-                        };
-                        // Inside the 1 px border, above the time axis when the box draws one.
-                        let mut inner = Bounds::new(
-                            frame.origin + gpui_kit::point(px(1.), px(1.)),
-                            size(frame.size.width - px(2.), frame.size.height - px(2.)),
-                        );
-                        if let Some(axis) = vcx.debug_bounds(axis_id) {
-                            let bottom = inner.bottom().min(axis.top());
-                            inner.size.height = (bottom - inner.top()).max(px(0.));
-                        }
-                        let title = vcx.debug_bounds(title_id);
-                        let areas: Vec<Area> = area_ids
-                            .iter()
-                            .filter_map(|(id, content)| {
-                                Some(Area {
-                                    bounds: vcx.debug_bounds(id)?,
-                                    content: content.clone(),
-                                })
-                            })
-                            .collect();
-                        for area in &areas {
-                            let a = area.bounds;
-                            if a.size.height > px(0.) && !inside(inner, a) {
-                                failures.push(
-                                    &what,
-                                    "scroll area",
-                                    format!("{a:?} outside {inner:?}"),
-                                );
-                            }
-                        }
-                        let mut rows = 0;
-                        for id in &part_ids {
-                            let Some(b) = vcx.debug_bounds(id) else {
-                                continue;
-                            };
-                            rows +=
-                                usize::from(check_part(&what, id, b, inner, &areas, &mut failures));
-                        }
-                        // A core row runs from the core's name to its percent, one row high.
-                        for c in &core_rows {
-                            let right = c.pct_right.max(c.name.x);
-                            let b = Bounds::from_corners(
-                                c.name,
-                                gpui_kit::point(right, c.name.y + c.row_h),
-                            );
-                            rows += usize::from(check_part(
-                                &what,
-                                CORE_ROWS,
-                                b,
-                                inner,
-                                &areas,
-                                &mut failures,
-                            ));
-                        }
-                        let area_bounds: Vec<Bounds<Pixels>> =
-                            areas.iter().map(|a| a.bounds).collect();
-                        let values = texts
-                            .iter()
-                            .filter(|t| {
-                                !t.text.is_empty()
-                                    && t.bounds.intersects(&t.mask)
-                                    && title.is_none_or(|r| t.bounds.top() >= r.bottom())
-                            })
-                            .count();
-                        let e = drawn
-                            .entry(what.split(" at ").next().unwrap_or("").to_owned())
-                            .or_default();
-                        e.0 += rows;
-                        e.1 += values;
-                        for t in &texts {
-                            check_text(&what, t, inner, title, &area_bounds, &mut failures);
+                        })
+                        .collect();
+                    for area in &areas {
+                        let a = area.bounds;
+                        if a.size.height > px(0.) && !inside(inner, a) {
+                            failures.push(&what, "scroll area", format!("{a:?} outside {inner:?}"));
                         }
                     }
-                    h -= 2.;
+                    let mut rows = 0;
+                    for id in &part_ids {
+                        let Some(b) = vcx.debug_bounds(id) else {
+                            continue;
+                        };
+                        rows += usize::from(check_part(&what, id, b, inner, &areas, &mut failures));
+                    }
+                    // A core row runs from the core's name to its percent, one row high.
+                    for c in &core_rows {
+                        let right = c.pct_right.max(c.name.x);
+                        let b = Bounds::from_corners(
+                            c.name,
+                            gpui_kit::point(right, c.name.y + c.row_h),
+                        );
+                        rows += usize::from(check_part(
+                            &what,
+                            CORE_ROWS,
+                            b,
+                            inner,
+                            &areas,
+                            &mut failures,
+                        ));
+                    }
+                    let area_bounds: Vec<Bounds<Pixels>> = areas.iter().map(|a| a.bounds).collect();
+                    let values = texts
+                        .iter()
+                        .filter(|t| {
+                            !t.text.is_empty()
+                                && t.bounds.intersects(&t.mask)
+                                && title.is_none_or(|r| t.bounds.top() >= r.bottom())
+                        })
+                        .count();
+                    let e = drawn
+                        .entry(what.split(" at ").next().unwrap_or("").to_owned())
+                        .or_default();
+                    e.0 += rows;
+                    e.1 += values;
+                    for t in &texts {
+                        check_text(&what, t, inner, title, &area_bounds, &mut failures);
+                    }
                 }
             }
             drop(driver);
         }
         assert!(failures.0.is_empty(), "{failures}");
-        // The checks ran: every mode drew rows, and every mode of the boxes whose body shows
-        // values drew body values.
+        // The checks ran: every mode drew rows, and every mode whose body shows values drew
+        // body values. The CPU, Top processes and Timeline bodies and the one-chart modes show
+        // none.
         for kind in BoxKind::ALL {
-            let with_values = matches!(
-                kind,
-                BoxKind::Memory | BoxKind::Gpu | BoxKind::Disk | BoxKind::Net
-            );
             for mode in kind.modes() {
+                let with_values = matches!(
+                    (kind, mode.id),
+                    (BoxKind::Memory, "rows" | "chart_rows" | "charts")
+                        | (BoxKind::Gpu | BoxKind::Net, _)
+                        | (BoxKind::Disk, "rows" | "disk_charts")
+                );
                 let key = format!("{} {}", kind.key(), mode.id);
                 let (rows, values) = drawn.get(&key).copied().unwrap_or_default();
                 assert!(rows > 0, "{key} drew no rows: {drawn:?}");
