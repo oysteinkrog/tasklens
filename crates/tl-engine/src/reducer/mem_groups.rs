@@ -11,8 +11,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use tl_collect::apps::mem_group::{MemGroup, MemGroupInput, MemGrouper};
 use tl_model::ids::{DeviceIdx, GroupKey};
-use tl_model::process::{ProcFlags, ProcessExtras, ProcessField, ProcessRecord};
-use tl_model::validity::Validity;
+use tl_model::process::{ProcFlags, ProcessExtras, ProcessRecord};
+use tl_model::validity::{ProcessField, Validity};
 
 use super::table::{GroupClass, group_class};
 
