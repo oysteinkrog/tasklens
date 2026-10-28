@@ -44,6 +44,8 @@ pub struct Bands {
     pub other_bytes: u64,
     pub other_processes: u32,
     /// In use minus the sum over all processes, clamped at 0. `None` when In use is not known.
+    /// When the processes sum to more than In use, the group bands are scaled down so the
+    /// bands still sum to In use.
     pub shared_bytes: Option<u64>,
 }
 
@@ -160,11 +162,38 @@ impl MemGroups {
                 .then_with(|| a.group.key.cmp(&b.group.key))
         });
         let rest = sums.split_off(sums.len().min(TOP_GROUPS));
-        Bands {
+        let mut bands = Bands {
             top: sums,
             other_bytes: rest.iter().fold(0u64, |a, g| a.saturating_add(g.bytes)),
             other_processes: rest.iter().map(|g| g.processes).sum(),
             shared_bytes: in_use.map(|used| used.saturating_sub(total)),
+        };
+        if let Some(used) = in_use
+            && total > used
+        {
+            bands.fit(total, used);
+        }
+        bands
+    }
+}
+
+impl Bands {
+    /// Scales the group bands so they sum to `used` when the processes sum to more (`total`).
+    /// The stack then still tops out at In use. The order stays largest first: the rounding
+    /// remainder, less than one byte per band, goes to the largest band.
+    fn fit(&mut self, total: u64, used: u64) {
+        let scale = |bytes: u64| (u128::from(bytes) * u128::from(used) / u128::from(total)) as u64;
+        let mut sum = 0u64;
+        for g in &mut self.top {
+            g.bytes = scale(g.bytes);
+            sum += g.bytes;
+        }
+        self.other_bytes = scale(self.other_bytes);
+        sum += self.other_bytes;
+        let rest = used - sum;
+        match self.top.first_mut() {
+            Some(g) => g.bytes += rest,
+            None => self.other_bytes += rest,
         }
     }
 }
@@ -411,13 +440,12 @@ mod tests {
                 "sample {sample}: largest first"
             );
             let shared = b.shared_bytes.expect("In use is known");
+            assert_eq!(band_sum(&b), in_use, "sample {sample}");
             if live_sum <= in_use {
-                assert_eq!(band_sum(&b), in_use, "sample {sample}");
                 assert_eq!(shared, in_use - live_sum, "sample {sample}");
             } else {
                 // Shared and kernel is clamped at 0, never negative.
                 assert_eq!(shared, 0, "sample {sample}");
-                assert_eq!(band_sum(&b), live_sum, "sample {sample}");
             }
             let live = procs
                 .iter()

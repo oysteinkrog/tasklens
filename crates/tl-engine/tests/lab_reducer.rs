@@ -3994,7 +3994,9 @@ fn memory_group_bands_published() {
     assert_eq!(&*shared.display_name, "Shared and kernel");
 
     // "b" leaves the sweep: its series gets one gap and the band list drops it. The sum of
-    // the processes is above In use, so Shared and kernel is 0.
+    // the processes (300 MiB) is above In use (200 MiB), so Shared and kernel is 0 and "a" is
+    // scaled to In use.
+    let a_device = snap.system.memory.groups[0].device;
     let b_device = snap.system.memory.groups[1].device;
     rig.run(vec![
         mem_used_msg(2 * SEC, 200 * MIB),
@@ -4007,7 +4009,27 @@ fn memory_group_bands_published() {
         !value(&rig, b_device).is_valid(),
         "a group outside the top is a gap"
     );
+    assert_eq!(value(&rig, a_device).value, 200.0 * mib);
+    let other = snap.system.memory.groups[1].device;
+    assert_eq!(value(&rig, other).value, 0.0);
     let shared = snap.system.memory.groups[2].device;
     assert_eq!(value(&rig, shared).value, 0.0);
     assert!(value(&rig, shared).is_valid());
+
+    // A sweep without processes still publishes: "a" gets a gap and Shared and kernel holds
+    // all of In use.
+    rig.run(vec![
+        mem_used_msg(3 * SEC, 200 * MIB),
+        mem_sweep(3 * SEC, &[]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let keys: Vec<&str> = snap.system.memory.groups.iter().map(|b| &*b.key).collect();
+    assert_eq!(keys, ["other", "shared"]);
+    assert!(!value(&rig, a_device).is_valid(), "a has left the sweep");
+    let at = |rig: &Rig, device| value(rig, device).t_ns;
+    assert_eq!(at(&rig, shared), 3 * SEC);
+    assert_eq!(value(&rig, shared).value, 200.0 * mib);
+    assert_eq!(at(&rig, other), 3 * SEC);
+    assert_eq!(value(&rig, other).value, 0.0);
 }

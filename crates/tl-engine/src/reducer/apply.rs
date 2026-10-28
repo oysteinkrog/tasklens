@@ -1237,13 +1237,10 @@ impl Reducer {
 
     /// Sums RssAnon per memory group over the published processes and pushes the top 20
     /// groups, "Other apps" and "Shared and kernel" as `MEM_GROUP` series (D-036, UI-PRF-060).
-    /// A group that leaves the top 20 gets one gap sample. A sweep without records changes
-    /// nothing.
+    /// A group that leaves the top 20 gets one gap sample. A sweep without records still
+    /// publishes the two fixed bands, with all of In use in "Shared and kernel".
     fn apply_mem_groups(&mut self, t: TimeNs, period: u64) -> Result<(), InvariantViolation> {
         let processes = Arc::clone(&self.components.processes);
-        if processes.records.is_empty() {
-            return Ok(());
-        }
         let mem = &self.components.system.memory;
         let in_use = readable(mem.validity).then_some(mem.used);
         let bands =
