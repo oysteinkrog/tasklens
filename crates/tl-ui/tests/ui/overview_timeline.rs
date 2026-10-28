@@ -7,17 +7,19 @@ use gpui_kit::{
     AppContext as _, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
 };
+use tl_model::command::{Command, HistoryWhat};
 use tl_model::demand::DeviceRange;
+use tl_model::history::{HistoryMetric, HistoryTop};
 use tl_model::journal::JournalAccess;
 use tl_model::settings::{OverviewRange, TimelineClick};
 use tl_model::snapshot::{
     ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, TimelineEvent, TimelineEventKind,
 };
-use tl_model::time::now_boot_ns;
+use tl_model::time::{TimeNs, now_boot_ns};
 use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
 use tl_ui::pages::performance::overview::timeline::{
-    BACK_TO_LIVE_ID, BANDS_ID, DAY_NS, PREVIEW_HOLD, PauseKind, TimelineBox, click_choices,
-    click_mode,
+    BACK_TO_LIVE_ID, BANDS_ID, DAY_NS, HISTORY_ASK_ID_BASE, HISTORY_ASK_TIMEOUT, PREVIEW_HOLD,
+    PauseKind, TimelineBox, click_choices, click_mode,
 };
 use tl_ui::settings_global::TlSettings;
 
@@ -141,6 +143,60 @@ fn range(r: &mut Rig) -> OverviewRange {
     r.vcx
         .update(|_, cx| TlSettings::settings(cx).performance.overview_range)
 }
+
+/// The timeline's process history queries, `(id, t)`, oldest first.
+fn history_asks(r: &Rig) -> Vec<(u64, TimeNs)> {
+    r.engine
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::HistoryQuery {
+                id,
+                what: HistoryWhat::TopAt { t, .. },
+                ..
+            } if id >= HISTORY_ASK_ID_BASE => Some((id, t)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Answers query `id` as the engine does: the current view again with `top` set. `t_ns` is the
+/// second read (the asked one moved into the retained span); `mem` is 0 when no block holds it.
+fn answer(r: &mut Rig, id: u64, t_ns: TimeNs, mem: u64) {
+    r.engine.publish_with(|s| {
+        let mut v = (*s.history).clone();
+        v.header.version += 1;
+        v.top = Some(Arc::new(HistoryTop {
+            query_id: id,
+            t_ns,
+            metric: HistoryMetric::Cpu,
+            cpu_total_pct: 10.,
+            mem_total_bytes: mem,
+            rows: Arc::from([]),
+        }));
+        s.history = Arc::new(v);
+    });
+    draw(r.vcx);
+}
+
+/// The last toast the box pushed, cleared, and the second History mode opened at.
+fn take_outcome(r: &mut Rig) -> (Option<String>, Option<TimeNs>) {
+    let b = timeline_box(r);
+    r.vcx.read_entity(&b, |b, _| {
+        (
+            b.last_toast.take().map(|t| t.to_string()),
+            b.last_history_at.take(),
+        )
+    })
+}
+
+fn history_mode(r: &mut Rig) -> bool {
+    r.vcx
+        .update(|_, cx| TlSettings::state(cx).processes.history_mode)
+}
+
+const NO_HISTORY: &str = "No process history at that time";
+const GIB: u64 = 1 << 30;
 
 /// The paused time, or `None` while live.
 fn paused(r: &mut Rig) -> Option<(i64, PauseKind)> {
@@ -284,29 +340,50 @@ fn timeline_click_modes(cx: &mut TestAppContext) {
     assert_eq!(mode, TimelineClick::Pause);
     assert!(!choices.contains(&TimelineClick::History));
 
-    // With recording on: a time older than the kept history shows the toast.
+    // With recording on, a click asks the process history for that second first. The clicks
+    // stay within the last half hour, so they fall in this boot.
     set_click(&mut r, TimelineClick::History, true);
     let choices = r.vcx.update(|_, cx| click_choices(cx));
     assert!(choices.contains(&TimelineClick::History));
-    r.vcx.update(|_, cx| {
-        TlSettings::update(cx, |d| d.settings.history.retention_h = 1);
-    });
-    click_bands(&mut r, 0.1);
-    let b = timeline_box(&mut r);
-    let (toast, opened) = r.vcx.read_entity(&b, |b, _| {
-        (b.last_toast.borrow().clone(), b.last_history_at.get())
-    });
-    assert_eq!(toast.as_deref(), Some("No process history at that time"));
-    assert_eq!(opened, None);
+    // 28.8 minutes ago.
+    click_bands(&mut r, 0.98);
+    let asks = history_asks(&r);
+    assert_eq!(asks.len(), 1, "one TopAt query");
+    let (id, t) = asks[0];
+    assert_eq!(
+        take_outcome(&mut r),
+        (None, None),
+        "nothing before the answer"
+    );
+    // Recording began 10 minutes ago: the engine reads its oldest second instead. The toast
+    // shows and nothing else happens.
+    let oldest = now_boot_ns() - 10 * MIN as u64;
+    answer(&mut r, id, oldest / S as u64 * S as u64, 16 * GIB);
+    assert_eq!(take_outcome(&mut r), (Some(NO_HISTORY.to_owned()), None));
     assert_eq!(paused(&mut r), None, "the toast does nothing else");
-    // A time inside it opens History mode there.
+    assert!(!history_mode(&mut r));
+    assert!(t < oldest, "the click was before the recording");
+
+    // A second inside the span but in a gap (no block) is the toast too.
+    click_bands(&mut r, 0.985);
+    let (id, t) = *history_asks(&r).last().expect("a query");
+    answer(&mut r, id, t / S as u64 * S as u64, 0);
+    assert_eq!(take_outcome(&mut r).0.as_deref(), Some(NO_HISTORY));
+
+    // No answer within the timeout: the toast.
+    click_bands(&mut r, 0.99);
+    assert_eq!(take_outcome(&mut r), (None, None));
+    r.vcx.executor().advance_clock(HISTORY_ASK_TIMEOUT);
+    draw(r.vcx);
+    assert_eq!(take_outcome(&mut r), (Some(NO_HISTORY.to_owned()), None));
+    assert!(!history_mode(&mut r));
+
+    // A second the history holds opens History mode there.
     click_bands(&mut r, 0.995);
-    let opened = r.vcx.read_entity(&b, |b, _| b.last_history_at.get());
-    assert!(opened.is_some(), "History mode opened");
-    let history_mode = r
-        .vcx
-        .update(|_, cx| TlSettings::state(cx).processes.history_mode);
-    assert!(history_mode);
+    let (id, t) = *history_asks(&r).last().expect("a query");
+    answer(&mut r, id, t / S as u64 * S as u64, 16 * GIB);
+    assert_eq!(take_outcome(&mut r), (None, Some(t)), "History mode opened");
+    assert!(history_mode(&mut r));
 }
 
 /// While paused 5 hours ago, the 1 min and 5 min ranges need the 1 s tier, which keeps the last
@@ -367,6 +444,18 @@ fn timeline_drag_selects_smallest_range(cx: &mut TestAppContext) {
     drag_to(r.vcx, b);
     release(r.vcx, b);
     assert_eq!(range(&mut r), OverviewRange::H1);
+
+    // In `history` mode a drag pauses too; it never opens History mode.
+    click(r.vcx, BACK_TO_LIVE_ID);
+    set_click(&mut r, TimelineClick::History, true);
+    let (a, b) = (bands_at(r.vcx, 0.5), bands_at(r.vcx, 15. / 24.));
+    press(r.vcx, a);
+    drag_to(r.vcx, b);
+    release(r.vcx, b);
+    assert_eq!(range(&mut r), OverviewRange::H24);
+    assert_eq!(paused(&mut r).map(|p| p.1), Some(PauseKind::Pause));
+    assert!(history_asks(&r).is_empty(), "no process history query");
+    assert!(!history_mode(&mut r));
 }
 
 /// When the journal shows only the user's own entries, OOM kills and crashes are left out and
@@ -375,15 +464,44 @@ fn timeline_drag_selects_smallest_range(cx: &mut TestAppContext) {
 fn timeline_journal_own_only_omits_kinds(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     let end = now_realtime();
+    let events = || -> Arc<[TimelineEvent]> {
+        Arc::from([
+            event(TimelineEventKind::Heat, end - 6 * HOUR),
+            event(TimelineEventKind::OomKill, end - 4 * HOUR),
+            event(TimelineEventKind::Crash, end - 2 * HOUR),
+        ])
+    };
     let mut tl = empty_timeline(end);
     tl.journal = Some(JournalAccess::OwnOnly);
+    tl.events = events();
     publish(&mut r, tl);
     let b = timeline_box(&mut r);
-    let note = r.vcx.read_entity(&b, |b, _| b.journal_note());
+    let (note, markers, text) = r.vcx.read_entity(&b, |b, _| {
+        let mut text = String::new();
+        b.copy_text(&mut text);
+        (b.journal_note(), b.last_markers.borrow().clone(), text)
+    });
     assert_eq!(note.as_deref(), Some("Needs the systemd-journal group"));
+    assert_eq!(markers.len(), 1, "only the heat marker: {markers:?}");
+    assert!(
+        r.vcx
+            .debug_bounds("perf-overview-timeline-marker-1")
+            .is_none()
+    );
+    assert!(text.contains("Heat"), "{text}");
+    assert!(
+        !text.contains("OOM kill") && !text.contains("Crash"),
+        "{text}"
+    );
+
+    // With the whole journal, all three show.
     let mut tl = empty_timeline(end);
     tl.journal = Some(JournalAccess::All);
+    tl.events = events();
     publish(&mut r, tl);
-    let note = r.vcx.read_entity(&b, |b, _| b.journal_note());
+    let (note, markers) = r
+        .vcx
+        .read_entity(&b, |b, _| (b.journal_note(), b.last_markers.borrow().len()));
     assert_eq!(note, None);
+    assert_eq!(markers, 3);
 }

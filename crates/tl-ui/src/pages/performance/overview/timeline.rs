@@ -8,9 +8,14 @@
 //!
 //! A click on the bands acts by `performance.timeline_click`: `pause` holds the Overview at the
 //! picked time until "Back to live", `preview` holds it while the pointer is down and for
-//! [`PREVIEW_HOLD`] after, and `history` opens History mode at that time. A drag picks a span:
-//! the range switch takes the smallest range that holds it, and the boxes show that range
-//! centred on the span, as a click would.
+//! [`PREVIEW_HOLD`] after, and `history` opens History mode at that time. Before it opens,
+//! the box asks the process history for that second (a `TopAt` query): no answer with data
+//! there within [`HISTORY_ASK_TIMEOUT`] gives the toast "No process history at that time". A drag
+//! picks a span: the range switch takes the smallest range that holds it, and the boxes show
+//! that range centred on the span, paused (previewed in `preview` mode), never in History mode.
+//!
+//! While the journal shows only the user's own entries, OOM kills and crashes are left out of
+//! the markers and the copied text, and the box says why.
 //!
 //! The paused time lives in the [`OverviewPause`] global. The page turns it into the device
 //! history request, and while it is set the range switch disables the ranges the finest tier
@@ -28,15 +33,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, Entity, Global, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, canvas, div, fill, point,
-    px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription,
+    Task, WeakEntity, Window, canvas, div, fill, point, px, size,
 };
 use smallvec::SmallVec;
+use tl_model::command::{Command, HistoryWhat};
+use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop};
 use tl_model::journal::JournalAccess;
 use tl_model::settings::{OverviewRange, TimelineClick};
-use tl_model::snapshot::{DeviceTimeline, HistPoint, TimelineBand, TimelineEventKind};
+use tl_model::snapshot::{
+    DeviceTimeline, HistPoint, TimelineBand, TimelineEvent, TimelineEventKind,
+};
 use tl_model::time::{TimeNs, now_boot_ns};
 
 use super::layout::BoxMode;
@@ -96,6 +105,14 @@ pub const MERGE_PX: f32 = 8.;
 const DRAG_MIN_PX: f32 = 4.;
 /// How long a preview stays after the pointer is released.
 pub const PREVIEW_HOLD: Duration = Duration::from_secs(30);
+/// How long a `history` click waits for the process history's answer.
+pub const HISTORY_ASK_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// The first id of the box's process history queries, apart from the History page's (from 1)
+/// and its hover card's (from 2^48).
+pub const HISTORY_ASK_ID_BASE: u64 = 1 << 52;
+/// An answer this close to the asked second still counts as that second: the newest frame can
+/// lag the clock by a second.
+const HISTORY_ASK_SLACK_NS: u64 = 2 * NS_PER_SEC as u64;
 /// Heat levels a band is drawn with; neighbouring cells of one level paint as one quad.
 const LEVELS: f32 = 12.;
 /// The alpha of the lowest and the highest level.
@@ -437,6 +454,24 @@ fn event_color(kind: TimelineEventKind, theme: &TlTheme) -> Hsla {
     }
 }
 
+/// Whether `e` is drawn: OOM kills and crashes are left out while the journal shows only the
+/// user's own entries (UI-PRF-057).
+fn event_shown(d: &DeviceTimeline, e: &TimelineEvent) -> bool {
+    d.journal != Some(JournalAccess::OwnOnly)
+        || !matches!(
+            e.kind,
+            TimelineEventKind::OomKill | TimelineEventKind::Crash
+        )
+}
+
+/// Whether a `TopAt` answer has process history at the asked second `t`, boot clock. The
+/// engine moves a time outside the retained span to the span's edge, and finds no block in a
+/// gap, which leaves the memory total at 0.
+pub fn answer_holds(top: &HistoryTop, t: TimeNs) -> bool {
+    let second = t / NS_PER_SEC as u64 * NS_PER_SEC as u64;
+    top.mem_total_bytes > 0 && top.t_ns.abs_diff(second) <= HISTORY_ASK_SLACK_NS
+}
+
 fn band_accent(band: TimelineBand) -> DeviceAccent {
     match band {
         TimelineBand::Cpu => DeviceAccent::Cpu,
@@ -455,6 +490,15 @@ struct Press {
     dragging: bool,
 }
 
+/// A `history` click waiting for the process history's answer.
+struct HistoryAsk {
+    id: u64,
+    /// The asked second, boot clock.
+    t: TimeNs,
+    /// The window History mode opens in.
+    window: AnyWindowHandle,
+}
+
 /// The 24-hour timeline box.
 pub struct TimelineBox {
     hub: Entity<SnapshotHub>,
@@ -471,6 +515,8 @@ pub struct TimelineBox {
     press: Option<Press>,
     /// The timer that ends a preview.
     preview: Option<Task<()>>,
+    history_ask: Option<HistoryAsk>,
+    next_ask_id: u64,
     style_version: u64,
     strings_version: u64,
     _subs: [Subscription; 5],
@@ -503,6 +549,8 @@ impl TimelineBox {
             width: 0.,
             press: None,
             preview: None,
+            history_ask: None,
+            next_ask_id: HISTORY_ASK_ID_BASE,
             style_version: metrics(cx).style_version,
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
@@ -544,7 +592,7 @@ impl TimelineBox {
         out.push_str(&self.words.title);
         out.push('\n');
         if let Some(d) = &self.data {
-            for e in d.events.iter() {
+            for e in d.events.iter().filter(|e| event_shown(d, e)) {
                 let _ = writeln!(
                     out,
                     "{}\t{}",
@@ -555,13 +603,17 @@ impl TimelineBox {
         }
     }
 
-    /// A new timeline component: the box redraws when its `Arc` changed.
+    /// A new timeline component: the box redraws when its `Arc` changed. A process history
+    /// answer may settle a `history` click.
     fn on_snapshot(
         &mut self,
         hub: Entity<SnapshotHub>,
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
+        if ev.mask.contains(ComponentMask::HISTORY) {
+            self.on_history_answer(&hub, cx);
+        }
         if !ev.mask.contains(ComponentMask::DEVICE_HISTORY) {
             return;
         }
@@ -663,16 +715,31 @@ impl TimelineBox {
                 t_of(press.x0.max(press.x), end, width),
             );
             range::set_range(smallest_range((b - a) as u64), cx);
-            self.pick((a + b) / 2, window, cx);
+            // A span is held as a click holds a time; `history` has no span to open.
+            let mode = match click_mode(cx) {
+                TimelineClick::Preview => TimelineClick::Preview,
+                TimelineClick::Pause | TimelineClick::History => TimelineClick::Pause,
+            };
+            self.pick_as((a + b) / 2, mode, window, cx);
         } else {
             self.pick(t_of(press.x0, end, width), window, cx);
         }
         cx.notify();
     }
 
-    /// A click at `t`, or the centre of a dragged span, acts by `performance.timeline_click`.
+    /// A click at `t` acts by `performance.timeline_click`.
     pub fn pick(&mut self, t: i64, window: &mut Window, cx: &mut Context<Self>) {
-        match click_mode(cx) {
+        self.pick_as(t, click_mode(cx), window, cx);
+    }
+
+    fn pick_as(
+        &mut self,
+        t: i64,
+        mode: TimelineClick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match mode {
             TimelineClick::Pause => {
                 self.preview = None;
                 self.hold(t, PauseKind::Pause, cx);
@@ -711,32 +778,81 @@ impl TimelineBox {
         );
     }
 
-    /// Opens History mode at `t` when the process history keeps that second; otherwise the
-    /// toast "No process history at that time". Before History mode has read the store, the
-    /// kept span is taken as the `history.retention_h` before now.
+    /// Asks the process history for the second at `t`, CLOCK_REALTIME. The answer opens History
+    /// mode there or shows the toast ([`Self::on_history_answer`]); no answer within
+    /// [`HISTORY_ASK_TIMEOUT`] shows the toast.
     fn open_history(&mut self, t: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let now_boot = now_boot_ns();
-        let offset = now_realtime_ns() - now_boot as i64;
-        let boot_t = t - offset;
-        let span = self.hub.read(cx).current().history.span.or_else(|| {
-            let hours = cx
-                .has_global::<TlSettings>()
-                .then(|| TlSettings::settings(cx).history.retention_h)?;
-            let keep = u64::from(hours) * HOUR_NS as u64;
-            Some((now_boot.saturating_sub(keep), now_boot))
+        let offset = now_realtime_ns() - now_boot_ns() as i64;
+        let Ok(boot_t) = TimeNs::try_from(t - offset) else {
+            self.no_history(cx);
+            return;
+        };
+        let id = self.next_ask_id;
+        self.next_ask_id += 1;
+        let cmd = Command::HistoryQuery {
+            id,
+            range: HistoryRange::At(boot_t),
+            what: HistoryWhat::TopAt {
+                t: boot_t,
+                metric: HistoryMetric::Cpu,
+                n: 1,
+            },
+        };
+        if self.hub.read(cx).client().send(cmd).is_err() {
+            self.no_history(cx);
+            return;
+        }
+        self.history_ask = Some(HistoryAsk {
+            id,
+            t: boot_t,
+            window: window.window_handle(),
         });
-        let inside =
-            boot_t >= 0 && span.is_some_and(|(from, to)| (from..=to).contains(&(boot_t as TimeNs)));
-        if !inside {
-            let text = tr(cx, "perf-overview-timeline-no-history");
-            #[cfg(any(test, feature = "test-hooks"))]
-            self.last_toast.replace(Some(text.clone()));
-            push_main_toast(cx, ToastKind::Info, text, None, None);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HISTORY_ASK_TIMEOUT).await;
+            let _ = this.update(cx, |b, cx| {
+                if b.history_ask.as_ref().is_some_and(|a| a.id == id) {
+                    b.history_ask = None;
+                    b.no_history(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Settles the waiting `history` click when the hub's process history answers it.
+    fn on_history_answer(&mut self, hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) {
+        let Some(id) = self.history_ask.as_ref().map(|a| a.id) else {
+            return;
+        };
+        let Some(top) = hub.read(cx).current().history.top.clone() else {
+            return;
+        };
+        if top.query_id != id {
+            return;
+        }
+        let Some(ask) = self.history_ask.take() else {
+            return;
+        };
+        if !answer_holds(&top, ask.t) {
+            self.no_history(cx);
             return;
         }
         #[cfg(any(test, feature = "test-hooks"))]
-        self.last_history_at.set(Some(boot_t as TimeNs));
-        crate::pages::processes::history::open_at(boot_t as TimeNs, window, cx);
+        self.last_history_at.set(Some(ask.t));
+        let (t, window) = (ask.t, ask.window);
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                crate::pages::processes::history::open_at(t, window, cx);
+            });
+        });
+    }
+
+    /// The toast "No process history at that time".
+    fn no_history(&self, cx: &mut App) {
+        let text = tr(cx, "perf-overview-timeline-no-history");
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.last_toast.replace(Some(text.clone()));
+        push_main_toast(cx, ToastKind::Info, text, None, None);
     }
 }
 
@@ -940,6 +1056,7 @@ impl TimelineBox {
             .events
             .iter()
             .enumerate()
+            .filter(|(_, e)| event_shown(d, e))
             .map(|(i, e)| (i, x_of(e.start_realtime_ns, end, width)))
             .filter(|(_, x)| (0. ..=width).contains(x))
             .collect();

@@ -741,6 +741,53 @@ fn performance_range_dropdown(cx: &mut TestAppContext) {
     );
 }
 
+/// The timeline click dropdown lists "Open History mode" only while recording is on, and follows
+/// a change while the Settings window stays open (UI-PRF-057).
+#[gpui_kit::test]
+fn performance_timeline_click_follows_recording(cx: &mut TestAppContext) {
+    setup(cx);
+    let recording = |on: bool, cx: &mut TestAppContext| {
+        cx.update(|cx| TlSettings::update(cx, |d| d.settings.history.enabled = on));
+    };
+    recording(false, cx);
+    let labels = |cx: &mut TestAppContext| {
+        page(cx, PageId::Performance).dropdown_labels(SettingKey::PerformanceTimelineClick)
+    };
+    assert_eq!(labels(cx), ["Pause until Back to live", "Preview for 30 s"]);
+
+    let (frame, mut vcx) = open(cx, 1);
+    set_search(&frame, &mut vcx, "timeline click");
+    click_selector(
+        &mut vcx,
+        "TlSelect-settings-select-performance.timeline_click".into(),
+    );
+    let list_h = |vcx: &mut VisualTestContext| {
+        vcx.debug_bounds("TlSelect-list")
+            .expect("the popup list")
+            .size
+            .height
+    };
+    let two = list_h(&mut vcx);
+    recording(true, cx);
+    draw_probe(&mut vcx);
+    let three = list_h(&mut vcx);
+    assert!(
+        three > two,
+        "the open window lists history: {two:?} -> {three:?}"
+    );
+    assert_eq!(
+        labels(cx),
+        [
+            "Pause until Back to live",
+            "Preview for 30 s",
+            "Open History mode"
+        ]
+    );
+    recording(false, cx);
+    draw_probe(&mut vcx);
+    assert_eq!(list_h(&mut vcx), two, "and drops it again");
+}
+
 #[gpui_kit::test]
 fn performance_gpu_optional_checkboxes(cx: &mut TestAppContext) {
     setup(cx);
