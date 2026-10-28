@@ -13,7 +13,6 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
@@ -38,7 +37,9 @@ use super::parts::{
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_rows, edit_chrome,
     grid_cells, is_wide, spark_chart, width_probe,
 };
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::{self, OverviewPause};
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
@@ -400,6 +401,9 @@ pub struct CpuBox {
     /// `performance.overview_core_smoothing`, and the average of each entry of `logical`.
     smoothing: CoreSmoothing,
     averages: Vec<CoreAverage>,
+    /// The page is held at a time (UI-PRF-057): the rows show the history's values there,
+    /// unsmoothed.
+    paused: bool,
     /// Whether the last render put the core rows beside the chart: the box is wide and the
     /// arrangement is automatic, or the arrangement is Side by side.
     side: bool,
@@ -432,7 +436,7 @@ pub struct CpuBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
-    _subs: [Subscription; 4],
+    _subs: [Subscription; 5],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -446,7 +450,7 @@ impl CpuBox {
         let spec = total_spec(cpu, &settings, &theme);
         let labels = total_labels(tr(cx, KEY_RANGE), settings.kernel, cx);
         let total = box_chart(spec, labels, hub, cx);
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(hub, cx);
         let grid_size = size(px(0.), px(0.));
         let mut this = Self {
             range_text: RangeText::default(),
@@ -460,6 +464,7 @@ impl CpuBox {
             freq_ids: Vec::new(),
             smoothing: TlSettings::settings(cx).performance.overview_core_smoothing,
             averages: Vec::new(),
+            paused: timeline::paused(cx).is_some(),
             grid_size: Rc::new(Cell::new(grid_size)),
             grid: core_bars_layout(0, grid_size.width, grid_size.height, 1.),
             catalog_version: u64::MAX,
@@ -494,6 +499,7 @@ impl CpuBox {
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<TlSettings>(Self::sync_settings),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
@@ -687,25 +693,28 @@ impl CpuBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        let devices = ev.mask.contains(ComponentMask::DEVICES);
-        let series = ev.mask.contains(ComponentMask::SERIES);
-        let system = ev.mask.contains(ComponentMask::SYSTEM);
-        let details = ev.mask.contains(ComponentMask::DEVICE_DETAILS);
+        let mask = box_mask(ev.mask, cx);
+        let devices = mask.contains(ComponentMask::DEVICES);
+        let series = mask.contains(ComponentMask::SERIES);
+        let system = mask.contains(ComponentMask::SYSTEM);
+        let details = mask.contains(ComponentMask::DEVICE_DETAILS);
         if !(devices || series || system || details) {
             return;
         }
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(&hub, cx);
         let mut changed = false;
         if devices {
             changed |= self.sync_devices(&snap, cx);
         }
         if series && !changed {
             let runs = ChangedRuns::new(&ev.changed_series);
-            if self
-                .logical_ids
-                .iter()
-                .chain(&self.freq_ids)
-                .any(|id| runs.contains(*id))
+            // While paused the changed ids are live ones: the history's series all changed.
+            if self.paused
+                || self
+                    .logical_ids
+                    .iter()
+                    .chain(&self.freq_ids)
+                    .any(|id| runs.contains(*id))
             {
                 changed |= self.sync_bars(&snap);
             }
@@ -721,6 +730,23 @@ impl CpuBox {
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
+    }
+
+    /// The page was held at a time or made live: the value, line and rows read the other
+    /// snapshot.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let paused = timeline::paused(cx).is_some();
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        self.averages.fill(CoreAverage::default());
+        let snap = box_snapshot(&self.hub, cx);
+        self.sync_bars(&snap);
+        self.sync_text(&snap, true);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     /// Rebuilds the logical CPU list, the row names and the sparklines when the catalog changed.
@@ -781,10 +807,14 @@ impl CpuBox {
     }
 
     /// The smoothed `CPU_TOTAL` (the newest valid sample with smoothing off) and the newest valid
-    /// `CPU_FREQ` of each logical CPU to the rows. True when a row's 1% or 0.1 GHz bucket
-    /// changed.
+    /// `CPU_FREQ` of each logical CPU to the rows; while paused, the newest at the picked time.
+    /// True when a row's 1% or 0.1 GHz bucket changed.
     fn sync_bars(&mut self, snap: &Snapshot) -> bool {
-        let tau_s = self.smoothing.tau_s();
+        let tau_s = if self.paused {
+            0.
+        } else {
+            self.smoothing.tau_s()
+        };
         if tau_s > 0.0 {
             for (avg, id) in self.averages.iter_mut().zip(&self.logical_ids) {
                 if let Some(view) = snap.series.get(*id) {
@@ -843,7 +873,7 @@ impl CpuBox {
         if smoothing != self.smoothing {
             self.smoothing = smoothing;
             self.averages.fill(CoreAverage::default());
-            let snap = Arc::clone(self.hub.read(cx).current());
+            let snap = box_snapshot(&self.hub, cx);
             if self.sync_bars(&snap) {
                 #[cfg(any(test, feature = "test-hooks"))]
                 self.notify_count.set(self.notify_count.get() + 1);

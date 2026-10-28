@@ -21,7 +21,6 @@ use std::cell::Cell;
 use std::cell::Cell as StdCell;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
@@ -47,7 +46,9 @@ use super::parts::{
     ChartSettings, ListFit, box_chart, box_frame, chart_section_versions, class_probe, edit_chrome,
     grid_cells, list_fit,
 };
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::{self, OverviewPause};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
@@ -489,12 +490,14 @@ pub struct NetBox {
     target: Option<DeviceKey>,
     catalog_version: u64,
     text_bits: u64,
+    /// The page is held at a time (UI-PRF-057).
+    paused: bool,
     settings: ChartSettings,
     net: NetSettings,
     settings_versions: [u64; 4],
     style_version: u64,
     strings_version: u64,
-    _subs: [Subscription; 4],
+    _subs: [Subscription; 5],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -514,7 +517,7 @@ impl NetBox {
         let theme = current(cx).clone();
         let settings = ChartSettings::read(cx);
         let net = NetSettings::from(TlSettings::settings(cx));
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(hub, cx);
         let aggregate = aggregate(&snap.devices);
         let range = tr(cx, KEY_RANGE);
         let chart = |upload: bool, cx: &mut Context<Self>| {
@@ -570,6 +573,7 @@ impl NetBox {
             target: None,
             catalog_version: snap.devices.version,
             text_bits: 0,
+            paused: timeline::paused(cx).is_some(),
             settings,
             net,
             settings_versions: section_versions(cx),
@@ -577,6 +581,7 @@ impl NetBox {
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<TlSettings>(Self::sync_settings),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
@@ -604,7 +609,7 @@ impl NetBox {
         }
         self.mode = mode;
         if mode == NetMode::AdapterCharts {
-            let snap = Arc::clone(self.hub.read(cx).current());
+            let snap = box_snapshot(&self.hub, cx);
             self.sync_adapters(&snap, cx);
         } else {
             self.adapters.clear();
@@ -833,15 +838,16 @@ impl NetBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        let devices = ev.mask.contains(ComponentMask::DEVICES);
+        let mask = box_mask(ev.mask, cx);
+        let devices = mask.contains(ComponentMask::DEVICES);
         if !(devices
-            || ev.mask.intersects(
+            || mask.intersects(
                 ComponentMask::SYSTEM | ComponentMask::SERIES | ComponentMask::DEVICE_DETAILS,
             ))
         {
             return;
         }
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(&hub, cx);
         if devices && snap.devices.version != self.catalog_version {
             self.catalog_version = snap.devices.version;
             let aggregate = aggregate(&snap.devices);
@@ -850,7 +856,7 @@ impl NetBox {
                 self.rebuild_specs(cx);
             }
         }
-        let peaks = ev.mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
+        let peaks = mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
         let text = self.sync_text(&snap, peaks);
         if self.sync_adapters(&snap, cx) || text {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -859,8 +865,22 @@ impl NetBox {
         }
     }
 
+    /// The page was held at a time or made live: the rates, peaks and adapters read the other
+    /// snapshot.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        self.paused = timeline::paused(cx).is_some();
+        let snap = box_snapshot(&self.hub, cx);
+        self.sync_peaks(&snap, true);
+        self.sync_text(&snap, true);
+        self.sync_adapters(&snap, cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
     /// The rates and totals when their inputs changed, or always with `force`. True when the
-    /// text was formatted again.
+    /// text was formatted again. While paused the totals since boot are "-": the history does
+    /// not keep them.
     fn sync_text(&mut self, snap: &Snapshot, force: bool) -> bool {
         let s = sums(snap, &self.net);
         let mut h = FxHasher::default();
@@ -916,7 +936,11 @@ impl NetBox {
         };
         self.down_peak_text = peak_text(self.down_peak);
         self.up_peak_text = peak_text(self.up_peak);
+        let paused = self.paused;
         let size = |bytes: u64| {
+            if paused {
+                return value_text(Validity::Missing, |_| {});
+            }
             let mut out = String::new();
             units::bytes(&mut out, bytes);
             SharedString::from(out)
@@ -945,7 +969,7 @@ impl NetBox {
         if respec {
             self.rebuild_specs(cx);
         }
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         let text = self.sync_text(&snap, false);
         if self.sync_adapters(&snap, cx) || text {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -985,7 +1009,7 @@ impl NetBox {
             let labels = chart_labels(range.clone());
             v.update(cx, |v, cx| v.set_labels(labels, cx));
         }
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.sync_text(&snap, true);
         cx.notify();
     }

@@ -28,7 +28,6 @@
 use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
@@ -57,7 +56,9 @@ use super::parts::{
     chart_section_versions, class_probe, edit_chrome, grid_cells, list_fit, meter_fits,
     spark_chart, spark_row,
 };
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -738,7 +739,7 @@ pub struct GpuBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
-    _subs: [Subscription; 4],
+    _subs: [Subscription; 5],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -786,6 +787,7 @@ impl GpuBox {
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<TlSettings>(Self::sync_settings),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
@@ -826,7 +828,7 @@ impl GpuBox {
             return;
         }
         self.box_hidden = hidden.to_vec();
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
         #[cfg(any(test, feature = "test-hooks"))]
@@ -879,7 +881,7 @@ impl GpuBox {
         let mode = GpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
-            let snap = Arc::clone(self.hub.read(cx).current());
+            let snap = box_snapshot(&self.hub, cx);
             if self.sync_engines(&snap, cx) {
                 self.sync_text(&snap, true);
             }
@@ -1067,7 +1069,7 @@ impl GpuBox {
         }
         self.more = gpus.len().saturating_sub(MAX_GPUS);
         self.sync_more_text(cx);
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
     }
@@ -1166,19 +1168,28 @@ impl GpuBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev
-            .mask
+        if !box_mask(ev.mask, cx)
             .intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES | ComponentMask::INVENTORY)
         {
             return;
         }
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(&hub, cx);
         let rows = self.sync_engines(&snap, cx);
         if self.sync_text(&snap, rows) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
+    }
+
+    /// The page was held at a time or made live: every section reads the other snapshot.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let snap = box_snapshot(&self.hub, cx);
+        self.sync_engines(&snap, cx);
+        self.sync_text(&snap, true);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     /// Every section's value, VRAM row and line when their inputs changed, or always with
@@ -1231,7 +1242,7 @@ impl GpuBox {
         let hidden = &TlSettings::settings(cx).performance.hidden_gpu_engines;
         if *hidden != self.hidden {
             self.hidden = hidden.clone();
-            let snap = Arc::clone(self.hub.read(cx).current());
+            let snap = box_snapshot(&self.hub, cx);
             if self.sync_engines(&snap, cx) {
                 self.sync_text(&snap, true);
                 #[cfg(any(test, feature = "test-hooks"))]

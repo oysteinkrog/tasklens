@@ -8,29 +8,43 @@ use gpui_kit::{
     Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
 };
 use tl_model::command::{Command, HistoryWhat};
-use tl_model::demand::DeviceRange;
+use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::history::{HistoryMetric, HistoryTop};
+use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::journal::JournalAccess;
-use tl_model::settings::{OverviewRange, TimelineClick};
+use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+use tl_model::settings::{OverviewLayoutSetting, OverviewRange, TimelineClick};
 use tl_model::snapshot::{
-    ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, TimelineEvent, TimelineEventKind,
+    ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, ProcessSnapshot, TimelineEvent,
+    TimelineEventKind,
 };
-use tl_model::time::{TimeNs, now_boot_ns};
+use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric, NetTotals};
+use tl_model::time::{BootId, TimeNs};
+use tl_model::validity::{FieldValidity, Validity};
+use tl_ui::pages::performance::overview::layout::BoxKind;
 use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
 use tl_ui::pages::performance::overview::timeline::{
     BACK_TO_LIVE_ID, BANDS_ID, DAY_NS, HISTORY_ASK_ID_BASE, HISTORY_ASK_TIMEOUT, PREVIEW_HOLD,
-    PauseKind, TimelineBox, click_choices, click_mode,
+    PauseKind, Paused, TimelineBox, click_choices, click_mode, set_paused, set_test_clock,
 };
 use tl_ui::settings_global::TlSettings;
 
-use super::overview_range::{Rig, click, draw, now_realtime, open, overview, set_range};
+use super::overview_range::{Rig, click, draw, open, overview, set_range};
 
 const S: i64 = 1_000_000_000;
 const MIN: i64 = 60 * S;
 const HOUR: i64 = 60 * MIN;
 
-/// The rig with a window tall enough to show the timeline without scrolling.
+/// The test clock's CLOCK_REALTIME now: 2026-10-28 09:20 UTC.
+const NOW: i64 = 1_793_179_200 * S;
+/// The test clock's CLOCK_BOOTTIME now: the machine booted 2 hours ago.
+const BOOT: TimeNs = 2 * HOUR as TimeNs;
+
+/// The rig with a window tall enough to show the timeline without scrolling, and the
+/// timeline's clocks pinned at [`NOW`] and [`BOOT`], so no test reads the host's clock or
+/// uptime.
 fn rig(cx: &mut TestAppContext) -> Rig<'_> {
+    set_test_clock(Some((NOW, BOOT)));
     let r = open(cx);
     r.vcx.simulate_resize(size(px(1600.), px(1400.)));
     draw(r.vcx);
@@ -70,7 +84,7 @@ fn publish(r: &mut Rig, tl: DeviceTimeline) {
                 version,
                 ..ComponentHeader::default()
             },
-            realtime_offset_ns: now_realtime() - now_boot_ns() as i64,
+            realtime_offset_ns: NOW - BOOT as i64,
             timeline: Some(Arc::new(tl)),
             ..DeviceHistory::default()
         });
@@ -217,7 +231,7 @@ fn timeline_bands_from_history(cx: &mut TestAppContext) {
         "the default layout places the timeline"
     );
 
-    let end = now_realtime();
+    let end = NOW;
     let mut tl = empty_timeline(end);
     // CPU: 2 hours at 100%, then a gap hour, then 2 hours at 0%.
     let cpu: Vec<HistPoint> = (0..300)
@@ -255,7 +269,7 @@ fn timeline_bands_from_history(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn timeline_event_markers_merge(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    let end = now_realtime();
+    let end = NOW;
     let mut tl = empty_timeline(end);
     tl.events = Arc::from([
         event(TimelineEventKind::Heat, end - 6 * HOUR),
@@ -290,7 +304,7 @@ fn timeline_event_markers_merge(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn timeline_click_modes(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    let end = now_realtime();
+    let end = NOW;
     publish(&mut r, empty_timeline(end));
     set_range(&mut r, OverviewRange::H24);
 
@@ -340,8 +354,8 @@ fn timeline_click_modes(cx: &mut TestAppContext) {
     assert_eq!(mode, TimelineClick::Pause);
     assert!(!choices.contains(&TimelineClick::History));
 
-    // With recording on, a click asks the process history for that second first. The clicks
-    // stay within the last half hour, so they fall in this boot.
+    // With recording on, a click asks the process history for that second first. The test
+    // clock booted 2 hours ago, so the clicks within the last half hour fall in this boot.
     set_click(&mut r, TimelineClick::History, true);
     let choices = r.vcx.update(|_, cx| click_choices(cx));
     assert!(choices.contains(&TimelineClick::History));
@@ -357,7 +371,7 @@ fn timeline_click_modes(cx: &mut TestAppContext) {
     );
     // Recording began 10 minutes ago: the engine reads its oldest second instead. The toast
     // shows and nothing else happens.
-    let oldest = now_boot_ns() - 10 * MIN as u64;
+    let oldest = BOOT - 10 * MIN as u64;
     answer(&mut r, id, oldest / S as u64 * S as u64, 16 * GIB);
     assert_eq!(take_outcome(&mut r), (Some(NO_HISTORY.to_owned()), None));
     assert_eq!(paused(&mut r), None, "the toast does nothing else");
@@ -391,7 +405,7 @@ fn timeline_click_modes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn timeline_paused_disables_unservable_ranges(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    let end = now_realtime();
+    let end = NOW;
     publish(&mut r, empty_timeline(end));
     assert_eq!(range(&mut r), OverviewRange::M1);
     // 5 hours ago is 19/24 of the way along.
@@ -417,7 +431,7 @@ fn timeline_paused_disables_unservable_ranges(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn timeline_drag_selects_smallest_range(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    let end = now_realtime();
+    let end = NOW;
     publish(&mut r, empty_timeline(end));
     // From 12 to 9 hours ago: 3 hours fits 24 h, not 1 h.
     let (a, b) = (bands_at(r.vcx, 0.5), bands_at(r.vcx, 15. / 24.));
@@ -463,7 +477,7 @@ fn timeline_drag_selects_smallest_range(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn timeline_journal_own_only_omits_kinds(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    let end = now_realtime();
+    let end = NOW;
     let events = || -> Arc<[TimelineEvent]> {
         Arc::from([
             event(TimelineEventKind::Heat, end - 6 * HOUR),
@@ -504,4 +518,320 @@ fn timeline_journal_own_only_omits_kinds(cx: &mut TestAppContext) {
         .read_entity(&b, |b, _| (b.journal_note(), b.last_markers.borrow().len()));
     assert_eq!(note, None);
     assert_eq!(markers, 3);
+}
+
+// ---- Boxes at the picked time ----
+
+const MB: f64 = 1_000_000.;
+
+fn proc_record(pid: u32, name: &str, cpu_pct: f32) -> ProcessRecord {
+    let name: Arc<str> = Arc::from(name);
+    ProcessRecord {
+        key: ProcessKey {
+            start_ticks: u64::from(pid),
+            boot_id: BootId(1),
+            pid,
+        },
+        ppid: 1,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: name.clone(),
+            name: name.clone(),
+            exe: None,
+            cmdline: None,
+            user: Arc::from("user"),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            desktop_path: None,
+            search_lower: name,
+        }),
+        group: GroupKey(0),
+        state: ProcState::Running,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.,
+        io_write_bps: 0.,
+        net_rx_bps: 0.,
+        net_tx_bps: 0.,
+        gpu_util_pct: 0.,
+        gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+fn gpu_totals(pct: f32) -> GpuTotals {
+    GpuTotals {
+        device: DeviceIdx(2),
+        util_pct: Metric::valid(pct),
+        mem_util_pct: Metric::default(),
+        mem_used: Metric::valid((f64::from(pct) / 100. * 8. * GIB as f64) as u64),
+        mem_total: Metric::valid(8 * GIB),
+        shared_used: Metric::default(),
+        shared_total: Metric::default(),
+        mem_reserved: Metric::default(),
+        enc_pct: Metric::default(),
+        dec_pct: Metric::default(),
+        enc_sessions: Metric::default(),
+        enc_dec_shared: false,
+        temp_c: Metric::valid(pct),
+        temp_edge_c: Metric::default(),
+        temp_junction_c: Metric::default(),
+        temp_mem_c: Metric::default(),
+        power_w: Metric::valid(pct),
+        power_limit_w: Metric::default(),
+        clock_gfx_mhz: Metric::default(),
+        clock_mem_mhz: Metric::default(),
+        fan_pct: Metric::default(),
+        pcie_rx_bps: Metric::default(),
+        pcie_tx_bps: Metric::default(),
+        engines: Default::default(),
+        throttling: Default::default(),
+        fdinfo_partial: false,
+        energy_since_boot: Metric::default(),
+        clock_video_mhz: Metric::default(),
+        pstate: Metric::default(),
+        clock_event_reasons: Metric::default(),
+        fan_rpm: Metric::default(),
+        pcie_gen: Metric::default(),
+        pcie_width: Metric::default(),
+        info: Arc::default(),
+    }
+}
+
+/// Live values for every box, all from `pct`: CPU, GPU and disk busy at `pct`%, `pct`% of
+/// 16 GiB memory in use, the disk and the interface moving `pct` MB/s, and one process `name`
+/// at `pct`% CPU.
+fn publish_live(r: &mut Rig, pct: f32, name: &str) {
+    let rate = f64::from(pct) * MB;
+    r.engine.publish_with(|s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.cpu.util_pct = Metric::valid(pct);
+        let total = 16 * GIB;
+        let used = (f64::from(pct) / 100. * total as f64) as u64;
+        sys.memory = MemoryTotals {
+            validity: Validity::Valid,
+            total,
+            used,
+            available: total - used,
+            cached: used / 2,
+            committed: used,
+            commit_limit: total,
+            ..MemoryTotals::default()
+        };
+        sys.gpus = Arc::from([(DeviceIdx(2), gpu_totals(pct))]);
+        sys.disks = Arc::from([(
+            DeviceIdx(3),
+            DiskTotals {
+                device: DeviceIdx(3),
+                active_pct: Metric::valid(pct),
+                read_bps: Metric::valid(rate),
+                write_bps: Metric::valid(rate / 2.),
+                response_ms: Metric::valid(1.),
+                read_total: 0,
+                written_total: 0,
+                capacity: 0,
+                temp_c: Metric::default(),
+            },
+        )]);
+        sys.nets = Arc::from([(
+            DeviceIdx(5),
+            NetTotals {
+                device: DeviceIdx(5),
+                rx_bps: Metric::valid(rate),
+                tx_bps: Metric::valid(rate / 2.),
+                rx_total: (rate * 100.) as u64,
+                tx_total: (rate * 50.) as u64,
+                link_speed_mbps: Metric::valid(1_000),
+                state: LinkState::Up,
+            },
+        )]);
+        let version = s.processes.header.version + 1;
+        s.processes = Arc::new(ProcessSnapshot {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            records: Arc::from([proc_record(4242, name, pct)]),
+            ..ProcessSnapshot::default()
+        });
+    });
+    draw(r.vcx);
+}
+
+/// The device history's answer to the paused 24 h request: one 1 min point at `at` per series,
+/// every value from `pct` as in [`publish_live`].
+fn publish_picked(r: &mut Rig, at: i64, pct: f32) {
+    let id = |device, metric| SeriesId {
+        device: DeviceIdx(device),
+        metric,
+    };
+    let rate = pct * MB as f32;
+    let used = pct / 100. * 16. * GIB as f32;
+    let mut series = vec![
+        (id(0, MetricId::CPU_TOTAL), pct),
+        (id(1, MetricId::MEM_USED), used),
+        (id(1, MetricId::MEM_CACHED), used / 2.),
+        (id(1, MetricId::MEM_AVAILABLE), 16. * GIB as f32 - used),
+        (id(1, MetricId::MEM_COMMIT), used),
+        (id(2, MetricId::GPU_UTIL), pct),
+        (id(2, MetricId::GPU_MEM), pct / 100. * 8. * GIB as f32),
+        (id(2, MetricId::GPU_TEMP), pct),
+        (id(2, MetricId::GPU_POWER), pct),
+        (id(3, MetricId::DISK_ACTIVE), pct),
+        (id(3, MetricId::DISK_READ), rate),
+        (id(3, MetricId::DISK_WRITE), rate / 2.),
+        (id(5, MetricId::NET_RX), rate),
+        (id(5, MetricId::NET_TX), rate / 2.),
+    ];
+    series.sort_by_key(|(id, _)| *id);
+    let t = at - at.rem_euclid(MIN);
+    let series: Vec<(SeriesId, Arc<[HistPoint]>)> = series
+        .into_iter()
+        .map(|(id, v)| (id, Arc::from([point_at(t, v)])))
+        .collect();
+    r.engine.publish_with(|s| {
+        let version = s.device_history.header.version + 1;
+        s.device_history = Arc::new(DeviceHistory {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            request: Some(DeviceHistoryRequest {
+                range: DeviceRange::H24,
+                end_realtime_ns: Some(NOW),
+            }),
+            realtime_offset_ns: NOW - BOOT as i64,
+            since_realtime_ns: Some(NOW - 2 * DAY_NS),
+            step_ns: MIN as u64,
+            series: Arc::from(series),
+            ..DeviceHistory::default()
+        });
+    });
+    draw(r.vcx);
+}
+
+/// What box `kind` shows, as its copied text. The match has no catch-all, so a new box kind
+/// does not compile until this test covers it.
+fn box_text(r: &mut Rig, kind: BoxKind) -> String {
+    let page = overview(r);
+    r.vcx.update(|_, cx| {
+        let page = page.read(cx);
+        let mut out = String::new();
+        match kind {
+            BoxKind::Cpu => page.cpu_box().read(cx).copy_text(&mut out),
+            BoxKind::Memory => page.mem_box().read(cx).copy_text(&mut out),
+            BoxKind::Gpu => page.gpu_box().read(cx).copy_text(&mut out),
+            BoxKind::Disk => page.disk_box().read(cx).copy_text(&mut out),
+            BoxKind::Net => page.net_box().read(cx).copy_text(&mut out),
+            BoxKind::TopProcs => page
+                .procs_box()
+                .expect("the Top processes box")
+                .read(cx)
+                .copy_text(&mut out),
+            BoxKind::Timeline => page.timeline_box().read(cx).copy_text(&mut out),
+        }
+        out
+    })
+}
+
+fn box_texts(r: &mut Rig) -> Vec<(BoxKind, String)> {
+    BoxKind::ALL
+        .into_iter()
+        .map(|k| (k, box_text(r, k)))
+        .collect()
+}
+
+fn set_pause(r: &mut Rig, at: Option<i64>) {
+    r.vcx.update(|_, cx| {
+        set_paused(
+            at.map(|at_realtime_ns| Paused {
+                at_realtime_ns,
+                kind: PauseKind::Pause,
+            }),
+            cx,
+        );
+    });
+    draw(r.vcx);
+}
+
+/// While paused, every box kind shows the history's values at the picked time: a new live
+/// snapshot changes no box. Back to live, every box shows live values and follows them again.
+#[gpui_kit::test]
+fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    // Every box kind placed: the default grid plus Top processes.
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            let unit = d.settings.performance.overview_row_unit_px;
+            d.settings.performance.overview = Some(OverviewLayoutSetting::with_top_procs(unit));
+            d.settings.performance.overview_range = OverviewRange::H24;
+        });
+    });
+    draw(r.vcx);
+    publish(&mut r, empty_timeline(NOW));
+    // The timeline box draws only its 24 hours, so its text is the same live and paused.
+    let changes = |k: BoxKind| k != BoxKind::Timeline;
+
+    publish_live(&mut r, 33., "live-a");
+    let live_a = box_texts(&mut r);
+    assert!(box_text(&mut r, BoxKind::Cpu).contains("33%"));
+    assert!(box_text(&mut r, BoxKind::TopProcs).contains("live-a"));
+
+    // Held 2 hours ago, the history answers with its values there.
+    let at = NOW - 2 * HOUR;
+    set_pause(&mut r, Some(at));
+    publish_picked(&mut r, at, 77.);
+    let picked = box_texts(&mut r);
+    for ((kind, live), (_, held)) in live_a.iter().zip(&picked) {
+        if changes(*kind) {
+            assert_ne!(live, held, "{kind:?} shows the picked time");
+        }
+    }
+    let cpu = box_text(&mut r, BoxKind::Cpu);
+    assert!(cpu.contains("77%") && !cpu.contains("33%"), "{cpu}");
+    let procs = box_text(&mut r, BoxKind::TopProcs);
+    assert!(
+        !procs.contains("live-a"),
+        "the history keeps no processes: {procs}"
+    );
+
+    // A new live snapshot changes no box while paused.
+    publish_live(&mut r, 55., "live-b");
+    for ((kind, before), (_, after)) in picked.iter().zip(&box_texts(&mut r)) {
+        assert_eq!(before, after, "{kind:?} ignores the live snapshot");
+        assert!(
+            !after.contains("55%") && !after.contains("live-b"),
+            "{after}"
+        );
+    }
+
+    // Back to live: every box shows the newest live values, then follows the next snapshot.
+    set_pause(&mut r, None);
+    let live_b = box_texts(&mut r);
+    for ((kind, held), (_, live)) in picked.iter().zip(&live_b) {
+        if changes(*kind) {
+            assert_ne!(held, live, "{kind:?} is live again");
+        }
+    }
+    assert!(box_text(&mut r, BoxKind::Cpu).contains("55%"));
+    assert!(box_text(&mut r, BoxKind::TopProcs).contains("live-b"));
+    publish_live(&mut r, 66., "live-c");
+    for ((kind, before), (_, after)) in live_b.iter().zip(&box_texts(&mut r)) {
+        if changes(*kind) {
+            assert_ne!(before, after, "{kind:?} follows the live snapshot");
+        }
+    }
 }

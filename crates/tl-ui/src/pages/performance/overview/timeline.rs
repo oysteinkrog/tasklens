@@ -159,9 +159,35 @@ pub fn set_paused(p: Option<Paused>, cx: &mut App) {
     }
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static TEST_CLOCK: Cell<Option<(i64, TimeNs)>> = const { Cell::new(None) };
+}
+
+/// Pins the clocks the timeline and the paused view read on this thread: CLOCK_REALTIME at
+/// `realtime_ns` and CLOCK_BOOTTIME at `boot_ns`. `None` reads the real clocks again. Tests use
+/// it so they do not depend on the host's clock or uptime.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_test_clock(clock: Option<(i64, TimeNs)>) {
+    TEST_CLOCK.set(clock);
+}
+
 /// CLOCK_REALTIME now.
 pub fn now_realtime_ns() -> i64 {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some((realtime, _)) = TEST_CLOCK.get() {
+        return realtime;
+    }
     i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or(i64::MAX)
+}
+
+/// CLOCK_BOOTTIME now.
+pub fn now_boot() -> TimeNs {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some((_, boot)) = TEST_CLOCK.get() {
+        return boot;
+    }
+    now_boot_ns()
 }
 
 /// The end of `range` held at `at`: the picked time centred in the range, never after `now`.
@@ -782,7 +808,7 @@ impl TimelineBox {
     /// mode there or shows the toast ([`Self::on_history_answer`]); no answer within
     /// [`HISTORY_ASK_TIMEOUT`] shows the toast.
     fn open_history(&mut self, t: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = now_realtime_ns() - now_boot_ns() as i64;
+        let offset = now_realtime_ns() - now_boot() as i64;
         let Ok(boot_t) = TimeNs::try_from(t - offset) else {
             self.no_history(cx);
             return;

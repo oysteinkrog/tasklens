@@ -46,7 +46,9 @@ use super::parts::{
     ChartSettings, ListFit, SPARK_GRID, box_chart, box_frame, chart_section_versions, class_probe,
     edit_chrome, grid_cells, list_fit, opens_device, spark_chart,
 };
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
@@ -422,7 +424,7 @@ pub struct DiskBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
-    _subs: [Subscription; 4],
+    _subs: [Subscription; 5],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -435,7 +437,7 @@ impl DiskBox {
         disks: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) -> Self {
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(hub, cx);
         let settings = ChartSettings::read(cx);
         let aggregate = aggregate_disks(&snap.devices);
         let total_chart = box_chart(
@@ -476,6 +478,7 @@ impl DiskBox {
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<TlSettings>(Self::sync_settings),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
@@ -500,7 +503,7 @@ impl DiskBox {
         }
         self.disks.clear();
         self.disks.extend(disks.iter().cloned());
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.build_rows(&snap, cx);
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
@@ -693,7 +696,8 @@ impl DiskBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev.mask.intersects(
+        let mask = box_mask(ev.mask, cx);
+        if !mask.intersects(
             ComponentMask::DEVICES
                 | ComponentMask::SYSTEM
                 | ComponentMask::DEVICE_DETAILS
@@ -701,10 +705,9 @@ impl DiskBox {
         ) {
             return;
         }
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(&hub, cx);
         let mut rebuilt = false;
-        if ev.mask.contains(ComponentMask::DEVICES) && snap.devices.version != self.catalog_version
-        {
+        if mask.contains(ComponentMask::DEVICES) && snap.devices.version != self.catalog_version {
             self.catalog_version = snap.devices.version;
             let aggregate = aggregate_disks(&snap.devices);
             if aggregate != self.aggregate {
@@ -719,6 +722,15 @@ impl DiskBox {
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
+    }
+
+    /// The page was held at a time or made live: every section reads the other snapshot.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let snap = box_snapshot(&self.hub, cx);
+        self.sync_text(&snap, true);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     /// Every section's model, active percent and rates when their inputs changed, or always

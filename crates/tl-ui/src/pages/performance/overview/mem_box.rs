@@ -41,7 +41,9 @@ use super::parts::{
     ChartSettings, GridFit, Meter, SPARK_GRID, SPARK_W, arrange_grid, box_chart, box_frame,
     chart_section_versions, class_probe, edit_chrome, grid_cells, spark_chart,
 };
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
@@ -477,7 +479,7 @@ pub struct MemBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
-    _subs: [Subscription; 4],
+    _subs: [Subscription; 5],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -488,7 +490,7 @@ impl MemBox {
     pub fn new(hub: &Entity<SnapshotHub>, memory: DeviceIdx, cx: &mut Context<Self>) -> Self {
         let theme = current(cx).clone();
         let settings = ChartSettings::read(cx);
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(hub, cx);
         let totals = Totals::of(&snap.system.memory);
         let colors = row_colors(&theme);
         let sparks = std::array::from_fn(|i| {
@@ -553,6 +555,7 @@ impl MemBox {
             strings_version: cx.global::<Strings>().strings_version,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<TlSettings>(Self::sync_settings),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
@@ -709,26 +712,32 @@ impl MemBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev
-            .mask
-            .intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES)
-        {
+        let mask = box_mask(ev.mask, cx);
+        if !mask.intersects(ComponentMask::SYSTEM | ComponentMask::DEVICES) {
             return;
         }
-        let snap: Arc<Snapshot> = Arc::clone(hub.read(cx).current());
-        if ev.mask.contains(ComponentMask::DEVICES)
+        let snap: Arc<Snapshot> = box_snapshot(&hub, cx);
+        if mask.contains(ComponentMask::DEVICES)
             && let Some(entry) = snap.devices.find(&DeviceIdentity::Memory)
             && entry.idx != self.memory
         {
             self.memory = entry.idx;
             self.rebuild_specs(cx);
         }
-        if ev.mask.contains(ComponentMask::SYSTEM) && self.sync_text(&snap.system.memory, false, cx)
-        {
+        if mask.contains(ComponentMask::SYSTEM) && self.sync_text(&snap.system.memory, false, cx) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
+    }
+
+    /// The page was held at a time or made live: the value and rows read the other snapshot.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let snap = box_snapshot(&self.hub, cx);
+        self.sync_text(&snap.system.memory, true, cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     /// The value, rows and percents when the totals changed, or always with `force`; new
@@ -845,7 +854,7 @@ impl MemBox {
         let labels = comp_labels(cx);
         self.comp_chart.update(cx, |v, cx| v.set_labels(labels, cx));
         // "No swap" is translated too.
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.sync_text(&snap.system.memory, true, cx);
         cx.notify();
     }

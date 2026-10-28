@@ -14,7 +14,6 @@ use std::fmt::Write as _;
 use std::hash::{Hash as _, Hasher as _};
 #[cfg(any(test, feature = "test-hooks"))]
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, MouseButton,
@@ -29,7 +28,9 @@ use tl_model::snapshot::ProcessSnapshot;
 
 use super::layout::BoxMode;
 use super::parts::{Meter, box_frame, edit_chrome};
+use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
+use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
@@ -114,7 +115,7 @@ pub struct ProcsBox {
     style_version: u64,
     strings_version: u64,
     hub: Entity<SnapshotHub>,
-    _subs: [Subscription; 3],
+    _subs: [Subscription; 4],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -126,7 +127,7 @@ pub struct ProcsBox {
 
 impl ProcsBox {
     pub fn new(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(hub, cx);
         let mut this = Self {
             rows: SmallVec::new(),
             title: tr(cx, KEY_TITLE),
@@ -137,6 +138,7 @@ impl ProcsBox {
             hub: hub.clone(),
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
+                cx.observe_global::<OverviewPause>(Self::on_pause),
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
@@ -177,10 +179,21 @@ impl ProcsBox {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev.mask.contains(ComponentMask::PROCESSES) {
+        if !box_mask(ev.mask, cx).contains(ComponentMask::PROCESSES) {
             return;
         }
-        let snap = Arc::clone(hub.read(cx).current());
+        let snap = box_snapshot(&hub, cx);
+        if self.sync_rows(&snap.processes, false) {
+            #[cfg(any(test, feature = "test-hooks"))]
+            self.notify_count.set(self.notify_count.get() + 1);
+            cx.notify();
+        }
+    }
+
+    /// The page was held at a time or made live. The device history keeps no processes, so
+    /// while paused the box has no rows.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let snap = box_snapshot(&self.hub, cx);
         if self.sync_rows(&snap.processes, false) {
             #[cfg(any(test, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
@@ -239,7 +252,7 @@ impl ProcsBox {
         self.strings_version = version;
         self.title = tr(cx, KEY_TITLE);
         self.header = [tr(cx, KEY_NAME), tr(cx, KEY_PID), tr(cx, KEY_CPU)];
-        let snap = Arc::clone(self.hub.read(cx).current());
+        let snap = box_snapshot(&self.hub, cx);
         self.sync_rows(&snap.processes, true);
         cx.notify();
     }

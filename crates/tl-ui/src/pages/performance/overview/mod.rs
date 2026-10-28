@@ -22,7 +22,7 @@
 //!
 //! [`timeline`] is the 24-hour timeline box (UI-PRF-057). A click on it can hold the page at a
 //! time; while held, the page asks for every range at that time and its header shows "Back to
-//! live".
+//! live", and every box reads [`picked`]'s snapshot at that time instead of the live one.
 //!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
@@ -39,6 +39,7 @@ pub mod layout;
 pub mod mem_box;
 pub mod net_box;
 pub mod parts;
+pub mod picked;
 pub mod procs_box;
 pub mod range;
 pub mod splitter;
@@ -644,8 +645,7 @@ impl OverviewPage {
     fn sync_range(&mut self, cx: &mut Context<Self>) {
         let snap = std::sync::Arc::clone(self.hub.read(cx).current());
         let range = self.range;
-        let now = jiff::Timestamp::now().as_nanosecond();
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        let now = timeline::now_realtime_ns();
         let axis_start = range::axis_start(
             range,
             &snap.device_history,
@@ -655,17 +655,30 @@ impl OverviewPage {
         );
         let id = |device, metric| SeriesId { device, metric };
         let idx = |identity| snap.devices.find(&identity).map(|e| e.idx);
+        // Held at a time, the figures wait for the history's answer and never read live series.
+        let waiting = self.paused.is_some()
+            && !snap
+                .device_history
+                .request
+                .is_some_and(|r| r.end_realtime_ns.is_some());
+        let figures = |ids: &[SeriesId]| {
+            if waiting {
+                None
+            } else {
+                range::figures(&snap, ids, range)
+            }
+        };
         let words = &self.figures_words;
         let text = |figures| RangeText {
             figures,
             axis_start: axis_start.clone(),
         };
         let pct = |f| range::figures_text(words, f, range::whole_percent);
-        let cpu = idx(DeviceIdentity::CpuPackage)
-            .and_then(|d| range::figures(&snap, &[id(d, MetricId::CPU_TOTAL)], range));
+        let cpu =
+            idx(DeviceIdentity::CpuPackage).and_then(|d| figures(&[id(d, MetricId::CPU_TOTAL)]));
         let total = snap.system.memory.total.max(1) as f32;
         let mem = idx(DeviceIdentity::Memory)
-            .and_then(|d| range::figures(&snap, &[id(d, MetricId::MEM_USED)], range))
+            .and_then(|d| figures(&[id(d, MetricId::MEM_USED)]))
             .map(|f| range::Figures {
                 min: f.min / total * 100.,
                 avg: f.avg / total * 100.,
@@ -674,19 +687,19 @@ impl OverviewPage {
         let gpu = self
             .gpu_cards
             .first()
-            .and_then(|c| range::figures(&snap, &[id(c.1, MetricId::GPU_UTIL)], range));
+            .and_then(|c| figures(&[id(c.1, MetricId::GPU_UTIL)]));
         let disks: SmallVec<[SeriesId; 8]> = self
             .disk_cards
             .iter()
             .map(|c| id(c.1, MetricId::DISK_ACTIVE))
             .collect();
-        let disk = range::busiest(&snap, &disks, range);
+        let disk = if waiting {
+            None
+        } else {
+            range::busiest(&snap, &disks, range)
+        };
         let net = net_box::aggregate(&snap.devices);
-        let net = range::figures(
-            &snap,
-            &[id(net, MetricId::NET_RX), id(net, MetricId::NET_TX)],
-            range,
-        );
+        let net = figures(&[id(net, MetricId::NET_RX), id(net, MetricId::NET_TX)]);
         let unit = NetFormat::of(cx);
         let net = range::figures_text(words, net, |v, out| {
             format_value(ValueFormat::RateNetwork, v, unit, out);
