@@ -1,15 +1,15 @@
 //! The one fit rule of every Overview box body (UI-PRF-017, UI-PRF-059, tasklens-crw.100).
 //!
 //! [`whole_rows`] is a column that draws a row only when the row fits whole, top first. A row
-//! that would end below the column, or below the clip of a box part, is left out with every row
-//! after it, so nothing draws in the time-axis band. [`fit_text`] is a value that shortens itself
+//! that would end below the column is left out with every row after it, so nothing draws in the
+//! time-axis band. [`fit_text`] is a value that shortens itself
 //! by dropping decimals until it fits its width, and draws nothing when even the form without
 //! decimals does not fit, so a drawn value never loses its unit.
 
 use gpui_kit::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, ParentElement, Pixels, Refineable as _, ShapedLine, SharedString, Style,
-    StyleRefinement, Styled, TextAlign, Window, point, px, size,
+    AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Refineable as _, ShapedLine,
+    SharedString, Style, StyleRefinement, Styled, TextAlign, Window, point, px, size,
 };
 use smallvec::SmallVec;
 
@@ -17,7 +17,8 @@ use smallvec::SmallVec;
 const EPS: f32 = 0.01;
 
 /// A flex column of rows that draws only the rows that fit whole, top first. Style it like a
-/// `div` (it starts as a flex column); the rows are its children.
+/// `div` (it starts as a flex column); the rows are its children. Each child is checked on its
+/// own, so an absolute overlay that fits (a size probe) still draws after a row left out.
 pub struct WholeRows {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 8]>,
@@ -55,8 +56,8 @@ impl IntoElement for WholeRows {
 
 impl Element for WholeRows {
     type RequestLayoutState = SmallVec<[LayoutId; 8]>;
-    /// How many rows, from the top, fit whole.
-    type PrepaintState = usize;
+    /// Whether each child fits whole.
+    type PrepaintState = SmallVec<[bool; 8]>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -93,17 +94,19 @@ impl Element for WholeRows {
         ids: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) -> usize {
-        // A row ends inside the column and inside the clip of the box part around it.
-        let limit = bounds.bottom().min(window.content_mask().bounds.bottom()) + px(EPS);
-        let shown = ids
+    ) -> Self::PrepaintState {
+        // Only the column counts, not the window clip: a box scrolled partly out of the page
+        // keeps its rows.
+        let limit = bounds.bottom() + px(EPS);
+        // Rows stack down the column, so once a row ends below it every later row does too.
+        let shown: SmallVec<[bool; 8]> = ids
             .iter()
-            .take_while(|id| window.layout_bounds(**id).bottom() <= limit)
-            .count();
+            .map(|id| window.layout_bounds(*id).bottom() <= limit)
+            .collect();
         let mut style = Style::default();
         style.refine(&self.style);
         window.with_text_style(style.text_style().cloned(), |window| {
-            for child in &mut self.children[..shown] {
+            for (child, _) in self.children.iter_mut().zip(&shown).filter(|(_, s)| **s) {
                 child.prepaint(window, cx);
             }
         });
@@ -116,14 +119,19 @@ impl Element for WholeRows {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        shown: &mut usize,
+        shown: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
         let mut style = Style::default();
         style.refine(&self.style);
         window.with_text_style(style.text_style().cloned(), |window| {
-            for child in &mut self.children[..*shown] {
+            for (child, _) in self
+                .children
+                .iter_mut()
+                .zip(shown.iter())
+                .filter(|(_, s)| **s)
+            {
                 child.paint(window, cx);
             }
         });
@@ -290,11 +298,22 @@ impl Element for FitText {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let (line, line_h) = shape(self.text.clone(), window);
-        let mut style = Style::default();
-        style.size = size(line.width().into(), line_h.into());
+        let mut style = Style {
+            flex_shrink: 1.,
+            ..Style::default()
+        };
         style.min_size.width = px(0.).into();
-        style.flex_shrink = 1.;
-        (window.request_layout(style, [], cx), (line, line_h))
+        // The text's width, except under a min-content constraint: a value never keeps its
+        // parents wider than their row, it shrinks and drops decimals instead.
+        let text_w = line.width();
+        let id = window.request_measured_layout(style, move |known, space, _, _| {
+            let w = known.width.unwrap_or(match space.width {
+                AvailableSpace::MinContent => px(0.),
+                _ => text_w,
+            });
+            size(w, line_h)
+        });
+        (id, (line, line_h))
     }
 
     fn prepaint(

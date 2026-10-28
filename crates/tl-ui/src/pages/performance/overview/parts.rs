@@ -1369,8 +1369,8 @@ impl ListFit {
 /// Lays out `n` cells of a list of `total` items in `body`, as `arrange` says, showing only
 /// whole cells (UI-PRF-059). When `total > n`, or when some cells do not fit at `min`, the
 /// "+n more" line takes `more_h` from the body first. Cells that do not fit whole are left out
-/// and counted in "+n more", so the grid never scrolls. Before the first paint the body is
-/// empty and every cell shows.
+/// and counted in "+n more", so the grid never scrolls. Before the first paint the body has no
+/// size at all and every cell shows; a painted body 0 px high shows none.
 pub fn list_fit(
     arrange: Arrange,
     n: usize,
@@ -1383,7 +1383,8 @@ pub fn list_fit(
     let less = |by: Pixels| size(body.width, (body.height - by).max(px(0.)));
     let more = if total > n { more_h } else { px(0.) };
     let grid = arrange_grid(arrange, n, less(more), min, gap, px(0.));
-    if body.height == px(0.) || (!grid.scrolls && !grid.scrolls_x) {
+    let unpainted = body.width == px(0.) && body.height == px(0.);
+    if unpainted || (!grid.scrolls && !grid.scrolls_x) {
         return ListFit { grid, shown: n };
     }
     let area = less(more_h);

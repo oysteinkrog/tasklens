@@ -5991,7 +5991,8 @@ mod page {
     }
 
     /// crw.71: at 1280 x 800 the Net box's Total values stay on one row inside the box, in
-    /// `stacked` and in the narrower `columns` mode.
+    /// `stacked` and in the narrower `columns` mode. Narrower pages may leave a Total row out
+    /// when it does not fit whole (crw.100).
     #[gpui_kit::test]
     fn overview_net_totals_stay_on_one_line(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::net_box::{
@@ -6039,7 +6040,15 @@ mod page {
                 draw(r.vcx);
                 let frame = r.bounds_of(NET_BOX_ID.into());
                 for id in [DOWN_TOTAL_ID, UP_TOTAL_ID] {
-                    let total = r.bounds_of(id.into());
+                    // A narrow page stacks the boxes at their kind minimum, where a Total row
+                    // that does not fit whole is left out (UI-PRF-017, crw.100).
+                    let Some(total) = r.vcx.debug_bounds(id) else {
+                        assert!(
+                            width < 720. || id == UP_TOTAL_ID,
+                            "{mode} {width} {id} drawn"
+                        );
+                        continue;
+                    };
                     // One t_sm row; a wrapped value is two rows tall.
                     assert!(total.size.height < px(20.), "{mode} {width} {id} {total:?}");
                     assert!(
@@ -8738,7 +8747,7 @@ mod sweep {
     use tl_ui::pages::performance::overview::cpu_box::{CORE_CHARTS_ID, CpuBox};
     use tl_ui::pages::performance::overview::disk_box::{self, DiskBox};
     use tl_ui::pages::performance::overview::fit::{
-        FitTextPaint, round_decimals, shorter_forms, take_fit_texts,
+        FitTextPaint, fit_text, round_decimals, shorter_forms, take_fit_texts,
     };
     use tl_ui::pages::performance::overview::gpu_box::{self, GpuBox};
     use tl_ui::pages::performance::overview::layout::BoxKind;
@@ -8771,6 +8780,49 @@ mod sweep {
             ["4.0 GiB / 15.9 GiB", "4 GiB / 16 GiB"]
         );
         assert!(shorter_forms("55%").is_empty());
+    }
+
+    /// A value `fit_text` in a flex row `w` px wide.
+    struct Probe(f32);
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().w(px(self.0)).child(fit_text("12.5 GiB"))
+        }
+    }
+
+    /// The text `fit_text` draws in a row `w` px wide, and its width.
+    fn probe(cx: &mut TestAppContext, w: f32) -> Option<(SharedString, Pixels)> {
+        let _ = take_fit_texts();
+        let (_view, vcx) = cx.add_window_view(move |_, _| Probe(w));
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(600.), px(100.)));
+        draw(vcx);
+        take_fit_texts()
+            .last()
+            .map(|t| (t.text.clone(), t.bounds.size.width))
+    }
+
+    /// A value draws whole when it fits, without decimals when only that fits, and not at all
+    /// when even that does not fit (crw.100).
+    #[gpui_kit::test]
+    fn overview_fit_text_drops_decimals(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let (whole, w) = probe(cx, 300.).expect("drawn");
+        assert_eq!(whole, "12.5 GiB");
+        let (short, short_w) = probe(cx, f32::from(w) - 1.).expect("drawn shorter");
+        assert_eq!(short, "13 GiB");
+        assert!(short_w < w);
+        assert_eq!(probe(cx, f32::from(short_w) - 1.), None);
     }
 
     /// One box of `w × h` at the window's top left.
@@ -8998,6 +9050,8 @@ mod sweep {
                         mem_box::spark_id(i),
                         mem_box::value_id(i),
                         mem_box::meter_id(i),
+                        mem_box::cell_id(i),
+                        mem_box::cell_head_id(i, "percent"),
                     ]);
                 }
             }
@@ -9006,6 +9060,7 @@ mod sweep {
                     gpu_box::rows_id(0),
                     gpu_box::chart_id(0),
                     gpu_box::vram_id(0),
+                    gpu_box::grid_id(0),
                 ]);
                 for key in ["gpu", "enc", "dec"] {
                     ids.push(gpu_box::engine_row_id(0, key));
@@ -9017,6 +9072,7 @@ mod sweep {
                     let key = DeviceKey(Arc::from(format!("disk{n}")));
                     ids.push(format!("{}{}", disk_box::DISK_ROW_ID_PREFIX, key.0));
                     ids.push(disk_box::cell_id(&key));
+                    ids.push(disk_box::head_id(&key, "active"));
                     for which in ["read", "write", "read-spark", "write-spark"] {
                         ids.push(disk_box::io_row_id(&key, which));
                     }
@@ -9043,6 +9099,30 @@ mod sweep {
             BoxKind::Cpu => &[CORE_CHARTS_ID, CORE_ROWS_SCROLL_ID],
             BoxKind::Memory => &[CHARTS_GRID_ID],
             _ => &[],
+        }
+    }
+
+    /// The failures by box, mode and kind of check: the first one and how many there were.
+    #[derive(Default)]
+    struct Failures(std::collections::BTreeMap<String, (String, usize)>);
+
+    impl Failures {
+        fn push(&mut self, what: &str, check: &str, detail: String) {
+            let mode = what.split(" at ").next().unwrap_or(what);
+            let e = self
+                .0
+                .entry(format!("{mode}: {check}"))
+                .or_insert_with(|| (format!("{what}: {detail}"), 0));
+            e.1 += 1;
+        }
+    }
+
+    impl std::fmt::Display for Failures {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            for (key, (first, n)) in &self.0 {
+                writeln!(f, "{key}: {n} times, first {first}")?;
+            }
+            Ok(())
         }
     }
 
@@ -9075,7 +9155,7 @@ mod sweep {
     }
 
     fn draw(cx: &mut VisualTestContext) {
-        for _ in 0..2 {
+        for _ in 0..3 {
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);
@@ -9132,7 +9212,9 @@ mod sweep {
             TlSettings::init(cx);
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let mut failures: Vec<String> = Vec::new();
+        let mut failures = Failures::default();
+        // How many values each box mode drew over the sweep.
+        let mut drawn_values = std::collections::BTreeMap::<String, usize>::new();
         for kind in BoxKind::ALL {
             let hub = hub.clone();
             let (host, vcx) = cx.add_window_view(move |_, cx| {
@@ -9183,12 +9265,19 @@ mod sweep {
                                 cx.notify();
                             })
                         });
-                        let _ = take_fit_texts();
                         draw(vcx);
+                        // Only the settled frame counts: the first frame after a resize may
+                        // still use the old size class. A refresh paints every view again, so
+                        // each value is logged once.
+                        let _ = take_fit_texts();
+                        vcx.update(|window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear(cx);
+                        });
                         let texts = take_fit_texts();
                         let what = format!("{} {} at {w} x {h}", kind.key(), mode.id);
                         let Some(frame) = vcx.debug_bounds(frame_id) else {
-                            failures.push(format!("{what}: no box"));
+                            failures.push(&what, "no box", String::new());
                             continue;
                         };
                         // Inside the 1 px border, above the time axis when the box draws one.
@@ -9205,7 +9294,12 @@ mod sweep {
                             .iter()
                             .filter_map(|id| vcx.debug_bounds(id))
                             .collect();
-                        let in_area = |b: Bounds<Pixels>| areas.iter().any(|a| a.intersects(&b));
+                        // A part in the content of a part that scrolls: below its top edge.
+                        let in_area = |b: Bounds<Pixels>| {
+                            areas.iter().any(|a| {
+                                b.left() >= a.left() - px(0.01) && b.top() >= a.top() - px(0.01)
+                            })
+                        };
                         for id in &part_ids {
                             let Some(b) = vcx.debug_bounds(id) else {
                                 continue;
@@ -9214,21 +9308,23 @@ mod sweep {
                                 continue;
                             }
                             if !inside(inner, b) {
-                                failures.push(format!("{what}: {id} at {b:?} outside {inner:?}"));
+                                failures.push(&what, id, format!("{b:?} outside {inner:?}"));
                             }
                         }
                         for area in &areas {
                             if area.size.height > px(0.) && !inside(inner, *area) {
-                                failures.push(format!(
-                                    "{what}: scroll area {area:?} outside {inner:?}"
-                                ));
+                                failures.push(
+                                    &what,
+                                    "scroll area",
+                                    format!("{area:?} outside {inner:?}"),
+                                );
                             }
                         }
+                        *drawn_values
+                            .entry(what.split(" at ").next().unwrap_or("").to_owned())
+                            .or_default() += texts.len();
                         for t in &texts {
                             check_text(&what, t, inner, title, &areas, &mut failures);
-                        }
-                        if failures.len() > 40 {
-                            panic!("{}", failures.join("\n"));
                         }
                     }
                     h -= 2.;
@@ -9236,7 +9332,11 @@ mod sweep {
             }
             drop(driver);
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(failures.0.is_empty(), "{failures}");
+        // The value checks ran: every box title draws its value (empty for Net and the boxes
+        // without one), so every mode logs values.
+        assert_eq!(drawn_values.len(), 20, "{drawn_values:?}");
+        assert!(drawn_values.values().all(|n| *n > 0), "{drawn_values:?}");
     }
 
     /// One drawn value: it keeps its unit, and it lies inside the box body unless it is in the
@@ -9247,19 +9347,31 @@ mod sweep {
         inner: Bounds<Pixels>,
         title: Option<Bounds<Pixels>>,
         areas: &[Bounds<Pixels>],
-        failures: &mut Vec<String>,
+        failures: &mut Failures,
     ) {
         let e = px(0.01);
+        // Scrolled out of view: nothing of it shows.
+        if !t.bounds.intersects(&t.mask) {
+            return;
+        }
         if skeleton(&t.text) != skeleton(&t.whole) {
-            failures.push(format!("{what}: {:?} drawn for {:?}", t.text, t.whole));
+            failures.push(
+                what,
+                "unit",
+                format!("{:?} drawn for {:?}", t.text, t.whole),
+            );
         }
         let b = t.bounds;
         // Across, a value is never cut by any clip: it keeps its unit.
         if b.left() < t.mask.left() - e || b.right() > t.mask.right() + e {
-            failures.push(format!("{what}: {:?} at {b:?} cut by {:?}", t.text, t.mask));
+            failures.push(
+                what,
+                "cut",
+                format!("{:?} at {b:?} by {:?}", t.text, t.mask),
+            );
         }
         if b.left() < inner.left() - e || b.right() > inner.right() + e {
-            failures.push(format!("{what}: {:?} at {b:?} past the box edge", t.text));
+            failures.push(what, "edge", format!("{:?} at {b:?} in {inner:?}", t.text));
         }
         if title.is_some_and(|r| b.top() < r.bottom()) {
             return;
@@ -9269,7 +9381,11 @@ mod sweep {
             return;
         }
         if !inside(inner, b) {
-            failures.push(format!("{what}: {:?} at {b:?} outside {inner:?}", t.text));
+            failures.push(
+                what,
+                "text",
+                format!("{:?} at {b:?} outside {inner:?}", t.text),
+            );
         }
     }
 }

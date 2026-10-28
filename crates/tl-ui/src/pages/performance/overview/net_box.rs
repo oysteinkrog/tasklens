@@ -1046,10 +1046,14 @@ fn stat_row(
 ) -> AnyElement {
     // Each text style goes in first: assigning it later would drop the nowrap, the ellipsis and
     // the color, and a long value would wrap onto the next row.
+    // The label gives way first, so the value keeps its width as long as it can.
     let mut label_el = div();
     *label_el.text_style() = t_xs(m);
     let label_el = label_el
-        .flex_none()
+        .min_w_0()
+        .flex_shrink(LABEL_SHRINK)
+        .overflow_hidden()
+        .text_ellipsis()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
         .child(label.clone());
@@ -1077,6 +1081,10 @@ fn stat_row(
         .child(value_el)
         .into_any_element()
 }
+
+/// The flex shrink of a stat row label: large, so the label shrinks to nothing before the value
+/// shrinks. A factor below 1 would not work: flex then removes only that part of the overflow.
+const LABEL_SHRINK: f32 = 1000.;
 
 /// One direction: "Download 1.2 Mbps", its chart, then the Peak and Total rows.
 struct Column<'a> {
@@ -1114,6 +1122,7 @@ fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
 fn half(label: &SharedString, value: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     div()
         .flex()
+        .flex_col()
         .flex_1()
         .min_w_0()
         .child(stat_row(None, label, value, m, theme))
@@ -1278,11 +1287,13 @@ impl NetBox {
             .flex_col()
             .size_full()
             .gap(m.sp[5])
-            // Clipped, so a box too low for both parts never draws over its time axis.
+            // Clipped, so a box too low for both parts never draws over its time axis. It
+            // gives way when the body is lower than its share.
             .child(
                 div()
                     .flex()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_h_0()
                     .w_full()
                     .h(relative(share))
                     .overflow_hidden()
@@ -1354,7 +1365,8 @@ impl NetBox {
             .child(
                 div()
                     .flex()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_w_0()
                     .h_full()
                     .w(relative(share))
                     .child(down),
@@ -1434,22 +1446,16 @@ impl NetBox {
             m.sp[2],
             GRID_ID,
         );
-        let mut body = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .overflow_hidden()
-            .gap(m.sp[2])
-            .child(
-                div()
-                    .debug_selector(|| GRID_ID.into())
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(cells),
-            );
+        // A "+n more" line that does not fit whole is left out (UI-PRF-017).
+        let mut body = whole_rows().relative().size_full().gap(m.sp[2]).child(
+            div()
+                .debug_selector(|| GRID_ID.into())
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .child(cells),
+        );
         let more = self.more_text(fit.shown, cx);
         if !more.is_empty() {
             body = body.child(more_line(more, m, theme));

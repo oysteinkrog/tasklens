@@ -1189,7 +1189,15 @@ impl MemBox {
             .flex_row()
             .size_full()
             .gap(m.sp[5])
-            .child(div().flex_none().w(relative(share)).h_full().child(text))
+            // The text part gives way when the body is narrower than its share.
+            .child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .w(relative(share))
+                    .h_full()
+                    .child(text),
+            )
             .child(div().flex_1().min_w_0().h_full().child(sparks))
             .child(self.spark_split.probe(Self::spark_inner_split, cx))
             .child(self.spark_split.gap(
@@ -1212,10 +1220,13 @@ impl MemBox {
     ) -> AnyElement {
         let share = self.split(m);
         let side = self.arrange == Arrange::Horizontal;
+        // The chart gives way when the body is lower or narrower than its share.
         let chart = div()
             .debug_selector(|| MEM_USED_CHART_ID.into())
             .relative()
-            .flex_none()
+            .flex_shrink(1.)
+            .min_h_0()
+            .min_w_0()
             .child(
                 self.used_chart
                     .clone()

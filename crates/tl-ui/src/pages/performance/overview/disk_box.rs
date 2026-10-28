@@ -1012,7 +1012,6 @@ fn cell_head(
             .whitespace_nowrap()
             .text_color(color)
             .child(fit_text(text))
-            .flex_shrink(NUMBER_SHRINK)
     };
     let mut name = div();
     *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
@@ -1026,8 +1025,8 @@ fn cell_head(
         .text_ellipsis()
         .text_color(theme.text_primary)
         .child(r.name.clone())
-        .flex_shrink(1.)
         .flex_1()
+        .flex_shrink(NAME_SHRINK)
         .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
     let active = part(
         head_id(key, "active"),
@@ -1104,8 +1103,10 @@ fn chart_cell(
         .into_any_element()
 }
 
-/// The flex shrink of a cell header number: small, so the name shrinks to its minimum first.
-const NUMBER_SHRINK: f32 = 0.001;
+/// The flex shrink of a cell header name: large, so the name shrinks to its minimum before a
+/// number shrinks. A number factor below 1 would not work: flex then removes only that part of
+/// the overflow.
+const NAME_SHRINK: f32 = 1000.;
 
 /// The bit mask of the `n` busiest of the first `shown` rows (unknown lowest, ties to the
 /// earlier row).
@@ -1140,7 +1141,7 @@ impl DiskBox {
         let share = self.split(m);
 
         let column = || whole_rows().h_full().gap(m.sp[2]);
-        let mut left = column().flex_none().w(relative(share));
+        let mut left = column().flex_shrink(1.).min_w_0().w(relative(share));
         let mut right = column().flex_1().min_w_0();
         for (i, r) in self.rows.iter().take(shown.shown).enumerate() {
             left = left.child(header(r, m, theme));
@@ -1231,22 +1232,16 @@ impl DiskBox {
             m.sp[2],
             GRID_ID,
         );
-        let mut body = div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .overflow_hidden()
-            .gap(m.sp[2])
-            .child(
-                div()
-                    .debug_selector(|| GRID_ID.into())
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(cells),
-            );
+        // A "+n more" line that does not fit whole is left out (UI-PRF-017).
+        let mut body = whole_rows().relative().size_full().gap(m.sp[2]).child(
+            div()
+                .debug_selector(|| GRID_ID.into())
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_hidden()
+                .child(cells),
+        );
         let more = self.shown_more_text();
         if !more.is_empty() {
             body = body.child(more_line(more, m, theme));
