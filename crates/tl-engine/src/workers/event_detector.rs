@@ -1,14 +1,14 @@
 //! The event detector of the `MetricHistory` worker (ADR-017, UI-PRF-057, D-030).
 //!
 //! [`EventDetector::observe`] runs once per second on a [`Reading`] of the live values. Each rule
-//! is tracked per device: an event starts once its rule has held for its window and ends once
-//! the metric has been under the threshold for [`QUIET_S`]. The stored start is the first second
-//! the rule was true, the duration runs to the first second under the threshold, the peak is the
-//! highest value while over, and the process is the one most often on top of the rule's resource
-//! while a process sweep ran. Ended events come back from `observe`; the worker queues them with
-//! `MetricHistory::push_event`. A value whose source is stale (ADR-008) is missing. Seconds
-//! without a rule's input do not count toward its quiet period, and a rule without its input for
-//! more than 3 s ends as at a gap, at its last second over.
+//! is tracked per device and counts only fresh seconds: a second whose input is missing, or whose
+//! source is stale (ADR-008), is neither over nor under. An event starts once its rule has been
+//! over for its window in fresh seconds, and ends after [`QUIET_S`] fresh seconds under. More
+//! than [`GAP_S`] seconds without a fresh one reset both counts and end a running event at its
+//! last fresh second over. The stored start is the first second of the window, the duration runs
+//! to the first of the seconds under, the peak is the highest value while over, and the process
+//! is the one most often on top of the rule's resource while a process sweep ran. Ended events
+//! come back from `observe`; the worker queues them with `MetricHistory::push_event`.
 //!
 //! Suspend spans come from the Logind `PrepareForSleep` signal ([`EventDetector::sleep`]) and,
 //! when the signal was missed, from the ADR-008 clock check ([`EventDetector::check_clock`]).
@@ -53,12 +53,12 @@ pub const HEAT_FOR_S: u64 = 30;
 pub const FULL_LOAD_PCT: f32 = 95.;
 /// How long full load must hold, s.
 pub const FULL_LOAD_FOR_S: u64 = 300;
-/// An event ends once its metric has been under the threshold this long, s.
+/// An event ends after this many fresh seconds under the threshold.
 pub const QUIET_S: u64 = 60;
-/// A reading more than this after the last one follows a gap (suspend, a sampling stop). The
-/// gap ends every started event at its last second over the threshold, and drops every window
-/// that had not passed yet.
-pub const GAP_NS: u64 = 3 * NS;
+/// More than this many seconds in a row without a fresh value of a rule's input is a gap
+/// (suspend, a sampling stop, a stale source). The gap ends the rule's running event at its last
+/// fresh second over, and drops a window that had not passed yet.
+pub const GAP_S: u64 = 3;
 /// A source's values count while its last update is at most max(3 × period, 1.5 s) old, the
 /// ADR-008 stale threshold.
 pub const STALE_PERIODS: u64 = 3;
@@ -317,7 +317,7 @@ impl Reading {
     }
 
     /// True when the input of `kind` on `key` is in this reading: valid, and its source not
-    /// stale. A rule without its input is neither over nor under.
+    /// stale.
     fn has_input(&self, kind: EventKind, key: &str) -> bool {
         let gpu = || self.gpus.iter().find(|g| &*g.key == key);
         match (kind, key) {
@@ -359,34 +359,35 @@ struct Over {
     resource: Resource,
 }
 
-/// How long a rule must hold before its event starts, ns.
-fn window_ns(kind: EventKind) -> u64 {
-    let s = match kind {
+/// How many fresh seconds over a rule needs before its event starts.
+fn window_s(kind: EventKind) -> u64 {
+    match kind {
         EventKind::MemoryPressure => PRESSURE_FOR_S,
         EventKind::SwapStorm => SWAP_STORM_FOR_S,
         EventKind::Heat => HEAT_FOR_S,
         EventKind::FullLoad => FULL_LOAD_FOR_S,
         _ => 0,
-    };
-    s * NS
+    }
 }
 
-/// One rule on one device, from its first second over the threshold.
+/// One rule on one device, from the first fresh second over of its window.
 struct Track {
     kind: EventKind,
     key: Arc<str>,
     resource: Resource,
     since: TimeNs,
+    /// The last fresh second over.
     last_over: TimeNs,
-    /// The last reading with the rule's input, over or under.
-    last_seen: TimeNs,
-    /// The first reading under the threshold after `last_over`.
-    under_since: Option<TimeNs>,
-    /// The time since `under_since` without the rule's input. It does not count toward
-    /// [`QUIET_S`].
-    missing_ns: u64,
+    /// The CLOCK_BOOTTIME second of the last fresh reading, over or under.
+    last_fresh_s: u64,
+    /// Fresh seconds over since `since`. The window has passed once it reaches [`window_s`].
+    over_s: u64,
     /// The window has passed.
     started: bool,
+    /// The first fresh second under after `last_over`.
+    under_since: Option<TimeNs>,
+    /// Fresh seconds under since `under_since`.
+    under_s: u64,
     /// The highest value while over, NaN while none was valid.
     peak: f32,
     /// Each top process seen while over and how many readings it was on top, first seen first.
@@ -394,6 +395,40 @@ struct Track {
 }
 
 impl Track {
+    fn new(o: &Over, now: TimeNs) -> Self {
+        Track {
+            kind: o.kind,
+            key: Arc::clone(&o.key),
+            resource: o.resource,
+            since: now,
+            last_over: now,
+            last_fresh_s: now / NS,
+            over_s: 0,
+            started: false,
+            under_since: None,
+            under_s: 0,
+            peak: f32::NAN,
+            tops: SmallVec::new(),
+        }
+    }
+
+    /// A fresh second over: clears the quiet count and moves the window on.
+    fn add_over(&mut self, o: &Over, now: TimeNs, top: &TopProcesses) {
+        self.last_over = now;
+        self.last_fresh_s = now / NS;
+        self.under_since = None;
+        self.under_s = 0;
+        self.over_s += 1;
+        self.started |= self.over_s >= window_s(self.kind);
+        self.peak = self.peak.max(o.value);
+        if let Some(name) = top.get(self.resource) {
+            match self.tops.iter_mut().find(|(n, _)| n == name) {
+                Some((_, count)) => *count += 1,
+                None => self.tops.push((Arc::clone(name), 1)),
+            }
+        }
+    }
+
     fn event(&self, end: TimeNs) -> HistEvent {
         let mut best: Option<&(Arc<str>, u32)> = None;
         for t in &self.tops {
@@ -448,96 +483,73 @@ impl EventDetector {
     /// One evaluation. Returns the events that ended, oldest start first.
     pub fn observe(&mut self, r: &Reading) -> Vec<HistEvent> {
         let now = r.t_ns;
+        let sec = now / NS;
         let mut ended = Vec::new();
-        if let Some(last) = self.last_ns
-            && (now < last || now - last > GAP_NS)
-        {
+        if self.last_ns.is_some_and(|last| now < last) {
             self.end_all(&mut ended, None);
         }
-        let step = self.last_ns.map_or(0, |last| now.saturating_sub(last));
         self.last_ns = Some(now);
 
-        let mut over = SmallVec::new();
+        let mut over: SmallVec<[Over; 8]> = SmallVec::new();
         r.over(&mut over);
-        for o in &over {
-            let i = match self
-                .tracks
-                .iter()
-                .position(|t| t.kind == o.kind && t.key == o.key)
-            {
-                Some(i) => i,
-                None => {
-                    self.tracks.push(Track {
-                        kind: o.kind,
-                        key: Arc::clone(&o.key),
-                        resource: o.resource,
-                        since: now,
-                        last_over: now,
-                        last_seen: now,
-                        under_since: None,
-                        missing_ns: 0,
-                        started: false,
-                        peak: f32::NAN,
-                        tops: SmallVec::new(),
-                    });
-                    self.tracks.len() - 1
-                }
-            };
-            let t = &mut self.tracks[i];
-            t.last_over = now;
-            t.last_seen = now;
-            t.under_since = None;
-            t.missing_ns = 0;
-            t.peak = t.peak.max(o.value);
-            if let Some(name) = r.top.get(t.resource) {
-                match t.tops.iter_mut().find(|(n, _)| n == name) {
-                    Some((_, count)) => *count += 1,
-                    None => t.tops.push((Arc::clone(name), 1)),
-                }
-            }
-            if now - t.since >= window_ns(t.kind) {
-                t.started = true;
-            }
-        }
         self.tracks.retain_mut(|t| {
-            if t.last_over == now {
-                return true;
-            }
-            // A stale or missing input is not a second under: its time does not count toward the
-            // quiet period. After more than 3 s without it the track ends as at a gap.
-            if !r.has_input(t.kind, &t.key) {
-                if now.saturating_sub(t.last_seen) <= GAP_NS {
-                    if t.under_since.is_some() {
-                        t.missing_ns += step;
-                    }
-                    return true;
-                }
+            let o = over.iter().find(|o| o.kind == t.kind && o.key == t.key);
+            let fresh = o.is_some() || r.has_input(t.kind, &t.key);
+            // The seconds since the last fresh one without a fresh value, this one included when
+            // it has none. A missing second is neither over nor under.
+            let missing = sec
+                .saturating_sub(t.last_fresh_s)
+                .saturating_sub(u64::from(fresh));
+            if missing > GAP_S {
                 if t.started {
-                    ended.push(t.event(t.under_since.unwrap_or(t.last_over)));
+                    ended.push(t.event(t.last_over));
                 }
                 return false;
             }
-            t.last_seen = now;
+            if !fresh {
+                return true;
+            }
+            if let Some(o) = o {
+                t.add_over(o, now, &r.top);
+                return true;
+            }
+            t.last_fresh_s = sec;
             if !t.started {
                 return false;
             }
             let under = *t.under_since.get_or_insert(now);
-            if (now - under).saturating_sub(t.missing_ns) >= QUIET_S * NS {
+            t.under_s += 1;
+            if t.under_s >= QUIET_S {
                 ended.push(t.event(under));
                 return false;
             }
             true
         });
+        for o in &over {
+            if !self
+                .tracks
+                .iter()
+                .any(|t| t.kind == o.kind && t.key == o.key)
+            {
+                let mut t = Track::new(o, now);
+                t.add_over(o, now, &r.top);
+                self.tracks.push(t);
+            }
+        }
         ended.sort_by_key(|e| e.start_t_ns);
         ended
     }
 
-    /// Ends every started event and drops the rest. A started event ends at its first second
-    /// under the threshold, else at `now`, else at its last second over.
+    /// Ends every started event and drops the rest. With `now` (shutdown) a started event ends
+    /// at its first second under, else at `now`; without it (the clock went back) at its last
+    /// second over.
     fn end_all(&mut self, ended: &mut Vec<HistEvent>, now: Option<TimeNs>) {
         for t in self.tracks.drain(..) {
             if t.started {
-                let end = t.under_since.or(now).unwrap_or(t.last_over);
+                let end = match now {
+                    Some(now) => t.under_since.unwrap_or(now),
+                    None => t.last_over,
+                };
                 ended.push(t.event(end));
             }
         }
@@ -929,7 +941,7 @@ mod tests {
         // Heat: CPU at its threshold, and a GPU without a threshold from throttling only.
         let mut d = EventDetector::new();
         let heat = |s: u64| Reading {
-            cpu_temp_c: Some(if s < 30 { 100. } else { 60. }),
+            cpu_temp_c: Some(if s < 29 { 100. } else { 60. }),
             cpu_hot_c: Some(100.),
             gpus: smallvec![GpuReading {
                 key: Arc::from("gpu:a"),
@@ -994,7 +1006,7 @@ mod tests {
         // Full load: 5 min at 95%, process only while a sweep ran.
         let mut d = EventDetector::new();
         let load = |s: u64| Reading {
-            cpu_pct: Some(if s < 300 { 96. } else { 50. }),
+            cpu_pct: Some(if s < 299 { 96. } else { 50. }),
             top: TopProcesses {
                 cpu: (s >= 200).then(|| Arc::from("rustc")),
                 ..TopProcesses::default()
@@ -1138,8 +1150,8 @@ mod tests {
         assert!(d.finish(400 * S).is_empty());
 
         // The samplers stop at 48 s during a memory pressure event. Memory values count up to
-        // 51 s, so the event ends there, 4 s later at 55 s rather than 60 s after: the stale
-        // seconds are not seconds under the threshold.
+        // 51 s. At 55 s, 4 s without a fresh value, the event ends at 51 s, its last fresh second
+        // over: the stale seconds are not seconds under the threshold.
         let mut d = EventDetector::new();
         let at = |s: u64| {
             let ok = s.min(48) * S;
@@ -1167,79 +1179,6 @@ mod tests {
             "the CPU window had not passed"
         );
 
-        // A stall of 3 s or less keeps the event, and its seconds are not under: the event
-        // still ends 60 s after the first second under at 100 s.
-        let mut d = EventDetector::new();
-        let blip = |s: u64| Reading {
-            psi_some_pct: match s {
-                20..23 => None,
-                0..100 => Some(20.),
-                _ => Some(1.),
-            },
-            ..Reading::default()
-        };
-        assert!(run_secs(&mut d, 0, 160, blip).is_empty());
-        let ev = run_secs(&mut d, 160, 161, blip);
-        assert_eq!(ev.len(), 1);
-        assert_eq!((ev[0].start_t_ns, ev[0].duration_ms), (0, 100_000));
-
-        // A GPU heat event from throttling ends at its last fresh second over, 3 s after the
-        // flag goes missing.
-        let mut d = EventDetector::new();
-        let gpu = |s: u64| Reading {
-            gpus: smallvec![GpuReading {
-                key: Arc::from("gpu:a"),
-                util_pct: None,
-                temp_c: None,
-                hot_c: None,
-                throttling: (s < 40).then_some(true),
-            }],
-            ..Reading::default()
-        };
-        assert!(run_secs(&mut d, 0, 43, gpu).is_empty());
-        let ev = run_secs(&mut d, 43, 44, gpu);
-        assert_eq!(ev.len(), 1);
-        assert_eq!((ev[0].kind, ev[0].duration_ms), (EventKind::Heat, 39_000));
-
-        // The same when the GPU and the CPU without hot_c still send a temperature: it is not
-        // their heat input, so both events end 3 s after the flag goes missing, not 60 s.
-        let mut d = EventDetector::new();
-        let temp_only = |s: u64| Reading {
-            cpu_temp_c: Some(99.),
-            cpu_throttling: (s < 40).then_some(true),
-            gpus: smallvec![GpuReading {
-                key: Arc::from("gpu:a"),
-                util_pct: Some(10.),
-                temp_c: Some(99.),
-                hot_c: None,
-                throttling: (s < 40).then_some(true),
-            }],
-            ..Reading::default()
-        };
-        assert!(run_secs(&mut d, 0, 43, temp_only).is_empty());
-        let ev = run_secs(&mut d, 43, 44, temp_only);
-        assert_eq!(ev.len(), 2, "{ev:?}");
-        for (e, key) in ev.iter().zip([CPU_KEY, "gpu:a"]) {
-            assert_eq!(e.device_key, name(key));
-            assert_eq!((e.kind, e.duration_ms), (EventKind::Heat, 39_000));
-        }
-
-        // Missing seconds during the quiet period do not count toward it: under from 40 s with
-        // 2 s and 3 s without the value, so the event ends at 105 s rather than 100 s.
-        let mut d = EventDetector::new();
-        let quiet = |s: u64| Reading {
-            psi_some_pct: match s {
-                0..40 => Some(20.),
-                60..62 | 80..83 => None,
-                _ => Some(1.),
-            },
-            ..Reading::default()
-        };
-        assert!(run_secs(&mut d, 0, 105, quiet).is_empty());
-        let ev = run_secs(&mut d, 105, 106, quiet);
-        assert_eq!(ev.len(), 1);
-        assert_eq!((ev[0].start_t_ns, ev[0].duration_ms), (0, 40_000));
-
         // Each GPU is judged by the worker that sends its values.
         let gpu_id = |uuid| DeviceIdentity::Gpu {
             uuid,
@@ -1247,6 +1186,314 @@ mod tests {
         };
         assert_eq!(gpu_source(&gpu_id([0; 16])), SourceId::GpuDrm);
         assert_eq!(gpu_source(&gpu_id([7; 16])), SourceId::GpuNvidia);
+    }
+
+    /// The rule an `event_detector_fresh_seconds` row drives, one at a time.
+    #[derive(Clone, Copy, Debug)]
+    enum Rule {
+        Pressure,
+        Swap,
+        /// A CPU with `hot_c` 90 °C: the temperature is the input.
+        CpuHeat,
+        /// A GPU without `hot_c`: the throttling flag is the input, the temperature is not.
+        GpuThrottle,
+        CpuLoad,
+        GpuLoad,
+    }
+
+    impl Rule {
+        const ALL: [Rule; 6] = [
+            Rule::Pressure,
+            Rule::Swap,
+            Rule::CpuHeat,
+            Rule::GpuThrottle,
+            Rule::CpuLoad,
+            Rule::GpuLoad,
+        ];
+
+        fn kind_key(self) -> (EventKind, &'static str) {
+            match self {
+                Rule::Pressure => (EventKind::MemoryPressure, MEMORY_KEY),
+                Rule::Swap => (EventKind::SwapStorm, MEMORY_KEY),
+                Rule::CpuHeat => (EventKind::Heat, CPU_KEY),
+                Rule::GpuThrottle => (EventKind::Heat, "gpu:a"),
+                Rule::CpuLoad => (EventKind::FullLoad, CPU_KEY),
+                Rule::GpuLoad => (EventKind::FullLoad, "gpu:a"),
+            }
+        }
+
+        /// The reading of one second: `o` over, `u` under, `-` the input missing or stale.
+        fn reading(self, c: u8) -> Reading {
+            let pick = |over: f32, under: f32| match c {
+                b'o' => Some(over),
+                b'u' => Some(under),
+                _ => None,
+            };
+            let gpu = |util_pct, throttling| GpuReading {
+                key: Arc::from("gpu:a"),
+                util_pct,
+                temp_c: Some(99.),
+                hot_c: None,
+                throttling,
+            };
+            let mut r = Reading::default();
+            match self {
+                Rule::Pressure => r.psi_some_pct = pick(20., 1.),
+                Rule::Swap => r.swap_in_pps = pick(3_000., 10.),
+                Rule::CpuHeat => {
+                    r.cpu_temp_c = pick(95., 60.);
+                    r.cpu_hot_c = Some(90.);
+                }
+                Rule::GpuThrottle => r.gpus = smallvec![gpu(None, pick(1., 0.).map(|v| v > 0.))],
+                Rule::CpuLoad => r.cpu_pct = pick(99., 10.),
+                Rule::GpuLoad => r.gpus = smallvec![gpu(pick(99., 10.), Some(false))],
+            }
+            r
+        }
+    }
+
+    /// A per-second pattern from runs of `(seconds, char)`. `_` is a second without a reading.
+    fn pattern(runs: &[(usize, u8)]) -> Vec<u8> {
+        runs.iter()
+            .flat_map(|&(n, c)| std::iter::repeat_n(c, n))
+            .collect()
+    }
+
+    /// The detector's ended events for `p` as (start, end) seconds.
+    fn detect(rule: Rule, p: &[u8]) -> Vec<(u64, u64)> {
+        let (kind, key) = rule.kind_key();
+        let mut d = EventDetector::new();
+        let mut out = Vec::new();
+        for (s, &c) in p.iter().enumerate() {
+            if c == b'_' {
+                continue;
+            }
+            let mut r = rule.reading(c);
+            r.t_ns = s as u64 * S;
+            for e in d.observe(&r) {
+                assert_eq!((e.kind, e.device_key.as_deref()), (kind, Some(key)));
+                let end = e.start_t_ns + u64::from(e.duration_ms) * MS;
+                out.push((e.start_t_ns / S, end / S));
+            }
+        }
+        out
+    }
+
+    /// The fresh-seconds rule written plainly over a whole pattern: split it where more than 3 s
+    /// pass without a fresh second, drop the missing seconds, then look for `window` fresh
+    /// seconds over in a row and, after them, 60 fresh seconds under in a row. A part that a gap
+    /// ends closes its running event at its last second over. Seconds after the last reading are
+    /// not seen yet.
+    fn reference(p: &[u8], window: usize) -> Vec<(u64, u64)> {
+        let seen = p.len() - p.iter().rev().take_while(|&&c| c == b'_').count();
+        // Each part: its fresh seconds (second, over) and whether a gap ends it.
+        let mut parts: Vec<(Vec<(u64, bool)>, bool)> = vec![(Vec::new(), false)];
+        let mut missing = 0;
+        for (s, &c) in p[..seen].iter().enumerate() {
+            if c == b'o' || c == b'u' {
+                if missing > 3 {
+                    parts.last_mut().unwrap().1 = true;
+                    parts.push((Vec::new(), false));
+                }
+                missing = 0;
+                parts.last_mut().unwrap().0.push((s as u64, c == b'o'));
+            } else {
+                missing += 1;
+            }
+        }
+        if missing > 3 {
+            parts.last_mut().unwrap().1 = true;
+        }
+        let run = |fresh: &[(u64, bool)], over: bool| {
+            fresh.iter().take_while(|(_, o)| *o == over).count()
+        };
+        let mut out = Vec::new();
+        for (fresh, gap_after) in parts {
+            let mut i = 0;
+            while i < fresh.len() {
+                let n = run(&fresh[i..], true);
+                if n < window {
+                    i += n.max(1);
+                    continue;
+                }
+                let start = fresh[i].0;
+                let mut j = i + window;
+                let mut end = None;
+                while j < fresh.len() {
+                    let n = run(&fresh[j..], false);
+                    if n >= 60 {
+                        end = Some(fresh[j].0);
+                        j += 60;
+                        break;
+                    }
+                    j += n.max(1);
+                }
+                match end {
+                    Some(end) => {
+                        out.push((start, end));
+                        i = j;
+                    }
+                    None => {
+                        if gap_after {
+                            let last_over = fresh.iter().rev().find(|(_, o)| *o).unwrap().0;
+                            out.push((start, last_over));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn event_detector_fresh_seconds() {
+        // Over only at 0, 3, ..., 30 with the seconds between missing: 11 fresh seconds over.
+        let sparse: Vec<u8> = (0..=30)
+            .map(|s| if s % 3 == 0 { b'o' } else { b'-' })
+            .chain(std::iter::repeat_n(b'u', 70))
+            .collect();
+        let rows: Vec<(&str, Rule, Vec<u8>, Vec<(u64, u64)>)> = vec![
+            ("review example", Rule::Pressure, sparse, vec![]),
+            (
+                "30 s over then 60 s under",
+                Rule::Pressure,
+                pattern(&[(30, b'o'), (60, b'u')]),
+                vec![(0, 30)],
+            ),
+            (
+                "29 s over is too short",
+                Rule::Pressure,
+                pattern(&[(29, b'o'), (60, b'u')]),
+                vec![],
+            ),
+            (
+                "1 s missing in the start window",
+                Rule::Pressure,
+                pattern(&[(10, b'o'), (1, b'-'), (20, b'o'), (60, b'u')]),
+                vec![(0, 31)],
+            ),
+            (
+                "3 s missing in the start window",
+                Rule::Swap,
+                pattern(&[(10, b'o'), (3, b'-'), (20, b'o'), (60, b'u')]),
+                vec![(0, 33)],
+            ),
+            (
+                "4 s missing in the start window resets it",
+                Rule::Pressure,
+                pattern(&[(10, b'o'), (4, b'-'), (29, b'o'), (60, b'u')]),
+                vec![],
+            ),
+            (
+                "the window starts again after a 4 s gap",
+                Rule::CpuHeat,
+                pattern(&[(10, b'o'), (4, b'-'), (30, b'o'), (60, b'u')]),
+                vec![(14, 44)],
+            ),
+            (
+                "4 s without readings in the start window resets it",
+                Rule::Pressure,
+                pattern(&[(10, b'o'), (4, b'_'), (29, b'o'), (60, b'u')]),
+                vec![],
+            ),
+            (
+                "1 s missing in the quiet window",
+                Rule::Pressure,
+                pattern(&[(30, b'o'), (20, b'u'), (1, b'-'), (40, b'u')]),
+                vec![(0, 30)],
+            ),
+            (
+                "3 s missing in the quiet window",
+                Rule::GpuThrottle,
+                pattern(&[(30, b'o'), (20, b'u'), (3, b'-'), (40, b'u')]),
+                vec![(0, 30)],
+            ),
+            (
+                "4 s missing in the quiet window ends at the last second over",
+                Rule::Pressure,
+                pattern(&[(30, b'o'), (20, b'u'), (4, b'-'), (60, b'u')]),
+                vec![(0, 29)],
+            ),
+            (
+                "3 s without readings, then 60 s under",
+                Rule::Swap,
+                pattern(&[(30, b'o'), (3, b'_'), (60, b'u')]),
+                vec![(0, 33)],
+            ),
+            (
+                "4 s without readings while over",
+                Rule::Pressure,
+                pattern(&[(30, b'o'), (4, b'_'), (60, b'u')]),
+                vec![(0, 29)],
+            ),
+            (
+                "a running event ends at its last fresh second over, then a new one",
+                Rule::GpuThrottle,
+                pattern(&[(40, b'o'), (4, b'-'), (60, b'o'), (60, b'u')]),
+                vec![(0, 39), (44, 104)],
+            ),
+            (
+                "a dip of 59 s under does not end it",
+                Rule::CpuHeat,
+                pattern(&[(30, b'o'), (59, b'u'), (1, b'o'), (60, b'u')]),
+                vec![(0, 90)],
+            ),
+            (
+                "full load needs 300 fresh seconds",
+                Rule::CpuLoad,
+                pattern(&[(299, b'o'), (60, b'u'), (300, b'o'), (60, b'u')]),
+                vec![(359, 659)],
+            ),
+            (
+                "3 s missing inside a full load window",
+                Rule::GpuLoad,
+                pattern(&[(150, b'o'), (3, b'-'), (150, b'o'), (60, b'u')]),
+                vec![(0, 303)],
+            ),
+        ];
+        for (what, rule, p, want) in &rows {
+            let window = window_s(rule.kind_key().0) as usize;
+            assert_eq!(&reference(p, window), want, "reference: {what}");
+            assert_eq!(&detect(*rule, p), want, "{what} ({rule:?})");
+        }
+
+        // Generated patterns of runs, checked against the reference. xorshift64 with a fixed
+        // seed, so a failure repeats.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let mut events = 0;
+        for i in 0..240 {
+            let rule = Rule::ALL[i % Rule::ALL.len()];
+            let scale = if matches!(rule, Rule::CpuLoad | Rule::GpuLoad) {
+                10
+            } else {
+                1
+            };
+            let mut runs = Vec::new();
+            for _ in 0..(4 + next(16)) {
+                runs.push(match next(10) {
+                    0..4 => ((1 + next(45)) as usize * scale, b'o'),
+                    4..7 => ((1 + next(70)) as usize * scale, b'u'),
+                    7..9 => ((1 + next(6)) as usize, b'-'),
+                    _ => ((1 + next(6)) as usize, b'_'),
+                });
+            }
+            let p = pattern(&runs);
+            let window = window_s(rule.kind_key().0) as usize;
+            let want = reference(&p, window);
+            events += want.len();
+            assert_eq!(detect(rule, &p), want, "pattern {i} ({rule:?}): {runs:?}");
+        }
+        assert!(
+            events >= 20,
+            "the generated patterns gave only {events} events"
+        );
     }
 
     #[test]
