@@ -955,6 +955,38 @@ Memory composition      t_sm 400 text_secondary (caption above the bar, chosen)
 - **Phase**: as per row and block.
 - **Decided here**: block visibility rules, table column widths, module header layout, Huge pages format.
 
+### UI-PRF-060 Memory by app (stacked)
+
+- **Implements**: D-036 (owner request, 2026-10-28).
+- **What it shows**: a stacked area chart of memory in use, split into memory groups. Each of the top N groups (default 10) is one band in its own colour. From the bottom: the top N groups, largest first, then "Other apps" (every other group), then "Shared and kernel" (the rest of In use). The top edge of the stack is In use (`MemTotal - MemAvailable`), so it matches the Physical memory chart of UI-PRF-026.
+- **Memory measure**: each process counts its private memory, `RssAnon` from `/proc/<pid>/status`, the same value as the default Memory column (D-004). A group's value is the sum over its processes. "Shared and kernel" is In use minus the sum over all processes, clamped at 0: shared and file-backed pages, tmpfs and kernel memory. PSS is not used, because the engine reads it only for rows on screen (ADR-008).
+- **Memory groups** (tl-collect `apps/mem_group.rs`). This grouping is separate from the table's `GroupKind`, whose key history already stores. Each process gets the first rule that applies:
+  1. **App**: the process is in an app scope (`GroupKind::App`) and its executable is in the same directory as the executable of the scope's oldest process. Key `app:<app id>`; name and icon from the desktop entry ("Google Chrome"). Chrome tabs, GPU and utility processes are one group. A program started from a terminal app (a shell, an editor, Claude Code) is not in the terminal's group, because its executable is elsewhere.
+  2. **Program**: any other process of the current user with a readable executable. Key `exe:<name>`. The name is the executable's file name. When that file name is a version number (digits and dots only, as `2.1.309`), the name is the directory above the `versions` directory instead: `~/.local/share/claude/versions/2.1.309` gives `claude`. A built-in table gives display names for known programs: `claude` shows as "Claude Code". Other names show as they are ("rustc", "node").
+  3. **System**: kernel threads and processes of other users. Key `system`, name "System".
+  4. **Unknown**: the executable cannot be read. Key `comm:<comm>`, name the `comm`.
+  Keys are stable across restarts and reboots, so history (below) continues the same group.
+- **Top N**: setting `performance.memory_by_app.top_n`, 3..=20, default 10. The chart ranks groups by their mean over the visible range. It re-ranks at most every 10 s and keeps a group's place unless another group's mean is at least 10% larger, so bands do not swap on small changes. Groups outside the top N add up into "Other apps".
+- **Colours**: a 12-colour categorical graph palette in the theme (`GraphPalette.groups[12]`). Each built-in theme supplies its own 12, checked for contrast against `chart_bg`. A group keeps its colour: the UI saves the last 64 colour picks as `performance.memory_by_app.colors` (group key to slot; the group shown least recently is dropped first). A new group takes the slot its key hashes to, or the next free slot among the groups on screen. "Other apps" is `text_tertiary` at 50%; "Shared and kernel" is `mem_fill` at 40%.
+- **Where**:
+  - **Memory page**: a view switch at the right of the Physical memory heading, with two segments, "Usage" (UI-PRF-026, default) and "By app". "By app" replaces the Physical memory chart with this chart at `graph_h_overall` 300, with the legend beside it. Saved as `performance.memory_view` (`usage`, `apps`).
+  - **Overview Memory box**: a new mode `apps` in the Layout submenu, labelled "By app": the stacked chart over the box range, with the legend at the right, or below the chart when the box is narrower than 480 px. The other modes do not change.
+- **Legend**: one row per band, top band first: a 10 × 10 swatch, the name, the process count ("× 50", only when more than 1) and the current value in bytes, right-aligned with tabular figures. A row that does not fit is left out whole (the UI-PRF-017 whole-rows rule) and counted in a last row "+n more".
+- **Interaction**: hovering a band or its legend row raises that band (the others drop to 40%) and shows a tooltip: name, value at the hovered time, share of In use, process count. Clicking a legend row opens the Processes tab filtered to the group's processes (an `app:` group selects its app row). The chart's context menu has "Groups shown" with 5, 10, 15 and 20, which sets `top_n`. Settings > Performance has the same setting as a number field.
+- **Ranges**: live and 1 h read the last hour (the `MetricHistory` 1 s tier, ADR-017). 24 h and 7 d read the 10 s and 1 min tiers and draw band means (D-032: a spike shorter than the tier step does not show). With `history.device_metrics` off, the 24 h and 7 d choices are disabled, as for the other boxes.
+- **Data binding**: on every process sweep the reducer sums `RssAnon` per memory group. It publishes the top 20 groups, "Other apps" and "Shared and kernel" as series `MetricId::MemGroup` on device keys `memgroup:<key>`, with each group's display name and process count (`Snapshot.system.memory.groups`, bit `SYSTEM`). The engine always publishes 20, so changing `top_n` needs no engine change and history holds enough groups. The `MetricHistory` worker stores these series like any other (ADR-017 addendum, D-036). Demand: `memory`.
+- **Build**: `pages/performance/memory_apps.rs` (`MemoryAppsChart`, the legend and the colour picks), shared by the Memory page and the Overview box. `chart/` draws the N bands with `YScale::FixedTotal(MemTotal)`.
+- **Tests**:
+  - `mem_group_rules` (tl-collect): Chrome helpers form one app group; a shell started in a terminal app is not in the terminal's group; the `versions` rule gives `claude`; an unreadable executable falls back to `comm`.
+  - `memory_groups_sum_to_in_use` (tl-engine): the bands plus "Other apps" plus "Shared and kernel" equal In use at every sample, and "Shared and kernel" is never negative.
+  - `memory_group_series_survive_restart` (tl-engine): a group's stored series continues after an engine restart.
+  - `memory_by_app_top_n` (tl-ui): 3, 10 and 20 bands plus the two fixed bands.
+  - `memory_by_app_rank_is_sticky` (tl-ui): a group 5% larger does not swap places; one 15% larger does.
+  - `memory_by_app_colours_kept` (tl-ui): a group keeps its colour after it leaves the top N and comes back.
+  - `memory_by_app_legend_whole_rows` (tl-ui).
+- **Phase**: P2.
+- **Decided here**: RssAnon as the measure, the four group rules, 20 groups published, top N 3..=20 with default 10, re-rank every 10 s with a 10% margin, 12 group colours, the two fixed bands.
+
 ### UI-PRF-029 Disk page: graphs and header buttons
 
 - **Implements**: PERF-047, PERF-048, PERF-051 (button), PERF-052 (button), PERF-053.
@@ -1473,6 +1505,7 @@ sp4 between cards
 | UI-PRF-024 | CPU page: Details grid | PERF-033 to 040 | P1/P2 |
 | UI-PRF-025 | CPU secondary graph | PERF-032, 038, 039, 040 | P2 |
 | UI-PRF-026 | Memory page: graphs | PERF-041 | P1 |
+| UI-PRF-060 | Memory by app (stacked) | D-036 | P2 |
 | UI-PRF-027 | Memory composition bar | PERF-042 | P1 |
 | UI-PRF-028 | Memory page: Details grid and blocks | PERF-043, 044, 045, 046 | P1/P2 |
 | UI-PRF-029 | Disk page: graphs and header buttons | PERF-047, 048, 051, 052, 053 | P1/P2 |

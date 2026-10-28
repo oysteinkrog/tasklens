@@ -2487,6 +2487,8 @@ A point with no valid input is invalid (a gap); validity is one bit per point. A
 
 **Event detector.** Part of the `MetricHistory` worker. It evaluates the UI-PRF-057 rules once per second on the live series, and fetches the journal event kinds there named (at start, then every 60 s while `Demand.device_timeline` is true). It writes each event into the store when it ends (or at shutdown, with the duration so far).
 
+**Memory group series** (D-036, UI-PRF-060). The reducer publishes the top 20 memory groups, "Other apps" and "Shared and kernel" as `MetricId::MemGroup` series on device keys `memgroup:<group key>` (`memgroup:other`, `memgroup:shared` for the two fixed bands), with the group's display name as `device_name` in the catalog. The worker stores them like device series, so the format does not change. A group enters the block catalog when it first reaches the top 20 and stays there until its segment ends; outside the top 20 it is a gap, and its memory counts in "Other apps". 22 series add about 0.3 MB to the 1 s tier in RAM.
+
 **Read path.** The UI does not use `HistoryQuery`. A snapshot component carries the data:
 
 ```rust

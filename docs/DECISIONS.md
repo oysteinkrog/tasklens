@@ -2,6 +2,15 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-28
+
+### D-036 Memory by app as a stacked chart
+
+- **Decision** (owner request 2026-10-28): memory in use can show as a stacked chart split into memory groups, with the top N groups each in their own colour, then "Other apps", then "Shared and kernel" (UI-PRF-060). N is a setting, 3 to 20, default 10. It is a view on the Memory page and a mode of the Overview Memory box, and it works on every range, including 24 h and 7 d (owner choice), so the group series go into the device metric history (ADR-017).
+- **Grouping**: memory groups are not the table's app groups. An app scope counts only the processes whose executable sits beside the app's own; every other process groups by program. The reason is Claude Code: each session runs in its own `claude-<n>.scope` or inside the terminal's service, and its process name is its version ("2.1.309"), so neither cgroup app groups nor process names put the sessions together. The executable path does (`~/.local/share/claude/versions/<version>`).
+- **Measure**: private memory (RssAnon), as the default Memory column. PSS would be fairer to shared pages, but the engine reads it only for rows on screen.
+- **Cost**: shared and file-backed memory is not split per group; it is one band, "Shared and kernel". History stores 22 more series (about 15% more than the device series today).
+
 ## 2026-10-26
 
 ### D-035 The system title bar is the default
