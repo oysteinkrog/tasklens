@@ -1346,6 +1346,10 @@ mod tests {
         out
     }
 
+    /// A table row: what it checks, the rule, the pattern and the ended events as (start, end)
+    /// seconds.
+    type Row = (&'static str, Rule, Vec<u8>, Vec<(u64, u64)>);
+
     #[test]
     fn event_detector_fresh_seconds() {
         // Over only at 0, 3, ..., 30 with the seconds between missing: 11 fresh seconds over.
@@ -1353,7 +1357,7 @@ mod tests {
             .map(|s| if s % 3 == 0 { b'o' } else { b'-' })
             .chain(std::iter::repeat_n(b'u', 70))
             .collect();
-        let rows: Vec<(&str, Rule, Vec<u8>, Vec<(u64, u64)>)> = vec![
+        let rows: Vec<Row> = vec![
             ("review example", Rule::Pressure, sparse, vec![]),
             (
                 "30 s over then 60 s under",
