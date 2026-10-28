@@ -6,8 +6,9 @@
 //! the rule was true, the duration runs to the first second under the threshold, the peak is the
 //! highest value while over, and the process is the one most often on top of the rule's resource
 //! while a process sweep ran. Ended events come back from `observe`; the worker queues them with
-//! `MetricHistory::push_event`. A value whose source is stale (ADR-008) is missing. A rule
-//! without its input for more than 3 s ends as at a gap, at its last second over.
+//! `MetricHistory::push_event`. A value whose source is stale (ADR-008) is missing. Seconds
+//! without a rule's input do not count toward its quiet period, and a rule without its input for
+//! more than 3 s ends as at a gap, at its last second over.
 //!
 //! Suspend spans come from the Logind `PrepareForSleep` signal ([`EventDetector::sleep`]) and,
 //! when the signal was missed, from the ADR-008 clock check ([`EventDetector::check_clock`]).
@@ -323,15 +324,24 @@ impl Reading {
             (EventKind::MemoryPressure, _) => self.psi_some_pct.is_some(),
             (EventKind::SwapStorm, _) => self.swap_in_pps.is_some(),
             (EventKind::Heat, CPU_KEY) => {
-                self.cpu_temp_c.is_some() || self.cpu_throttling.is_some()
+                heat_input(self.cpu_temp_c, self.cpu_hot_c, self.cpu_throttling)
             }
             (EventKind::FullLoad, CPU_KEY) => self.cpu_pct.is_some(),
             (EventKind::Heat, _) => {
-                gpu().is_some_and(|g| g.temp_c.is_some() || g.throttling.is_some())
+                gpu().is_some_and(|g| heat_input(g.temp_c, g.hot_c, g.throttling))
             }
             (EventKind::FullLoad, _) => gpu().is_some_and(|g| g.util_pct.is_some()),
             _ => false,
         }
+    }
+}
+
+/// The input of the heat rule: the temperature on a device with `hot_c`, the throttling flag
+/// on a device without one. A temperature without a threshold never says heat is under.
+fn heat_input(temp_c: Option<f32>, hot_c: Option<f32>, throttling: Option<bool>) -> bool {
+    match hot_c {
+        Some(_) => temp_c.is_some(),
+        None => throttling.is_some(),
     }
 }
 
@@ -372,6 +382,9 @@ struct Track {
     last_seen: TimeNs,
     /// The first reading under the threshold after `last_over`.
     under_since: Option<TimeNs>,
+    /// The time since `under_since` without the rule's input. It does not count toward
+    /// [`QUIET_S`].
+    missing_ns: u64,
     /// The window has passed.
     started: bool,
     /// The highest value while over, NaN while none was valid.
@@ -441,6 +454,7 @@ impl EventDetector {
         {
             self.end_all(&mut ended, None);
         }
+        let step = self.last_ns.map_or(0, |last| now.saturating_sub(last));
         self.last_ns = Some(now);
 
         let mut over = SmallVec::new();
@@ -461,6 +475,7 @@ impl EventDetector {
                         last_over: now,
                         last_seen: now,
                         under_since: None,
+                        missing_ns: 0,
                         started: false,
                         peak: f32::NAN,
                         tops: SmallVec::new(),
@@ -472,6 +487,7 @@ impl EventDetector {
             t.last_over = now;
             t.last_seen = now;
             t.under_since = None;
+            t.missing_ns = 0;
             t.peak = t.peak.max(o.value);
             if let Some(name) = r.top.get(t.resource) {
                 match t.tops.iter_mut().find(|(n, _)| n == name) {
@@ -487,10 +503,13 @@ impl EventDetector {
             if t.last_over == now {
                 return true;
             }
-            // A stale or missing input is not a second under. After more than 3 s without it the
-            // track ends as at a gap.
+            // A stale or missing input is not a second under: its time does not count toward the
+            // quiet period. After more than 3 s without it the track ends as at a gap.
             if !r.has_input(t.kind, &t.key) {
                 if now.saturating_sub(t.last_seen) <= GAP_NS {
+                    if t.under_since.is_some() {
+                        t.missing_ns += step;
+                    }
                     return true;
                 }
                 if t.started {
@@ -503,7 +522,7 @@ impl EventDetector {
                 return false;
             }
             let under = *t.under_since.get_or_insert(now);
-            if now - under >= QUIET_S * NS {
+            if (now - under).saturating_sub(t.missing_ns) >= QUIET_S * NS {
                 ended.push(t.event(under));
                 return false;
             }
@@ -1181,6 +1200,45 @@ mod tests {
         let ev = run_secs(&mut d, 43, 44, gpu);
         assert_eq!(ev.len(), 1);
         assert_eq!((ev[0].kind, ev[0].duration_ms), (EventKind::Heat, 39_000));
+
+        // The same when the GPU and the CPU without hot_c still send a temperature: it is not
+        // their heat input, so both events end 3 s after the flag goes missing, not 60 s.
+        let mut d = EventDetector::new();
+        let temp_only = |s: u64| Reading {
+            cpu_temp_c: Some(99.),
+            cpu_throttling: (s < 40).then_some(true),
+            gpus: smallvec![GpuReading {
+                key: Arc::from("gpu:a"),
+                util_pct: Some(10.),
+                temp_c: Some(99.),
+                hot_c: None,
+                throttling: (s < 40).then_some(true),
+            }],
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 43, temp_only).is_empty());
+        let ev = run_secs(&mut d, 43, 44, temp_only);
+        assert_eq!(ev.len(), 2, "{ev:?}");
+        for (e, key) in ev.iter().zip([CPU_KEY, "gpu:a"]) {
+            assert_eq!(e.device_key, name(key));
+            assert_eq!((e.kind, e.duration_ms), (EventKind::Heat, 39_000));
+        }
+
+        // Missing seconds during the quiet period do not count toward it: under from 40 s with
+        // 2 s and 3 s without the value, so the event ends at 105 s rather than 100 s.
+        let mut d = EventDetector::new();
+        let quiet = |s: u64| Reading {
+            psi_some_pct: match s {
+                0..40 => Some(20.),
+                60..62 | 80..83 => None,
+                _ => Some(1.),
+            },
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 105, quiet).is_empty());
+        let ev = run_secs(&mut d, 105, 106, quiet);
+        assert_eq!(ev.len(), 1);
+        assert_eq!((ev[0].start_t_ns, ev[0].duration_ms), (0, 40_000));
 
         // Each GPU is judged by the worker that sends its values.
         let gpu_id = |uuid| DeviceIdentity::Gpu {
