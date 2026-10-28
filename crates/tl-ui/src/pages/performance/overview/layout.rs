@@ -1252,7 +1252,7 @@ mod tests {
         // CPU's 7 rows and GPU's 6 rows, with the 6 px gutter between them.
         let (_, cpu_y, _, cpu_h) = rect(&p, Cpu);
         assert_eq!(cpu_y, 16.);
-        assert_eq!(cpu_h, (7. * 1096. / 13. + 36. + 16.).round() - 16.);
+        assert_eq!(cpu_h, (7. * 1096_f32 / 13. + 36. + 16.).round() - 16.);
         assert_eq!(rect(&p, Gpu).1, cpu_y + cpu_h + 6.);
         assert_eq!(rect(&p, Memory).3, cpu_h);
         // The kind minimums still count in the unit.
