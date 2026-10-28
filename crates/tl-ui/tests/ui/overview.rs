@@ -5194,8 +5194,14 @@ mod page {
             .update(|_, cx| page.read(cx).disk_box().read(cx).shown_more_text());
         assert_eq!(more.as_ref(), format!("+{} more", 3 - cs.len()));
 
-        // Automatic: the mode's grid, here two columns in a 222 px box, saved as `auto`.
+        // Automatic: the mode's grid, here two columns in a 222 px box, saved as `auto`. Edit
+        // Layout holds the row height, and a 650 px window is too short to fill at 32 px rows
+        // (D-037), so the box keeps the unit.
+        r.page_action(&tl_ui::pages::performance::actions::PerfOverviewEditDone);
         r.set_row_unit(32);
+        r.vcx.simulate_resize(size(px(1200.), px(650.)));
+        draw(r.vcx);
+        r.edit_layout();
         pick_arrange(&mut r, BoxKind::Disk, "Automatic");
         assert_eq!(shown(&mut r), Arrange::Auto);
         let (grid, cs, fit) = cells(&mut r, Arrange::Auto);
@@ -6959,8 +6965,9 @@ mod page {
         assert!(after.grid.row > before.grid.row, "{after:?}");
         assert!(!after.scrolls);
         assert_eq!(bottom(&after), Some(after.content_h - px(16.)));
+        // In the window, the lowest boxes end at the bottom padding of the 1200 px window.
         let gpu = r.vcx.debug_bounds(box_id(Gpu)).expect("gpu");
-        assert_eq!(gpu.bottom(), after.content_h - px(16.));
+        assert_eq!(gpu.bottom(), px(1200. - 16.));
     }
 
     #[gpui_kit::test]
@@ -7333,8 +7340,15 @@ mod page {
         assert_eq!(r.saved(), None);
         r.release(point(from.x - px(147.), from.y + px(50.)));
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
+        // 7 rows of the row height held since Edit Layout started (D-037), edges rounded.
+        let page = r.page.clone();
+        let row = r.vcx.update(|_, cx| page.read(cx).placement().grid.row);
+        let top = 16. + 7. * (row + 6.);
         let net = r.vcx.debug_bounds(box_id(Net)).expect("net");
-        assert_eq!(f32::from(net.size.height), 7. * 40. + 6. * 6.);
+        assert_eq!(
+            f32::from(net.size.height),
+            (top + 7. * row + 6. * 6.).round() - top.round()
+        );
         // A double-click on the corner sets the kind minimum, 3 × 6 at 1200 px, and saves.
         let at = center(r.bounds_of(corner_id(Net)));
         r.press(at, 2);
