@@ -787,7 +787,7 @@ fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
 
     publish_live(&mut r, 33., "live-a");
     let live_a = box_texts(&mut r);
-    assert!(box_text(&mut r, BoxKind::Cpu).contains("33%"));
+    assert!(box_text(&mut r, BoxKind::Cpu).contains("33.0%"));
     assert!(box_text(&mut r, BoxKind::TopProcs).contains("live-a"));
 
     // Held 2 hours ago, the history answers with its values there.
@@ -801,7 +801,7 @@ fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
         }
     }
     let cpu = box_text(&mut r, BoxKind::Cpu);
-    assert!(cpu.contains("77%") && !cpu.contains("33%"), "{cpu}");
+    assert!(cpu.contains("77.0%") && !cpu.contains("33.0%"), "{cpu}");
     let procs = box_text(&mut r, BoxKind::TopProcs);
     assert!(
         !procs.contains("live-a"),
@@ -813,7 +813,7 @@ fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
     for ((kind, before), (_, after)) in picked.iter().zip(&box_texts(&mut r)) {
         assert_eq!(before, after, "{kind:?} ignores the live snapshot");
         assert!(
-            !after.contains("55%") && !after.contains("live-b"),
+            !after.contains("55.0%") && !after.contains("live-b"),
             "{after}"
         );
     }
@@ -826,7 +826,7 @@ fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
             assert_ne!(held, live, "{kind:?} is live again");
         }
     }
-    assert!(box_text(&mut r, BoxKind::Cpu).contains("55%"));
+    assert!(box_text(&mut r, BoxKind::Cpu).contains("55.0%"));
     assert!(box_text(&mut r, BoxKind::TopProcs).contains("live-b"));
     publish_live(&mut r, 66., "live-c");
     for ((kind, before), (_, after)) in live_b.iter().zip(&box_texts(&mut r)) {
