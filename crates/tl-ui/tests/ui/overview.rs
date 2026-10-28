@@ -6911,6 +6911,58 @@ mod page {
         );
     }
 
+    /// D-037: the rows fill the page outside Edit Layout. Edit Layout keeps the drawn row height
+    /// from when it started, through the toolbar taking height and a hidden box, so cells do not
+    /// move; Done fills the page again.
+    #[gpui_kit::test]
+    fn overview_grid_edit_freezes_row_height(cx: &mut TestAppContext) {
+        use BoxKind::{Cpu, Gpu, Timeline};
+        use tl_ui::pages::performance::actions::PerfOverviewEditDone;
+        let mut r = open(cx, true, 1160., 1200.);
+        let page = r.page.clone();
+        let placement = |r: &mut Rig| r.vcx.update(|_, cx| page.read(cx).placement().clone());
+        let before = placement(&mut r);
+        assert!(before.grid.row > before.grid.unit, "{before:?}");
+        assert!(!before.scrolls);
+        let bottom = |p: &tl_ui::pages::performance::overview::layout::Placement| {
+            p.boxes.iter().map(|b| b.bounds.bottom()).max()
+        };
+        assert_eq!(bottom(&before), Some(before.content_h - px(16.)));
+        let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu").size;
+
+        r.edit_layout();
+        draw(r.vcx);
+        let editing = placement(&mut r);
+        assert_eq!(
+            editing.grid.row, before.grid.row,
+            "the toolbar does not move cells"
+        );
+        assert!(
+            editing.scrolls,
+            "the toolbar's 40 px make the frozen grid scroll"
+        );
+        r.hide(Timeline);
+        draw(r.vcx);
+        let hidden = placement(&mut r);
+        assert_eq!(
+            hidden.grid.row, before.grid.row,
+            "a hidden box does not move cells"
+        );
+        assert_eq!(r.vcx.debug_bounds(box_id(Cpu)).expect("cpu").size, cpu);
+        assert!(bottom(&hidden) < Some(hidden.content_h), "{hidden:?}");
+
+        // Done: 13 rows now fill the page, so every row grows.
+        r.page_action(&PerfOverviewEditDone);
+        draw(r.vcx);
+        assert!(!r.editing());
+        let after = placement(&mut r);
+        assert!(after.grid.row > before.grid.row, "{after:?}");
+        assert!(!after.scrolls);
+        assert_eq!(bottom(&after), Some(after.content_h - px(16.)));
+        let gpu = r.vcx.debug_bounds(box_id(Gpu)).expect("gpu");
+        assert_eq!(gpu.bottom(), after.content_h - px(16.));
+    }
+
     #[gpui_kit::test]
     fn overview_edit_esc_leaves_mode(cx: &mut TestAppContext) {
         use BoxKind::{Cpu, Disk};

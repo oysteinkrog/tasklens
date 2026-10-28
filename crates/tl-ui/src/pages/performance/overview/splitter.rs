@@ -119,7 +119,7 @@ impl Drag {
         let (first, second, min_a, min_b, pitch) = if target.is_vertical() {
             (a.cols, b.cols, min_a.0, min_b.0, g.cw + g.gutter)
         } else {
-            (a.rows, b.rows, min_a.1, min_b.1, g.unit + g.gutter)
+            (a.rows, b.rows, min_a.1, min_b.1, g.row + g.gutter)
         };
         let total = first + second;
         let (lo, hi) = if min_a + min_b <= total {
@@ -195,16 +195,18 @@ pub fn set_span(layout: &mut OverviewLayout, target: Target, span: u16) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pages::performance::overview::layout::{ROW_UNIT_DEFAULT, place};
+    use crate::pages::performance::overview::layout::{ROW_UNIT_DEFAULT, place, place_rows};
     use gpui_kit::px;
 
+    /// Rows held at the unit, as in Edit Layout, where the gaps are splitters.
     fn placed(layout: &OverviewLayout) -> Placement {
-        place(
+        place_rows(
             layout,
             |_| true,
             size(px(1200.), px(900.)),
             1.,
             ROW_UNIT_DEFAULT,
+            Some(ROW_UNIT_DEFAULT),
         )
     }
 

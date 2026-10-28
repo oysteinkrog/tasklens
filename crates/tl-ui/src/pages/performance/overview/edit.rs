@@ -316,7 +316,7 @@ impl BoxDrag {
             }
         };
         let dx = step(at.x - self.start.x, grid.cw + grid.gutter);
-        let dy = step(at.y - self.start.y, grid.unit + grid.gutter);
+        let dy = step(at.y - self.start.y, grid.row + grid.gutter);
         let f = self.start_box();
         let cells = match self.grab {
             Grab::Move => GridBox {
@@ -373,14 +373,18 @@ pub struct EditState {
     pub drag: Option<BoxDrag>,
     /// The Add Box button's bounds from the last paint, to open its menu below it.
     add_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The drawn row height when the mode started, logical px: the grid keeps it while editing,
+    /// so cells do not move under a drag (D-037).
+    pub row: f32,
 }
 
 impl EditState {
-    pub fn new(cx: &mut App) -> Self {
+    pub fn new(row: f32, cx: &mut App) -> Self {
         Self {
             focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
             drag: None,
             add_bounds: Rc::default(),
+            row,
         }
     }
 
@@ -425,7 +429,8 @@ impl OverviewPage {
         self.edit.is_some()
     }
 
-    /// `PerfOverviewEditLayout`: turns the mode on and takes focus, so Esc reaches the page.
+    /// `PerfOverviewEditLayout`: turns the mode on and takes focus, so Esc reaches the page. The
+    /// drawn row height stays at its value now until the mode ends (D-037).
     pub(super) fn on_edit_layout(
         &mut self,
         _: &PerfOverviewEditLayout,
@@ -433,7 +438,13 @@ impl OverviewPage {
         cx: &mut Context<Self>,
     ) {
         if self.edit.is_none() {
-            self.edit = Some(EditState::new(cx));
+            let grid = self.placement.grid;
+            let row = if grid.scale > 0. {
+                grid.row / grid.scale
+            } else {
+                self.row_unit
+            };
+            self.edit = Some(EditState::new(row, cx));
             self.set_edit_chrome(true, cx);
             self.notify(cx);
         }
@@ -445,8 +456,8 @@ impl OverviewPage {
         self.edit.as_ref().and_then(|e| e.drag.as_ref())
     }
 
-    /// `PerfOverviewEditDone` (Done, Esc): turns the mode off. Focus on a box goes to the page.
-    /// A drag in progress ends without a change.
+    /// `PerfOverviewEditDone` (Done, Esc): turns the mode off and fills the rows again (D-037).
+    /// Focus on a box goes to the page. A drag in progress ends without a change.
     pub(super) fn on_edit_done(
         &mut self,
         _: &PerfOverviewEditDone,
@@ -467,6 +478,7 @@ impl OverviewPage {
         self.hover = None;
         self.hover_shown = false;
         self.hover_task = None;
+        self.relayout(cx);
         self.set_edit_chrome(false, cx);
         self.notify(cx);
     }

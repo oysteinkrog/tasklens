@@ -69,7 +69,7 @@ use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::gpu_box::GpuBox;
 use self::inner_split::{InnerSplitChanged, hit_selector};
-use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place};
+use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place_rows};
 use self::mem_box::MemBox;
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
@@ -508,7 +508,7 @@ impl OverviewPage {
             !self.disk_keys.is_empty(),
             self.procs.is_some(),
         );
-        self.placement = place(
+        self.placement = place_rows(
             &self.layout,
             |k| match k {
                 BoxKind::Gpu => gpu,
@@ -519,6 +519,7 @@ impl OverviewPage {
             self.area,
             s,
             self.row_unit,
+            self.edit.as_ref().map(|e| e.row),
         );
     }
 

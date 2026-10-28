@@ -659,11 +659,13 @@ pub struct PlacedBox {
 }
 
 /// The grid's cell sizes on a page, in px (logical px × scale): the column width `cw`, the row
-/// height `unit`, the `gutter` between cells and the page padding `pad`.
+/// unit `unit`, the drawn row height `row` (at least `unit`, D-037), the `gutter` between cells
+/// and the page padding `pad`. Kind minimums count in `unit`; boxes and drags in `row`.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct GridMetrics {
     pub cw: f32,
     pub unit: f32,
+    pub row: f32,
     pub gutter: f32,
     pub pad: f32,
     /// The UI scale, for the kind minimums.
@@ -680,6 +682,7 @@ impl GridMetrics {
         Self {
             cw: ((width - 2. * pad - gutters) / f32::from(GRID_COLS)).max(0.),
             unit: unit * scale,
+            row: unit * scale,
             gutter,
             pad,
             scale,
@@ -693,7 +696,7 @@ impl GridMetrics {
 
     /// The top edge of row `row`.
     pub fn y(&self, row: u16) -> f32 {
-        self.pad + f32::from(row) * (self.unit + self.gutter)
+        self.pad + f32::from(row) * (self.row + self.gutter)
     }
 
     /// The width of `cols` columns: `cols·cw + (cols − 1)·gutter`.
@@ -701,9 +704,9 @@ impl GridMetrics {
         f32::from(cols) * self.cw + f32::from(cols.saturating_sub(1)) * self.gutter
     }
 
-    /// The height of `rows` rows: `rows·unit + (rows − 1)·gutter`.
+    /// The height of `rows` drawn rows: `rows·row + (rows − 1)·gutter`.
     pub fn h(&self, rows: u16) -> f32 {
-        f32::from(rows) * self.unit + f32::from(rows.saturating_sub(1)) * self.gutter
+        f32::from(rows) * self.row + f32::from(rows.saturating_sub(1)) * self.gutter
     }
 
     /// The bounds of `b`'s cells, every edge rounded to a whole px.
@@ -752,10 +755,13 @@ fn snapped(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 }
 
 /// Places the boxes of `layout` whose kind is `present` in `area` (UI-PRF-056). Logical sizes
-/// are × `scale`; `unit` is the row height in logical px.
+/// are × `scale`; `unit` is the row unit in logical px.
 ///
-/// - 12 columns over the page width and rows of `unit`, `sp3` gutters, padding `PAGE_PAD`.
-///   Edges round to whole px. An absent kind leaves its cells empty.
+/// - 12 columns over the page width and rows of at least `unit`, `sp3` gutters, padding
+///   `PAGE_PAD`. Edges round to whole px. An absent kind leaves its cells empty.
+/// - Fill (D-037): when the boxes end above the bottom, every row grows by the same amount so
+///   the lowest box ends at the bottom padding: `max(unit, (H − 2·pad − (R − 1)·gutter) / R)`,
+///   `R` the largest `row + rows` of the present boxes.
 /// - The page scrolls when the boxes go past the bottom.
 /// - Below `STACK_W` the boxes stack in reading order, full width, each at its kind minimum
 ///   height, 8 px apart.
@@ -766,8 +772,21 @@ pub fn place(
     scale: f32,
     unit: f32,
 ) -> Placement {
+    place_rows(layout, present, area, scale, unit, None)
+}
+
+/// [`place`] with the drawn row height held at `frozen` logical px (at least `unit`) instead of
+/// the fill, as Edit Layout does so cells do not move under a drag (D-037). `None` fills.
+pub fn place_rows(
+    layout: &OverviewLayout,
+    present: impl Fn(BoxKind) -> bool,
+    area: Size<Pixels>,
+    scale: f32,
+    unit: f32,
+    frozen: Option<f32>,
+) -> Placement {
     let (w, h) = (f32::from(area.width), f32::from(area.height));
-    let grid = GridMetrics::new(w, unit, scale);
+    let mut grid = GridMetrics::new(w, unit, scale);
     let pad = grid.pad;
     let mut placement = Placement {
         grid,
@@ -802,6 +821,24 @@ pub fn place(
         return placement;
     }
 
+    let filled = match frozen {
+        Some(row) => {
+            grid.row = (row * scale).max(grid.unit);
+            false
+        }
+        None => {
+            let rows = shown.iter().map(|b| b.bottom()).max().unwrap_or(1).max(1);
+            let free = h - 2. * pad - f32::from(rows - 1) * grid.gutter;
+            let row = free / f32::from(rows);
+            let filled = row > grid.unit;
+            if filled {
+                grid.row = row;
+            }
+            filled
+        }
+    };
+    placement.grid = grid;
+
     let mut bottom: f32 = 0.;
     for b in &shown {
         let bounds = grid.bounds(*b);
@@ -813,7 +850,8 @@ pub fn place(
     }
     let content_h = bottom + pad;
     placement.content_h = px(content_h);
-    placement.scrolls = content_h > h;
+    // A filled grid fits by its formula; edge rounding may add half a px.
+    placement.scrolls = !filled && content_h > h;
     placement
 }
 
@@ -829,6 +867,18 @@ mod tests {
 
     fn placed(layout: &OverviewLayout, w: f32, h: f32) -> Placement {
         place(layout, |_| true, area(w, h), 1., ROW_UNIT_DEFAULT)
+    }
+
+    /// [`placed`] with rows held at the unit, as in Edit Layout: the grid formula without fill.
+    fn unit_rows(layout: &OverviewLayout, w: f32, h: f32) -> Placement {
+        place_rows(
+            layout,
+            |_| true,
+            area(w, h),
+            1.,
+            ROW_UNIT_DEFAULT,
+            Some(ROW_UNIT_DEFAULT),
+        )
     }
 
     /// (x, y, w, h) of `kind`.
@@ -1021,10 +1071,15 @@ mod tests {
         px(x + w)
     }
 
+    fn rect_bottom(p: &Placement, kind: BoxKind) -> Pixels {
+        let (_, y, _, h) = rect(p, kind);
+        px(y + h)
+    }
+
     #[test]
     fn overview_grid_default_1200x900() {
         // cw = (1200 − 32 − 66) / 12 = 91.83; rows of 40 with 6 px gutters.
-        let p = placed(&OverviewLayout::grid_default(), 1200., 900.);
+        let p = unit_rows(&OverviewLayout::grid_default(), 1200., 900.);
         assert!(!p.stacked && !p.scrolls);
         assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 777., 316.));
         assert_eq!(rect(&p, BoxKind::Memory), (799., 16., 385., 316.));
@@ -1059,12 +1114,13 @@ mod tests {
         assert_eq!(rect_right(&p, BoxKind::Net), px(1184.));
 
         // A missing kind leaves its cells empty; the boxes do not widen.
-        let p = place(
+        let p = place_rows(
             &OverviewLayout::grid_default(),
             |k| k != BoxKind::Gpu,
             area(1200., 900.),
             1.,
             ROW_UNIT_DEFAULT,
+            Some(ROW_UNIT_DEFAULT),
         );
         assert!(p.boxes.iter().all(|b| b.kind != BoxKind::Gpu));
         assert_eq!(rect(&p, BoxKind::Disk), (407., 338., 386., 270.));
@@ -1101,7 +1157,7 @@ mod tests {
         );
         // At draw time a box keeps its saved span, even below its kind minimum.
         let small = layout(&[(BoxKind::Cpu, 0, 0, 2, 4)]);
-        let p = placed(&small, 1200., 900.);
+        let p = unit_rows(&small, 1200., 900.);
         assert_eq!(rect(&p, BoxKind::Cpu).3, 4. * 40. + 3. * 6.);
         assert!(rect(&p, BoxKind::Cpu).2 < BoxKind::Cpu.min_w());
     }
@@ -1154,6 +1210,17 @@ mod tests {
 
     #[test]
     fn overview_place_scales() {
+        let p = place_rows(
+            &OverviewLayout::grid_default(),
+            |_| true,
+            area(2400., 1800.),
+            2.,
+            ROW_UNIT_DEFAULT,
+            Some(ROW_UNIT_DEFAULT),
+        );
+        assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1553., 632.));
+        assert_eq!(rect(&p, BoxKind::Memory), (1597., 32., 771., 632.));
+        // Filled, the rows grow in px: the timeline ends at the bottom padding, 32 px.
         let p = place(
             &OverviewLayout::grid_default(),
             |_| true,
@@ -1161,8 +1228,96 @@ mod tests {
             2.,
             ROW_UNIT_DEFAULT,
         );
-        assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1553., 632.));
-        assert_eq!(rect(&p, BoxKind::Memory), (1597., 32., 771., 632.));
+        assert_eq!(p.boxes.last().expect("placed").bounds.bottom(), px(1768.));
+        assert!(!p.scrolls);
+    }
+
+    /// D-037: a 13-row layout on the owner's 1160 × 1200 page. Every row grows by the same
+    /// amount, so the lowest box ends at the bottom padding and nothing is left empty under it.
+    #[test]
+    fn overview_grid_fills_page() {
+        use BoxKind::*;
+        let mut l = OverviewLayout::grid_default();
+        l.boxes.retain(|b| b.kind != Timeline);
+        assert_eq!(l.boxes.iter().map(|b| b.bottom()).max(), Some(13));
+        let p = placed(&l, 1160., 1200.);
+        // (1200 − 32 − 12 × 6) / 13 = 84.31 px rows.
+        assert!((p.grid.row - 1096. / 13.).abs() < 1e-3, "{}", p.grid.row);
+        assert_eq!(p.grid.unit, ROW_UNIT_DEFAULT, "the unit stays");
+        assert!(!p.scrolls);
+        assert_eq!(p.content_h, px(1200.));
+        for kind in [Gpu, Disk, Net] {
+            assert_eq!(rect_bottom(&p, kind), px(1184.), "{kind:?}");
+        }
+        // CPU's 7 rows and GPU's 6 rows, with the 6 px gutter between them.
+        let (_, cpu_y, _, cpu_h) = rect(&p, Cpu);
+        assert_eq!(cpu_y, 16.);
+        assert_eq!(cpu_h, (7. * 1096. / 13. + 36. + 16.).round() - 16.);
+        assert_eq!(rect(&p, Gpu).1, cpu_y + cpu_h + 6.);
+        assert_eq!(rect(&p, Memory).3, cpu_h);
+        // The kind minimums still count in the unit.
+        assert_eq!(p.grid.min_span(Cpu), (4, 7));
+        // An absent kind does not count: without the last row the others fill the page.
+        let p = place(
+            &layout(&[(Cpu, 0, 0, 8, 7), (Net, 0, 7, 4, 6)]),
+            |k| k != Net,
+            area(1160., 1200.),
+            1.,
+            ROW_UNIT_DEFAULT,
+        );
+        assert_eq!(rect_bottom(&p, Cpu), px(1184.));
+        // A frozen row height keeps its value and may scroll.
+        let p = place_rows(
+            &l,
+            |_| true,
+            area(1160., 1200.),
+            1.,
+            ROW_UNIT_DEFAULT,
+            Some(90.),
+        );
+        assert_eq!(p.grid.row, 90.);
+        assert!(p.scrolls);
+        // Never below the unit, whatever was frozen.
+        let p = place_rows(
+            &l,
+            |_| true,
+            area(1160., 1200.),
+            1.,
+            ROW_UNIT_DEFAULT,
+            Some(10.),
+        );
+        assert_eq!(p.grid.row, ROW_UNIT_DEFAULT);
+    }
+
+    /// D-037: a layout taller than the page keeps rows of the unit and scrolls.
+    #[test]
+    fn overview_grid_tall_layout_scrolls() {
+        // 24 rows are 24 × 40 + 23 × 6 = 1098 px plus the padding, over 900.
+        let l = OverviewLayout::from_setting(Some(&OverviewLayoutSetting::with_top_procs(40)));
+        let p = placed(&l, 1200., 900.);
+        assert_eq!(p.grid.row, ROW_UNIT_DEFAULT);
+        assert!(p.scrolls);
+        assert_eq!(p.content_h, px(1130.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 777., 316.));
+        // Exactly the page: rows stay at the unit, nothing scrolls.
+        let p = placed(&l, 1200., 1130.);
+        assert_eq!(p.grid.row, ROW_UNIT_DEFAULT);
+        assert!(!p.scrolls);
+        // 24 px taller and each of the 24 rows grows by 1 px, still without scrolling.
+        let p = placed(&l, 1200., 1154.);
+        assert_eq!(p.grid.row, ROW_UNIT_DEFAULT + 1.);
+        assert!(!p.scrolls);
+        assert_eq!(p.content_h, px(1154.));
+        // A larger unit: the default grid at rows of 80 is taller than 900 and scrolls.
+        let p = place(
+            &OverviewLayout::grid_default(),
+            |_| true,
+            area(1200., 900.),
+            1.,
+            80.,
+        );
+        assert_eq!(p.grid.row, 80.);
+        assert!(p.scrolls);
     }
 
     #[test]
