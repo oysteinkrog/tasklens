@@ -15,6 +15,11 @@
 //! Series are stored by `(persistent_key, MetricId)` (ADR-017 "Series identity") and mapped back
 //! to the current catalog's `DeviceIdx` on read, so a renumbered device continues its series.
 //!
+//! Memory groups (D-036, ADR-017 "Memory group series"): the reducer's `MEM_GROUP` series on
+//! `memgroup:<key>` devices are stored like any device series. A group registers with its first
+//! sample, which it gets when it first reaches the top 20, and so enters the block catalog under
+//! its display name. Outside the top 20 it gets no samples, so its points are gaps.
+//!
 //! Read path: while `Demand.device_history_range` is set, the worker reads the range's tier once
 //! per tier point (1 s, 10 s or 60 s) and whenever the request changes, and publishes at most
 //! 1,024 min/max-decimated points per series. A series whose points did not change keeps its
@@ -1361,6 +1366,184 @@ mod tests {
         assert_eq!(h.realtime_offset_ns, offset2);
         // The reboot lies inside the range, so it comes with its boot time.
         assert_eq!(*h.boots, [offset2]);
+    }
+
+    /// D-036, ADR-017 "Memory group series": a memory group's series is stored under
+    /// `memgroup:<key>` with the group's display name in the block catalog, continues after an
+    /// engine restart under a new `DeviceIdx`, and is a gap while the group is outside the top
+    /// 20. The 24 h and 7 d reads return band means, not the per-second maximum.
+    #[test]
+    fn memory_group_series_survive_restart() {
+        use tl_history::format::HEADER_LEN;
+
+        let mem_group = MetricId::MEM_GROUP;
+        let group = |idx: u16, key: &str, name: &str| DeviceEntry {
+            display_name: Arc::from(name),
+            ..entry(
+                idx,
+                DeviceIdentity::MemGroup {
+                    key: Arc::from(key),
+                },
+                &format!("memgroup:{key}"),
+                true,
+            )
+        };
+        // 1 s values alternate between `low` and `low + 200`, so every 10 s, 1 min and read
+        // bucket holds as many of each: the mean is `low + 100`, the maximum `low + 200`.
+        let alternate = |i: u64, low: f32| if i % 2 == 0 { low } else { low + 200.0 };
+        // Every bucket edge falls on a whole multiple of 1800 s (the 4 s, 90 s and 600 s read
+        // steps of 1 h, 24 h and 7 d), so no read bucket mixes the two sessions.
+        let offset = 1_699_999_200 * SEC as i64;
+        let rt = |t: TimeNs| t as i64 + offset;
+        let point = |h: &DeviceHistory, id: SeriesId, t: TimeNs| -> HistPoint {
+            *h.get(id)
+                .expect("series")
+                .iter()
+                .find(|p| p.t_realtime_ns == rt(t))
+                .expect("bucket")
+        };
+        let valid = |h: &DeviceHistory, id: SeriesId, f: fn(&HistPoint) -> f32| -> Vec<f32> {
+            h.get(id)
+                .map(|p| p.iter().filter(|p| !p.is_gap()).map(f).collect())
+                .unwrap_or_default()
+        };
+
+        // Session 1: rustc for 120 s; node in the top 20 for the first 60 s only.
+        let dir = tempdir();
+        let t0 = 1_800 * SEC;
+        let mut st = open(dir.path(), 1, offset, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![
+                entry(0, DeviceIdentity::Memory, "memory", true),
+                group(1, "exe:rustc", "rustc"),
+                group(2, "exe:node", "node"),
+                group(3, "other", "Other apps"),
+            ],
+        ));
+        for i in 0..120 {
+            let t = t0 + i * SEC;
+            let mut batch = vec![
+                (sid(1, mem_group), sample(t, alternate(i, 100.0))),
+                (sid(3, mem_group), sample(t, 50.0)),
+            ];
+            match i {
+                0..60 => batch.push((sid(2, mem_group), sample(t, 40.0))),
+                // The reducer's one gap sample when the group leaves the top 20.
+                60 => batch.push((
+                    sid(2, mem_group),
+                    Sample {
+                        t_ns: t,
+                        value: 0.0,
+                        flags: SampleFlags::empty(),
+                    },
+                )),
+                _ => {}
+            }
+            st.push(&batch);
+        }
+        let now = t0 + 125 * SEC;
+        let h = st
+            .answer(live(DeviceRange::H24), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 90 * SEC);
+        assert_eq!(valid(&h, sid(2, mem_group), |p| p.mean), [40.0]);
+        assert!(point(&h, sid(2, mem_group), t0 + 90 * SEC).is_gap());
+        assert!(!point(&h, sid(1, mem_group), t0 + 90 * SEC).is_gap());
+        st.close(now).expect("close");
+
+        // Session 2: the engine restarts 15 minutes later on the same boot. The new reducer
+        // numbers its devices again, and node does not reach the top 20.
+        let t1 = t0 + 900 * SEC;
+        let mut st = open(dir.path(), 1, offset, t1);
+        st.set_catalog(catalog(
+            1,
+            vec![
+                entry(0, DeviceIdentity::Memory, "memory", true),
+                group(1, "other", "Other apps"),
+                group(2, "exe:rustc", "rustc"),
+            ],
+        ));
+        // Second 120 stays open, so seconds 0 to 119 are readable.
+        for i in 0..=120 {
+            let t = t1 + i * SEC;
+            st.push(&[
+                (sid(1, mem_group), sample(t, 50.0)),
+                (sid(2, mem_group), sample(t, alternate(i, 500.0))),
+            ]);
+        }
+        let now = t1 + 125 * SEC;
+        st.tick(now).expect("tick");
+
+        // 1 h: the 1 s tier, in 4 s buckets of two low and two high values.
+        let h = st
+            .answer(live(DeviceRange::H1), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 4 * SEC);
+        let rustc = sid(2, mem_group);
+        let mut want = vec![200.0; 30];
+        want.extend([600.0; 30]);
+        assert_eq!(valid(&h, rustc, |p| p.mean), want);
+        assert!(point(&h, rustc, t0 + 600 * SEC).is_gap());
+        assert_eq!(valid(&h, sid(1, mem_group), |p| p.mean), [50.0; 60]);
+
+        // 24 h: the 10 s tier in 90 s buckets, each session's from its own segment.
+        let h = st
+            .answer(live(DeviceRange::H24), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 90 * SEC);
+        assert_eq!(valid(&h, rustc, |p| p.mean), [200.0, 200.0, 600.0, 600.0]);
+        assert_eq!(valid(&h, rustc, |p| p.min), [100.0, 100.0, 500.0, 500.0]);
+        assert_eq!(valid(&h, rustc, |p| p.max), [300.0, 300.0, 700.0, 700.0]);
+
+        // 7 d: the 1 min tier in 600 s buckets.
+        let h = st
+            .answer(live(DeviceRange::D7), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.step_ns, 600 * SEC);
+        assert_eq!(valid(&h, rustc, |p| p.mean), [200.0, 600.0]);
+        assert_eq!(valid(&h, rustc, |p| p.max), [300.0, 700.0]);
+
+        // The first block of each 1 min segment names the groups that had samples in its
+        // session: node only in the first.
+        let store = st.store_mut().expect("open");
+        let catalogs: Vec<Vec<(String, String)>> = store
+            .segments(Tier::M1)
+            .iter()
+            .map(|(path, _, _)| {
+                let bytes = std::fs::read(path).expect("read segment");
+                let (block, _) =
+                    metrics::decode_metric_block(&bytes[HEADER_LEN..], 0).expect("first block");
+                let mut names: Vec<(String, String)> = block
+                    .catalog
+                    .expect("catalog in the first block")
+                    .iter()
+                    .filter(|s| s.device_key.starts_with("memgroup:"))
+                    .map(|s| (s.device_key.to_string(), s.device_name.to_string()))
+                    .collect();
+                names.sort();
+                names
+            })
+            .collect();
+        let pair = |k: &str, n: &str| (k.to_string(), n.to_string());
+        assert_eq!(
+            catalogs,
+            [
+                vec![
+                    pair("memgroup:exe:node", "node"),
+                    pair("memgroup:exe:rustc", "rustc"),
+                    pair("memgroup:other", "Other apps"),
+                ],
+                vec![
+                    pair("memgroup:exe:rustc", "rustc"),
+                    pair("memgroup:other", "Other apps"),
+                ],
+            ]
+        );
     }
 
     #[test]
