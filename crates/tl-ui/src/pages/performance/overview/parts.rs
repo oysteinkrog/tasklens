@@ -37,6 +37,7 @@ use crate::theme::{TlTheme, UiMetrics, current};
 use super::layout::{Arrange, BoxKind};
 use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 use super::range::RangeText;
+use super::timeline::{self, OverviewPause};
 
 /// The meter bar height, logical px before `ui_scale`.
 pub const METER_H: f32 = 6.;
@@ -1545,8 +1546,15 @@ pub fn chart_section_versions(cx: &App) -> [u64; 3] {
     ]
 }
 
+/// Whether the Overview is paused or previewing: its charts wait for the history's answer
+/// (`ChartView::with_hold`) and never draw live samples.
+fn overview_held(cx: &App) -> bool {
+    timeline::paused(cx).is_some()
+}
+
 /// A box chart: `ChartView::new` with the compact scale label on (TMOG), the ceiling small in
-/// the plot's top-left corner. It reads the device metric history at 1 h, 24 h and 7 d.
+/// the plot's top-left corner. It reads the device metric history at 1 h, 24 h and 7 d, and
+/// while the Overview is paused only the history's answer at the picked time.
 pub fn box_chart<T: 'static>(
     spec: ChartSpec,
     mut labels: ChartLabels,
@@ -1560,7 +1568,8 @@ pub fn box_chart<T: 'static>(
         let snap = std::sync::Arc::clone(hub.read(cx).current());
         let mut view = ChartView::new(spec, labels, hub, cx)
             .with_newest_marks()
-            .with_device_history(&snap);
+            .with_device_history(&snap)
+            .with_hold::<OverviewPause>(overview_held, cx);
         view.set_compact_scale(true, cx);
         view
     })
@@ -1594,6 +1603,7 @@ pub const SPARK_GRID: GridStyle = GridStyle {
 
 /// A sparkline chart for a spark row: no heading, no value, no range word, no scale label. The
 /// newest-point marks are on, and a sparkline under `grid::MARKS_MIN_HEIGHT` tall draws none.
+/// While the Overview is paused it waits for the history, as [`box_chart`] does.
 pub fn spark_chart<T: 'static>(
     spec: ChartSpec,
     value_fmt: ValueFormat,
@@ -1613,6 +1623,7 @@ pub fn spark_chart<T: 'static>(
         ChartView::new(spec, labels, hub, cx)
             .with_newest_marks()
             .with_device_history(&snap)
+            .with_hold::<OverviewPause>(overview_held, cx)
     })
 }
 

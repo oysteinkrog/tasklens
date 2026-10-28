@@ -225,7 +225,7 @@ pub(crate) fn overview(r: &mut Rig) -> Entity<OverviewPage> {
 }
 
 /// One chart of each device box.
-fn box_charts(r: &mut Rig) -> Vec<Entity<ChartView>> {
+pub(crate) fn box_charts(r: &mut Rig) -> Vec<Entity<ChartView>> {
     let page = overview(r);
     r.vcx.update(|_, cx| {
         let page = page.read(cx);

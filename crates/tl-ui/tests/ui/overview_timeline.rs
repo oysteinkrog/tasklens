@@ -13,14 +13,16 @@ use tl_model::history::{HistoryMetric, HistoryTop};
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::journal::JournalAccess;
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{OverviewLayoutSetting, OverviewRange, TimelineClick};
 use tl_model::snapshot::{
-    ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, ProcessSnapshot, TimelineEvent,
-    TimelineEventKind,
+    ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, ProcessSnapshot, SeriesSet,
+    TimelineEvent, TimelineEventKind,
 };
 use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric, NetTotals};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
+use tl_ui::chart::ChartView;
 use tl_ui::pages::performance::overview::layout::BoxKind;
 use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
 use tl_ui::pages::performance::overview::timeline::{
@@ -29,7 +31,7 @@ use tl_ui::pages::performance::overview::timeline::{
 };
 use tl_ui::settings_global::TlSettings;
 
-use super::overview_range::{Rig, click, draw, open, overview, set_range};
+use super::overview_range::{Rig, box_charts, click, draw, open, overview, set_range};
 
 const S: i64 = 1_000_000_000;
 const MIN: i64 = 60 * S;
@@ -834,4 +836,102 @@ fn overview_boxes_follow_picked_time(cx: &mut TestAppContext) {
             assert_ne!(before, after, "{kind:?} follows the live snapshot");
         }
     }
+}
+
+const CPU: SeriesId = SeriesId {
+    device: DeviceIdx(0),
+    metric: MetricId::CPU_TOTAL,
+};
+
+/// A live CPU total series whose newest sample, at [`BOOT`], is `pct`.
+fn publish_live_series(r: &mut Rig, pct: f32) {
+    r.engine.publish_with(|s| {
+        let version = s.series.header.version + 1;
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            series: Arc::from([Arc::new(SeriesView {
+                id: CPU,
+                version,
+                period_ns: S as u64,
+                samples: Arc::from([
+                    Sample::valid(BOOT - S as TimeNs, pct),
+                    Sample::valid(BOOT, pct),
+                ]),
+            })]),
+            slow: Arc::from([]),
+        });
+    });
+    draw(r.vcx);
+}
+
+/// A device history for the 1 min range with one CPU total point `pct` at `t`: the answer to a
+/// request paused at `end`, or live with `None`.
+fn publish_m1_history(r: &mut Rig, end: Option<i64>, t: i64, pct: f32) {
+    r.engine.publish_with(|s| {
+        let version = s.device_history.header.version + 1;
+        s.device_history = Arc::new(DeviceHistory {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            request: Some(DeviceHistoryRequest {
+                range: DeviceRange::M1,
+                end_realtime_ns: end,
+            }),
+            realtime_offset_ns: NOW - BOOT as i64,
+            since_realtime_ns: Some(NOW - 2 * DAY_NS),
+            step_ns: S as u64,
+            series: Arc::from([(CPU, Arc::from([point_at(t, pct)]))]),
+            ..DeviceHistory::default()
+        });
+    });
+    draw(r.vcx);
+}
+
+/// The newest value `chart` draws for its first series, `None` when it draws none.
+fn newest(r: &mut Rig, chart: &Entity<ChartView>) -> Option<f32> {
+    r.vcx.read_entity(chart, |c, _| {
+        let view = c.resolved().first()?.as_ref()?;
+        view.samples.last().map(|s| s.value)
+    })
+}
+
+/// While paused, the Overview charts draw nothing until the history answers at the picked
+/// time: a live sample published in between never shows. Back to live, they read the live
+/// series again.
+#[gpui_kit::test]
+fn overview_charts_wait_for_picked_time(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    publish_live_series(&mut r, 33.);
+    let total = {
+        let page = overview(&mut r);
+        r.vcx
+            .update(|_, cx| page.read(cx).cpu_box().read(cx).total_chart().clone())
+    };
+    assert_eq!(newest(&mut r, &total), Some(33.));
+
+    // Held before the history answers: no chart draws, not even after a new live sample.
+    let at = NOW - 30 * MIN;
+    set_pause(&mut r, Some(at));
+    publish_live_series(&mut r, 55.);
+    for chart in box_charts(&mut r) {
+        let drawn = r
+            .vcx
+            .read_entity(&chart, |c, _| c.resolved().iter().any(Option::is_some));
+        assert!(!drawn, "a held chart draws no live series");
+    }
+
+    // The history answers at the picked time.
+    publish_m1_history(&mut r, Some(at + 30 * S), at, 77.);
+    assert_eq!(newest(&mut r, &total), Some(77.));
+    publish_live_series(&mut r, 66.);
+    assert_eq!(newest(&mut r, &total), Some(77.));
+
+    // Back to live: once the history is live again, the chart reads the live series.
+    set_pause(&mut r, None);
+    publish_m1_history(&mut r, None, NOW, 10.);
+    assert_eq!(newest(&mut r, &total), Some(66.));
 }

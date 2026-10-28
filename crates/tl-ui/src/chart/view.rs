@@ -5,7 +5,9 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
+use gpui_kit::{
+    App, Context, Entity, Global, IntoElement, Render, SharedString, Subscription, Window,
+};
 use smallvec::SmallVec;
 use tl_model::ids::{ProcessSeriesId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
@@ -70,6 +72,11 @@ pub struct ChartView {
     /// With `device_history`: the history answers a paused request for this chart's range
     /// (UI-PRF-057), so the chart reads it at every range.
     paused: bool,
+    /// With `device_history`: the owner holds the chart at a time (`with_hold`, the paused or
+    /// previewing Overview). Until the history answers for this chart's range (`paused`) the
+    /// chart draws no series, so it never shows live samples while held.
+    held: bool,
+    _hold_sub: Option<Subscription>,
     /// Set while the chart reads the device metric history ([`reads_history`]): the series are
     /// on CLOCK_REALTIME and the chart is drawn against that clock.
     pub(crate) history: Option<HistoryClock>,
@@ -130,6 +137,8 @@ impl ChartView {
             frozen: false,
             device_history: false,
             paused: false,
+            held: false,
+            _hold_sub: None,
             history: None,
             boots: Arc::from([]),
             value_text: None,
@@ -173,6 +182,31 @@ impl ChartView {
         self
     }
 
+    /// Holds the chart while `held` says so (UI-PRF-057): until the snapshot's device history
+    /// answers a paused request for this chart's range, the chart draws no series. `G` is the
+    /// global `held` reads; the chart follows it on every change.
+    #[must_use]
+    pub fn with_hold<G: Global>(mut self, held: fn(&App) -> bool, cx: &mut Context<Self>) -> Self {
+        self.held = held(cx);
+        self._hold_sub = Some(cx.observe_global::<G>(move |this, cx| {
+            let now = held(cx);
+            if now != this.held {
+                this.held = now;
+                let hub = this.hub.clone();
+                this.resolve(hub.read(cx).current());
+                cx.notify();
+            }
+        }));
+        let hub = self.hub.clone();
+        self.resolve(hub.read(cx).current());
+        self
+    }
+
+    /// Whether the chart is held and the history has not answered for its range yet.
+    fn waiting(&self) -> bool {
+        self.device_history && self.held && !self.paused
+    }
+
     /// Whether this chart reads the device metric history now.
     fn reads_device_history(&self) -> bool {
         self.device_history && (reads_history(self.spec.range_ns) || self.paused)
@@ -205,6 +239,10 @@ impl ChartView {
             // Paused or back to live: the source changes.
             self.resolve(hub.read(cx).current());
             cx.notify();
+            return;
+        }
+        if self.waiting() {
+            // Held before the history answered: nothing to draw yet.
             return;
         }
         if self.reads_device_history() {
@@ -255,11 +293,19 @@ impl ChartView {
     ///
     /// With `with_device_history`, ranges over 10 minutes read `snap.device_history` instead
     /// ([`reads_history`]): each series becomes a view on CLOCK_REALTIME, and process series are
-    /// absent.
+    /// absent. A held chart whose history has not answered yet (`with_hold`) has no series.
     pub fn resolve(&mut self, snap: &Snapshot) {
         self.paused = self.paused_in(snap);
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
+        if self.waiting() {
+            self.history = None;
+            self.boots = Arc::from([]);
+            self.tier_fallback = false;
+            self.series.clear();
+            self.series.extend(self.spec.series.iter().map(|_| None));
+            return;
+        }
         if self.reads_device_history() {
             let hist = &*snap.device_history;
             self.history = Some(HistoryClock::of(hist));
