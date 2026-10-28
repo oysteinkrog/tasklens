@@ -110,14 +110,14 @@ impl shell::ShellPage for FakeProcesses {
     }
 }
 
-struct Rig<'a> {
-    page: Entity<PerformancePage>,
-    demand: Entity<DemandAggregator>,
-    engine: Arc<FakeEngine>,
-    vcx: &'a mut VisualTestContext,
+pub(crate) struct Rig<'a> {
+    pub(crate) page: Entity<PerformancePage>,
+    pub(crate) demand: Entity<DemandAggregator>,
+    pub(crate) engine: Arc<FakeEngine>,
+    pub(crate) vcx: &'a mut VisualTestContext,
 }
 
-fn draw(cx: &mut VisualTestContext) {
+pub(crate) fn draw(cx: &mut VisualTestContext) {
     for _ in 0..2 {
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -129,7 +129,7 @@ fn draw(cx: &mut VisualTestContext) {
 
 /// The main window, 1600 × 1000, on the Performance tab with the Overview selected and every
 /// card shown. Animations are off.
-fn open(cx: &mut TestAppContext) -> Rig<'_> {
+pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
         s.devices = Arc::new(DeviceCatalog {
@@ -214,7 +214,7 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     r
 }
 
-fn overview(r: &mut Rig) -> Entity<OverviewPage> {
+pub(crate) fn overview(r: &mut Rig) -> Entity<OverviewPage> {
     let page = r.page.clone();
     r.vcx.update(|_, cx| {
         page.read(cx)
@@ -269,7 +269,7 @@ fn range_texts(r: &mut Rig) -> Vec<RangeText> {
     })
 }
 
-fn click(cx: &mut VisualTestContext, id: &'static str) {
+pub(crate) fn click(cx: &mut VisualTestContext, id: &'static str) {
     let at = cx.debug_bounds(id).expect(id).center();
     cx.simulate_event(MouseDownEvent {
         button: MouseButton::Left,
@@ -287,7 +287,7 @@ fn click(cx: &mut VisualTestContext, id: &'static str) {
     draw(cx);
 }
 
-fn set_range(r: &mut Rig, range: OverviewRange) {
+pub(crate) fn set_range(r: &mut Rig, range: OverviewRange) {
     r.vcx.update(|_, cx| {
         TlSettings::update(cx, |d| d.settings.performance.overview_range = range);
     });
@@ -301,7 +301,7 @@ fn cpu() -> SeriesId {
     }
 }
 
-fn now_realtime() -> i64 {
+pub(crate) fn now_realtime() -> i64 {
     i64::try_from(jiff::Timestamp::now().as_nanosecond()).expect("fits")
 }
 
@@ -335,6 +335,7 @@ fn publish_history_boots(
             step_ns: 60 * S,
             series: Arc::from([(cpu(), Arc::from(points))]),
             boots: Arc::from(boots),
+            timeline: None,
         });
     });
     draw(r.vcx);

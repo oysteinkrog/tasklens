@@ -14,7 +14,7 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::settings::{OverviewGridSetting, OverviewLayoutSetting};
 
 use super::super::page::PAGE_PAD;
-use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box};
+use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box, timeline};
 use crate::theme::DeviceAccent;
 
 /// The grid's columns (UI-PRF-056).
@@ -35,8 +35,8 @@ pub const STACK_W: f32 = 720.;
 /// The gap between stacked boxes, logical px.
 const STACK_GAP: f32 = 8.;
 
-/// The Overview boxes: the five of the default layout and the opt-in Top processes box
-/// (crw.45).
+/// The Overview boxes: the five device boxes and the 24-hour timeline of the default layout
+/// (UI-PRF-057), and the opt-in Top processes box (crw.45).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BoxKind {
     Cpu,
@@ -45,23 +45,26 @@ pub enum BoxKind {
     Disk,
     Net,
     TopProcs,
+    Timeline,
 }
 
 impl BoxKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Cpu,
         Self::Memory,
         Self::Gpu,
         Self::Disk,
         Self::Net,
         Self::TopProcs,
+        Self::Timeline,
     ];
 
     /// The colour family shared by this box, its charts and its sidebar card. The optional Top
-    /// processes box uses the CPU family because its only measure is CPU utilization.
+    /// processes box uses the CPU family because its only measure is CPU utilization; the
+    /// timeline, which shows every device, uses it too.
     pub const fn accent(self) -> DeviceAccent {
         match self {
-            Self::Cpu | Self::TopProcs => DeviceAccent::Cpu,
+            Self::Cpu | Self::TopProcs | Self::Timeline => DeviceAccent::Cpu,
             Self::Memory => DeviceAccent::Memory,
             Self::Gpu => DeviceAccent::Gpu,
             Self::Disk => DeviceAccent::Disk,
@@ -78,6 +81,7 @@ impl BoxKind {
             Self::Disk => "disk",
             Self::Net => "net",
             Self::TopProcs => "processes",
+            Self::Timeline => "timeline",
         }
     }
 
@@ -96,6 +100,7 @@ impl BoxKind {
         match self {
             Self::Cpu => 280.,
             Self::TopProcs => 260.,
+            Self::Timeline => 160.,
             _ => 220.,
         }
     }
@@ -105,6 +110,7 @@ impl BoxKind {
     pub const fn min_w(self) -> f32 {
         match self {
             Self::Cpu | Self::TopProcs => 280.,
+            Self::Timeline => 400.,
             _ => 200.,
         }
     }
@@ -118,6 +124,7 @@ impl BoxKind {
             Self::Disk => disk_box::MODES,
             Self::Net => net_box::MODES,
             Self::TopProcs => procs_box::MODES,
+            Self::Timeline => timeline::MODES,
         }
     }
 
@@ -135,7 +142,7 @@ impl BoxKind {
             Self::Gpu => gpu_box::ARRANGE,
             Self::Disk => disk_box::ARRANGE,
             Self::Net => net_box::ARRANGE,
-            Self::TopProcs => &[],
+            Self::TopProcs | Self::Timeline => &[],
         };
         choices.iter().find(|(m, _)| *m == id).map(|&(_, c)| c)
     }
@@ -347,7 +354,7 @@ impl GridBox {
 pub struct OverviewLayout {
     pub boxes: SmallVec<[GridBox; 8]>,
     /// Each kind's mode and split in [`BoxKind::ALL`] order, kept while its box is hidden.
-    configs: [BoxConfig; 6],
+    configs: [BoxConfig; 7],
     /// The GPU box's hidden engine charts by en-US name, `"VRAM"` for the VRAM row (D-029). Names
     /// the GPU does not report stay. Kept while the box is hidden.
     hidden_gpu: Vec<String>,
@@ -368,7 +375,7 @@ pub enum LayoutError {
 
 impl OverviewLayout {
     /// The default grid (UI-PRF-056): CPU 8 × 7 and Memory 4 × 7 on top, then GPU, Disk and
-    /// Net 4 × 6 each from row 7.
+    /// Net 4 × 6 each from row 7, then the timeline 12 × 4 from row 13 (UI-PRF-057).
     pub fn grid_default() -> Self {
         let b = |kind, col, row, cols, rows| GridBox {
             kind,
@@ -386,6 +393,7 @@ impl OverviewLayout {
                 b(BoxKind::Gpu, 0, 7, 4, 6),
                 b(BoxKind::Disk, 4, 7, 4, 6),
                 b(BoxKind::Net, 8, 7, 4, 6),
+                b(BoxKind::Timeline, 0, 13, 12, 4),
             ],
         }
     }
@@ -937,13 +945,16 @@ mod tests {
 
     #[test]
     fn overview_grid_converts_rows() {
-        // UI-PRF-056: the UI-PRF-018 default rows load as exactly the default grid.
+        // UI-PRF-056: the UI-PRF-018 default rows load as exactly the default grid without the
+        // timeline.
         let mut settings = tl_model::settings::Settings::default();
         settings.performance.overview = Some(OverviewLayoutSetting::rows_default());
         assert!(settings.clamp().is_empty());
+        let mut want = OverviewLayout::grid_default();
+        want.boxes.retain(|b| b.kind != BoxKind::Timeline);
         assert_eq!(
             OverviewLayout::from_setting(settings.performance.overview.as_ref()),
-            OverviewLayout::grid_default()
+            want
         );
     }
 
@@ -984,14 +995,21 @@ mod tests {
         assert_eq!(layout.validate(), Ok(()));
         assert!(layout.has(BoxKind::TopProcs));
         let p = placed(&layout, 1200., 900.);
-        let procs = p.boxes.last().expect("placed");
-        assert_eq!(procs.kind, BoxKind::TopProcs);
+        let procs = p
+            .boxes
+            .iter()
+            .find(|b| b.kind == BoxKind::TopProcs)
+            .expect("placed");
         assert_eq!(procs.bounds.left(), rect_left(&p, BoxKind::Cpu));
         assert_eq!(procs.bounds.right(), rect_right(&p, BoxKind::Net));
         assert!(procs.bounds.size.height >= px(260.));
-        // 20 rows are 914 px plus the padding.
+        // The timeline stays at the bottom, under the band.
+        let last = p.boxes.last().expect("placed");
+        assert_eq!(last.kind, BoxKind::Timeline);
+        assert!(last.bounds.top() > procs.bounds.bottom());
+        // 24 rows are 1098 px plus the padding.
         assert!(p.scrolls);
-        assert_eq!(p.content_h, px(946.));
+        assert_eq!(p.content_h, px(1130.));
     }
 
     fn rect_left(p: &Placement, kind: BoxKind) -> Pixels {
@@ -1013,8 +1031,10 @@ mod tests {
         assert_eq!(rect(&p, BoxKind::Gpu), (16., 338., 385., 270.));
         assert_eq!(rect(&p, BoxKind::Disk), (407., 338., 386., 270.));
         assert_eq!(rect(&p, BoxKind::Net), (799., 338., 385., 270.));
-        // 13 rows: 13 × 40 + 12 × 6 = 592, plus the padding.
-        assert_eq!(p.content_h, px(624.));
+        // The timeline over all 12 columns from row 13, 4 rows high (UI-PRF-057).
+        assert_eq!(rect(&p, BoxKind::Timeline), (16., 614., 1168., 178.));
+        // 17 rows: 17 × 40 + 16 × 6 = 776, plus the padding.
+        assert_eq!(p.content_h, px(808.));
         let order: Vec<BoxKind> = p.boxes.iter().map(|b| b.kind).collect();
         assert_eq!(
             order,
@@ -1023,7 +1043,8 @@ mod tests {
                 BoxKind::Memory,
                 BoxKind::Gpu,
                 BoxKind::Disk,
-                BoxKind::Net
+                BoxKind::Net,
+                BoxKind::Timeline
             ]
         );
         // The gutters are 6 px after rounding, and the right edge is the padding.
@@ -1088,8 +1109,8 @@ mod tests {
     #[test]
     fn overview_first_free_scans_rows_then_columns() {
         let l = OverviewLayout::grid_default();
-        // The default fills rows 0..13 across: a 3 × 4 box goes under it.
-        assert_eq!(l.first_free(3, 4), (0, 13));
+        // The default fills rows 0..17 across: a 3 × 4 box goes under it.
+        assert_eq!(l.first_free(3, 4), (0, 17));
         let mut l = layout(&[(BoxKind::Cpu, 0, 0, 8, 7), (BoxKind::Net, 8, 3, 4, 6)]);
         // Columns 8..12 are free in rows 0..3 only: 3 rows high fits there, 4 does not.
         assert_eq!(l.first_free(4, 3), (8, 0));
@@ -1103,11 +1124,12 @@ mod tests {
         let p = placed(&OverviewLayout::grid_default(), 700., 900.);
         assert!(p.stacked);
         assert!(p.boxes.iter().all(|b| b.bounds.size.width == px(668.)));
-        // Each box at its kind minimum: 280 + 4 × 220, 4 gaps of 8 and 2 × 16 padding.
-        assert_eq!(p.content_h, px(1224.));
+        // Each box at its kind minimum: 280 + 4 × 220 + 160, 5 gaps of 8 and 2 × 16 padding.
+        assert_eq!(p.content_h, px(1392.));
         assert!(p.scrolls);
         assert_eq!(rect(&p, BoxKind::Memory), (16., 304., 668., 220.));
         assert_eq!(rect(&p, BoxKind::Net), (16., 988., 668., 220.));
+        assert_eq!(rect(&p, BoxKind::Timeline), (16., 1216., 668., 160.));
     }
 
     #[test]

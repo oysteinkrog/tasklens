@@ -862,6 +862,8 @@ fn box_icon(id: &'static str, m: &UiMetrics, theme: &TlTheme) -> Option<impl Int
         BoxKind::Gpu => DeviceKind::Gpu,
         BoxKind::Disk => DeviceKind::Disk,
         BoxKind::Net => DeviceKind::Net,
+        // The timeline shows every device: no device icon.
+        BoxKind::Timeline => return None,
     };
     let name = device.icon()?;
     Some(
@@ -941,7 +943,10 @@ pub fn box_frame(
     } else {
         px(0.)
     };
-    let draws_time_axis = BoxKind::from_frame_id(id) != Some(BoxKind::TopProcs);
+    let draws_time_axis = !matches!(
+        BoxKind::from_frame_id(id),
+        Some(BoxKind::TopProcs | BoxKind::Timeline)
+    );
     // Each text style goes in first: it replaces the whole text refinement, so the nowrap,
     // ellipsis and colour set after it would otherwise be lost.
     let mut title_el = div();

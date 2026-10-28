@@ -21,6 +21,12 @@
 //! `Arc`, and a read that changed nothing is not sent. When the range is cleared, one empty
 //! `DeviceHistory` frees the points.
 //!
+//! Timeline (UI-PRF-057): while `Demand.device_timeline` is true, the same component carries a
+//! `DeviceTimeline`: the last 24 hours of the 1 min tier for CPU total, memory in use, the
+//! busiest disk's active time and the network total, with the events and boots of those hours.
+//! It is read again every 60 s and when an event was queued, and dropped when the timeline is
+//! no longer shown.
+//!
 //! Events (ADR-017 "Event detector", UI-PRF-057): the sink also sends one `Reading` of the
 //! published snapshot per second and each Logind `PrepareForSleep`. The worker runs the
 //! `EventDetector` rules on each reading, the clock check on each tick, and queues every ended
@@ -51,10 +57,12 @@ use tl_history::metrics::{
 use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{DeviceIdx, SeriesId};
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::journal::JournalAccess;
 use tl_model::series::Sample;
-use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
+use tl_model::snapshot::{
+    DeviceHistory, DeviceTimeline, HistPoint, Snapshot, TimelineEvent, TimelineEventKind,
+};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
 use super::event_detector::{EventDetector, JournalEnv, JournalEvents, JournalFetch, Reading};
@@ -74,6 +82,10 @@ const RETRY_NS: u64 = 60_000_000_000;
 /// `MetricHistory::open` stops loading the 1 s ring after this long (ADR-012 start budget).
 const LOAD_BUDGET: Duration = Duration::from_secs(2);
 const NS_PER_SEC: u64 = 1_000_000_000;
+/// The timeline is read again this often while shown (ADR-017).
+const TIMELINE_EVERY_NS: u64 = 60 * NS_PER_SEC;
+/// The span the timeline covers.
+const TIMELINE_SPAN_NS: i64 = 86_400 * NS_PER_SEC as i64;
 
 /// One event for the `MetricHistory` worker.
 pub enum MetricMsg {
@@ -231,6 +243,15 @@ struct Published {
     read_at: TimeNs,
 }
 
+/// What the last timeline held.
+struct PublishedTimeline {
+    data: Arc<DeviceTimeline>,
+    /// Boottime of the read.
+    read_at: TimeNs,
+    /// `State::events_queued` at the read.
+    events_seen: u64,
+}
+
 /// The worker's state. Each blocking job locks it.
 pub struct State {
     store: Option<MetricHistory>,
@@ -247,6 +268,9 @@ pub struct State {
     opens: u64,
     /// What the last journal fetch could read, for the timeline's tooltip.
     journal_access: Option<JournalAccess>,
+    timeline: Option<PublishedTimeline>,
+    /// Events queued into the store so far, so an ended event reads the timeline again.
+    events_queued: u64,
 }
 
 impl Default for State {
@@ -267,6 +291,8 @@ impl State {
             detector: EventDetector::new(),
             opens: 0,
             journal_access: None,
+            timeline: None,
+            events_queued: 0,
         }
     }
 
@@ -392,6 +418,7 @@ impl State {
         if let Some(store) = self.store.as_mut() {
             for e in events {
                 store.push_event(e);
+                self.events_queued += 1;
             }
         }
     }
@@ -432,19 +459,41 @@ impl State {
         }
     }
 
-    /// The `DeviceHistory` to send for `request` at `now_t_ns`, or `None` when nothing needs
-    /// sending: the request and the data are unchanged, or the last read is less than one tier
-    /// point old. A cleared request sends one empty `DeviceHistory`.
+    /// [`State::answer_with`] without the timeline.
     pub fn answer(
         &mut self,
         request: Option<DeviceHistoryRequest>,
         now_t_ns: TimeNs,
     ) -> Result<Option<DeviceHistory>, tl_history::HistoryError> {
+        self.answer_with(request, false, now_t_ns)
+    }
+
+    /// The `DeviceHistory` to send for `request` and, with `timeline`, the 24-hour timeline at
+    /// `now_t_ns`, or `None` when nothing needs sending: the request, the data and the timeline
+    /// are unchanged, or the last reads are too recent. A cleared request and timeline send one
+    /// empty `DeviceHistory`.
+    pub fn answer_with(
+        &mut self,
+        request: Option<DeviceHistoryRequest>,
+        timeline: bool,
+        now_t_ns: TimeNs,
+    ) -> Result<Option<DeviceHistory>, tl_history::HistoryError> {
+        let range = self.answer_range(request, now_t_ns)?;
+        let timeline = self.answer_timeline(timeline, now_t_ns)?;
+        Ok((range || timeline).then(|| self.current()))
+    }
+
+    /// Reads `request` when due. True when the published range part changed.
+    fn answer_range(
+        &mut self,
+        request: Option<DeviceHistoryRequest>,
+        now_t_ns: TimeNs,
+    ) -> Result<bool, tl_history::HistoryError> {
         let Some(request) = request else {
-            return Ok(self.published.take().map(|_| self.empty()));
+            return Ok(self.published.take().is_some());
         };
         let Some(store) = self.store.as_mut() else {
-            return Ok(None);
+            return Ok(false);
         };
         let now_rt = (now_t_ns as i64).saturating_add(self.realtime_offset_ns);
         let (tier, from, to) = plan(request, now_rt);
@@ -453,7 +502,7 @@ impl State {
             && p.tier == tier
             && now_t_ns < p.read_at.saturating_add(tier.point_ns())
         {
-            return Ok(None);
+            return Ok(false);
         }
         let span = store.read(tier, from, to, now_t_ns)?;
         let since = store.since_realtime_ns(tier);
@@ -470,30 +519,69 @@ impl State {
                 && reused
                 && p.series.len() == series.len()
         });
-        let series: Arc<[_]> = series.into();
-        let boots: Arc<[i64]> = boots.into();
         if unchanged && let Some(p) = &mut self.published {
             p.read_at = now_t_ns;
-            return Ok(None);
+            return Ok(false);
         }
         self.published = Some(Published {
             request,
             tier,
             step_ns,
             since,
-            series: Arc::clone(&series),
-            boots: Arc::clone(&boots),
+            series: series.into(),
+            boots: boots.into(),
             read_at: now_t_ns,
         });
-        Ok(Some(DeviceHistory {
-            request: Some(request),
-            realtime_offset_ns: self.realtime_offset_ns,
-            since_realtime_ns: since,
-            step_ns,
-            series,
-            boots,
-            ..DeviceHistory::default()
-        }))
+        Ok(true)
+    }
+
+    /// Reads the timeline every 60 s and after a queued event while `want`; drops it otherwise.
+    /// True when the published timeline changed.
+    fn answer_timeline(
+        &mut self,
+        want: bool,
+        now_t_ns: TimeNs,
+    ) -> Result<bool, tl_history::HistoryError> {
+        if !want {
+            return Ok(self.timeline.take().is_some());
+        }
+        let offset = self.realtime_offset_ns;
+        let (events_queued, journal) = (self.events_queued, self.journal_access);
+        let Some(store) = self.store.as_mut() else {
+            return Ok(false);
+        };
+        if let Some(t) = &self.timeline
+            && t.events_seen == events_queued
+            && now_t_ns < t.read_at.saturating_add(TIMELINE_EVERY_NS)
+        {
+            return Ok(false);
+        }
+        let to = (now_t_ns as i64).saturating_add(offset);
+        let from = to.saturating_sub(TIMELINE_SPAN_NS);
+        let span = store.read(Tier::M1, from, to, now_t_ns)?;
+        let mut boots = store.boots_realtime_ns();
+        boots.retain(|&t| (from..=to).contains(&t));
+        let data = timeline_of(&span, to, boots, journal);
+        self.timeline = Some(PublishedTimeline {
+            data: Arc::new(data),
+            read_at: now_t_ns,
+            events_seen: events_queued,
+        });
+        Ok(true)
+    }
+
+    /// The component from the published range part and timeline.
+    fn current(&self) -> DeviceHistory {
+        let mut h = self.empty();
+        if let Some(p) = &self.published {
+            h.request = Some(p.request);
+            h.since_realtime_ns = p.since;
+            h.step_ns = p.step_ns;
+            h.series = Arc::clone(&p.series);
+            h.boots = Arc::clone(&p.boots);
+        }
+        h.timeline = self.timeline.as_ref().map(|t| Arc::clone(&t.data));
+        h
     }
 
     /// The span's series under their current `SeriesId`, sorted, with the `Arc` of the last
@@ -542,6 +630,106 @@ impl State {
             realtime_offset_ns: self.realtime_offset_ns,
             ..DeviceHistory::default()
         }
+    }
+}
+
+/// The timeline of a 1 min tier `span` that ends at `to`: CPU total, memory in use, the
+/// aggregate disk's active time (the busiest disk) and the aggregate network's download plus
+/// upload, keyed as the reducer stores them.
+fn timeline_of(
+    span: &MetricSpan,
+    to: i64,
+    boots: Vec<i64>,
+    journal: Option<JournalAccess>,
+) -> DeviceTimeline {
+    let find = |key: &str, metric: MetricId| {
+        span.series
+            .iter()
+            .find(|(k, _)| &*k.device_key == key && k.metric == metric)
+            .map(|(_, p)| p)
+    };
+    let band = |key: &str, metric: MetricId| -> Arc<[HistPoint]> {
+        find(key, metric).map_or_else(
+            || Arc::from([]),
+            |points| {
+                points
+                    .iter()
+                    .map(|p| HistPoint {
+                        t_realtime_ns: p.t_realtime_ns,
+                        mean: p.mean,
+                        min: p.min,
+                        max: p.max,
+                    })
+                    .collect()
+            },
+        )
+    };
+    let net: Arc<[HistPoint]> = match (
+        find("aggregate:net", MetricId::NET_RX),
+        find("aggregate:net", MetricId::NET_TX),
+    ) {
+        (None, None) => Arc::from([]),
+        (rx, tx) => {
+            let len = rx.map_or(0, |p| p.len()).max(tx.map_or(0, |p| p.len()));
+            (0..len)
+                .map(|i| {
+                    let at = |s: Option<&Arc<[metrics::MetricPoint]>>| s.and_then(|p| p.get(i));
+                    let (a, b) = (at(rx), at(tx));
+                    let t = a.or(b).map_or(0, |p| p.t_realtime_ns);
+                    let valid: f32 = [a, b]
+                        .into_iter()
+                        .flatten()
+                        .filter(|p| !p.mean.is_nan())
+                        .map(|p| p.mean)
+                        .sum();
+                    let gap = [a, b].into_iter().flatten().all(|p| p.mean.is_nan());
+                    let mean = if gap { f32::NAN } else { valid };
+                    HistPoint {
+                        t_realtime_ns: t,
+                        mean,
+                        min: mean,
+                        max: mean,
+                    }
+                })
+                .collect()
+        }
+    };
+    let events: Arc<[TimelineEvent]> = span
+        .events
+        .iter()
+        .map(|e| TimelineEvent {
+            kind: event_kind(e.event.kind),
+            start_realtime_ns: e.start_realtime_ns,
+            duration_ms: e.event.duration_ms,
+            peak: e.event.peak,
+            process: e.event.process.clone(),
+        })
+        .collect();
+    DeviceTimeline {
+        end_realtime_ns: to,
+        step_ns: span.step_ns,
+        bands: [
+            band("cpu", MetricId::CPU_TOTAL),
+            band("memory", MetricId::MEM_USED),
+            band("aggregate:disk", MetricId::DISK_ACTIVE),
+            net,
+        ],
+        events,
+        boots: boots.into(),
+        journal,
+    }
+}
+
+fn event_kind(kind: EventKind) -> TimelineEventKind {
+    match kind {
+        EventKind::MemoryPressure => TimelineEventKind::MemoryPressure,
+        EventKind::SwapStorm => TimelineEventKind::SwapStorm,
+        EventKind::Heat => TimelineEventKind::Heat,
+        EventKind::FullLoad => TimelineEventKind::FullLoad,
+        EventKind::Suspend => TimelineEventKind::Suspend,
+        EventKind::Boot => TimelineEventKind::Boot,
+        EventKind::OomKill => TimelineEventKind::OomKill,
+        EventKind::Crash => TimelineEventKind::Crash,
     }
 }
 
@@ -702,7 +890,7 @@ pub async fn run_metric_history(
                 if let Err(e) = st.close(now_boot_ns()) {
                     tracing::debug!("device history close failed: {e}");
                 }
-                st.answer(None, now_boot_ns()).ok().flatten()
+                st.answer_with(None, false, now_boot_ns()).ok().flatten()
             });
             let empty = match job {
                 Ok(mut job) => match join_result(&cx, job.join(&cx).await) {
@@ -835,6 +1023,7 @@ pub async fn run_metric_history(
             next_tick = now.saturating_add(TICK_NS);
         }
         let request = demand.device_history_range;
+        let timeline = demand.device_timeline;
         let job_state = Arc::clone(&state);
         let mut batch = std::mem::take(&mut msgs);
         let job = spawn(&cx, move || {
@@ -854,7 +1043,7 @@ pub async fn run_metric_history(
                 tracing::debug!("device history write failed: {e}");
                 error = Some(());
             }
-            let answer = match st.answer(request, now_t_ns) {
+            let answer = match st.answer_with(request, timeline, now_t_ns) {
                 Ok(answer) => answer,
                 Err(e) => {
                     tracing::debug!("device history read failed: {e}");
@@ -1219,6 +1408,128 @@ mod tests {
         assert!(empty.series.is_empty() && empty.request.is_none());
         assert_eq!(empty.realtime_offset_ns, OFFSET);
         assert!(st.answer(None, now + 4 * SEC).expect("read").is_none());
+    }
+
+    /// UI-PRF-057, ADR-017: the timeline carries the four bands of the last 24 hours (the
+    /// network band is download plus upload), the queued events and the journal access. It is
+    /// read again after 60 s or a new event, and dropped once when the timeline is not shown.
+    #[test]
+    fn timeline_reads_bands_events_and_journal() {
+        use tl_model::devices::AggregateKind;
+
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![
+                entry(0, DeviceIdentity::CpuPackage, "cpu", true),
+                entry(1, DeviceIdentity::Memory, "memory", true),
+                entry(
+                    2,
+                    DeviceIdentity::Aggregate(AggregateKind::Disks),
+                    "aggregate:disk",
+                    true,
+                ),
+                entry(
+                    3,
+                    DeviceIdentity::Aggregate(AggregateKind::Nets),
+                    "aggregate:net",
+                    true,
+                ),
+            ],
+        ));
+        for i in 0..180 {
+            let t = t0 + i * SEC;
+            st.push(&[
+                (sid(0, MetricId::CPU_TOTAL), sample(t, 40.0)),
+                (sid(1, MetricId::MEM_USED), sample(t, 8.0e9)),
+                (sid(2, MetricId::DISK_ACTIVE), sample(t, 25.0)),
+                (sid(3, MetricId::NET_RX), sample(t, 100.0)),
+                (sid(3, MetricId::NET_TX), sample(t, 50.0)),
+            ]);
+        }
+        st.queue_events([HistEvent {
+            kind: EventKind::Heat,
+            start_t_ns: t0 + 10 * SEC,
+            duration_ms: 30_000,
+            peak: 97.0,
+            device_key: Some(Arc::from("cpu")),
+            process: Some(Arc::from("blender")),
+        }]);
+        st.store_journal(
+            st.opens(),
+            JournalFetch {
+                events: Vec::new(),
+                access: JournalAccess::OwnOnly,
+            },
+        );
+        let now = t0 + 185 * SEC;
+        st.tick(now).expect("tick");
+        let h = st
+            .answer_with(None, true, now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.request, None, "the timeline needs no range request");
+        let tl = h.timeline.clone().expect("a timeline");
+        assert_eq!(tl.end_realtime_ns, now as i64 + OFFSET);
+        let valid = |band: usize| -> Vec<f32> {
+            tl.bands[band]
+                .iter()
+                .filter(|p| !p.is_gap())
+                .map(|p| p.mean)
+                .collect()
+        };
+        for (band, want) in [(0, 40.0), (1, 8.0e9), (2, 25.0), (3, 150.0)] {
+            let means = valid(band);
+            assert!(!means.is_empty(), "band {band} has points");
+            assert!(means.iter().all(|&m| m == want), "band {band}: {means:?}");
+        }
+        assert_eq!(tl.events.len(), 1);
+        let e = &tl.events[0];
+        assert_eq!(e.kind, TimelineEventKind::Heat);
+        assert_eq!(e.start_realtime_ns, (t0 + 10 * SEC) as i64 + OFFSET);
+        assert_eq!(e.process.as_deref(), Some("blender"));
+        assert_eq!(tl.journal, Some(JournalAccess::OwnOnly));
+
+        // Within 60 s nothing is read again, unless an event ended.
+        assert!(
+            st.answer_with(None, true, now + SEC)
+                .expect("read")
+                .is_none()
+        );
+        st.queue_events([HistEvent {
+            kind: EventKind::Suspend,
+            start_t_ns: t0 + 100 * SEC,
+            duration_ms: 1_000,
+            peak: 0.0,
+            device_key: None,
+            process: None,
+        }]);
+        let h = st
+            .answer_with(None, true, now + 2 * SEC)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(h.timeline.expect("a timeline").events.len(), 2);
+        assert!(
+            st.answer_with(None, true, now + 3 * SEC)
+                .expect("read")
+                .is_none()
+        );
+        let h = st.answer_with(None, true, now + 62 * SEC).expect("read");
+        assert!(h.is_some(), "read again after 60 s");
+
+        // The timeline is no longer shown: one empty component, then nothing.
+        let h = st
+            .answer_with(None, false, now + 63 * SEC)
+            .expect("read")
+            .expect("sent");
+        assert!(h.timeline.is_none());
+        assert!(
+            st.answer_with(None, false, now + 64 * SEC)
+                .expect("read")
+                .is_none()
+        );
     }
 
     fn psi(t_ns: TimeNs, pct: f32) -> MetricMsg {

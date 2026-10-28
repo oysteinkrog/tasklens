@@ -124,6 +124,15 @@ pub struct PerfOverviewSetBoxPower {
     pub on: bool,
 }
 
+/// Sets `performance.timeline_click` to `click`: `pause`, `preview` or `history` (the timeline
+/// box menu's "Click" submenu, UI-PRF-057).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetTimelineClick {
+    pub click: Arc<str>,
+}
+
 /// Shows (`shown`) or hides the engine chart `engine` (an en-US engine name, or "VRAM") of the
 /// Overview box of `kind` (the GPU box menu's "Engines" submenu, UI-PRF-019, D-029).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

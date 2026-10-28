@@ -838,6 +838,32 @@ perf-overview-ago-24h = 24 hours ago
 perf-overview-ago-7d = 7 days ago
 perf-overview-since = since {$time}
 perf-overview-figures = min {$min}  avg {$avg}  peak {$peak}
+perf-overview-box-timeline = Timeline
+perf-overview-mode-bands = Bands
+perf-overview-timeline-band-cpu = CPU
+perf-overview-timeline-band-memory = Memory
+perf-overview-timeline-band-disk = Disk
+perf-overview-timeline-band-network = Network
+perf-overview-timeline-event-pressure = Memory pressure
+perf-overview-timeline-event-swap = Swap storm
+perf-overview-timeline-event-heat = Heat
+perf-overview-timeline-event-full-load = Full load
+perf-overview-timeline-event-suspend = Sleep
+perf-overview-timeline-event-boot = Boot
+perf-overview-timeline-event-oom = OOM kill
+perf-overview-timeline-event-crash = Crash
+perf-overview-timeline-merged = { $count ->
+    [one] {$count} event
+   *[other] {$count} events
+}
+perf-overview-timeline-journal-own-only = Needs the systemd-journal group
+perf-overview-timeline-no-history = No process history at that time
+perf-overview-timeline-click = Click
+perf-overview-timeline-click-pause = Pause until Back to live
+perf-overview-timeline-click-preview = Preview for 30 s
+perf-overview-timeline-click-history = Open History mode
+perf-overview-back-to-live = Back to live
+perf-overview-range-not-kept = Not kept at this resolution
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page
@@ -3361,6 +3387,7 @@ shell-settings-perf-status-bar-performance = Performance tab
 shell-settings-perf-status-bar-all-tabs = Every tab
 shell-settings-perf-status-bar-off = Off
 shell-settings-perf-overview-range = Overview time range
+shell-settings-perf-timeline-click = Timeline click
 shell-settings-perf-memory-composition = Show memory composition
 shell-settings-perf-swap = Show swap usage
 shell-settings-perf-gpu-optional = Optional GPU graphs

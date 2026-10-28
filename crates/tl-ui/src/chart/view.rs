@@ -67,6 +67,9 @@ pub struct ChartView {
     /// The chart reads the device metric history for ranges over 10 minutes
     /// (`with_device_history`, the Overview charts).
     device_history: bool,
+    /// With `device_history`: the history answers a paused request for this chart's range
+    /// (UI-PRF-057), so the chart reads it at every range.
+    paused: bool,
     /// Set while the chart reads the device metric history ([`reads_history`]): the series are
     /// on CLOCK_REALTIME and the chart is drawn against that clock.
     pub(crate) history: Option<HistoryClock>,
@@ -126,6 +129,7 @@ impl ChartView {
             newest_marks: false,
             frozen: false,
             device_history: false,
+            paused: false,
             history: None,
             boots: Arc::from([]),
             value_text: None,
@@ -171,7 +175,15 @@ impl ChartView {
 
     /// Whether this chart reads the device metric history now.
     fn reads_device_history(&self) -> bool {
-        self.device_history && reads_history(self.spec.range_ns)
+        self.device_history && (reads_history(self.spec.range_ns) || self.paused)
+    }
+
+    /// Whether `snap`'s device history answers a paused request for this chart's range.
+    fn paused_in(&self, snap: &Snapshot) -> bool {
+        self.device_history
+            && snap.device_history.request.is_some_and(|r| {
+                r.end_realtime_ns.is_some() && r.range.span_ns() == self.spec.range_ns
+            })
     }
 
     /// Notifies only when one of this chart's series changed, or when a device change may have
@@ -187,6 +199,14 @@ impl ChartView {
             return;
         }
         let range_ns = self.spec.range_ns;
+        if ev.mask.contains(ComponentMask::DEVICE_HISTORY)
+            && self.paused_in(hub.read(cx).current()) != self.paused
+        {
+            // Paused or back to live: the source changes.
+            self.resolve(hub.read(cx).current());
+            cx.notify();
+            return;
+        }
         if self.reads_device_history() {
             // History series change only with the device history component.
             if ev.mask.contains(ComponentMask::DEVICE_HISTORY) {
@@ -237,6 +257,7 @@ impl ChartView {
     /// ([`reads_history`]): each series becomes a view on CLOCK_REALTIME, and process series are
     /// absent.
     pub fn resolve(&mut self, snap: &Snapshot) {
+        self.paused = self.paused_in(snap);
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
         if self.reads_device_history() {

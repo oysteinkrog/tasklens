@@ -189,6 +189,21 @@ impl OverviewRange {
     }
 }
 
+/// `performance.timeline_click` (UI-PRF-057, D-030): what a click on the Overview timeline does.
+/// `History` is offered only while `history.enabled` is on; [`Settings::clamp`] loads a saved
+/// `history` as `Pause` while it is off.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineClick {
+    /// The Overview shows the picked time until "Back to live".
+    #[default]
+    Pause,
+    /// The Overview shows the picked time while the pointer is down and for 30 s after.
+    Preview,
+    /// History mode opens at the picked time.
+    History,
+}
+
 /// Entries of `performance.gpu_optional_graphs`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -411,6 +426,8 @@ pub struct PerformanceSettings {
     pub status_bar: StatusBarPlacement,
     /// The range of every Overview chart (UI-PRF-055).
     pub overview_range: OverviewRange,
+    /// What a click on the Overview timeline does (UI-PRF-057).
+    pub timeline_click: TimelineClick,
     /// The height of one Overview grid row, logical px (UI-PRF-056), in
     /// [`OVERVIEW_ROW_UNIT_RANGE`].
     pub overview_row_unit_px: u32,
@@ -433,7 +450,15 @@ pub struct PerformanceSettings {
 pub const OVERVIEW_KEY: &str = "performance.overview";
 
 /// The kinds `[performance.overview]` accepts, in default order.
-pub const OVERVIEW_BOX_KINDS: [&str; 6] = ["cpu", "memory", "gpu", "disk", "net", "processes"];
+pub const OVERVIEW_BOX_KINDS: [&str; 7] = [
+    "cpu",
+    "memory",
+    "gpu",
+    "disk",
+    "net",
+    "processes",
+    "timeline",
+];
 
 /// The smallest and largest Overview weight. Load and save clamp into this range; the minimum
 /// matches the 3 decimals a weight is written with, so a saved layout always reloads.
@@ -455,13 +480,14 @@ pub const OVERVIEW_MIN_SPAN: (i64, i64) = (3, 4);
 
 /// Each kind's smallest width and height in logical px (UI-PRF-018, UI-PRF-056), in
 /// [`OVERVIEW_BOX_KINDS`] order.
-pub const OVERVIEW_KIND_MIN: [(&str, u32, u32); 6] = [
+pub const OVERVIEW_KIND_MIN: [(&str, u32, u32); 7] = [
     ("cpu", 280, 280),
     ("memory", 200, 220),
     ("gpu", 200, 220),
     ("disk", 200, 220),
     ("net", 200, 220),
     ("processes", 280, 260),
+    ("timeline", 400, 160),
 ];
 
 /// The grid rows `kind` spans at least with rows of `unit` px: `max(4, ceil(min_h / unit))`.
@@ -840,8 +866,15 @@ impl OverviewLayoutSetting {
     }
 
     /// The default grid (UI-PRF-056): CPU 8 × 7 and Memory 4 × 7 on top, then GPU, Disk and
-    /// Net 4 × 6 each from row 7.
+    /// Net 4 × 6 each from row 7, then the timeline 12 × 4 from row 13 (UI-PRF-057).
     pub fn grid_default() -> Self {
+        let mut layout = Self::grid_without_timeline();
+        layout.grid.push(Self::timeline_at(13));
+        layout
+    }
+
+    /// The default grid without the timeline: what the UI-PRF-018 default rows convert to.
+    pub fn grid_without_timeline() -> Self {
         let cell = |kind: &str, col, row, cols, rows| OverviewGridSetting {
             kind: kind.to_owned(),
             col,
@@ -862,24 +895,39 @@ impl OverviewLayoutSetting {
         }
     }
 
-    /// The default grid plus Top processes over all 12 columns under it, `max(4, ceil(260 /
-    /// unit))` rows high: the layout an old `overview_top_processes = true` migrates to.
+    /// The timeline over all 12 columns from `row`, 4 rows high (UI-PRF-056).
+    fn timeline_at(row: i64) -> OverviewGridSetting {
+        OverviewGridSetting {
+            kind: "timeline".to_owned(),
+            col: 0,
+            row,
+            cols: OVERVIEW_GRID_COLS,
+            rows: 4,
+            ..OverviewGridSetting::default()
+        }
+    }
+
+    /// The default grid plus Top processes over all 12 columns above the timeline, `max(4,
+    /// ceil(260 / unit))` rows high: the layout an old `overview_top_processes = true` migrates
+    /// to.
     pub fn with_top_procs(unit: u32) -> Self {
-        let mut layout = Self::grid_default();
+        let mut layout = Self::grid_without_timeline();
         let top = layout
             .grid
             .iter()
             .map(|e| e.row + e.rows)
             .max()
             .unwrap_or(0);
+        let rows = overview_min_rows("processes", unit);
         layout.grid.push(OverviewGridSetting {
             kind: "processes".to_owned(),
             col: 0,
             row: top,
             cols: OVERVIEW_GRID_COLS,
-            rows: overview_min_rows("processes", unit),
+            rows,
             ..OverviewGridSetting::default()
         });
+        layout.grid.push(Self::timeline_at(top + rows));
         layout
     }
 
@@ -1135,6 +1183,7 @@ impl Default for PerformanceSettings {
             overview_core_smoothing: CoreSmoothing::default(),
             status_bar: StatusBarPlacement::default(),
             overview_range: OverviewRange::default(),
+            timeline_click: TimelineClick::default(),
             overview_row_unit_px: OVERVIEW_ROW_UNIT_DEFAULT,
             overview_top_processes: false,
             overview: None,
@@ -1926,6 +1975,10 @@ impl Settings {
             c,
         );
         self.performance.migrate_overview(c);
+        // UI-PRF-057: `history` is offered only while recording is on.
+        if self.performance.timeline_click == TimelineClick::History && !self.history.enabled {
+            self.performance.timeline_click = TimelineClick::Pause;
+        }
         changed
     }
 }
@@ -2757,6 +2810,29 @@ mod tests {
     }
 
     #[test]
+    fn timeline_click_history_needs_recording() {
+        assert_eq!(
+            PerformanceSettings::default().timeline_click,
+            TimelineClick::Pause
+        );
+        for (text, want) in [
+            ("pause", TimelineClick::Pause),
+            ("preview", TimelineClick::Preview),
+        ] {
+            let (s, _) = load_toml(&format!("[performance]\ntimeline_click = \"{text}\"\n"));
+            assert_eq!(s.performance.timeline_click, want, "{text}");
+        }
+        // UI-PRF-057: a saved `history` loads as `pause` while recording is off.
+        let (s, _) = load_toml("[performance]\ntimeline_click = \"history\"\n");
+        assert_eq!(s.performance.timeline_click, TimelineClick::Pause);
+        let (s, _) =
+            load_toml("[performance]\ntimeline_click = \"history\"\n[history]\nenabled = true\n");
+        assert_eq!(s.performance.timeline_click, TimelineClick::History);
+        let out = toml::to_string(&s).expect("serializes");
+        assert!(out.contains("timeline_click = \"history\""), "{out}");
+    }
+
+    #[test]
     fn overview_defaults_d026() {
         // D-026: the GPU box defaults to one chart per engine. A saved mode still wins, and
         // the old default is now a saved mode like any other.
@@ -2796,7 +2872,7 @@ mod tests {
         assert!(changed.is_empty(), "{changed:?}");
         assert_eq!(
             inline.performance.overview,
-            Some(OverviewLayoutSetting::grid_default())
+            Some(OverviewLayoutSetting::grid_without_timeline())
         );
         assert_eq!(load_toml("").0.performance.overview, None);
     }
@@ -2810,7 +2886,7 @@ mod tests {
         assert!(s.clamp().is_empty());
         assert_eq!(
             s.performance.overview,
-            Some(OverviewLayoutSetting::grid_default())
+            Some(OverviewLayoutSetting::grid_without_timeline())
         );
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("[[performance.overview.grid]]"), "{text}");
@@ -3061,12 +3137,22 @@ mod tests {
         assert_eq!(layout, OverviewLayoutSetting::with_top_procs(40));
         // UI-PRF-056: a band of max(4, ceil(260 / unit)) rows over all 12 columns under the
         // default grid.
-        let last = layout.grid.last().expect("a Top processes entry");
-        assert_eq!(last.kind, "processes");
-        assert_eq!((last.col, last.row, last.cols, last.rows), (0, 13, 12, 7));
+        let procs = &layout.grid[5];
+        assert_eq!(procs.kind, "processes");
+        assert_eq!(
+            (procs.col, procs.row, procs.cols, procs.rows),
+            (0, 13, 12, 7)
+        );
         assert_eq!(
             &layout.grid[..5],
-            &OverviewLayoutSetting::grid_default().grid[..]
+            &OverviewLayoutSetting::grid_without_timeline().grid[..]
+        );
+        // The timeline stays at the bottom, under the Top processes band (UI-PRF-057).
+        let timeline = layout.grid.last().expect("a timeline entry");
+        assert_eq!(timeline.kind, "timeline");
+        assert_eq!(
+            (timeline.col, timeline.row, timeline.cols, timeline.rows),
+            (0, 20, 12, 4)
         );
         // The old key is not written, so the migration runs once.
         let text = toml::to_string(&s).expect("serializes");

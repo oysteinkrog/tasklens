@@ -111,7 +111,7 @@ pub fn hide(layout: &mut OverviewLayout, kind: BoxKind) -> bool {
 }
 
 /// The kinds the layout does not place, in [`BoxKind::ALL`] order: the "Add Box" menu.
-pub fn hidden_kinds(layout: &OverviewLayout) -> SmallVec<[BoxKind; 6]> {
+pub fn hidden_kinds(layout: &OverviewLayout) -> SmallVec<[BoxKind; 7]> {
     BoxKind::ALL
         .into_iter()
         .filter(|k| !layout.has(*k))
@@ -368,7 +368,7 @@ impl BoxDrag {
 /// Edit Layout mode state, kept by [`OverviewPage`] while the mode is on.
 pub struct EditState {
     /// One focus handle per kind in [`BoxKind::ALL`] order; Tab moves between the placed ones.
-    focus: [FocusHandle; 6],
+    focus: [FocusHandle; 7],
     /// The box drag in progress.
     pub drag: Option<BoxDrag>,
     /// The Add Box button's bounds from the last paint, to open its menu below it.
@@ -414,6 +414,7 @@ fn kind_name(kind: BoxKind, cx: &App) -> SharedString {
             BoxKind::Disk => "perf-overview-box-disks",
             BoxKind::Net => "perf-overview-box-network",
             BoxKind::TopProcs => "perf-overview-box-processes",
+            BoxKind::Timeline => "perf-overview-box-timeline",
         },
     )
 }
@@ -1211,7 +1212,7 @@ mod tests {
             Some(GridBox {
                 kind: TopProcs,
                 col: 0,
-                row: 13,
+                row: 17,
                 cols: 4,
                 rows: 7
             })

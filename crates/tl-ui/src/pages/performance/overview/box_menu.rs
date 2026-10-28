@@ -17,16 +17,20 @@ use gpui_kit::{
     MouseDownEvent, ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
 
+use smallvec::SmallVec;
+use tl_model::settings::TimelineClick;
+
 use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind};
 use super::parts::TITLE_TOP;
+use super::timeline;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
     PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxEngine,
-    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower,
+    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower, PerfOverviewSetTimelineClick,
 };
 use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
@@ -220,10 +224,42 @@ fn arrange_items(
     menu
 }
 
+/// The timeline's "Click" submenu (UI-PRF-057): one radio item per click choice, `history`
+/// only while recording is on.
+fn click_items(menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+    let current = timeline::click_mode(cx);
+    let choices: SmallVec<[(TimelineClick, SharedString); 3]> = timeline::click_choices(cx)
+        .into_iter()
+        .map(|c| (c, tr(cx, timeline::click_label(c))))
+        .collect();
+    menu.submenu(
+        tr(cx, "perf-overview-timeline-click"),
+        window,
+        cx,
+        move |mut menu, _, _| {
+            for (click, word) in &choices {
+                menu = menu.radio_item(
+                    word.clone(),
+                    *click == current,
+                    Box::new(PerfOverviewSetTimelineClick {
+                        click: timeline::click_key(*click).into(),
+                    }),
+                );
+            }
+            menu
+        },
+    )
+}
+
 /// "Layout" with the mode items, "Reset Box" and a separator: the start of the page menu when
-/// the right-click landed on `target`'s title line.
+/// the right-click landed on `target`'s title line. The timeline adds its "Click" submenu.
 pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &mut App) -> TlMenu {
     let kind = target.kind.key().into();
+    let menu = if target.kind == BoxKind::Timeline {
+        click_items(menu, window, cx)
+    } else {
+        menu
+    };
     menu.submenu(
         tr(cx, "perf-overview-box-layout"),
         window,

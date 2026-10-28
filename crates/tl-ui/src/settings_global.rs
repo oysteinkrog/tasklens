@@ -424,6 +424,7 @@ setting_keys! {
     PerformanceOverviewCoreSmoothing => "performance.overview_core_smoothing", Performance, Str;
     PerformanceStatusBar => "performance.status_bar", Performance, Str;
     PerformanceOverviewRange => "performance.overview_range", Performance, Str;
+    PerformanceTimelineClick => "performance.timeline_click", Performance, Str;
     Fans => "fans", Fans, Map;
     GraphsMinigraphCpu => "graphs.minigraph_cpu", Graphs, Bool;
     GraphsMinigraphMemory => "graphs.minigraph_memory", Graphs, Bool;
@@ -562,6 +563,7 @@ fn assign(s: &mut Settings, key: SettingKey, value: &SettingValue) -> Result<(),
             }
             K::PerformanceStatusBar => parse(&mut s.performance.status_bar, v),
             K::PerformanceOverviewRange => parse(&mut s.performance.overview_range, v),
+            K::PerformanceTimelineClick => parse(&mut s.performance.timeline_click, v),
             K::RenderingGpu => text(&mut s.rendering.gpu, v),
             _ => Err("kind mismatch"),
         },

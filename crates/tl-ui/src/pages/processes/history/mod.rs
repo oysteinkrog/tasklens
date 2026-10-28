@@ -471,9 +471,26 @@ struct HistorySession {
     off_toast_shown: bool,
     /// One flag per [`HistoryLoadProblem`], in [`problem_index`] order.
     problems_shown: [bool; 6],
+    /// The second the Overview timeline asked History mode to show (UI-PRF-057). The page takes
+    /// it when it is built, or at once when it is already open.
+    pending_scrub: Option<TimeNs>,
 }
 
 impl Global for HistorySession {}
+
+/// Opens History mode scrubbed to `t` (UI-PRF-057, the timeline's `history` click): selects
+/// the Processes tab, turns History mode on when it is off, and hands `t` to the page.
+pub fn open_at(t: TimeNs, window: &mut Window, cx: &mut App) {
+    cx.default_global::<HistorySession>().pending_scrub = Some(t);
+    if history_mode(cx) {
+        window.dispatch_action(
+            Box::new(crate::actions::SelectTab(Tab::Processes as usize)),
+            cx,
+        );
+    } else {
+        window.dispatch_action(Box::new(crate::actions::ToggleHistoryMode), cx);
+    }
+}
 
 /// True while `history.enabled` is off. Without settings (tests) recording counts as on.
 fn recording_off(cx: &App) -> bool {
@@ -641,6 +658,7 @@ impl HistoryPage {
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
+        subs.push(cx.observe_global::<HistorySession>(|this, cx| this.take_pending_scrub(cx)));
         subs.push(cx.observe(&table, |this, _, cx| this.sync_selection(cx)));
         subs.push(cx.subscribe_in(
             &table,
@@ -727,6 +745,7 @@ impl HistoryPage {
         let session = cx.default_global::<HistorySession>();
         page.state.banner_hidden = session.banner_hidden;
         page.state.off_toast_shown = session.off_toast_shown;
+        page.state.scrub = session.pending_scrub.take();
         page.request(cx);
         page.update_live_timer(cx);
         // Deferred: the main window may be mid-update when History mode turns on.
@@ -873,6 +892,17 @@ impl HistoryPage {
     }
 
     /// Sets the scrub time (`None` is live) and asks for its frame.
+    /// Takes the time the Overview timeline asked for, if any.
+    fn take_pending_scrub(&mut self, cx: &mut Context<Self>) {
+        let pending = cx
+            .try_global::<HistorySession>()
+            .and_then(|s| s.pending_scrub);
+        if let Some(t) = pending {
+            cx.global_mut::<HistorySession>().pending_scrub = None;
+            self.set_scrub(Some(t), cx);
+        }
+    }
+
     pub fn set_scrub(&mut self, scrub: Option<TimeNs>, cx: &mut Context<Self>) {
         if self.state.scrub == scrub {
             return;

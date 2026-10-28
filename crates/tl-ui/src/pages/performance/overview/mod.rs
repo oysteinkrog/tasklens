@@ -20,6 +20,10 @@
 //! device metric history, and the min, avg and peak line and time axis start of each box, which
 //! the page works out from the snapshot and hands to the boxes.
 //!
+//! [`timeline`] is the 24-hour timeline box (UI-PRF-057). A click on it can hold the page at a
+//! time; while held, the page asks for every range at that time and its header shows "Back to
+//! live".
+//!
 //! Render contract (D-022, crw.34): the page never notifies on a sample. Each box is a cached
 //! child view that notifies only when its own text or bars change. The page re-renders on a
 //! resize, when a GPU or disk card comes or goes, and (from GPUI's ancestor marking) when a box
@@ -38,6 +42,7 @@ pub mod parts;
 pub mod procs_box;
 pub mod range;
 pub mod splitter;
+pub mod timeline;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -68,13 +73,18 @@ use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::range::{RangeText, history_request};
 use self::splitter::{Drag, Splitter, Target, set_span, splitters};
-use super::actions::{PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfSetStatusBar};
+use self::timeline::{OverviewPause, Paused, TimelineBox};
+use super::actions::{
+    PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfOverviewSetTimelineClick,
+    PerfSetStatusBar,
+};
 use super::details::{KeyValueModel, Template};
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
 use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{NetFormat, ValueFormat, format_value};
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
@@ -201,6 +211,11 @@ pub struct OverviewPage {
     net: Entity<NetBox>,
     /// The Top processes box, built only while the layout places it.
     procs: Option<Entity<ProcsBox>>,
+    /// The 24-hour timeline box (UI-PRF-057).
+    timeline: Entity<TimelineBox>,
+    /// The time the page is held at, and CLOCK_REALTIME when it was set, so the request end
+    /// stays the same until the pause or the range changes (UI-PRF-057).
+    paused: Option<(Paused, i64)>,
     sidebar: Entity<DeviceSidebar>,
     gpu_keys: SmallVec<[DeviceKey; 4]>,
     disk_keys: SmallVec<[DeviceKey; 8]>,
@@ -335,6 +350,8 @@ impl OverviewPage {
         let procs = layout
             .has(BoxKind::TopProcs)
             .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
+        let timeline = cx.new(|cx| TimelineBox::new(&hub, cx));
+        subs.push(cx.observe_global::<OverviewPause>(Self::on_pause));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -352,6 +369,8 @@ impl OverviewPage {
             disk,
             net,
             procs,
+            timeline,
+            paused: timeline::paused(cx).map(|p| (p, timeline::now_realtime_ns())),
             sidebar: sidebar.clone(),
             gpu_keys: gpu_cards.iter().map(|c| c.0.clone()).collect(),
             disk_keys: disk_cards.iter().map(|c| c.0.clone()).collect(),
@@ -390,11 +409,14 @@ impl OverviewPage {
     }
 
     /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
-    /// processes box is placed, and the device metric history for 1 h, 24 h and 7 d.
+    /// processes box is placed, the device metric history for 1 h, 24 h and 7 d and for every
+    /// range while held at a time, and the timeline while its box is placed.
     pub fn demand_part(&self) -> Demand {
+        let (paused, at) = self.paused.unzip();
         Demand {
             process_top: self.procs.is_some(),
-            device_history_range: history_request(self.range),
+            device_history_range: history_request(self.range, paused, at.unwrap_or(0)),
+            device_timeline: self.layout.has(BoxKind::Timeline),
             any_surface_visible: true,
             cpu: CpuDemand::PerCore,
             cpu_fast: true,
@@ -446,6 +468,16 @@ impl OverviewPage {
     /// The Top processes box while the layout places it.
     pub fn procs_box(&self) -> Option<&Entity<ProcsBox>> {
         self.procs.as_ref()
+    }
+
+    /// The 24-hour timeline box.
+    pub fn timeline_box(&self) -> &Entity<TimelineBox> {
+        &self.timeline
+    }
+
+    /// The time the page is held at, `None` while live (UI-PRF-057).
+    pub fn paused(&self) -> Option<Paused> {
+        self.paused.map(|(p, _)| p)
     }
 
     /// The hub the boxes read.
@@ -529,6 +561,9 @@ impl OverviewPage {
         if range != self.range {
             // The boxes re-spec their charts from the same settings change.
             self.range = range;
+            if let Some((_, at)) = &mut self.paused {
+                *at = timeline::now_realtime_ns();
+            }
             self.send_demand(cx);
             self.sync_range(cx);
             self.notify(cx);
@@ -551,6 +586,37 @@ impl OverviewPage {
             self.relayout(cx);
             self.notify(cx);
         }
+    }
+
+    /// The timeline held the page at a time or made it live: a new history request, the
+    /// header's "Back to live" and the range switches' disabled ranges follow.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let paused = timeline::paused(cx);
+        if paused == self.paused() {
+            return;
+        }
+        self.paused = paused.map(|p| (p, timeline::now_realtime_ns()));
+        self.send_demand(cx);
+        self.sync_range(cx);
+        self.status.update(cx, |_, cx| cx.notify());
+        self.notify(cx);
+    }
+
+    /// `PerfOverviewSetTimelineClick`: the timeline menu's "Click" items (UI-PRF-057). An unknown
+    /// value, and `history` while recording is off, do nothing.
+    fn on_set_timeline_click(
+        &mut self,
+        a: &PerfOverviewSetTimelineClick,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(click) = timeline::click_from_key(&a.click) else {
+            return;
+        };
+        if !timeline::click_choices(cx).contains(&click) {
+            return;
+        }
+        TlSettings::update(cx, |d| d.settings.performance.timeline_click = click);
     }
 
     /// A new snapshot: the boxes' range text follows the series and the device history. The
@@ -691,6 +757,7 @@ impl OverviewPage {
     /// placement and one render.
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
+        let timeline_moved = layout.has(BoxKind::Timeline) != self.layout.has(BoxKind::Timeline);
         let split = layout.split(BoxKind::Cpu);
         let cpu_arrange = layout.arrange(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
@@ -753,6 +820,8 @@ impl OverviewPage {
                 let hub = self.hub.clone();
                 cx.new(|cx| ProcsBox::new(&hub, cx))
             });
+            self.send_demand(cx);
+        } else if timeline_moved {
             self.send_demand(cx);
         }
         self.relayout(cx);
@@ -961,6 +1030,25 @@ impl OverviewPage {
                     .child(self.header.0.clone()),
             );
         let switch = (!self.bar_on_overview).then(|| range::range_switch(range::HEADER_SWITCH, cx));
+        // UI-PRF-057: while held at a time, "Back to live" ends the pause.
+        let live = self.paused.is_some().then(|| {
+            div()
+                .debug_selector(|| timeline::BACK_TO_LIVE_ID.into())
+                .child(
+                    TlButton::new(timeline::BACK_TO_LIVE_ID, TlButtonKind::Primary)
+                        .size(TlButtonSize::Sm)
+                        .label(tr(cx, "perf-overview-back-to-live"))
+                        .on_click(|_, _, cx| timeline::set_paused(None, cx)),
+                )
+        });
+        let right = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap(m.sp[4])
+            .children(live)
+            .children(switch);
         div()
             .debug_selector(|| RANGE_HEADER_ID.into())
             .flex()
@@ -972,7 +1060,7 @@ impl OverviewPage {
             .px(m.sp[5])
             .pt(m.sp[4])
             .child(title)
-            .children(switch)
+            .child(right)
             .into_any_element()
     }
 
@@ -989,6 +1077,7 @@ impl OverviewPage {
                 Some(procs) => procs.clone().cached(cached).into_any_element(),
                 None => div().into_any_element(),
             },
+            BoxKind::Timeline => self.timeline.clone().cached(cached).into_any_element(),
         }
     }
 }
@@ -1085,6 +1174,7 @@ impl OverviewPage {
                         procs.read(cx).copy_text(out);
                     }
                 }
+                BoxKind::Timeline => self.timeline.read(cx).copy_text(out),
             }
         }
     }
@@ -1111,6 +1201,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_set_box_power))
             .on_action(cx.listener(Self::on_set_box_engine))
             .on_action(cx.listener(Self::on_reset_box))
+            .on_action(cx.listener(Self::on_set_timeline_click))
     }
 }
 

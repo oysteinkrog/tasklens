@@ -6,6 +6,10 @@
 //! ([`history_request`]). The chart view picks its source from its range
 //! (`chart::view::reads_history`).
 //!
+//! While the timeline paused the Overview at a time (UI-PRF-057, [`super::timeline::Paused`]),
+//! every range is asked for at that time from the history, and the switch disables the ranges
+//! the finest tier at that time cannot serve.
+//!
 //! [`RangeText`] is what a device box shows for the range: the "min 6%  avg 42%  peak 100%" line
 //! under its title ([`figures`]) and the start of its time axis ("1 hour ago", or "since 09:14"
 //! while the history does not cover the range yet, [`axis_start`]). The page works both out and
@@ -21,6 +25,7 @@ use tl_model::series::Sample;
 use tl_model::settings::OverviewRange;
 use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 
+use super::timeline::{self, Paused};
 use crate::chart::view::find_tiered;
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::i18n::tr;
@@ -74,8 +79,23 @@ pub fn set_range(range: OverviewRange, cx: &mut App) {
 }
 
 /// What the page asks the device metric history for: the range ending now for 1 h, 24 h and
-/// 7 d, nothing for the live ranges.
-pub fn history_request(range: OverviewRange) -> Option<DeviceHistoryRequest> {
+/// 7 d, nothing for the live ranges. While `paused`, every range ends at the picked time
+/// centred in the range, never after `now_realtime_ns` (UI-PRF-057).
+pub fn history_request(
+    range: OverviewRange,
+    paused: Option<Paused>,
+    now_realtime_ns: i64,
+) -> Option<DeviceHistoryRequest> {
+    if let Some(p) = paused {
+        return Some(DeviceHistoryRequest {
+            range: range.device_range(),
+            end_realtime_ns: Some(timeline::paused_end(
+                p.at_realtime_ns,
+                range,
+                now_realtime_ns,
+            )),
+        });
+    }
     range.from_history().then(|| DeviceHistoryRequest {
         range: range.device_range(),
         end_realtime_ns: None,
@@ -83,23 +103,29 @@ pub fn history_request(range: OverviewRange) -> Option<DeviceHistoryRequest> {
 }
 
 /// The segmented switch: one segment per range, the current one on. A click saves the range.
+/// While paused, a range the history cannot serve at the picked time is disabled with "Not kept
+/// at this resolution" (UI-PRF-057).
 pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
     let current = current_range(cx);
+    let paused = timeline::paused(cx);
+    let now = timeline::now_realtime_ns();
     let mut row = div().flex().flex_row().flex_none();
     for (range, key) in OverviewRange::ALL.into_iter().zip(SWITCH_KEYS) {
         let id = segment_id(prefix, range);
-        row = row.child(
-            div().debug_selector(move || id.clone()).child(
-                TlButton::new(
-                    ElementId::Name(segment_id(prefix, range).into()),
-                    TlButtonKind::Segment {
-                        on: range == current,
-                    },
-                )
-                .label(tr(cx, key))
-                .on_click(move |_, _, cx| set_range(range, cx)),
-            ),
-        );
+        let servable = paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
+        let mut button = TlButton::new(
+            ElementId::Name(segment_id(prefix, range).into()),
+            TlButtonKind::Segment {
+                on: range == current,
+            },
+        )
+        .label(tr(cx, key))
+        .disabled(!servable)
+        .on_click(move |_, _, cx| set_range(range, cx));
+        if !servable {
+            button = button.tooltip(tr(cx, "perf-overview-range-not-kept"));
+        }
+        row = row.child(div().debug_selector(move || id.clone()).child(button));
     }
     row.into_any_element()
 }
@@ -161,7 +187,11 @@ impl Acc {
 /// are taken from the sum of the two means of each point. Gaps are left out.
 pub fn figures(snap: &Snapshot, ids: &[SeriesId], range: OverviewRange) -> Option<Figures> {
     let mut acc = Acc::default();
-    if range.from_history() {
+    let paused = snap
+        .device_history
+        .request
+        .is_some_and(|r| r.end_realtime_ns.is_some());
+    if range.from_history() || paused {
         history_figures(&snap.device_history, ids, range, &mut acc)?;
     } else {
         let span = range.span_ns();
@@ -466,14 +496,39 @@ mod tests {
 
     #[test]
     fn history_request_only_for_long_ranges() {
-        assert_eq!(history_request(OverviewRange::M1), None);
-        assert_eq!(history_request(OverviewRange::M5), None);
+        assert_eq!(history_request(OverviewRange::M1, None, 0), None);
+        assert_eq!(history_request(OverviewRange::M5, None, 0), None);
         assert_eq!(
-            history_request(OverviewRange::D7),
+            history_request(OverviewRange::D7, None, 0),
             Some(DeviceHistoryRequest {
                 range: DeviceRange::D7,
                 end_realtime_ns: None
             })
+        );
+    }
+
+    #[test]
+    fn paused_request_centres_the_picked_time() {
+        let now = 100 * 3_600 * S as i64;
+        let paused = |at| {
+            Some(Paused {
+                at_realtime_ns: at,
+                kind: timeline::PauseKind::Pause,
+            })
+        };
+        // A live range is asked for from the history too, ending half a range after the pick.
+        let at = now - 3_600 * S as i64;
+        assert_eq!(
+            history_request(OverviewRange::M1, paused(at), now),
+            Some(DeviceHistoryRequest {
+                range: DeviceRange::M1,
+                end_realtime_ns: Some(at + 30 * S as i64),
+            })
+        );
+        // Never after now.
+        assert_eq!(
+            history_request(OverviewRange::H24, paused(at), now).and_then(|r| r.end_realtime_ns),
+            Some(now)
         );
     }
 }

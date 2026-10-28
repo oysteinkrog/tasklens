@@ -44,6 +44,7 @@ use crate::hub::GlobalHub;
 use crate::i18n::tr;
 use crate::pages::performance::card::{CardWords, card_words};
 use crate::pages::performance::gpu::device_engines;
+use crate::pages::performance::overview::timeline;
 use crate::pages::performance::{
     DeviceKey, DeviceKind as PerfKind, DeviceRow, PerformanceSettingsView, sidebar_order,
     type_number,
@@ -171,10 +172,26 @@ pub fn page(cx: &mut App) -> PageBuilder {
         ],
     );
     page.dropdown(
-        overview,
+        overview.clone(),
         SettingKey::PerformanceOverviewRange,
         tr(cx, "shell-settings-perf-overview-range"),
         &range,
+    );
+    // UI-PRF-057: `history` is listed only while recording is on.
+    let clicks: Vec<(SharedString, SettingValue)> = timeline::click_choices(cx)
+        .into_iter()
+        .map(|c| {
+            (
+                tr(cx, timeline::click_label(c)),
+                SettingValue::Str(timeline::click_key(c).into()),
+            )
+        })
+        .collect();
+    page.dropdown(
+        overview,
+        SettingKey::PerformanceTimelineClick,
+        tr(cx, "shell-settings-perf-timeline-click"),
+        &clicks,
     );
 
     for (key, label) in [

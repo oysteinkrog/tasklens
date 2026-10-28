@@ -285,6 +285,7 @@ fn merge<'a>(parts: impl Iterator<Item = &'a Demand> + Clone) -> Demand {
         if m.device_history_range.is_none() {
             m.device_history_range = p.device_history_range;
         }
+        m.device_timeline |= p.device_timeline;
     }
     if !m.any_surface_visible {
         return Demand {

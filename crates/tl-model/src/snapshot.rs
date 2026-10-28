@@ -1556,6 +1556,67 @@ pub struct DeviceHistory {
     /// CLOCK_REALTIME start of every boot inside the served range, oldest first, so a chart
     /// draws its boot marker (UI-PRF-055).
     pub boots: Arc<[i64]>,
+    /// The 24-hour timeline while `Demand.device_timeline` is set (UI-PRF-057). It is
+    /// independent of `request`: a live 1 min range still carries it.
+    pub timeline: Option<Arc<DeviceTimeline>>,
+}
+
+/// The heat bands of the timeline, in [`DeviceTimeline::bands`] order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TimelineBand {
+    /// CPU total, percent.
+    Cpu,
+    /// Memory in use, bytes.
+    Memory,
+    /// Active time of the busiest disk, percent.
+    Disk,
+    /// Download plus upload of the counted interfaces, bytes per second.
+    Network,
+}
+
+impl TimelineBand {
+    pub const ALL: [Self; 4] = [Self::Cpu, Self::Memory, Self::Disk, Self::Network];
+}
+
+/// Kinds of timeline events (UI-PRF-057).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TimelineEventKind {
+    MemoryPressure,
+    SwapStorm,
+    Heat,
+    FullLoad,
+    Suspend,
+    Boot,
+    OomKill,
+    Crash,
+}
+
+/// One stored event on CLOCK_REALTIME (ADR-017). Process names are `comm` only (ADR-015).
+#[derive(Clone, PartialEq, Debug)]
+pub struct TimelineEvent {
+    pub kind: TimelineEventKind,
+    pub start_realtime_ns: i64,
+    pub duration_ms: u32,
+    pub peak: f32,
+    pub process: Option<Arc<str>>,
+}
+
+/// The 24-hour timeline (ADR-017, UI-PRF-057): four bands of 1 min tier means, the events and
+/// the boots of the last 24 hours, and what the journal fetch could read.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct DeviceTimeline {
+    /// CLOCK_REALTIME end of the 24 hours the bands cover.
+    pub end_realtime_ns: i64,
+    /// Bucket width of the band points in ns.
+    pub step_ns: u64,
+    /// One band per [`TimelineBand`], in that order. A NaN mean is a gap.
+    pub bands: [Arc<[HistPoint]>; 4],
+    /// Oldest first.
+    pub events: Arc<[TimelineEvent]>,
+    /// CLOCK_REALTIME start of every boot inside the 24 hours, oldest first.
+    pub boots: Arc<[i64]>,
+    /// What the last journal fetch could read; `None` before the first fetch.
+    pub journal: Option<crate::journal::JournalAccess>,
 }
 
 impl DeviceHistory {
