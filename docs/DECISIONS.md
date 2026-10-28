@@ -4,6 +4,12 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-28
 
+### D-037 Overview grid rows stretch to fill the page
+
+- **Decision** (owner, 2026-10-28): when the Overview boxes end above the bottom of the page, the snap grid's rows grow evenly so the layout fills the page (UI-PRF-056 Fill). A layout taller than the page keeps the fixed row unit and scrolls.
+- **Why**: on the owner's 1160 × 1200 window a 13-row saved layout left about 300 px empty under the boxes. That looked like a bug. The new timeline box from 1.0.7 is only in the default grid, so saved layouts did not get it.
+- **Not changed**: saved layouts keep their cells; nothing is added to them. Edit Layout keeps a fixed row height while editing.
+
 ### D-036 Memory by app as a stacked chart
 
 - **Decision** (owner request 2026-10-28): memory in use can show as a stacked chart split into memory groups, with the top N groups each in their own colour, then "Other apps", then "Shared and kernel" (UI-PRF-060). N is a setting, 3 to 20, default 10. It is a view on the Memory page and a mode of the Overview Memory box, and it works on every range, including 24 h and 7 d (owner choice), so the group series go into the device metric history (ADR-017).
