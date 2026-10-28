@@ -88,6 +88,8 @@ const LABEL_W: f32 = 64.;
 const MARKER_ROW: f32 = 18.;
 /// The hour tick row under the bands, logical px.
 const TICK_ROW: f32 = 16.;
+/// A marker label shows only with at least this much room before the next marker, logical px.
+const LABEL_MIN_ROOM: f32 = 32.;
 /// Markers closer than this merge into one, logical px.
 pub const MERGE_PX: f32 = 8.;
 /// A press that moves less than this is a click, logical px.
@@ -1004,7 +1006,8 @@ impl TimelineBox {
                 .items_end()
                 .overflow_hidden()
                 .child(div().flex_none().w(px(2. * s)).h_full().bg(color))
-                .child(text);
+                // A label cut to a letter or two says nothing; the tooltip still lists it.
+                .children((room >= LABEL_MIN_ROOM * s).then_some(text));
             let state = HoverTooltip::state((MARKER_ID_PREFIX, n), window, cx);
             let marker = HoverTooltip::attach(
                 &state,
