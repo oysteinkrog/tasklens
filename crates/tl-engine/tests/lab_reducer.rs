@@ -3969,7 +3969,7 @@ fn memory_group_bands_published() {
             ("shared", "Shared and kernel", 0),
         ]
     );
-    let value = |device| {
+    let value = |rig: &Rig, device| {
         rig.last_sample(SeriesId {
             device,
             metric: MetricId::MEM_GROUP,
@@ -3980,7 +3980,7 @@ fn memory_group_bands_published() {
         .memory
         .groups
         .iter()
-        .map(|b| value(b.device).value)
+        .map(|b| value(&rig, b.device).value)
         .collect();
     let mib = MIB as f32;
     assert_eq!(values, [300.0 * mib, 50.0 * mib, 0.0, 650.0 * mib]);
@@ -4004,10 +4004,10 @@ fn memory_group_bands_published() {
     let snap = rig.latest();
     assert_eq!(snap.system.memory.groups.len(), 3);
     assert!(
-        !value(b_device).is_valid(),
+        !value(&rig, b_device).is_valid(),
         "a group outside the top is a gap"
     );
     let shared = snap.system.memory.groups[2].device;
-    assert_eq!(value(shared).value, 0.0);
-    assert!(value(shared).is_valid());
+    assert_eq!(value(&rig, shared).value, 0.0);
+    assert!(value(&rig, shared).is_valid());
 }
