@@ -6,7 +6,8 @@
 //! the rule was true, the duration runs to the first second under the threshold, the peak is the
 //! highest value while over, and the process is the one most often on top of the rule's resource
 //! while a process sweep ran. Ended events come back from `observe`; the worker queues them with
-//! `MetricHistory::push_event`.
+//! `MetricHistory::push_event`. A value whose source is stale (ADR-008) is missing. A rule
+//! without its input for more than 3 s ends as at a gap, at its last second over.
 //!
 //! Suspend spans come from the Logind `PrepareForSleep` signal ([`EventDetector::sleep`]) and,
 //! when the signal was missed, from the ADR-008 clock check ([`EventDetector::check_clock`]).
@@ -27,6 +28,8 @@ use tl_collect::counters::{Clock, SUSPEND_GAP_NS};
 use tl_collect::parse::hwmon::CPU_TEMP_CHIPS;
 use tl_history::metrics::{EventKind, HistEvent};
 use tl_model::devices::{DeviceCatalog, DeviceIdentity};
+use tl_model::health::SourceId;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::journal::JournalAccess;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{ProcessSnapshot, Snapshot};
@@ -55,6 +58,11 @@ pub const QUIET_S: u64 = 60;
 /// gap ends every started event at its last second over the threshold, and drops every window
 /// that had not passed yet.
 pub const GAP_NS: u64 = 3 * NS;
+/// A source's values count while its last update is at most max(3 × period, 1.5 s) old, the
+/// ADR-008 stale threshold.
+pub const STALE_PERIODS: u64 = 3;
+/// The floor of the stale threshold, ns.
+pub const STALE_MIN_NS: u64 = 1_500_000_000;
 /// The device key of the memory rules (ADR-017).
 pub const MEMORY_KEY: &str = "memory";
 /// The device key of the CPU package (ADR-017).
@@ -152,10 +160,11 @@ pub struct GpuReading {
     pub temp_c: Option<f32>,
     /// The device catalog's `hot_c` (ADR-016).
     pub hot_c: Option<f32>,
-    pub throttling: bool,
+    pub throttling: Option<bool>,
 }
 
-/// What the rules read once per second. `None` is a value that is not valid now.
+/// What the rules read once per second. `None` is a value that is not valid now, or whose
+/// source is stale.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Reading {
     /// CLOCK_BOOTTIME, ns.
@@ -163,7 +172,7 @@ pub struct Reading {
     pub cpu_pct: Option<f32>,
     pub cpu_temp_c: Option<f32>,
     pub cpu_hot_c: Option<f32>,
-    pub cpu_throttling: bool,
+    pub cpu_throttling: Option<bool>,
     pub gpus: SmallVec<[GpuReading; 2]>,
     pub psi_some_pct: Option<f32>,
     pub swap_in_pps: Option<f32>,
@@ -174,8 +183,35 @@ fn valid(m: Metric<f32>) -> Option<f32> {
     (m.validity.is_valid() && m.value.is_finite()).then_some(m.value)
 }
 
-fn flag(m: Metric<bool>) -> bool {
-    m.validity.is_valid() && m.value
+fn flag(m: Metric<bool>) -> Option<bool> {
+    m.validity.is_valid().then_some(m.value)
+}
+
+/// True when `id` sent data at most the ADR-008 stale threshold before `snap` was published.
+fn fresh(snap: &Snapshot, id: SourceId, period_ns: u64) -> bool {
+    let threshold = period_ns.saturating_mul(STALE_PERIODS).max(STALE_MIN_NS);
+    snap.health.sources[id.index()]
+        .last_ok_ns
+        .is_some_and(|ok| snap.published_ns.saturating_sub(ok) <= threshold)
+}
+
+/// The sampling period of the first live series with `metric`, on `device` when given. 1 s
+/// without one.
+fn period_ns(snap: &Snapshot, metric: MetricId, device: Option<DeviceIdx>) -> u64 {
+    let view = match device {
+        Some(device) => snap.series.get(SeriesId { device, metric }),
+        None => snap.series.series.iter().find(|v| v.id.metric == metric),
+    };
+    view.map_or(NS, |v| v.period_ns).max(1)
+}
+
+/// The GPU worker that sends a GPU's values: NVML devices carry their UUID, AMD and Intel cards
+/// use `[0; 16]` (R-166).
+fn gpu_source(identity: &DeviceIdentity) -> SourceId {
+    match identity {
+        DeviceIdentity::Gpu { uuid, .. } if *uuid != [0; 16] => SourceId::GpuNvidia,
+        _ => SourceId::GpuDrm,
+    }
 }
 
 /// The `hot_c` of the sensor the engine reads the CPU temperature from: the first chip in
@@ -198,7 +234,9 @@ pub fn cpu_hot_c(devices: &DeviceCatalog) -> Option<f32> {
 }
 
 impl Reading {
-    /// The values of `snap` at its publish time.
+    /// The values of `snap` at its publish time. A value whose source is stale then (its
+    /// `last_ok_ns` in `snap.health`) is left out, so a stalled sampler's last value never
+    /// starts or extends an event. The CPU worker sends the CPU temperature and throttling.
     pub fn from_snapshot(snap: &Snapshot) -> Self {
         let sys = &snap.system;
         let gpus = sys
@@ -206,24 +244,36 @@ impl Reading {
             .iter()
             .filter_map(|(idx, g)| {
                 let entry = snap.devices.get(*idx)?;
+                let period = period_ns(snap, MetricId::GPU_UTIL, Some(*idx));
+                let ok = fresh(snap, gpu_source(&entry.identity), period);
                 Some(GpuReading {
                     key: Arc::clone(&entry.persistent_key),
-                    util_pct: valid(g.util_pct),
-                    temp_c: valid(g.temp_c),
+                    util_pct: valid(g.util_pct).filter(|_| ok),
+                    temp_c: valid(g.temp_c).filter(|_| ok),
                     hot_c: entry.hot_c,
-                    throttling: flag(g.throttling),
+                    throttling: flag(g.throttling).filter(|_| ok),
                 })
             })
             .collect();
+        let cpu = fresh(
+            snap,
+            SourceId::Cpu,
+            period_ns(snap, MetricId::CPU_TOTAL, None),
+        );
+        let memory = fresh(
+            snap,
+            SourceId::Memory,
+            period_ns(snap, MetricId::PSI_MEM_SOME, None),
+        );
         Self {
             t_ns: snap.published_ns,
-            cpu_pct: valid(sys.cpu.util_pct),
-            cpu_temp_c: valid(sys.cpu.temp_c),
+            cpu_pct: valid(sys.cpu.util_pct).filter(|_| cpu),
+            cpu_temp_c: valid(sys.cpu.temp_c).filter(|_| cpu),
             cpu_hot_c: cpu_hot_c(&snap.devices),
-            cpu_throttling: flag(sys.cpu.throttling),
+            cpu_throttling: flag(sys.cpu.throttling).filter(|_| cpu),
             gpus,
-            psi_some_pct: valid(sys.memory.psi_some_pct),
-            swap_in_pps: valid(sys.memory.swap_in_pps),
+            psi_some_pct: valid(sys.memory.psi_some_pct).filter(|_| memory),
+            swap_in_pps: valid(sys.memory.swap_in_pps).filter(|_| memory),
             top: TopProcesses::from_sweep(&snap.processes, snap.published_ns),
         }
     }
@@ -247,7 +297,7 @@ impl Reading {
         if let Some(v) = self.swap_in_pps.filter(|v| *v >= SWAP_STORM_PPS) {
             push(EventKind::SwapStorm, &memory, v, Resource::Swap);
         }
-        if hot(self.cpu_temp_c, self.cpu_hot_c) || self.cpu_throttling {
+        if hot(self.cpu_temp_c, self.cpu_hot_c) || self.cpu_throttling == Some(true) {
             let v = self.cpu_temp_c.unwrap_or(f32::NAN);
             push(EventKind::Heat, &cpu, v, Resource::Cpu);
         }
@@ -255,13 +305,32 @@ impl Reading {
             push(EventKind::FullLoad, &cpu, v, Resource::Cpu);
         }
         for g in &self.gpus {
-            if hot(g.temp_c, g.hot_c) || g.throttling {
+            if hot(g.temp_c, g.hot_c) || g.throttling == Some(true) {
                 let v = g.temp_c.unwrap_or(f32::NAN);
                 push(EventKind::Heat, &g.key, v, Resource::Gpu);
             }
             if let Some(v) = g.util_pct.filter(|v| *v >= FULL_LOAD_PCT) {
                 push(EventKind::FullLoad, &g.key, v, Resource::Gpu);
             }
+        }
+    }
+
+    /// True when the input of `kind` on `key` is in this reading: valid, and its source not
+    /// stale. A rule without its input is neither over nor under.
+    fn has_input(&self, kind: EventKind, key: &str) -> bool {
+        let gpu = || self.gpus.iter().find(|g| &*g.key == key);
+        match (kind, key) {
+            (EventKind::MemoryPressure, _) => self.psi_some_pct.is_some(),
+            (EventKind::SwapStorm, _) => self.swap_in_pps.is_some(),
+            (EventKind::Heat, CPU_KEY) => {
+                self.cpu_temp_c.is_some() || self.cpu_throttling.is_some()
+            }
+            (EventKind::FullLoad, CPU_KEY) => self.cpu_pct.is_some(),
+            (EventKind::Heat, _) => {
+                gpu().is_some_and(|g| g.temp_c.is_some() || g.throttling.is_some())
+            }
+            (EventKind::FullLoad, _) => gpu().is_some_and(|g| g.util_pct.is_some()),
+            _ => false,
         }
     }
 }
@@ -299,6 +368,8 @@ struct Track {
     resource: Resource,
     since: TimeNs,
     last_over: TimeNs,
+    /// The last reading with the rule's input, over or under.
+    last_seen: TimeNs,
     /// The first reading under the threshold after `last_over`.
     under_since: Option<TimeNs>,
     /// The window has passed.
@@ -388,6 +459,7 @@ impl EventDetector {
                         resource: o.resource,
                         since: now,
                         last_over: now,
+                        last_seen: now,
                         under_since: None,
                         started: false,
                         peak: f32::NAN,
@@ -398,6 +470,7 @@ impl EventDetector {
             };
             let t = &mut self.tracks[i];
             t.last_over = now;
+            t.last_seen = now;
             t.under_since = None;
             t.peak = t.peak.max(o.value);
             if let Some(name) = r.top.get(t.resource) {
@@ -414,6 +487,18 @@ impl EventDetector {
             if t.last_over == now {
                 return true;
             }
+            // A stale or missing input is not a second under. After more than 3 s without it the
+            // track ends as at a gap.
+            if !r.has_input(t.kind, &t.key) {
+                if now.saturating_sub(t.last_seen) <= GAP_NS {
+                    return true;
+                }
+                if t.started {
+                    ended.push(t.event(t.under_since.unwrap_or(t.last_over)));
+                }
+                return false;
+            }
+            t.last_seen = now;
             if !t.started {
                 return false;
             }
@@ -729,8 +814,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use smallvec::smallvec;
+    use tl_model::series::SeriesView;
+    use tl_model::snapshot::SeriesSet;
+    use tl_model::time::BootId;
 
     const S: u64 = NS;
+    const MS: u64 = 1_000_000;
 
     fn name(n: &str) -> Option<Arc<str>> {
         Some(Arc::from(n))
@@ -828,7 +917,7 @@ mod tests {
                 util_pct: Some(10.),
                 temp_c: Some(99.),
                 hot_c: None,
-                throttling: s < 40,
+                throttling: Some(s < 40),
             }],
             top: TopProcesses {
                 cpu: name("make"),
@@ -926,7 +1015,7 @@ mod tests {
             util_pct: Some(util),
             temp_c: Some(60.),
             hot_c: Some(90.),
-            throttling: false,
+            throttling: Some(false),
         };
         let gpus = |s: u64| Reading {
             gpus: smallvec![
@@ -976,6 +1065,130 @@ mod tests {
         let ev = d.finish(50 * S);
         assert_eq!((ev.len(), ev[0].duration_ms, ev[0].peak), (1, 50_000, 50.));
         assert!(d.finish(60 * S).is_empty());
+    }
+
+    /// A snapshot published at `t_ns` with the CPU at 99% and memory PSI at 20%. The CPU
+    /// samples at 10 Hz. Each source last sent data at the given time.
+    fn stalled(t_ns: TimeNs, cpu_ok_ns: TimeNs, memory_ok_ns: TimeNs) -> Snapshot {
+        let mut snap = Snapshot::empty(BootId(1), 1);
+        snap.published_ns = t_ns;
+        let sys = Arc::make_mut(&mut snap.system);
+        sys.cpu.util_pct = Metric::valid(99.);
+        sys.memory.psi_some_pct = Metric::valid(20.);
+        let health = Arc::make_mut(&mut snap.health);
+        health.sources[SourceId::Cpu.index()].last_ok_ns = Some(cpu_ok_ns);
+        health.sources[SourceId::Memory.index()].last_ok_ns = Some(memory_ok_ns);
+        snap.series = Arc::new(SeriesSet {
+            series: Arc::from([Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(0),
+                    metric: MetricId::CPU_TOTAL,
+                },
+                version: 1,
+                period_ns: 100 * MS,
+                samples: Arc::default(),
+            })]),
+            ..SeriesSet::default()
+        });
+        snap
+    }
+
+    #[test]
+    fn event_detector_stale_source() {
+        // Each value counts up to the stale threshold of its own source: 1.5 s for the 10 Hz
+        // CPU, 3 s for the 1 s memory sampler. The publish time never makes a value fresh.
+        let r = Reading::from_snapshot(&stalled(10 * S, 8_500 * MS, 7 * S));
+        assert_eq!(
+            (r.t_ns, r.cpu_pct, r.psi_some_pct),
+            (10 * S, Some(99.), Some(20.))
+        );
+        let r = Reading::from_snapshot(&stalled(10 * S, 8_400 * MS, 7 * S - 1));
+        assert_eq!((r.cpu_pct, r.psi_some_pct), (None, None));
+        // A source that never sent data has no values.
+        let mut snap = stalled(10 * S, 10 * S, 10 * S);
+        Arc::make_mut(&mut snap.health).sources[SourceId::Memory.index()].last_ok_ns = None;
+        assert_eq!(Reading::from_snapshot(&snap).psi_some_pct, None);
+
+        // Both samplers stall at 10 s while their last values stay over the thresholds: no
+        // event starts.
+        let mut d = EventDetector::new();
+        for s in 10..400 {
+            let r = Reading::from_snapshot(&stalled(s * S, 10 * S, 10 * S));
+            assert!(d.observe(&r).is_empty(), "at {s} s");
+        }
+        assert!(d.finish(400 * S).is_empty());
+
+        // The samplers stop at 48 s during a memory pressure event. Memory values count up to
+        // 51 s, so the event ends there, 4 s later at 55 s rather than 60 s after: the stale
+        // seconds are not seconds under the threshold.
+        let mut d = EventDetector::new();
+        let at = |s: u64| {
+            let ok = s.min(48) * S;
+            Reading::from_snapshot(&stalled(s * S, ok, ok))
+        };
+        let mut ended = Vec::new();
+        for s in 0..55 {
+            assert!(d.observe(&at(s)).is_empty(), "at {s} s");
+        }
+        ended.extend(d.observe(&at(55)));
+        assert_eq!(
+            ended,
+            vec![HistEvent {
+                kind: EventKind::MemoryPressure,
+                start_t_ns: 0,
+                duration_ms: 51_000,
+                peak: 20.,
+                device_key: name(MEMORY_KEY),
+                process: None,
+            }]
+        );
+        assert!(run_secs(&mut d, 56, 200, at).is_empty());
+        assert!(
+            d.finish(200 * S).is_empty(),
+            "the CPU window had not passed"
+        );
+
+        // A stall of 3 s or less keeps the event, and its seconds are not under: the event
+        // still ends 60 s after the first second under at 100 s.
+        let mut d = EventDetector::new();
+        let blip = |s: u64| Reading {
+            psi_some_pct: match s {
+                20..23 => None,
+                0..100 => Some(20.),
+                _ => Some(1.),
+            },
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 160, blip).is_empty());
+        let ev = run_secs(&mut d, 160, 161, blip);
+        assert_eq!(ev.len(), 1);
+        assert_eq!((ev[0].start_t_ns, ev[0].duration_ms), (0, 100_000));
+
+        // A GPU heat event from throttling ends at its last fresh second over, 3 s after the
+        // flag goes missing.
+        let mut d = EventDetector::new();
+        let gpu = |s: u64| Reading {
+            gpus: smallvec![GpuReading {
+                key: Arc::from("gpu:a"),
+                util_pct: None,
+                temp_c: None,
+                hot_c: None,
+                throttling: (s < 40).then_some(true),
+            }],
+            ..Reading::default()
+        };
+        assert!(run_secs(&mut d, 0, 43, gpu).is_empty());
+        let ev = run_secs(&mut d, 43, 44, gpu);
+        assert_eq!(ev.len(), 1);
+        assert_eq!((ev[0].kind, ev[0].duration_ms), (EventKind::Heat, 39_000));
+
+        // Each GPU is judged by the worker that sends its values.
+        let gpu_id = |uuid| DeviceIdentity::Gpu {
+            uuid,
+            pci_bus_id: Arc::from("0000:01:00.0"),
+        };
+        assert_eq!(gpu_source(&gpu_id([0; 16])), SourceId::GpuDrm);
+        assert_eq!(gpu_source(&gpu_id([7; 16])), SourceId::GpuNvidia);
     }
 
     #[test]
