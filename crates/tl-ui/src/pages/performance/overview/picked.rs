@@ -317,7 +317,7 @@ impl<'a> Picker<'a> {
             Arc::from([])
         };
         SeriesSet {
-            header: live.header.clone(),
+            header: live.header,
             series: views,
             slow: Arc::from([]),
         }
