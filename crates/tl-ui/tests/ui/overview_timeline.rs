@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    TestAppContext, VisualTestContext, point, px, size,
+    AppContext as _, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
 };
 use tl_model::demand::DeviceRange;
 use tl_model::journal::JournalAccess;

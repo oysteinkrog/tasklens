@@ -673,8 +673,7 @@ fn timeline_of(
             let len = rx.map_or(0, |p| p.len()).max(tx.map_or(0, |p| p.len()));
             (0..len)
                 .map(|i| {
-                    let at = |s: Option<&Arc<[metrics::MetricPoint]>>| s.and_then(|p| p.get(i));
-                    let (a, b) = (at(rx), at(tx));
+                    let (a, b) = (rx.and_then(|p| p.get(i)), tx.and_then(|p| p.get(i)));
                     let t = a.or(b).map_or(0, |p| p.t_realtime_ns);
                     let valid: f32 = [a, b]
                         .into_iter()
@@ -1443,7 +1442,7 @@ mod tests {
             let t = t0 + i * SEC;
             st.push(&[
                 (sid(0, MetricId::CPU_TOTAL), sample(t, 40.0)),
-                (sid(1, MetricId::MEM_USED), sample(t, 8.0e9)),
+                (sid(1, MetricId::MEM_USED), sample(t, 4096.0)),
                 (sid(2, MetricId::DISK_ACTIVE), sample(t, 25.0)),
                 (sid(3, MetricId::NET_RX), sample(t, 100.0)),
                 (sid(3, MetricId::NET_TX), sample(t, 50.0)),
@@ -1480,7 +1479,7 @@ mod tests {
                 .map(|p| p.mean)
                 .collect()
         };
-        for (band, want) in [(0, 40.0), (1, 8.0e9), (2, 25.0), (3, 150.0)] {
+        for (band, want) in [(0, 40.0), (1, 4096.0), (2, 25.0), (3, 150.0)] {
             let means = valid(band);
             assert!(!means.is_empty(), "band {band} has points");
             assert!(means.iter().all(|&m| m == want), "band {band}: {means:?}");

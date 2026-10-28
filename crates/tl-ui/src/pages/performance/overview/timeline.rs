@@ -680,7 +680,7 @@ impl TimelineBox {
                 let shown = paused(cx);
                 self.preview = Some(cx.spawn(async move |_, cx| {
                     cx.background_executor().timer(PREVIEW_HOLD).await;
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         if paused(cx) == shown {
                             set_paused(None, cx);
                         }

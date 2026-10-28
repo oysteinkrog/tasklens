@@ -981,7 +981,7 @@ mod tests {
     use super::*;
     use crate::pages::performance::overview::layout::ROW_UNIT_DEFAULT;
 
-    use BoxKind::{Cpu, Disk, Gpu, Memory, Net, TopProcs};
+    use BoxKind::{Cpu, Disk, Gpu, Memory, Net, Timeline, TopProcs};
 
     /// (col, row, cols, rows) of `kind`.
     fn cells(layout: &OverviewLayout, kind: BoxKind) -> (u16, u16, u16, u16) {
@@ -1015,9 +1015,11 @@ mod tests {
         let kinds: Vec<BoxKind> = l.boxes.iter().map(|b| b.kind).collect();
         assert_eq!(
             kinds,
-            [Cpu, Memory, Gpu, Disk, Net],
+            [Cpu, Memory, Gpu, Disk, Net, Timeline],
             "the box order is kept"
         );
+        // The timeline moves down under GPU and Disk.
+        assert_eq!(cells(&l, Timeline), (0, 19, 12, 4));
 
         // CPU down by the 6 rows of GPU and Disk: they close up into the space CPU left, and
         // CPU goes under them.

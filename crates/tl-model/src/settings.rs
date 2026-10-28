@@ -660,13 +660,14 @@ pub struct OverviewBoxSetting {
 }
 
 /// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
-pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 6] = [
+pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 7] = [
     ("cpu", &["chart_cores", "chart", "cores", "core_charts"]),
     ("memory", &["rows", "chart_rows", "chart", "charts"]),
     ("gpu", &["engine_charts", "chart_engines", "chart"]),
     ("disk", &["disk_charts", "rows", "total_chart"]),
     ("net", &["stacked", "columns", "combined", "adapter_charts"]),
     ("processes", &["list"]),
+    ("timeline", &["bands"]),
 ];
 
 /// The values of a box's `arrange`: the mode's own rule, one column, one row.

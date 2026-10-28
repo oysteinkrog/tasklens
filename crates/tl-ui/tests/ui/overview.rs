@@ -3549,6 +3549,7 @@ mod page {
             BoxKind::Disk => "perf-overview-box-disk",
             BoxKind::Net => "perf-overview-box-net",
             BoxKind::TopProcs => "perf-overview-box-processes",
+            BoxKind::Timeline => "perf-overview-box-timeline",
         }
     }
 
@@ -3668,7 +3669,7 @@ mod page {
             1.,
             ROW_UNIT_DEFAULT,
         );
-        assert_eq!(want.boxes.len(), 5);
+        assert_eq!(want.boxes.len(), 6, "five device boxes and the timeline");
         for p in &want.boxes {
             let got = r.vcx.debug_bounds(box_id(p.kind)).expect("box drawn");
             let mut at = p.bounds;
@@ -6434,7 +6435,8 @@ mod page {
     )> {
         let mut out = Vec::new();
         for kind in BoxKind::ALL {
-            if kind == BoxKind::TopProcs {
+            // Neither the Top processes box nor the timeline is a device box.
+            if matches!(kind, BoxKind::TopProcs | BoxKind::Timeline) {
                 continue;
             }
             let box_id = box_id(kind);
@@ -6821,7 +6823,7 @@ mod page {
     /// Add Box puts the kind at its kind minimum in the first free place.
     #[gpui_kit::test]
     fn overview_edit_hide_and_add_box(cx: &mut TestAppContext) {
-        use BoxKind::{Cpu, Disk, Gpu, Memory, Net};
+        use BoxKind::{Cpu, Disk, Gpu, Memory, Net, Timeline};
         use tl_ui::pages::performance::actions::PerfOverviewAddBox;
         let mut r = open(cx, true, 1200., 900.);
         assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
@@ -6835,7 +6837,7 @@ mod page {
             assert_eq!(f32::from(hide.size.width), 16.);
         }
         r.hide(Gpu);
-        assert_eq!(r.kinds(), [Cpu, Memory, Disk, Net]);
+        assert_eq!(r.kinds(), [Cpu, Memory, Disk, Net, Timeline]);
         assert_eq!(
             r.layout().get(Disk),
             OverviewLayout::grid_default().get(Disk),
@@ -6850,11 +6852,11 @@ mod page {
             Some(GridBox {
                 kind: BoxKind::TopProcs,
                 col: 0,
-                row: 7,
+                row: 17,
                 cols: 4,
                 rows: 7
             }),
-            "4 × 7 fits GPU's old cells and the row under them"
+            "4 × 7 does not fit GPU's old 6 rows above the timeline, so it goes under it"
         );
         assert_eq!(OverviewLayout::from_setting(r.saved().as_ref()), r.layout());
         assert!(r.editing(), "the mode stays on");
