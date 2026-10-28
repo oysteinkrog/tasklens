@@ -123,6 +123,8 @@ pub struct CoreLabelPaint {
     /// The right edge of the percent.
     pub pct_right: Pixels,
     pub ghz: bool,
+    /// The height of the core's row.
+    pub row_h: Pixels,
 }
 
 /// The core labels every [`CoreBars`] painted on this thread since the last call.
@@ -764,6 +766,7 @@ impl Element for CoreBars {
                         name: point(x, y),
                         pct_right: x + parts.pct_right,
                         ghz: parts.ghz,
+                        row_h: l.row_h,
                     });
                 });
             }

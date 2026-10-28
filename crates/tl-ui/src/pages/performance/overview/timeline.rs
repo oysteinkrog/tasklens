@@ -48,6 +48,7 @@ use tl_model::snapshot::{
 };
 use tl_model::time::{TimeNs, now_boot_ns};
 
+use super::fit::whole_rows;
 use super::layout::BoxMode;
 use super::parts::{box_frame, edit_chrome};
 use super::range::{self, RangeText};
@@ -73,6 +74,12 @@ pub const BRACKET_ID: &str = "perf-overview-timeline-bracket";
 
 /// The debug selector of the span a drag is picking.
 pub const SELECTION_ID: &str = "perf-overview-timeline-selection";
+
+/// The debug selector of the row of event markers above the bands.
+pub const MARKER_ROW_ID: &str = "perf-overview-timeline-marker-row";
+
+/// The debug selector of the row of hour ticks under the bands.
+pub const TICK_ROW_ID: &str = "perf-overview-timeline-tick-row";
 
 /// The prefix of each event marker's debug selector, followed by its index.
 pub const MARKER_ID_PREFIX: &str = "perf-overview-timeline-marker-";
@@ -936,8 +943,9 @@ impl Render for TimelineBox {
             }
             None => area,
         };
-        let row = |child: AnyElement, h: f32| {
+        let row = |id: &'static str, child: AnyElement, h: f32| {
             div()
+                .debug_selector(move || id.into())
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -945,12 +953,10 @@ impl Render for TimelineBox {
                 .child(div().flex_none().w(px(LABEL_W * s)))
                 .child(div().relative().flex_1().min_w_0().h_full().child(child))
         };
-        let body = div()
-            .flex()
-            .flex_col()
+        // Only the rows that fit whole draw, top first (UI-PRF-017).
+        let body = whole_rows()
             .size_full()
-            .overflow_hidden()
-            .child(row(markers, MARKER_ROW))
+            .child(row(MARKER_ROW_ID, markers, MARKER_ROW))
             .child(
                 div()
                     .flex()
@@ -959,7 +965,7 @@ impl Render for TimelineBox {
                     .child(labels)
                     .child(area),
             )
-            .child(row(ticks, TICK_ROW))
+            .child(row(TICK_ROW_ID, ticks, TICK_ROW))
             .into_any_element();
         box_frame(
             TIMELINE_BOX_ID,

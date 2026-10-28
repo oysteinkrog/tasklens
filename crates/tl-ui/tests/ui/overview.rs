@@ -8475,7 +8475,7 @@ mod wired {
         }
     }
 
-    fn proc_record(pid: u32, cpu_pct: f32) -> ProcessRecord {
+    pub(super) fn proc_record(pid: u32, cpu_pct: f32) -> ProcessRecord {
         let name: Arc<str> = Arc::from(format!("proc{pid}"));
         ProcessRecord {
             key: proc_key(pid),
@@ -8737,6 +8737,7 @@ mod sweep {
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::DeviceIdx;
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
     use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
     use tl_model::validity::Validity;
     use tl_ui::anim::AnimationDriver;
@@ -8744,7 +8745,9 @@ mod sweep {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
-    use tl_ui::pages::performance::overview::cpu_box::{CORE_CHARTS_ID, CpuBox};
+    use tl_ui::pages::performance::overview::cpu_box::{
+        CORE_CHARTS_ID, CPU_CHART_ID, CpuBox, POWER_STRIP_ID, core_chart_id,
+    };
     use tl_ui::pages::performance::overview::disk_box::{self, DiskBox};
     use tl_ui::pages::performance::overview::fit::{
         FitTextPaint, fit_text, round_decimals, shorter_forms, take_fit_texts,
@@ -8754,10 +8757,12 @@ mod sweep {
     use tl_ui::pages::performance::overview::mem_box::{self, CHARTS_GRID_ID, MemBox};
     use tl_ui::pages::performance::overview::net_box::{self, NetBox};
     use tl_ui::pages::performance::overview::parts::{
-        CORE_ROWS_SCROLL_ID, time_axis_id, title_row_id,
+        CORE_ROWS_SCROLL_ID, core_spark_id, take_core_labels, time_axis_id, title_row_id,
     };
-    use tl_ui::pages::performance::overview::procs_box::ProcsBox;
-    use tl_ui::pages::performance::overview::timeline::TimelineBox;
+    use tl_ui::pages::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
+    use tl_ui::pages::performance::overview::timeline::{
+        BANDS_ID, MARKER_ROW_ID, TICK_ROW_ID, TimelineBox,
+    };
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -9087,19 +9092,88 @@ mod sweep {
                     net_box::cell_id(DeviceIdx(33)),
                 ]);
             }
-            BoxKind::Cpu | BoxKind::TopProcs | BoxKind::Timeline => {}
+            BoxKind::Cpu => {
+                ids.extend([CPU_CHART_ID.to_owned(), POWER_STRIP_ID.to_owned()]);
+                for i in 0..usize::from(CPUS) {
+                    ids.extend([core_spark_id(i), core_chart_id(i)]);
+                }
+            }
+            BoxKind::TopProcs => {
+                ids.extend(PROCS.map(|pid| format!("{PROC_ROW_ID_PREFIX}{pid}")));
+            }
+            BoxKind::Timeline => {
+                ids.extend([MARKER_ROW_ID, BANDS_ID, TICK_ROW_ID].map(str::to_owned));
+            }
         }
         ids
     }
 
-    /// The parts of `kind` that scroll their content by design (UI-PRF-019): what they hold
-    /// may be clipped at their edge.
-    fn scroll_areas(kind: BoxKind) -> &'static [&'static str] {
+    /// The name the sweep gives each core row the CPU box paints, as a part of its own.
+    const CORE_ROWS: &str = "core rows";
+
+    /// The pids of the process fixtures: the top 10 by CPU are 12 to 21.
+    const PROCS: std::ops::Range<u32> = 10..22;
+
+    /// The parts of `kind` that scroll their content by design (UI-PRF-019), each with the
+    /// parts it holds. Only those may be clipped at its edge.
+    fn scroll_areas(kind: BoxKind) -> Vec<(&'static str, Vec<String>)> {
+        let cores = 0..usize::from(CPUS);
         match kind {
-            BoxKind::Cpu => &[CORE_CHARTS_ID, CORE_ROWS_SCROLL_ID],
-            BoxKind::Memory => &[CHARTS_GRID_ID],
-            _ => &[],
+            BoxKind::Cpu => vec![
+                (CORE_CHARTS_ID, cores.clone().map(core_chart_id).collect()),
+                (
+                    CORE_ROWS_SCROLL_ID,
+                    cores
+                        .map(core_spark_id)
+                        .chain([CORE_ROWS.to_owned()])
+                        .collect(),
+                ),
+            ],
+            BoxKind::Memory => vec![(
+                CHARTS_GRID_ID,
+                (0..5)
+                    .flat_map(|i| {
+                        [
+                            mem_box::cell_id(i),
+                            mem_box::cell_head_id(i, "name"),
+                            mem_box::cell_head_id(i, "value"),
+                            mem_box::cell_head_id(i, "percent"),
+                        ]
+                    })
+                    .collect(),
+            )],
+            _ => vec![],
         }
+    }
+
+    /// A drawn scroll area: its bounds and the parts it holds.
+    struct Area {
+        bounds: Bounds<Pixels>,
+        content: Vec<&'static str>,
+    }
+
+    /// Checks one part `id` drawn at `b`: what shows of it lies inside `inner`. A part a scroll
+    /// area holds shows only inside that area. Returns whether any of it shows.
+    fn check_part(
+        what: &str,
+        id: &str,
+        b: Bounds<Pixels>,
+        inner: Bounds<Pixels>,
+        areas: &[Area],
+        failures: &mut Failures,
+    ) -> bool {
+        if b.size.height <= px(0.) || b.size.width <= px(0.) {
+            return false;
+        }
+        let shown = match areas.iter().find(|a| a.content.iter().any(|c| *c == id)) {
+            Some(a) if !b.intersects(&a.bounds) => return false,
+            Some(a) => b.intersect(&a.bounds),
+            None => b,
+        };
+        if !inside(inner, shown) {
+            failures.push(what, id, format!("{shown:?} outside {inner:?}"));
+        }
+        true
     }
 
     /// The failures by box, mode and kind of check: the first one and how many there were.
@@ -9190,6 +9264,16 @@ mod sweep {
                 disk(22, 54_321_000.),
             ]);
             sys.nets = Arc::from([net(30, 12_345_678.), net(33, 98_765.)]);
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: s.processes.header.version + 1,
+                    ..ComponentHeader::default()
+                },
+                records: PROCS
+                    .map(|pid| super::wired::proc_record(pid, (pid - 10) as f32))
+                    .collect(),
+                ..ProcessSnapshot::default()
+            });
         });
         let client: Arc<dyn EngineClient> = engine.clone();
         cx.update(|cx| {
@@ -9213,8 +9297,9 @@ mod sweep {
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let mut failures = Failures::default();
-        // How many values each box mode drew over the sweep.
-        let mut drawn_values = std::collections::BTreeMap::<String, usize>::new();
+        // How many rows and how many body values (not empty, not in the title row) each box
+        // mode drew over the sweep.
+        let mut drawn = std::collections::BTreeMap::<String, (usize, usize)>::new();
         for kind in BoxKind::ALL {
             let hub = hub.clone();
             let (host, vcx) = cx.add_window_view(move |_, cx| {
@@ -9249,6 +9334,10 @@ mod sweep {
             let axis_id = leak(time_axis_id(frame_id));
             let title_id = leak(title_row_id(frame_id));
             let part_ids: Vec<&'static str> = parts(kind).into_iter().map(leak).collect();
+            let area_ids: Vec<(&'static str, Vec<&'static str>)> = scroll_areas(kind)
+                .into_iter()
+                .map(|(id, content)| (id, content.into_iter().map(leak).collect()))
+                .collect();
             for mode in kind.modes() {
                 vcx.update(|_, cx| {
                     let boxed = host.read(cx).boxed.clone();
@@ -9270,11 +9359,13 @@ mod sweep {
                         // still use the old size class. A refresh paints every view again, so
                         // each value is logged once.
                         let _ = take_fit_texts();
+                        let _ = take_core_labels();
                         vcx.update(|window, cx| {
                             window.refresh();
                             window.draw(cx).clear(cx);
                         });
                         let texts = take_fit_texts();
+                        let core_rows = take_core_labels();
                         let what = format!("{} {} at {w} x {h}", kind.key(), mode.id);
                         let Some(frame) = vcx.debug_bounds(frame_id) else {
                             failures.push(&what, "no box", String::new());
@@ -9290,41 +9381,66 @@ mod sweep {
                             inner.size.height = (bottom - inner.top()).max(px(0.));
                         }
                         let title = vcx.debug_bounds(title_id);
-                        let areas: Vec<Bounds<Pixels>> = scroll_areas(kind)
+                        let areas: Vec<Area> = area_ids
                             .iter()
-                            .filter_map(|id| vcx.debug_bounds(id))
-                            .collect();
-                        // A part in the content of a part that scrolls: below its top edge.
-                        let in_area = |b: Bounds<Pixels>| {
-                            areas.iter().any(|a| {
-                                b.left() >= a.left() - px(0.01) && b.top() >= a.top() - px(0.01)
+                            .filter_map(|(id, content)| {
+                                Some(Area {
+                                    bounds: vcx.debug_bounds(id)?,
+                                    content: content.clone(),
+                                })
                             })
-                        };
+                            .collect();
+                        for area in &areas {
+                            let a = area.bounds;
+                            if a.size.height > px(0.) && !inside(inner, a) {
+                                failures.push(
+                                    &what,
+                                    "scroll area",
+                                    format!("{a:?} outside {inner:?}"),
+                                );
+                            }
+                        }
+                        let mut rows = 0;
                         for id in &part_ids {
                             let Some(b) = vcx.debug_bounds(id) else {
                                 continue;
                             };
-                            if b.size.height <= px(0.) || in_area(b) {
-                                continue;
-                            }
-                            if !inside(inner, b) {
-                                failures.push(&what, id, format!("{b:?} outside {inner:?}"));
-                            }
+                            rows +=
+                                usize::from(check_part(&what, id, b, inner, &areas, &mut failures));
                         }
-                        for area in &areas {
-                            if area.size.height > px(0.) && !inside(inner, *area) {
-                                failures.push(
-                                    &what,
-                                    "scroll area",
-                                    format!("{area:?} outside {inner:?}"),
-                                );
-                            }
+                        // A core row runs from the core's name to its percent, one row high.
+                        for c in &core_rows {
+                            let right = c.pct_right.max(c.name.x);
+                            let b = Bounds::from_corners(
+                                c.name,
+                                gpui_kit::point(right, c.name.y + c.row_h),
+                            );
+                            rows += usize::from(check_part(
+                                &what,
+                                CORE_ROWS,
+                                b,
+                                inner,
+                                &areas,
+                                &mut failures,
+                            ));
                         }
-                        *drawn_values
+                        let area_bounds: Vec<Bounds<Pixels>> =
+                            areas.iter().map(|a| a.bounds).collect();
+                        let values = texts
+                            .iter()
+                            .filter(|t| {
+                                !t.text.is_empty()
+                                    && t.bounds.intersects(&t.mask)
+                                    && title.is_none_or(|r| t.bounds.top() >= r.bottom())
+                            })
+                            .count();
+                        let e = drawn
                             .entry(what.split(" at ").next().unwrap_or("").to_owned())
-                            .or_default() += texts.len();
+                            .or_default();
+                        e.0 += rows;
+                        e.1 += values;
                         for t in &texts {
-                            check_text(&what, t, inner, title, &areas, &mut failures);
+                            check_text(&what, t, inner, title, &area_bounds, &mut failures);
                         }
                     }
                     h -= 2.;
@@ -9333,10 +9449,23 @@ mod sweep {
             drop(driver);
         }
         assert!(failures.0.is_empty(), "{failures}");
-        // The value checks ran: every box title draws its value (empty for Net and the boxes
-        // without one), so every mode logs values.
-        assert_eq!(drawn_values.len(), 20, "{drawn_values:?}");
-        assert!(drawn_values.values().all(|n| *n > 0), "{drawn_values:?}");
+        // The checks ran: every mode drew rows, and every mode of the boxes whose body shows
+        // values drew body values.
+        for kind in BoxKind::ALL {
+            let with_values = matches!(
+                kind,
+                BoxKind::Memory | BoxKind::Gpu | BoxKind::Disk | BoxKind::Net
+            );
+            for mode in kind.modes() {
+                let key = format!("{} {}", kind.key(), mode.id);
+                let (rows, values) = drawn.get(&key).copied().unwrap_or_default();
+                assert!(rows > 0, "{key} drew no rows: {drawn:?}");
+                assert!(
+                    !with_values || values > 0,
+                    "{key} drew no body values: {drawn:?}"
+                );
+            }
+        }
     }
 
     /// One drawn value: it keeps its unit, and it lies inside the box body unless it is in the

@@ -62,6 +62,9 @@ pub const CPU_SPLITTER_LINE_ID: &str = "perf-overview-cpu-splitter-line";
 pub const POWER_SPLITTER_ID: &str = "perf-overview-cpu-power-splitter";
 pub const POWER_SPLITTER_LINE_ID: &str = "perf-overview-cpu-power-splitter-line";
 
+/// The debug selector of the total chart's part.
+pub const CPU_CHART_ID: &str = "perf-overview-cpu-chart";
+
 /// The debug selector of the power draw strip.
 pub const POWER_STRIP_ID: &str = "perf-overview-cpu-power-strip";
 
@@ -955,6 +958,7 @@ impl CpuBox {
     /// The total chart, filling its part.
     fn chart_part(&self) -> AnyElement {
         div()
+            .debug_selector(|| CPU_CHART_ID.into())
             .relative()
             .size_full()
             .child(
