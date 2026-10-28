@@ -4,6 +4,7 @@ pub mod classify;
 pub mod desktop;
 pub mod icons;
 pub mod launchers;
+pub mod mem_group;
 pub mod naming;
 
 use std::ffi::OsString;
