@@ -51,6 +51,12 @@ pub enum DeviceIdentity {
     },
     /// Disk, Network and GPU card series computed by the reducer (R-154).
     Aggregate(AggregateKind),
+    /// One band of the memory-by-app chart (D-036, UI-PRF-060): a memory group key such as
+    /// `app:google-chrome` or `exe:rustc`, or `other` and `shared` for the two fixed bands.
+    /// The persistent key is `memgroup:<key>`.
+    MemGroup {
+        key: Arc<str>,
+    },
 }
 
 /// Aggregate devices, created at session start with `present = true`. Persistent keys
@@ -75,6 +81,7 @@ pub enum DeviceKind {
     Fan,
     Battery,
     Aggregate,
+    MemGroup,
 }
 
 impl DeviceIdentity {
@@ -91,6 +98,7 @@ impl DeviceIdentity {
             DeviceIdentity::Fan { .. } => DeviceKind::Fan,
             DeviceIdentity::Battery { .. } => DeviceKind::Battery,
             DeviceIdentity::Aggregate(_) => DeviceKind::Aggregate,
+            DeviceIdentity::MemGroup { .. } => DeviceKind::MemGroup,
         }
     }
 }
@@ -287,6 +295,12 @@ mod tests {
             (
                 DeviceIdentity::Aggregate(AggregateKind::Gpus),
                 DeviceKind::Aggregate,
+            ),
+            (
+                DeviceIdentity::MemGroup {
+                    key: s("exe:rustc"),
+                },
+                DeviceKind::MemGroup,
             ),
         ];
         for (identity, kind) in cases {

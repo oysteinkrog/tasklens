@@ -142,7 +142,8 @@ impl DeviceKey {
             DeviceIdentity::Aggregate(AggregateKind::Gpus) => Self::AGGREGATE_GPU.into(),
             DeviceIdentity::Aggregate(AggregateKind::Nets)
             | DeviceIdentity::CpuLogical { .. }
-            | DeviceIdentity::Sensor { .. } => return None,
+            | DeviceIdentity::Sensor { .. }
+            | DeviceIdentity::MemGroup { .. } => return None,
         };
         Some(DeviceKey(key.into()))
     }

@@ -160,6 +160,8 @@ impl MemorySource {
                 value: pressure.swap_in_pps.per_sec as f32,
                 validity: pressure.swap_in_pps.validity,
             },
+            // The reducer fills the memory groups from the process sweep.
+            groups: Arc::default(),
         };
         let sample = MemorySample {
             t_ns: r.t_ns,

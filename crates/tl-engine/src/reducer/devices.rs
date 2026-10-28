@@ -295,7 +295,10 @@ fn covered(kinds: DeviceKinds, identity: &DeviceIdentity) -> bool {
         DeviceIdentity::Gpu { .. } => DeviceKinds::GPUS,
         DeviceIdentity::Battery { .. } => DeviceKinds::BATTERIES,
         DeviceIdentity::CpuLogical { .. } => DeviceKinds::CPUS,
-        DeviceIdentity::CpuPackage | DeviceIdentity::Memory | DeviceIdentity::Aggregate(_) => {
+        DeviceIdentity::CpuPackage
+        | DeviceIdentity::Memory
+        | DeviceIdentity::Aggregate(_)
+        | DeviceIdentity::MemGroup { .. } => {
             return false;
         }
     };

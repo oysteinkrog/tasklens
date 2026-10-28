@@ -1824,8 +1824,16 @@ fn component_versions_bump_only_when_changed() {
     let next = rig.latest();
     assert!(next.processes.header.version > prev.processes.header.version);
     assert!(next.table.header.version > prev.table.header.version);
-    assert_eq!(next.series.header.version, prev.series.header.version);
-    assert!(Arc::ptr_eq(&next.series, &prev.series));
+    // A sweep appends only the memory group series (D-036); the CPU series keeps its `Arc`.
+    let cpu = |snap: &Snapshot| Arc::clone(snap.series.get(CPU_TOTAL).expect("CPU series"));
+    assert!(Arc::ptr_eq(&cpu(&next), &cpu(&prev)));
+    assert!(
+        next.series
+            .series
+            .iter()
+            .filter(|v| v.id.metric != MetricId::MEM_GROUP)
+            .all(|v| prev.series.get(v.id).is_some_and(|p| Arc::ptr_eq(p, v)))
+    );
     assert_eq!(next.processes.records.len(), 2);
     rig.passed();
 }
@@ -3892,4 +3900,114 @@ fn sensors_list_fans_into_snapshot_without_demand() {
         snap.system.sensors.is_empty(),
         "no value read without demand"
     );
+}
+
+/// A sweep of `rows` (pid, comm, RssAnon) for the current user, with no readable executable.
+fn mem_sweep(t_ns: TimeNs, rows: &[(u32, &str, u64)]) -> EngineMsg {
+    let uid = rustix::process::getuid().as_raw();
+    let mut sweep = sweep_msg(t_ns);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        s.records = rows
+            .iter()
+            .map(|&(pid, comm, rss)| {
+                let mut r = proc_record(pid);
+                r.uid = uid;
+                r.rss_anon_bytes = rss;
+                let mut meta = ProcessMeta::clone(&r.meta);
+                meta.comm = comm.into();
+                r.meta = Arc::new(meta);
+                r
+            })
+            .collect();
+        s.extras = rows.iter().map(|_| proc_extras()).collect();
+    }
+    sweep
+}
+
+fn mem_used_msg(t_ns: TimeNs, used: u64) -> EngineMsg {
+    src(SourceUpdate::Memory(MemorySample {
+        t_ns,
+        totals: MemoryTotals {
+            validity: Validity::Valid,
+            total: 4 * used,
+            available: 3 * used,
+            used,
+            ..MemoryTotals::default()
+        },
+        zram: Vec::new(),
+        swap_in_flags: SampleFlags::empty(),
+        validity: Validity::Valid,
+    }))
+}
+
+#[test]
+fn memory_group_bands_published() {
+    const MIB: u64 = 1 << 20;
+    let mut rig = Rig::new();
+    rig.run(vec![
+        mem_used_msg(SEC, 1000 * MIB),
+        mem_sweep(
+            SEC,
+            &[(1, "a", 100 * MIB), (2, "a", 200 * MIB), (3, "b", 50 * MIB)],
+        ),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let bands: Vec<(&str, &str, u32)> = snap
+        .system
+        .memory
+        .groups
+        .iter()
+        .map(|b| (&*b.key, &*b.name, b.process_count))
+        .collect();
+    assert_eq!(
+        bands,
+        [
+            ("comm:a", "a", 2),
+            ("comm:b", "b", 1),
+            ("other", "Other apps", 0),
+            ("shared", "Shared and kernel", 0),
+        ]
+    );
+    let value = |device| {
+        rig.last_sample(SeriesId {
+            device,
+            metric: MetricId::MEM_GROUP,
+        })
+    };
+    let values: Vec<f32> = snap
+        .system
+        .memory
+        .groups
+        .iter()
+        .map(|b| value(b.device).value)
+        .collect();
+    let mib = MIB as f32;
+    assert_eq!(values, [300.0 * mib, 50.0 * mib, 0.0, 650.0 * mib]);
+    let shared = snap
+        .devices
+        .find(&DeviceIdentity::MemGroup {
+            key: "shared".into(),
+        })
+        .expect("shared band in the catalog");
+    assert_eq!(&*shared.persistent_key, "memgroup:shared");
+    assert_eq!(&*shared.display_name, "Shared and kernel");
+
+    // "b" leaves the sweep: its series gets one gap and the band list drops it. The sum of
+    // the processes is above In use, so Shared and kernel is 0.
+    let b_device = snap.system.memory.groups[1].device;
+    rig.run(vec![
+        mem_used_msg(2 * SEC, 200 * MIB),
+        mem_sweep(2 * SEC, &[(1, "a", 100 * MIB), (2, "a", 200 * MIB)]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.system.memory.groups.len(), 3);
+    assert!(
+        !value(b_device).is_valid(),
+        "a group outside the top is a gap"
+    );
+    let shared = snap.system.memory.groups[2].device;
+    assert_eq!(value(shared).value, 0.0);
+    assert!(value(shared).is_valid());
 }

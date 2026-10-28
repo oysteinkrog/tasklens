@@ -460,7 +460,7 @@ fn hist_meta(rec: &ProcessRecord) -> HistMeta {
     }
 }
 
-/// `DeviceIdentity` variant order: 0 CpuPackage .. 8 Battery, 9 Aggregate.
+/// `DeviceIdentity` variant order: 0 CpuPackage .. 8 Battery, 9 Aggregate, 10 MemGroup.
 fn device_kind(identity: &DeviceIdentity) -> u8 {
     match identity {
         DeviceIdentity::CpuPackage => 0,
@@ -473,6 +473,7 @@ fn device_kind(identity: &DeviceIdentity) -> u8 {
         DeviceIdentity::Fan { .. } => 7,
         DeviceIdentity::Battery { .. } => 8,
         DeviceIdentity::Aggregate(_) => 9,
+        DeviceIdentity::MemGroup { .. } => 10,
     }
 }
 

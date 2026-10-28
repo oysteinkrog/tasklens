@@ -28,11 +28,12 @@ use tl_model::snapshot::{
     ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
     WindowsSnapshot,
 };
-use tl_model::system::{GpuEngine, GpuTotals, Metric, SensorKind};
+use tl_model::system::{GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
+use super::mem_groups::{DEVICE_KEY_PREFIX, MemGroups};
 use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
 use super::suspend::Transition;
@@ -138,6 +139,8 @@ pub struct ApplyState {
     collect: bool,
     /// `Demand.details` at the last tick, to find the tabs that opened since (tasklens-dwy.7).
     details_seen: Arc<[DetailDemand]>,
+    /// Memory groups for the memory-by-app chart (D-036, UI-PRF-060).
+    mem_groups: MemGroups,
 }
 
 impl ApplyState {
@@ -232,6 +235,7 @@ fn fallback_name_key(id: &DeviceIdentity) -> (String, String) {
             AggregateKind::Nets => ("Network".into(), "aggregate:net".into()),
             AggregateKind::Gpus => ("GPU".into(), "aggregate:gpu".into()),
         },
+        DeviceIdentity::MemGroup { key } => (key.to_string(), format!("{DEVICE_KEY_PREFIX}{key}")),
     }
 }
 
@@ -271,6 +275,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Fan => &[MetricId::FAN_RPM, MetricId::FAN_PWM],
         DeviceKind::Battery => &[MetricId::BATTERY_PCT, MetricId::BATTERY_POWER],
         DeviceKind::Aggregate => &[],
+        DeviceKind::MemGroup => &[MetricId::MEM_GROUP],
     }
 }
 
@@ -556,6 +561,7 @@ impl Reducer {
                 self.publish_processes(observed, Some(observed.1));
                 self.rebuild_table(settings);
                 let period = u64::from(settings.interval_ms) * 1_000_000;
+                self.record_system(observed.1, |r| r.apply_mem_groups(observed.1, period))?;
                 let processes = &self.components.processes;
                 self.apply_state.process_series.on_sweep(
                     observed.1,
@@ -1220,10 +1226,111 @@ impl Reducer {
             self.mark(ComponentMask::INVENTORY);
         }
         self.apply_state.pseudo.zram = s.zram;
-        self.system_mut(t).memory = m;
+        let system = self.system_mut(t);
+        // The memory groups come from the process sweep, not from this sample.
+        let groups = std::mem::take(&mut system.memory.groups);
+        system.memory = MemoryTotals { groups, ..m };
         self.sample_ok(SourceId::Memory, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
+    }
+
+    /// Sums RssAnon per memory group over the published processes and pushes the top 20
+    /// groups, "Other apps" and "Shared and kernel" as `MEM_GROUP` series (D-036, UI-PRF-060).
+    /// A group that leaves the top 20 gets one gap sample. A sweep without records changes
+    /// nothing.
+    fn apply_mem_groups(&mut self, t: TimeNs, period: u64) -> Result<(), InvariantViolation> {
+        let processes = Arc::clone(&self.components.processes);
+        if processes.records.is_empty() {
+            return Ok(());
+        }
+        let mem = &self.components.system.memory;
+        let in_use = readable(mem.validity).then_some(mem.used);
+        let bands =
+            self.apply_state
+                .mem_groups
+                .bands(&processes.records, &processes.extras, in_use);
+
+        let mut published = Vec::with_capacity(bands.top.len() + 2);
+        let mut shown = Vec::with_capacity(bands.top.len());
+        for g in &bands.top {
+            let idx = self.mem_group_device(&g.group.key, &g.group.name)?;
+            self.push(idx, MetricId::MEM_GROUP, t, g.bytes as f32, true, period);
+            shown.push(idx);
+            published.push(MemGroupBand {
+                key: Arc::clone(&g.group.key),
+                name: Arc::clone(&g.group.name),
+                process_count: g.processes,
+                device: idx,
+            });
+        }
+        let groups = &self.apply_state.mem_groups;
+        let fixed = [
+            (
+                Arc::clone(&groups.other_key),
+                Arc::clone(&groups.other_name),
+                Some(bands.other_bytes),
+                bands.other_processes,
+            ),
+            (
+                Arc::clone(&groups.shared_key),
+                Arc::clone(&groups.shared_name),
+                bands.shared_bytes,
+                0,
+            ),
+        ];
+        for (key, name, bytes, process_count) in fixed {
+            let idx = self.mem_group_device(&key, &name)?;
+            let value = bytes.unwrap_or(0) as f32;
+            self.push(idx, MetricId::MEM_GROUP, t, value, bytes.is_some(), period);
+            published.push(MemGroupBand {
+                key,
+                name,
+                process_count,
+                device: idx,
+            });
+        }
+
+        let left: Vec<DeviceIdx> = std::mem::replace(&mut self.apply_state.mem_groups.shown, shown)
+            .into_iter()
+            .filter(|idx| !self.apply_state.mem_groups.shown.contains(idx))
+            .collect();
+        for idx in left {
+            self.gaps(idx, &[MetricId::MEM_GROUP], t);
+        }
+        if *self.components.system.memory.groups != *published {
+            Arc::make_mut(&mut self.components.system).memory.groups = published.into();
+            self.mark(ComponentMask::SYSTEM);
+        }
+        self.mark(ComponentMask::SERIES);
+        Ok(())
+    }
+
+    /// The device of a memory group band. A new key, or a new display name for a known key,
+    /// updates the catalog.
+    fn mem_group_device(
+        &mut self,
+        key: &Arc<str>,
+        name: &Arc<str>,
+    ) -> Result<DeviceIdx, InvariantViolation> {
+        if let Some((idx, known)) = self.apply_state.mem_groups.devices.get(key)
+            && known == name
+        {
+            return Ok(*idx);
+        }
+        let identity = DeviceIdentity::MemGroup {
+            key: Arc::clone(key),
+        };
+        let persistent_key = format!("{DEVICE_KEY_PREFIX}{key}");
+        let (idx, _) = self
+            .devices
+            .ensure(&identity, name, None, &persistent_key, None, None)?;
+        self.apply_state
+            .mem_groups
+            .devices
+            .insert(Arc::clone(key), (idx, Arc::clone(name)));
+        self.mark(ComponentMask::DEVICES);
+        Ok(idx)
     }
 
     fn apply_disks(&mut self, s: DiskSample) -> Result<(), InvariantViolation> {

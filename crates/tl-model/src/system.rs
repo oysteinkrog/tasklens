@@ -169,7 +169,7 @@ pub struct CpuTotals {
 }
 
 /// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MemoryTotals {
     /// Of the meminfo read as a whole.
     pub validity: Validity,
@@ -203,6 +203,25 @@ pub struct MemoryTotals {
     pub psi_full_pct: Metric<f32>,
     /// Pages swapped in per second from the /proc/vmstat `pswpin` delta; series SWAP_IN.
     pub swap_in_pps: Metric<f32>,
+    /// The bands of the memory-by-app chart from the last process sweep (D-036, UI-PRF-060):
+    /// the top 20 memory groups by RssAnon, largest first, then "Other apps" and "Shared and
+    /// kernel". Each band's value is series `MEM_GROUP` on its device. The reducer fills it; the
+    /// memory worker leaves it empty.
+    pub groups: Arc<[MemGroupBand]>,
+}
+
+/// One band of the memory-by-app chart (D-036, UI-PRF-060).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemGroupBand {
+    /// The memory group key (`app:<app id>`, `exe:<name>`, `system`, `comm:<comm>`), or
+    /// `other` and `shared` for the two fixed bands. The device key is `memgroup:<key>`.
+    pub key: Arc<str>,
+    /// The display name: "Google Chrome", "Claude Code", "Other apps", "Shared and kernel".
+    pub name: Arc<str>,
+    /// Processes in the band. 0 for "Shared and kernel".
+    pub process_count: u32,
+    /// The `DeviceIdentity::MemGroup` device whose `MEM_GROUP` series holds the band.
+    pub device: DeviceIdx,
 }
 
 /// zram `mm_stat` fields 1, 2 and 3.

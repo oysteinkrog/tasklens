@@ -12,6 +12,7 @@ pub mod app_detail;
 pub mod apply;
 pub mod devices;
 pub mod health;
+pub mod mem_groups;
 mod power;
 pub mod process_series;
 pub mod processes;
