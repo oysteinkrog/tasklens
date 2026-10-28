@@ -2191,12 +2191,13 @@ mod bottom {
         ];
         for gpus in [1, 2] {
             for engines in [2, 3] {
-                // 3D, encode and decode, or without decode only 3D and encode, in every mode.
+                // 3D, encode and decode, or, with decode Unsupported, 3D and encode, in every
+                // mode.
                 let totals = |device: u16| {
                     let mut t = gpu_engines(false);
                     t.device = DeviceIdx(device);
                     if engines == 2 {
-                        t.dec_pct = Metric::default();
+                        t.dec_pct = Metric::with(Validity::Unsupported);
                     }
                     t
                 };
