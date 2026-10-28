@@ -56,7 +56,7 @@ fn user(
 fn write_tree(root: &Path, procs: &[Proc]) {
     for p in procs {
         let dir = root.join(p.pid.to_string());
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).expect("create pid dir");
         // Field 9 is flags: 0x0020_0000 is PF_KTHREAD.
         let flags = if p.kernel_thread { 0x0020_0000 } else { 0 };
         fs::write(
@@ -67,7 +67,7 @@ fn write_tree(root: &Path, procs: &[Proc]) {
                 p.pid, p.comm, p.ppid, p.pid, p.pid, p.start_ticks
             ),
         )
-        .unwrap();
+        .expect("write fixture file");
         fs::write(
             dir.join("status"),
             format!(
@@ -76,13 +76,13 @@ fn write_tree(root: &Path, procs: &[Proc]) {
                 u = p.uid
             ),
         )
-        .unwrap();
-        fs::write(dir.join("comm"), format!("{}\n", p.comm)).unwrap();
-        fs::write(dir.join("cmdline"), "").unwrap();
-        fs::write(dir.join("cgroup"), format!("0::{}\n", p.cgroup)).unwrap();
+        .expect("write fixture file");
+        fs::write(dir.join("comm"), format!("{}\n", p.comm)).expect("write fixture file");
+        fs::write(dir.join("cmdline"), "").expect("write fixture file");
+        fs::write(dir.join("cgroup"), format!("0::{}\n", p.cgroup)).expect("write fixture file");
         if let Some(exe) = p.exe {
             // The target need not exist: the reader only reads the link.
-            symlink(exe, dir.join("exe")).unwrap();
+            symlink(exe, dir.join("exe")).expect("write exe link");
         }
     }
 }
@@ -104,9 +104,14 @@ fn read_tree(root: &Path, pids: &[u32]) -> Vec<Read> {
         .map(|&pid| {
             let dir = root.join(pid.to_string());
             let mut stat = PidStat::default();
-            parse_pid_stat(&fs::read(dir.join("stat")).unwrap(), &mut stat).unwrap();
+            parse_pid_stat(&fs::read(dir.join("stat")).expect("read stat"), &mut stat)
+                .expect("parse stat");
             let mut status = PidStatus::default();
-            parse_status(&fs::read(dir.join("status")).unwrap(), &mut status).unwrap();
+            parse_status(
+                &fs::read(dir.join("status")).expect("read status"),
+                &mut status,
+            )
+            .expect("parse status");
             let key = ProcessKey {
                 start_ticks: stat.start_ticks,
                 boot_id: BootId(1),
@@ -116,7 +121,7 @@ fn read_tree(root: &Path, pids: &[u32]) -> Vec<Read> {
                 .get_or_refresh_with(key, &stat.comm_raw, &mut bufs, || {
                     rustix::fs::open(&dir, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty()).ok()
                 })
-                .unwrap();
+                .expect("pid dir opens");
             let meta = meta.clone();
             // `match_app` takes the app id of the app.slice unit first (E05-016), so a process
             // in an app scope is `GroupKind::App` with that id.
@@ -148,7 +153,7 @@ fn app_name(app_id: &str) -> Option<&'static str> {
 
 /// Groups the processes of `procs`, in their order.
 fn groups(procs: &[Proc]) -> Vec<Arc<MemGroup>> {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
     write_tree(tmp.path(), procs);
     let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
     let read = read_tree(tmp.path(), &pids);
