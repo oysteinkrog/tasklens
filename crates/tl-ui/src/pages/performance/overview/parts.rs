@@ -34,6 +34,7 @@ use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
 
+use super::fit::fit_text;
 use super::layout::{Arrange, BoxKind};
 use super::mem_box::{MeterRow, ROW_LABEL_W, ROW_VALUE_W, meter_row};
 use super::range::RangeText;
@@ -978,10 +979,11 @@ pub fn box_frame(
     *value_el.text_style() = title_value_style(m);
     let value_el = value_el
         .debug_selector(move || title_value_id(id))
-        .flex_none()
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(value);
+        .child(fit_text(value));
     let mut frame = div()
         .debug_selector(move || id.into())
         .relative()
@@ -1051,7 +1053,15 @@ pub fn box_frame(
                     .flex()
                     .flex_col()
                     .child(figures)
-                    .child(div().flex_1().min_h_0().w_full().child(body))
+                    // Clipped, so nothing draws in the time-axis band (UI-PRF-017).
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(body),
+                    )
                     .child(
                         div()
                             .debug_selector(move || time_axis_id(id))
@@ -1669,7 +1679,7 @@ pub fn spark_row(
             .justify_end()
             .whitespace_nowrap()
             .text_color(theme.text_primary)
-            .child(row.value.clone());
+            .child(fit_text(row.value.clone()));
         return div()
             .flex()
             .flex_row()

@@ -39,6 +39,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::ROW_LABEL_W;
@@ -861,19 +862,19 @@ pub fn row_part_id(key: &DeviceKey, part: &str) -> String {
 }
 
 /// A right-aligned number column: a rate or the active percent. It is `RATE_W` wide at least and
-/// grows to its text, so a rate never wraps or loses its unit (UI-FND-051 rule 3).
+/// grows to its text, so a rate never wraps; with less room it drops decimals and keeps its unit
+/// (UI-FND-051 rule 3, UI-PRF-017).
 fn rate_cell(id: String, text: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     // The text style first: assigning it later would drop the nowrap and the color.
     let mut d = div();
     *d.text_style() = numeric_style(m, m.text.sm);
     d.debug_selector(move || id)
-        .flex_none()
         .min_w(px(RATE_W * m.ui_scale))
         .flex()
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(text.clone())
+        .child(fit_text(text.clone()))
         .into_any_element()
 }
 
@@ -1000,28 +1001,34 @@ fn cell_head(
     let key = &r.key;
     let one_line = width >= px(HEAD_ONE_LINE_W * m.ui_scale);
     let part = |id: String, text: SharedString, color, style: TextStyleRefinement| {
-        // Only the name gives way, so the numbers always show whole. The text style goes in
-        // first: assigning it later would drop the nowrap and the ellipsis.
+        // The name gives way first: a number shrinks only once the name is at its minimum, and
+        // then drops decimals and keeps its unit. The text style goes in first: assigning it
+        // later would drop the nowrap.
         let mut d = div();
         *d.text_style() = style;
         d.debug_selector(move || id)
+            .flex()
             .min_w_0()
-            .overflow_hidden()
             .whitespace_nowrap()
-            .text_ellipsis()
             .text_color(color)
-            .child(text)
-            .flex_shrink_0()
+            .child(fit_text(text))
+            .flex_shrink(NUMBER_SHRINK)
     };
-    let name = part(
-        head_id(key, "name"),
-        r.name.clone(),
-        theme.text_primary,
-        label_style(m, m.text.sm, FontWeight::MEDIUM),
-    )
-    .flex_shrink(1.)
-    .flex_1()
-    .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
+    let mut name = div();
+    *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let name = name
+        .debug_selector({
+            let id = head_id(key, "name");
+            move || id
+        })
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.text_primary)
+        .child(r.name.clone())
+        .flex_shrink(1.)
+        .flex_1()
+        .min_w(px(HEAD_NAME_MIN_W * m.ui_scale));
     let active = part(
         head_id(key, "active"),
         r.active.clone(),
@@ -1097,6 +1104,9 @@ fn chart_cell(
         .into_any_element()
 }
 
+/// The flex shrink of a cell header number: small, so the name shrinks to its minimum first.
+const NUMBER_SHRINK: f32 = 0.001;
+
 /// The bit mask of the `n` busiest of the first `shown` rows (unknown lowest, ties to the
 /// earlier row).
 fn busiest(rows: &[DiskRow], shown: usize, n: usize) -> u8 {
@@ -1129,14 +1139,7 @@ impl DiskBox {
         self.expanded = busiest(&self.rows, shown.shown, shown.expanded);
         let share = self.split(m);
 
-        let column = || {
-            div()
-                .flex()
-                .flex_col()
-                .h_full()
-                .overflow_hidden()
-                .gap(m.sp[2])
-        };
+        let column = || whole_rows().h_full().gap(m.sp[2]);
         let mut left = column().flex_none().w(relative(share));
         let mut right = column().flex_1().min_w_0();
         for (i, r) in self.rows.iter().take(shown.shown).enumerate() {

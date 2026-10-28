@@ -35,6 +35,7 @@ use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
+use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
@@ -912,14 +913,14 @@ pub fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .child(row.label.clone());
     let mut value = div();
     *value.text_style() = numeric_style(m, m.text.sm);
+    // Shrinks to its column before the meter row overflows; the value then drops decimals.
     let value = value
-        .flex_none()
         .min_w(px(ROW_VALUE_W * s))
         .flex()
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(row.value.clone());
+        .child(fit_text(row.value.clone()));
     div()
         .flex()
         .flex_row()
@@ -960,12 +961,12 @@ fn text_row(
     *label.text_style() = t_sm(m);
     let mut value = div()
         .debug_selector(move || value_id(index))
-        .flex_none()
+        .min_w_0()
         .flex()
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(row.value.clone());
+        .child(fit_text(row.value.clone()));
     *value.text_style() = numeric_style(m, m.text.sm);
     let mut pct = div()
         .flex_none()
@@ -974,7 +975,7 @@ fn text_row(
         .justify_end()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
-        .child(percent.clone());
+        .child(fit_text(percent.clone()));
     *pct.text_style() = numeric_style(m, m.text.sm);
     let meter = div()
         .debug_selector(move || meter_id(index))
@@ -1011,7 +1012,7 @@ fn text_row(
     }
     row_el
         .child(label.flex_none().w(px(ROW_LABEL_W * s)))
-        .child(value.w(px(ROW_VALUE_W * s)))
+        .child(value.flex_none().w(px(ROW_VALUE_W * s)))
         .child(meter)
         .child(pct)
         .into_any_element()
@@ -1073,18 +1074,20 @@ fn chart_cell(
     *value.text_style() = numeric_style(m, m.text.sm);
     let value = value
         .debug_selector(move || cell_head_id(i, "value"))
-        .flex_none()
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(row.value.clone());
+        .child(fit_text(row.value.clone()));
     let mut pct = div();
     *pct.text_style() = numeric_style(m, m.text.sm);
     let pct = pct
         .debug_selector(move || cell_head_id(i, "percent"))
-        .flex_none()
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
-        .child(percent.clone());
+        .child(fit_text(percent.clone()));
     div()
         .debug_selector(move || cell_id(i))
         .flex()
@@ -1148,11 +1151,10 @@ impl MemBox {
         (body, fit)
     }
 
-    /// The five text rows in a column that shares the body height.
+    /// The five text rows in a column that shares the body height. A row that does not fit whole
+    /// is left out, top first (UI-PRF-017).
     fn text_rows(&self, wide: bool, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
+        whole_rows()
             .size_full()
             .gap(m.sp[2])
             .children(
@@ -1175,7 +1177,7 @@ impl MemBox {
     ) -> AnyElement {
         let share = self.split(m);
         let text = self.text_rows(wide, m, theme);
-        let sparks = div().flex().flex_col().size_full().gap(m.sp[2]).children(
+        let sparks = whole_rows().size_full().gap(m.sp[2]).children(
             self.sparks
                 .iter()
                 .enumerate()

@@ -8713,3 +8713,563 @@ mod title_row {
         assert!(line.right() <= frame.right(), "{line:?} in {frame:?}");
     }
 }
+
+/// tasklens-crw.100: the whole-rows rule (UI-PRF-017) holds for every box kind and mode at every
+/// size, and a value that does not fit drops decimals before it would lose its unit.
+mod sweep {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels,
+        Render, SharedString, StyleRefinement, Styled as _, TestAppContext, VisualTestContext,
+        Window, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+    use tl_model::ids::DeviceIdx;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
+    use tl_model::validity::Validity;
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::DeviceKey;
+    use tl_ui::pages::performance::overview::cpu_box::{CORE_CHARTS_ID, CpuBox};
+    use tl_ui::pages::performance::overview::disk_box::{self, DiskBox};
+    use tl_ui::pages::performance::overview::fit::{
+        FitTextPaint, round_decimals, shorter_forms, take_fit_texts,
+    };
+    use tl_ui::pages::performance::overview::gpu_box::{self, GpuBox};
+    use tl_ui::pages::performance::overview::layout::BoxKind;
+    use tl_ui::pages::performance::overview::mem_box::{self, CHARTS_GRID_ID, MemBox};
+    use tl_ui::pages::performance::overview::net_box::{self, NetBox};
+    use tl_ui::pages::performance::overview::parts::{
+        CORE_ROWS_SCROLL_ID, time_axis_id, title_row_id,
+    };
+    use tl_ui::pages::performance::overview::procs_box::ProcsBox;
+    use tl_ui::pages::performance::overview::timeline::TimelineBox;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const GIB: u64 = 1 << 30;
+    const CPUS: u16 = 8;
+
+    #[test]
+    fn overview_values_drop_decimals() {
+        assert_eq!(
+            round_decimals("3.98 GiB / 15.92 GiB", 1),
+            "4.0 GiB / 15.9 GiB"
+        );
+        assert_eq!(round_decimals("3.98 GiB / 15.92 GiB", 0), "4 GiB / 16 GiB");
+        assert_eq!(round_decimals("9.96 MiB/s", 1), "10.0 MiB/s");
+        assert_eq!(round_decimals("1,999.5 KiB", 0), "2,000 KiB");
+        assert_eq!(round_decimals("12%", 0), "12%");
+        assert_eq!(round_decimals("v1. 2.5", 0), "v1. 3");
+        assert_eq!(
+            shorter_forms("3.98 GiB / 15.92 GiB"),
+            ["4.0 GiB / 15.9 GiB", "4 GiB / 16 GiB"]
+        );
+        assert!(shorter_forms("55%").is_empty());
+    }
+
+    /// One box of `w × h` at the window's top left.
+    struct Host {
+        boxed: Boxed,
+        w: f32,
+        h: f32,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div().w(px(self.w)).h(px(self.h)).child(
+                    self.boxed
+                        .view()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
+            )
+        }
+    }
+
+    fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("dev"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind,
+            hot_c: None,
+        }
+    }
+
+    /// CPU package 0 with logical CPUs at 100.., memory 1, a GPU at 10, disks at 20 to 22, eth0
+    /// at 30, wlan0 at 33, the disk and net aggregates at 50 and 51.
+    fn catalog() -> DeviceCatalog {
+        let mut entries = vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            entry(
+                10,
+                DeviceIdentity::Gpu {
+                    uuid: [1; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                None,
+            ),
+        ];
+        for (idx, minor, name) in [(20, 0, "sda"), (21, 16, "sdb"), (22, 32, "nvme0n1")] {
+            entries.push(entry(
+                idx,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor,
+                    name: Arc::from(name),
+                    wwn_or_serial: None,
+                },
+                None,
+            ));
+        }
+        for (idx, ifindex, name, kind) in [
+            (30, 2, "eth0", NetKind::Wired),
+            (33, 4, "wlan0", NetKind::Wireless),
+        ] {
+            entries.push(entry(
+                idx,
+                DeviceIdentity::Net {
+                    netns_ino: 1,
+                    ifindex,
+                    name: Arc::from(name),
+                },
+                Some(kind),
+            ));
+        }
+        entries.push(entry(
+            50,
+            DeviceIdentity::Aggregate(AggregateKind::Disks),
+            None,
+        ));
+        entries.push(entry(
+            51,
+            DeviceIdentity::Aggregate(AggregateKind::Nets),
+            None,
+        ));
+        entries
+            .extend((0..CPUS).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id }, None)));
+        DeviceCatalog {
+            version: 1,
+            entries: Arc::from(entries),
+        }
+    }
+
+    /// A GPU with 3D, encode and decode engines and the owner's VRAM of 1.0.7: 3.98 of 15.92 GiB.
+    fn gpu() -> GpuTotals {
+        GpuTotals {
+            device: DeviceIdx(10),
+            util_pct: Metric::valid(25.),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::valid(398 * GIB / 100),
+            mem_total: Metric::valid(1592 * GIB / 100),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            mem_reserved: Metric::default(),
+            enc_pct: Metric::valid(10.),
+            dec_pct: Metric::valid(5.),
+            enc_sessions: Metric::default(),
+            enc_dec_shared: false,
+            temp_c: Metric::valid(62.),
+            temp_edge_c: Metric::default(),
+            temp_junction_c: Metric::default(),
+            temp_mem_c: Metric::default(),
+            power_w: Metric::valid(120.),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+            engines: Default::default(),
+            throttling: Default::default(),
+            fdinfo_partial: false,
+            energy_since_boot: Metric::default(),
+            clock_video_mhz: Metric::default(),
+            pstate: Metric::default(),
+            clock_event_reasons: Metric::default(),
+            fan_rpm: Metric::default(),
+            pcie_gen: Metric::default(),
+            pcie_width: Metric::default(),
+            info: Arc::default(),
+        }
+    }
+
+    fn disk(device: u16, read_bps: f64) -> (DeviceIdx, DiskTotals) {
+        (
+            DeviceIdx(device),
+            DiskTotals {
+                device: DeviceIdx(device),
+                active_pct: Metric::valid(40.),
+                read_bps: Metric::valid(read_bps),
+                write_bps: Metric::valid(read_bps / 3.),
+                response_ms: Metric::default(),
+                read_total: 0,
+                written_total: 0,
+                capacity: 0,
+                temp_c: Metric::default(),
+            },
+        )
+    }
+
+    fn net(device: u16, bps: f64) -> (DeviceIdx, NetTotals) {
+        (
+            DeviceIdx(device),
+            NetTotals {
+                device: DeviceIdx(device),
+                rx_bps: Metric::valid(bps),
+                tx_bps: Metric::valid(bps / 7.),
+                rx_total: 123_456_789_012,
+                tx_total: 9_876_543_210,
+                link_speed_mbps: Metric::default(),
+                state: LinkState::Up,
+            },
+        )
+    }
+
+    fn devices(kind: &str, idx: &[u16]) -> Vec<(DeviceKey, DeviceIdx, SharedString)> {
+        idx.iter()
+            .enumerate()
+            .map(|(n, i)| {
+                (
+                    DeviceKey(Arc::from(format!("{kind}{n}"))),
+                    DeviceIdx(*i),
+                    SharedString::from(format!("{kind} {n}")),
+                )
+            })
+            .collect()
+    }
+
+    #[derive(Clone)]
+    enum Boxed {
+        Cpu(Entity<CpuBox>),
+        Mem(Entity<MemBox>),
+        Gpu(Entity<GpuBox>),
+        Disk(Entity<DiskBox>),
+        Net(Entity<NetBox>),
+        Procs(Entity<ProcsBox>),
+        Timeline(Entity<TimelineBox>),
+    }
+
+    impl Boxed {
+        fn view(&self) -> AnyView {
+            match self {
+                Self::Cpu(e) => e.clone().into(),
+                Self::Mem(e) => e.clone().into(),
+                Self::Gpu(e) => e.clone().into(),
+                Self::Disk(e) => e.clone().into(),
+                Self::Net(e) => e.clone().into(),
+                Self::Procs(e) => e.clone().into(),
+                Self::Timeline(e) => e.clone().into(),
+            }
+        }
+
+        fn set_mode(&self, mode: &str, cx: &mut gpui_kit::App) {
+            match self {
+                Self::Cpu(e) => e.update(cx, |b, cx| b.set_mode(mode, cx)),
+                Self::Mem(e) => e.update(cx, |b, cx| b.set_mode(mode, cx)),
+                Self::Gpu(e) => e.update(cx, |b, cx| b.set_mode(mode, cx)),
+                Self::Disk(e) => e.update(cx, |b, cx| b.set_mode(mode, cx)),
+                Self::Net(e) => e.update(cx, |b, cx| b.set_mode(mode, cx)),
+                Self::Procs(_) | Self::Timeline(_) => {}
+            }
+        }
+    }
+
+    /// The row, cell and part selectors of `kind` whose bounds the sweep checks.
+    fn parts(kind: BoxKind) -> Vec<String> {
+        let mut ids = vec![];
+        match kind {
+            BoxKind::Memory => {
+                ids.extend([mem_box::MEM_USED_CHART_ID.to_owned()]);
+                for i in 0..5 {
+                    ids.extend([
+                        mem_box::row_id(i),
+                        mem_box::spark_id(i),
+                        mem_box::value_id(i),
+                        mem_box::meter_id(i),
+                    ]);
+                }
+            }
+            BoxKind::Gpu => {
+                ids.extend([
+                    gpu_box::rows_id(0),
+                    gpu_box::chart_id(0),
+                    gpu_box::vram_id(0),
+                ]);
+                for key in ["gpu", "enc", "dec"] {
+                    ids.push(gpu_box::engine_row_id(0, key));
+                    ids.push(gpu_box::engine_cell_id(0, key));
+                }
+            }
+            BoxKind::Disk => {
+                for (n, _) in devices("disk", &[20, 21, 22]).iter().enumerate() {
+                    let key = DeviceKey(Arc::from(format!("disk{n}")));
+                    ids.push(format!("{}{}", disk_box::DISK_ROW_ID_PREFIX, key.0));
+                    ids.push(disk_box::cell_id(&key));
+                    for which in ["read", "write", "read-spark", "write-spark"] {
+                        ids.push(disk_box::io_row_id(&key, which));
+                    }
+                }
+            }
+            BoxKind::Net => {
+                ids.extend([
+                    net_box::DOWN_TOTAL_ID.to_owned(),
+                    net_box::UP_TOTAL_ID.to_owned(),
+                    net_box::COMBINED_CHART_ID.to_owned(),
+                    net_box::cell_id(DeviceIdx(30)),
+                    net_box::cell_id(DeviceIdx(33)),
+                ]);
+            }
+            BoxKind::Cpu | BoxKind::TopProcs | BoxKind::Timeline => {}
+        }
+        ids
+    }
+
+    /// The parts of `kind` that scroll their content by design (UI-PRF-019): what they hold
+    /// may be clipped at their edge.
+    fn scroll_areas(kind: BoxKind) -> &'static [&'static str] {
+        match kind {
+            BoxKind::Cpu => &[CORE_CHARTS_ID, CORE_ROWS_SCROLL_ID],
+            BoxKind::Memory => &[CHARTS_GRID_ID],
+            _ => &[],
+        }
+    }
+
+    fn leak(id: String) -> &'static str {
+        Box::leak(id.into_boxed_str())
+    }
+
+    /// `text` with every number replaced by `#`: what a shorter form must keep.
+    fn skeleton(text: &str) -> String {
+        let mut out = String::new();
+        let mut in_number = false;
+        for c in text.chars() {
+            let digit = c.is_ascii_digit() || (in_number && (c == '.' || c == ','));
+            if digit && !in_number {
+                out.push('#');
+            } else if !digit {
+                out.push(c);
+            }
+            in_number = digit;
+        }
+        out
+    }
+
+    fn inside(inner: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+        let e = px(0.01);
+        b.left() >= inner.left() - e
+            && b.right() <= inner.right() + e
+            && b.top() >= inner.top() - e
+            && b.bottom() <= inner.bottom() + e
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    /// For every box kind and every mode, at heights from the kind minimum down to 0 in 2 px steps
+    /// and widths 200 to 600 px in 20 px steps: no row or text crosses the time-axis band or the
+    /// box edge, and every drawn value keeps its unit (UI-PRF-017, UI-PRF-019).
+    #[gpui_kit::test]
+    fn overview_boxes_never_draw_into_time_axis(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            s.devices = Arc::new(catalog());
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.memory.validity = Validity::Valid;
+            sys.memory.total = 64 * GIB;
+            sys.memory.used = 23 * GIB;
+            sys.memory.available = 41 * GIB;
+            sys.memory.cached = 6 * GIB;
+            sys.memory.swap_total = 8 * GIB;
+            sys.memory.swap_free = 7 * GIB;
+            sys.memory.commit_limit = 40 * GIB;
+            sys.memory.committed = 31 * GIB;
+            sys.gpus = Arc::from([(DeviceIdx(10), gpu())]);
+            sys.disks = Arc::from([
+                disk(20, 123_456_789.),
+                disk(21, 9_876.),
+                disk(22, 54_321_000.),
+            ]);
+            sys.nets = Arc::from([net(30, 12_345_678.), net(33, 98_765.)]);
+        });
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let mut failures: Vec<String> = Vec::new();
+        for kind in BoxKind::ALL {
+            let hub = hub.clone();
+            let (host, vcx) = cx.add_window_view(move |_, cx| {
+                let boxed = match kind {
+                    BoxKind::Cpu => Boxed::Cpu(cx.new(|cx| CpuBox::new(&hub, DeviceIdx(0), cx))),
+                    BoxKind::Memory => Boxed::Mem(cx.new(|cx| MemBox::new(&hub, DeviceIdx(1), cx))),
+                    BoxKind::Gpu => {
+                        Boxed::Gpu(cx.new(|cx| GpuBox::new(&hub, &devices("gpu", &[10]), cx)))
+                    }
+                    BoxKind::Disk => Boxed::Disk(
+                        cx.new(|cx| DiskBox::new(&hub, &devices("disk", &[20, 21, 22]), cx)),
+                    ),
+                    BoxKind::Net => Boxed::Net(cx.new(|cx| NetBox::new(&hub, cx))),
+                    BoxKind::TopProcs => Boxed::Procs(cx.new(|cx| ProcsBox::new(&hub, cx))),
+                    BoxKind::Timeline => Boxed::Timeline(cx.new(|cx| TimelineBox::new(&hub, cx))),
+                };
+                Host {
+                    boxed,
+                    w: 400.,
+                    h: 400.,
+                }
+            });
+            vcx.simulate_scale_factor_change(1.0);
+            let driver = vcx.update(|window, cx| {
+                let driver = cx.new(AnimationDriver::new);
+                AnimationDriver::register(&driver, window, cx);
+                driver
+            });
+            vcx.simulate_resize(size(px(700.), px(400.)));
+            draw(vcx);
+            let frame_id = leak(format!("perf-overview-box-{}", kind.key()));
+            let axis_id = leak(time_axis_id(frame_id));
+            let title_id = leak(title_row_id(frame_id));
+            let part_ids: Vec<&'static str> = parts(kind).into_iter().map(leak).collect();
+            for mode in kind.modes() {
+                vcx.update(|_, cx| {
+                    let boxed = host.read(cx).boxed.clone();
+                    boxed.set_mode(mode.id, cx);
+                });
+                let mut h = kind.min_h();
+                while h >= 0. {
+                    for w in (200..=600).step_by(20) {
+                        let w = w as f32;
+                        vcx.update(|_, cx| {
+                            host.update(cx, |host, cx| {
+                                host.w = w;
+                                host.h = h;
+                                cx.notify();
+                            })
+                        });
+                        let _ = take_fit_texts();
+                        draw(vcx);
+                        let texts = take_fit_texts();
+                        let what = format!("{} {} at {w} x {h}", kind.key(), mode.id);
+                        let Some(frame) = vcx.debug_bounds(frame_id) else {
+                            failures.push(format!("{what}: no box"));
+                            continue;
+                        };
+                        // Inside the 1 px border, above the time axis when the box draws one.
+                        let mut inner = Bounds::new(
+                            frame.origin + gpui_kit::point(px(1.), px(1.)),
+                            size(frame.size.width - px(2.), frame.size.height - px(2.)),
+                        );
+                        if let Some(axis) = vcx.debug_bounds(axis_id) {
+                            let bottom = inner.bottom().min(axis.top());
+                            inner.size.height = (bottom - inner.top()).max(px(0.));
+                        }
+                        let title = vcx.debug_bounds(title_id);
+                        let areas: Vec<Bounds<Pixels>> = scroll_areas(kind)
+                            .iter()
+                            .filter_map(|id| vcx.debug_bounds(id))
+                            .collect();
+                        let in_area = |b: Bounds<Pixels>| areas.iter().any(|a| a.intersects(&b));
+                        for id in &part_ids {
+                            let Some(b) = vcx.debug_bounds(id) else {
+                                continue;
+                            };
+                            if b.size.height <= px(0.) || in_area(b) {
+                                continue;
+                            }
+                            if !inside(inner, b) {
+                                failures.push(format!("{what}: {id} at {b:?} outside {inner:?}"));
+                            }
+                        }
+                        for area in &areas {
+                            if area.size.height > px(0.) && !inside(inner, *area) {
+                                failures.push(format!(
+                                    "{what}: scroll area {area:?} outside {inner:?}"
+                                ));
+                            }
+                        }
+                        for t in &texts {
+                            check_text(&what, t, inner, title, &areas, &mut failures);
+                        }
+                        if failures.len() > 40 {
+                            panic!("{}", failures.join("\n"));
+                        }
+                    }
+                    h -= 2.;
+                }
+            }
+            drop(driver);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// One drawn value: it keeps its unit, and it lies inside the box body unless it is in the
+    /// title row (checked across only) or clipped by a part that scrolls.
+    fn check_text(
+        what: &str,
+        t: &FitTextPaint,
+        inner: Bounds<Pixels>,
+        title: Option<Bounds<Pixels>>,
+        areas: &[Bounds<Pixels>],
+        failures: &mut Vec<String>,
+    ) {
+        let e = px(0.01);
+        if skeleton(&t.text) != skeleton(&t.whole) {
+            failures.push(format!("{what}: {:?} drawn for {:?}", t.text, t.whole));
+        }
+        let b = t.bounds;
+        // Across, a value is never cut by any clip: it keeps its unit.
+        if b.left() < t.mask.left() - e || b.right() > t.mask.right() + e {
+            failures.push(format!("{what}: {:?} at {b:?} cut by {:?}", t.text, t.mask));
+        }
+        if b.left() < inner.left() - e || b.right() > inner.right() + e {
+            failures.push(format!("{what}: {:?} at {b:?} past the box edge", t.text));
+        }
+        if title.is_some_and(|r| b.top() < r.bottom()) {
+            return;
+        }
+        let clipped = b.top() < t.mask.top() - e || b.bottom() > t.mask.bottom() + e;
+        if clipped && areas.iter().any(|a| inside(*a, t.mask)) {
+            return;
+        }
+        if !inside(inner, b) {
+            failures.push(format!("{what}: {:?} at {b:?} outside {inner:?}", t.text));
+        }
+    }
+}

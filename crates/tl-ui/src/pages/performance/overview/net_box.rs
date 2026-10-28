@@ -40,6 +40,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::disk_box::more_line;
+use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
@@ -1055,12 +1056,12 @@ fn stat_row(
     let mut value_el = div();
     *value_el.text_style() = numeric_style(m, m.text.sm);
     let mut value_el = value_el
+        .flex()
+        .justify_end()
         .min_w_0()
         .whitespace_nowrap()
-        .overflow_hidden()
-        .text_ellipsis()
         .text_color(theme.text_primary)
-        .child(value.clone());
+        .child(fit_text(value.clone()));
     if let Some(id) = id {
         value_el = value_el.debug_selector(move || id.into());
     }
@@ -1091,9 +1092,7 @@ struct Column<'a> {
 }
 
 fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
+    whole_rows()
         .flex_1()
         .min_w_0()
         .h_full()
@@ -1160,10 +1159,11 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let mut rates = div();
     *rates.text_style() = numeric_style(m, m.text.sm);
     let rates = rates
-        .flex_none()
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
-        .child(a.rates.clone());
+        .child(fit_text(a.rates.clone()));
     div()
         .flex()
         .flex_row()
@@ -1374,9 +1374,7 @@ impl NetBox {
         let words = (&self.down_word, &self.up_word);
         let peak = (&self.peak_word, &self.peak_word);
         let total = (&self.total_word, &self.total_word);
-        div()
-            .flex()
-            .flex_col()
+        whole_rows()
             .size_full()
             .gap(m.sp[2])
             .child(pair_row(words, &self.down_text, &self.up_text, m, theme))

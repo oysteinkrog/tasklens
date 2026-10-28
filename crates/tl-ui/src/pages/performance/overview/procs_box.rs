@@ -26,6 +26,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
 
+use super::fit::whole_rows;
 use super::layout::BoxMode;
 use super::parts::{Meter, box_frame, edit_chrome};
 use super::picked::{box_mask, box_snapshot};
@@ -371,13 +372,7 @@ impl Render for ProcsBox {
                 &self.last_jump,
             ));
         }
-        let body = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .overflow_hidden()
-            .children(rows)
-            .into_any_element();
+        let body = whole_rows().size_full().children(rows).into_any_element();
         box_frame(
             PROCS_BOX_ID,
             None,

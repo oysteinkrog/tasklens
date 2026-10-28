@@ -33,6 +33,7 @@ pub mod box_menu;
 pub mod cpu_box;
 pub mod disk_box;
 pub mod edit;
+pub mod fit;
 pub mod gpu_box;
 pub mod inner_split;
 pub mod layout;

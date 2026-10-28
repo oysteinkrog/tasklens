@@ -48,6 +48,7 @@ use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines};
 use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
+use super::fit::fit_text;
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
@@ -1417,18 +1418,24 @@ fn section_heading(
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
-    let mut heading = div()
-        .flex_none()
+    let mut heading = div();
+    *heading.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
+    let heading = heading
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
         .whitespace_nowrap()
+        .text_ellipsis()
         .text_color(theme.text_primary)
         .child(section.heading.clone());
-    *heading.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
-    let mut value = div()
-        .flex_none()
+    let mut value = div();
+    *value.text_style() = numeric_style(m, m.text.sm);
+    let value = value
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(section.value.clone());
-    *value.text_style() = numeric_style(m, m.text.sm);
+        .child(fit_text(section.value.clone()));
     div()
         .flex()
         .flex_row()
@@ -1465,10 +1472,11 @@ fn engine_cell(
     let mut value = div();
     *value.text_style() = numeric_style(m, m.text.sm);
     let value = value
-        .flex_none()
+        .flex()
+        .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
-        .child(e.meter.value.clone());
+        .child(fit_text(e.meter.value.clone()));
     div()
         .debug_selector(move || engine_cell_id(i, key))
         .flex()
