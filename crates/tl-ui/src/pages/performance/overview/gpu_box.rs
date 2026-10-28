@@ -9,7 +9,9 @@
 //! section shows only when both fit. When one section's rows do not fit, it shows only the
 //! busiest engine and a "+n more engines" row, then only "+n more engines", and then the
 //! temperature and power row and the VRAM row give way, so no row crosses the time axis
-//! (UI-PRF-059). Narrow rows drop the meter and keep the sparkline
+//! (UI-PRF-059). Then the count rows give way from the bottom. Below the chart's height the
+//! chart gives way too and only whole rows show, none below a 22 px body; `engine_charts` does
+//! the same with the rows under its grid. Narrow rows drop the meter and keep the sparkline
 //! (`meter_fits`). A resize re-renders the box only when one of those changes. Pointer movement
 //! never notifies.
 //!
@@ -349,6 +351,18 @@ fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
     )
 }
 
+/// The body was laid out: before the first paint its size is zero.
+fn painted(body: Size<Pixels>) -> bool {
+    body.width > px(0.) || body.height > px(0.)
+}
+
+/// How many whole rows fit `h` px when each row takes the gap above it, so none fit below
+/// 22 px (UI-PRF-019 GPU fit).
+fn whole_rows(h: f32, m: &UiMetrics) -> usize {
+    let (row, gap, _) = spacing(m);
+    (h / (row + gap) + 1e-3).floor().max(0.) as usize
+}
+
 /// A section's body rows under its chart: the engine rows, the VRAM row and, when known, the
 /// temperature and power row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -382,7 +396,8 @@ fn section_rows(s: &GpuSection, mode: GpuMode, vram: bool) -> SectionRows {
 }
 
 /// The rows a section draws after `cut` rows gave way (UI-PRF-059): the temperature and power
-/// row first, then VRAM, then the engine rows (one row by then) and last the "+n more" row.
+/// row first, then VRAM. The count rows go last, from the bottom: the "+n more" row, then the
+/// engine rows (one row by then, or the `engine_charts` "+n more engines" row).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Kept {
     engines: bool,
@@ -399,8 +414,8 @@ fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
     };
     let line = keep(r.line);
     let vram = keep(r.vram);
-    let engines = keep(r.engines > 0);
     let more = keep(more);
+    let engines = keep(r.engines > 0);
     Kept {
         engines,
         vram,
@@ -409,19 +424,20 @@ fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
     }
 }
 
-/// What `engine_charts` shows: how many sections, and each shown section's grid with the
-/// number of whole cells it shows.
+/// What `engine_charts` shows: how many sections, each shown section's grid with the number
+/// of whole cells it shows, and how many rows under the first grid gave way (`kept`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct ChartsFit {
     sections: usize,
     grids: [ListFit; MAX_GPUS],
+    cut: usize,
 }
 
 impl ChartsFit {
     /// The layout class for `class_probe`: the sections and every shown grid's class.
     fn class(&self) -> u32 {
         let mut h = FxHasher::default();
-        self.sections.hash(&mut h);
+        (self.sections, self.cut).hash(&mut h);
         for g in &self.grids[..self.sections.min(MAX_GPUS)] {
             g.class().hash(&mut h);
         }
@@ -448,7 +464,8 @@ fn charts_fixed_h(engines: usize, lines: usize, vram: bool, heading: bool, m: &U
 /// cells, else the first with "+n more" for the others. The spare height goes to the grids in
 /// equal parts, and each grid fills its part (`list_fit`). A grid shows only whole cells: the
 /// cells that would be cut are left out, and a "+n more engines" row takes its height from the
-/// grid's part (UI-PRF-059).
+/// grid's part (UI-PRF-059). When even the rows under a grid with no cell do not fit, they give
+/// way in the order of `kept`, so none shows below 22 px.
 fn charts_fit(
     arrange: Arrange,
     body: Size<Pixels>,
@@ -461,6 +478,7 @@ fn charts_fit(
     let mut fit = ChartsFit {
         sections: count,
         grids: [ListFit::default(); MAX_GPUS],
+        cut: 0,
     };
     if count == 0 {
         return fit;
@@ -470,7 +488,8 @@ fn charts_fit(
     let min_grid =
         |i: usize| f32::from(arrange_min_h(arrange, engines[i], body.width, min, gap_px));
     let more = |shown: usize| usize::from(total > shown);
-    if body.height > px(0.) {
+    let painted = painted(body);
+    if painted {
         fit.sections = 1;
         if count >= 2 {
             let two = charts_fixed_h(engines[0], 0, vram, false, m)
@@ -493,7 +512,7 @@ fn charts_fit(
     for (i, grid) in fit.grids.iter_mut().enumerate().take(n) {
         let h = min_grid(i) + spare;
         // A part with no height shows no cell; `list_fit` reads an empty area as the first paint.
-        if body.height > px(0.) && h <= 0. {
+        if painted && h <= 0. {
             continue;
         }
         *grid = list_fit(
@@ -505,6 +524,20 @@ fn charts_fit(
             gap_px,
             px(row + gap),
         );
+    }
+    if painted && n == 1 {
+        // The rows under the grid: "+n more engines", VRAM and "+n more". They start under
+        // the drawn cells, a gap below the grid.
+        let g = fit.grids[0];
+        let grid_h = if engines[0] > 0 {
+            f32::from(g.grid.content_h(gap_px)) + gap
+        } else {
+            0.
+        };
+        let rows = usize::from(g.shown < engines[0]) + usize::from(vram) + more(1);
+        let fits = whole_rows(f32::from(body.height) - grid_h + gap, m)
+            .min(whole_rows(f32::from(body.height), m));
+        fit.cut = rows.saturating_sub(fits);
     }
     fit
 }
@@ -522,6 +555,9 @@ struct Fit {
     /// How many of the first section's rows gave way after that (`kept`), so no row crosses
     /// the time axis.
     cut: usize,
+    /// The first section's chart shows. Below its height it gives way too, and only the rows
+    /// that fit whole show.
+    chart: bool,
     /// The engine rows draw their meters (see `meter_fits`).
     meters: bool,
 }
@@ -534,6 +570,7 @@ impl Fit {
             | u32::from(self.meters) << 3
             | u32::from(self.busiest) << 4
             | (self.cut as u32) << 5
+            | u32::from(self.chart) << 12
     }
 }
 
@@ -562,8 +599,9 @@ fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
 /// last section. Both sections show only when both fit in full. Otherwise one section shows, and
 /// when its rows do not fit, only its busiest engine and "+n more engines" (two engines or
 /// more). When even that is cut, the busiest engine joins "+n more engines", and after that
-/// whole rows give way in the order of `kept` (UI-PRF-059). `side` is the chart's share of the
-/// width when it sits beside the rows (Side by side).
+/// whole rows give way in the order of `kept` (UI-PRF-059). When the body is lower than the
+/// chart, the chart gives way and the rows that fit whole show at the top, none below 22 px.
+/// `side` is the chart's share of the width when it sits beside the rows (Side by side).
 fn fit(
     body: Size<Pixels>,
     rows: &[SectionRows],
@@ -579,12 +617,13 @@ fn fit(
     let meters = meter_fits(rows_w, m);
     let side = side.is_some();
     let count = rows.len();
-    if body.height == px(0.) || count == 0 {
+    if !painted(body) || count == 0 {
         return Fit {
             sections: count,
             collapsed: false,
             busiest: true,
             cut: 0,
+            chart: true,
             meters,
         };
     }
@@ -604,6 +643,7 @@ fn fit(
                 collapsed: false,
                 busiest: true,
                 cut: 0,
+                chart: true,
                 meters,
             };
         }
@@ -614,14 +654,16 @@ fn fit(
     let collapsed = h < one(false, true) && rows[0].engines >= 2;
     let busiest = !collapsed || h >= one(true, true);
     let base = lines(rows[0], collapsed, busiest) + more(1);
-    let cut = (0..base)
-        .find(|c| section_h(base - c, false, side, m) <= h)
-        .unwrap_or(base);
+    let (chart, cut) = match (0..=base).find(|c| section_h(base - c, false, side, m) <= h) {
+        Some(cut) => (true, cut),
+        None => (false, base - whole_rows(h, m).min(base)),
+    };
     Fit {
         sections: 1,
         collapsed,
         busiest,
         cut,
+        chart,
         meters,
     }
 }
@@ -924,7 +966,8 @@ impl GpuBox {
     }
 
     /// How many of the first section's rows gave way in the last render after its engines
-    /// joined "+n more engines": the temperature and power row, then VRAM, then the rest.
+    /// joined "+n more engines": the temperature and power row, then VRAM, then "+n more", then
+    /// the engine row. In `engine_charts`, the rows under a grid with no cell.
     pub fn cut_rows(&self) -> usize {
         self.cut
     }
@@ -1516,9 +1559,10 @@ impl GpuBox {
             .collect();
         let mut split_share = None;
         let mut custom_chart_h = None;
-        if side && shown.sections > 0 {
+        let charts = if shown.chart { shown.sections } else { 0 };
+        if side && charts > 0 {
             split_share = Some(self.chart_split.share(SplitAxis::Row, m.sp[5], s));
-        } else if with_rows && shown.sections > 0 {
+        } else if with_rows && charts > 0 {
             self.chart_split.set_range(SPLIT_RANGE.0, SPLIT_RANGE.1);
             let n = shown.sections as f32;
             let basis: f32 = lines
@@ -1614,6 +1658,10 @@ impl GpuBox {
                 .debug_selector(move || chart_id(i))
                 .min_h(px(MIN_CHART_H * s))
                 .child(chart_element(section));
+            if !shown.chart {
+                body = body.child(col.flex_basis(px(0.)).child(section_rows));
+                continue;
+            }
             if let Some(share) = split_share.filter(|_| side) {
                 // Side by side: the chart takes the share of the width, the rows the rest.
                 let parts = div()
@@ -1692,7 +1740,7 @@ impl GpuBox {
         }
         self.collapsed = false;
         self.busiest = true;
-        self.cut = 0;
+        self.cut = shown.cut;
         self.meters = meter_fits(self.body.get().width, m);
         let more = self.shown_more_text();
         let min = cell_min(m);
@@ -1738,7 +1786,12 @@ impl GpuBox {
                 m.sp[2],
                 grid_id(i),
             );
-            let left_out = fit.shown < engines[i];
+            let rows = SectionRows {
+                engines: usize::from(fit.shown < engines[i]),
+                vram,
+                line: false,
+            };
+            let keep = kept(rows, extra > 0, if i == 0 { shown.cut } else { 0 });
             let grid = div()
                 .debug_selector(move || grid_id(i))
                 .flex_1()
@@ -1753,19 +1806,19 @@ impl GpuBox {
                 .flex_none()
                 .w_full()
                 .gap(m.sp[2]);
-            if left_out {
+            if keep.engines {
                 rest = rest.child(text_row(&section.cells_more, m, theme));
             }
-            if vram {
+            if keep.vram {
                 rest = rest.child(spark_row(&section.vram, None, self.meters, m, theme));
             }
-            if last && !more.is_empty() {
+            if keep.more {
                 rest = rest.child(text_row(&more, m, theme));
             }
             if !section.engines.is_empty() {
                 col = col.child(grid);
             }
-            if left_out || vram || (last && !more.is_empty()) {
+            if keep.engines || keep.vram || keep.more {
                 col = col.child(rest);
             }
             body = body.child(col);

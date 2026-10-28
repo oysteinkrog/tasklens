@@ -2171,6 +2171,98 @@ mod bottom {
         assert_rows_above_axis(&mut r, 5, "160 px body");
     }
 
+    /// Every GPU layout draws only whole rows, top first, at every body height (UI-PRF-019 GPU
+    /// fit). The body steps from 0 to 300 px in 2 px steps, for 1 and 2 GPUs with 2 and 3
+    /// engines, in each mode and Arrange choice. Every drawn row, chart, grid and cell ends at
+    /// or above the time axis.
+    #[gpui_kit::test]
+    fn gpu_box_whole_rows_at_every_height(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::parts::figures_id;
+
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (300., 200.));
+        let (gpu, _, _) = r.boxes();
+        let layouts = [
+            ("chart", Arrange::Auto),
+            ("chart_engines", Arrange::Vertical),
+            ("chart_engines", Arrange::Horizontal),
+            ("engine_charts", Arrange::Auto),
+            ("engine_charts", Arrange::Vertical),
+            ("engine_charts", Arrange::Horizontal),
+        ];
+        for gpus in [1, 2] {
+            for shared in [false, true] {
+                let list = devices("gpu", &[10, 11][..gpus]);
+                r.vcx
+                    .update(|_, cx| gpu.update(cx, |g, cx| g.set_gpus(&list, cx)));
+                r.system(|s| {
+                    let mut t11 = gpu_engines(shared);
+                    t11.device = DeviceIdx(11);
+                    s.gpus =
+                        Arc::from([(DeviceIdx(10), gpu_engines(shared)), (DeviceIdx(11), t11)]);
+                });
+                let engines = r
+                    .vcx
+                    .update(|_, cx| gpu.read(cx).sections()[0].engines.len());
+                assert_eq!(engines, if shared { 2 } else { 3 });
+                for (mode, arrange) in layouts {
+                    r.vcx.update(|_, cx| {
+                        gpu.update(cx, |g, cx| {
+                            g.set_mode(mode, cx);
+                            g.set_arrange(arrange, cx);
+                        })
+                    });
+                    for body in (0..=300).step_by(2) {
+                        let body = body as f32;
+                        let what = format!("{gpus} GPUs, {engines} engines, {mode} {arrange:?}");
+                        r.heights(body + 68. + FIGURES_ROW, 200.);
+                        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+                        let figures = r.bounds(figures_id(GPU_BOX_ID));
+                        assert_eq!(
+                            f32::from(axis.top() - figures.bottom()),
+                            body,
+                            "{what}: body"
+                        );
+                        let mut ids = Vec::new();
+                        for i in 0..2 {
+                            ids.extend([rows_id(i), chart_id(i), grid_id(i), vram_id(i)]);
+                            for key in ["gpu", "enc", "dec"] {
+                                ids.push(engine_row_id(i, key));
+                                ids.push(engine_cell_id(i, key));
+                            }
+                        }
+                        let mut drawn = 0;
+                        for id in ids {
+                            let Some(b) = r.vcx.debug_bounds(leak(id.clone())) else {
+                                continue;
+                            };
+                            // An empty container draws nothing. The grid fills what its
+                            // section leaves, so only its cells count as drawn.
+                            if b.size.height <= px(0.) {
+                                continue;
+                            }
+                            if id != grid_id(0) && id != grid_id(1) {
+                                drawn += 1;
+                            }
+                            assert!(
+                                b.bottom() <= axis.top() + px(0.01),
+                                "{what}, {body} px body: {id} ends at {:?}, the time axis \
+                                 starts at {:?}",
+                                b.bottom(),
+                                axis.top()
+                            );
+                        }
+                        if body < 22. {
+                            assert_eq!(drawn, 0, "{what}, {body} px body: nothing drawn");
+                        }
+                        if body >= 22. {
+                            assert!(drawn > 0, "{what}, {body} px body: a row shows");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// At the supported 720 px page width a GPU box is 224 px wide with a 198 px body: too
     /// narrow for label 72, meter 32, value 80 and the 96 px sparkline with their gaps (304 px).
     /// The engine rows drop the meter and keep the sparkline, and stay inside the body.
