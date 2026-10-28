@@ -262,8 +262,9 @@ fn idle_exit() {
         .expect("idle exit");
     let elapsed = answered.elapsed();
     assert_eq!(status.code(), Some(0));
+    // The helper's idle clock starts before the client sees the reply, so allow a little under 200.
     assert!(
-        (Duration::from_millis(200)..=Duration::from_millis(400)).contains(&elapsed),
+        (Duration::from_millis(180)..=Duration::from_millis(400)).contains(&elapsed),
         "{elapsed:?}"
     );
 }
