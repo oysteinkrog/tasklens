@@ -2190,20 +2190,22 @@ mod bottom {
             ("engine_charts", Arrange::Horizontal),
         ];
         for gpus in [1, 2] {
-            for shared in [false, true] {
+            for engines in [2, 3] {
+                // 3D, encode and decode, or without decode only 3D and encode, in every mode.
+                let totals = |device: u16| {
+                    let mut t = gpu_engines(false);
+                    t.device = DeviceIdx(device);
+                    if engines == 2 {
+                        t.dec_pct = Metric::default();
+                    }
+                    t
+                };
                 let list = devices("gpu", &[10, 11][..gpus]);
                 r.vcx
                     .update(|_, cx| gpu.update(cx, |g, cx| g.set_gpus(&list, cx)));
                 r.system(|s| {
-                    let mut t11 = gpu_engines(shared);
-                    t11.device = DeviceIdx(11);
-                    s.gpus =
-                        Arc::from([(DeviceIdx(10), gpu_engines(shared)), (DeviceIdx(11), t11)]);
+                    s.gpus = Arc::from([(DeviceIdx(10), totals(10)), (DeviceIdx(11), totals(11))])
                 });
-                let engines = r
-                    .vcx
-                    .update(|_, cx| gpu.read(cx).sections()[0].engines.len());
-                assert_eq!(engines, if shared { 2 } else { 3 });
                 for (mode, arrange) in layouts {
                     r.vcx.update(|_, cx| {
                         gpu.update(cx, |g, cx| {
@@ -2211,6 +2213,14 @@ mod bottom {
                             g.set_arrange(arrange, cx);
                         })
                     });
+                    let (sections, shown_engines) = r.vcx.update(|_, cx| {
+                        let g = gpu.read(cx);
+                        (g.sections().len(), g.sections()[0].engines.len())
+                    });
+                    assert_eq!(sections, gpus, "{mode}");
+                    if mode != "chart" {
+                        assert_eq!(shown_engines, engines, "{mode}");
+                    }
                     for body in (0..=300).step_by(2) {
                         let body = body as f32;
                         let what = format!("{gpus} GPUs, {engines} engines, {mode} {arrange:?}");
