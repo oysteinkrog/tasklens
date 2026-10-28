@@ -295,7 +295,7 @@ impl Element for FitText {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         window: &mut Window,
-        cx: &mut App,
+        _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let (line, line_h) = shape(self.text.clone(), window);
         let mut style = Style {
