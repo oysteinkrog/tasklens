@@ -206,8 +206,9 @@ pub struct MemoryTotals {
     /// The bands of the memory-by-app chart from the last process sweep (D-036, UI-PRF-060):
     /// the top 20 memory groups by RssAnon, largest first, then "Other apps" and "Shared and
     /// kernel". Each band's value is series `MEM_GROUP` on its device. The reducer fills it; the
-    /// memory worker leaves it empty.
-    pub groups: Arc<[MemGroupBand]>,
+    /// memory worker leaves it empty. A thin `Arc<Vec>`, not `Arc<[_]>`, so `MemorySample`
+    /// keeps `EngineMsg` within its 256 bytes.
+    pub groups: Arc<Vec<MemGroupBand>>,
 }
 
 /// One band of the memory-by-app chart (D-036, UI-PRF-060).
