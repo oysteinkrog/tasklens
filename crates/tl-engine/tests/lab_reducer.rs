@@ -323,8 +323,10 @@ fn record_sink_called_when_installed() {
     rig.run(vec![sweep_msg(1), sweep_msg(2)])
         .expect("no invariant violation");
     assert_eq!(counts[1].load(Ordering::Relaxed), 2, "once per sweep");
-    assert_eq!(counts[0].load(Ordering::Relaxed), 0);
-    assert_eq!(counts[2].load(Ordering::Relaxed), 0);
+    // Each sweep also records the memory group bands (D-036), even with no processes. The
+    // first sweep adds the "Other apps" and "Shared and kernel" devices to the catalog.
+    assert_eq!(counts[0].load(Ordering::Relaxed), 2);
+    assert_eq!(counts[2].load(Ordering::Relaxed), 1);
 }
 
 /// What a `LogSink` saw: each system batch, the sweep count and each catalog's device count.
@@ -509,7 +511,8 @@ fn sink_removed_stops_calls() {
         (log.system.len(), log.sweeps, log.catalogs.len())
     };
     let (system, sweeps, catalogs) = calls(&log);
-    assert_eq!((system, sweeps), (1, 1));
+    // One system batch for the memory group bands of the sweep (D-036), one for the CPU.
+    assert_eq!((system, sweeps), (2, 1));
     assert!(catalogs >= 1, "the first CPU sample adds its cores");
 
     rig.reducer().set_record_sink(None);
