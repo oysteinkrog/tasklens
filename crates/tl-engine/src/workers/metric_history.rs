@@ -1390,7 +1390,13 @@ mod tests {
         };
         // 1 s values alternate between `low` and `low + 200`, so every 10 s, 1 min and read
         // bucket holds as many of each: the mean is `low + 100`, the maximum `low + 200`.
-        let alternate = |i: u64, low: f32| if i % 2 == 0 { low } else { low + 200.0 };
+        let alternate = |i: u64, low: f32| {
+            if i.is_multiple_of(2) {
+                low
+            } else {
+                low + 200.0
+            }
+        };
         // Every bucket edge falls on a whole multiple of 1800 s (the 4 s, 90 s and 600 s read
         // steps of 1 h, 24 h and 7 d), so no read bucket mixes the two sessions.
         let offset = 1_699_999_200 * SEC as i64;
