@@ -135,45 +135,23 @@ impl MemGrouper {
         self.groups.retain(|_, (_, seen)| *seen == sweep);
     }
 
-    fn intern(
-        &mut self,
-        kind: MemGroupKind,
-        name: GroupName<'_>,
-        app_id: Option<&str>,
-    ) -> Arc<MemGroup> {
+    fn intern(&mut self, kind: MemGroupKind, name: &str, app_id: Option<&str>) -> Arc<MemGroup> {
         // A renamed desktop entry gives a new group with the same key.
         if let Some((group, seen)) = self.groups.get_mut(self.key.as_str())
-            && &*group.name == name.as_str()
+            && &*group.name == name
         {
             *seen = self.sweep;
             return group.clone();
         }
         let group = Arc::new(MemGroup {
             key: Arc::from(self.key.as_str()),
-            name: Arc::from(name.as_str()),
+            name: Arc::from(name),
             kind,
-            app_id: (kind == MemGroupKind::App)
-                .then(|| app_id.map(Arc::from))
-                .flatten(),
+            app_id: app_id.filter(|_| kind == MemGroupKind::App).map(Arc::from),
         });
         self.groups
             .insert(Box::from(self.key.as_str()), (group.clone(), self.sweep));
         group
-    }
-}
-
-/// The display name of a group, borrowed from the input.
-enum GroupName<'a> {
-    Text(&'a str),
-    System,
-}
-
-impl GroupName<'_> {
-    fn as_str(&self) -> &str {
-        match self {
-            GroupName::Text(s) => s,
-            GroupName::System => SYSTEM_NAME,
-        }
     }
 }
 
@@ -214,34 +192,28 @@ fn group_of<'a>(
     reference: Option<&str>,
     self_uid: u32,
     key: &mut String,
-) -> (MemGroupKind, GroupName<'a>) {
+) -> (MemGroupKind, &'a str) {
     key.clear();
     if p.kernel_thread || p.ruid != self_uid {
         key.push_str(SYSTEM_KEY);
-        return (MemGroupKind::System, GroupName::System);
+        return (MemGroupKind::System, SYSTEM_NAME);
     }
     let Some(exe) = p.exe else {
         key.push_str("comm:");
         key.push_str(p.comm);
-        return (MemGroupKind::Unknown, GroupName::Text(p.comm));
+        return (MemGroupKind::Unknown, p.comm);
     };
     if let (Some(app_id), Some(reference)) = (p.app_id, reference)
         && beside(exe, reference)
     {
         key.push_str("app:");
         key.push_str(app_id);
-        return (
-            MemGroupKind::App,
-            GroupName::Text(p.app_name.unwrap_or(app_id)),
-        );
+        return (MemGroupKind::App, p.app_name.unwrap_or(app_id));
     }
     let name = program_name(exe);
     key.push_str("exe:");
     key.push_str(name);
-    (
-        MemGroupKind::Program,
-        GroupName::Text(program_display_name(name)),
-    )
+    (MemGroupKind::Program, program_display_name(name))
 }
 
 /// True when `exe` is in the same directory as `reference`. In a [`SHARED_BIN_DIRS`] directory
