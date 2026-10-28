@@ -1152,10 +1152,12 @@ impl CpuBox {
             .flex_col()
             .size_full()
             .gap(m.sp[5])
+            // The parts give way when the body is smaller than their share.
             .child(
                 div()
                     .relative()
-                    .flex_none()
+                    .flex_shrink(1.)
+                    .min_h_0()
                     .h(relative(share))
                     .w_full()
                     .overflow_hidden()
@@ -1216,16 +1218,18 @@ impl Render for CpuBox {
                 self.split.set_mins(PART_MIN, rows_min);
                 let share = self.split(&m);
                 let frame = div().flex().size_full().gap(core_gutter(&m));
+                // The chart part gives way when the body is smaller than its share, so the rows
+                // never push it into the time axis.
                 let (frame, chart_part, rows_part) = if self.side {
                     (
                         frame.flex_row(),
-                        div().flex_none().w(relative(share)).h_full(),
+                        div().flex_shrink(1.).min_w_0().w(relative(share)).h_full(),
                         div().flex_1().min_w_0().h_full(),
                     )
                 } else {
                     (
                         frame.flex_col(),
-                        div().flex_none().h(relative(share)).w_full(),
+                        div().flex_shrink(1.).min_h_0().h(relative(share)).w_full(),
                         div().flex_1().min_h_0().w_full().pb(m.sp[2]),
                     )
                 };

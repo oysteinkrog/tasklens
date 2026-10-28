@@ -9165,7 +9165,7 @@ mod sweep {
         if b.size.height <= px(0.) || b.size.width <= px(0.) {
             return false;
         }
-        let shown = match areas.iter().find(|a| a.content.iter().any(|c| *c == id)) {
+        let shown = match areas.iter().find(|a| a.content.contains(&id)) {
             Some(a) if !b.intersects(&a.bounds) => return false,
             Some(a) => b.intersect(&a.bounds),
             None => b,
