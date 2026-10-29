@@ -26,13 +26,16 @@ use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::session::engine_root;
 use tl_engine::source::{self, WorkerControl};
 use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
+use tl_engine::workers::memory;
 use tl_engine::workers::processes::{self, ProcessesSource};
 use tl_engine::workers::workers_for;
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::ids::{ColumnId, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{GroupRowKind, ProcessRecord};
+use tl_model::series::SeriesView;
 use tl_model::settings::EngineSettings;
+use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
 use tl_model::validity::{ProcessField, Validity};
 
@@ -190,16 +193,19 @@ struct Rig {
 
 impl Rig {
     fn start(root: &FixtureRoot, demand: Demand, interval_ms: u32) -> Self {
+        let settings = EngineSettings {
+            interval_ms,
+            ..EngineSettings::default()
+        };
+        Self::start_with(root, demand, settings)
+    }
+
+    fn start_with(root: &FixtureRoot, demand: Demand, settings: EngineSettings) -> Self {
         let mut fl = FakeLab::new();
         CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
         let (updates, rx, demand_tx, settings_tx, control) = channels();
         demand_tx.send(demand).expect("watch has receivers");
-        settings_tx
-            .send(EngineSettings {
-                interval_ms,
-                ..EngineSettings::default()
-            })
-            .expect("watch has receivers");
+        settings_tx.send(settings).expect("watch has receivers");
         let worker_io = io(&updates, &demand_tx, &settings_tx, &control);
         let src = ProcessesSource::new(root.config())
             .expect("fixture source opens")
@@ -323,6 +329,72 @@ fn hidden_zero_sweeps_60s() {
         "swept while hidden: {:?}",
         rig.times()
     );
+    rig.finish();
+}
+
+/// Device history alone: the memory group sweep with no surface shown (D-036, UI-PRF-060).
+fn history_demand() -> Demand {
+    Demand {
+        device_history: true,
+        ..Demand::default()
+    }
+}
+
+/// tasklens-8fx.45: with only `history.device_metrics` on, the sweep runs every 10 s, also with
+/// no window.
+#[test]
+fn history_only_sweeps_every_10s() {
+    let root = FixtureRoot::merged();
+    let mut rig = Rig::start(&root, history_demand(), 1000);
+    rig.run(Duration::from_secs(60), Duration::from_millis(100));
+    let times = rig.times_before(60_000);
+    assert_eq!(times, [0, 10_000, 20_000, 30_000, 40_000, 50_000]);
+    assert!(rig.sweeps.iter().all(|(_, s)| !s.records.is_empty()));
+    rig.finish();
+}
+
+/// With `history.device_metrics` off, device history demand alone sweeps nothing.
+#[test]
+fn history_off_no_sweeps() {
+    let root = FixtureRoot::merged();
+    let mut settings = EngineSettings {
+        interval_ms: 1000,
+        ..EngineSettings::default()
+    };
+    settings.history.device_metrics = false;
+    let mut rig = Rig::start_with(&root, history_demand(), settings);
+    rig.run(Duration::from_secs(60), Duration::from_millis(100));
+    assert!(
+        rig.sweeps.is_empty(),
+        "swept with history off: {:?}",
+        rig.times()
+    );
+    rig.finish();
+}
+
+/// Opening the Processes tab ends the 10 s wait at once, then the sweep follows the interval.
+#[test]
+fn table_demand_ends_history_wait() {
+    let root = FixtureRoot::merged();
+    let mut rig = Rig::start(&root, history_demand(), 1000);
+    rig.run(Duration::from_secs(25), Duration::from_millis(100));
+    assert_eq!(rig.times(), [0, 10_000, 20_000]);
+
+    rig.demand
+        .send(Demand {
+            device_history: true,
+            ..table_demand()
+        })
+        .expect("watch has receivers");
+    rig.run(Duration::from_secs(3), Duration::from_millis(10));
+    let after: Vec<u64> = rig
+        .times_before(28_000)
+        .into_iter()
+        .filter(|t| *t >= 25_000)
+        .collect();
+    assert_eq!(after.len(), 3, "{after:?}");
+    assert!(after[0] <= 25_010, "first table sweep at {} ms", after[0]);
+    assert_eq!(after[1..], [after[0] + 1_000, after[0] + 2_000]);
     rig.finish();
 }
 
@@ -506,6 +578,111 @@ fn engine_publishes_table_from_fixture() {
     let version = ui.latest.load_full().processes.header.version;
     fl.run_for(Duration::from_secs(60), Duration::from_millis(100));
     assert_eq!(ui.latest.load_full().processes.header.version, version);
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+/// The `MEM_GROUP` series of a band key in `snap`, if the band is published.
+fn band_series(snap: &Snapshot, key: &str) -> Option<Arc<SeriesView>> {
+    let band = snap.system.memory.groups.iter().find(|b| &*b.key == key)?;
+    snap.series
+        .get(SeriesId {
+            device: band.device,
+            metric: MetricId::MEM_GROUP,
+        })
+        .cloned()
+}
+
+/// Runs `total` in 100 ms steps and returns the lab time in ms of each new sample of the "Other
+/// apps" band, checking at each one that the bands sum to In use.
+fn other_band_times(fl: &mut FakeLab, ui: &fake_sources::UiSide, total: Duration) -> Vec<u64> {
+    let len = |ui: &fake_sources::UiSide| {
+        band_series(&ui.latest.load_full(), "other").map_or(0, |v| v.samples.len())
+    };
+    let mut seen = len(ui);
+    let mut times = Vec::new();
+    let end = fl.now_ms() + total.as_millis() as u64;
+    while fl.now_ms() < end {
+        fl.advance(Duration::from_millis(100));
+        let n = len(ui);
+        if n == seen {
+            continue;
+        }
+        seen = n;
+        times.push(fl.now_ms());
+        if fl.now_ms() < 1_000 {
+            // The first sweep can run before the first memory sample.
+            continue;
+        }
+        let snap = ui.latest.load_full();
+        assert_eq!(snap.system.memory.validity, Validity::Valid);
+        let used = snap.system.memory.used;
+        assert!(used > 0);
+        let sum: f64 = snap
+            .system
+            .memory
+            .groups
+            .iter()
+            .filter_map(|b| band_series(&snap, &b.key))
+            .filter_map(|v| v.samples.last().copied())
+            .filter(|s| s.is_valid())
+            .map(|s| f64::from(s.value))
+            .sum();
+        let diff = (sum - used as f64).abs();
+        assert!(
+            diff <= used as f64 * 1e-5,
+            "bands sum to {sum}, In use is {used}, at {} ms",
+            fl.now_ms()
+        );
+    }
+    times
+}
+
+/// tasklens-8fx.45: with only device history on and no surface, the memory group series get a
+/// sample every 10 s from the engine's own sweep, Processes stays healthy, and the bands sum to
+/// In use. Opening the table brings back the interval.
+#[test]
+fn mem_group_series_every_10s() {
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
+    let mut fl = FakeLab::new();
+    let (ep, ui) =
+        fake_sources::root_endpoints(root.config(), vec![processes::spec(), memory::spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+
+    ui.demand_tx
+        .send(history_demand())
+        .expect("watch has receivers");
+    let times = other_band_times(&mut fl, &ui, Duration::from_secs(60));
+    assert_eq!(times.len(), 6, "{times:?}");
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 10_000), "{times:?}");
+    let snap = ui.latest.load_full();
+    let other = band_series(&snap, "other").expect("other band");
+    assert_eq!(other.period_ns, 10_000_000_000);
+    assert!(other.samples.iter().all(|s| s.is_valid()));
+    assert_eq!(
+        snap.health.get(SourceId::Processes).state,
+        SourceState::Running
+    );
+
+    ui.demand_tx
+        .send(Demand {
+            device_history: true,
+            ..table_demand()
+        })
+        .expect("watch has receivers");
+    let times = other_band_times(&mut fl, &ui, Duration::from_secs(5));
+    assert!(times.len() >= 5, "{times:?}");
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
+    let other = band_series(&ui.latest.load_full(), "other").expect("other band");
+    assert_eq!(other.period_ns, 1_000_000_000);
 
     handle.abort();
     fl.advance(Duration::from_millis(10));

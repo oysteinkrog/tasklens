@@ -2,9 +2,11 @@
 //! turns each sweep into a `SourceUpdate::Processes(ProcessSweep)`.
 //!
 //! One sweep is one blocking job, at `processes.interval_ms` (250 to 10,000 ms) while the table,
-//! a process detail, a process graph or recording needs it, and not at all otherwise
-//! (PROC-002, PROC-004, PROC-093). Records hold command lines and paths: this module logs only
-//! the record count (ADR-015).
+//! a process detail, a process graph or recording needs it (PROC-002, PROC-004, PROC-093). While
+//! only `history.device_metrics` needs it, the sweep runs every `HISTORY_PERIOD` (10 s) for the
+//! memory group series, and the reducer does no table work (D-036, UI-PRF-060). Otherwise it does
+//! not run. Records hold command lines and paths: this module logs only the record count
+//! (ADR-015).
 //!
 //! While the helper is `Unlocked`, `HelperReads` fills the Restricted cells of visible rows
 //! through `ReadProcessFiles` at 1 Hz, after the sweep and outside it (PROC-076). The next sweep
@@ -65,12 +67,30 @@ use crate::workers::WorkerSpec;
 pub const MIN_INTERVAL_MS: u32 = 250;
 pub const MAX_INTERVAL_MS: u32 = 10_000;
 
+/// The sweep period while only `history.device_metrics` needs the memory group series (D-036,
+/// UI-PRF-060).
+pub const HISTORY_PERIOD: Duration = Duration::from_secs(10);
+
 /// The process rate table (ADR-008 row "Process table"): on while any process consumer is
 /// visible or recording is on. Graph targets keep it on with the table hidden (R-154 item 2),
 /// and so does the Overview Top processes box (`process_top`, crw.45). The Connections tab
 /// needs the process names and users for its Process and User cells (UI-SYS-062, UI-SYS-068).
+/// While only device history needs it, the sweep runs at `HISTORY_PERIOD` instead.
 pub fn processes_period(d: &Demand, s: &EngineSettings) -> Option<Duration> {
-    let wanted = d.process_table
+    if demanded(d) {
+        Some(Duration::from_millis(u64::from(
+            s.interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
+        )))
+    } else if history_only(d, s) {
+        Some(HISTORY_PERIOD)
+    } else {
+        None
+    }
+}
+
+/// True while a view, a detail, a graph or recording needs the process table.
+fn demanded(d: &Demand) -> bool {
+    d.process_table
         || d.process_top
         || d.connections
         || !d.detail_keys.is_empty()
@@ -78,12 +98,13 @@ pub fn processes_period(d: &Demand, s: &EngineSettings) -> Option<Duration> {
         || d.recording
         || !d.details.is_empty()
         || !d.affinity_targets.is_empty()
-        || !d.graph_targets.is_empty();
-    wanted.then(|| {
-        Duration::from_millis(u64::from(
-            s.interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
-        ))
-    })
+        || !d.graph_targets.is_empty()
+}
+
+/// True while only device history needs the sweep: the memory group series, without the table.
+/// The same gate as the device metric recorder: the setting and the demand.
+pub fn history_only(d: &Demand, s: &EngineSettings) -> bool {
+    !demanded(d) && d.device_history && s.history.device_metrics
 }
 
 /// The status-only columns (R-286): with one shown, `status` is read for every pid.
@@ -129,6 +150,8 @@ pub struct ProcessesSource {
     cfg: Arc<EngineConfig>,
     /// Set by `period`: the optional reads run only while something shows them.
     wants: Cell<SweepWants>,
+    /// `history_only`, set by `period`: a demand change ends the 10 s wait at once.
+    history_only: Cell<bool>,
     /// `Demand.detail_keys`, set by `period`: the visible rows whose P2 columns the sweep reads.
     detail_keys: RefCell<Arc<[ProcessKey]>>,
     /// The sampler's clock, also used for the helper's I/O rates.
@@ -201,6 +224,7 @@ impl ProcessesSource {
             protect,
             cfg,
             wants: Cell::new(SweepWants::default()),
+            history_only: Cell::new(false),
             detail_keys: RefCell::new(Arc::from([])),
             clock: real_clock,
             helper: None,
@@ -276,6 +300,7 @@ impl Source for ProcessesSource {
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.wants.set(sweep_wants(d, s));
         self.detail_keys.replace(Arc::clone(&d.detail_keys));
+        self.history_only.set(history_only(d, s));
         processes_period(d, s)
     }
 
@@ -347,6 +372,11 @@ impl Source for ProcessesSource {
 
     fn reset_baselines(&mut self) {
         self.sampler.reset_baselines();
+    }
+
+    /// Opening the Processes tab must not wait for the next 10 s history sweep.
+    fn wakes_on_demand(&self) -> bool {
+        self.history_only.get()
     }
 }
 
@@ -1002,6 +1032,31 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(processes_period(&details, &s), Some(Duration::from_secs(2)));
+    }
+
+    /// tasklens-8fx.45: device history alone sweeps every 10 s for the memory group series, and
+    /// only while `history.device_metrics` is on. Any other consumer sets the normal interval.
+    #[test]
+    fn period_history_only() {
+        let s = settings(2000);
+        let history = Demand {
+            device_history: true,
+            ..Demand::default()
+        };
+        assert_eq!(processes_period(&history, &s), Some(HISTORY_PERIOD));
+        assert!(history_only(&history, &s));
+
+        let mut off = settings(2000);
+        off.history.device_metrics = false;
+        assert_eq!(processes_period(&history, &off), None);
+        assert!(!history_only(&history, &off));
+
+        let table = Demand {
+            process_table: true,
+            ..history
+        };
+        assert_eq!(processes_period(&table, &s), Some(Duration::from_secs(2)));
+        assert!(!history_only(&table, &s));
     }
 
     #[test]

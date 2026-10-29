@@ -48,6 +48,7 @@ use crate::update::{
 };
 use crate::workers::history::HistoryMsg;
 use crate::workers::process_detail::pss_keys;
+use crate::workers::processes;
 
 /// Valid CPU samples whose irq share stays 0 before the Interrupts row shows `n/a` (U-21).
 const IRQ_ZERO_SAMPLES: u32 = 10;
@@ -554,15 +555,28 @@ impl Reducer {
                 let sink = self.record_sink.as_deref_mut();
                 self.processes
                     .apply_sweep(sweep, now_boot_ns(), settings.interval_ms, sink);
+                // The worker's period: 10 s while only device history needs the memory group
+                // series (D-036). Then the sweep feeds those series and no table work runs.
+                let demand = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone());
+                let history_only = demand
+                    .as_ref()
+                    .is_some_and(|d| processes::history_only(d, settings));
+                let period = demand
+                    .as_ref()
+                    .and_then(|d| processes::processes_period(d, settings))
+                    .map_or(u64::from(settings.interval_ms) * 1_000_000, |p| {
+                        u64::try_from(p.as_nanos()).unwrap_or(u64::MAX)
+                    });
                 if let Some(id) = source {
-                    let period = u64::from(settings.interval_ms) * 1_000_000;
                     self.sample_ok(id, observed.1, period);
                 }
                 self.publish_processes(observed, Some(observed.1));
-                let period = u64::from(settings.interval_ms) * 1_000_000;
                 // Before the table, so its memory group filter uses this sweep's keys.
                 let mem_groups =
                     self.record_system(observed.1, |r| r.apply_mem_groups(observed.1, period));
+                if history_only {
+                    return mem_groups;
+                }
                 self.rebuild_table(settings);
                 mem_groups?;
                 let processes = &self.components.processes;
