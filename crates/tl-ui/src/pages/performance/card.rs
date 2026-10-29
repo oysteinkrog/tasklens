@@ -1674,7 +1674,8 @@ impl DeviceCard {
                 .split(' ')
                 .map(|word| measure(CardFont::Heading, word))
                 .fold(Pixels::ZERO, Pixels::max);
-            let title_room = (column(self.width) - title_w).max(Pixels::ZERO);
+            // One pixel more than the word, so rounding never cuts it.
+            let title_room = (column(self.width) - title_w - px(1.)).max(Pixels::ZERO);
             let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
                 edit_w.min(title_room)
             } else {
