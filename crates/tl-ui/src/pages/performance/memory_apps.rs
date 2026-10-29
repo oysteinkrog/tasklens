@@ -148,27 +148,35 @@ fn key_hash(key: &str) -> u64 {
 
 /// The colour slot of each key in `shown` (top band first), and whether `picks` changed.
 ///
-/// A key with a saved pick keeps its slot unless a key before it in `shown` took that slot
-/// already. Any other key takes the slot its key hashes to, or the next free slot among the
-/// shown keys. With more than 12 keys shown, slots repeat. The shown keys then move to the end
-/// of `picks` (most recently shown last), and the oldest picks past 64 are dropped.
+/// Saved picks are walked most recent first, so when two shown keys have the same saved slot,
+/// the one shown most recently keeps it, whatever their rank. Any other key takes the slot its
+/// key hashes to, or the next free slot among the shown keys. With more than 12 keys shown no
+/// slot is free, and a key keeps its saved slot (or its hash slot), so slots repeat. The shown
+/// keys then move to the end of `picks` (most recently shown last; saved keys keep their order
+/// among themselves, so rank never decides it), and the oldest picks past 64 are dropped.
 pub fn pick_colors(picks: &mut Vec<GroupColor>, shown: &[Arc<str>]) -> (Vec<u8>, bool) {
     let n = usize::from(MEMORY_BY_APP_SLOTS);
     let mut slots: Vec<Option<u8>> = vec![None; shown.len()];
     let mut used = vec![false; n];
-    for (i, key) in shown.iter().enumerate() {
-        if let Some(p) = picks.iter().find(|p| p.key == **key)
-            && !used[usize::from(p.slot) % n]
+    for p in picks.iter().rev() {
+        let s = usize::from(p.slot) % n;
+        if let Some(i) = shown.iter().position(|k| **k == p.key)
+            && !used[s]
         {
-            slots[i] = Some(p.slot % MEMORY_BY_APP_SLOTS);
-            used[usize::from(p.slot) % n] = true;
+            slots[i] = Some(s as u8);
+            used[s] = true;
         }
     }
     for (i, key) in shown.iter().enumerate() {
         if slots[i].is_some() {
             continue;
         }
-        let home = (key_hash(key) % n as u64) as usize;
+        let home = picks
+            .iter()
+            .find(|p| p.key == **key)
+            .map_or((key_hash(key) % n as u64) as usize, |p| {
+                usize::from(p.slot) % n
+            });
         let slot = (0..n)
             .map(|d| (home + d) % n)
             .find(|&s| !used[s])
@@ -178,15 +186,31 @@ pub fn pick_colors(picks: &mut Vec<GroupColor>, shown: &[Arc<str>]) -> (Vec<u8>,
     }
     let slots: Vec<u8> = slots.into_iter().map(Option::unwrap_or_default).collect();
 
+    let slot_of = |key: &str| {
+        shown.iter().position(|k| **k == *key).map(|i| GroupColor {
+            key: key.to_string(),
+            slot: slots[i],
+        })
+    };
     let mut next: Vec<GroupColor> = picks
         .iter()
         .filter(|p| !shown.iter().any(|k| **k == p.key))
         .cloned()
         .collect();
-    next.extend(shown.iter().zip(&slots).map(|(key, &slot)| GroupColor {
-        key: key.to_string(),
-        slot,
-    }));
+    // A key saved twice (a hand-edited file) moves once, at its later place.
+    next.extend(
+        picks
+            .iter()
+            .enumerate()
+            .filter(|&(j, p)| !picks[j + 1..].iter().any(|q| q.key == p.key))
+            .filter_map(|(_, p)| slot_of(&p.key)),
+    );
+    next.extend(
+        shown
+            .iter()
+            .filter(|k| !picks.iter().any(|p| p.key == ***k))
+            .filter_map(|k| slot_of(k)),
+    );
     if next.len() > MEMORY_BY_APP_COLORS_MAX {
         next.drain(..next.len() - MEMORY_BY_APP_COLORS_MAX);
     }

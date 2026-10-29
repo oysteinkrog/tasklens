@@ -1039,6 +1039,65 @@ mod by_app {
         // Showing the same groups again changes nothing.
         let (_, changed) = pick_colors(&mut picks, &keys(&["app:a", "exe:b", "exe:c"]));
         assert!(!changed);
+        // Showing them in another rank order changes nothing either.
+        let (again, changed) = pick_colors(&mut picks, &keys(&["exe:c", "app:a", "exe:b"]));
+        assert!(!changed);
+        assert_eq!(again, [first[2], first[0], first[1]]);
+
+        // Two returning groups with the same saved slot: the one shown more recently keeps it,
+        // whatever their rank, and the other takes a slot no other shown group has.
+        let saved = |order: &[&str]| {
+            let mut p: Vec<GroupColor> = order
+                .iter()
+                .map(|k| GroupColor {
+                    key: (*k).to_string(),
+                    slot: 3,
+                })
+                .collect();
+            p.insert(
+                0,
+                GroupColor {
+                    key: "exe:z".into(),
+                    slot: 5,
+                },
+            );
+            p
+        };
+        for older_first in [true, false] {
+            for older_ranked_first in [true, false] {
+                let pick_order = if older_first {
+                    ["exe:old", "exe:new"]
+                } else {
+                    ["exe:new", "exe:old"]
+                };
+                let (recent, other) = (pick_order[1], pick_order[0]);
+                let shown = if older_ranked_first {
+                    keys(&["exe:old", "exe:new", "exe:z"])
+                } else {
+                    keys(&["exe:new", "exe:old", "exe:z"])
+                };
+                let mut p = saved(&pick_order);
+                let (slots, _) = pick_colors(&mut p, &shown);
+                let at = |k: &str| slots[shown.iter().position(|s| &**s == k).unwrap()];
+                let case = format!("picks {pick_order:?}, shown {shown:?}");
+                assert_eq!(at(recent), 3, "{case}: the most recent pick keeps slot 3");
+                assert_ne!(at(other), 3, "{case}");
+                assert_ne!(at(other), 5, "{case}: slot 5 is exe:z's");
+                assert_eq!(at("exe:z"), 5, "{case}");
+                // The next frame, in either rank order, keeps every slot.
+                for again in [
+                    &shown[..],
+                    &[shown[1].clone(), shown[0].clone(), shown[2].clone()][..],
+                ] {
+                    let (next, changed) = pick_colors(&mut p, again);
+                    assert!(!changed, "{case}: stable");
+                    for (k, s) in again.iter().zip(next) {
+                        assert_eq!(s, at(&**k), "{case}: {k} keeps its slot");
+                    }
+                }
+            }
+        }
+
         // At most 64 picks are kept; the group shown least recently goes first.
         for i in 0..70 {
             pick_colors(&mut picks, &keys(&[&format!("exe:x{i}")]));
