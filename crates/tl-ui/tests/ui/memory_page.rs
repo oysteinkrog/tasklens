@@ -1197,30 +1197,64 @@ mod by_app {
         assert_eq!(first, "p2");
     }
 
-    /// A theme change gives the bands new colours and keeps their values and process counts, so
-    /// the legend and the tooltip stay right before the next snapshot.
+    /// Every band rebuild keeps the values and process counts (leader rule 08:21). For each
+    /// trigger (theme, `top_n`, range, view switch, device arrival) the legend values, the
+    /// counts and the stack sum are the same right after the trigger, before any new samples.
     #[gpui_kit::test]
-    fn memory_by_app_theme_keeps_values(cx: &mut TestAppContext) {
+    fn memory_by_app_rebuild_keeps_values(cx: &mut TestAppContext) {
         let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         publish_groups(&mut r, 5);
-        let apps = r
-            .vcx
-            .update(|_, cx| r.page.read(cx).apps().cloned())
-            .expect("the By app chart");
+        // The engine also publishes the two fixed bands with their process counts.
+        r.engine.publish_with(|s| {
+            let mut sys = (*s.system).clone();
+            sys.header.version += 1;
+            let mut groups = (*sys.memory.groups).clone();
+            for (key, count, device) in [("other", 9, OTHER), ("shared", 0, SHARED)] {
+                groups.push(MemGroupBand {
+                    key: Arc::from(key),
+                    name: Arc::from(key),
+                    process_count: count,
+                    device,
+                });
+            }
+            sys.memory.groups = Arc::new(groups);
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+
+        let apps = |r: &mut Rig<'_>| {
+            r.vcx
+                .update(|_, cx| r.page.read(cx).apps().cloned())
+                .expect("the By app chart")
+        };
+        // Each band's key, value and process count, bottom first, and the stack sum.
         let facts = |r: &mut Rig<'_>| {
-            r.vcx.read_entity(&apps, |a, _| {
+            let apps = apps(r);
+            let bands = r.vcx.read_entity(&apps, |a, _| {
                 a.bands()
                     .iter()
                     .map(|b| (b.key.clone(), b.value, b.processes))
                     .collect::<Vec<_>>()
-            })
+            });
+            let sum: f64 = bands.iter().map(|&(_, v, _)| v).sum();
+            (bands, sum)
         };
         let before = facts(&mut r);
-        assert!(before.iter().all(|&(_, v, _)| v > 0.), "{before:?}");
-        assert_eq!(before[0].2, Some(3));
-        let colour = |r: &mut Rig<'_>| r.vcx.read_entity(&apps, |a, _| a.bands()[0].color);
-        let dark = colour(&mut r);
+        let (bands, sum) = &before;
+        assert_eq!(bands.len(), 5, "{bands:?}");
+        assert!(bands.iter().all(|&(_, v, _)| v > 0.), "{bands:?}");
+        assert_eq!(bands[0].2, Some(3), "a group band's count");
+        // "Other apps": its own 9 processes and the 3 of each of p3 and p4.
+        assert_eq!(bands[3].2, Some(15), "the Other apps count");
+        // p0..p4 are 5 to 1 MiB, Other apps 1 MiB and Shared and kernel 2 MiB.
+        assert_eq!(*sum, 18. * f64::from(MIB));
 
+        // Theme: new colours, same values.
+        let colour = |r: &mut Rig<'_>| {
+            let apps = apps(r);
+            r.vcx.read_entity(&apps, |a, _| a.bands()[0].color)
+        };
+        let dark = colour(&mut r);
         r.vcx.update(|_, cx| {
             tl_ui::theme::store::activate("Default Light", tl_ui::theme::ActivateSource::User, cx)
                 .expect("theme exists");
@@ -1231,11 +1265,132 @@ mod by_app {
             dark,
             "the bands take the new theme's colours"
         );
-        assert_eq!(facts(&mut r), before);
-        let lines = r
-            .vcx
-            .update(|_, cx| apps.read(cx).tooltip_lines(0, None, cx));
-        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(facts(&mut r), before, "after the theme change");
+        let tooltip = {
+            let apps = apps(&mut r);
+            r.vcx
+                .update(|_, cx| apps.read(cx).tooltip_lines(0, None, cx))
+        };
+        assert_eq!(tooltip.len(), 4, "{tooltip:?}");
+
+        // top_n 3 to 4: p3 leaves Other apps for its own band. The bands that stay keep their
+        // values and counts, and the new band starts with its own.
+        let set_top_n = |r: &mut Rig<'_>, n: i64| {
+            r.vcx.update(|_, cx| {
+                TlSettings::set(
+                    cx,
+                    SettingKey::PerformanceMemoryByAppTopN,
+                    SettingValue::Int(n),
+                )
+            });
+            draw(r.vcx);
+        };
+        set_top_n(&mut r, 4);
+        let (bands, sum) = facts(&mut r);
+        assert_eq!(sum, before.1, "after top_n 3 to 4");
+        assert_eq!(bands[..3], before.0[..3], "after top_n 3 to 4");
+        assert_eq!(
+            bands[3],
+            (Arc::from("exe:p3"), 2. * f64::from(MIB), Some(3)),
+            "after top_n 3 to 4"
+        );
+        assert_eq!(
+            bands[4].1,
+            2. * f64::from(MIB),
+            "Other apps: p4 and its own"
+        );
+        assert_eq!(bands[4].2, Some(12), "Other apps: p4 and its own");
+        assert_eq!(bands[5], before.0[4], "after top_n 3 to 4");
+        set_top_n(&mut r, 3);
+        assert_eq!(facts(&mut r), before, "after top_n 4 to 3");
+
+        // Range: 60 s to 300 s.
+        r.vcx.update(|_, cx| {
+            TlSettings::set(
+                cx,
+                SettingKey::PerformanceGraphRangeS,
+                SettingValue::Int(300),
+            )
+        });
+        draw(r.vcx);
+        assert_eq!(facts(&mut r), before, "after the range change");
+
+        // View switch: Usage, then By app again.
+        for view in [MemoryView::Usage, MemoryView::Apps] {
+            r.page.update(r.vcx, |p, cx| p.set_view(view, cx));
+            draw(r.vcx);
+        }
+        assert_eq!(facts(&mut r), before, "after the view switch");
+
+        // Device arrival: a new group with no samples yet, and the fixed bands' devices arrive
+        // again at new indexes. The samples and the memory totals stay the same.
+        const OTHER_NEW: DeviceIdx = DeviceIdx(110);
+        const SHARED_NEW: DeviceIdx = DeviceIdx(111);
+        let moved = |d: DeviceIdx| match d {
+            OTHER => OTHER_NEW,
+            SHARED => SHARED_NEW,
+            d => d,
+        };
+        r.engine.publish_with(|s| {
+            let mut entries: Vec<DeviceEntry> = s.devices.entries.to_vec();
+            entries[usize::from(OTHER.0)] = entry(OTHER.0, DeviceIdentity::CpuPackage);
+            entries[usize::from(SHARED.0)] = entry(SHARED.0, DeviceIdentity::CpuPackage);
+            entries.push(mem_entry(DeviceIdx(102), "exe:p5", "p5"));
+            while entries.len() < usize::from(OTHER_NEW.0) {
+                let i = entries.len() as u16;
+                entries.push(entry(i, DeviceIdentity::CpuPackage));
+            }
+            entries.push(mem_entry(OTHER_NEW, "other", "Other apps"));
+            entries.push(mem_entry(SHARED_NEW, "shared", "Shared and kernel"));
+            s.devices = Arc::new(DeviceCatalog {
+                version: s.devices.version + 1,
+                entries: entries.into(),
+            });
+            let mut views: Vec<Arc<SeriesView>> = s
+                .series
+                .series
+                .iter()
+                .map(|v| {
+                    let mut v = (**v).clone();
+                    v.id.device = moved(v.id.device);
+                    Arc::new(v)
+                })
+                .collect();
+            views.sort_by_key(|v| v.id);
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: s.series.header.version + 1,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let mut sys = (*s.system).clone();
+            sys.header.version += 1;
+            let groups = sys
+                .memory
+                .groups
+                .iter()
+                .map(|b| MemGroupBand {
+                    device: moved(b.device),
+                    ..b.clone()
+                })
+                .collect();
+            sys.memory.groups = Arc::new(groups);
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        let series_of = |r: &mut Rig<'_>, i: usize| {
+            let apps = apps(r);
+            r.vcx
+                .read_entity(&apps, |a, _| a.bands()[i].series.last().copied())
+        };
+        assert_eq!(
+            series_of(&mut r, 4).map(|s| s.device),
+            Some(SHARED_NEW),
+            "the bands were rebuilt on the new devices"
+        );
+        assert_eq!(facts(&mut r), before, "after the device arrival");
     }
 
     /// The stack always adds up to In use: at every sample the group bands, "Other apps" and
