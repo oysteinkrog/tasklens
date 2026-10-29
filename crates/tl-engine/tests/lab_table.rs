@@ -245,6 +245,28 @@ fn build_full(
     q: &TableQuery,
     settings: &EngineSettings,
 ) -> ProcessTableView {
+    let mem_groups = FxHashMap::default();
+    build_mem(
+        records,
+        app_stats,
+        unit_stats,
+        pseudo,
+        &mem_groups,
+        q,
+        settings,
+    )
+}
+
+/// `build_full` with the memory group key per process.
+fn build_mem(
+    records: &[ProcessRecord],
+    app_stats: &[AppCgroupSample],
+    unit_stats: &[CgroupStats],
+    pseudo: Option<&PseudoInput>,
+    mem_groups: &FxHashMap<ProcessKey, Arc<str>>,
+    q: &TableQuery,
+    settings: &EngineSettings,
+) -> ProcessTableView {
     assert!(
         records.is_sorted_by_key(|r| r.key),
         "records must be sorted by ProcessKey"
@@ -264,6 +286,7 @@ fn build_full(
         unit_names: &unit_names,
         unit_users: &unit_names,
         pseudo,
+        mem_groups,
     };
     table::build(&input, q)
 }
@@ -1025,6 +1048,95 @@ fn group_name_filter_matches_members() {
     assert_eq!(header_counts(&view), [0, 0, 0]);
     assert_eq!(view.rows.len(), 3);
     assert!(view.rows.iter().all(|r| !r.has_children));
+}
+
+/// D-036, UI-PRF-060: `TableQuery::mem_group` shows exactly the processes of that memory
+/// group, ANDs with the text filter, and hides the pseudo rows.
+#[test]
+fn mem_group_filter_exact() {
+    let records = vec![
+        rec(1, 0, "fish", 0.0),
+        rec(2, 1, "claude 2.1.309", 0.0),
+        rec(3, 1, "claude 2.1.310", 0.0),
+        in_app(rec(4, 0, "firefox", 0.0), "firefox"),
+        in_app(rec(5, 4, "Web Content", 0.0), "firefox"),
+        // Its name matches "claude", but it is not in the group.
+        rec(6, 1, "claude-notes", 0.0),
+        kthread(7),
+    ];
+    let key = |k: &str| -> Arc<str> { Arc::from(k) };
+    let mem_groups: FxHashMap<ProcessKey, Arc<str>> = records
+        .iter()
+        .map(|r| {
+            let k = match r.key.pid {
+                1 => key("exe:fish"),
+                2 | 3 => key("exe:claude"),
+                4 | 5 => key("app:firefox"),
+                6 => key("exe:vim"),
+                _ => key("system"),
+            };
+            (r.key, k)
+        })
+        .collect();
+    let pseudo = pseudo(Some(1.0), vec![zram("zram0", GIB)]);
+    let view = |mode: TableMode, filter: &str, expanded: &[NodeId]| {
+        let mut q = query(mode, "pid", true, filter, expanded);
+        q.mem_group = Some(Arc::from("exe:claude"));
+        build_mem(
+            &records,
+            &[],
+            &[],
+            Some(&pseudo),
+            &mem_groups,
+            &q,
+            &settings(),
+        )
+    };
+
+    // Flat: exactly the claude processes, no pseudo rows.
+    let v = view(TableMode::Flat, "", &[]);
+    assert_eq!(pids(&v, &records), [2, 3]);
+    assert_eq!(v.shown, 2);
+    assert!(!has_pseudo(&v));
+    // The text filter still applies.
+    let v = view(TableMode::Flat, "309", &[]);
+    assert_eq!(pids(&v, &records), [2]);
+    let v = view(TableMode::Flat, "notes", &[]);
+    assert!(pids(&v, &records).is_empty());
+
+    // Grouped: the headers stay, only the members show under them.
+    let v = view(TableMode::Grouped, "", &headers());
+    assert_eq!(header_counts(&v), [0, 2, 0]);
+    assert_eq!(
+        names(&v, &records),
+        [
+            row("Apps", 0),
+            row("Background processes", 0),
+            row("claude 2.1.309", 1),
+            row("claude 2.1.310", 1),
+            row("System processes", 0),
+        ]
+    );
+    assert!(!has_pseudo(&v));
+    let v = view(TableMode::Grouped, "309", &headers());
+    assert_eq!(header_counts(&v), [0, 1, 0]);
+
+    // Tree: the parent is not in the group, so its matching children become roots.
+    let v = view(TableMode::Tree, "", &nodes(&records, &[1]));
+    let rows: Vec<(u32, u8)> = v
+        .rows
+        .iter()
+        .map(|row| {
+            let r = &records[row.record.expect("tree rows are processes") as usize];
+            (r.key.pid, row.depth)
+        })
+        .collect();
+    assert_eq!(rows, [(2, 0), (3, 0)]);
+
+    // Without a group the filter is off.
+    let q = query(TableMode::Flat, "pid", true, "", &[]);
+    let v = build_mem(&records, &[], &[], None, &mem_groups, &q, &settings());
+    assert_eq!(v.shown, 7);
 }
 
 /// Apps (one nested in another), a two-process unit, loose Background and System processes,
@@ -2044,6 +2156,7 @@ fn group_rows_sum_extras_columns() {
             unit_names: &unit_names,
             unit_users: &unit_names,
             pseudo: None,
+            mem_groups: &FxHashMap::default(),
         };
         table::build(
             &input,

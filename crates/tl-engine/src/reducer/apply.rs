@@ -559,9 +559,12 @@ impl Reducer {
                     self.sample_ok(id, observed.1, period);
                 }
                 self.publish_processes(observed, Some(observed.1));
-                self.rebuild_table(settings);
                 let period = u64::from(settings.interval_ms) * 1_000_000;
-                self.record_system(observed.1, |r| r.apply_mem_groups(observed.1, period))?;
+                // Before the table, so its memory group filter uses this sweep's keys.
+                let mem_groups =
+                    self.record_system(observed.1, |r| r.apply_mem_groups(observed.1, period));
+                self.rebuild_table(settings);
+                mem_groups?;
                 let processes = &self.components.processes;
                 self.apply_state.process_series.on_sweep(
                     observed.1,
@@ -1917,6 +1920,7 @@ impl Reducer {
             unit_names: &self.unit_names,
             unit_users: &self.unit_users,
             pseudo: Some(&self.apply_state.pseudo),
+            mem_groups: &self.apply_state.mem_groups.keys,
         };
         let mut view = table::build(&input, &self.query);
         view.totals = table::totals(

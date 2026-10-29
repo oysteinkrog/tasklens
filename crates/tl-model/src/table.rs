@@ -47,6 +47,10 @@ pub struct TableQuery {
     pub expanded: Arc<[NodeId]>,
     /// Tree mode: a filter match also shows the match's descendants (R-141 item 4).
     pub include_children: bool,
+    /// Memory group key (D-036, UI-PRF-060), for example `exe:claude`. When set, a process row
+    /// shows only when its process is in that group, and the text filter still applies. Grouped
+    /// and tree parents show as they do for the text filter. Pseudo rows are hidden.
+    pub mem_group: Option<Arc<str>>,
 }
 
 impl Default for TableQuery {
@@ -62,6 +66,7 @@ impl Default for TableQuery {
             filter: Arc::from(""),
             expanded: Arc::from([]),
             include_children: false,
+            mem_group: None,
         }
     }
 }
@@ -550,6 +555,7 @@ mod process_table_tests {
         assert!(q.filter.is_empty());
         assert!(q.expanded.is_empty());
         assert!(!q.include_children);
+        assert!(q.mem_group.is_none());
     }
 
     #[test]

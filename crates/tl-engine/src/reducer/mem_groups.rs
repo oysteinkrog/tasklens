@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use tl_collect::apps::mem_group::{MemGroup, MemGroupInput, MemGrouper};
-use tl_model::ids::{DeviceIdx, GroupKey};
+use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcessExtras, ProcessRecord};
 use tl_model::validity::{ProcessField, Validity};
 
@@ -53,6 +53,9 @@ pub struct Bands {
 pub struct MemGroups {
     grouper: MemGrouper,
     out: Vec<Arc<MemGroup>>,
+    /// The memory group key of each live process in the last sweep. The process table's
+    /// memory group filter reads it, so the UI does not repeat the grouping rules.
+    pub keys: FxHashMap<ProcessKey, Arc<str>>,
     /// `getuid()`. Tests set it.
     pub self_uid: u32,
     /// Device and display name per band key, so a sweep in steady state does not touch the
@@ -77,6 +80,7 @@ impl MemGroups {
         MemGroups {
             grouper: MemGrouper::new(),
             out: Vec::new(),
+            keys: FxHashMap::default(),
             self_uid,
             devices: FxHashMap::default(),
             shown: Vec::new(),
@@ -90,6 +94,7 @@ impl MemGroups {
     /// Sums RssAnon per memory group over the live `records`. `extras` is index aligned with
     /// `records`, or empty. `in_use` is `MemTotal - MemAvailable` when known. Exited records
     /// are left out; a record whose RssAnon cannot be read counts as a process with 0 bytes.
+    /// Also refills `keys` with the group key of each live record.
     pub fn bands(
         &mut self,
         records: &[ProcessRecord],
@@ -139,7 +144,9 @@ impl MemGroups {
         let mut sums: Vec<GroupSum> = Vec::new();
         let mut index: FxHashMap<&str, usize> = FxHashMap::default();
         let mut total = 0u64;
+        self.keys.clear();
         for (&i, group) in live.iter().zip(&self.out) {
+            self.keys.insert(records[i].key, Arc::clone(&group.key));
             let bytes = rss_anon(&records[i]);
             total = total.saturating_add(bytes);
             let slot = *index.entry(&group.key).or_insert_with(|| {
@@ -528,5 +535,39 @@ mod tests {
             ]
         );
         assert_eq!(b.shared_bytes, Some(500 * MIB - 187 * MIB));
+    }
+
+    #[test]
+    fn mem_group_keys_per_process() {
+        let mut groups = MemGroups::new(UID);
+        let chrome = Some(("google-chrome", "Google Chrome"));
+        let procs = [
+            Proc {
+                app: chrome,
+                ..proc(10, "/opt/google/chrome/chrome", 100 * MIB)
+            },
+            proc(20, "/home/u/.local/share/claude/versions/2.1.309", 40 * MIB),
+            proc(21, "/home/u/.local/share/claude/versions/2.1.310", 30 * MIB),
+            Proc {
+                flags: ProcFlags::EXITED,
+                ..proc(22, "/home/u/.local/share/claude/versions/2.1.310", 30 * MIB)
+            },
+        ];
+        let (records, extras) = build(&procs);
+        groups.bands(&records, &extras, None);
+        let key = |pid: u32| {
+            let r = records.iter().find(|r| r.key.pid == pid).expect("record");
+            groups.keys.get(&r.key).map(|k| &**k)
+        };
+        assert_eq!(key(10), Some("app:google-chrome"));
+        assert_eq!(key(20), Some("exe:claude"));
+        assert_eq!(key(21), Some("exe:claude"));
+        assert_eq!(key(22), None, "an exited record has no key");
+        assert_eq!(groups.keys.len(), 3);
+
+        // The next sweep replaces the keys.
+        let (records, extras) = build(&procs[..1]);
+        groups.bands(&records, &extras, None);
+        assert_eq!(groups.keys.len(), 1);
     }
 }

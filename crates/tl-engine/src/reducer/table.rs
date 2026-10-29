@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, DeviceKind, NetKind};
-use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, PseudoKind};
+use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessExtras, ProcessRecord,
 };
@@ -47,6 +47,9 @@ pub struct TableInput<'a> {
     pub unit_users: &'a FxHashMap<UnitRef, Arc<str>>,
     /// Values of the pseudo rows (E09-023). `None` builds the table without pseudo rows.
     pub pseudo: Option<&'a PseudoInput>,
+    /// Memory group key per live process, from the last sweep (D-036). `TableQuery::mem_group`
+    /// matches against it.
+    pub mem_groups: &'a FxHashMap<ProcessKey, Arc<str>>,
 }
 
 /// What the pseudo rows show (PROC-012): the latest CPU and memory sample values the reducer
@@ -518,11 +521,21 @@ fn extra_strings<'a>(input: &TableInput<'a>, x: Option<&'a ProcessExtras>) -> [&
     [unit.name.as_ref(), description]
 }
 
-/// The record indexes that pass `filter` and are not hidden by `hide_system`, in record order.
-pub(crate) fn filtered(input: &TableInput<'_>, filter: &Filter) -> Vec<u32> {
+/// True when `mem_group` is `None` or `r` is in that memory group (D-036, UI-PRF-060).
+fn in_mem_group(input: &TableInput<'_>, mem_group: Option<&str>, r: &ProcessRecord) -> bool {
+    mem_group.is_none_or(|g| input.mem_groups.get(&r.key).is_some_and(|k| **k == *g))
+}
+
+/// The record indexes that pass `filter` and `mem_group` and are not hidden by `hide_system`,
+/// in record order.
+pub(crate) fn filtered(
+    input: &TableInput<'_>,
+    filter: &Filter,
+    mem_group: Option<&str>,
+) -> Vec<u32> {
     let mut out = Vec::with_capacity(input.records.len());
     for (i, r) in input.records.iter().enumerate() {
-        if hidden(input, i) {
+        if hidden(input, i) || !in_mem_group(input, mem_group, r) {
             continue;
         }
         let pass = filter.is_empty() || {
@@ -867,7 +880,7 @@ fn tree_rows(
     query: &TableQuery,
     filter: &Filter,
 ) -> (Vec<TableRow>, Vec<GroupRow>, Vec<GroupRow>, u32) {
-    let matches = filtered(input, filter);
+    let matches = filtered(input, filter, query.mem_group.as_deref());
     let visible = tree_visible(input, &matches, query.include_children);
     let shown = visible.iter().filter(|v| **v).count() as u32;
     let f = forest(input.records, &visible);
@@ -877,7 +890,7 @@ fn tree_rows(
         sort_indices(input, &mut v, query.sort);
         v
     };
-    let pseudo = shown_pseudo_rows(input, filter, "");
+    let pseudo = shown_pseudo_rows(input, query, filter, "");
     let mut rows = Vec::with_capacity(shown as usize + pseudo.len());
     if pseudo.is_empty() {
         flatten_tree(input.records, &f, &order, &expanded, &mut rows, 0);
@@ -1606,12 +1619,17 @@ pub fn pseudo_rows(input: &PseudoInput) -> Vec<GroupRow> {
 
 /// The pseudo rows that pass `hide_system` and `filter`. Pseudo rows sit in System, so
 /// `hide_system` hides both (PROC-046). The filter matches the row name, the user "root" and
-/// `extra`.
-fn shown_pseudo_rows(input: &TableInput<'_>, filter: &Filter, extra: &str) -> Vec<GroupRow> {
+/// `extra`. A memory group filter hides them: they are in no memory group.
+fn shown_pseudo_rows(
+    input: &TableInput<'_>,
+    query: &TableQuery,
+    filter: &Filter,
+    extra: &str,
+) -> Vec<GroupRow> {
     let Some(pseudo) = input.pseudo else {
         return Vec::new();
     };
-    if input.settings.hide_system {
+    if input.settings.hide_system || query.mem_group.is_some() {
         return Vec::new();
     }
     let mut rows = pseudo_rows(pseudo);
@@ -1736,7 +1754,7 @@ fn grouped_rows(
     let mut kthreads: Vec<u32> = Vec::new();
     for (i, r) in records.iter().enumerate() {
         let c = class[i];
-        if hidden[i] {
+        if hidden[i] || !in_mem_group(input, query.mem_group.as_deref(), r) {
             continue;
         }
         let pass = filter.is_empty() || {
@@ -1848,6 +1866,7 @@ fn grouped_rows(
     let pseudo_from = groups.len();
     groups.extend(shown_pseudo_rows(
         input,
+        query,
         filter,
         GroupClass::System.name_lower(),
     ));
@@ -1951,9 +1970,9 @@ fn flat_rows(
     query: &TableQuery,
     filter: &Filter,
 ) -> (Vec<TableRow>, Vec<GroupRow>, u32) {
-    let mut indexes = filtered(input, filter);
+    let mut indexes = filtered(input, filter, query.mem_group.as_deref());
     let shown = indexes.len() as u32;
-    let pseudo = shown_pseudo_rows(input, filter, "");
+    let pseudo = shown_pseudo_rows(input, query, filter, "");
     if pseudo.is_empty() {
         sort_indices(input, &mut indexes, query.sort);
         let rows = indexes.iter().map(|&i| leaf_row(input, i, 0)).collect();
@@ -2374,6 +2393,7 @@ mod tests {
             unit_names: &unit_names,
             unit_users: &unit_names,
             pseudo: None,
+            mem_groups: &FxHashMap::default(),
         };
         let expanded: Vec<NodeId> = records
             .iter()
@@ -2705,6 +2725,7 @@ mod tests {
                 unit_names: &unit_names,
                 unit_users: &unit_names,
                 pseudo: None,
+                mem_groups: &FxHashMap::default(),
             };
             let query = TableQuery {
                 mode: self.mode,
