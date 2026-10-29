@@ -8117,6 +8117,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tl-remote"
+version = "1.0.3"
+dependencies = [
+ "proptest",
+ "tl-model",
+ "zstd",
+]
+
+[[package]]
 name = "tl-tray"
 version = "1.0.3"
 dependencies = [
