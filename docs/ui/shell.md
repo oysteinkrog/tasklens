@@ -236,6 +236,21 @@ This is the mode with "Use system title bar" off. The default is the server mode
 - **Phase**: P1.
 - **Decided here**: menu row button height 24; follow APP-001 over ADR-010 on row order.
 
+### UI-SHL-008 Host tabs (several PCs in one window)
+
+- **Implements**: D-038, ADR-018 "Hosts".
+- **When shown**: only with more than one host. With one host nothing changes.
+- **Where**: in the menu row (UI-SHL-006) and in the client-drawn title bar (UI-SHL-003), right-aligned, just left of the pin. Each tab: a 6 px status dot, the host name in `t_sm`, and the host's CPU percent in `text_secondary` with tabular figures ("home · 23%"). Height 24, padding 8, gap 2. The selected host has the accent outline of UI-SHL-020. The local host is first.
+- **Status dot**: `ok` connected; `warn` connecting or reconnecting (pulses at 1 Hz); `danger` failed, with the reason as the tab tooltip ("Can't connect: ssh needs a key for home").
+- **Switching**: click, or Ctrl+1 to Ctrl+9 in tab order. The window title becomes "tasklens - <host>" for a remote host. Each host keeps its own main tab, selection, filter, scroll and Performance page; switching back restores them. Pages for a host are built the first time it is shown.
+- **While reconnecting**: the host's pages keep their last data at 60% opacity with the banner "Reconnecting to home" across the top of the page; every action is disabled until fresh data arrives (ADR-018 Reconnect).
+- **Remote marks**: on a remote host, menu items that act on that PC's desktop or need root end with "on <host>" ("Switch to window on home"), and root actions ask "End process firefox on home as administrator?" first.
+- **Settings > Hosts**: a list of hosts (name, ssh target), with Add, Remove, Rename, Move up and down, and "Test connection", which shows the result line from ADR-018 Remote transport. Stored as `[[hosts]]` (`name`, `target`) in `settings.toml`; the local host is implicit and named by the hostname, renameable.
+- **Context menu on a host tab**: Reconnect, Settings for this host (opens the host settings of ADR-018 Settings), Remove host.
+- **Tests**: `host_tabs_hidden_with_one_host`; `host_tabs_switch_keeps_page_state` (two fake hosts, change tab, selection and filter on each, switch back and forth); `host_tab_reconnect_disables_actions`; `host_tab_failed_tooltip`; `host_tabs_ctrl_digit`.
+- **Phase**: P2.
+- **Decided here**: placement left of the pin, the tab content, Ctrl+digit, per-host page state.
+
 ### UI-SHL-007 Active and inactive window appearance
 
 - **Implements**: APP-027 (accent outline), ADR-010; reference video frames (`scratchpad/ts/cus_sheet_02.png`) where the accent outline is shown only in some frames.

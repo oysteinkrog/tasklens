@@ -30,6 +30,8 @@ Where these records deviate from Astra, the ADR says so under "Deviation from As
 | 014 | Performance budgets, phase-0 spike and fallback |
 | 015 | Logging, errors, crash handling and privacy |
 | 016 | Data sources and parsing rules |
+| 017 | Device metric history |
+| 018 | Engine service, clients and multiple hosts |
 
 ---
 
@@ -2525,3 +2527,96 @@ pub struct DeviceTimeline { pub bands: [Arc<[HistPoint]>; 4], pub events: Arc<[H
 - A series written under one `DeviceIdx` and read back after a catalog renumbering (and after a fake `boot_id` change) continues under its device key, with a gap and a `Boot` event between.
 - Aggregation: a single 100% 10 Hz sample in a second gives 100 in the 1 s tier and as the max of the 10 s and 1 min points.
 - Truncated last block is read up to the bad CRC.
+
+## ADR-018: Engine service, clients and multiple hosts
+
+### Context
+
+The owner works from the office desktop and the home desktop and wants one tasklens window that shows either PC, picked from tabs in the window (owner request, 2026-10-29, D-038). Owner decisions: remote PCs are reached over SSH; the engine becomes an always-on per-user service and every window is a client of it; remote control covers everything the local window can do, root actions included.
+
+ADR-005 already puts the engine behind `EngineClient`, and `tl-ui` uses nothing else. A client that speaks a wire protocol replaces the in-process `EngineHandle`; the pages do not change shape. Astra reviewed the first draft (2026-10-29); this version answers its twelve findings.
+
+### Decision
+
+**Crates and binaries** (amends ADR-001).
+
+| Piece | Kind | Allowed workspace deps | New external deps |
+|---|---|---|---|
+| `tl-model/src/remote_proto.rs` | protocol types and the envelope codec, pure | (tl-model's own) | none |
+| `tl-remote` | lib: transports, envelope compression, `RemoteClient`, server sessions' wire side | tl-model | `zstd`, `arc-swap`, `async-channel`, `rustix` (already allowed in tl-model/tl-ops rows) |
+| `tl-server` | bin `tasklens-engine`: the engine service | tl-model, tl-engine, tl-history, tl-remote | `sd-notify` |
+| `tl-app` | bin `tasklens`: the window, `tasklens bridge` | adds tl-remote | none |
+
+asupersync stays inside `tl-engine` (D-001); its normal dependency closure may now reach `tl-server` as it does `tl-app`. `xtask check-deps` gains rows for `tl-remote` and `tl-server` and checks that `tl-remote` has no asupersync, Tokio or GPUI in its closure. `tasklens-engine` joins the shipped-binary checks (ADR-002).
+
+**The engine service.** `tasklens-engine.service`, a systemd user unit: `Type=notify`, `Restart=on-failure`, `RestartSec=2`, `TimeoutStopSec=10`, enabled by the package through a user preset. It sends `READY=1` after the socket is bound and history is open; on SIGTERM it stops sampling, flushes history (ADR-017 shutdown) and exits within 5 s. It runs while the user manager runs, so from login to logout; `tasklens-setup linger on` keeps it running with nobody logged in (off by default).
+
+**One engine per user per machine.** Any process that runs an engine first takes `flock(LOCK_EX | LOCK_NB)` on `$XDG_STATE_HOME/tasklens/engine.lock` and holds it for its lifetime; only the holder opens history for writing. The service exits 0 with the log line "engine already running in a window" when the lock is taken. The window's fallback engine (below) also needs the lock; without it the window shows "Can't start the engine" and keeps retrying the socket.
+
+**Local transport.** `$XDG_RUNTIME_DIR` must be an absolute path to a directory owned by the user with mode 0700, else the service and the window refuse with an error naming the path. The socket is `$XDG_RUNTIME_DIR/tasklens/engine.sock`; the `tasklens` directory is created 0700 and checked with `lstat` (directory, owned by the user, not a symlink). An existing socket path is removed only when it is a socket owned by the user and `connect` fails with `ECONNREFUSED` while the service holds the engine lock. On accept the server checks `SO_PEERCRED` uid == its own uid; the client checks the same of the server.
+
+**Remote transport.** The window spawns `ssh` with structured arguments: `-T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- <target> tasklens bridge`. `<target>` is rejected when it is empty, starts with `-`, or contains whitespace or control characters. Host-key checking is left to the user's ssh config. stdout carries only protocol bytes; stderr is drained continuously into a 64-line ring. Deadlines: process start plus handshake 20 s. Failures are named from the exit status and stderr: 255 with "Permission denied" (key needed), "Host key verification failed", 127 or "not found" (tasklens not installed there), protocol refusal (version). `tasklens bridge` connects its stdin and stdout to the local socket, running `systemctl --user start tasklens-engine.service` first when the socket is missing, and tells the server in `Hello` that it is a bridge, so the server knows the session is remote. Reconnect after a drop with backoff 1, 2, 4, 8, 16, 30 s while the host tab exists.
+
+**Envelope** (`remote_proto.rs`, extends `wire.rs`). Every frame: magic `TLR1` (4 bytes), protocol version `u16`, flags `u8` (bit 0 zstd), encoded length `u32`, decoded length `u32`, payload. Limits: encoded and decoded length at most 64 MiB each, decompression into a buffer of exactly the decoded length, trailing bytes and short payloads are errors that close the connection. Payloads larger than 1 KiB are zstd level 1. `Hello` and `Welcome`/`Refused` use a fixed layout that never changes between versions (magic, `proto: u16`, `app_version` as length-prefixed UTF-8, flags), so a version mismatch is always readable. Compatibility is `proto` equality; app versions may differ when `proto` matches. `Refused` names the server's `proto` and app version.
+
+**Sessions.** The server keeps one session per connection, up to 8. Each session has its own `Demand`, its own `TableQuery` and table projection, its own detail and history window requests (`Snapshot.device_history` demand, ADR-017), its own journal streams and its own action namespace. The engine collects for the union of all sessions' demands plus the service's own background demand (below); the reducer builds the table view per session (ADR-004's single `TableQuery` becomes one per session). A session that is not shown in any window asks only for the title bar value.
+
+**Background demand.** With no client connected the service keeps collecting what history needs: the device series of ADR-017 at their 1 s rate, the memory group sweep every 10 s (UI-PRF-060 Data binding) and the event detector's journal sources, as the window does today when hidden to the tray.
+
+**Snapshot deltas.**
+- The server numbers the frames it sends to a session (`frame: u64`, from 1 per session). A frame carries `base: u64`, the frame it is a delta against (0 means complete), and every part of `Snapshot` whose content differs from `base`'s.
+- The client sends `Ack { frame }` after it has applied a frame and installed the result. The server keeps the `Snapshot` (Arc clones) of the newest acknowledged frame and always builds the next delta against it. Frames in flight never become a base.
+- Parts: `table` and `processes` are row deltas keyed by `ProcessKey` (added rows whole, changed rows as changed fields, removed keys); `series` and `process_series` send, per series id, the samples after the base's last sample time, or the whole ring when the base's last sample is no longer in the ring, and list removed series; `device_history` is sent whole when its request generation changes and as appended points otherwise; every other part is sent whole when its `Arc` differs from the base's.
+- The client builds a complete new `Snapshot` from its installed one plus the frame, gives it the client's own strictly increasing `sequence` (so ADR-005's hub check holds across engine restarts), stores it in its `ArcSwap`, then `try_send`s the wake token. UI code compares component versions against the installed snapshot, never against a frame's contents.
+- A complete frame is sent first, after an engine instance change, and every 60 s.
+
+**Queues and back-pressure.** Per session the server has: a snapshot slot of one (latest wins, built from the newest publish when the writer is free), the ordered action event queue (256; overflow closes the session), per-stream journal queues (64 batches; overflow ends that stream with `JournalError::Overflow`), and replies. One writer thread per session sends in the order actions, replies, journal, snapshot. A session with no `Ack` for 30 s is closed. Collection never waits on a socket. Client side: `send` puts the command on a bounded queue of 64 and returns `Err(Busy)` when full, `Err(EngineStopped)` while disconnected; it never blocks.
+
+**Identity and reconnects.** `Welcome` carries `host_name`, `machine_id`, `boot_id` and `engine_instance` (128 random bits per engine process). The client keys a host by `machine_id`. On a new `engine_instance` or `boot_id` the client drops its installed snapshot and starts from the complete frame. Action ids are per session; the server maps `(session, ActionId)`, so ids from two windows never mix. When a connection drops, every action sent and not yet finished becomes `OutcomeUnknown("connection to <host> lost")` in the UI; commands are never replayed. Process targets keep ADR-006's checks on the server (`boot_id`, start time, pidfd); a target captured before a reconnect is checked against the new state like any other.
+
+**Journal.** `JournalOpen { stream, query }`, `JournalCtl`, `JournalClose`. The server runs `journalctl` as ADR-016 does, batches at most every 100 ms and kills the child on close, on session end and on handle drop (the client sends `JournalClose` from `Drop`).
+
+**History.** ADR-017's read path stays: history reaches the UI through `Snapshot.device_history` on demand, with its gaps, boot markers and time base. The protocol adds no history query.
+
+**Settings** (amends ADR-011). Two owners:
+- Host settings, in `$XDG_CONFIG_HOME/tasklens/engine.toml`, written only by the engine service: `processes.interval_ms` and the `[history]` table, plus `remote_admin` (below). A client reads them with `GetHostSettings` (reply `HostSettings { rev, values }`) and changes them with `SetHostSettings { base_rev, changes }` (reply `Ack { rev }` or `Conflict { current }`; the UI reloads on conflict). A client never sends defaults it has not read.
+- Window settings, in `settings.toml` as today, written only by the window: everything else, including the network unit, the adapter kinds counted, `subtree_totals` and `hide_system`, which move from `EngineSettings` into the session's `TableQuery` and demand.
+- Migration: on first start the service creates `engine.toml` from the host keys in `settings.toml`; the window stops writing them. ADR-011's atomic writes, permissions and future-schema read-only rule apply to both files.
+
+**Remote root actions.** Every action runs on the host that owns the process. Root actions go through that host's privilege paths:
+- Process actions through `tl-helper` (polkit action `io.github.oysteinkrog.Tasklens.helper`, ADR-006, with its request checks unchanged).
+- Service start, stop, restart, enable and disable through systemd's D-Bus API (polkit `org.freedesktop.systemd1.manage-units` and `manage-unit-files`).
+- `tasklens-setup` operations (polkit `io.github.oysteinkrog.Tasklens.setup`).
+- Generic administrator launches (`pkexec <program>`) run on the host's desktop session and its polkit agent, so on a remote host someone must answer the prompt there.
+With nobody at the remote screen, a polkit prompt cannot be answered. `tasklens-setup remote-admin on`, run on a host, installs `/etc/polkit-1/rules.d/49-tasklens-remote-admin.rules`, which returns `YES` for exactly those action ids when `subject.user` is the user who ran it; for the systemd ids only when `action.lookup("unit")` is set (single units, no daemon reload). It sets `remote_admin = true` in that host's `engine.toml`; `off` removes the file. This is honest about its reach: with it on, any process running as that user on that host gets those actions without a prompt, whether it came through tasklens or not. `tasklens-setup` prints that sentence before asking for confirmation. With it off, a root action on a remote host fails at admission with "home needs `tasklens-setup remote-admin on` for administrator actions". The window always asks before a root action on a remote host: "End process firefox on home as administrator?".
+
+**Commands that act on the host's desktop.** Every command runs on the host it targets, including switch to window, open file location, open a terminal, run new task and the KWin bridge actions: they act on that host's screen. On a remote host the menu item gets the suffix "on home" and the toast after it says so. The service reads the desktop session's environment (`WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_ACTIVATION_TOKEN` is not used) from the systemd user manager, which Plasma fills at login, and starts the KWin bridge when the session bus appears and again after it goes away and comes back. Each window sends its own process id and app id in `Hello`, so the KWin bridge can tell tasklens windows apart from the engine's pid. When the host has no desktop session, these commands fail with `Rejected(NoDesktopSession)`: "home has no desktop session".
+
+**Dumps on a remote host.** Dump files are written on the engine host under `$XDG_STATE_HOME/tasklens/dumps/`; progress comes as `ActionEvent`s from the server instead of the UI polling the file (ADR-005 changes for all hosts). On a remote host the result toast says "Saved on home: <path>" with "Copy path"; "Open folder" shows only for the local host.
+
+**Window fallback.** When the local socket cannot be reached within 3 s of start and `systemctl --user start` fails, the window runs an in-process engine as today, if it can take the engine lock, and shows "Engine service not running" in the status bar. It keeps trying the socket every 30 s; when the service comes up (it cannot while the window holds the lock), nothing changes until the window restarts.
+
+**Budgets.** Measured by tests with recorded fixtures: a host with 1500 processes on the Processes tab at most 64 KiB/s on the wire at 1 s refresh; a hidden host at most 2 KiB/s; the service with no clients uses no more CPU than today's engine with the window hidden to the tray, within 10%.
+
+### Consequences
+
+- History and the event detector no longer depend on the window being open.
+- The local window always runs the wire protocol, so remote hosts get the same code path.
+- `proto` becomes a compatibility surface; both PCs should run the same release, which the owner's release flow gives.
+- `remote-admin on` lets any process of that user on that host use the listed root actions without a prompt. It is off by default and per host.
+
+### Implementation contracts (settled after Astra's second review, 2026-10-29)
+
+Each bead below owns its contract and a test for it.
+
+- **Delta flow.** At most one unacknowledged frame per session. The next frame is built only after the `Ack`, against the acknowledged snapshot, from the newest publish (latest wins). A series whose base sample has left the ring, or whose ring was reset, is sent whole. The table part carries the row order as a key list whenever the order changed. Component versions on the client are the server's, copied as they are; the client resets its hub comparison state on every reconnect and engine instance change. History points that change after they were sent (decimation) make `device_history` go whole.
+- **Queues in bytes.** Replies: 16 messages or 4 MiB. Journal: at most 4 streams per session, 1 MiB queued per stream. Snapshots are never starved: one goes out at least every 2 s while others wait. A write blocked for 10 s closes that session only. `JournalClose` and `Ack` travel on the control path, ahead of the command queue, so closing works when the queue is full; follow and cursor rules stay as ADR-005.
+- **Per session.** One `SnapshotHub` per host connection in the window. Server limits per session: 8 detail requests, 4 history windows, 4 journal streams.
+- **Reconnect.** Until the first complete frame after a reconnect, the host's pages show their last data dimmed with "Reconnecting to home" and every action is disabled. UI action tracking is keyed by host and session.
+- **Privilege coverage.** `remote-admin on` covers every action id in `io.github.oysteinkrog.Tasklens.policy` (helper, setup, netmon, SMART) and systemd's `manage-units` (only with a `unit` detail) and `manage-unit-files`. At start the service checks that the rules file exists exactly when `remote_admin` is true; on a mismatch it treats remote admin as off and logs why.
+- **Envelope details.** Little endian. Bootstrap frames are never compressed. zstd window at most 8 MiB (`windowLogMax 23`), one decode buffer of the declared decoded length, total buffered input per session at most 80 MiB. A snapshot frame that would exceed 64 MiB is sent without `process_series` and `device_history`, which follow in later frames; this is logged.
+- **Endpoints.** An existing `tasklens` runtime directory with the wrong owner or mode is an error, not fixed silently. stderr ring: 64 lines, 16 KiB. ssh options never turn off host-key checking. `tasklens bridge` runs `systemctl --user start` and retries once when connecting fails for any reason.
+- **History off.** Background demand follows host settings: with `history.device_metrics` off the service collects nothing for history and runs the memory group sweep only on demand.
+- **Settings migration.** The release that adds the service stops writing host keys from the window. The service imports them from `settings.toml` once, then owns them; its revision counter is stored in `engine.toml` and survives restarts. `tasklens-setup` changes host settings through the engine socket, never by writing the file. Each machine has one window process (single instance, ADR-010), so `settings.toml` keeps one writer.
+- **Lifetime.** "Always on" means from login to logout of the owner's user, plus linger when turned on. When the window's fallback engine holds the lock, the window shows "Switch to engine service" in the status bar; it stops its engine (flushing history), releases the lock, starts the unit and connects.
+- **Rescue mode.** `--low-memory` keeps its own stripped engine (ADR-004). It writes no history, so it neither takes nor needs the engine lock.

@@ -2,6 +2,18 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-29
+
+### D-038 Engine service and several PCs in one window
+
+- **Decision** (owner request and choices, 2026-10-29): tasklens becomes an engine service plus windows that are its clients (ADR-018). One window shows several PCs, picked with host tabs (UI-SHL-008). Remote PCs are reached over SSH with the owner's keys; no engine listens on a network port. The engine runs as an always-on per-user systemd service, from login to logout, and records history with no window open. A remote PC can be controlled fully: every action, root actions included, and actions on that PC's desktop, which happen on its screen.
+- **Root actions on a remote PC**: with nobody at that screen to answer polkit, `tasklens-setup remote-admin on` on that PC lets the owner's user run tasklens' root actions there without a prompt. It is off by default, per PC, and the window always asks before a root action on another PC.
+- **Why**: the owner works from both the office and the home desktop and wants to see and manage both from either.
+
+### D-039 Shared and kernel split into six bands
+
+- **Decision** (owner request, 2026-10-29): the "Shared and kernel" band of the By app chart becomes six bands from `/proc/meminfo`: shared memory, compressed swap, kernel slab, other kernel, driver memory and file cache in use (UI-PRF-060). The last two are estimates and say so.
+
 ## 2026-10-28
 
 ### D-037 Overview grid rows stretch to fill the page
