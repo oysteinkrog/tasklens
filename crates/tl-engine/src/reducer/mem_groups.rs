@@ -3,8 +3,9 @@
 //! On every process sweep the reducer sums RssAnon per memory group (tl-collect
 //! `apps/mem_group.rs`) and publishes the top 20 groups, "Other apps" and "Shared and kernel" as
 //! `MEM_GROUP` series on `DeviceIdentity::MemGroup` devices. "Shared and kernel" is In use minus
-//! the sum over all processes, clamped at 0. The engine always publishes 20 groups, so the UI's
-//! `top_n` setting needs no engine change.
+//! the sum over all processes, clamped at 0. It is also published as six parts from
+//! /proc/meminfo (`kernel_parts`, UI-PRF-060 "Shared and kernel split", ADR-017). The engine
+//! always publishes 20 groups, so the UI's `top_n` setting needs no engine change.
 
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use rustc_hash::FxHashMap;
 use tl_collect::apps::mem_group::{MemGroup, MemGroupInput, MemGrouper};
 use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcessExtras, ProcessRecord};
+use tl_model::system::MemoryTotals;
 use tl_model::validity::{ProcessField, Validity};
 
 use super::table::{GroupClass, group_class};
@@ -24,6 +26,16 @@ pub const OTHER_NAME: &str = "Other apps";
 /// Key and name of the band for In use minus the sum over all processes.
 pub const SHARED_KEY: &str = "shared";
 pub const SHARED_NAME: &str = "Shared and kernel";
+/// Key and name of the six parts of "Shared and kernel", in stacking order. The parts sum to
+/// the "Shared and kernel" band.
+pub const KERNEL_PARTS: [(&str, &str); 6] = [
+    ("k:shmem", "Shared memory"),
+    ("k:zswap", "Compressed swap"),
+    ("k:slab", "Kernel slab"),
+    ("k:kernel", "Other kernel"),
+    ("k:driver", "Driver memory"),
+    ("k:filecache", "File cache in use"),
+];
 /// Prefix of the persistent device key: `memgroup:<group key>`.
 pub const DEVICE_KEY_PREFIX: &str = "memgroup:";
 
@@ -67,6 +79,8 @@ pub struct MemGroups {
     pub other_name: Arc<str>,
     pub shared_key: Arc<str>,
     pub shared_name: Arc<str>,
+    /// Key and name of each of the six parts, as `KERNEL_PARTS`.
+    pub kernel_keys: [(Arc<str>, Arc<str>); 6],
 }
 
 impl Default for MemGroups {
@@ -88,6 +102,7 @@ impl MemGroups {
             other_name: Arc::from(OTHER_NAME),
             shared_key: Arc::from(SHARED_KEY),
             shared_name: Arc::from(SHARED_NAME),
+            kernel_keys: KERNEL_PARTS.map(|(k, n)| (Arc::from(k), Arc::from(n))),
         }
     }
 
@@ -205,6 +220,57 @@ impl Bands {
     }
 }
 
+/// The six parts of "Shared and kernel" in bytes, in `KERNEL_PARTS` order, from one meminfo
+/// read. They sum to `shared` exactly:
+///
+/// 1. Shmem.
+/// 2. Zswap.
+/// 3. SUnreclaim.
+/// 4. Page tables, secondary page tables, kernel stacks, per-CPU and vmalloc.
+/// 5. Driver memory: MemTotal minus everything meminfo accounts for.
+/// 6. File cache in use, the remainder.
+///
+/// When parts 1 to 5 add up to more than `shared`, part 6 is 0 and the excess comes off part 5,
+/// then 4, 3, 2 and 1. A field the kernel does not print counts as 0.
+pub fn kernel_parts(shared: u64, m: &MemoryTotals) -> [u64; 6] {
+    let k = &*m.kernel;
+    let p4 = u128::from(k.page_tables)
+        + u128::from(k.sec_page_tables)
+        + u128::from(k.kernel_stack)
+        + u128::from(k.percpu)
+        + u128::from(k.vmalloc_used);
+    let accounted = u128::from(m.free)
+        + u128::from(k.buffers)
+        + u128::from(m.cached)
+        + u128::from(k.anon_pages)
+        + u128::from(m.slab_reclaimable)
+        + u128::from(m.slab_unreclaimable)
+        + p4
+        + u128::from(m.zswap);
+    let mut parts = [
+        u128::from(k.shmem),
+        u128::from(m.zswap),
+        u128::from(m.slab_unreclaimable),
+        p4,
+        u128::from(m.total).saturating_sub(accounted),
+        0,
+    ];
+    let shared = u128::from(shared);
+    let sum: u128 = parts.iter().sum();
+    if sum <= shared {
+        parts[5] = shared - sum;
+    } else {
+        let mut excess = sum - shared;
+        for part in parts[..5].iter_mut().rev() {
+            let cut = excess.min(*part);
+            *part -= cut;
+            excess -= cut;
+        }
+    }
+    // Each part is at most `shared`, which came from a u64.
+    parts.map(|p| p as u64)
+}
+
 /// RssAnon of a record, 0 when it was not read.
 fn rss_anon(r: &ProcessRecord) -> u64 {
     match r.validity.get(ProcessField::RssAnon) {
@@ -218,7 +284,7 @@ mod tests {
     use tl_model::actions::SchedPolicy;
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcState, ProcessMeta};
-    use tl_model::system::CpuSet;
+    use tl_model::system::{CpuSet, KernelMemory};
     use tl_model::table::{Manager, UnitRef};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
@@ -448,6 +514,14 @@ mod tests {
             );
             let shared = b.shared_bytes.expect("In use is known");
             assert_eq!(band_sum(&b), in_use, "sample {sample}");
+            // The six parts of Shared and kernel add up to the band, so the groups, Other apps
+            // and the six add up to In use.
+            let m = random_totals(&mut rng);
+            let parts: u64 = kernel_parts(b.shared_bytes.expect("In use is known"), &m)
+                .iter()
+                .sum();
+            let top_other = b.top.iter().map(|g| g.bytes).sum::<u64>() + b.other_bytes;
+            assert_eq!(top_other + parts, in_use, "sample {sample}: six parts");
             if live_sum <= in_use {
                 assert_eq!(shared, in_use - live_sum, "sample {sample}");
             } else {
@@ -461,6 +535,134 @@ mod tests {
             let counted: u32 = b.top.iter().map(|g| g.processes).sum::<u32>() + b.other_processes;
             assert_eq!(counted, live, "sample {sample}: every live process once");
         }
+    }
+
+    /// `MemoryTotals` from a meminfo fixture, mapped as the memory worker does.
+    fn totals(meminfo: &[u8]) -> MemoryTotals {
+        use tl_collect::parse::meminfo::{MemInfo, parse_meminfo};
+        let mut info = MemInfo::default();
+        parse_meminfo(meminfo, &mut info).expect("fixture parses");
+        MemoryTotals {
+            total: info.mem_total,
+            available: info.mem_available,
+            used: info.mem_total.saturating_sub(info.mem_available),
+            free: info.mem_free,
+            cached: info.cached,
+            slab_reclaimable: info.sreclaimable,
+            slab_unreclaimable: info.sunreclaim,
+            zswap: info.zswap.unwrap_or(0),
+            kernel: Arc::new(KernelMemory {
+                shmem: info.shmem,
+                buffers: info.buffers,
+                anon_pages: info.anon_pages.unwrap_or(0),
+                page_tables: info.page_tables.unwrap_or(0),
+                sec_page_tables: info.sec_page_tables.unwrap_or(0),
+                kernel_stack: info.kernel_stack.unwrap_or(0),
+                percpu: info.percpu.unwrap_or(0),
+                vmalloc_used: info.vmalloc_used.unwrap_or(0),
+            }),
+            ..MemoryTotals::default()
+        }
+    }
+
+    fn random_totals(rng: &mut Lcg) -> MemoryTotals {
+        let mut mib = |n: u64| rng.next(n) * MIB;
+        MemoryTotals {
+            total: 1024 * MIB + mib(65536),
+            free: mib(4096),
+            cached: mib(8192),
+            slab_reclaimable: mib(1024),
+            slab_unreclaimable: mib(1024),
+            zswap: mib(512),
+            kernel: Arc::new(KernelMemory {
+                shmem: mib(2048),
+                buffers: mib(256),
+                anon_pages: mib(16384),
+                page_tables: mib(512),
+                sec_page_tables: mib(64),
+                kernel_stack: mib(128),
+                percpu: mib(64),
+                vmalloc_used: mib(1024),
+            }),
+            ..MemoryTotals::default()
+        }
+    }
+
+    fn check_parts(label: &str, shared: u64, m: &MemoryTotals) {
+        let parts = kernel_parts(shared, m);
+        let sum: u128 = parts.iter().map(|&p| u128::from(p)).sum();
+        assert_eq!(sum, u128::from(shared), "{label}: parts sum to shared");
+        if shared == 0 {
+            assert_eq!(parts, [0; 6], "{label}");
+        }
+    }
+
+    #[test]
+    fn kernel_parts_sum_to_shared() {
+        let fixtures: [(&str, &[u8]); 4] = [
+            (
+                "owner-desktop",
+                include_bytes!("../../../tl-collect/tests/fixtures/owner-desktop/proc/meminfo"),
+            ),
+            (
+                "minimal-vm",
+                include_bytes!("../../../tl-collect/tests/fixtures/minimal-vm/proc/meminfo"),
+            ),
+            (
+                "meminfo-minimal",
+                include_bytes!("../../../tl-collect/tests/fixtures/meminfo-minimal/proc/meminfo"),
+            ),
+            (
+                "mem-composition",
+                include_bytes!("../../../tl-collect/tests/fixtures/mem-composition/proc/meminfo"),
+            ),
+        ];
+        for (name, buf) in fixtures {
+            let m = totals(buf);
+            for shared in [0, MIB, m.used / 2, m.used] {
+                check_parts(&format!("{name} shared {shared}"), shared, &m);
+            }
+        }
+        let mut rng = Lcg(11);
+        for i in 0..500 {
+            let m = random_totals(&mut rng);
+            // Often below the sum of parts 1 to 5, so the shrink order runs.
+            let shared = rng.next(20_000) * MIB;
+            check_parts(&format!("random {i}"), shared, &m);
+        }
+    }
+
+    #[test]
+    fn kernel_parts_shrink_order() {
+        let m = MemoryTotals {
+            total: 100 * MIB,
+            zswap: 5 * MIB,
+            slab_unreclaimable: 10 * MIB,
+            kernel: Arc::new(KernelMemory {
+                shmem: 20 * MIB,
+                page_tables: 30 * MIB,
+                ..KernelMemory::default()
+            }),
+            ..MemoryTotals::default()
+        };
+        // Part 5 is 100 - (10 + 30 + 5) = 55. Parts 1 to 5 sum to 120.
+        assert_eq!(
+            kernel_parts(200 * MIB, &m).map(|p| p / MIB),
+            [20, 5, 10, 30, 55, 80]
+        );
+        assert_eq!(
+            kernel_parts(100 * MIB, &m).map(|p| p / MIB),
+            [20, 5, 10, 30, 35, 0]
+        );
+        // Driver memory goes first, then other kernel.
+        assert_eq!(
+            kernel_parts(50 * MIB, &m).map(|p| p / MIB),
+            [20, 5, 10, 15, 0, 0]
+        );
+        assert_eq!(
+            kernel_parts(10 * MIB, &m).map(|p| p / MIB),
+            [10, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]

@@ -48,8 +48,8 @@ use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
 use tl_model::system::{
-    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals, LinkState, MemoryTotals,
-    Metric, NetTotals,
+    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals, KernelMemory, LinkState,
+    MemoryTotals, Metric, NetTotals,
 };
 use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
@@ -1433,7 +1433,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                 committed: 5,
                 ..MemoryTotals::default()
             },
-            zram: Vec::new(),
+            zram: Box::default(),
             swap_in_flags: SampleFlags::empty(),
             validity: Validity::Valid,
         }),
@@ -2296,7 +2296,7 @@ fn memory_msg(t_ns: TimeNs) -> EngineMsg {
             used: 1 << 30,
             ..MemoryTotals::default()
         },
-        zram: Vec::new(),
+        zram: Box::default(),
         swap_in_flags: SampleFlags::empty(),
         validity: Validity::Valid,
     }))
@@ -2362,7 +2362,7 @@ fn memory_available_series() {
             used: 2 << 30,
             ..MemoryTotals::default()
         },
-        zram: Vec::new(),
+        zram: Box::default(),
         swap_in_flags: SampleFlags::empty(),
         validity: Validity::Valid,
     }))])
@@ -2398,7 +2398,7 @@ fn system_pressure_series() {
                 swap_in_pps: Metric::valid(640.0),
                 ..MemoryTotals::default()
             },
-            zram: Vec::new(),
+            zram: Box::default(),
             swap_in_flags: SampleFlags::empty(),
             validity: Validity::Valid,
         }))
@@ -2565,7 +2565,7 @@ fn swap_in_series_keeps_counter_flags() {
                 swap_in_pps: pps,
                 ..MemoryTotals::default()
             },
-            zram: Vec::new(),
+            zram: Box::default(),
             swap_in_flags,
             validity: Validity::Valid,
         }))
@@ -3937,10 +3937,86 @@ fn mem_used_msg(t_ns: TimeNs, used: u64) -> EngineMsg {
             used,
             ..MemoryTotals::default()
         },
-        zram: Vec::new(),
+        zram: Box::default(),
         swap_in_flags: SampleFlags::empty(),
         validity: Validity::Valid,
     }))
+}
+
+#[test]
+fn memory_group_kernel_parts_published() {
+    const MIB: u64 = 1 << 20;
+    let mut rig = Rig::new();
+    let mem = src(SourceUpdate::Memory(MemorySample {
+        t_ns: SEC,
+        totals: MemoryTotals {
+            validity: Validity::Valid,
+            total: 4000 * MIB,
+            available: 3000 * MIB,
+            used: 1000 * MIB,
+            free: 1500 * MIB,
+            cached: 800 * MIB,
+            slab_reclaimable: 20 * MIB,
+            slab_unreclaimable: 30 * MIB,
+            zswap: 10 * MIB,
+            kernel: Arc::new(KernelMemory {
+                shmem: 100 * MIB,
+                buffers: 50 * MIB,
+                anon_pages: 600 * MIB,
+                page_tables: 10 * MIB,
+                kernel_stack: 5 * MIB,
+                ..KernelMemory::default()
+            }),
+            ..MemoryTotals::default()
+        },
+        zram: Box::default(),
+        swap_in_flags: SampleFlags::empty(),
+        validity: Validity::Valid,
+    }));
+    rig.run(vec![mem, mem_sweep(SEC, &[(1, "a", 300 * MIB)])])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    let value = |rig: &Rig, key: &str| {
+        let dev = snap
+            .devices
+            .find(&DeviceIdentity::MemGroup { key: key.into() })
+            .unwrap_or_else(|| panic!("{key} in the catalog"));
+        assert_eq!(&*dev.persistent_key, format!("memgroup:{key}"));
+        let v = rig.last_sample(SeriesId {
+            device: dev.idx,
+            metric: MetricId::MEM_GROUP,
+        });
+        (dev.display_name.to_string(), v.value)
+    };
+    let parts: Vec<(String, f32)> = [
+        "k:shmem",
+        "k:zswap",
+        "k:slab",
+        "k:kernel",
+        "k:driver",
+        "k:filecache",
+    ]
+    .iter()
+    .map(|k| value(&rig, k))
+    .collect();
+    let names: Vec<&str> = parts.iter().map(|p| p.0.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Shared memory",
+            "Compressed swap",
+            "Kernel slab",
+            "Other kernel",
+            "Driver memory",
+            "File cache in use"
+        ]
+    );
+    let sum: f32 = parts.iter().map(|p| p.1).sum();
+    let shared = value(&rig, "shared").1;
+    assert_eq!(shared, 700.0 * MIB as f32);
+    assert_eq!(sum, shared);
+    // The six are series only: the band list keeps its three entries.
+    assert_eq!(snap.system.memory.groups.len(), 3);
 }
 
 #[test]

@@ -27,7 +27,7 @@ use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     InvField, MemoryDetails, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
 };
-use tl_model::system::{MemoryTotals, Metric, ZramTotals};
+use tl_model::system::{KernelMemory, MemoryTotals, Metric, ZramTotals};
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
@@ -162,6 +162,16 @@ impl MemorySource {
             },
             // The reducer fills the memory groups from the process sweep.
             groups: Arc::default(),
+            kernel: Arc::new(KernelMemory {
+                shmem: info.shmem,
+                buffers: info.buffers,
+                anon_pages: info.anon_pages.unwrap_or(0),
+                page_tables: info.page_tables.unwrap_or(0),
+                sec_page_tables: info.sec_page_tables.unwrap_or(0),
+                kernel_stack: info.kernel_stack.unwrap_or(0),
+                percpu: info.percpu.unwrap_or(0),
+                vmalloc_used: info.vmalloc_used.unwrap_or(0),
+            }),
         };
         let sample = MemorySample {
             t_ns: r.t_ns,

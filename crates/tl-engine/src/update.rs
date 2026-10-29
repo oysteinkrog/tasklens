@@ -184,7 +184,8 @@ pub struct CpuCoreSample {
 pub struct MemorySample {
     pub t_ns: TimeNs,
     pub totals: MemoryTotals,
-    pub zram: Vec<ZramStat>,
+    /// A boxed slice, not a `Vec`, so `EngineMsg` stays within 256 bytes.
+    pub zram: Box<[ZramStat]>,
     /// `RESET` and `GAP_BEFORE` of the swap-in rate (ADR-008), for the `SWAP_IN` series.
     pub swap_in_flags: SampleFlags,
     pub validity: Validity,
@@ -582,7 +583,7 @@ mod tests {
                 SourceUpdate::Memory(MemorySample {
                     t_ns: 0,
                     totals: MemoryTotals::default(),
-                    zram: Vec::new(),
+                    zram: Box::default(),
                     swap_in_flags: SampleFlags::empty(),
                     validity: Validity::default(),
                 }),

@@ -1,6 +1,5 @@
 ---
 source: crates/tl-collect/src/sample/memory.rs
-assertion_line: 542
 expression: r
 ---
 MemoryReading {
@@ -27,6 +26,24 @@ MemoryReading {
         ),
         zswapped: Some(
             0,
+        ),
+        anon_pages: Some(
+            20427423744,
+        ),
+        page_tables: Some(
+            496640000,
+        ),
+        sec_page_tables: Some(
+            22392832,
+        ),
+        kernel_stack: Some(
+            109740032,
+        ),
+        percpu: Some(
+            56623104,
+        ),
+        vmalloc_used: Some(
+            566464512,
         ),
         hugepages_total: Some(
             0,

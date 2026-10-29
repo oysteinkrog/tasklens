@@ -209,6 +209,23 @@ pub struct MemoryTotals {
     /// memory worker leaves it empty. A thin `Arc<Vec>`, not `Arc<[_]>`, so `MemorySample`
     /// keeps `EngineMsg` within its 256 bytes.
     pub groups: Arc<Vec<MemGroupBand>>,
+    /// The meminfo fields beyond the ones above that split "Shared and kernel" (UI-PRF-060,
+    /// ADR-017). Behind an `Arc` so `MemorySample` keeps `EngineMsg` within its 256 bytes.
+    pub kernel: Arc<KernelMemory>,
+}
+
+/// More /proc/meminfo fields in bytes, from the same read as `MemoryTotals`. A field the
+/// kernel does not print is 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KernelMemory {
+    pub shmem: u64,
+    pub buffers: u64,
+    pub anon_pages: u64,
+    pub page_tables: u64,
+    pub sec_page_tables: u64,
+    pub kernel_stack: u64,
+    pub percpu: u64,
+    pub vmalloc_used: u64,
 }
 
 /// One band of the memory-by-app chart (D-036, UI-PRF-060).

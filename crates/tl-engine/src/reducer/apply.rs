@@ -33,7 +33,7 @@ use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
-use super::mem_groups::{DEVICE_KEY_PREFIX, MemGroups};
+use super::mem_groups::{DEVICE_KEY_PREFIX, MemGroups, kernel_parts};
 use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
 use super::suspend::Transition;
@@ -1242,7 +1242,7 @@ impl Reducer {
             };
             self.mark(ComponentMask::INVENTORY);
         }
-        self.apply_state.pseudo.zram = s.zram;
+        self.apply_state.pseudo.zram = s.zram.into_vec();
         let system = self.system_mut(t);
         // The memory groups come from the process sweep, not from this sample.
         let groups = std::mem::take(&mut system.memory.groups);
@@ -1264,6 +1264,10 @@ impl Reducer {
             self.apply_state
                 .mem_groups
                 .bands(&processes.records, &processes.extras, in_use);
+
+        let parts = bands
+            .shared_bytes
+            .map(|shared| kernel_parts(shared, &self.components.system.memory));
 
         let mut published = Vec::with_capacity(bands.top.len() + 2);
         let mut shown = Vec::with_capacity(bands.top.len());
@@ -1303,6 +1307,21 @@ impl Reducer {
                 process_count,
                 device: idx,
             });
+        }
+
+        // The six parts of "Shared and kernel". They are series only, not bands of `groups`.
+        let kernel_keys = self.apply_state.mem_groups.kernel_keys.clone();
+        for (i, (key, name)) in kernel_keys.iter().enumerate() {
+            let idx = self.mem_group_device(key, name)?;
+            let bytes = parts.map_or(0, |p| p[i]);
+            self.push(
+                idx,
+                MetricId::MEM_GROUP,
+                t,
+                bytes as f32,
+                parts.is_some(),
+                period,
+            );
         }
 
         let left: Vec<DeviceIdx> = std::mem::replace(&mut self.apply_state.mem_groups.shown, shown)

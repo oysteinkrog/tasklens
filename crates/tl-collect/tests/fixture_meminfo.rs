@@ -51,11 +51,58 @@ fn owner_desktop_snapshot() {
 }
 
 #[test]
+fn kernel_split_fields() {
+    let buf = fixture_bytes("owner-desktop", "proc/meminfo");
+    let info = parse(&buf).expect("owner-desktop meminfo parses");
+    let kb = |key| Some(raw_value(&buf, key) * 1024);
+    assert_eq!(info.anon_pages, kb("AnonPages"));
+    assert_eq!(info.page_tables, kb("PageTables"));
+    assert_eq!(info.sec_page_tables, kb("SecPageTables"));
+    assert_eq!(info.kernel_stack, kb("KernelStack"));
+    assert_eq!(info.percpu, kb("Percpu"));
+    assert_eq!(info.vmalloc_used, kb("VmallocUsed"));
+    assert_eq!(info.zswap, kb("Zswap"));
+}
+
+/// A kernel without Zswap and SecPageTables lines.
+#[test]
+fn kernel_split_fields_missing() {
+    let buf = fixture_bytes("owner-desktop", "proc/meminfo");
+    let text = String::from_utf8(buf.clone()).expect("ASCII");
+    let old: Vec<u8> = text
+        .lines()
+        .filter(|l| !l.starts_with("Zswap:") && !l.starts_with("SecPageTables:"))
+        .map(|l| format!("{l}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let info = parse(&old).expect("meminfo without the two lines parses");
+    assert_eq!(info.zswap, None);
+    assert_eq!(info.sec_page_tables, None);
+    assert_eq!(info.page_tables, Some(raw_value(&buf, "PageTables") * 1024));
+    assert_eq!(info.anon_pages, Some(raw_value(&buf, "AnonPages") * 1024));
+    assert_eq!(
+        info.kernel_stack,
+        Some(raw_value(&buf, "KernelStack") * 1024)
+    );
+    assert_eq!(info.percpu, Some(raw_value(&buf, "Percpu") * 1024));
+    assert_eq!(
+        info.vmalloc_used,
+        Some(raw_value(&buf, "VmallocUsed") * 1024)
+    );
+}
+
+#[test]
 fn minimal_optional_none() {
     let buf = minimal();
     let info = parse(&buf).expect("minimal meminfo parses");
     assert_eq!(info.zswap, None);
     assert_eq!(info.zswapped, None);
+    assert_eq!(info.anon_pages, None);
+    assert_eq!(info.page_tables, None);
+    assert_eq!(info.sec_page_tables, None);
+    assert_eq!(info.kernel_stack, None);
+    assert_eq!(info.percpu, None);
+    assert_eq!(info.vmalloc_used, None);
     assert_eq!(info.hugepages_total, None);
     assert_eq!(info.hugepages_free, None);
     assert_eq!(info.hugepagesize, None);
