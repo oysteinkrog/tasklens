@@ -1473,6 +1473,9 @@ app-114-tasklens-lost-the-graphics-device = tasklens lost the graphics device an
 shell-filter-label = Filter:
 shell-filter-clear = Clear filter
 shell-filter-name = Filter
+# Memory group chip on Processes (D-036, UI-PRF-060). { $name } is the group name.
+processes-group-chip = Group: { $name }
+shell-filter-group-clear = Clear group filter
 
 ## Processes toolbar buttons (E22, UI-PRC-019)
 

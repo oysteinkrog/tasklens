@@ -17,7 +17,7 @@ use super::{ProcessesPage, toast};
 use crate::components::toast::ToastKind;
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::window::main::{FilterChanged, GlobalShellEvents};
+use crate::window::main::{FilterChanged, GlobalShellEvents, MemGroupCleared};
 
 /// "Include children" shows while the filter has text or the mode is Tree (UI-SHL-025). The
 /// shell's checkbox applies the same rule.
@@ -28,7 +28,7 @@ pub fn include_children_visible(filter_nonempty: bool, mode: TableMode) -> bool 
 /// The page's filter subscriptions and the last `processes.filter_include_children` seen.
 pub struct FilterBinding {
     include_children: bool,
-    _subs: SmallVec<[Subscription; 2]>,
+    _subs: SmallVec<[Subscription; 3]>,
 }
 
 impl FilterBinding {
@@ -40,6 +40,9 @@ impl FilterBinding {
                 if ev.tab == Tab::Processes {
                     this.apply_filter(&ev.text, cx);
                 }
+            }));
+            subs.push(cx.subscribe(&events, |this, _, _: &MemGroupCleared, cx| {
+                this.clear_mem_group(cx);
             }));
         }
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_include_children(cx)));
@@ -69,6 +72,20 @@ impl ProcessesPage {
             q.set_filter(Arc::from(lower));
             q.bump_and_send(&*client);
             // The filtered list opens at its first match, not at the old offset.
+            t.scroll_to_top(cx);
+        });
+    }
+
+    /// The shell's group chip was cleared: drop the memory group filter and send the query.
+    fn clear_mem_group(&mut self, cx: &mut Context<Self>) {
+        let client = Arc::clone(&self.client);
+        self.table.update(cx, |t, cx| {
+            let q = t.delegate.query_mut();
+            if q.mem_group().is_none() {
+                return;
+            }
+            q.set_mem_group(None);
+            q.bump_and_send(&*client);
             t.scroll_to_top(cx);
         });
     }

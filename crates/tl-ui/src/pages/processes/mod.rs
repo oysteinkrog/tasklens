@@ -331,7 +331,7 @@ impl ProcessesPage {
         let counts = if view.query_generation == d.query().generation() {
             StatusCounts {
                 helper,
-                ..StatusCounts::of(view, !d.query().filter().is_empty(), selected)
+                ..StatusCounts::of(view, d.query().is_filtered(), selected)
             }
         } else {
             StatusCounts {

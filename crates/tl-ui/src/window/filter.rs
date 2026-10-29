@@ -21,6 +21,10 @@
 //! On Processes the box also draws the "Include children" checkbox to the left of the outline
 //! (E20-010, UI-SHL-025). It toggles `processes.filter_include_children` through
 //! `ToggleSetting`; the process page owns the toasts and the filtering.
+//!
+//! On Processes the box also draws the memory group chip "Group: <name>" directly left of the
+//! outline while the page has one set (D-036, UI-PRF-060). The page sets its text with
+//! `set_group_chip`. Its x, or Esc in the empty box, clears it and emits `MemGroupCleared`.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -42,7 +46,7 @@ use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::table::TableMode;
 
-use super::main::{FilterChanged, GlobalShellEvents};
+use super::main::{FilterChanged, GlobalShellEvents, MemGroupCleared};
 use crate::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT, ToggleSetting};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::icons::{TlIcon, icon};
@@ -112,6 +116,7 @@ struct Labels {
     clear: SharedString,
     name: SharedString,
     include_children: SharedString,
+    group_clear: SharedString,
     strings_version: u64,
 }
 
@@ -130,6 +135,7 @@ impl Labels {
             clear: text("shell-filter-clear"),
             name: text("shell-filter-name"),
             include_children: text("shell-filter-include-children"),
+            group_clear: text("shell-filter-group-clear"),
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
         }
     }
@@ -145,6 +151,8 @@ pub struct FilterBox {
     window_active: bool,
     labels: Labels,
     processes: ProcessesView,
+    /// The Processes memory group chip text, "Group: <name>". `None` hides the chip.
+    group_chip: Option<SharedString>,
     /// The drawn width at the last prepaint: the outline plus the checkbox part when shown.
     width: Rc<Cell<Pixels>>,
     /// The outline's left edge minus the box's left edge at the last prepaint: the checkbox part
@@ -207,6 +215,7 @@ impl FilterBox {
             window_active: window.is_window_active(),
             labels: Labels::read(cx),
             processes: ProcessesView::read(cx),
+            group_chip: None,
             width: Rc::new(Cell::new(px(0.))),
             outline_inset: Rc::new(Cell::new(px(0.))),
             input_target: px(0.),
@@ -300,6 +309,20 @@ impl FilterBox {
         )
     }
 
+    /// Sets or clears the memory group chip. The Processes page calls it; the chip shows on
+    /// Processes only.
+    pub fn set_group_chip(&mut self, text: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.group_chip != text {
+            self.group_chip = text;
+            cx.notify();
+        }
+    }
+
+    /// The memory group chip text, `None` when there is no chip.
+    pub fn group_chip(&self) -> Option<&SharedString> {
+        self.group_chip.as_ref()
+    }
+
     /// The outline colour of the last render.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn outline_color(&self) -> gpui_kit::Hsla {
@@ -339,11 +362,25 @@ impl FilterBox {
         cx.notify();
     }
 
+    /// Drops the memory group chip and tells the Processes page.
+    fn clear_group_chip(&mut self, cx: &mut Context<Self>) {
+        if self.group_chip.take().is_none() {
+            return;
+        }
+        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+            events.update(cx, |_, cx| cx.emit(MemGroupCleared));
+        }
+        cx.notify();
+    }
+
     /// Esc: with text, clear it and send the empty text at once; then focus the page. An Esc on
-    /// empty text only moves focus; the Esc chain runs on a further Esc from the page.
+    /// empty text clears the memory group chip when there is one, else only moves focus; the
+    /// Esc chain runs on a further Esc from the page.
     fn on_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.per_tab[self.tab as usize].is_empty() || self.input.read(cx).text().len() > 0 {
             self.clear_now(window, cx);
+        } else if self.tab == Tab::Processes {
+            self.clear_group_chip(cx);
         }
         cx.emit(ReturnFocus);
     }
@@ -506,11 +543,70 @@ impl Render for FilterBox {
                 )
         });
 
+        let chip = self
+            .group_chip
+            .clone()
+            .filter(|_| self.tab == Tab::Processes)
+            .map(|text| {
+                let clear = self.labels.group_clear.clone();
+                let button = div()
+                    .id("shell-filter-group-clear")
+                    .debug_selector(|| "FilterBox-group-clear".into())
+                    .role(Role::Button)
+                    .aria_label(clear.clone())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(CLEAR_HIT * s))
+                    .rounded(m.radius_small)
+                    .hover(|st| st.bg(theme.tab_hover))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.clear_group_chip(cx);
+                        cx.emit(ReturnFocus);
+                    }))
+                    .child(icon(TlIcon::X, m.icon.sm, theme.text_secondary));
+                let tip = HoverTooltip::state("shell-filter-group-clear-tooltip", window, cx);
+                let button = HoverTooltip::attach(
+                    &tip,
+                    button,
+                    DELAY_CONTROL,
+                    TlTooltip::text(clear).build(),
+                    window,
+                    cx,
+                );
+                let mut label = div()
+                    .debug_selector(|| "FilterBox-group-chip-label".into())
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(theme.text_primary);
+                *label.text_style() = t_sm(&m);
+                let pill = div()
+                    .debug_selector(|| "FilterBox-group-chip".into())
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .items_center()
+                    .h(px(INPUT_H * s))
+                    .gap(m.sp[2])
+                    .pl(m.sp[4])
+                    .pr(m.sp[1])
+                    .rounded(px(INPUT_H * s / 2.))
+                    .border_1()
+                    .border_color(theme.divider)
+                    .bg(theme.tab_bg)
+                    .child(label.child(text))
+                    .child(button);
+                div().flex().flex_none().items_center().h_full().child(pill)
+            });
+
         let width = self.width.clone();
         let outline_inset = self.outline_inset.clone();
         let input_drawn = self.input_drawn.clone();
         // Reversed so the outline comes first in element order: the checkbox is the Tab stop
-        // after the filter input (UI-SHL-121) while it is drawn to the left.
+        // after the filter input (UI-SHL-121) while it is drawn to the left. The group chip
+        // comes second, so it sits directly left of the outline.
         div()
             .debug_selector(|| "FilterBox".into())
             .flex()
@@ -560,6 +656,7 @@ impl Render for FilterBox {
                     .child(label)
                     .child(field),
             )
+            .children(chip)
             .children(include)
     }
 }

@@ -8,11 +8,17 @@
 //! filter and Hide system processes and expands once more, so a jump costs at most two query
 //! round trips. Whether a row is filtered or hidden is the engine's rule (PROC-046), so the page
 //! asks the view instead of predicting it.
+//!
+//! `open_mem_group` opens the tab filtered to one memory group (D-036, UI-PRF-060): the chart
+//! legends call it. The engine owns the group of each process, so the page only sends the key.
 
+use std::sync::Arc;
+
+use fluent_bundle::FluentValue;
 use gpui_kit::{Action as _, AnyWindowHandle, App, Context, SharedString, Window};
 use rustc_hash::FxHashMap;
 use tl_model::command::Tab;
-use tl_model::ids::{NodeId, ProcessKey};
+use tl_model::ids::{GroupKey, NodeId, ProcessKey};
 use tl_model::process::{GroupKind, ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::table::TableMode;
@@ -24,9 +30,9 @@ use super::table::GroupHeader;
 use crate::actions::{ClearFilter, SelectTab};
 use crate::components::toast::{ToastAction, ToastKind};
 use crate::hub::GlobalHub;
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
-use crate::window::main::{ShellState, push_main_toast};
+use crate::window::main::{ShellState, main_window_view, push_main_toast};
 
 /// The caller's toast texts. An empty or `None` text means this module's default string.
 #[derive(Clone, Debug, Default)]
@@ -54,12 +60,21 @@ pub(super) struct PendingJump {
     window: AnyWindowHandle,
 }
 
+/// An app row to select once the view of `generation` is in the table (`open_mem_group`).
+pub(super) struct PendingRow {
+    id: ProcRowId,
+    generation: u64,
+    window: AnyWindowHandle,
+}
+
 /// The page's jump state.
 #[derive(Default)]
 pub(super) struct JumpState {
     pending: Option<PendingJump>,
     /// The jump the "not visible" toast's Show button continues.
     hidden: Option<PendingJump>,
+    /// The app row `open_mem_group` selects.
+    row: Option<PendingRow>,
 }
 
 impl ProcessesPage {
@@ -91,6 +106,59 @@ impl ProcessesPage {
             window: window.window_handle(),
         };
         self.expand_and_wait(job, cx);
+    }
+
+    /// Opens the tab filtered to memory group `key`, for example `exe:claude` (D-036,
+    /// UI-PRF-060), and shows the chip "Group: <name>" left of the filter box. The filter text
+    /// stays and applies too. In grouped mode an `app:<id>` key also expands and selects that
+    /// app's row: the row of the oldest live process with that app id. Keep the signature; the
+    /// Memory page and the Overview Memory box call it.
+    pub fn open_mem_group(
+        &mut self,
+        key: Arc<str>,
+        name: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = cx.try_global::<ShellState>().map(|s| s.active_tab);
+        if active.is_some_and(|t| t != Tab::Processes) {
+            window.dispatch_action(Box::new(SelectTab(Tab::Processes as usize)), cx);
+        }
+        if cx.has_global::<TlSettings>() && TlSettings::state(cx).processes.history_mode {
+            TlSettings::update(cx, |d| d.state.processes.history_mode = false);
+        }
+        self.jump.hidden = None;
+        self.jump.pending = None;
+        self.jump.row = None;
+
+        let chip = tr_args(
+            cx,
+            "processes-group-chip",
+            &[("name", FluentValue::from(name.as_ref()))],
+        );
+        set_group_chip(Some(chip), cx);
+
+        let processes = live_processes(cx);
+        let client = &*self.client;
+        let (generation, app) = self.table.update(cx, |t, cx| {
+            let q = t.delegate.query_mut();
+            let app = match key.strip_prefix("app:") {
+                Some(id) if q.mode() == TableMode::Grouped => app_group(&processes, id),
+                _ => None,
+            };
+            if let Some(group) = app {
+                q.expand_path(&[GroupHeader::Apps.node(), NodeId::Group(group)]);
+            }
+            q.set_mem_group(Some(key));
+            q.bump_and_send(client);
+            t.scroll_to_top(cx);
+            (q.generation(), app)
+        });
+        self.jump.row = app.map(|group| PendingRow {
+            id: ProcRowId::Group(group),
+            generation,
+            window: window.window_handle(),
+        });
     }
 
     /// Resolves `pid` to the key of its current non-exited record once, then `select_by_key`.
@@ -138,12 +206,13 @@ impl ProcessesPage {
     /// Steps 3, 5 and 6, run after each snapshot: once the view of the pending generation is in
     /// the table, the jump selects the row or explains why it cannot.
     pub(super) fn resolve_jump(&mut self, cx: &mut Context<Self>) {
-        let Some(job) = &self.jump.pending else {
-            return;
-        };
         let (installed, query) = {
             let d = &self.table.read(cx).delegate;
             (d.snapshot().table.query_generation, d.query().generation())
+        };
+        self.resolve_row(installed, query, cx);
+        let Some(job) = &self.jump.pending else {
+            return;
         };
         if installed != job.generation || query != job.generation {
             return;
@@ -191,15 +260,42 @@ impl ProcessesPage {
         self.jump.hidden = Some(job);
     }
 
-    /// A filter or Hide system processes can keep a live record out of the view.
+    /// Selects, centres and focuses the app row of `open_mem_group` once its view is in the
+    /// table. A newer query drops it. No toast: the chip says what the tab shows.
+    fn resolve_row(&mut self, installed: u64, query: u64, cx: &mut Context<Self>) {
+        let Some(row) = &self.jump.row else {
+            return;
+        };
+        if query != row.generation {
+            self.jump.row = None;
+            return;
+        }
+        if installed != row.generation {
+            return;
+        }
+        let Some(row) = self.jump.row.take() else {
+            return;
+        };
+        if self.table.update(cx, |t, cx| t.jump_to(row.id, cx)) {
+            let focus = self.focus.clone();
+            cx.defer(move |cx| {
+                let _ = row
+                    .window
+                    .update(cx, |_, window, cx| window.focus(&focus, cx));
+            });
+        }
+    }
+
+    /// A filter, a memory group or Hide system processes can keep a live record out of the
+    /// view.
     fn hides_rows(&self, cx: &App) -> bool {
-        let filtered = !self.table.read(cx).delegate.query().filter().is_empty();
+        let filtered = self.table.read(cx).delegate.query().is_filtered();
         filtered
             || (cx.has_global::<TlSettings>() && TlSettings::settings(cx).processes.hide_system)
     }
 
-    /// The Show button: clears the filter (the shell box and the query) and Hide system
-    /// processes, then expands again and waits for that view.
+    /// The Show button: clears the filter (the shell box and the query), the memory group and
+    /// Hide system processes, then expands again and waits for that view.
     pub(super) fn show_hidden(&mut self, cx: &mut Context<Self>) {
         let Some(mut job) = self.jump.hidden.take() else {
             return;
@@ -212,8 +308,11 @@ impl ProcessesPage {
             });
         });
         self.table.update(cx, |t, _| {
-            t.delegate.query_mut().set_filter("".into());
+            let q = t.delegate.query_mut();
+            q.set_filter("".into());
+            q.set_mem_group(None);
         });
+        set_group_chip(None, cx);
         if cx.has_global::<TlSettings>() && TlSettings::settings(cx).processes.hide_system {
             TlSettings::update(cx, |d| d.settings.processes.hide_system = false);
         }
@@ -230,6 +329,37 @@ pub(super) fn register_show_hidden(cx: &mut Context<ProcessesPage>) {
     let app: &mut App = cx;
     app.on_action(move |_: &ProcessesShowHidden, cx| {
         let _ = page.update(cx, |p, cx| p.show_hidden(cx));
+    });
+}
+
+/// The app group of the oldest live process with app id `app_id` that sits under Apps.
+/// Records are sorted by key, oldest first.
+fn app_group(processes: &ProcessSnapshot, app_id: &str) -> Option<GroupKey> {
+    let not_app = [
+        GroupKind::Background.key(),
+        GroupKind::System.key(),
+        GroupKind::Ungrouped.key(),
+    ];
+    processes
+        .records
+        .iter()
+        .find(|r| {
+            !r.flags.contains(ProcFlags::EXITED)
+                && r.meta.app_id.as_deref() == Some(app_id)
+                && !not_app.contains(&r.group)
+        })
+        .map(|r| r.group)
+}
+
+/// Sets the shell filter box's memory group chip. Deferred: the caller may be inside the main
+/// window's update.
+fn set_group_chip(text: Option<SharedString>, cx: &mut App) {
+    cx.defer(move |cx| {
+        let Some(main) = main_window_view(cx) else {
+            return;
+        };
+        let filter = main.read(cx).filter_box().clone();
+        filter.update(cx, |f, cx| f.set_group_chip(text, cx));
     });
 }
 

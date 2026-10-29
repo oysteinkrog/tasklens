@@ -63,6 +63,8 @@ pub struct ProcessQuery {
     filter: Arc<str>,
     /// `processes.filter_include_children`.
     include_children: bool,
+    /// Memory group key from a chart legend click (D-036). Session only: `save` ignores it.
+    mem_group: Option<Arc<str>>,
     /// Session state per identity.
     expanded: FxHashSet<NodeId>,
     /// Rows the user collapsed, so defaults do not re-expand them.
@@ -111,6 +113,7 @@ impl ProcessQuery {
             sort,
             filter: Arc::from(""),
             include_children: settings.processes.filter_include_children,
+            mem_group: None,
             expanded,
             collapsed_by_user,
             shown: None,
@@ -135,6 +138,20 @@ impl ProcessQuery {
         &self.filter
     }
 
+    pub fn mem_group(&self) -> Option<&Arc<str>> {
+        self.mem_group.as_ref()
+    }
+
+    /// True when the text filter or the memory group filter is set.
+    pub fn is_filtered(&self) -> bool {
+        !self.filter.is_empty() || self.mem_group.is_some()
+    }
+
+    /// `None` clears the memory group filter.
+    pub fn set_mem_group(&mut self, key: Option<Arc<str>>) {
+        self.mem_group = key;
+    }
+
     pub fn is_expanded(&self, id: &NodeId) -> bool {
         self.expanded.contains(id)
     }
@@ -149,6 +166,7 @@ impl ProcessQuery {
             filter: Arc::clone(&self.filter),
             expanded: self.expanded.iter().cloned().collect(),
             include_children: self.include_children,
+            mem_group: self.mem_group.clone(),
         }
     }
 

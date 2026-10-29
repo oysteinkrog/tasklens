@@ -376,8 +376,14 @@ pub struct FilterChanged {
 #[derive(Clone, Copy, Debug)]
 pub struct PauseChanged(pub bool);
 
+/// Emitted when the user clears the Processes memory group chip with its x or with Esc in the
+/// empty filter box (D-036, UI-PRF-060).
+#[derive(Clone, Copy, Debug)]
+pub struct MemGroupCleared;
+
 impl EventEmitter<FilterChanged> for ShellEvents {}
 impl EventEmitter<PauseChanged> for ShellEvents {}
+impl EventEmitter<MemGroupCleared> for ShellEvents {}
 
 pub struct GlobalShellEvents(pub Entity<ShellEvents>);
 

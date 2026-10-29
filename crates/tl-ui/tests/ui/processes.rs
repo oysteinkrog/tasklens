@@ -2260,11 +2260,11 @@ mod toolbar {
 mod jump {
     use std::sync::Arc;
 
-    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
     use tl_model::client::EngineClient as _;
     use tl_model::command::Tab;
     use tl_model::ids::{NodeId, ProcessKey};
-    use tl_model::process::{GroupKind, ProcFlags, ProcessRecord};
+    use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessRecord};
     use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::{TableMode, TableQuery, TableRow};
@@ -2277,7 +2277,7 @@ mod jump {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{ShellPage, main_window_view};
 
-    use super::delegate::{key, record, row, snapshot};
+    use super::delegate::{group, key, record, row, snapshot};
     use super::shell::{open_with, select};
 
     /// Fillers before the target, so centring has to scroll.
@@ -2350,8 +2350,19 @@ mod jump {
                     row(NodeId::Process(key(pid)), 0, Some(ix as u32), None)
                 })
                 .collect();
+            self.publish_rows(records, rows, Vec::new(), generation);
+        }
+
+        /// A snapshot holding `records` whose view is `rows` and `groups`, for `generation`.
+        fn publish_rows(
+            &mut self,
+            records: Vec<ProcessRecord>,
+            rows: Vec<TableRow>,
+            groups: Vec<GroupRow>,
+            generation: u64,
+        ) {
             self.version += 1;
-            let mut s = Snapshot::clone(&snapshot(self.version, rows, Vec::new(), records));
+            let mut s = Snapshot::clone(&snapshot(self.version, rows, groups, records));
             s.sequence = self.engine.latest().sequence + 1;
             Arc::make_mut(&mut s.table).query_generation = generation;
             Arc::make_mut(&mut s.processes).header.version = self.version;
@@ -2416,6 +2427,103 @@ mod jump {
             self.vcx
                 .update(|window, cx| page.read(cx).primary_focus().is_focused(window))
         }
+
+        fn open_mem_group(&mut self, key: &str, name: &str) {
+            let page = self.page.clone();
+            let (key, name) = (Arc::<str>::from(key), name.to_string());
+            self.vcx.update(|window, cx| {
+                page.update(cx, |p, cx| p.open_mem_group(key, name.into(), window, cx))
+            });
+            self.draw();
+        }
+
+        /// The shell filter box's group chip text.
+        fn chip(&mut self) -> Option<String> {
+            self.vcx.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window open");
+                let filter = main.read(cx).filter_box().read(cx);
+                filter.group_chip().map(|t| t.to_string())
+            })
+        }
+    }
+
+    /// D-036, UI-PRF-060: the legend's entry point sends the memory group with the query and
+    /// shows the chip; its x and Esc in the empty filter box clear both.
+    #[gpui_kit::test]
+    fn mem_group_chip_shows_and_clears(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        select(&mut r.vcx, Tab::Performance);
+        r.open_mem_group("exe:claude", "Claude Code");
+        assert_eq!(r.active_tab(), Tab::Processes);
+        assert_eq!(r.last_query().mem_group.as_deref(), Some("exe:claude"));
+        assert_eq!(r.chip().as_deref(), Some("Group: Claude Code"));
+        assert!(r.vcx.debug_bounds("FilterBox-group-chip").is_some());
+        let chip = r.vcx.debug_bounds("FilterBox-group-chip").expect("chip");
+        let outline = r.vcx.debug_bounds("FilterBox-outline").expect("outline");
+        assert!(chip.right() <= outline.left(), "left of the filter box");
+
+        // The x clears the chip and the query's group.
+        let x = r.vcx.debug_bounds("FilterBox-group-clear").expect("x");
+        r.vcx.simulate_click(x.center(), Modifiers::none());
+        r.draw();
+        assert_eq!(r.last_query().mem_group, None);
+        assert_eq!(r.chip(), None);
+        assert!(r.vcx.debug_bounds("FilterBox-group-chip").is_none());
+
+        // Esc in the focused empty filter box clears it too.
+        r.open_mem_group("exe:claude", "Claude Code");
+        assert_eq!(r.chip().as_deref(), Some("Group: Claude Code"));
+        r.vcx.update(|window, cx| {
+            let main = main_window_view(cx).expect("main window open");
+            let input = main.read(cx).filter_box().read(cx).input().clone();
+            input.update(cx, |s, cx| s.focus(window, cx));
+        });
+        r.draw();
+        let before = super::sent(&r.engine).len();
+        r.vcx.simulate_keystrokes("escape");
+        r.draw();
+        assert_eq!(r.chip(), None);
+        let sent = super::sent(&r.engine);
+        assert_eq!(sent.len(), before + 1, "one query");
+        assert_eq!(sent.last().and_then(|q| q.mem_group.clone()), None);
+    }
+
+    /// An `app:` group in grouped mode expands the Apps header and the app row, then selects
+    /// the app row once its view arrives.
+    #[gpui_kit::test]
+    fn mem_group_app_selects_app_row(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        let mut recs = records();
+        for rec in recs.iter_mut().filter(|x| x.group == firefox()) {
+            Arc::make_mut(&mut rec.meta).app_id = Some(Arc::from("firefox"));
+        }
+        r.publish(recs.clone(), &[], 0);
+        r.open_mem_group("app:firefox", "Firefox");
+        let q = r.last_query();
+        assert_eq!(q.mem_group.as_deref(), Some("app:firefox"));
+        assert_eq!(q.mode, TableMode::Grouped);
+        assert!(q.expanded.contains(&GroupHeader::Apps.node()));
+        assert!(q.expanded.contains(&NodeId::Group(firefox())));
+        assert!(r.selected().is_empty(), "nothing before the view");
+
+        let target = recs.iter().position(|x| x.key.pid == TARGET).unwrap() as u32;
+        let rows = vec![
+            row(GroupHeader::Apps.node(), 0, None, None),
+            row(NodeId::Group(firefox()), 1, None, Some(0)),
+            row(NodeId::Process(key(TARGET)), 2, Some(target), None),
+            row(GroupHeader::Background.node(), 0, None, None),
+            row(GroupHeader::System.node(), 0, None, None),
+        ];
+        let groups = vec![group(
+            NodeId::Group(firefox()),
+            GroupRowKind::App,
+            "Firefox",
+            3,
+        )];
+        r.publish_rows(recs, rows, groups, q.generation);
+        assert_eq!(r.selected(), [ProcRowId::Group(firefox())]);
+        assert!(r.table_focused());
+        assert!(r.toasts().is_empty(), "no toast");
     }
 
     #[gpui_kit::test]

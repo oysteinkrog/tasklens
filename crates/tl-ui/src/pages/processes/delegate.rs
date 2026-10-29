@@ -1588,10 +1588,10 @@ impl TreeTableDelegate for ProcessDelegate {
         }
     }
 
-    /// An empty view under a filter: "No processes match the filter" (UI-PRC-024). The engine
-    /// sends no group header when nothing matches at all.
+    /// An empty view under a filter or a memory group: "No processes match the filter"
+    /// (UI-PRC-024). The engine sends no group header when nothing matches at all.
     fn empty_text(&self) -> Option<SharedString> {
-        (!self.query.filter().is_empty()).then(|| self.no_match.clone())
+        self.query.is_filtered().then(|| self.no_match.clone())
     }
 
     /// The no-match text comes with "Clear filter" (UI-PRC-024).
