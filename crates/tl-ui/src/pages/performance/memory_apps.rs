@@ -382,11 +382,7 @@ impl MemoryAppsChart {
         let total = snap.system.memory.total;
         let spec = Self::spec_of(&[], None, total, settings);
         let labels = Self::labels_of(&words);
-        let chart = cx.new(|cx| {
-            let mut v = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
-            v.set_value_sum(true, cx);
-            v
-        });
+        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
         let subs = smallvec![
             cx.subscribe(&hub, Self::on_snapshot),
             cx.observe_global::<TlSettings>(Self::sync_settings),
@@ -609,6 +605,12 @@ impl MemoryAppsChart {
         if self.update_values(snap, newest.unwrap_or(0)) {
             cx.notify();
         }
+        // The value is In use from the memory totals: a sum of the bands would show "-" while
+        // a ranked group has no sample at the newest time.
+        let mut text = String::new();
+        units::bytes(&mut text, snap.system.memory.used);
+        let text = Some(SharedString::from(text));
+        self.chart.update(cx, |v, cx| v.set_value_text(text, cx));
     }
 
     /// The bands from `top` and `rest`, with colours from the saved picks. Saves the picks when
@@ -863,8 +865,22 @@ impl MemoryAppsChart {
         let mut tip = div()
             .debug_selector(|| TOOLTIP_ID.into())
             .absolute()
-            .left(at.x + px(12. * m.ui_scale))
-            .top(at.y + px(12. * m.ui_scale))
+            .map(|tip| {
+                // Keep the tooltip inside the chart box: above or left of the pointer in the
+                // lower or right half.
+                let size = self.bounds.get().size;
+                let gap = px(12. * m.ui_scale);
+                let tip = if at.x > size.width / 2. {
+                    tip.right(size.width - at.x + gap)
+                } else {
+                    tip.left(at.x + gap)
+                };
+                if at.y > size.height / 2. {
+                    tip.bottom(size.height - at.y + gap)
+                } else {
+                    tip.top(at.y + gap)
+                }
+            })
             .flex()
             .flex_col()
             .px(m.sp[3])
