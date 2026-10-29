@@ -876,6 +876,7 @@ impl MemoryAppsChart {
                 on[i + 1] = v.is_some_and(above);
             }
         }
+        drop(part_views);
         self.older = older;
         on
     }
