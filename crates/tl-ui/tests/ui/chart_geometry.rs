@@ -549,24 +549,30 @@ fn stacked_gap_in_middle_series() {
     let y = |v: f32| y_of(v, 0.0, 300.0, 100.0);
     let x = |s: &Sample| map.x_local(s.t_ns);
 
-    // Band 2 at bucket 100 is s0 + s2 over a floor of s0, and its neighbours are full sums.
+    // Band 1 is 0 from the axis time after its last valid sample (series 2's sample 40 ms
+    // later) until its next valid one, so band 2 there is s0 + s2 over a floor of s0. Its
+    // neighbours further out are full sums (tasklens-o55.53, UI-PRF-060).
     let band2 = &cache.fills[2];
-    assert!(has_vertex(band2, x(&data[2][100]), y(40.0)));
-    assert!(has_vertex(band2, x(&data[2][100]), y(10.0)));
-    assert!(has_vertex(band2, x(&data[2][99]), y(60.0)));
+    for i in [99, 100] {
+        assert!(
+            has_vertex(band2, x(&data[2][i]), y(40.0)),
+            "band 2 top at {i}"
+        );
+        assert!(
+            has_vertex(band2, x(&data[2][i]), y(10.0)),
+            "band 2 floor at {i}"
+        );
+    }
+    assert!(has_vertex(band2, x(&data[2][98]), y(60.0)));
     assert!(has_vertex(band2, x(&data[2][101]), y(60.0)));
-    // Band 1 has its own gap there: it ramps to zero height on top of band 0 at bucket 100, so
-    // no hole opens under band 2 (tasklens-o55.53).
-    let x100 = x(&data[1][100]);
-    assert!(has_vertex(&cache.fills[1], x100, y(10.0)));
-    assert!(
-        cache.fills[1]
-            .path
-            .vertices
-            .iter()
-            .filter(|v| (v.xy_position.x.as_f32() - x100).abs() < 0.01)
-            .all(|v| (v.xy_position.y.as_f32() - y(10.0)).abs() < 0.01)
-    );
+    // Band 1 ramps to zero height on band 0 at those two times and draws nothing between.
+    let band1 = &cache.fills[1];
+    assert!(has_vertex(band1, x(&data[2][99]), y(10.0)));
+    assert!(has_vertex(band1, x(&data[2][100]), y(10.0)));
+    assert!(xs(band1).all(|v| v <= x(&data[2][99]) + 0.01 || v >= x(&data[2][100]) - 0.01));
+    for q in 950..1050 {
+        assert_bands_meet(&cache.fills, map.x_local(data[0][0].t_ns + q * 10 * MS));
+    }
     // Dotted gaps come from series 0, which has none.
     assert!(cache.gaps.is_empty());
 }
@@ -803,6 +809,301 @@ fn stacked_group_entry_leaves_no_hole() {
         let x_prev = map.x_local(t - SEC);
         assert!(has_vertex(&cache.fills[1], x_prev, y(10.0)), "ramp start");
         assert!(has_vertex(&cache.fills[1], map.x_local(t), y(30.0)));
+    }
+}
+
+/// The bottom band enters late. It ramps up from zero height at the sweep before, so band 1
+/// never floats over a hole (review of tasklens-o55.53).
+#[test]
+fn stacked_bottom_band_entry_leaves_no_hole() {
+    let y = |v: f32| y_of(v, 0.0, 100.0, 100.0);
+    let data = with_band(0, 30..60);
+    let map = exact_map(&data[2]);
+    let cache = stack_three(&data);
+    let x = |i: usize| map.x_local(data[2][i].t_ns);
+    assert!(has_vertex(&cache.fills[0], x(29), y(0.0)), "ramp start");
+    assert!(has_vertex(&cache.fills[0], x(30), y(10.0)));
+    for q in 0..59 * 8 {
+        let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
+        assert_bands_meet(&cache.fills, at);
+    }
+}
+
+/// A band enters 0.5 s after the bands below it sweep, as when its group is first summed on a
+/// slow sweep. The bands above stay on its top at every x (review of tasklens-o55.53).
+#[test]
+fn stacked_entry_half_period_off_leaves_no_hole() {
+    for band in [0, 1] {
+        let mut data = with_band(band, 30..59);
+        for s in &mut data[band] {
+            s.t_ns += 500 * MS;
+        }
+        let map = exact_map(&data[2]);
+        let cache = stack_three(&data);
+        for q in 0..59 * 16 {
+            let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 16);
+            assert_bands_meet(&cache.fills, at);
+        }
+    }
+}
+
+/// One fill segment of a stacked band: x, top y and floor y at its left and right ends.
+struct Seg {
+    x: (f32, f32),
+    top: (f32, f32),
+    floor: (f32, f32),
+}
+
+/// The segments of one band's fill. `FillMesh::band` adds two triangles per segment.
+fn band_segments(set: &PathSet) -> Vec<Seg> {
+    set.path
+        .vertices
+        .chunks(6)
+        .map(|c| {
+            let x_of = |v: &gpui_kit::PathVertex<gpui_kit::Pixels>| v.xy_position.x.as_f32();
+            let lo = c.iter().map(x_of).fold(f32::MAX, f32::min);
+            let hi = c.iter().map(x_of).fold(f32::MIN, f32::max);
+            let at = |x: f32| {
+                c.iter()
+                    .filter(|v| x_of(v) == x)
+                    .map(|v| v.xy_position.y.as_f32())
+                    .fold((f32::MAX, f32::MIN), |(t, f), y| (t.min(y), f.max(y)))
+            };
+            let (l, r) = (at(lo), at(hi));
+            Seg {
+                x: (lo, hi),
+                top: (l.0, r.0),
+                floor: (l.1, r.1),
+            }
+        })
+        .collect()
+}
+
+/// The (top, floor) y of a band at `x`, interpolated from the left end of the segment that
+/// holds `x`, or `None` when the band draws nothing there.
+fn band_at(segs: &[Seg], x: f32) -> Option<(f32, f32)> {
+    let s = segs.get(segs.partition_point(|s| s.x.1 < x))?;
+    if s.x.0 > x {
+        return None;
+    }
+    let f = (x - s.x.0) / (s.x.1 - s.x.0);
+    Some((
+        s.top.0 + (s.top.1 - s.top.0) * f,
+        s.floor.0 + (s.floor.1 - s.floor.0) * f,
+    ))
+}
+
+/// The stack at `x` from the bottom band up: the lowest drawn band sits on the baseline (plot
+/// height 100), each drawn band's floor is the top of the drawn band below it within `tol` px,
+/// and no band has a negative height. Returns the top of the stack, `None` when nothing draws.
+fn stack_top(bands: &[Vec<Seg>], x: f32, tol: f32, case: usize) -> Option<f32> {
+    let mut level = None;
+    for (b, segs) in bands.iter().enumerate() {
+        let Some((top, floor)) = band_at(segs, x) else {
+            continue;
+        };
+        let below = level.unwrap_or(100.0);
+        assert!(
+            (floor - below).abs() <= tol,
+            "case {case}: band {b} floor {floor} apart from {below} at x {x}"
+        );
+        assert!(
+            top <= floor + tol,
+            "case {case}: band {b} negative at x {x}"
+        );
+        level = Some(top);
+    }
+    level
+}
+
+/// The reference stack of the shared axis rule (UI-PRF-060), written out the slow way: axis
+/// times, the sum of the band values at each, whether some band has a value there, and whether
+/// some band's run spans the step before it.
+struct RefStack {
+    t: Vec<u64>,
+    sum: Vec<f32>,
+    valid: Vec<bool>,
+    span: Vec<bool>,
+}
+
+fn reference_stack(data: &[Vec<Sample>]) -> RefStack {
+    let mut all: Vec<u64> = data.iter().flatten().map(|s| s.t_ns).collect();
+    all.sort_unstable();
+    let mut t: Vec<u64> = Vec::new();
+    for a in all {
+        if t.last().is_none_or(|&l| a - l >= MS) {
+            t.push(a);
+        }
+    }
+    let n = t.len();
+    let slot = |a: u64| t.partition_point(|&s| s <= a) - 1;
+    let (mut sum, mut valid, mut span) = (vec![0f32; n], vec![false; n], vec![false; n]);
+    for band in data {
+        let own: Vec<(usize, Sample)> = band.iter().map(|s| (slot(s.t_ns), *s)).collect();
+        let (mut has, mut gap_before) = (vec![false; n], vec![false; n]);
+        for k in 0..n {
+            let j = own.partition_point(|o| o.0 < k);
+            let value = match own.get(j) {
+                Some(&(sk, s)) if sk == k => {
+                    has[k] = s.is_valid();
+                    gap_before[k] = s.flags.contains(SampleFlags::GAP_BEFORE);
+                    if has[k] { s.value } else { 0.0 }
+                }
+                next => match (j.checked_sub(1).map(|p| own[p]), next) {
+                    (Some((pk, p)), Some(&(nk, nx)))
+                        if p.is_valid()
+                            && nx.is_valid()
+                            && !nx.flags.contains(SampleFlags::GAP_BEFORE) =>
+                    {
+                        has[k] = true;
+                        let f = (t[k] - t[pk]) as f64 / (t[nk] - t[pk]) as f64;
+                        (f64::from(p.value) + f64::from(nx.value - p.value) * f) as f32
+                    }
+                    _ => 0.0,
+                },
+            };
+            sum[k] += value;
+            valid[k] |= has[k];
+            if k > 0 && has[k - 1] && has[k] && !gap_before[k] {
+                span[k] = true;
+            }
+        }
+    }
+    RefStack {
+        t,
+        sum,
+        valid,
+        span,
+    }
+}
+
+/// 1 to 25 bands over 20 sweeps 1 s apart. Each band starts and ends at a random sweep (the
+/// bottom band too), may end with one gap sample (a group that leaves the top 20), has random
+/// gap samples and `GAP_BEFORE` breaks, and its sample times are off the sweep time by 0, less
+/// than 1 ms, 1 to 3 ms, about 0.1 s or up to 0.5 s, on top of a lateness the sweep shares.
+fn random_stack(rng: &mut fastrand::Rng) -> Vec<Vec<Sample>> {
+    const SWEEPS: usize = 20;
+    let late: Vec<u64> = (0..=SWEEPS)
+        .map(|_| match rng.u8(0..3) {
+            0 => rng.u64(0..400 * MS),
+            _ => 0,
+        })
+        .collect();
+    (0..rng.usize(1..=25))
+        .map(|_| {
+            let start = if rng.bool() { 0 } else { rng.usize(0..SWEEPS) };
+            let end = if rng.bool() {
+                SWEEPS
+            } else {
+                rng.usize(start + 1..=SWEEPS)
+            };
+            let at = |rng: &mut fastrand::Rng, i: usize| {
+                let off = match rng.u8(0..6) {
+                    0 | 1 => 0,
+                    2 => rng.u64(0..MS),
+                    3 => rng.u64(MS..3 * MS),
+                    4 => rng.u64(90 * MS..110 * MS),
+                    _ => rng.u64(0..500 * MS),
+                };
+                10 * SEC + i as u64 * SEC + late[i] + off
+            };
+            let mut band = Vec::new();
+            for i in start..end {
+                let t = at(rng, i);
+                band.push(match rng.u8(0..25) {
+                    0 | 1 => Sample::gap(t),
+                    2 => {
+                        let mut s = Sample::valid(t, rng.f32() * 10.0);
+                        s.flags |= SampleFlags::GAP_BEFORE;
+                        s
+                    }
+                    3 => Sample::valid(t, 0.0),
+                    _ => Sample::valid(t, rng.f32() * 10.0),
+                });
+            }
+            if end < SWEEPS && rng.bool() {
+                band.push(Sample::gap(at(rng, end)));
+            }
+            band
+        })
+        .collect()
+}
+
+/// Seeded sweep over 2000 random stacks (leader decision on tasklens-o55.53, UI-PRF-060). At
+/// every axis time a band's top meets the floor of the band above within 1e-3, no band has a
+/// negative height, and the top of the stack is the sum of the band values. Between two axis
+/// times the bands still meet, and across a step that no band's run spans nothing draws.
+#[test]
+fn stacked_sweep_bands_meet_on_shared_axis() {
+    const H: f32 = 100.0;
+    let mut rng = fastrand::Rng::with_seed(0x0055_0053);
+    for case in 0..2000 {
+        let data = random_stack(&mut rng);
+        let reference = reference_stack(&data);
+        let (Some(&oldest), Some(&newest)) = (reference.t.first(), reference.t.last()) else {
+            continue;
+        };
+        let range = (newest - oldest).max(SEC);
+        // 1 px per ms: every axis time keeps its own decimation bucket.
+        let map = TimeMap {
+            anchor_ns: newest,
+            right_edge_ns: newest,
+            range_ns: range,
+            plot_width: (range / MS) as f32,
+        };
+        let y_max = 10.0 * data.len() as f32;
+        // 1e-3 in value units, as px.
+        let tol = 1e-3 * H / y_max;
+        let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), SEC)).collect();
+        let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+            .collect();
+        let mut cache = ChartCache::default();
+        stack_build(
+            &spec,
+            map,
+            newest,
+            y_max,
+            &mut cache,
+            &mut Scratch::default(),
+        );
+        let bands: Vec<Vec<Seg>> = (0..data.len())
+            .map(|i| {
+                cache
+                    .fills
+                    .iter()
+                    .find(|f| f.color == colour(i))
+                    .map_or_else(Vec::new, band_segments)
+            })
+            .collect();
+
+        let n = reference.t.len();
+        let x = |k: usize| map.x_local(reference.t[k]);
+        for k in 0..n {
+            let drawn = reference.span[k] || (k + 1 < n && reference.span[k + 1]);
+            let top = stack_top(&bands, x(k), tol, case);
+            if drawn {
+                assert!(reference.valid[k], "case {case}: drawn at an empty time");
+                let want = y_of(reference.sum[k], 0.0, y_max, H);
+                let got = top.unwrap_or_else(|| panic!("case {case}: nothing drawn at {k}"));
+                assert!(
+                    (got - want).abs() <= tol,
+                    "case {case}: stack top {got} not the sum {want} at {k}"
+                );
+            }
+            if k + 1 < n {
+                let mid = (x(k) + x(k + 1)) / 2.0;
+                let top = stack_top(&bands, mid, tol, case);
+                assert_eq!(
+                    top.is_some(),
+                    reference.span[k + 1],
+                    "case {case}: step after {k} drawn {:?}",
+                    top
+                );
+            }
+        }
     }
 }
 
