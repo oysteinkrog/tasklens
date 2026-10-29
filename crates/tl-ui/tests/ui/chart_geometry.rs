@@ -571,9 +571,11 @@ fn stacked_gap_in_middle_series() {
     assert!(cache.gaps.is_empty());
 }
 
-/// Three bands of 10, 20 and 30 on a 1 s grid, built stacked to 100.
+/// Three bands of 10, 20 and 30 on a 1 s grid, built stacked to 100. The window is that of the
+/// series that reaches furthest, which is the last one.
 fn stack_three(data: &[Vec<Sample>]) -> ChartCache {
-    let map = exact_map(&data[0]);
+    let newest = &data[data.len() - 1];
+    let map = exact_map(newest);
     let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), SEC)).collect();
     let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
         .iter()
@@ -581,7 +583,7 @@ fn stack_three(data: &[Vec<Sample>]) -> ChartCache {
         .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
         .collect();
     let mut cache = ChartCache::default();
-    let now = data[0][data[0].len() - 1].t_ns;
+    let now = newest[newest.len() - 1].t_ns;
     stack_build(&spec, map, now, 100.0, &mut cache, &mut Scratch::default());
     cache
 }
