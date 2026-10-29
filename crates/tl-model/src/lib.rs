@@ -47,3 +47,5 @@ pub mod history;
 pub mod client;
 
 pub mod tray;
+
+pub mod remote_proto;

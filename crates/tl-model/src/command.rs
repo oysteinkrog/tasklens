@@ -79,7 +79,7 @@ pub enum CommandError {
 }
 
 /// Commands for the KWin bridge (PROC-052 to PROC-055).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KWinCommand {
     Activate {
         internal_id: Arc<str>,
@@ -109,7 +109,7 @@ pub enum KWinCommand {
 }
 
 /// One `tasklens-setup` step run through pkexec (table (c), R-149 item 2).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SetupStep {
     RaplEnable,
     RaplRevert,
@@ -180,7 +180,7 @@ pub enum SetupPhase {
 
 /// History query payload. The E30 block wins over the earlier sketch (R-156 item 3). `HistoryRange` and
 /// `HistoryMetric` come from history.rs (E03-062).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryWhat {
     Frame {
         metric: HistoryMetric,
@@ -198,7 +198,7 @@ pub enum HistoryWhat {
 
 /// Device requests (R-139 item 2). `disk` is the kernel name (`sda`, `nvme0n1`), the same string as
 /// `DeviceIdentity::Disk.name`; the UI resolves a DeviceIdx through DeviceCatalog, workers never see one.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceCommand {
     /// UDisks2 SMART read. `update` runs SmartUpdate first.
     SmartRead { disk: Arc<str>, update: bool },
@@ -214,7 +214,7 @@ pub enum DeviceCommand {
 
 /// Everything the UI queues with `EngineClient::send` (ADR-005, R-136). Values are moved into
 /// the bounded queue, never cloned on the hot path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     SetTableQuery(TableQuery),
     /// P2.

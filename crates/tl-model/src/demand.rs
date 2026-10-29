@@ -6,12 +6,14 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::details::{DetailTab, DetailTarget};
 use crate::ids::{ColumnId, GraphTarget, ProcessKey};
 use crate::table::UnitRef;
 
 /// How much CPU data the visible surfaces need. `PerCore` implies `Total`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum CpuDemand {
     #[default]
     Off,
@@ -30,7 +32,7 @@ impl CpuDemand {
 }
 
 /// Bitset of `ColumnId`, 256 bits. Bit index = `ColumnId::bit()` (number minus 1, R-155 item 1).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct ColumnSet(pub [u64; 4]);
 
 impl ColumnSet {
@@ -62,7 +64,7 @@ impl ColumnSet {
 }
 
 /// One open Properties window and its visible tab (UI-PWN-002).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct DetailDemand {
     pub target: DetailTarget,
     pub tab: DetailTab,
@@ -70,7 +72,7 @@ pub struct DetailDemand {
 
 /// What the tray icons show (P3). There is no process list here: tray process graphs use
 /// `Demand.graph_targets` (R-156 item 2, R-154).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct TrayDemand {
     /// Any tray icon is visible. The aggregator counts this as a visible surface.
     pub icons_shown: bool,
@@ -88,7 +90,7 @@ pub const UNIT_DETAILS_MAX: usize = 10;
 pub const GRAPH_TARGETS_MAX: usize = 16; // R-154
 
 /// An Overview time range served from the device metric history (UI-PRF-055, ADR-017).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum DeviceRange {
     /// Requested only while paused (UI-PRF-057).
     M1,
@@ -114,7 +116,7 @@ impl DeviceRange {
 }
 
 /// What the Overview asks the device metric history for (ADR-008, ADR-017).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct DeviceHistoryRequest {
     pub range: DeviceRange,
     /// The range ends now (`None`) or at this CLOCK_REALTIME time while paused (`Some`).
@@ -122,7 +124,7 @@ pub struct DeviceHistoryRequest {
 }
 
 /// Everything the visible surfaces need. Lists are shared `Arc` slices, so a clone is cheap.
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Demand {
     pub any_surface_visible: bool,
     pub cpu: CpuDemand,

@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::devices::DeviceCatalog;
 use crate::ids::{ProcessKey, SeriesId};
 use crate::process::ProcessRecord;
@@ -21,7 +23,7 @@ pub trait RecordSink: Send + 'static {
 }
 
 /// Metric chips in display order. Keys 1 to 5 select them (UI-PRC-035).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum HistoryMetric {
     Cpu,
     Memory,
@@ -31,7 +33,7 @@ pub enum HistoryMetric {
 }
 
 /// Defined here (not in command.rs) so `HistoryView` can hold it. command.rs uses it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum HistoryRange {
     #[default]
     Live,

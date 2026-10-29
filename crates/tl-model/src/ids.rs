@@ -194,9 +194,9 @@ pub struct GroupKey(pub u64);
 ///
 /// Not `Copy`: `Unit(UnitRef)` holds an `Arc<str>`. Callers clone it.
 ///
-/// No serde derive: `Arc<str>` needs serde's `rc` feature (ADR-002). `NodeId` is never written
-/// to disk or sent to the helper.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// serde for the engine protocol only (ADR-018). `NodeId` is never written to disk or sent to the
+/// helper.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum NodeId {
     Group(GroupKey),
     Process(ProcessKey),
@@ -213,9 +213,7 @@ pub enum PseudoKind {
 }
 
 /// What a per-process graph follows (R-154). `ProcessSeriesId` pairs it with a column.
-///
-/// No serde derive: `Arc<str>` needs serde's `rc` feature.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GraphTarget {
     Process(ProcessKey),
     Name(Arc<str>),

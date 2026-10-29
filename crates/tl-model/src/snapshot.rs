@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use smallvec::SmallVec;
 
 use crate::actions::{Family, FourTuple, Proto};
@@ -198,7 +200,7 @@ pub struct SystemSnapshot {
 }
 
 /// Window frame in logical pixels.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct FrameGeometry {
     pub x: i32,
     pub y: i32,

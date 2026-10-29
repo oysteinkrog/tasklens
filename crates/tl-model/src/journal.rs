@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::table::UnitRef;
 
 /// Entries per initial load and per `load_older`.
@@ -14,14 +16,14 @@ pub const JOURNAL_PAGE: usize = 200;
 
 /// What to read: the last `JOURNAL_PAGE` entries of this boot for one unit, then new entries
 /// while `follow` is on.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct JournalQuery {
     pub unit: UnitRef,
     pub follow: bool,
 }
 
 /// One journal entry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// `__REALTIME_TIMESTAMP` in microseconds since the Unix epoch.
     pub realtime_us: u64,
@@ -34,7 +36,7 @@ pub struct JournalEntry {
 }
 
 /// Which entries the user may read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum JournalAccess {
     All,
     /// Only the user's own entries are visible. Sent for system units only (R-167).
@@ -44,7 +46,7 @@ pub enum JournalAccess {
 /// Why the journal could not be read. The UI owns the texts: `NotFound` is
 /// "journalctl not found", `Timeout` is "Reading the journal took too long.", and `Exit` is
 /// "Could not read the journal".
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum JournalError {
     NotFound,
     Timeout,
@@ -55,7 +57,7 @@ pub enum JournalError {
 }
 
 /// Events from the engine's journal task to the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum JournalEvent {
     /// `older` is true for a `LoadOlder` page; `exhausted` is true when no older entries remain.
     Batch {
@@ -68,7 +70,7 @@ pub enum JournalEvent {
 }
 
 /// Control messages from the handle to the engine's journal task.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum JournalControl {
     /// `Some(cursor)` pages back from that entry; `None` pages back from the oldest entry the
     /// engine has sent.

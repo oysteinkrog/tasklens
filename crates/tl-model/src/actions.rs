@@ -4,8 +4,8 @@
 //! it and reports ordered `ActionEvent`s. `tl-ui/src/action_tracker.rs::message(&ActionError)`
 //! owns the user text, so nothing here implements `Display`.
 //!
-//! serde derives are only on `Copy` types: workspace serde has only the `derive` feature, so
-//! `Arc<str>` fields are not serializable (ADR-002). The helper protocol has its own types.
+//! The serde derives carry these types over the engine protocol (ADR-018); serde's `rc` feature
+//! sends `Arc` values by value. The helper protocol has its own types.
 //!
 //! Privacy: `OpenUri`, `Launch` command text and dump paths are user data. Never log them above
 //! debug level (ADR-015).
@@ -30,7 +30,7 @@ pub const MAX_ACTIONS_IN_FLIGHT: usize = 16;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ActionId(pub u64);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionRequest {
     pub id: ActionId,
     pub kind: ActionKind,
@@ -42,7 +42,7 @@ pub struct ActionRequest {
 }
 
 /// A cgroup captured with its inode so the engine can tell a recreated cgroup apart.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct CgroupRef {
     /// Relative to /sys/fs/cgroup.
     pub rel_path: Arc<str>,
@@ -127,7 +127,7 @@ impl<'de> Deserialize<'de> for FourTuple {
 
 /// What an action acts on. Every variant carries a full identity so the engine and the helper
 /// can revalidate it. Never add a PID-only target.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ActionTarget {
     Process(ProcessKey),
     /// P2, Threads tab. Allowed kinds: `Signal`, `SetNice`, `SetSched`, `SetAffinity`.
@@ -219,7 +219,7 @@ pub enum DumpMode {
 }
 
 /// P3: only the keys the user changed, plus the keys already in the tasklens drop-in (SYS-013).
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct RecoveryEdit {
     /// `Restart=` word: no, on-success, on-failure, on-abnormal, on-watchdog, on-abort, always.
     pub restart: Option<Arc<str>>,
@@ -241,7 +241,7 @@ pub struct RecoveryEdit {
     pub on_failure: Option<Arc<[Arc<str>]>>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LaunchWhat {
     Command(Arc<str>),
     DesktopEntry(Arc<str>),
@@ -256,14 +256,14 @@ pub enum LaunchWhat {
     },
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LaunchSpec {
     pub what: LaunchWhat,
     pub as_admin: bool,
     pub cwd: Option<Arc<str>>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ActionKind {
     /// End Task is `Signal(Term)`, End Process is `Signal(Kill)`.
     Signal(Signal),
@@ -332,7 +332,7 @@ impl ActionKind {
 }
 
 /// Why an action failed (ADR-015, R-148 item 3, R-170 item 9).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ActionError {
     PermissionDenied,
     NoSuchProcess,
@@ -358,7 +358,7 @@ pub enum ActionError {
 }
 
 /// Why admission refused a request. Nothing was started.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum RejectReason {
     /// `MAX_ACTIONS_IN_FLIGHT` requests are running.
     Busy,
@@ -373,7 +373,7 @@ pub enum RejectReason {
     AlreadyRunning,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ActionState {
     /// Never started, nothing changed.
     Rejected(RejectReason),
@@ -419,7 +419,7 @@ impl ActionState {
 }
 
 /// One step of an action. Events for one `ActionId` arrive in order.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ActionEvent {
     pub id: ActionId,
     /// Index into the request's targets; `None` for the whole request.

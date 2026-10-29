@@ -25,7 +25,7 @@ pub enum TableMode {
 }
 
 /// Sort column and direction. The engine always breaks ties by `ProcessKey`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SortSpec {
     pub column: ColumnId,
     pub ascending: bool,
@@ -34,7 +34,7 @@ pub struct SortSpec {
 /// What the UI asks the engine to show, sent with `Command::SetTableQuery`.
 ///
 /// `filter` holds user text: never log it above debug level.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TableQuery {
     /// Echoed in `ProcessTableView::query_generation` so the UI can tell a stale view.
     pub generation: u64,
@@ -156,7 +156,7 @@ pub enum Manager {
 }
 
 /// Identity of a systemd unit. `foo.service` may exist in both managers.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct UnitRef {
     pub manager: Manager,
     pub name: Arc<str>,
@@ -177,7 +177,7 @@ pub enum StartupSource {
 }
 
 /// Identity of a Startup Apps entry. Selection is kept by `StartupRef` across rescans (R-082).
-#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StartupRef {
     pub source: StartupSource,
     /// The .desktop file name for autostart entries, the unit id for user units, the script
@@ -241,7 +241,7 @@ pub enum ServiceStateFilter {
 }
 
 /// The Services filter strip (UI-SYS-011).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ServiceFilter {
     /// OR of the chosen states. Empty means all states.
     pub states: SmallVec<[ServiceStateFilter; 4]>,
@@ -266,7 +266,7 @@ impl Default for ServiceFilter {
 }
 
 /// The engine-built system tables (UI-SYS-002).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SysTable {
     Services,
     Startup,
@@ -274,7 +274,7 @@ pub enum SysTable {
 }
 
 /// One row of a system table (R-155 item 1).
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SysNodeId {
     /// "System services (N)" or "User services (N)".
     ServiceGroup(Manager),
@@ -288,7 +288,7 @@ pub enum SysNodeId {
 
 /// Column ids of the system tables (R-170 item 6). Each table has its own id set, so a shared
 /// string such as "name" is fine. `as_str` and `from_str` work like `ColumnId`'s.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SysColumnId {
     Services(ServiceColumn),
     Startup(StartupColumn),
@@ -298,7 +298,7 @@ pub enum SysColumnId {
 /// The 19 Services ids of UI-SYS-013, in this order:
 /// name, display_name, status, startup_type, pid, user, path, manager, unit_type, sub_state,
 /// load_state, cpu, memory, disk, tasks, active_since, unit_file, triggered_by, description.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ServiceColumn {
     Name,
     DisplayName,
@@ -322,7 +322,7 @@ pub enum ServiceColumn {
 }
 
 /// The 7 Startup ids: name, publisher, status, impact, type, location, command.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum StartupColumn {
     Name,
     Publisher,
@@ -335,7 +335,7 @@ pub enum StartupColumn {
 
 /// The 17 Connections ids: proto, local, foreign, state, pid, process, user, family, local_port,
 /// foreign_port, recv_q, send_q, interface, inode, service, remote_host, netns.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConnColumn {
     Proto,
     Local,
@@ -503,7 +503,7 @@ impl SysColumnId {
 }
 
 /// Sort column and direction of a system table.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SysSortSpec {
     pub column: SysColumnId,
     pub ascending: bool,
@@ -512,7 +512,7 @@ pub struct SysSortSpec {
 /// What the UI asks the engine to show for one system table.
 ///
 /// `filter` holds user text: never log it above debug level.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SysTableQuery {
     pub table: SysTable,
     pub generation: u64,

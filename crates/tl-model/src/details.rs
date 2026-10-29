@@ -19,14 +19,14 @@ use crate::table::{Total, UnitRef};
 use crate::validity::Validity;
 
 /// What a Properties window shows: one process or one app group.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum DetailTarget {
     Process(ProcessKey),
     App(GroupKey),
 }
 
 /// The Properties tabs. The declaration order is the index into `TargetDetail::tabs`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum DetailTab {
     General,
     Threads,
@@ -570,11 +570,11 @@ pub fn env_name_is_masked(name: &str) -> bool {
 }
 
 /// One Strings scan. Allocated by the UI, starting at 1.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ScanId(pub u64);
 
 /// One handle search. Allocated by the UI, starting at 1.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SearchId(pub u64);
 
 // ---- Strings (UI-PWN-017, PROC-084) ----
