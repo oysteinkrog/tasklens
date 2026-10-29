@@ -340,6 +340,7 @@ fn end_to_end_engine_real_runtime() {
     };
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut wakes = 0u32;
+    let mut advances = 0u32;
     let mut sent_grouped = false;
     let mut prev_sequence = 0;
     // The UI waits on `wake`; polling it every 10 ms keeps this test free of an executor.
@@ -350,7 +351,16 @@ fn end_to_end_engine_real_runtime() {
         }
         wakes += 1;
         let snap = handle.latest();
-        assert!(snap.sequence > prev_sequence, "sequence goes up on wake");
+        // A token sent after store N can be read after the test already loaded N, so an
+        // equal sequence is fine. A smaller one is not.
+        assert!(
+            snap.sequence >= prev_sequence,
+            "sequence went back from {prev_sequence} to {}",
+            snap.sequence
+        );
+        if snap.sequence > prev_sequence {
+            advances += 1;
+        }
         prev_sequence = snap.sequence;
         if !sent_grouped && snap.table.query_generation == 1 {
             assert_eq!(send(TableMode::Grouped, 2), Ok(()));
@@ -359,7 +369,10 @@ fn end_to_end_engine_real_runtime() {
     }
 
     let snap = handle.latest();
-    assert!(wakes >= 2, "{wakes} wakes in 2 s");
+    assert!(
+        advances >= 2,
+        "{advances} of {wakes} wakes saw a newer snapshot"
+    );
     assert!(sent_grouped, "query generation 1 never published");
     assert_eq!(snap.table.query_generation, 2);
     assert_eq!(header_rows(&snap), 3, "{:?}", snap.table.rows);
