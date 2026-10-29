@@ -37,6 +37,8 @@ use tl_model::table::{Manager, UnitRef};
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
+use crate::client_session::ClientMsg;
+
 #[derive(Debug, Clone)]
 pub enum EngineMsg {
     Source(SourceUpdate),
@@ -46,6 +48,9 @@ pub enum EngineMsg {
     },
     /// Housekeeping, sent every 1 s by the session (stale marking, linger expiry).
     Tick,
+    /// A client session opens, closes or sends a command (ADR-018). `Command` is the local
+    /// session's.
+    Client(ClientMsg),
 }
 
 /// The restart signal a worker returns as `Outcome::Err` (ADR-015).

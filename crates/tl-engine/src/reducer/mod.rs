@@ -46,10 +46,11 @@ use tl_model::snapshot::{
     InventorySnapshot, ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot,
     StartupSnapshot, SystemSnapshot, WindowsSnapshot,
 };
-use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery, UnitRef};
+use tl_model::table::{ProcessTableView, SysTable, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
+use crate::client_session::ClientSessions;
 use crate::source::WorkerControl;
 use crate::update::EngineMsg;
 use crate::workers::history::HistorySink;
@@ -90,12 +91,13 @@ pub enum HelperCommand {
     RunSetup(SetupStep),
 }
 
-/// The current `Arc` of every snapshot component, header included.
+/// The current `Arc` of every shared snapshot component, header included. The process table
+/// is per client session; so are the rows, query generation and counts of `connections`,
+/// `services` and `startup`, which stay unused here (ADR-018).
 pub struct Components {
     pub system: Arc<SystemSnapshot>,
     pub series: Arc<SeriesSet>,
     pub processes: Arc<ProcessSnapshot>,
-    pub table: Arc<ProcessTableView>,
     pub connections: Arc<ConnectionsSnapshot>,
     pub services: Arc<ServicesSnapshot>,
     pub startup: Arc<StartupSnapshot>,
@@ -142,9 +144,8 @@ pub struct Reducer {
     pub processes: processes::ProcessState,
     /// Sleep and resume state (E09-008).
     pub suspend: suspend::SuspendState,
-    pub query: TableQuery,
-    /// The last `SetSysTableQuery` per system table: Services, Startup, Connections (E09-027).
-    pub sys_queries: [Option<SysTableQuery>; 3],
+    /// The open client sessions with their table and system table queries (ADR-018).
+    pub clients: ClientSessions,
     pub components: Components,
     /// Reducer-to-worker control (E08-004).
     pub control: watch::Sender<WorkerControl>,
@@ -186,13 +187,10 @@ pub struct Reducer {
 
 /// The components that carry a `ComponentHeader` and that `build_snapshot` versions itself.
 /// `SERIES` comes from `SeriesStore::publish`; `DEVICES` and `HEALTH` have their own `version`.
-const HEADER_BITS: [ComponentMask; 13] = [
+/// Each client session versions `SESSION_BITS` itself.
+const HEADER_BITS: [ComponentMask; 9] = [
     ComponentMask::SYSTEM,
     ComponentMask::PROCESSES,
-    ComponentMask::TABLE,
-    ComponentMask::CONNECTIONS,
-    ComponentMask::SERVICES,
-    ComponentMask::STARTUP,
     ComponentMask::INVENTORY,
     ComponentMask::WINDOWS,
     ComponentMask::DETAILS,
@@ -228,13 +226,11 @@ impl Reducer {
             health: health::HealthState::new(),
             processes: processes::ProcessState::new(),
             suspend: suspend::SuspendState::default(),
-            query: TableQuery::default(),
-            sys_queries: [None, None, None],
+            clients: ClientSessions::new(&empty),
             components: Components {
                 system: empty.system,
                 series: empty.series,
                 processes: empty.processes,
-                table: empty.table,
                 connections: empty.connections,
                 services: empty.services,
                 startup: empty.startup,
@@ -306,24 +302,10 @@ impl Reducer {
             if let Some(sink) = self.metric_sink.as_mut() {
                 sink.on_snapshot(&next);
             }
+            self.clients.publish(&next);
             publisher.publish(next);
         }
         Ok(())
-    }
-
-    /// The stored query of `table`, or the default one: generation 0, default sort, no filter,
-    /// nothing expanded (E09-027).
-    pub fn sys_query(&self, table: SysTable) -> SysTableQuery {
-        self.sys_queries[sys_table_index(table)]
-            .clone()
-            .unwrap_or_else(|| SysTableQuery {
-                table,
-                generation: 0,
-                sort: sys_table::default_sort(table),
-                filter: Arc::from(""),
-                expanded: Arc::from([]),
-                services: None,
-            })
     }
 
     /// Installs or removes the record sink: E30's recording switch. `None` stops every sink call
@@ -340,6 +322,7 @@ impl Reducer {
     /// `sequence += 1`. Dirty components get a new version; every other component reuses its
     /// `Arc`. A dirty header component whose `Arc` was not replaced with a higher version gets
     /// `version` one above the last published one; its observed times are the ones apply set.
+    /// Returns the local session's snapshot; `ClientSessions::publish` makes the others.
     fn build_snapshot(&mut self) -> Snapshot {
         let mut dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE);
         self.sequence += 1;
@@ -380,10 +363,6 @@ impl Reducer {
             self.published[i] = match bit {
                 ComponentMask::SYSTEM => bump(&mut c.system, p),
                 ComponentMask::PROCESSES => bump(&mut c.processes, p),
-                ComponentMask::TABLE => bump(&mut c.table, p),
-                ComponentMask::CONNECTIONS => bump(&mut c.connections, p),
-                ComponentMask::SERVICES => bump(&mut c.services, p),
-                ComponentMask::STARTUP => bump(&mut c.startup, p),
                 ComponentMask::INVENTORY => bump(&mut c.inventory, p),
                 ComponentMask::WINDOWS => bump(&mut c.windows, p),
                 ComponentMask::DETAILS => bump(&mut c.details, p),
@@ -393,7 +372,11 @@ impl Reducer {
                 _ => bump(&mut c.device_details, p),
             };
         }
+        for session in self.clients.iter_mut() {
+            session.prepare(dirty, c);
+        }
 
+        let local = self.clients.local();
         Snapshot {
             sequence: self.sequence,
             epoch: self.epoch,
@@ -402,10 +385,10 @@ impl Reducer {
             system: Arc::clone(&c.system),
             series: Arc::clone(&c.series),
             processes: Arc::clone(&c.processes),
-            table: Arc::clone(&c.table),
-            connections: Arc::clone(&c.connections),
-            services: Arc::clone(&c.services),
-            startup: Arc::clone(&c.startup),
+            table: Arc::clone(local.table()),
+            connections: Arc::clone(local.connections()),
+            services: Arc::clone(local.services()),
+            startup: Arc::clone(local.startup()),
             inventory: Arc::clone(&c.inventory),
             devices: Arc::clone(&c.devices),
             health: Arc::clone(&c.health),
@@ -508,7 +491,7 @@ pub fn sys_table_index(table: SysTable) -> usize {
 }
 
 /// A snapshot component with a `ComponentHeader`.
-trait Headed: Clone {
+pub(crate) trait Headed: Clone {
     fn header(&self) -> &ComponentHeader;
     fn header_mut(&mut self) -> &mut ComponentHeader;
 }
@@ -545,7 +528,7 @@ headed!(
 /// Makes the header version of `component` at least `published + 1` and returns it. Apply
 /// replaces a changed component with a fresh `Arc`, which is not shared, so `make_mut` does not
 /// copy it.
-fn bump<T: Headed>(component: &mut Arc<T>, published: u64) -> u64 {
+pub(crate) fn bump<T: Headed>(component: &mut Arc<T>, published: u64) -> u64 {
     let version = component.header().version;
     if version > published {
         return version;

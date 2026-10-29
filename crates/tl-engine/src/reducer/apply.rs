@@ -25,7 +25,7 @@ use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
     DiskDetails, DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
-    ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
+    ProcessSnapshot, ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
     WindowsSnapshot,
 };
 use tl_model::system::{GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, SensorKind};
@@ -37,9 +37,10 @@ use super::mem_groups::{DEVICE_KEY_PREFIX, MemGroups, kernel_parts};
 use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
 use super::suspend::Transition;
-use super::sys_table::{self, SysTableInput};
+use super::sys_table::SysTableInput;
 use super::table::{self, PseudoInput, SweepTotals, TableInput};
 use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index};
+use crate::client_session::{ClientMsg, ClientSessionId};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
@@ -425,7 +426,11 @@ impl Reducer {
         match msg {
             EngineMsg::Source(up) => self.apply_source(cx, up, settings),
             EngineMsg::Command(cmd) => {
-                self.apply_command(cx, cmd, settings);
+                self.apply_command(cx, ClientSessionId::LOCAL, cmd, settings);
+                Ok(())
+            }
+            EngineMsg::Client(msg) => {
+                self.apply_client(cx, msg, settings);
                 Ok(())
             }
             EngineMsg::ActionFinished { id } => {
@@ -657,16 +662,58 @@ impl Reducer {
         Ok(())
     }
 
-    fn apply_command(&mut self, cx: &Cx, cmd: Command, settings: &EngineSettings) {
+    /// Opens or closes a client session, or applies its command (ADR-018). A new session's
+    /// table and system tables are built at once, so its first publish has them.
+    fn apply_client(&mut self, cx: &Cx, msg: ClientMsg, settings: &EngineSettings) {
+        match msg {
+            ClientMsg::Open { id, link } => {
+                let empty = Snapshot::empty(self.boot_id, self.epoch);
+                if let Err(e) = self.clients.open(id, link, &empty) {
+                    tracing::warn!(target: "tasklens::engine", id = id.0, "client session refused: {e}");
+                    return;
+                }
+                self.rebuild_tables(settings, Some(id));
+                for table in [SysTable::Services, SysTable::Startup, SysTable::Connections] {
+                    self.rebuild_sys_for(table, settings, Some(id));
+                }
+            }
+            ClientMsg::Close(id) => {
+                if !self.clients.close(id) {
+                    tracing::debug!(target: "tasklens::engine", id = id.0, "close: no such client session");
+                }
+            }
+            ClientMsg::Command { id, cmd } => {
+                if self.clients.get(id).is_none() {
+                    tracing::debug!(target: "tasklens::engine", id = id.0, "command from a closed client session dropped");
+                    return;
+                }
+                self.apply_command(cx, id, *cmd, settings);
+            }
+        }
+    }
+
+    /// Applies one command of session `id`, which is open. Table and system table queries are
+    /// that session's; every other command is shared (ADR-018).
+    fn apply_command(
+        &mut self,
+        cx: &Cx,
+        id: ClientSessionId,
+        cmd: Command,
+        settings: &EngineSettings,
+    ) {
         match cmd {
             Command::SetTableQuery(q) => {
-                self.query = q;
-                self.rebuild_table(settings);
+                if let Some(session) = self.clients.get_mut(id) {
+                    session.query = q;
+                }
+                self.rebuild_tables(settings, Some(id));
             }
             Command::SetSysTableQuery(q) => {
                 let table = q.table;
-                self.sys_queries[sys_table_index(table)] = Some(q);
-                self.rebuild_sys(table, settings);
+                if let Some(session) = self.clients.get_mut(id) {
+                    session.sys_queries[sys_table_index(table)] = Some(q);
+                }
+                self.rebuild_sys_for(table, settings, Some(id));
             }
             Command::Action(req) => {
                 if let Some(gate) = self.action_gate.as_mut() {
@@ -1936,9 +1983,15 @@ impl Reducer {
                 .any(|x| x.unit.as_ref().is_some_and(|u| changed.contains(u)))
     }
 
-    /// Rebuilds the process table and its header totals from the current state. Always marks
-    /// `TABLE`, so `query_generation` is echoed even when the rows are equal.
+    /// Rebuilds every session's process table and the header totals from the current state.
     fn rebuild_table(&mut self, settings: &EngineSettings) {
+        self.rebuild_tables(settings, None);
+    }
+
+    /// Rebuilds the process table of session `only`, or of every session for `None`, and the
+    /// header totals. Always marks the session's `TABLE`, so `query_generation` is echoed even
+    /// when the rows are equal.
+    fn rebuild_tables(&mut self, settings: &EngineSettings, only: Option<ClientSessionId>) {
         let processes = Arc::clone(&self.components.processes);
         let system = Arc::clone(&self.components.system);
         let devices = Arc::clone(&self.components.devices);
@@ -1955,8 +2008,7 @@ impl Reducer {
             pseudo: Some(&self.apply_state.pseudo),
             mem_groups: &self.apply_state.mem_groups.keys,
         };
-        let mut view = table::build(&input, &self.query);
-        view.totals = table::totals(
+        let totals = table::totals(
             &system,
             &devices,
             &SweepTotals {
@@ -1964,12 +2016,20 @@ impl Reducer {
                 file_nr: self.processes.file_nr(),
             },
         );
-        view.header = ComponentHeader {
+        let header = ComponentHeader {
             version: 0,
             ..processes.header
         };
-        self.components.table = Arc::new(view);
-        self.mark(ComponentMask::TABLE);
+        for session in self
+            .clients
+            .iter_mut()
+            .filter(|s| only.is_none_or(|id| s.id() == id))
+        {
+            let mut view = table::build(&input, &session.query);
+            view.totals = totals.clone();
+            view.header = header;
+            session.set_table(view);
+        }
         self.refresh_app_details();
     }
 
@@ -2197,11 +2257,21 @@ impl Reducer {
         matched
     }
 
-    /// Rebuilds the rows of one system table from its component and stored query, and echoes
-    /// the query generation and stores the table's counts. Always marks the
-    /// component, so the generation is echoed even when the rows are equal (E09-027).
+    /// Rebuilds the rows of one system table for every session.
     fn rebuild_sys(&mut self, table: SysTable, settings: &EngineSettings) {
-        let query = self.sys_query(table);
+        self.rebuild_sys_for(table, settings, None);
+    }
+
+    /// Rebuilds the rows of one system table of session `only`, or of every session for `None`,
+    /// from the shared component and the session's stored query. Echoes the query generation
+    /// and stores the table's counts. Always marks the session's part, so the generation is
+    /// echoed even when the rows are equal (E09-027).
+    fn rebuild_sys_for(
+        &mut self,
+        table: SysTable,
+        settings: &EngineSettings,
+        only: Option<ClientSessionId>,
+    ) {
         let c = &self.components;
         let input = SysTableInput {
             services: &c.services,
@@ -2210,32 +2280,12 @@ impl Reducer {
             processes: &c.processes,
             settings,
         };
-        match table {
-            SysTable::Services => {
-                let (out, counts, manager_counts) = sys_table::build_services(&input, &query);
-                let next = Arc::make_mut(&mut self.components.services);
-                next.rows = out.rows;
-                next.query_generation = out.query_generation;
-                next.counts = counts;
-                next.manager_counts = manager_counts;
-                self.mark(ComponentMask::SERVICES);
-            }
-            SysTable::Startup => {
-                let (out, counts) = sys_table::build_startup(&input, &query);
-                let next = Arc::make_mut(&mut self.components.startup);
-                next.rows = out.rows;
-                next.query_generation = out.query_generation;
-                next.counts = counts;
-                self.mark(ComponentMask::STARTUP);
-            }
-            SysTable::Connections => {
-                let (out, counts) = sys_table::build_connections(&input, &query);
-                let next = Arc::make_mut(&mut self.components.connections);
-                next.rows = out.rows;
-                next.query_generation = out.query_generation;
-                next.counts = counts;
-                self.mark(ComponentMask::CONNECTIONS);
-            }
+        for session in self
+            .clients
+            .iter_mut()
+            .filter(|s| only.is_none_or(|id| s.id() == id))
+        {
+            session.rebuild_sys(table, &input);
         }
     }
 }
