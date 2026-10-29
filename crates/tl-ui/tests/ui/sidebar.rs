@@ -1251,6 +1251,28 @@ mod sidebar {
         assert_eq!(prepared(&mut r, "cpu").clear, px(0.));
     }
 
+    /// tasklens-crw.101: the Overview card's title reads "Overview", not "…", at every nav_width
+    /// from 180 to 400.
+    #[gpui_kit::test]
+    fn overview_card_title_is_overview_at_every_width(cx: &mut TestAppContext) {
+        let mut settings = with_overview();
+        settings.motion.animations = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
+        for w in (180..=400).step_by(10) {
+            r.host_w.set(w as f32);
+            r.vcx.update(|window, _| window.refresh());
+            draw(r.vcx);
+            publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
+            draw(r.vcx);
+            assert_eq!(keys(&mut r)[0], OVERVIEW);
+            let heading = prepared(&mut r, OVERVIEW).layout.heading;
+            let rows: Vec<&str> = heading.rows.iter().map(|row| &*row.text).collect();
+            assert_eq!(rows, ["Overview"], "width {w}");
+            assert!(!heading.cut, "width {w}");
+        }
+    }
+
     /// UI-PRF-058: the top card leaves a column as wide as the sidebar's edit button plus sp3
     /// free at its right, so no text runs under the button. Here the CPU card is first.
     #[gpui_kit::test]
