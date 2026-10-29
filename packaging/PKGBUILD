@@ -4,7 +4,7 @@
 # before running makepkg in this folder.
 
 pkgname=tasklens
-pkgver=1.0.3
+pkgver=1.0.8
 pkgrel=1
 pkgdesc='Task manager for Linux'
 arch=('x86_64')
