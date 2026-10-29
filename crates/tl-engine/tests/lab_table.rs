@@ -1063,6 +1063,8 @@ fn mem_group_filter_exact() {
         // Its name matches "claude", but it is not in the group.
         rec(6, 1, "claude-notes", 0.0),
         kthread(7),
+        // A child of a claude process in another group.
+        rec(8, 2, "node", 0.0),
     ];
     let key = |k: &str| -> Arc<str> { Arc::from(k) };
     let mem_groups: FxHashMap<ProcessKey, Arc<str>> = records
@@ -1073,6 +1075,7 @@ fn mem_group_filter_exact() {
                 2 | 3 => key("exe:claude"),
                 4 | 5 => key("app:firefox"),
                 6 => key("exe:vim"),
+                8 => key("exe:node"),
                 _ => key("system"),
             };
             (r.key, k)
@@ -1133,10 +1136,27 @@ fn mem_group_filter_exact() {
         .collect();
     assert_eq!(rows, [(2, 0), (3, 0)]);
 
+    // Include children does not pull in a child from another group.
+    let mut q = query(TableMode::Tree, "pid", true, "", &nodes(&records, &[1, 2]));
+    q.mem_group = Some(Arc::from("exe:claude"));
+    q.include_children = true;
+    let v = build_mem(&records, &[], &[], None, &mem_groups, &q, &settings());
+    let rows: Vec<u32> = v
+        .rows
+        .iter()
+        .map(|row| {
+            records[row.record.expect("tree rows are processes") as usize]
+                .key
+                .pid
+        })
+        .collect();
+    assert_eq!(rows, [2, 3]);
+    assert_eq!(v.shown, 2);
+
     // Without a group the filter is off.
     let q = query(TableMode::Flat, "pid", true, "", &[]);
     let v = build_mem(&records, &[], &[], None, &mem_groups, &q, &settings());
-    assert_eq!(v.shown, 7);
+    assert_eq!(v.shown, 8);
 }
 
 /// Apps (one nested in another), a two-process unit, loose Background and System processes,

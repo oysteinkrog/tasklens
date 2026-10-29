@@ -848,8 +848,13 @@ impl TreeEmit<'_> {
 
 /// Tree mode visibility: a record is visible when it is in `matches` or, with
 /// `include_children`, when any ancestor in the full ppid forest is (PROC-045).
-/// Records hidden by `hide_system` never become visible this way.
-fn tree_visible(input: &TableInput<'_>, matches: &[u32], include_children: bool) -> Vec<bool> {
+/// Records hidden by `hide_system` or outside `mem_group` never become visible this way.
+fn tree_visible(
+    input: &TableInput<'_>,
+    matches: &[u32],
+    include_children: bool,
+    mem_group: Option<&str>,
+) -> Vec<bool> {
     let records = input.records;
     let mut visible = vec![false; records.len()];
     for &i in matches {
@@ -863,7 +868,7 @@ fn tree_visible(input: &TableInput<'_>, matches: &[u32], include_children: bool)
             mark_subtree(&all, i, &mut reached, &mut stack);
         }
         for (i, (v, r)) in visible.iter_mut().zip(reached).enumerate() {
-            *v |= r && !hidden(input, i);
+            *v |= r && !hidden(input, i) && in_mem_group(input, mem_group, &records[i]);
         }
     }
     visible
@@ -880,8 +885,9 @@ fn tree_rows(
     query: &TableQuery,
     filter: &Filter,
 ) -> (Vec<TableRow>, Vec<GroupRow>, Vec<GroupRow>, u32) {
-    let matches = filtered(input, filter, query.mem_group.as_deref());
-    let visible = tree_visible(input, &matches, query.include_children);
+    let mem_group = query.mem_group.as_deref();
+    let matches = filtered(input, filter, mem_group);
+    let visible = tree_visible(input, &matches, query.include_children, mem_group);
     let shown = visible.iter().filter(|v| **v).count() as u32;
     let f = forest(input.records, &visible);
     let expanded: FxHashSet<NodeId> = query.expanded.iter().cloned().collect();
