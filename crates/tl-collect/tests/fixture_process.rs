@@ -1355,7 +1355,7 @@ fn sweep_fd_count_only_when_wanted() {
 }
 
 /// tasklens-8fx.45: in memory-only mode a pid of the last sweep gets only its `statm` read, with
-/// no `io` and no rates, until its tenth of the sweeps (pid 4201: sweep 11) reads `stat` again.
+/// no `io` and no rates, until its statm text size changes, as on an exec: then `stat` is read.
 #[test]
 fn sweep_mem_only_reads_statm_of_known_pid() {
     let (_tmp, root) = sweep_root();
@@ -1379,7 +1379,8 @@ fn sweep_mem_only_reads_statm_of_known_pid() {
         b"666958 70000 60000 181 0 58 0\n",
     )
     .expect("statm");
-    for _ in 2..=10 {
+    // The text size (181) stands.
+    for _ in 2..=20 {
         core.sweep_core(&ctx, &mut out);
         let p = only(&out);
         assert_eq!(p.key, key);
@@ -1394,7 +1395,12 @@ fn sweep_mem_only_reads_statm_of_known_pid() {
     );
     assert_eq!(io_reads(), io0);
 
-    // The pid's tenth reads stat, and without it the process is skipped.
+    // A new text size reads stat, and without it the process is skipped.
+    fs::write(
+        root.proc_path("4201/statm"),
+        b"666958 70000 60000 900 0 58 0\n",
+    )
+    .expect("statm");
     core.sweep_core(&ctx, &mut out);
     assert!(out.is_empty());
 
