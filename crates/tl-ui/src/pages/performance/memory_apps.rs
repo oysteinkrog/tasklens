@@ -86,18 +86,32 @@ pub struct Ranker {
 }
 
 impl Ranker {
-    /// Ranks `means` (group key, mean over the visible range) at `now_ns`. Does nothing within
-    /// [`RERANK_NS`] of the last ranking unless `force` or nothing is ranked yet. Groups ranked before keep their order
-    /// unless the one below has a mean at least [`RANK_MARGIN`] times larger; new groups join
-    /// below them, largest first. Groups without a mean leave. Returns whether the order changed.
+    /// Ranks `means` (group key, mean over the visible range) at `now_ns`. Groups ranked before
+    /// keep their order unless the one below has a mean at least [`RANK_MARGIN`] times larger;
+    /// new groups join below them, largest first. Groups without a mean leave. Within
+    /// [`RERANK_NS`] of the last ranking (unless `force` or nothing is ranked yet) only the new
+    /// groups join, below the others, so every group with data is in a band. Returns whether
+    /// the order changed.
     pub fn rank(&mut self, means: &[(Arc<str>, f64)], now_ns: u64, force: bool) -> bool {
+        let fresh_of = |order: &[Arc<str>]| {
+            let mut fresh: Vec<(Arc<str>, f64)> = means
+                .iter()
+                .filter(|(k, _)| !order.contains(k))
+                .cloned()
+                .collect();
+            fresh.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            fresh
+        };
         if !force
             && !self.order.is_empty()
             && self
                 .ranked_at
                 .is_some_and(|t| now_ns.saturating_sub(t) < RERANK_NS)
         {
-            return false;
+            let fresh = fresh_of(&self.order);
+            let changed = !fresh.is_empty();
+            self.order.extend(fresh.into_iter().map(|(k, _)| k));
+            return changed;
         }
         self.ranked_at = Some(now_ns);
         let mean_of = |key: &str| means.iter().find(|(k, _)| &**k == key).map(|m| m.1);
@@ -106,13 +120,7 @@ impl Ranker {
             .iter()
             .filter_map(|k| mean_of(k).map(|m| (Arc::clone(k), m)))
             .collect();
-        let mut fresh: Vec<(Arc<str>, f64)> = means
-            .iter()
-            .filter(|(k, _)| !order.iter().any(|(o, _)| o == k))
-            .cloned()
-            .collect();
-        fresh.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        order.extend(fresh);
+        order.extend(fresh_of(&self.order));
         // Each swap moves a strictly larger mean up, so this ends.
         loop {
             let mut swapped = false;

@@ -826,7 +826,7 @@ mod by_app {
     use tl_model::system::MemGroupBand;
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
     use tl_ui::pages::performance::memory_apps::{
-        APPS_ID, BandKind, LEGEND_ID, Ranker, TOOLTIP_ID, legend_fit, pick_colors,
+        APPS_ID, BandKind, LEGEND_ID, Ranker, TOOLTIP_ID, legend_fit, pick_colors, split_top,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue};
 
@@ -1014,6 +1014,20 @@ mod by_app {
         // 15% larger after 10 s: swap.
         assert!(r.rank(&means(100., 115.), 30_000_000_000, false));
         assert_eq!(order(&r), ["b", "a"]);
+
+        // Groups that arrive within 10 s of the last ranking join below the others at once,
+        // largest first, so with 2 bands shown they add up into "Other apps".
+        let mut with_new = means(100., 115.);
+        with_new.push((Arc::from("c"), 50.));
+        with_new.push((Arc::from("d"), 500.));
+        assert!(r.rank(&with_new, 35_000_000_000, false));
+        assert_eq!(order(&r), ["b", "a", "d", "c"]);
+        let (top, rest) = split_top(r.order(), 2);
+        assert_eq!(top.len() + rest.len(), with_new.len());
+        assert!(!r.rank(&with_new, 36_000_000_000, false));
+        // The next ranking moves the larger newcomer up.
+        r.rank(&with_new, 40_000_000_000, false);
+        assert_eq!(order(&r), ["d", "b", "a", "c"]);
     }
 
     #[test]
