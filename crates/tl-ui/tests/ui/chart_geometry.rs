@@ -563,6 +563,87 @@ fn stacked_gap_in_middle_series() {
     assert!(cache.gaps.is_empty());
 }
 
+/// Three bands of 10, 20 and 30 on a 1 s grid, built stacked to 100.
+fn stack_three(data: &[Vec<Sample>]) -> ChartCache {
+    let map = exact_map(&data[0]);
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), SEC)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+        .collect();
+    let mut cache = ChartCache::default();
+    let now = data[0][data[0].len() - 1].t_ns;
+    stack_build(&spec, map, now, 100.0, &mut cache, &mut Scratch::default());
+    cache
+}
+
+/// A slow sweep ends 0.6 s late and the next one 0.1 s late, so two samples of each series fall
+/// in one period slot. Each lower sample counts once in the floor above it (tasklens-o55.53,
+/// UI-PRF-060).
+#[test]
+fn stacked_same_slot_counts_once() {
+    let vals = [10.0, 20.0, 30.0];
+    let data: Vec<Vec<Sample>> = vals
+        .iter()
+        .map(|&v| {
+            let mut s = series(60, SEC, 10 * SEC, move |_| v);
+            s[30].t_ns += 600 * MS;
+            s[31].t_ns += 100 * MS;
+            s
+        })
+        .collect();
+    let map = exact_map(&data[0]);
+    let cache = stack_three(&data);
+    let y = |v: f32| y_of(v, 0.0, 100.0, 100.0);
+
+    for i in [30, 31] {
+        let x = map.x_local(data[0][i].t_ns);
+        assert!(
+            has_vertex(&cache.fills[1], x, y(10.0)),
+            "band 1 floor at {i}"
+        );
+        assert!(has_vertex(&cache.fills[1], x, y(30.0)), "band 1 top at {i}");
+        assert!(
+            has_vertex(&cache.fills[2], x, y(30.0)),
+            "band 2 floor at {i}"
+        );
+        assert!(has_vertex(&cache.fills[2], x, y(60.0)), "band 2 top at {i}");
+    }
+    for (k, top) in [10.0, 30.0, 60.0].into_iter().enumerate() {
+        assert!(
+            ys(&cache.fills[k]).all(|v| v >= y(top) - 0.01),
+            "band {k} above its top"
+        );
+    }
+}
+
+/// A sweep late past the stale limit breaks every band at the same time: one empty column, no
+/// partial stack (tasklens-o55.53, UI-PRF-060).
+#[test]
+fn stacked_all_bands_gap_together() {
+    let vals = [10.0, 20.0, 30.0];
+    let data: Vec<Vec<Sample>> = vals
+        .iter()
+        .map(|&v| {
+            let mut s = series(60, SEC, 10 * SEC, move |_| v);
+            s[30].flags |= SampleFlags::GAP_BEFORE;
+            s
+        })
+        .collect();
+    let map = exact_map(&data[0]);
+    let cache = stack_three(&data);
+    let (x29, x30) = (map.x_local(data[0][29].t_ns), map.x_local(data[0][30].t_ns));
+    for (k, fill) in cache.fills.iter().enumerate() {
+        assert!(
+            xs(fill).all(|v| v <= x29 + 0.01 || v >= x30 - 0.01),
+            "band {k} draws inside the gap"
+        );
+        assert!(xs(fill).any(|v| (v - x29).abs() < 0.01), "band {k} before");
+        assert!(xs(fill).any(|v| (v - x30).abs() < 0.01), "band {k} after");
+    }
+}
+
 #[test]
 fn many_series_no_per_rebuild_allocation() {
     let data: Vec<Vec<Sample>> = (0..32)

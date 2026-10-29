@@ -301,14 +301,15 @@ pub struct Scratch {
     pts: Vec<Pt>,
     stale_pts: Vec<Pt>,
     /// Stacked mode: the current series' window with cumulative values, the band floor under
-    /// each of those samples, the floor under each decimated point, and the running sum per
-    /// period slot.
+    /// each of those samples, the floor under each decimated point, and the running sums as
+    /// (time, sum) sorted by time, read from `acc` and written to `acc_next`.
     stacked: Vec<Sample>,
     /// Series drawn as means (`ChartSeries::mean_ns`): the window's means.
     meaned: Vec<Sample>,
     floors: Vec<f32>,
     pt_floors: Vec<f32>,
-    acc: Vec<f32>,
+    acc: Vec<(u64, f32)>,
+    acc_next: Vec<(u64, f32)>,
     /// Grid cells: the decimated points after clipping to the cell, physical px.
     clipped: Vec<Point<Pixels>>,
     /// Grid cells: the last built cell's dotted-gap spans, chart-local physical px.
@@ -356,79 +357,89 @@ impl Scratch {
     }
 }
 
-/// Period slots that align stacked series by bucket index, so ±period/2 jitter still lands in one
-/// slot (ADR-008: per-core series come from one `/proc/stat` read).
+/// Aligns stacked series by sample time (UI-PRF-060). Series read in one pass (one
+/// `/proc/stat` read, ADR-008, or one process sweep) share their sample times, so a sample takes
+/// the lower series' running sum at its own time. Failing that it takes the nearest sum within
+/// half a period that no earlier sample of the same series took, so jitter still stacks. A sum
+/// takes at most one sample per series, so two samples less than a period apart never count a
+/// lower series twice.
 struct StackGrid {
-    period_ns: u64,
-    first_slot: u64,
+    half_ns: u64,
 }
 
 impl StackGrid {
-    /// Slots from the window's left overscan edge to the newest sample of any series. The period
-    /// is the first present series' period.
-    fn new(input: &BuildInput, acc: &mut Vec<f32>) -> Self {
+    /// Clears the running sums. The period is the first present series' period.
+    fn new(input: &BuildInput, acc: &mut Vec<(u64, f32)>) -> Self {
         let period_ns = input
             .series
             .iter()
             .find_map(|(_, v)| v.map(|v| v.period_ns))
             .unwrap_or(1)
             .max(1);
-        let map = &input.map;
-        let left = map
-            .right_edge_ns
-            .saturating_sub(map.range_ns)
-            .saturating_sub(period_ns.saturating_mul(2));
-        let grid = Self {
-            period_ns,
-            first_slot: left / period_ns,
-        };
-        let newest = input
-            .series
-            .iter()
-            .filter_map(|(_, v)| v.and_then(|v| v.samples.last()).map(|s| s.t_ns))
-            .max()
-            .unwrap_or(0);
-        let len = grid.slot(newest).map_or(0, |i| i + 1);
         acc.clear();
-        acc.resize(len, 0.0);
-        grid
+        Self {
+            half_ns: period_ns / 2,
+        }
     }
 
-    fn slot(&self, t_ns: u64) -> Option<usize> {
-        let k = t_ns.saturating_add(self.period_ns / 2) / self.period_ns;
-        usize::try_from(k.checked_sub(self.first_slot)?).ok()
-    }
-
-    /// Copies `samples` into `out` with each valid value raised by the sum of the lower series in
-    /// its slot, and that sum into `floors`. A slot that a lower series missed counts it as 0.
-    fn stack(&self, samples: &[Sample], acc: &[f32], out: &mut Vec<Sample>, floors: &mut Vec<f32>) {
+    /// Copies `samples` into `out` with each valid value raised by the sum of the lower series at
+    /// its time, and that sum into `floors`. A time that a lower series missed counts it as 0.
+    /// `acc` holds the running sums as (time, sum) sorted by time; `next` gets them with the
+    /// valid values of `samples` added.
+    fn stack(
+        &self,
+        samples: &[Sample],
+        acc: &[(u64, f32)],
+        next: &mut Vec<(u64, f32)>,
+        out: &mut Vec<Sample>,
+        floors: &mut Vec<f32>,
+    ) {
         out.clear();
         floors.clear();
+        next.clear();
+        // Sums before `j` are taken or out of reach of every later sample.
+        let mut j = 0;
         for s in samples {
-            let floor = if s.flags.contains(SampleFlags::VALID) {
-                self.slot(s.t_ns)
-                    .and_then(|i| acc.get(i))
-                    .copied()
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
+            let mut floor = 0.0;
+            if s.flags.contains(SampleFlags::VALID) {
+                let t = s.t_ns;
+                let reach = t.saturating_sub(self.half_ns)..=t.saturating_add(self.half_ns);
+                while j < acc.len() && acc[j].0 < *reach.start() {
+                    next.push(acc[j]);
+                    j += 1;
+                }
+                // The nearest sum in reach; a tie goes to the earlier one.
+                let mut best: Option<(usize, u64)> = None;
+                for (k, &(at, _)) in acc.iter().enumerate().skip(j) {
+                    if !reach.contains(&at) {
+                        break;
+                    }
+                    let d = at.abs_diff(t);
+                    if best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some((k, d));
+                    }
+                }
+                match best {
+                    Some((k, _)) => {
+                        next.extend_from_slice(&acc[j..k]);
+                        let (at, sum) = acc[k];
+                        floor = sum;
+                        next.push((at, sum + s.value));
+                        j = k + 1;
+                    }
+                    None => next.push((t, s.value)),
+                }
+            }
             out.push(Sample {
                 value: s.value + floor,
                 ..*s
             });
             floors.push(floor);
         }
-    }
-
-    /// Adds the valid values of `samples` to their slots.
-    fn add(&self, samples: &[Sample], acc: &mut [f32]) {
-        for s in samples {
-            if s.flags.contains(SampleFlags::VALID)
-                && let Some(a) = self.slot(s.t_ns).and_then(|i| acc.get_mut(i))
-            {
-                *a += s.value;
-            }
+        next.extend_from_slice(&acc[j..]);
+        // A new sum can land before one taken just above it. Sorting in place allocates nothing.
+        if !next.is_sorted_by_key(|e| e.0) {
+            next.sort_unstable_by_key(|e| e.0);
         }
     }
 }
@@ -1135,8 +1146,9 @@ fn stroke_set(color: Hsla, dashed: bool, mesh: &mut StrokeMesh) -> Option<PathSe
 /// Gaps come from the first series only. `cache.newest` gets each series' newest drawn point.
 ///
 /// With `input.stack`, series are stacked in order: each valid sample of series `k` is raised by
-/// the values of series `0..k` in the same period slot, and its fill goes down to that floor
-/// instead of the baseline. Runs, gaps and decimation stay per series.
+/// the values of series `0..k` at the same time, each lower sample counted once (`StackGrid`,
+/// UI-PRF-060), and its fill goes down to that floor instead of the baseline. Runs, gaps and
+/// decimation stay per series.
 pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) {
     let map = &input.map;
     let Scratch {
@@ -1148,6 +1160,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         floors,
         pt_floors,
         acc,
+        acc_next,
         line,
         live,
         stale,
@@ -1172,8 +1185,8 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         let (samples, from, band_floors): (&[Sample], usize, Option<&[f32]>) = match &grid {
             Some(g) => {
                 let window = &view.samples[from..];
-                g.stack(window, acc, stacked, floors);
-                g.add(window, acc);
+                g.stack(window, acc, acc_next, stacked, floors);
+                std::mem::swap(acc, acc_next);
                 (&stacked[..], 0, Some(&floors[..]))
             }
             None if spec.mean_ns > 0 => {
