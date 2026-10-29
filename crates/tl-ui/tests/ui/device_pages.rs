@@ -2757,6 +2757,10 @@ fn modules_collapsed_when_more_than_4(cx: &mut TestAppContext) {
     });
     assert!(r.vcx.debug_bounds("perf-mem-module-grid-0").is_none());
 
+    // The modules block sits below the fold of an 800 px window.
+    r.vcx.simulate_resize(size(px(1280.), px(1600.)));
+    r.vcx.update(|window, _| window.activate_window());
+    draw(r.vcx);
     let at = r
         .vcx
         .debug_bounds("perf-mem-module-chevron-0")
