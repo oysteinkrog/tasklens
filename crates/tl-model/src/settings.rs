@@ -712,7 +712,7 @@ pub struct OverviewBoxSetting {
 /// The layout modes of each Overview box kind (UI-PRF-019), the default mode first.
 pub const OVERVIEW_BOX_MODES: [(&str, &[&str]); 7] = [
     ("cpu", &["chart_cores", "chart", "cores", "core_charts"]),
-    ("memory", &["rows", "chart_rows", "chart", "charts"]),
+    ("memory", &["rows", "chart_rows", "chart", "charts", "apps"]),
     ("gpu", &["engine_charts", "chart_engines", "chart"]),
     ("disk", &["disk_charts", "rows", "total_chart"]),
     ("net", &["stacked", "columns", "combined", "adapter_charts"]),
@@ -2950,6 +2950,16 @@ mod tests {
         assert!(changed.is_empty(), "{changed:?}");
         let b = first(&s);
         assert_eq!(b.mode.as_deref(), Some("chart_engines"));
+    }
+
+    #[test]
+    fn overview_memory_apps_mode_kept() {
+        // UI-PRF-060: the Memory box's "By app" mode is a saved mode like the others.
+        let mem = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"memory\", \
+                   width = 1.0, mode = \"apps\" }] }]\n";
+        let (s, changed) = load_toml(mem);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(first(&s).mode.as_deref(), Some("apps"));
     }
 
     #[test]
