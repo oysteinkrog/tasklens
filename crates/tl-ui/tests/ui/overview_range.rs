@@ -428,6 +428,53 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     }
 }
 
+/// UI-PRF-060: with `history.device_metrics` off, 24 h and 7 d are disabled in both switches,
+/// so a click keeps the range. 1 min to 1 h stay. Turned on again, 24 h can be picked.
+#[gpui_kit::test]
+fn overview_range_long_ranges_need_device_history(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let segment = |prefix: &str, range: OverviewRange| -> &'static str {
+        Box::leak(segment_id(prefix, range).into_boxed_str())
+    };
+    let saved = |r: &mut Rig| {
+        r.vcx
+            .update(|_, cx| TlSettings::settings(cx).performance.overview_range)
+    };
+    let set_kept = |r: &mut Rig, on: bool| {
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.history.device_metrics = on);
+        });
+        draw(r.vcx);
+    };
+    set_kept(&mut r, false);
+    for range in [OverviewRange::H24, OverviewRange::D7] {
+        click(r.vcx, segment(STATUS_SWITCH, range));
+        assert_eq!(saved(&mut r), OverviewRange::M1, "{range:?} in the bar");
+    }
+    click(r.vcx, segment(STATUS_SWITCH, OverviewRange::H1));
+    assert_eq!(saved(&mut r), OverviewRange::H1, "1 h stays enabled");
+
+    // The bar off: the Overview header's switch has the same rule.
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            d.settings.performance.status_bar = StatusBarPlacement::Off;
+        });
+    });
+    draw(r.vcx);
+    for range in [OverviewRange::H24, OverviewRange::D7] {
+        click(r.vcx, segment(HEADER_SWITCH, range));
+        assert_eq!(saved(&mut r), OverviewRange::H1, "{range:?} in the header");
+    }
+    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::M5));
+    assert_eq!(saved(&mut r), OverviewRange::M5);
+
+    set_kept(&mut r, true);
+    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::H24));
+    assert_eq!(saved(&mut r), OverviewRange::H24, "enabled again");
+    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::D7));
+    assert_eq!(saved(&mut r), OverviewRange::D7);
+}
+
 /// min, avg and peak of the CPU total: the valid live samples at 1 min, and the stored min,
 /// mean and max of the history points at 24 h, gaps left out.
 #[gpui_kit::test]

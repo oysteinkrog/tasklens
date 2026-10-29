@@ -876,6 +876,7 @@ perf-overview-timeline-click-preview = Preview for 30 s
 perf-overview-timeline-click-history = Open History mode
 perf-overview-back-to-live = Back to live
 perf-overview-range-not-kept = Not kept at this resolution
+perf-overview-range-history-off = Device history is off
 
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page

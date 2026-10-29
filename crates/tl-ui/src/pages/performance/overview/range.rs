@@ -102,16 +102,25 @@ pub fn history_request(
     })
 }
 
+/// `history.device_metrics`, on before settings load. 24 h and 7 d read only the stored history,
+/// so with it off their segments are disabled (UI-PRF-060).
+pub fn history_kept(cx: &App) -> bool {
+    !cx.has_global::<TlSettings>() || TlSettings::settings(cx).history.device_metrics
+}
+
 /// The segmented switch: one segment per range, the current one on. A click saves the range.
 /// While paused, a range the history cannot serve at the picked time is disabled with "Not kept
-/// at this resolution" (UI-PRF-057).
+/// at this resolution" (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are
+/// disabled with "Device history is off" (UI-PRF-060).
 pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
     let current = current_range(cx);
     let paused = timeline::paused(cx);
     let now = timeline::now_realtime_ns();
+    let kept = history_kept(cx);
     let mut row = div().flex().flex_row().flex_none();
     for (range, key) in OverviewRange::ALL.into_iter().zip(SWITCH_KEYS) {
         let id = segment_id(prefix, range);
+        let stored = kept || !matches!(range, OverviewRange::H24 | OverviewRange::D7);
         let servable = paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
         let mut button = TlButton::new(
             ElementId::Name(segment_id(prefix, range).into()),
@@ -120,9 +129,11 @@ pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
             },
         )
         .label(tr(cx, key))
-        .disabled(!servable)
+        .disabled(!stored || !servable)
         .on_click(move |_, _, cx| set_range(range, cx));
-        if !servable {
+        if !stored {
+            button = button.tooltip(tr(cx, "perf-overview-range-history-off"));
+        } else if !servable {
             button = button.tooltip(tr(cx, "perf-overview-range-not-kept"));
         }
         row = row.child(div().debug_selector(move || id.clone()).child(button));

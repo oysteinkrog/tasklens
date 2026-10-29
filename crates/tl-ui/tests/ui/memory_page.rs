@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
+    Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
@@ -29,6 +29,7 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::actions::PerfToggleMemorySwapGraph;
 use tl_ui::pages::performance::memory::{COMMIT_ID, MemoryPage, PHYSICAL_ID, SWAP_ID};
+use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
@@ -38,11 +39,30 @@ const GIB: u64 = 1 << 30;
 /// The Memory device in the fake catalog.
 const MEM: DeviceIdx = DeviceIdx(1);
 
-struct Host(Entity<MemoryPage>);
+/// The page, and in [`open_with_box`] an Overview Memory box (its width and height) left of it.
+struct Host {
+    page: Entity<MemoryPage>,
+    mem_box: Option<(Entity<MemBox>, f32, f32)>,
+}
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1000.)).h(px(2000.)).child(self.0.clone())
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
+        let page = div().w(px(1000.)).h(px(2000.)).child(self.page.clone());
+        let Some((mem, w, h)) = &self.mem_box else {
+            return page.into_any_element();
+        };
+        div()
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(*w))
+                    .h(px(*h))
+                    .child(mem.clone().cached(StyleRefinement::default().size_full())),
+            )
+            .child(page.flex_none())
+            .into_any_element()
     }
 }
 
@@ -79,6 +99,9 @@ fn system(total: u64, commit_limit: u64, swap_total: u64) -> SystemSnapshot {
 
 struct Rig<'a> {
     page: Entity<MemoryPage>,
+    host: Entity<Host>,
+    /// The Overview Memory box in "By app" mode, from [`open_with_box`].
+    mem_box: Option<Entity<MemBox>>,
     demand: Entity<DemandAggregator>,
     engine: Arc<FakeEngine>,
     /// A live chart asks the window's driver for its next frame.
@@ -98,6 +121,21 @@ fn draw(cx: &mut VisualTestContext) {
 
 /// A Memory page over `sys` in a 1000 px wide window, with `settings`, its root focused.
 fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig<'_> {
+    open_in(cx, settings, sys, false)
+}
+
+/// [`open`] with an Overview Memory box in "By app" mode, 700 × 400, left of the page. Both read
+/// the same snapshots (UI-PRF-060: the box follows the page's By app rules).
+fn open_with_box(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig<'_> {
+    open_in(cx, settings, sys, true)
+}
+
+fn open_in(
+    cx: &mut TestAppContext,
+    settings: Settings,
+    sys: SystemSnapshot,
+    with_box: bool,
+) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
         s.devices = Arc::new(DeviceCatalog {
@@ -143,9 +181,20 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
     };
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| MemoryPage::new(key, row, h, d, cx));
-    let host = page.clone();
-    let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
+    let mem_box = with_box.then(|| {
+        let mem = cx.new(|cx| MemBox::new(&hub, MEM, cx));
+        mem.update(cx, |b, cx| b.set_mode(APPS_MODE, cx));
+        mem
+    });
+    let (in_host, box_in_host) = (page.clone(), mem_box.clone());
+    let (host, vcx) = cx.add_window_view(move |_, _| Host {
+        page: in_host,
+        mem_box: box_in_host.map(|b| (b, 700., 400.)),
+    });
     vcx.simulate_scale_factor_change(1.0);
+    if with_box {
+        vcx.simulate_resize(size(px(1800.), px(2000.)));
+    }
     let driver = vcx.update(|window, cx| {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
@@ -156,6 +205,8 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
     draw(vcx);
     Rig {
         page,
+        host,
+        mem_box,
         demand,
         engine,
         _driver: driver,
@@ -821,12 +872,13 @@ mod details {
 
 /// UI-PRF-060: the memory-by-app chart and its legend.
 mod by_app {
-    use tl_model::settings::{GroupColor, MemoryView};
+    use tl_model::settings::{GroupColor, MemoryView, OverviewRange};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::system::MemGroupBand;
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
     use tl_ui::pages::performance::memory_apps::{
-        APPS_ID, BandKind, LEGEND_ID, Ranker, TOOLTIP_ID, legend_fit, pick_colors, split_top,
+        APPS_ID, BandKind, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID, legend_fit, pick_colors,
+        split_top,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue};
 
@@ -1242,12 +1294,24 @@ mod by_app {
         );
     }
 
-    /// Every band rebuild keeps the values and process counts (leader rule 08:21). For each
-    /// trigger (theme, `top_n`, range, view switch, device arrival) the legend values, the
-    /// counts and the stack sum are the same right after the trigger, before any new samples.
+    /// The By app charts of the rig: the page's, then the Overview box's when it has one.
+    fn charts(r: &mut Rig<'_>) -> Vec<Entity<MemoryAppsChart>> {
+        let (page, mem_box) = (r.page.clone(), r.mem_box.clone());
+        r.vcx.update(|_, cx| {
+            let mut out: Vec<_> = page.read(cx).apps().cloned().into_iter().collect();
+            out.extend(mem_box.and_then(|b| b.read(cx).apps().cloned()));
+            out
+        })
+    }
+
+    /// Every band rebuild keeps the values and process counts (leader rules 08:21 and 08:30),
+    /// on the Memory page and in the Overview Memory box. For each trigger (theme, `top_n`, the
+    /// page range, the Overview range, the box resize from legend at the right to legend below,
+    /// the view switch, device arrival) the legend values, the counts and the stack sum are the
+    /// same right after the trigger, before any new samples.
     #[gpui_kit::test]
     fn memory_by_app_rebuild_keeps_values(cx: &mut TestAppContext) {
-        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        let mut r = open_with_box(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         publish_groups(&mut r, 5);
         // The engine also publishes the two fixed bands with their process counts.
         r.engine.publish_with(|s| {
@@ -1267,25 +1331,27 @@ mod by_app {
         });
         draw(r.vcx);
 
-        let apps = |r: &mut Rig<'_>| {
-            r.vcx
-                .update(|_, cx| r.page.read(cx).apps().cloned())
-                .expect("the By app chart")
-        };
-        // Each band's key, value and process count, bottom first, and the stack sum.
+        // For each chart: each band's key, value and process count, bottom first, and the
+        // stack sum.
         let facts = |r: &mut Rig<'_>| {
-            let apps = apps(r);
-            let bands = r.vcx.read_entity(&apps, |a, _| {
-                a.bands()
-                    .iter()
-                    .map(|b| (b.key.clone(), b.value, b.processes))
-                    .collect::<Vec<_>>()
-            });
-            let sum: f64 = bands.iter().map(|&(_, v, _)| v).sum();
-            (bands, sum)
+            charts(r)
+                .iter()
+                .map(|apps| {
+                    let bands = r.vcx.read_entity(apps, |a, _| {
+                        a.bands()
+                            .iter()
+                            .map(|b| (b.key.clone(), b.value, b.processes))
+                            .collect::<Vec<_>>()
+                    });
+                    let sum: f64 = bands.iter().map(|&(_, v, _)| v).sum();
+                    (bands, sum)
+                })
+                .collect::<Vec<_>>()
         };
         let before = facts(&mut r);
-        let (bands, sum) = &before;
+        assert_eq!(before.len(), 2, "the page and the box");
+        assert_eq!(before[1], before[0], "the box shows what the page shows");
+        let (bands, sum) = &before[0];
         assert_eq!(bands.len(), 5, "{bands:?}");
         assert!(bands.iter().all(|&(_, v, _)| v > 0.), "{bands:?}");
         assert_eq!(bands[0].2, Some(3), "a group band's count");
@@ -1295,28 +1361,28 @@ mod by_app {
         assert_eq!(*sum, 18. * f64::from(MIB));
 
         // Theme: new colours, same values.
-        let colour = |r: &mut Rig<'_>| {
-            let apps = apps(r);
-            r.vcx.read_entity(&apps, |a, _| a.bands()[0].color)
+        let colours = |r: &mut Rig<'_>| {
+            charts(r)
+                .iter()
+                .map(|apps| r.vcx.read_entity(apps, |a, _| a.bands()[0].color))
+                .collect::<Vec<_>>()
         };
-        let dark = colour(&mut r);
+        let dark = colours(&mut r);
         r.vcx.update(|_, cx| {
             tl_ui::theme::store::activate("Default Light", tl_ui::theme::ActivateSource::User, cx)
                 .expect("theme exists");
         });
         draw(r.vcx);
-        assert_ne!(
-            colour(&mut r),
-            dark,
-            "the bands take the new theme's colours"
-        );
+        for (i, (light, dark)) in colours(&mut r).into_iter().zip(dark).enumerate() {
+            assert_ne!(light, dark, "chart {i} takes the new theme's colours");
+        }
         assert_eq!(facts(&mut r), before, "after the theme change");
-        let tooltip = {
-            let apps = apps(&mut r);
-            r.vcx
-                .update(|_, cx| apps.read(cx).tooltip_lines(0, None, cx))
-        };
-        assert_eq!(tooltip.len(), 4, "{tooltip:?}");
+        for apps in charts(&mut r) {
+            let tooltip = r
+                .vcx
+                .update(|_, cx| apps.read(cx).tooltip_lines(0, None, cx));
+            assert_eq!(tooltip.len(), 4, "{tooltip:?}");
+        }
 
         // top_n 3 to 4: p3 leaves Other apps for its own band. The bands that stay keep their
         // values and counts, and the new band starts with its own.
@@ -1331,25 +1397,31 @@ mod by_app {
             draw(r.vcx);
         };
         set_top_n(&mut r, 4);
-        let (bands, sum) = facts(&mut r);
-        assert_eq!(sum, before.1, "after top_n 3 to 4");
-        assert_eq!(bands[..3], before.0[..3], "after top_n 3 to 4");
-        assert_eq!(
-            bands[3],
-            (Arc::from("exe:p3"), 2. * f64::from(MIB), Some(3)),
-            "after top_n 3 to 4"
-        );
-        assert_eq!(
-            bands[4].1,
-            2. * f64::from(MIB),
-            "Other apps: p4 and its own"
-        );
-        assert_eq!(bands[4].2, Some(12), "Other apps: p4 and its own");
-        assert_eq!(bands[5], before.0[4], "after top_n 3 to 4");
+        for (i, (bands, sum)) in facts(&mut r).into_iter().enumerate() {
+            let was = &before[i].0;
+            assert_eq!(sum, before[i].1, "chart {i} after top_n 3 to 4");
+            assert_eq!(bands[..3], was[..3], "chart {i} after top_n 3 to 4");
+            assert_eq!(
+                bands[3],
+                (Arc::from("exe:p3"), 2. * f64::from(MIB), Some(3)),
+                "chart {i} after top_n 3 to 4"
+            );
+            assert_eq!(
+                bands[4].1,
+                2. * f64::from(MIB),
+                "chart {i}: Other apps holds p4 and its own"
+            );
+            assert_eq!(
+                bands[4].2,
+                Some(12),
+                "chart {i}: Other apps holds p4 and its own"
+            );
+            assert_eq!(bands[5], was[4], "chart {i} after top_n 3 to 4");
+        }
         set_top_n(&mut r, 3);
         assert_eq!(facts(&mut r), before, "after top_n 4 to 3");
 
-        // Range: 60 s to 300 s.
+        // Range: the page from 60 s to 300 s, the Overview from 1 min to 5 min and back.
         r.vcx.update(|_, cx| {
             TlSettings::set(
                 cx,
@@ -1358,7 +1430,26 @@ mod by_app {
             )
         });
         draw(r.vcx);
-        assert_eq!(facts(&mut r), before, "after the range change");
+        assert_eq!(facts(&mut r), before, "after the page range change");
+        for range in [OverviewRange::M5, OverviewRange::M1] {
+            r.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.performance.overview_range = range);
+            });
+            draw(r.vcx);
+            assert_eq!(facts(&mut r), before, "after the Overview range {range:?}");
+        }
+
+        // Box resize: 700 px wide has the legend at the right, 400 px has it below.
+        for w in [400., 700.] {
+            r.host.update(r.vcx, |h, cx| {
+                if let Some(b) = &mut h.mem_box {
+                    b.1 = w;
+                }
+                cx.notify();
+            });
+            draw(r.vcx);
+            assert_eq!(facts(&mut r), before, "after the box resize to {w} px");
+        }
 
         // View switch: Usage, then By app again.
         for view in [MemoryView::Usage, MemoryView::Apps] {
@@ -1425,23 +1516,23 @@ mod by_app {
             s.system = Arc::new(sys);
         });
         draw(r.vcx);
-        let series_of = |r: &mut Rig<'_>, i: usize| {
-            let apps = apps(r);
-            r.vcx
-                .read_entity(&apps, |a, _| a.bands()[i].series.last().copied())
-        };
-        assert_eq!(
-            series_of(&mut r, 4).map(|s| s.device),
-            Some(SHARED_NEW),
-            "the bands were rebuilt on the new devices"
-        );
+        for (i, apps) in charts(&mut r).iter().enumerate() {
+            let shared = r
+                .vcx
+                .read_entity(apps, |a, _| a.bands()[4].series.last().copied());
+            assert_eq!(
+                shared.map(|s| s.device),
+                Some(SHARED_NEW),
+                "chart {i}: the bands were rebuilt on the new devices"
+            );
+        }
         assert_eq!(facts(&mut r), before, "after the device arrival");
     }
 
     /// The stack always adds up to In use: at every sample the group bands, "Other apps" and
     /// "Shared and kernel" sum to In use to the byte, while groups arrive and leave inside the
     /// 10 s ranking pause and across rankings. Every group with a sample now is in exactly one
-    /// band.
+    /// band. The Memory page and the Overview Memory box both follow this (leader rule 08:30).
     #[gpui_kit::test]
     fn memory_by_app_stack_sums_to_in_use(cx: &mut TestAppContext) {
         const PERIOD: u64 = 1_000_000_000;
@@ -1469,7 +1560,7 @@ mod by_app {
         };
         let bytes = |mib: u32| f64::from(mib) * f64::from(MIB);
 
-        let r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        let mut r = open_with_box(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         let base = now_boot_ns() - STEPS * PERIOD;
         // The samples of each group, then "Other apps" and "Shared and kernel".
         let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); n + 2];
@@ -1554,55 +1645,59 @@ mod by_app {
             });
             draw(r.vcx);
 
-            let apps = r
-                .vcx
-                .update(|_, cx| r.page.read(cx).apps().cloned())
-                .expect("the By app chart");
-            let bands = r.vcx.read_entity(&apps, |a, _| a.bands().to_vec());
-            let sum: f64 = bands.iter().map(|b| b.value).sum();
-            assert_eq!(sum, bytes(in_use_mib), "step {k}: the stack is In use");
-            let shared = bands
-                .iter()
-                .find(|b| b.kind == BandKind::Shared)
-                .expect("the Shared and kernel band");
-            assert!(
-                shared.value >= 0.,
-                "step {k}: Shared and kernel is not negative"
-            );
-            assert_eq!(shared.value, bytes(shared_mib), "step {k}");
-            let groups = bands
-                .iter()
-                .filter(|b| matches!(b.kind, BandKind::Group(_)))
-                .count();
-            assert!(groups <= 3, "step {k}: at most top_n group bands");
-            for (i, &(key, from, to, ..)) in script.iter().enumerate() {
-                if (from..to).contains(&k) {
-                    let series = id(group_dev(i as u16));
-                    let count = bands
-                        .iter()
-                        .map(|b| b.series.iter().filter(|s| **s == series).count())
-                        .sum::<usize>();
-                    assert_eq!(count, 1, "step {k}: {key} is in exactly one band");
-                }
-            }
-
-            // The script reaches the cases it is for: exe:d arrives mid-pause into "Other
-            // apps" and gets its own band at the next ranking.
-            let band_of = |key: &str| bands.iter().find(|b| &*b.key == key).map(|b| b.kind);
-            let in_other = |i: u16| {
-                bands
+            let shown = charts(&mut r);
+            assert_eq!(shown.len(), 2, "the page and the box");
+            for (c, apps) in shown.iter().enumerate() {
+                let bands = r.vcx.read_entity(apps, |a, _| a.bands().to_vec());
+                let sum: f64 = bands.iter().map(|b| b.value).sum();
+                assert_eq!(
+                    sum,
+                    bytes(in_use_mib),
+                    "chart {c} step {k}: the stack is In use"
+                );
+                let shared = bands
                     .iter()
-                    .find(|b| b.kind == BandKind::Other)
-                    .is_some_and(|b| b.series.contains(&id(group_dev(i))))
-            };
-            match k {
-                3..10 => assert!(in_other(3), "step {k}: exe:d waits in Other apps"),
-                10..20 => assert!(
-                    matches!(band_of("exe:d"), Some(BandKind::Group(_))),
-                    "step {k}: exe:d has its own band"
-                ),
-                22..30 => assert!(in_other(6), "step {k}: exe:g waits in Other apps"),
-                _ => {}
+                    .find(|b| b.kind == BandKind::Shared)
+                    .expect("the Shared and kernel band");
+                assert!(
+                    shared.value >= 0.,
+                    "chart {c} step {k}: Shared and kernel is not negative"
+                );
+                assert_eq!(shared.value, bytes(shared_mib), "chart {c} step {k}");
+                let groups = bands
+                    .iter()
+                    .filter(|b| matches!(b.kind, BandKind::Group(_)))
+                    .count();
+                assert!(groups <= 3, "chart {c} step {k}: at most top_n group bands");
+                for (i, &(key, from, to, ..)) in script.iter().enumerate() {
+                    if (from..to).contains(&k) {
+                        let series = id(group_dev(i as u16));
+                        let count = bands
+                            .iter()
+                            .map(|b| b.series.iter().filter(|s| **s == series).count())
+                            .sum::<usize>();
+                        assert_eq!(count, 1, "chart {c} step {k}: {key} is in exactly one band");
+                    }
+                }
+
+                // The script reaches the cases it is for: exe:d arrives mid-pause into "Other
+                // apps" and gets its own band at the next ranking.
+                let band_of = |key: &str| bands.iter().find(|b| &*b.key == key).map(|b| b.kind);
+                let in_other = |i: u16| {
+                    bands
+                        .iter()
+                        .find(|b| b.kind == BandKind::Other)
+                        .is_some_and(|b| b.series.contains(&id(group_dev(i))))
+                };
+                match k {
+                    3..10 => assert!(in_other(3), "chart {c} step {k}: exe:d waits in Other apps"),
+                    10..20 => assert!(
+                        matches!(band_of("exe:d"), Some(BandKind::Group(_))),
+                        "chart {c} step {k}: exe:d has its own band"
+                    ),
+                    22..30 => assert!(in_other(6), "chart {c} step {k}: exe:g waits in Other apps"),
+                    _ => {}
+                }
             }
         }
     }

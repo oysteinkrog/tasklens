@@ -250,6 +250,8 @@ pub struct OverviewPage {
     /// `performance.status_bar` is `overview`: the bar holds the range switch, so the page
     /// draws no header row.
     bar_on_overview: bool,
+    /// `history.device_metrics`: with it off the range switches disable 24 h and 7 d.
+    history_kept: bool,
     /// The words of the range text: "min { $min }  avg { $avg }  peak { $peak }", "since
     /// { $time }" and the time axis start of each range.
     figures_words: Template,
@@ -395,6 +397,7 @@ impl OverviewPage {
             status,
             range: range::current_range(cx),
             bar_on_overview: status_bar::placement(cx) == StatusBarPlacement::Overview,
+            history_kept: range::history_kept(cx),
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
             since_words: Template::new(cx, "perf-overview-since", &["time"]),
             ago_words: range::ago_words(cx),
@@ -559,7 +562,8 @@ impl OverviewPage {
     }
 
     /// `[performance.overview]` changed: a new placement and one render, and the Top processes
-    /// box with its demand comes or goes. Any other settings change does nothing here.
+    /// box with its demand comes or goes. A change of `history.device_metrics` redraws the range
+    /// switches. Any other settings change does nothing here.
     fn sync_layout(&mut self, cx: &mut Context<Self>) {
         let range = range::current_range(cx);
         if range != self.range {
@@ -575,6 +579,13 @@ impl OverviewPage {
         let bar_on_overview = status_bar::placement(cx) == StatusBarPlacement::Overview;
         if bar_on_overview != self.bar_on_overview {
             self.bar_on_overview = bar_on_overview;
+            self.notify(cx);
+        }
+        let history_kept = range::history_kept(cx);
+        if history_kept != self.history_kept {
+            // Both range switches draw 24 h and 7 d enabled or disabled.
+            self.history_kept = history_kept;
+            self.status.update(cx, |_, cx| cx.notify());
             self.notify(cx);
         }
         if self.drag.is_some() || self.box_drag().is_some() {

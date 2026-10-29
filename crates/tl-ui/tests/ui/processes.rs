@@ -1860,8 +1860,8 @@ mod shell {
     use tl_ui::table::tree_table::TreeTableDelegate as _;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
-        self as shell, MainWindow, PageSlot, ShellPage, main_window_view, open_main_window,
-        set_test_page,
+        self as shell, MainWindow, PageFactory, PageSlot, ShellPage, main_window_view,
+        open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
 
@@ -1902,6 +1902,15 @@ mod shell {
         cx: &mut TestAppContext,
         state: UiState,
     ) -> (Arc<FakeEngine>, VisualTestContext) {
+        open_with_perf(cx, state, other)
+    }
+
+    /// [`open_with`] with `perf` building the Performance tab.
+    pub(super) fn open_with_perf(
+        cx: &mut TestAppContext,
+        state: UiState,
+        perf: PageFactory,
+    ) -> (Arc<FakeEngine>, VisualTestContext) {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         cx.update(|cx| {
@@ -1926,7 +1935,7 @@ mod shell {
             toast::init(cx);
             tl_ui::actions::bind_keys_global(cx);
             cx.set_global(StartOptions::default());
-            set_test_page(cx, Tab::Performance, other);
+            set_test_page(cx, Tab::Performance, perf);
             shell::init(cx);
         });
         let handle = cx.update(open_main_window).expect("the main window opens");
@@ -2316,7 +2325,12 @@ mod jump {
     }
 
     fn rig(cx: &mut TestAppContext, state: UiState) -> Rig {
-        let (engine, mut vcx) = open_with(cx, state);
+        let opened = open_with(cx, state);
+        rig_on(opened)
+    }
+
+    /// The rig on a main window [`open_with`] or `open_with_perf` opened.
+    fn rig_on((engine, mut vcx): (Arc<FakeEngine>, VisualTestContext)) -> Rig {
         let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
         let page = vcx
             .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
@@ -2524,6 +2538,244 @@ mod jump {
         assert_eq!(r.selected(), [ProcRowId::Group(firefox())]);
         assert!(r.table_focused());
         assert!(r.toasts().is_empty(), "no toast");
+    }
+
+    /// D-036, UI-PRF-060, leader note 07:15: a click on a group's legend row, in the Overview
+    /// Memory box and on the Memory page, switches to the Processes tab, sends the query with
+    /// that memory group and shows its chip. "Other apps" and "Shared and kernel" open nothing.
+    mod legend {
+        use std::sync::Arc;
+
+        use gpui_kit::{
+            AnyView, AppContext as _, Context, EventEmitter, FocusHandle, InteractiveElement as _,
+            IntoElement, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
+            Window, div, px, size,
+        };
+        use tl_model::command::Tab;
+        use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+        use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+        use tl_model::series::{Sample, SeriesView};
+        use tl_model::settings::{MemoryView, UiState};
+        use tl_model::snapshot::{ComponentHeader, SeriesSet};
+        use tl_model::system::MemGroupBand;
+        use tl_model::time::now_boot_ns;
+        use tl_model::validity::Validity;
+        use tl_ui::demand::GlobalDemand;
+        use tl_ui::hub::GlobalHub;
+        use tl_ui::pages::performance::memory::MemoryPage;
+        use tl_ui::pages::performance::memory_apps::LEGEND_ID;
+        use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
+        use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
+        use tl_ui::settings_global::TlSettings;
+        use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage};
+        use tl_ui::window::status::StatusChanged;
+
+        use super::super::shell::{open_with_perf, select};
+        use super::{Rig, rig_on};
+
+        const MEMORY: DeviceIdx = DeviceIdx(1);
+        const GROUPS: u16 = 3;
+        const MIB: f32 = 1_048_576.;
+        const GIB: u64 = 1 << 30;
+
+        /// The Performance tab's stand-in: one view that draws the By app legend.
+        struct Perf {
+            view: AnyView,
+            focus: FocusHandle,
+        }
+
+        impl EventEmitter<StatusChanged> for Perf {}
+
+        impl Render for Perf {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .track_focus(&self.focus)
+                    .size_full()
+                    .child(self.view.clone())
+            }
+        }
+
+        impl ShellPage for Perf {
+            fn primary_focus(&self) -> FocusHandle {
+                self.focus.clone()
+            }
+        }
+
+        fn slot(view: AnyView, cx: &mut Context<MainWindow>) -> PageSlot {
+            let page = cx.new(|cx| Perf {
+                view,
+                focus: cx.focus_handle().tab_stop(true),
+            });
+            PageSlot::new(page, cx)
+        }
+
+        /// The Overview Memory box in "By app" mode.
+        fn mem_box(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let mem = cx.new(|cx| MemBox::new(&hub, MEMORY, cx));
+            mem.update(cx, |b, cx| b.set_mode(APPS_MODE, cx));
+            slot(mem.into(), cx)
+        }
+
+        /// The Memory page, in its By app view from the settings.
+        fn memory_page(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            let key = DeviceKey(Arc::from(DeviceKey::MEMORY));
+            let row = DeviceRow {
+                key: key.clone(),
+                kind: DeviceKind::Memory,
+                idx: MEMORY,
+                generation: 0,
+                net_class: None,
+                fan_connected: None,
+            };
+            let page = cx.new(|cx| MemoryPage::new(key, row, hub, demand, cx));
+            slot(page.into(), cx)
+        }
+
+        fn entry(idx: u16, identity: DeviceIdentity, name: &str) -> DeviceEntry {
+            DeviceEntry {
+                idx: DeviceIdx(idx),
+                identity,
+                generation: 0,
+                display_name: Arc::from(name),
+                present: true,
+                parent: None,
+                persistent_key: Arc::from(""),
+                net_kind: None,
+                hot_c: None,
+            }
+        }
+
+        /// 60 one-second samples of `value` up to now.
+        fn flat(device: DeviceIdx, value: f32) -> Arc<SeriesView> {
+            const PERIOD: u64 = 1_000_000_000;
+            let now = now_boot_ns();
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::MEM_GROUP,
+                },
+                version: 1,
+                period_ns: PERIOD,
+                samples: (0..60u64)
+                    .map(|k| Sample::valid(now - (59 - k) * PERIOD, value))
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        }
+
+        /// Groups p0 to p2 of 3 to 1 MiB with 2 processes each, "Other apps" 1 MiB and
+        /// "Shared and kernel" 2 MiB.
+        fn publish_groups(r: &Rig) {
+            r.engine.publish_with(|s| {
+                let mut entries = vec![
+                    entry(0, DeviceIdentity::CpuPackage, "CPU"),
+                    entry(1, DeviceIdentity::Memory, "Memory"),
+                ];
+                let mut views = Vec::new();
+                let mut bands = Vec::new();
+                let fixed = [
+                    ("other", "Other apps", 1.),
+                    ("shared", "Shared and kernel", 2.),
+                ];
+                let groups = (0..GROUPS).map(|i| {
+                    let mib = f32::from(GROUPS - i);
+                    (format!("exe:p{i}"), format!("p{i}"), mib)
+                });
+                let all = groups.chain(
+                    fixed
+                        .into_iter()
+                        .map(|(k, n, mib)| (k.to_owned(), n.to_owned(), mib)),
+                );
+                for (key, name, mib) in all {
+                    let idx = entries.len() as u16;
+                    let identity = DeviceIdentity::MemGroup {
+                        key: Arc::from(key.as_str()),
+                    };
+                    entries.push(entry(idx, identity, &name));
+                    views.push(flat(DeviceIdx(idx), mib * MIB));
+                    if key.starts_with("exe:") {
+                        bands.push(MemGroupBand {
+                            key: Arc::from(key),
+                            name: Arc::from(name),
+                            process_count: 2,
+                            device: DeviceIdx(idx),
+                        });
+                    }
+                }
+                s.devices = Arc::new(DeviceCatalog {
+                    version: s.devices.version + 1,
+                    entries: entries.into(),
+                });
+                s.series = Arc::new(SeriesSet {
+                    header: ComponentHeader {
+                        version: s.series.header.version + 1,
+                        ..ComponentHeader::default()
+                    },
+                    series: views.into(),
+                    slow: Arc::from([]),
+                });
+                let sys = Arc::make_mut(&mut s.system);
+                sys.header.version += 1;
+                sys.header.validity = Validity::Valid;
+                sys.memory.validity = Validity::Valid;
+                sys.memory.total = 64 * GIB;
+                sys.memory.used = 23 * GIB;
+                sys.memory.available = 41 * GIB;
+                sys.memory.groups = Arc::new(bands);
+            });
+        }
+
+        fn click_row(r: &mut Rig, row: usize) {
+            let id: &'static str = Box::leak(format!("{LEGEND_ID}-{row}").into_boxed_str());
+            let at = r.vcx.debug_bounds(id).expect(id).center();
+            r.vcx.simulate_click(at, Modifiers::none());
+            r.draw();
+        }
+
+        /// The main window with `perf` as the Performance tab, on that tab with the groups shown.
+        fn legend_click(cx: &mut TestAppContext, perf: PageFactory) {
+            let opened = open_with_perf(cx, UiState::default(), perf);
+            let mut r = rig_on(opened);
+            r.vcx.update(|_, cx| {
+                tl_ui::components::kv_grid::init(cx);
+                TlSettings::update(cx, |d| {
+                    d.settings.performance.memory_view = MemoryView::Apps
+                });
+            });
+            r.vcx.simulate_resize(size(px(1600.), px(1200.)));
+            publish_groups(&r);
+            select(&mut r.vcx, Tab::Performance);
+            for _ in 0..3 {
+                r.draw();
+            }
+            assert_eq!(r.active_tab(), Tab::Performance);
+
+            // Rows top first: Shared and kernel, Other apps, p2, p1, p0.
+            for row in [0, 1] {
+                click_row(&mut r, row);
+                assert_eq!(r.active_tab(), Tab::Performance, "row {row} opens nothing");
+                assert_eq!(r.chip(), None, "row {row}");
+            }
+            assert_eq!(r.last_query().mem_group, None);
+
+            click_row(&mut r, 2);
+            assert_eq!(r.active_tab(), Tab::Processes);
+            assert_eq!(r.last_query().mem_group.as_deref(), Some("exe:p2"));
+            assert_eq!(r.chip().as_deref(), Some("Group: p2"));
+        }
+
+        #[gpui_kit::test]
+        fn mem_group_legend_click_in_overview_box(cx: &mut TestAppContext) {
+            legend_click(cx, mem_box);
+        }
+
+        #[gpui_kit::test]
+        fn mem_group_legend_click_on_memory_page(cx: &mut TestAppContext) {
+            legend_click(cx, memory_page);
+        }
     }
 
     #[gpui_kit::test]
