@@ -1000,3 +1000,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-29 14:30 owner asked to break down Shared and kernel: six meminfo bands (shmem, zswap, slab, other kernel, driver estimate, file cache remainder), beads tasklens-8fx.46 and tasklens-o55.52, part of 1.0.9.
 - 2026-10-29 14:50 owner asked for a server/client design with host tabs (D-038). ADR-018 written, Astra reviewed twice; settled: desktop commands run on the target host's screen, one frame in flight, rescue mode lock-free. UI-SHL-008 host tabs. Epic tasklens-q4x76 with 16 beads at P3, after the 1.0.9 beads.
 - 2026-10-29 16:40 8fx.45 held: memory sweep limit raised from 20 ms to 60 ms median / 100 ms max; identity (pid, start_ticks) every sweep, group key cached and refreshed every 60 s.
+- 2026-10-29 17:42 o55.52 decided: derived chart series for the pre-split Shared and kernel band; k:* never ranked as groups (live bug since 8fx.46, blocks 1.0.9).
