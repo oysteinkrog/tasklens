@@ -46,7 +46,7 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> AnyElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let page = div().w(px(1000.)).h(px(2000.)).child(self.page.clone());
         let Some((mem, w, h)) = &self.mem_box else {
             return page.into_any_element();
