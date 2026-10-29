@@ -4,9 +4,9 @@
 //! One sweep is one blocking job, at `processes.interval_ms` (250 to 10,000 ms) while the table,
 //! a process detail, a process graph or recording needs it (PROC-002, PROC-004, PROC-093). While
 //! only `history.device_metrics` needs it, the sweep runs every `HISTORY_PERIOD` (10 s) for the
-//! memory group series in the sampler's memory-only mode (`statm` per known pid), and the reducer
-//! does no table work (D-036, UI-PRF-060). Otherwise it does not run. Records hold command lines
-//! and paths: this module logs only the record count (ADR-015).
+//! memory group series in the sampler's memory-only mode (`stat` and `status` per pid), and the
+//! reducer does no table work (D-036, UI-PRF-060). Otherwise it does not run. Records hold
+//! command lines and paths: this module logs only the record count (ADR-015).
 //!
 //! While the helper is `Unlocked`, `HelperReads` fills the Restricted cells of visible rows
 //! through `ReadProcessFiles` at 1 Hz, after the sweep and outside it (PROC-076). The next sweep

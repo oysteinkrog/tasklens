@@ -1354,67 +1354,74 @@ fn sweep_fd_count_only_when_wanted() {
     assert_eq!(fd_count_fallbacks(), before + 1);
 }
 
-/// tasklens-8fx.45: in memory-only mode a pid of the last sweep gets only its `statm` read, with
-/// no `io` and no rates, until its statm text size changes, as on an exec: then `stat` is read.
+/// tasklens-8fx.45: in memory-only mode every sweep reads `stat` and `status` and no `statm` or
+/// `io`. RssAnon comes from status, a uid change shows at the next sweep and a reused pid (new
+/// start_ticks) is a new key at once.
 #[test]
-fn sweep_mem_only_reads_statm_of_known_pid() {
+fn sweep_mem_only_reads_stat_and_status() {
     let (_tmp, root) = sweep_root();
     let mut core = SweepCore::new(root.clone());
     core.set_mem_only(true);
-    // Asks for io and every status field: memory-only mode reads neither for a known pid.
+    // Asks for io and every status field: memory-only mode reads no io.
     let ctx = sweep_ctx(false);
-    let page = rustix::param::page_size() as u64;
     let mut out = Vec::new();
 
+    // Without statm the memory fields still come from status: RssAnon 1234 kB, VmRSS 244936 kB.
+    fs::remove_file(root.proc_path("4201/statm")).expect("remove statm");
     let (status0, io0) = (status_reads(), io_reads());
     core.sweep_core(&ctx, &mut out);
     let key = only(&out).key;
-    assert_eq!(status_reads(), status0 + 1, "first sight reads status");
-    assert_eq!(io_reads(), io0);
-
-    fs::remove_file(root.proc_path("4201/stat")).expect("remove stat");
-    fs::remove_file(root.proc_path("4201/status")).expect("remove status");
-    fs::write(
-        root.proc_path("4201/statm"),
-        b"666958 70000 60000 181 0 58 0\n",
-    )
-    .expect("statm");
-    // The text size (181) stands.
-    for _ in 2..=20 {
-        core.sweep_core(&ctx, &mut out);
+    for i in 1..=5 {
+        if i > 1 {
+            core.sweep_core(&ctx, &mut out);
+        }
         let p = only(&out);
         assert_eq!(p.key, key);
-        assert_eq!(p.rss_anon_bytes, 10_000 * page);
+        assert_eq!(p.rss_anon_bytes, 1234 * 1024);
+        assert_eq!(p.rss_bytes, 244_936 * 1024);
         assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
         assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+        assert_eq!(status_reads(), status0 + i, "status read every sweep");
     }
-    assert_eq!(
-        status_reads(),
-        status0 + 1,
-        "no status read for a known pid"
-    );
     assert_eq!(io_reads(), io0);
 
-    // A new text size reads stat, and without it the process is skipped.
-    fs::write(
-        root.proc_path("4201/statm"),
-        b"666958 70000 60000 900 0 58 0\n",
-    )
-    .expect("statm");
+    // A uid change shows at the next sweep.
+    let status = String::from_utf8(fixture_bytes("process-edge", "proc/4201/status"))
+        .expect("status is UTF-8")
+        .replace(
+            "Uid:\t1000\t1000\t1000\t1000",
+            "Uid:\t1001\t1001\t1001\t1001",
+        );
+    fs::write(root.proc_path("4201/status"), status).expect("write status");
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(only(&out).status.uid[0], 1001);
+
+    // A reused pid: the new start_ticks is a new key in the next sweep.
+    set_stat(&root, 8812, 1204, 999_999);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(only(&out).key.start_ticks, 999_999);
+
+    // Without stat there is no key, so the process is skipped.
+    fs::remove_file(root.proc_path("4201/stat")).expect("remove stat");
     core.sweep_core(&ctx, &mut out);
     assert!(out.is_empty());
 
-    // Off again: a full read with status and io.
+    // Off again: a full read with statm, status and io.
     set_stat(&root, 8812, 1204, 351_220);
     fs::write(
-        root.proc_path("4201/status"),
-        fixture_bytes("process-edge", "proc/4201/status"),
+        root.proc_path("4201/statm"),
+        fixture_bytes("process-edge", "proc/4201/statm"),
     )
-    .expect("restore status");
+    .expect("restore statm");
     core.set_mem_only(false);
+    let status1 = status_reads();
     core.sweep_core(&ctx, &mut out);
-    assert_eq!(only(&out).key.start_ticks, 351_220);
-    assert_eq!(status_reads(), status0 + 2);
+    let p = only(&out);
+    assert_eq!(p.key.start_ticks, 351_220);
+    // process-edge 4201 statm: resident 61234, shared 60925.
+    let page = rustix::param::page_size() as u64;
+    assert_eq!(p.rss_anon_bytes, (61_234 - 60_925) * page);
+    assert_eq!(status_reads(), status1 + 1);
     assert_eq!(io_reads(), io0 + 1);
 }
 
@@ -2059,7 +2066,7 @@ use std::sync::{Arc, Mutex};
 use tl_collect::apps::AppPaths;
 use tl_collect::apps::classify::{ProcClass, ProtectInputs};
 use tl_collect::proc::meta::PasswdUserNames;
-use tl_collect::proc::sweep::{ProcessSampler, SweepInputs, SweepOutput};
+use tl_collect::proc::sweep::{MEM_ONLY_META_REFRESH, ProcessSampler, SweepInputs, SweepOutput};
 use tl_model::process::{GroupKind, ProcFlags, ProcessRecord};
 
 const FIREFOX_UNIT: &str =
@@ -2178,8 +2185,9 @@ fn sweep_full_snapshot() {
 
 sweep_clock!(mem_only_clock);
 
-/// tasklens-8fx.45: memory-only sweeps give the same processes, groups, users and RssAnon as a
-/// full sweep, read no metadata of a known process and sample no app unit.
+/// tasklens-8fx.45: memory-only sweeps give the same processes, groups, users and units as a
+/// full sweep, re-read the metadata of each process once in `MEM_ONLY_META_REFRESH` sweeps and
+/// sample no app unit. RssAnon comes from status there (`sweep_mem_only_reads_stat_and_status`).
 #[test]
 fn sweep_mem_only_matches_full_sweep() {
     let (_tmp, root) = merged_root();
@@ -2194,14 +2202,16 @@ fn sweep_mem_only_matches_full_sweep() {
     mem_only_clock::set(SEC, SEC);
     s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
     let meta = meta_file_reads();
-    for i in 2..=12 {
+    let every = u64::from(MEM_ONLY_META_REFRESH);
+    for i in 2..=every + 1 {
         mem_only_clock::set(i * SEC, i * SEC);
         s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
     }
+    // comm, exe, cmdline and cgroup of every process, once.
     assert_eq!(
-        meta_file_reads(),
-        meta,
-        "no metadata read for a known process"
+        meta_file_reads() - meta,
+        4 * u32::try_from(out.records.len()).expect("record count"),
+        "each process's metadata re-read once in MEM_ONLY_META_REFRESH sweeps"
     );
     assert!(out.apps.is_empty(), "no app unit sampled");
 
@@ -2216,7 +2226,7 @@ fn sweep_mem_only_matches_full_sweep() {
                     r.meta.name.clone(),
                     r.uid,
                     r.flags,
-                    r.rss_anon_bytes,
+                    r.validity.get(ProcessField::RssAnon),
                     x.unit.clone(),
                 )
             })
@@ -2224,6 +2234,95 @@ fn sweep_mem_only_matches_full_sweep() {
     };
     assert!(!want.records.is_empty());
     assert_eq!(rows(&out), rows(&want));
+}
+
+sweep_clock!(mem_only_regroup_clock);
+
+/// What the memory group of pid 4209 is built from: key, uid, exe and unit.
+fn mem_inputs(out: &SweepOutput) -> (ProcessKey, u32, Option<Arc<str>>, Option<Arc<str>>) {
+    let i = index_of(out, 4209);
+    let (r, x) = (&out.records[i], &out.extras[i]);
+    (
+        r.key,
+        r.uid,
+        r.meta.exe.clone(),
+        x.unit.as_ref().map(|u| u.name.clone()),
+    )
+}
+
+/// tasklens-8fx.45 leader decision: in memory-only mode a reused pid regroups at once and a uid
+/// change shows at the next sweep. An exec that keeps `comm`, and a cgroup move, show within
+/// `MEM_ONLY_META_REFRESH` sweeps.
+#[test]
+fn sweep_mem_only_regroups() {
+    let (tmp, root) = merged_root();
+    let proc4209 = tmp.path().join("proc/4209");
+    const KDED: &str =
+        "user.slice/user-1000.slice/user@1000.service/session.slice/plasma-kded6.service";
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(mem_only_regroup_clock::now);
+    s.set_mem_only(true);
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+    let mut t = 0;
+    let mut sweep = |s: &mut ProcessSampler, out: &mut SweepOutput| {
+        t += 10 * SEC;
+        mem_only_regroup_clock::set(t, t);
+        s.sweep(&sweep_ctx(false), &no_inputs(&protect), out);
+    };
+    sweep(&mut s, &mut out);
+    let (key, uid, exe, unit) = mem_inputs(&out);
+    assert_eq!((key.start_ticks, uid), (352_000, 1000));
+    assert_eq!(exe, None, "4209 has no exe link");
+    assert_eq!(unit.as_deref(), Some("session-2.scope"));
+
+    // Exec of another program with the same comm: shows within MEM_ONLY_META_REFRESH sweeps.
+    std::os::unix::fs::symlink("/usr/bin/other", proc4209.join("exe")).expect("exe link");
+    let mut n = 0;
+    while mem_inputs(&out).2.is_none() {
+        assert!(n < MEM_ONLY_META_REFRESH, "exec not seen in time");
+        sweep(&mut s, &mut out);
+        n += 1;
+    }
+    assert_eq!(mem_inputs(&out).2.as_deref(), Some("/usr/bin/other"));
+
+    // A cgroup move: also within MEM_ONLY_META_REFRESH sweeps.
+    fs::write(proc4209.join("cgroup"), format!("0::/{KDED}\n")).expect("write cgroup");
+    let mut n = 0;
+    while mem_inputs(&out).3.as_deref() != Some("plasma-kded6.service") {
+        assert!(n < MEM_ONLY_META_REFRESH, "cgroup move not seen in time");
+        sweep(&mut s, &mut out);
+        n += 1;
+    }
+
+    // A uid change: the next sweep.
+    let status = fs::read_to_string(proc4209.join("status")).expect("read status");
+    fs::write(
+        proc4209.join("status"),
+        status.replace(
+            "Uid:\t1000\t1000\t1000\t1000",
+            "Uid:\t1001\t1001\t1001\t1001",
+        ),
+    )
+    .expect("write status");
+    sweep(&mut s, &mut out);
+    assert_eq!(mem_inputs(&out).1, 1001);
+
+    // A reused pid running another program in another cgroup: the next sweep.
+    let stat = fs::read_to_string(proc4209.join("stat")).expect("read stat");
+    fs::write(proc4209.join("stat"), stat.replace(" 352000 ", " 999000 ")).expect("write stat");
+    fs::remove_file(proc4209.join("exe")).expect("remove exe");
+    std::os::unix::fs::symlink("/usr/bin/reused", proc4209.join("exe")).expect("exe link");
+    fs::write(
+        proc4209.join("cgroup"),
+        "0::/user.slice/user-1000.slice/session-2.scope\n",
+    )
+    .expect("write cgroup");
+    sweep(&mut s, &mut out);
+    let (key, _, exe, unit) = mem_inputs(&out);
+    assert_eq!(key.start_ticks, 999_000);
+    assert_eq!(exe.as_deref(), Some("/usr/bin/reused"));
+    assert_eq!(unit.as_deref(), Some("session-2.scope"));
 }
 
 sweep_clock!(app_member_clock);

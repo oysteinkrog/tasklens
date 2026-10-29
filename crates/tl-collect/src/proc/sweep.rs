@@ -8,11 +8,12 @@
 //! after a counter reset or across a suspend. Nothing here logs above `trace` per process.
 //!
 //! In memory-only mode (`set_mem_only`, while only the memory group history needs the sweep:
-//! D-036, UI-PRF-060) a process seen in the last sweep gets only its `statm` read. Its `stat` is
-//! read again when the statm text size changes, as it does on an exec of another program. A pid
-//! is not reused between two sweeps: the kernel hands out pids in order up to `pid_max`.
-//! `status` is read on first sight only. A new process is read in full. No rates, `io`, fd
-//! counts or cgroup stats.
+//! D-036, UI-PRF-060) each process gets `stat` and `status` read every sweep and no `statm`.
+//! `stat` gives the key (pid, start_ticks), so a reused pid is a new process at once. `status`
+//! gives RssAnon, VmRSS, commit, VmSize and the uid, so a uid change shows at the next sweep.
+//! The metadata (exe, cmdline, cgroup) is re-read for a new key, when `comm` changes and every
+//! [`MEM_ONLY_META_REFRESH`] sweeps, so an exec or a cgroup move shows within that many sweeps.
+//! No rates, `io`, fd counts or cgroup stats.
 //!
 //! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns, the app
 //! unit samples and the Frozen state of unit cgroups on top of `SweepCore`. Command lines, paths and user names are never logged
@@ -55,7 +56,9 @@ use crate::proc::cgroup::{
 use crate::proc::extras_p2::ExtrasP2Reader;
 use crate::proc::fdcount::{FdCount, fd_count};
 use crate::proc::io::{IoRead, PidIo, read_io_at};
-use crate::proc::meta::{ExeLink, Interner, MetaCache, MetaChange, RawMeta, ReadBufs, UserNames};
+use crate::proc::meta::{
+    ExeLink, Interner, META_REFRESH_SWEEPS, MetaCache, MetaChange, RawMeta, ReadBufs, UserNames,
+};
 use crate::proc::pid_stat::{PF_KTHREAD, PidStat, parse_pid_stat};
 use crate::proc::smaps::{CoverageBuilder, PssReader, RollupRead, apply_rollups};
 use crate::proc::statm::{PidStatm, parse_statm};
@@ -68,6 +71,10 @@ const DIRENT_BUF: usize = 32 * 1024;
 /// Without a demand, `status` is read for the pids with `pid % STATUS_STAGGER == sweep %
 /// STATUS_STAGGER`, so its fields are at most this many sweeps old (R-286).
 pub const STATUS_STAGGER: u64 = 10;
+
+/// In memory-only mode the metadata of a process is re-read at least this often, in sweeps:
+/// 60 s at the 10 s period (tasklens-8fx.45).
+pub const MEM_ONLY_META_REFRESH: u32 = 6;
 
 thread_local! {
     static STATUS_READS: Cell<u32> = const { Cell::new(0) };
@@ -143,6 +150,7 @@ pub struct SweptProc {
     /// `STATUS_STAGGER` sweeps old). Validity of its fields is from the same read.
     pub status: PidStatus,
     pub status_fresh: bool,
+    /// All zero in memory-only mode: the byte fields below then come from `status`.
     pub statm: PidStatm,
     /// statm (resident − shared) × page size: the kernel's `RssAnon` (R-286).
     pub rss_anon_bytes: u64,
@@ -192,9 +200,6 @@ pub struct SweepCore {
     clock: fn() -> (TimeNs, u64),
     /// Memory-only mode: see the module doc.
     mem_only: bool,
-    /// In memory-only mode, the key, last `stat` and statm text size of each pid of the last
-    /// sweep, so a known pid needs no `stat` read. Empty otherwise.
-    known: FxHashMap<u32, (ProcessKey, PidStat, u64)>,
 }
 
 impl SweepCore {
@@ -212,7 +217,6 @@ impl SweepCore {
             stat: PidStat::default(),
             clock: real_clock,
             mem_only: false,
-            known: FxHashMap::default(),
         }
     }
 
@@ -221,7 +225,6 @@ impl SweepCore {
         if self.mem_only != on {
             self.mem_only = on;
             self.reset_baselines();
-            self.known.clear();
         }
     }
 
@@ -290,7 +293,6 @@ impl SweepCore {
                     path: &mut self.path,
                     stat: &mut self.stat,
                     mem_only: self.mem_only,
-                    known: &mut self.known,
                 };
                 if let Some(p) = sweep_one(ctx, dir, &mut core) {
                     per_pid(&p, dir);
@@ -303,7 +305,6 @@ impl SweepCore {
         self.next.clear();
         let live = &self.prev;
         self.status.retain(|k, _| live.contains_key(k));
-        self.known.retain(|_, (k, _, _)| live.contains_key(k));
         let observed_end = (self.clock)().0;
         (observed_start, observed_end)
     }
@@ -367,7 +368,6 @@ struct SweepIo<'a> {
     path: &'a mut String,
     stat: &'a mut PidStat,
     mem_only: bool,
-    known: &'a mut FxHashMap<u32, (ProcessKey, PidStat, u64)>,
 }
 
 /// Reads `name` relative to `dir` into `buf` with one `read` (R-286). The per-process files are
@@ -408,78 +408,61 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         path,
         stat,
         mem_only,
-        known,
     } = core;
     let mem_only = *mem_only;
     let (proc_fd, pid) = (dir.proc_fd, dir.pid);
     let (t_ns, mono_ns) = clock();
 
-    // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). It is read first,
-    // so memory-only mode can keep the `stat` of a known pid while its text size stands.
-    let mut statm = PidStatm::default();
-    let statm_read = read_once(
+    let stat_read = read_once(
         proc_fd,
-        pid_path(path, pid, "statm"),
+        pid_path(path, pid, "stat"),
         &mut bufs.small,
         SMALL_FILE_LIMIT,
     )
-    .and_then(|()| parse_statm(&bufs.small, &mut statm));
-    let cached = match (mem_only, &statm_read) {
-        (true, Ok(())) => known.get(&pid).filter(|(_, _, text)| *text == statm.text),
-        _ => None,
-    };
-    let key = match cached {
-        Some((key, old, _)) => {
-            stat.clone_from(old);
-            *key
-        }
-        None => {
-            let stat_read = read_once(
-                proc_fd,
-                pid_path(path, pid, "stat"),
-                &mut bufs.small,
-                SMALL_FILE_LIMIT,
-            )
-            .and_then(|()| parse_pid_stat(&bufs.small, stat));
-            if let Err(e) = stat_read {
-                tracing::trace!(pid, error = %e, "stat not read, process skipped");
-                return None;
-            }
-            let key = ProcessKey {
-                start_ticks: stat.start_ticks,
-                boot_id: ctx.boot_id,
-                pid,
-            };
-            if mem_only {
-                known.insert(pid, (key, stat.clone(), statm.text));
-            }
-            key
-        }
+    .and_then(|()| parse_pid_stat(&bufs.small, stat));
+    if let Err(e) = stat_read {
+        tracing::trace!(pid, error = %e, "stat not read, process skipped");
+        return None;
+    }
+    let key = ProcessKey {
+        start_ticks: stat.start_ticks,
+        boot_id: ctx.boot_id,
+        pid,
     };
     let kernel_thread = stat.flags & PF_KTHREAD != 0;
 
     let mut validity = FieldValidity::default();
-
-    // A kernel thread has no mm: its status has no memory lines, so the fields stay
-    // Unsupported.
-    let statm_validity = match statm_read {
-        Ok(()) if kernel_thread => Validity::Unsupported,
-        Ok(()) => Validity::Valid,
-        Err(e) => {
-            statm = PidStatm::default();
-            e.validity()
-        }
-    };
-    validity.set(ProcessField::RssAnon, statm_validity);
-    validity.set(ProcessField::Rss, statm_validity);
     validity.set(ProcessField::Threads, Validity::Valid);
 
+    // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). Memory-only mode
+    // takes them from status, which it reads every sweep anyway. A kernel thread has no mm: its
+    // status has no memory lines, so the fields stay Unsupported.
+    let mut statm = PidStatm::default();
+    if !mem_only {
+        let statm_validity = match read_once(
+            proc_fd,
+            pid_path(path, pid, "statm"),
+            &mut bufs.small,
+            SMALL_FILE_LIMIT,
+        )
+        .and_then(|()| parse_statm(&bufs.small, &mut statm))
+        {
+            Ok(()) if kernel_thread => Validity::Unsupported,
+            Ok(()) => Validity::Valid,
+            Err(e) => {
+                statm = PidStatm::default();
+                e.validity()
+            }
+        };
+        validity.set(ProcessField::RssAnon, statm_validity);
+        validity.set(ProcessField::Rss, statm_validity);
+    }
+
     // status: on first sight, when a status-only field is demanded, or for this sweep's tenth.
-    // Otherwise the last read's values and validity stand (R-286). Memory-only mode reads it on
-    // first sight only: the memory groups need only its uid.
+    // Otherwise the last read's values and validity stand (R-286). Memory-only mode reads it
+    // every sweep: the memory groups need its RssAnon and uid.
     let staggered = u64::from(pid) % STATUS_STAGGER == *sweep % STATUS_STAGGER;
-    let due =
-        (!mem_only && (ctx.want_status_fields || staggered)) || !status_cache.contains_key(&key);
+    let due = mem_only || ctx.want_status_fields || staggered || !status_cache.contains_key(&key);
     if due {
         count(&STATUS_READS);
         let slot = status_cache.entry(key).or_default();
@@ -505,6 +488,10 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         (None, None) => Validity::Unsupported,
     };
     validity.set(ProcessField::Swap, present(status.vm_swap));
+    if mem_only {
+        validity.set(ProcessField::RssAnon, present(status.rss_anon));
+        validity.set(ProcessField::Rss, present(status.vm_rss));
+    }
 
     let (io, io_validity) = if ctx.want_io && !mem_only {
         count(&IO_READS);
@@ -526,6 +513,27 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         None
     };
     let page = *page_size;
+    let (rss_anon_bytes, rss_bytes, rss_shared_bytes, commit_bytes, vsize_bytes) = if mem_only {
+        let or0 = |v: Option<u64>| v.unwrap_or(0);
+        (
+            or0(status.rss_anon),
+            or0(status.vm_rss),
+            or0(status.rss_file).saturating_add(or0(status.rss_shmem)),
+            or0(status.vm_data).saturating_add(or0(status.vm_stk)),
+            or0(status.vm_size),
+        )
+    } else {
+        (
+            statm
+                .resident
+                .saturating_sub(statm.shared)
+                .saturating_mul(page),
+            statm.resident.saturating_mul(page),
+            statm.shared.saturating_mul(page),
+            statm.data.saturating_mul(page),
+            statm.size.saturating_mul(page),
+        )
+    };
 
     let cur = Prev {
         t_ns,
@@ -548,14 +556,11 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         status: status.clone(),
         status_fresh: due,
         statm,
-        rss_anon_bytes: statm
-            .resident
-            .saturating_sub(statm.shared)
-            .saturating_mul(page),
-        rss_bytes: statm.resident.saturating_mul(page),
-        rss_shared_bytes: statm.shared.saturating_mul(page),
-        commit_bytes: statm.data.saturating_mul(page),
-        vsize_bytes: statm.size.saturating_mul(page),
+        rss_anon_bytes,
+        rss_bytes,
+        rss_shared_bytes,
+        commit_bytes,
+        vsize_bytes,
         io,
         fd_count,
         cpu_pct: 0.0,
@@ -571,7 +576,7 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         validity,
     };
 
-    // Memory-only mode gives no rates: a cached `stat` has no new counters.
+    // Memory-only mode gives no rates: the series it feeds need none, and `io` is not read.
     let base = if mem_only { None } else { prev.get(&key) };
     let io_rates = match base.and_then(|old| rate_base(old, &cur)) {
         Some((old, dt_s)) => {
@@ -883,8 +888,8 @@ impl ProcessSampler {
         self.app_prev.clear();
     }
 
-    /// Memory-only mode (see the module doc): for the memory group series alone. A known process
-    /// also keeps its metadata until its `comm` changes, and no app unit is sampled. A change
+    /// Memory-only mode (see the module doc): for the memory group series alone. The metadata
+    /// is re-read every `MEM_ONLY_META_REFRESH` sweeps and no app unit is sampled. A change
     /// forgets every baseline.
     pub fn set_mem_only(&mut self, on: bool) {
         if self.core.mem_only != on {
@@ -1270,7 +1275,7 @@ fn app_io_rates(old: &AppPrev, cur: &AppPrev) -> Option<(f32, f32)> {
 struct Build<'a, 'b> {
     ctx: &'a SweepCtx,
     inp: &'a SweepInputs<'b>,
-    /// Memory-only mode: a known process keeps its cached metadata until its `comm` changes.
+    /// Memory-only mode: the metadata is re-read every `MEM_ONLY_META_REFRESH` sweeps.
     mem_only: bool,
     meta: &'a mut MetaCache,
     apps: &'a mut AppResolver,
@@ -1301,21 +1306,21 @@ impl Build<'_, '_> {
     fn push(&mut self, p: &SweptProc, dir: PidDir<'_>) {
         let key = p.key;
         let pid = key.pid;
-        // The real uid of the last status read, at most STATUS_STAGGER sweeps old (R-286).
+        // The real uid of the last status read, at most STATUS_STAGGER sweeps old (R-286), and
+        // from this sweep in memory-only mode.
         let ruid = p.status.uid[0];
         let kernel_thread = p.stat.flags & PF_KTHREAD != 0;
         // The pid directory is opened only when the metadata is read. A process gone by then
         // is left out of this sweep.
-        let cached = self.mem_only && self.meta.cached(&key, &p.stat.comm_raw).is_some();
-        let found = if cached {
-            self.meta
-                .cached(&key, &p.stat.comm_raw)
-                .map(|raw| (raw, MetaChange::Unchanged))
+        let every = if self.mem_only {
+            MEM_ONLY_META_REFRESH
         } else {
-            self.meta
-                .get_or_refresh_with(key, &p.stat.comm_raw, self.bufs, || dir.open())
+            META_REFRESH_SWEEPS
         };
-        let Some((raw, change)) = found else {
+        let Some((raw, change)) =
+            self.meta
+                .get_or_refresh_every(key, &p.stat.comm_raw, self.bufs, every, || dir.open())
+        else {
             return;
         };
 

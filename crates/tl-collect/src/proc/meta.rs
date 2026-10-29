@@ -193,22 +193,36 @@ impl MetaCache {
         bufs: &mut ReadBufs,
         open: impl FnOnce() -> Option<D>,
     ) -> Option<(&RawMeta, MetaChange)> {
+        self.get_or_refresh_every(key, stat_comm_raw, bufs, META_REFRESH_SWEEPS, open)
+    }
+
+    /// `get_or_refresh_with` with an entry re-read at least every `every` calls in place of
+    /// `META_REFRESH_SWEEPS`. The memory-only sweep uses its own period (tasklens-8fx.45).
+    pub fn get_or_refresh_every<D: AsFd>(
+        &mut self,
+        key: ProcessKey,
+        stat_comm_raw: &[u8],
+        bufs: &mut ReadBufs,
+        every: u32,
+        open: impl FnOnce() -> Option<D>,
+    ) -> Option<(&RawMeta, MetaChange)> {
+        let every = every.max(1);
         match self.entries.entry(key) {
             Entry::Vacant(v) => {
                 let dir = open()?;
                 let meta = read_meta(dir.as_fd(), stat_comm_raw, bufs, &mut self.interner);
                 // Staggered by pid, so a population first seen in one sweep does not refresh
-                // in one sweep: the first refresh comes after 10 - (pid % 10) calls.
+                // in one sweep: the first refresh comes after every - (pid % every) calls.
                 let e = v.insert(CacheEntry {
                     meta,
                     stat_comm: SmallVec::from_slice(stat_comm_raw),
-                    sweeps: key.pid % META_REFRESH_SWEEPS,
+                    sweeps: key.pid % every,
                 });
                 Some((&e.meta, MetaChange::New))
             }
             Entry::Occupied(o) => {
                 let e = o.into_mut();
-                if e.sweeps + 1 < META_REFRESH_SWEEPS && e.stat_comm.as_slice() == stat_comm_raw {
+                if e.sweeps + 1 < every && e.stat_comm.as_slice() == stat_comm_raw {
                     e.sweeps += 1;
                     return Some((&e.meta, MetaChange::Unchanged));
                 }
@@ -220,15 +234,6 @@ impl MetaCache {
                 Some((&e.meta, MetaChange::Refreshed))
             }
         }
-    }
-
-    /// The cached metadata of `key` without a read or a refresh count, while `stat_comm_raw`
-    /// still matches the stat `comm` of the last read. `None` otherwise.
-    pub fn cached(&self, key: &ProcessKey, stat_comm_raw: &[u8]) -> Option<&RawMeta> {
-        self.entries
-            .get(key)
-            .filter(|e| e.stat_comm.as_slice() == stat_comm_raw)
-            .map(|e| &e.meta)
     }
 
     /// Drops the entries of keys not in `live`.
