@@ -691,15 +691,30 @@ fn covered(fills: &[PathSet], x: f32) -> Vec<(f32, f32)> {
     merged
 }
 
-/// The stacked fills at `x` form one span that reaches the baseline (plot height 100): no band
-/// spans a hole.
-fn assert_no_hole(fills: &[PathSet], x: f32) {
-    let spans = covered(fills, x);
-    assert_eq!(spans.len(), 1, "hole at x {x}: {spans:?}");
+/// At `x` the top of each drawn band meets the floor of the next drawn band above it, and the
+/// lowest drawn band sits on the baseline (plot height 100): no fill spans a hole and none
+/// overlaps another (leader decision on tasklens-o55.53).
+fn assert_bands_meet(fills: &[PathSet], x: f32) {
+    let spans: Vec<(f32, f32)> = fills
+        .iter()
+        .enumerate()
+        .filter_map(|(k, f)| {
+            let s = covered(std::slice::from_ref(f), x);
+            assert!(s.len() <= 1, "band {k} split at x {x}: {s:?}");
+            s.first().copied()
+        })
+        .collect();
+    assert!(!spans.is_empty(), "nothing drawn at x {x}");
     assert!(
         (spans[0].1 - 100.0).abs() < 0.01,
         "lifted at x {x}: {spans:?}"
     );
+    for w in spans.windows(2) {
+        assert!(
+            (w[0].0 - w[1].1).abs() < 0.01,
+            "top and floor apart at x {x}: {spans:?}"
+        );
+    }
 }
 
 /// Three bands of 10, 20 and 30 where `band` has samples only in `keep`: an invalid sample
@@ -750,7 +765,7 @@ fn stacked_group_exit_leaves_no_hole() {
         ));
         for q in 0..59 * 8 {
             let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
-            assert_no_hole(&cache.fills, at);
+            assert_bands_meet(&cache.fills, at);
         }
         // The newest mark stays on the last real sample, not the ramp.
         assert!(
@@ -778,7 +793,7 @@ fn stacked_group_entry_leaves_no_hole() {
         let cache = stack_three(&data);
         for q in 0..59 * 8 {
             let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
-            assert_no_hole(&cache.fills, at);
+            assert_bands_meet(&cache.fills, at);
         }
         let first = data[1]
             .iter()

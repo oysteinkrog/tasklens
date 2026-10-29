@@ -995,8 +995,8 @@ Memory composition      t_sm 400 text_secondary (caption above the bar, chosen)
   - `memory_by_app_legend_whole_rows` (tl-ui).
   - `stacked_same_slot_counts_once` (tl-ui): two samples 0.5 s apart in one period slot; every band keeps its own height and none rises above the total.
   - `stacked_all_bands_gap_together` (tl-ui): a gap at one time in every band leaves one empty column in every band.
-  - `stacked_group_exit_leaves_no_hole` (tl-ui): the bottom or a middle band stops with one gap sample; it ramps to zero height at that time and the stacked fills cover every x from the top to the baseline.
-  - `stacked_group_entry_leaves_no_hole` (tl-ui): a band that enters late, or comes back after a gap, ramps up from the previous sweep time; no hole at any x.
+  - `stacked_group_exit_leaves_no_hole` (tl-ui): the bottom or a middle band stops with one gap sample; it ramps to zero height at that time, and at every x the top of each band meets the floor of the band above it.
+  - `stacked_group_entry_leaves_no_hole` (tl-ui): a band that enters late, or comes back after a gap, ramps up from the previous sweep time; at every x the top of each band meets the floor of the band above it.
 - **Phase**: P2.
 - **Decided here**: RssAnon as the measure, the four group rules, 20 groups published, top N 3..=20 with default 10, re-rank every 10 s with a 10% margin, 12 group colours, the two fixed bands.
 
