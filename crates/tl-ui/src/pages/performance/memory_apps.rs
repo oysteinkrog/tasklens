@@ -305,15 +305,24 @@ fn series_id(device: DeviceIdx) -> SeriesId {
     }
 }
 
-/// The value of `view` at `t_ns`: the nearest valid sample within 1.5 periods, else 0.
+/// The value of `view` at `t_ns`: the nearest sample (the earlier one on a tie) when it is valid
+/// and within 1.5 periods, else 0. A gap sample counts as 0: the engine writes one when a group
+/// leaves its top 20, and the group's bytes are then in "Other apps".
 fn value_at(view: &SeriesView, t_ns: u64) -> f64 {
     let samples: &[Sample] = &view.samples;
-    let Some(i) = crate::chart::hover::nearest_index(samples, t_ns) else {
+    let split = samples.partition_point(|s| s.t_ns < t_ns);
+    let Some(s) = [
+        split.checked_sub(1),
+        (split < samples.len()).then_some(split),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|i| samples[i])
+    .min_by_key(|s| s.t_ns.abs_diff(t_ns)) else {
         return 0.;
     };
-    let s = samples[i];
     let slack = view.period_ns.saturating_mul(3) / 2;
-    if s.t_ns.abs_diff(t_ns) <= slack.max(1) {
+    if s.is_valid() && s.t_ns.abs_diff(t_ns) <= slack.max(1) {
         f64::from(s.value)
     } else {
         0.
