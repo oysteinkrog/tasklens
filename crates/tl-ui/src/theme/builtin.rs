@@ -483,8 +483,8 @@ mod tests {
         let root: Value = serde_json::from_str(BUILTIN_JSON).unwrap();
         let mut colours = Vec::new();
         collect_colour_strings(&root, &mut colours);
-        // 2 themes x (22 slots + accent + 4 status + 13 graph).
-        assert_eq!(colours.len(), 2 * (23 + 4 + 13));
+        // 2 themes x (22 slots + accent + 4 status + 13 graph + 12 group colours).
+        assert_eq!(colours.len(), 2 * (23 + 4 + 13 + GROUP_COLORS));
         for c in &colours {
             assert_eq!(c.len(), 7, "{c} is not #RRGGBB");
             assert!(c[1..].bytes().all(|b| b.is_ascii_hexdigit()), "{c}");
