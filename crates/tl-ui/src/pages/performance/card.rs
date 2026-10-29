@@ -5,7 +5,7 @@
 //! The words come from `perf-card-*`, `perf-unknown-*`, `perf-net-state-*` and `perf-net-type-*`
 //! in `en-US.ftl`, translated once per strings version into [`CardWords`] ([`card_words`]).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -50,8 +50,11 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
-/// Mini graph width, × ui_scale. Every card draws its graph at this size (UI-PRF-059).
+/// Mini graph width, × ui_scale. Every card draws its graph at this size (UI-PRF-059), unless
+/// the top card's title needs the room ([`card_graph_width`]).
 pub const CARD_GRAPH_W: f32 = 80.0;
+/// The narrowest a mini graph gets to make room for the top card's title, × ui_scale (crw.101).
+pub const CARD_GRAPH_MIN_W: f32 = 40.0;
 /// Mini graph height, × ui_scale.
 pub const CARD_GRAPH_H: f32 = 48.0;
 /// Gap between the graph and the text column, × ui_scale (UI-PRF-059).
@@ -954,10 +957,33 @@ impl CardTextLayout {
 }
 
 /// The text column width of a card `card_w` wide: less the 1 px border on both sides, the sp5
-/// inset, and the fixed graph with its gap (UI-PRF-059).
-pub fn card_text_width(card_w: Pixels, m: &UiMetrics) -> Pixels {
+/// inset, and the graph `graph_w` wide with its gap (UI-PRF-059).
+pub fn card_text_width(card_w: Pixels, graph_w: Pixels, m: &UiMetrics) -> Pixels {
     let s = m.ui_scale;
-    (card_w - px(2.0 * s) - m.sp[5] - px((CARD_GRAPH_W + CARD_TEXT_GAP) * s)).max(Pixels::ZERO)
+    (card_w - px(2.0 * s) - m.sp[5] - graph_w - px(CARD_TEXT_GAP * s)).max(Pixels::ZERO)
+}
+
+/// The full graph width, [`CARD_GRAPH_W`], scaled.
+pub fn card_graph_full_w(m: &UiMetrics) -> Pixels {
+    px(CARD_GRAPH_W * m.ui_scale)
+}
+
+/// The graph width every sidebar card shares (UI-PRF-059, crw.101): the text column comes
+/// first. The top card, `card_w` wide, keeps its title `title_w` wide on one row beside the
+/// edit button's column; the graph gets what is left, from [`CARD_GRAPH_MIN_W`] to
+/// [`CARD_GRAPH_W`]. The title keeps one pixel of rounding room. At the 252 px default the
+/// graph is the full 80 px.
+pub fn card_graph_width(card_w: Pixels, title_w: Pixels, m: &UiMetrics) -> Pixels {
+    let s = m.ui_scale;
+    let title = px(f32::from(title_w).ceil() + 1.0);
+    let room = card_w - px(2.0 * s) - m.sp[5] - px(CARD_TEXT_GAP * s) - title - edit_column(m);
+    room.clamp(px(CARD_GRAPH_MIN_W * s), card_graph_full_w(m))
+}
+
+/// The column the top card keeps free at its right for the sidebar's edit button: the button
+/// and sp3.
+fn edit_column(m: &UiMetrics) -> Pixels {
+    px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3]
 }
 
 /// The least text column, × ui_scale, an edit-mode card keeps next to its graph: room for "…"
@@ -968,14 +994,15 @@ const EDIT_TEXT_MIN_W: f32 = 16.0;
 /// mode a card whose text column would be narrower than [`EDIT_TEXT_MIN_W`] draws none and gives
 /// its text the whole card: at nav_width 180 the drag handle and switch leave the card 96 px.
 pub fn card_shows_graph(card_w: Pixels, edit_mode: bool, m: &UiMetrics) -> bool {
-    !edit_mode || card_text_width(card_w, m) >= px(EDIT_TEXT_MIN_W * m.ui_scale)
+    !edit_mode
+        || card_text_width(card_w, card_graph_full_w(m), m) >= px(EDIT_TEXT_MIN_W * m.ui_scale)
 }
 
-/// The text column of a card: [`card_text_width`] with the graph, else the whole width inside
-/// the border and the sp5 inset.
-fn card_column_width(card_w: Pixels, graph: bool, m: &UiMetrics) -> Pixels {
-    if graph {
-        card_text_width(card_w, m)
+/// The text column of a card: [`card_text_width`] with a graph `graph_w` wide, else the whole
+/// width inside the border and the sp5 inset.
+fn card_column_width(card_w: Pixels, graph: Option<Pixels>, m: &UiMetrics) -> Pixels {
+    if let Some(graph_w) = graph {
+        card_text_width(card_w, graph_w, m)
     } else {
         (card_w - px(2.0 * m.ui_scale) - m.sp[5]).max(Pixels::ZERO)
     }
@@ -1342,6 +1369,8 @@ pub struct CardPrepared {
     pub clear: Pixels,
     /// The card draws its graph ([`card_shows_graph`]).
     pub graph: bool,
+    /// The graph width, shared by every sidebar card ([`card_graph_width`]).
+    pub graph_w: Pixels,
 }
 
 impl CardPrepared {
@@ -1446,6 +1475,9 @@ pub struct CardView {
     pointer: bool,
     /// The first card of the sidebar, under its edit button.
     top: bool,
+    /// The top card's title, shared by the sidebar's cards. Its width sets the graph width of
+    /// every card ([`card_graph_width`]). `None` keeps the full graph (the mini window).
+    lead: Option<Rc<RefCell<SharedString>>>,
     width: Rc<Cell<Pixels>>,
     /// The height the sidebar lays this card out with. Render writes the measured height and
     /// notifies `sidebar` when it changed, so the cards below move on the next frame.
@@ -1481,6 +1513,7 @@ impl CardView {
             hidden_in_edit: false,
             pointer: false,
             top: false,
+            lead: None,
             width,
             height,
             sidebar,
@@ -1492,6 +1525,12 @@ impl CardView {
             #[cfg(any(test, feature = "test-hooks"))]
             prepared: None,
         }
+    }
+
+    /// Sizes the graph by the top card's title in `lead`, as every sidebar card does.
+    pub fn with_lead(mut self, lead: Rc<RefCell<SharedString>>) -> Self {
+        self.lead = Some(lead);
+        self
     }
 
     /// Replaces the formatted text and invalidates only this card.
@@ -1553,7 +1592,8 @@ impl Render for CardView {
             width: self.width.get(),
             prepared: None,
         };
-        let prepared = card.prepare_top(self.top, window, cx);
+        let lead = self.lead.as_ref().map(|lead| lead.borrow().clone());
+        let prepared = card.prepare_top(self.top, lead.as_deref(), window, cx);
         let height = prepared.height;
         let stale_at = prepared.stale_at(self.chart.read(cx));
         #[cfg(any(test, feature = "test-hooks"))]
@@ -1630,12 +1670,20 @@ impl DeviceCard {
     /// Reads the value from the chart and lays the text out for `width`. [`CardView`] calls it
     /// before render to learn the card height; render calls it when no one did.
     pub fn prepare(&mut self, window: &Window, cx: &mut App) -> &CardPrepared {
-        self.prepare_top(false, window, cx)
+        self.prepare_top(false, None, window, cx)
     }
 
     /// [`DeviceCard::prepare`] for a card that may be the sidebar's first. With `top` the
-    /// heading row ends sp3 before the edit button over the card's top right corner.
-    pub fn prepare_top(&mut self, top: bool, window: &Window, cx: &mut App) -> &CardPrepared {
+    /// heading row ends sp3 before the edit button over the card's top right corner. `lead` is
+    /// the top card's title: outside edit mode the graph narrows so it fits on one row beside
+    /// the button ([`card_graph_width`]).
+    pub fn prepare_top(
+        &mut self,
+        top: bool,
+        lead: Option<&str>,
+        window: &Window,
+        cx: &mut App,
+    ) -> &CardPrepared {
         if self.prepared.is_none() {
             let m = *metrics(cx);
             let value = CardValue::of(self.chart.read(cx), NetFormat::of(cx));
@@ -1648,6 +1696,12 @@ impl DeviceCard {
                 advances.style_version = m.style_version;
             }
             let mut measure = |f: CardFont, s: &str| advances.width(s, f, &m, window);
+            let graph_w = match lead {
+                Some(title) if !self.edit_mode => {
+                    card_graph_width(self.width, measure(CardFont::Heading, title), &m)
+                }
+                _ => card_graph_full_w(&m),
+            };
             // The live text, and the room kept for the widest text of the format or the live
             // text when it is wider still. Rounded up to a whole pixel, as layout rounds up the
             // text box.
@@ -1659,25 +1713,16 @@ impl DeviceCard {
                     .fold(live, |w, t| w.max(measure(CardFont::Value, t)));
                 (px(f32::from(w).ceil()), px(f32::from(live).ceil()))
             });
-            // The graph has one fixed size (UI-PRF-059). The top card leaves the edit button's
-            // column free, as if the button were part of the card, unless the value would then
-            // not fit where it fits without it (at the least nav_width).
+            // The top card leaves the edit button's column free, as if the button were part of
+            // the card, unless the value would then not fit where it fits without it. Its title
+            // ends before the button either way: the graph width leaves it room.
             let edit_mode = self.edit_mode;
-            let column = |w: Pixels| card_column_width(w, card_shows_graph(w, edit_mode, &m), &m);
-            let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
+            let graph_at = |w: Pixels| card_shows_graph(w, edit_mode, &m).then_some(graph_w);
+            let column = |w: Pixels| card_column_width(w, graph_at(w), &m);
+            let edit_w = edit_column(&m);
             let fits = |w: Pixels| column(w) >= value_w;
-            // The title comes before the button: the column keeps at most the room the title's
-            // longest word leaves, so a short title is never cut to "…" beside the button.
-            let title_w = self
-                .lines
-                .heading
-                .split(' ')
-                .map(|word| measure(CardFont::Heading, word))
-                .fold(Pixels::ZERO, Pixels::max);
-            // One pixel more than the word, so rounding never cuts it.
-            let title_room = (column(self.width) - title_w - px(1.)).max(Pixels::ZERO);
             let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
-                edit_w.min(title_room)
+                edit_w
             } else {
                 Pixels::ZERO
             };
@@ -1687,7 +1732,7 @@ impl DeviceCard {
                 &self.lines,
                 value_w,
                 live_w,
-                card_column_width(inner_w, graph, &m),
+                card_column_width(inner_w, graph.then_some(graph_w), &m),
                 m.sp[3],
                 m.icon.xs,
                 &mut measure,
@@ -1699,6 +1744,7 @@ impl DeviceCard {
                 height,
                 clear,
                 graph,
+                graph_w,
             });
         }
         self.prepared.as_ref().expect("prepared above")
@@ -1721,6 +1767,7 @@ impl RenderOnce for DeviceCard {
             height,
             clear,
             graph: show_graph,
+            graph_w,
         } = self.prepared.take().expect("prepared above");
         let lines = self.lines;
         let key = self.key;
@@ -1822,7 +1869,7 @@ impl RenderOnce for DeviceCard {
         let graph = div()
             .debug_selector(move || format!("perf-card-graph:{graph_key}"))
             .flex_none()
-            .w(px(CARD_GRAPH_W * s))
+            .w(graph_w)
             .h(px(CARD_GRAPH_H * s))
             .child(self.chart.cached(StyleRefinement::default().size_full()));
 
@@ -2804,11 +2851,32 @@ mod tests {
     #[test]
     fn card_text_width_leaves_the_fixed_graph() {
         let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let full = card_graph_full_w(&m);
         // nav_width 252 less sp4 on each side: 236 less border, sp5 inset, 80 graph, 10 gap.
-        assert_eq!(card_text_width(px(236.), &m), px(132.));
+        assert_eq!(card_text_width(px(236.), full, &m), px(132.));
         // nav_width 180.
-        assert_eq!(card_text_width(px(164.), &m), px(60.));
-        assert_eq!(card_text_width(px(20.), &m), Pixels::ZERO);
+        assert_eq!(card_text_width(px(164.), full, &m), px(60.));
+        assert_eq!(card_text_width(px(164.), px(41.), &m), px(99.));
+        assert_eq!(card_text_width(px(20.), full, &m), Pixels::ZERO);
+    }
+
+    /// Leader decision on tasklens-crw.101: the graph narrows, down to 40 px, so the top card's
+    /// title fits on one row beside the edit button's 30 px column.
+    #[test]
+    fn card_graph_width_leaves_the_top_title_room() {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        // nav_width 180: 164 less border, sp5 inset, 10 gap, 30 for the button, and "Overview"
+        // (67.2 px, rounded up, plus 1 px) leaves 41.
+        assert_eq!(card_graph_width(px(164.), px(67.2), &m), px(41.));
+        // At the 252 px default the graph keeps its 80 px.
+        assert_eq!(card_graph_width(px(236.), px(67.2), &m), px(80.));
+        // A short title never widens it past 80, a long one never narrows it under 40.
+        assert_eq!(card_graph_width(px(164.), px(10.), &m), px(80.));
+        assert_eq!(card_graph_width(px(164.), px(200.), &m), px(40.));
+        // The 1 px left over at 180 is the title's rounding room: the top card's column, less
+        // the button's column, holds the rounded title.
+        let column = card_text_width(px(164.), px(41.), &m) - edit_column(&m);
+        assert_eq!(column, px(69.));
     }
 
     /// Leader decision on tasklens-crw.95: only an edit-mode card whose text column would be
@@ -2819,11 +2887,14 @@ mod tests {
         // The edit card at nav_width 180: 96 px leaves an 8 px column next to the graph.
         assert!(card_shows_graph(px(96.), false, &m));
         assert!(!card_shows_graph(px(96.), true, &m));
-        assert_eq!(card_column_width(px(96.), false, &m), px(82.));
+        assert_eq!(card_column_width(px(96.), None, &m), px(82.));
         // 120 px leaves exactly 16 px, which keeps the graph.
         assert!(card_shows_graph(px(120.), true, &m));
         assert!(!card_shows_graph(px(119.), true, &m));
-        assert_eq!(card_column_width(px(120.), true, &m), px(16.));
+        assert_eq!(
+            card_column_width(px(120.), Some(card_graph_full_w(&m)), &m),
+            px(16.)
+        );
         assert!(card_shows_graph(px(20.), false, &m));
     }
 

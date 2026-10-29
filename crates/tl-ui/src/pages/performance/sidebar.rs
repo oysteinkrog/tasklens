@@ -15,7 +15,7 @@
 //! nothing runs while no card moves. With animations off the change is at once. Edit mode
 //! (E24-013) is a later bead.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -565,6 +565,8 @@ pub struct DeviceSidebar {
     catalog_version: u64,
     /// Card width from the last paint: the sidebar width less its padding.
     card_width: Rc<Cell<Pixels>>,
+    /// The top card's title, shared with every card: it sets their one graph width (crw.101).
+    lead: Rc<RefCell<gpui_kit::SharedString>>,
     /// Reused by [`update_card_lines`].
     scratch: String,
     /// The card words for the current strings version.
@@ -631,6 +633,7 @@ impl DeviceSidebar {
             style_version: m.style_version,
             catalog_version: snap.devices.version,
             card_width: Rc::new(Cell::new(card_width)),
+            lead: Rc::default(),
             scratch: String::new(),
             words: card_words(cx),
             edit_words: edit_words(cx),
@@ -874,6 +877,7 @@ impl DeviceSidebar {
                 Rc::clone(&height),
                 self.id,
             )
+            .with_lead(Rc::clone(&self.lead))
         });
         CardState {
             row: row.clone(),
@@ -1112,6 +1116,7 @@ impl DeviceSidebar {
                 card.view.update(cx, |view, cx| view.set_lines(lines, cx));
             }
         }
+        self.sync_card_lead(cx);
         changed
     }
 
@@ -1138,6 +1143,25 @@ impl DeviceSidebar {
         for (i, card) in self.cards.iter().enumerate() {
             card.view
                 .update(cx, |view, cx| view.set_top(top == Some(i), cx));
+        }
+        self.sync_card_lead(cx);
+    }
+
+    /// Shares the top card's title with every card, which sizes their graphs by it (crw.101),
+    /// and redraws them when it changed.
+    fn sync_card_lead(&self, cx: &mut App) {
+        let title = self
+            .cards
+            .iter()
+            .find(|c| !c.is_removing())
+            .map(|c| c.lines.heading.clone())
+            .unwrap_or_default();
+        if *self.lead.borrow() == title {
+            return;
+        }
+        *self.lead.borrow_mut() = title;
+        for card in &self.cards {
+            card.view.update(cx, |_, cx| cx.notify());
         }
     }
 

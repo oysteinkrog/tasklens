@@ -1251,25 +1251,62 @@ mod sidebar {
         assert_eq!(prepared(&mut r, "cpu").clear, px(0.));
     }
 
-    /// tasklens-crw.101: the Overview card's title reads "Overview", not "…", at every nav_width
-    /// from 180 to 400.
+    /// tasklens-crw.101, leader decision: at every nav_width from 180 to 400 every card shows its
+    /// full title, no title row touches the edit button, and every card draws its graph at one
+    /// width of at least 40 px, so the text starts at one x. The Overview card is the top card
+    /// and reads "Overview", not "…".
     #[gpui_kit::test]
-    fn overview_card_title_is_overview_at_every_width(cx: &mut TestAppContext) {
+    fn card_titles_whole_at_every_width(cx: &mut TestAppContext) {
         let mut settings = with_overview();
         settings.motion.animations = false;
         let mut r = open(cx, nine(), settings, UiState::default());
         r.vcx.simulate_resize(gpui_kit::size(px(1200.), px(1800.)));
-        for w in (180..=400).step_by(10) {
+        for w in 180..=400 {
             r.host_w.set(w as f32);
             r.vcx.update(|window, _| window.refresh());
-            draw(r.vcx);
             publish_cpu_value_at(&mut r, now_boot_ns(), 100.);
             draw(r.vcx);
-            assert_eq!(keys(&mut r)[0], OVERVIEW);
-            let heading = prepared(&mut r, OVERVIEW).layout.heading;
-            let rows: Vec<&str> = heading.rows.iter().map(|row| &*row.text).collect();
-            assert_eq!(rows, ["Overview"], "width {w}");
-            assert!(!heading.cut, "width {w}");
+            draw(r.vcx);
+            let all = keys(&mut r);
+            assert!(all.len() >= 10, "width {w}: {all:?}");
+            assert_eq!(all[0], OVERVIEW, "width {w}");
+            let button = r
+                .vcx
+                .debug_bounds("TlButton-perf-edit-open")
+                .expect("edit button");
+            let mut shared = None;
+            for key in all {
+                let p = prepared(&mut r, &key);
+                let rows: Vec<&str> = p.layout.heading.rows.iter().map(|row| &*row.text).collect();
+                let full = lines(&mut r, &key).heading;
+                assert!(!p.layout.heading.cut, "width {w} {key}: {rows:?}");
+                assert_eq!(rows.join(" "), &*full, "width {w} {key}");
+                for i in 0..rows.len() {
+                    let id = sel(format!("perf-card-row:{key}:heading:{i}"));
+                    let row = r.vcx.debug_bounds(id).expect("heading row");
+                    assert!(
+                        !row.intersects(&button),
+                        "width {w} {key}: heading row {i} {row:?}, button {button:?}"
+                    );
+                }
+                let graph = r
+                    .vcx
+                    .debug_bounds(sel(format!("perf-card-graph:{key}")))
+                    .unwrap_or_else(|| panic!("width {w}: {key} graph"));
+                assert!(graph.size.width >= px(40.), "width {w} {key}: {graph:?}");
+                let text = text_column(&mut r, &key);
+                let (graph_w, text_x) = *shared.get_or_insert((graph.size.width, text.left()));
+                assert_eq!(graph.size.width, graph_w, "width {w} {key}");
+                assert_eq!(text.left(), text_x, "width {w} {key}");
+            }
+            if w == 180 {
+                // 164 px card less border, sp5, the 10 px gap, the button's 30 px column and
+                // "Overview" (67.2 px in the test font, rounded up, plus 1 px).
+                assert_eq!(shared.map(|(g, _)| g), Some(px(41.)), "width {w}");
+            }
+            if w >= 252 {
+                assert_eq!(shared.map(|(g, _)| g), Some(px(80.)), "width {w}");
+            }
         }
     }
 
@@ -1332,9 +1369,10 @@ mod sidebar {
     }
 
     /// UI-PRF-059: every card, the Overview card included, draws an 80 x 48 graph at nav_width
-    /// 180 and 252, outside and in edit mode, and no card has an icon. The one exception, by
-    /// leader decision on tasklens-crw.95: an edit card at nav_width 180 is 96 px, which would
-    /// leave an 8 px text column, so it draws no graph.
+    /// 180 and 252, outside and in edit mode, and no card has an icon. Two exceptions, by leader
+    /// decision: an edit card at nav_width 180 is 96 px, which would leave an 8 px text column,
+    /// so it draws no graph (tasklens-crw.95), and outside edit mode at nav_width 180 every
+    /// graph is 41 px wide so the Overview title fits beside the edit button (tasklens-crw.101).
     #[gpui_kit::test]
     fn card_graph_size_fixed(cx: &mut TestAppContext) {
         at_each_width_and_mode(cx, |r, what| {
@@ -1350,9 +1388,10 @@ mod sidebar {
                     continue;
                 };
                 assert!(graphs, "{what}: {key} draws a graph");
+                let width = if what == "nav_width 180" { 41. } else { 80. };
                 assert_eq!(
                     (g.size.width, g.size.height),
-                    (px(80.), px(48.)),
+                    (px(width), px(48.)),
                     "{what} {key}"
                 );
             }
@@ -1389,10 +1428,10 @@ mod sidebar {
     /// UI-PRF-059, as drawn: the CPU line 2 "3901 MHz · 55 °C" breaks only at the dot, so no
     /// row ends in a number whose unit is on the next row, and the Overview line 1 wraps at every
     /// " · " to as many rows as it needs instead of being cut. The test font draws every
-    /// character 0.6 em wide: at nav_width 180 "3901 MHz ·" is wider than the 60 px column, so
-    /// the row leaves the dot out; at 200 the CPU line takes 2 rows and the Overview line 5: "GPU ·
-    /// Disk" (72 px) would fit a row of 80 px only by leaving out the dot after Disk, so the row
-    /// ends at "GPU ·" instead; at 252 the Overview line takes 3.
+    /// character 0.6 em wide. At nav_width 180 and 200 the graphs narrow so "Overview" fits
+    /// beside the edit button (tasklens-crw.101): the CPU column is 99 px and the Overview
+    /// column 69. The CPU line takes 2 rows, and the Overview line 5: "GPU · Disk" (72 px) does
+    /// not fit 69 px, so the row ends at "GPU ·"; at 252 the Overview line takes 3.
     #[gpui_kit::test]
     fn card_rows_break_only_between_values(cx: &mut TestAppContext) {
         let mut settings = with_overview();
@@ -1412,9 +1451,8 @@ mod sidebar {
         assert_eq!(lines(&mut r, "cpu").line2, cpu_full);
         assert_eq!(lines(&mut r, OVERVIEW).line1, overview_full);
         let cpu_two = ["3901\u{a0}MHz\u{a0}·", "55\u{a0}°C"];
-        let cpu_bare = ["3901\u{a0}MHz", "55\u{a0}°C"];
         for (w, cpu_rows, overview_rows) in [
-            (180., &cpu_bare[..], 5),
+            (180., &cpu_two[..], 5),
             (200., &cpu_two[..], 5),
             (252., &[cpu_full][..], 3),
             (400., &[cpu_full][..], 2),
@@ -1719,7 +1757,7 @@ mod sidebar {
             let cpu_rows: Vec<&str> = cpu.rows.iter().map(|row| &*row.text).collect();
             assert!(!cpu.cut, "nav_width {w}: {cpu_rows:?}");
             if w == 180. {
-                assert_eq!(cpu_rows, ["3901\u{a0}MHz", "55\u{a0}°C"]);
+                assert_eq!(cpu_rows, ["3901\u{a0}MHz\u{a0}·", "55\u{a0}°C"]);
                 assert!(prepared(&mut r, "net:eth0").layout.value_cut);
             }
             for edit in [false, true] {
