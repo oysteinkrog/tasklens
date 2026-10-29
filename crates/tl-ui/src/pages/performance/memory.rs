@@ -2,6 +2,10 @@
 //! bar and the Details grid, the two page-menu check items and the page's demand
 //! (docs/ui/performance.md UI-PRF-026, UI-PRF-020; PERF-018, PERF-026, PERF-041; ADR-008).
 //!
+//! A Usage / By app switch above the first chart picks `performance.memory_view`. "By app" puts
+//! the memory-by-app chart and its legend (UI-PRF-060, `memory_apps.rs`) in place of the
+//! Physical memory chart, and adds "Groups shown" to the page menu.
+//!
 //! The charts are cached views that re-render for their own series. The page re-renders only
 //! when a chart appears or goes, or its header or Details rows change. The specs are built again
 //! only when a total, a chart setting or the theme changed.
@@ -33,8 +37,11 @@ use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
+use super::actions::{
+    PerfSetMemoryGroupsShown, PerfToggleMemoryComposition, PerfToggleMemorySwapGraph,
+};
 use super::details::{Fallback, KeyValueModel, render_details};
+use super::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
 use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
@@ -50,7 +57,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::settings_global::{Section, TlSettings, animations_on};
+use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings, animations_on};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -61,6 +68,7 @@ use crate::table::tree_table::{
 };
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_model::settings::MemoryView;
 
 /// Debug selectors of the chart boxes.
 pub const PHYSICAL_ID: &str = "perf-mem-physical";
@@ -68,6 +76,8 @@ pub const COMMIT_ID: &str = "perf-mem-commit";
 /// Debug selector of the box around the composition bar view.
 pub const BAR_WRAP_ID: &str = "perf-mem-bar-wrap";
 pub const SWAP_ID: &str = "perf-mem-swap";
+/// Debug selector of the Usage / By app switch; each segment adds `-usage` or `-apps`.
+pub const VIEW_SWITCH_ID: &str = "perf-mem-view";
 
 /// Element ids and debug selectors of the grids in the "Compressed memory" block. Each zram
 /// grid adds its index. Every grid sits in a parent with its own id, because `render_details`
@@ -86,6 +96,9 @@ const KEY_MENU_COMPOSITION: &str = "perf-mem-menu-composition";
 const KEY_MENU_SWAP: &str = "perf-mem-menu-swap";
 const KEY_RANGE_MEMORY: &str = "perf-mem-range-memory";
 const KEY_RANGE_SWAP: &str = "perf-mem-range-swap";
+const KEY_VIEW_USAGE: &str = "perf-mem-view-usage";
+const KEY_VIEW_APPS: &str = "perf-mem-view-apps";
+const KEY_GROUPS_SHOWN: &str = "perf-mem-apps-groups-shown";
 const KEY_BLOCK_COMPRESSED: &str = "perf-mem-block-compressed";
 const KEY_ZSWAP: &str = "perf-mem-zswap";
 const KEY_BLOCK_SWAP: &str = "perf-mem-block-swap";
@@ -130,6 +143,9 @@ pub struct Words {
     pub zswap: SharedString,
     pub block_swap: SharedString,
     pub block_modules: SharedString,
+    pub view_usage: SharedString,
+    pub view_apps: SharedString,
+    pub groups_shown: SharedString,
     pub swap_table: SwapWords,
 }
 
@@ -165,6 +181,9 @@ impl Words {
         self.zswap = t(KEY_ZSWAP);
         self.block_swap = t(KEY_BLOCK_SWAP);
         self.block_modules = t(KEY_BLOCK_MODULES);
+        self.view_usage = t(KEY_VIEW_USAGE);
+        self.view_apps = t(KEY_VIEW_APPS);
+        self.groups_shown = t(KEY_GROUPS_SHOWN);
         self.swap_table = SwapWords {
             columns: KEY_SWAP_COLS.map(t),
             types: KEY_SWAP_TYPES.map(t),
@@ -181,6 +200,10 @@ struct PageSettings {
     rounded: bool,
     composition: bool,
     swap: bool,
+    /// `performance.memory_view`.
+    view: MemoryView,
+    /// `performance.memory_by_app.top_n`.
+    top_n: u8,
 }
 
 impl PageSettings {
@@ -192,6 +215,8 @@ impl PageSettings {
             rounded: s.appearance.rounded_corners,
             composition: s.performance.memory_composition,
             swap: s.performance.memory_swap_graph,
+            view: s.performance.memory_view,
+            top_n: s.performance.memory_by_app.top_n,
         }
     }
 }
@@ -1618,6 +1643,9 @@ pub struct MemoryPage {
     physical: Entity<ChartView>,
     commit: Entity<ChartView>,
     swap: Entity<ChartView>,
+    /// The memory-by-app chart, created the first time the "By app" view shows.
+    apps: Option<Entity<MemoryAppsChart>>,
+    hub: Entity<SnapshotHub>,
     /// The composition bar view, which keeps the `CompositionBarState`. Created the first time
     /// the bar is shown; a cached view, so a memory sample repaints only the bar.
     bar: Option<Entity<CompositionBarView>>,
@@ -1724,6 +1752,8 @@ impl MemoryPage {
             physical,
             commit,
             swap,
+            apps: None,
+            hub: hub.clone(),
             bar: None,
             composition,
             details: memory_details_model(),
@@ -1760,7 +1790,32 @@ impl MemoryPage {
         this.sync_bar(cx);
         this.sync_details(&snap, cx);
         this.sync_modules(&snap, cx);
+        this.sync_apps(cx);
         this
+    }
+
+    /// Creates the memory-by-app chart when the "By app" view shows for the first time.
+    fn sync_apps(&mut self, cx: &mut Context<Self>) {
+        if self.settings.view == MemoryView::Apps && self.apps.is_none() {
+            let hub = self.hub.clone();
+            self.apps = Some(cx.new(|cx| MemoryAppsChart::new(hub, cx)));
+        }
+    }
+
+    /// The memory-by-app chart, once the "By app" view has shown.
+    pub fn apps(&self) -> Option<&Entity<MemoryAppsChart>> {
+        self.apps.as_ref()
+    }
+
+    /// `performance.memory_view`.
+    pub fn view(&self) -> MemoryView {
+        self.settings.view
+    }
+
+    /// Switches the first chart between Usage and By app and saves the choice.
+    pub fn set_view(&mut self, view: MemoryView, cx: &mut Context<Self>) {
+        TlSettings::update(cx, |d| d.settings.performance.memory_view = view);
+        self.sync_settings(cx);
     }
 
     /// Brings Details rows 7 to 11 up to date from the inventory; notifies only on change.
@@ -2048,6 +2103,10 @@ impl MemoryPage {
             self.show_swap = new.swap;
             self.sync_swap_shown(cx);
         }
+        if new.view != old.view {
+            self.sync_apps(cx);
+            cx.notify();
+        }
     }
 
     /// A new theme: the charts take the new colours.
@@ -2109,6 +2168,57 @@ impl MemoryPage {
             p.memory_swap_graph = !p.memory_swap_graph;
         });
         self.sync_settings(cx);
+    }
+
+    fn on_groups_shown(
+        &mut self,
+        a: &PerfSetMemoryGroupsShown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        TlSettings::set(
+            cx,
+            SettingKey::PerformanceMemoryByAppTopN,
+            SettingValue::Int(i64::from(a.count)),
+        );
+        self.sync_settings(cx);
+    }
+
+    /// The Usage / By app switch, right-aligned above the first chart.
+    fn view_switch(&self, cx: &App) -> AnyElement {
+        let m = metrics(cx);
+        let mut row = div().flex().flex_none();
+        for (id, label, view) in [
+            ("usage", self.words.view_usage.clone(), MemoryView::Usage),
+            ("apps", self.words.view_apps.clone(), MemoryView::Apps),
+        ] {
+            let weak = self.this.clone();
+            let selector = format!("{VIEW_SWITCH_ID}-{id}");
+            row = row.child(
+                div().debug_selector(move || selector).child(
+                    TlButton::new(
+                        ElementId::Name(format!("{VIEW_SWITCH_ID}-{id}").into()),
+                        TlButtonKind::Segment {
+                            on: self.settings.view == view,
+                        },
+                    )
+                    .size(TlButtonSize::Sm)
+                    .label(label)
+                    .on_click(move |_, _, cx| {
+                        weak.update(cx, |page, cx| page.set_view(view, cx)).ok();
+                    }),
+                ),
+            );
+        }
+        div()
+            .debug_selector(|| VIEW_SWITCH_ID.into())
+            .flex()
+            .flex_row()
+            .justify_end()
+            .w_full()
+            .pb(m.sp[1])
+            .child(row)
+            .into_any_element()
     }
 
     /// Creates the "Swap devices" table on the first render. The Name column then follows the
@@ -2331,10 +2441,14 @@ impl DevicePage for MemoryPage {
                     .pt(m.sp[6] - m.sp[4])
                     .child(bar.clone())
             });
+        let first = match (&self.apps, self.settings.view) {
+            (Some(apps), MemoryView::Apps) => apps.clone().into_any_element(),
+            _ => Self::chart_box(PHYSICAL_ID, &self.physical, h).into_any_element(),
+        };
         v_flex()
             .w_full()
             .gap(m.sp[4])
-            .child(Self::chart_box(PHYSICAL_ID, &self.physical, h))
+            .child(v_flex().w_full().child(self.view_switch(cx)).child(first))
             .child(commit)
             .children(swap)
             .children(bar)
@@ -2411,8 +2525,24 @@ impl DevicePage for MemoryPage {
         blocks
     }
 
-    fn menu_items(&self, menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
+    fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
         let w = &self.words;
+        // UI-PRF-060: the By app chart's context menu sets `top_n`.
+        let menu = if self.settings.view == MemoryView::Apps {
+            let top_n = self.settings.top_n;
+            menu.submenu(w.groups_shown.clone(), window, cx, move |sub, _, _| {
+                GROUPS_SHOWN.iter().fold(sub, |sub, &n| {
+                    sub.radio_item(
+                        n.to_string(),
+                        n == top_n,
+                        Box::new(PerfSetMemoryGroupsShown { count: n }),
+                    )
+                })
+            })
+            .separator()
+        } else {
+            menu
+        };
         menu.check_item(
             w.menu_composition.clone(),
             self.show_composition,
@@ -2531,6 +2661,7 @@ impl Render for MemoryPage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_composition))
             .on_action(cx.listener(Self::on_toggle_swap))
+            .on_action(cx.listener(Self::on_groups_shown))
             .child(
                 DevicePageFrame {
                     page: self,

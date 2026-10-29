@@ -124,6 +124,15 @@ pub struct PerfOverviewSetBoxPower {
     pub on: bool,
 }
 
+/// Sets `performance.memory_by_app.top_n` to `count` (the Memory page menu's "Groups shown"
+/// items, UI-PRF-060).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetMemoryGroupsShown {
+    pub count: u8,
+}
+
 /// Sets `performance.timeline_click` to `click`: `pause`, `preview` or `history` (the timeline
 /// box menu's "Click" submenu, UI-PRF-057).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

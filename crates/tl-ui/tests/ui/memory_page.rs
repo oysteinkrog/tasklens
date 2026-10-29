@@ -818,3 +818,251 @@ mod details {
         assert_eq!(cached.as_deref(), Some("12.40 GiB"));
     }
 }
+
+/// UI-PRF-060: the memory-by-app chart and its legend.
+mod by_app {
+    use tl_model::settings::{GroupColor, MemoryView};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet};
+    use tl_model::system::MemGroupBand;
+    use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
+    use tl_ui::pages::performance::memory_apps::{
+        APPS_ID, BandKind, LEGEND_ID, Ranker, legend_fit, pick_colors,
+    };
+    use tl_ui::settings_global::{SettingKey, SettingValue};
+
+    use super::*;
+
+    const MIB: f32 = 1_048_576.;
+    const OTHER: DeviceIdx = DeviceIdx(100);
+    const SHARED: DeviceIdx = DeviceIdx(101);
+
+    fn group_dev(i: u16) -> DeviceIdx {
+        DeviceIdx(2 + i)
+    }
+
+    fn mem_entry(idx: DeviceIdx, key: &str, name: &str) -> DeviceEntry {
+        DeviceEntry {
+            display_name: Arc::from(name),
+            persistent_key: Arc::from(format!("memgroup:{key}")),
+            ..entry(
+                idx.0,
+                DeviceIdentity::MemGroup {
+                    key: Arc::from(key),
+                },
+            )
+        }
+    }
+
+    fn flat(device: DeviceIdx, value: f32) -> Arc<SeriesView> {
+        const PERIOD: u64 = 1_000_000_000;
+        let now = now_boot_ns();
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device,
+                metric: MetricId::MEM_GROUP,
+            },
+            version: 1,
+            period_ns: PERIOD,
+            samples: (0..60u64)
+                .map(|k| Sample::valid(now - (59 - k) * PERIOD, value))
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    /// Publishes `n` groups `exe:p<i>` of `n - i` MiB each, with 3 processes, plus the two fixed
+    /// bands.
+    fn publish_groups(r: &mut Rig<'_>, n: u16) {
+        r.engine.publish_with(|s| {
+            let mut entries: Vec<DeviceEntry> = s.devices.entries.to_vec();
+            let mut views = Vec::new();
+            let mut bands = Vec::new();
+            for i in 0..n {
+                let key = format!("exe:p{i}");
+                entries.push(mem_entry(group_dev(i), &key, &format!("p{i}")));
+                views.push(flat(group_dev(i), f32::from(n - i) * MIB));
+                bands.push(MemGroupBand {
+                    key: Arc::from(key),
+                    name: Arc::from(format!("p{i}")),
+                    process_count: 3,
+                    device: group_dev(i),
+                });
+            }
+            // Pad to idx 100 so the fixed bands sit at their own idx.
+            while entries.len() < usize::from(OTHER.0) {
+                let i = entries.len() as u16;
+                entries.push(entry(i, DeviceIdentity::CpuPackage));
+            }
+            entries.push(mem_entry(OTHER, "other", "Other apps"));
+            entries.push(mem_entry(SHARED, "shared", "Shared and kernel"));
+            views.push(flat(OTHER, MIB));
+            views.push(flat(SHARED, 2. * MIB));
+            views.sort_by_key(|v| v.id);
+            s.devices = Arc::new(DeviceCatalog {
+                version: 2,
+                entries: entries.into(),
+            });
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: 2,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let mut sys = (*s.system).clone();
+            sys.header.version += 1;
+            sys.memory.groups = Arc::new(bands);
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+    }
+
+    fn apps_settings(top_n: u8) -> Settings {
+        let mut s = Settings::default();
+        s.performance.memory_view = MemoryView::Apps;
+        s.performance.memory_by_app.top_n = top_n;
+        s
+    }
+
+    fn band_kinds(r: &mut Rig<'_>) -> Vec<BandKind> {
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        r.vcx
+            .read_entity(&apps, |a, _| a.bands().iter().map(|b| b.kind).collect())
+    }
+
+    #[gpui_kit::test]
+    fn memory_by_app_top_n(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 25);
+        assert!(r.vcx.debug_bounds(APPS_ID).is_some());
+        assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_none());
+        assert!(r.vcx.debug_bounds(VIEW_SWITCH_ID).is_some());
+        for n in [3u8, 10, 20] {
+            r.vcx.update(|_, cx| {
+                TlSettings::set(
+                    cx,
+                    SettingKey::PerformanceMemoryByAppTopN,
+                    SettingValue::Int(i64::from(n)),
+                )
+            });
+            draw(r.vcx);
+            let kinds = band_kinds(&mut r);
+            assert_eq!(kinds.len(), usize::from(n) + 2, "top_n {n}");
+            let groups = kinds
+                .iter()
+                .filter(|k| matches!(k, BandKind::Group(_)))
+                .count();
+            assert_eq!(groups, usize::from(n));
+            assert_eq!(kinds[usize::from(n)], BandKind::Other);
+            assert_eq!(kinds[usize::from(n) + 1], BandKind::Shared);
+        }
+        // The largest group is the bottom band, and its colour pick is saved.
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .unwrap();
+        let bottom = r.vcx.read_entity(&apps, |a, _| a.bands()[0].key.clone());
+        assert_eq!(&*bottom, "exe:p0");
+        let saved = r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .memory_by_app
+                .colors
+                .iter()
+                .any(|c| c.key == "exe:p0")
+        });
+        assert!(saved);
+
+        // Back to Usage.
+        r.page
+            .update(r.vcx, |p, cx| p.set_view(MemoryView::Usage, cx));
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_some());
+        assert!(r.vcx.debug_bounds(APPS_ID).is_none());
+        let view = r
+            .vcx
+            .update(|_, cx| TlSettings::settings(cx).performance.memory_view);
+        assert_eq!(view, MemoryView::Usage);
+    }
+
+    #[test]
+    fn memory_by_app_rank_is_sticky() {
+        let means = |a: f64, b: f64| vec![(Arc::<str>::from("a"), a), (Arc::from("b"), b)];
+        let order = |r: &Ranker| r.order().iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let mut r = Ranker::default();
+        assert!(r.rank(&means(100., 90.), 0, false));
+        assert_eq!(order(&r), ["a", "b"]);
+        // 5% larger: no swap.
+        r.rank(&means(100., 105.), 20_000_000_000, false);
+        assert_eq!(order(&r), ["a", "b"]);
+        // 15% larger, but within 10 s of the last ranking: no swap yet.
+        assert!(!r.rank(&means(100., 115.), 25_000_000_000, false));
+        assert_eq!(order(&r), ["a", "b"]);
+        // 15% larger after 10 s: swap.
+        assert!(r.rank(&means(100., 115.), 30_000_000_000, false));
+        assert_eq!(order(&r), ["b", "a"]);
+    }
+
+    #[test]
+    fn memory_by_app_colours_kept() {
+        let keys = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| Arc::<str>::from(*n))
+                .collect::<Vec<_>>()
+        };
+        let mut picks: Vec<GroupColor> = Vec::new();
+        let (first, changed) = pick_colors(&mut picks, &keys(&["app:a", "exe:b", "exe:c"]));
+        assert!(changed);
+        let mut distinct = first.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3, "the shown groups get different colours");
+        // exe:b leaves the top N while others come and go, then comes back.
+        pick_colors(&mut picks, &keys(&["app:a", "exe:c", "exe:d"]));
+        pick_colors(&mut picks, &keys(&["exe:e", "app:a"]));
+        let (back, _) = pick_colors(&mut picks, &keys(&["app:a", "exe:b", "exe:c"]));
+        assert_eq!(back, first);
+        // Showing the same groups again changes nothing.
+        let (_, changed) = pick_colors(&mut picks, &keys(&["app:a", "exe:b", "exe:c"]));
+        assert!(!changed);
+        // At most 64 picks are kept; the group shown least recently goes first.
+        for i in 0..70 {
+            pick_colors(&mut picks, &keys(&[&format!("exe:x{i}")]));
+        }
+        assert_eq!(picks.len(), 64);
+        assert!(!picks.iter().any(|p| p.key == "app:a"));
+        assert_eq!(picks.last().map(|p| p.key.as_str()), Some("exe:x69"));
+    }
+
+    #[gpui_kit::test]
+    fn memory_by_app_legend_whole_rows(cx: &mut TestAppContext) {
+        assert_eq!(legend_fit(12, 300., 20.), (12, 0));
+        assert_eq!(legend_fit(22, 300., 20.), (14, 8));
+        assert_eq!(legend_fit(15, 300., 20.), (15, 0));
+        assert_eq!(legend_fit(16, 300., 20.), (14, 2));
+
+        let mut r = open(cx, apps_settings(20), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 25);
+        // 22 bands in a 300 px legend of 20 px rows: 14 rows, then "+8 more".
+        let legend = r.vcx.debug_bounds(LEGEND_ID).expect("legend");
+        assert_eq!(legend.size.height, px(300.));
+        for row in 0..14 {
+            let b = r
+                .vcx
+                .debug_bounds(&format!("{LEGEND_ID}-{row}"))
+                .unwrap_or_else(|| panic!("row {row}"));
+            assert!(b.bottom() <= legend.bottom(), "row {row} is whole");
+        }
+        assert!(r.vcx.debug_bounds(&format!("{LEGEND_ID}-14")).is_none());
+        let more = r
+            .vcx
+            .debug_bounds(&format!("{LEGEND_ID}-more"))
+            .expect("+n more row");
+        assert!(more.bottom() <= legend.bottom());
+    }
+}

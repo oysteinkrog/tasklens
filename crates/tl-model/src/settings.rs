@@ -120,6 +120,52 @@ impl CoreSmoothing {
     }
 }
 
+/// `performance.memory_view` (UI-PRF-060, D-036): what the Memory page's first chart shows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryView {
+    /// The Physical memory chart (UI-PRF-026).
+    #[default]
+    Usage,
+    /// The memory-by-app stacked chart.
+    Apps,
+}
+
+/// The smallest, default and largest `performance.memory_by_app.top_n` (UI-PRF-060).
+pub const MEMORY_BY_APP_TOP_N: (u8, u8, u8) = (3, 10, 20);
+/// The colour picks `performance.memory_by_app.colors` keeps at most (UI-PRF-060).
+pub const MEMORY_BY_APP_COLORS_MAX: usize = 64;
+/// The group colour slots of a theme (`GraphPalette.groups`).
+pub const MEMORY_BY_APP_SLOTS: u8 = 12;
+
+/// `[performance.memory_by_app]` (UI-PRF-060, D-036).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryByAppSettings {
+    /// Groups drawn as their own band, in [`MEMORY_BY_APP_TOP_N`].
+    pub top_n: u8,
+    /// The colour slot of each group shown lately, the group shown least recently first. At most
+    /// [`MEMORY_BY_APP_COLORS_MAX`] entries.
+    pub colors: Vec<GroupColor>,
+}
+
+impl Default for MemoryByAppSettings {
+    fn default() -> Self {
+        Self {
+            top_n: MEMORY_BY_APP_TOP_N.1,
+            colors: Vec::new(),
+        }
+    }
+}
+
+/// One colour pick: a memory group key and its slot in `GraphPalette.groups`.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupColor {
+    pub key: String,
+    pub slot: u8,
+}
+
 /// `performance.status_bar` (UI-PRF-054, D-030): where the machine status bar shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -435,6 +481,10 @@ pub struct PerformanceSettings {
     /// turns `true` into an `overview` layout, and never written (UI-PRF-018).
     #[serde(skip_serializing)]
     pub overview_top_processes: bool,
+    /// What the Memory page's first chart shows (UI-PRF-060).
+    pub memory_view: MemoryView,
+    /// `[performance.memory_by_app]`: the memory-by-app chart (UI-PRF-060).
+    pub memory_by_app: MemoryByAppSettings,
     /// `[performance.overview]`: the Overview page layout (UI-PRF-018, D-023). `None` is the
     /// default layout. A value of the wrong type anywhere in it is dropped by [`Settings::clamp`]
     /// with the part it is in, so it never resets the rest of `[performance]`.
@@ -1187,6 +1237,8 @@ impl Default for PerformanceSettings {
             timeline_click: TimelineClick::default(),
             overview_row_unit_px: OVERVIEW_ROW_UNIT_DEFAULT,
             overview_top_processes: false,
+            memory_view: MemoryView::default(),
+            memory_by_app: MemoryByAppSettings::default(),
             overview: None,
         }
     }
@@ -1975,6 +2027,22 @@ impl Settings {
             "performance.overview_row_unit_px",
             c,
         );
+        let (min, _, max) = MEMORY_BY_APP_TOP_N;
+        clamp_key(
+            &mut self.performance.memory_by_app.top_n,
+            (min, max, 1),
+            "performance.memory_by_app.top_n",
+            c,
+        );
+        let colors = &mut self.performance.memory_by_app.colors;
+        let before = colors.len();
+        colors.retain(|g| !g.key.is_empty() && g.slot < MEMORY_BY_APP_SLOTS);
+        if colors.len() > MEMORY_BY_APP_COLORS_MAX {
+            colors.drain(..colors.len() - MEMORY_BY_APP_COLORS_MAX);
+        }
+        if colors.len() != before {
+            c.push("performance.memory_by_app.colors");
+        }
         self.performance.migrate_overview(c);
         // UI-PRF-057: `history` is offered only while recording is on.
         if self.performance.timeline_click == TimelineClick::History && !self.history.enabled {
@@ -2497,6 +2565,42 @@ mod tests {
         assert_eq!(s.services.unit_types, UnitType::DEFAULT_SHOWN);
         assert_eq!(changed.len(), 8);
         assert!(changed.contains(&"services.unit_types"));
+    }
+
+    /// UI-PRF-060: `top_n` stays in 3..=20, and `colors` keeps at most 64 valid picks, dropping
+    /// the oldest first.
+    #[test]
+    fn memory_by_app_settings_clamp() {
+        let mut s = Settings::default();
+        assert_eq!(s.performance.memory_by_app.top_n, 10);
+        assert_eq!(s.performance.memory_view, MemoryView::Usage);
+        s.performance.memory_by_app.top_n = 2;
+        s.performance.memory_by_app.colors = (0..70)
+            .map(|i| GroupColor {
+                key: format!("exe:p{i}"),
+                slot: (i % 12) as u8,
+            })
+            .chain([GroupColor {
+                key: "exe:bad".into(),
+                slot: 12,
+            }])
+            .collect();
+        let changed = s.clamp();
+        assert_eq!(s.performance.memory_by_app.top_n, 3);
+        let colors = &s.performance.memory_by_app.colors;
+        assert_eq!(colors.len(), 64);
+        assert_eq!(colors[0].key, "exe:p6");
+        assert_eq!(colors[63].key, "exe:p69");
+        assert!(changed.contains(&"performance.memory_by_app.top_n"));
+        assert!(changed.contains(&"performance.memory_by_app.colors"));
+        s.performance.memory_by_app.top_n = 21;
+        s.clamp();
+        assert_eq!(s.performance.memory_by_app.top_n, 20);
+
+        s.performance.memory_view = MemoryView::Apps;
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("memory_view = \"apps\""), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
     }
 
     #[test]

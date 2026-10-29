@@ -463,7 +463,7 @@ fn lerp_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
 }
 
 /// The theme between `a` (`t = 0`) and `b` (`t = 1`): the 22 slots, the accent, the 4 status
-/// colours and the 13 graph colours each lerp in Hsla space. Name, mode, version and `builtin`
+/// colours, the 13 graph colours and the 12 group colours each lerp in Hsla space. Name, mode, version and `builtin`
 /// come from `b`.
 ///
 /// The derived tints lerp too, instead of a `rebuild_derived`, which needs the `[appearance]`
@@ -497,6 +497,7 @@ pub fn lerp_theme(a: &TlTheme, b: &TlTheme, t: f32) -> TlTheme {
         net_line: l(ga.net_line, gb.net_line),
         grid: l(ga.grid, gb.grid),
         chart_bg: l(ga.chart_bg, gb.chart_bg),
+        groups: std::array::from_fn(|i| l(ga.groups[i], gb.groups[i])),
     };
     let (da, db) = (&a.derived, &b.derived);
     out.derived = Derived {

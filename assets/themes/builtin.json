@@ -10,7 +10,9 @@
   "status":{"success":"#4CAF50","warning":"#E0A526","danger":"#D9534F","info":"#2A9FD6"},
   "graph":{"cpu_fill":"#0D546D","cpu_line":"#0A7096","kernel_line":"#C1514E","mem_fill":"#7E6A9A",
     "mem_line":"#A58CC4","gpu_fill":"#508A59","gpu_line":"#71B768","disk_fill":"#8A7340",
-    "disk_line":"#D9B567","net_fill":"#1E5C66","net_line":"#359CAB","grid":"#2A3033","chart_bg":"#1D2223"}},
+    "disk_line":"#D9B567","net_fill":"#1E5C66","net_line":"#359CAB","grid":"#2A3033","chart_bg":"#1D2223",
+    "groups":["#4E9FE0","#E8864A","#5DBB63","#D1679E","#C9B13F","#8F7FE0","#3FB8B0","#E06464",
+      "#A5C25A","#B886D9","#E0A35A","#6FA8C8"]}},
  {"name":"Default Light","mode":"light",
   "WINDOW_BG":"#F3F4F6","TITLEBAR":"#E4E6E9","TOOLBAR":"#EBEDEF","INPUT":"#FFFFFF",
   "INPUT_FOCUS":"#FFFFFF","HEADER":"#DDE1E5","LIST_BG":"#FFFFFF","ROW_ALT":"#F6F7F8",
@@ -22,5 +24,7 @@
   "status":{"success":"#2E7D32","warning":"#B7791F","danger":"#C62828","info":"#0277A6"},
   "graph":{"cpu_fill":"#BFDCE8","cpu_line":"#0A7096","kernel_line":"#C1514E","mem_fill":"#D8CCE6",
     "mem_line":"#7E6A9A","gpu_fill":"#CFE4D2","gpu_line":"#3F8A4A","disk_fill":"#F0E2BC",
-    "disk_line":"#B8923A","net_fill":"#C4E3E7","net_line":"#2A8A98","grid":"#D9DEE2","chart_bg":"#FAFBFC"}}
+    "disk_line":"#B8923A","net_fill":"#C4E3E7","net_line":"#2A8A98","grid":"#D9DEE2","chart_bg":"#FAFBFC",
+    "groups":["#1F6FB2","#B8561C","#2E7D32","#A8336E","#7D6A00","#5B4BB8","#00796F","#B3261E",
+      "#557A12","#7E3FA8","#9A5B00","#2F6F8F"]}}
 ]}

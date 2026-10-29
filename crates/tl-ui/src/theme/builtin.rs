@@ -8,6 +8,7 @@ use std::sync::Arc;
 use gpui_kit::{Hsla, rgb, rgba};
 use serde_json::Value;
 
+use super::palette::GROUP_COLORS;
 use super::{GraphPalette, StatusColors, ThemeDef, ThemeMode, ThemeSlot};
 
 const BUILTIN_JSON: &str = include_str!("../../../../assets/themes/builtin.json");
@@ -195,8 +196,41 @@ fn nested_colors<const N: usize>(
     }
 }
 
+/// Reads `graph.groups`, an array of 12 colours. `Ok(None)` when it is absent, or when it is
+/// broken and `strict` is false.
+fn group_colors(
+    obj: &BTreeMap<String, Value>,
+    theme: &Arc<str>,
+    strict: bool,
+) -> Result<Option<[Hsla; GROUP_COLORS]>, ThemeParseError> {
+    let Some(v) = obj.get("graph").and_then(|g| g.get("groups")) else {
+        return Ok(None);
+    };
+    let parsed = (|| {
+        let bad = || ThemeParseError::BadColor {
+            theme: theme.clone(),
+            key: "graph.groups".to_string(),
+            value: v.to_string(),
+        };
+        let items = v
+            .as_array()
+            .filter(|a| a.len() == GROUP_COLORS)
+            .ok_or_else(bad)?;
+        let mut out = [Hsla::default(); GROUP_COLORS];
+        for (slot, item) in out.iter_mut().zip(items) {
+            *slot = color_value(item, theme, "graph.groups")?;
+        }
+        Ok(out)
+    })();
+    match parsed {
+        Ok(out) => Ok(Some(out)),
+        Err(e) if strict => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Parses one theme object. Reads `name`, optional `mode`, the 22 upper-case slots, `accent`,
-/// optional `status` (4 keys) and optional `graph` (13 keys). Every other key goes into `extra`.
+/// optional `status` (4 keys) and optional `graph` (13 keys plus the 12 `groups`). Every other key goes into `extra`.
 ///
 /// A missing or bad slot or `accent` is always an error; the user store repairs those before it
 /// calls this (E17-008). With `strict = true` a broken `mode`, `status` or `graph` is also an
@@ -305,8 +339,25 @@ pub fn parse_theme_object(
             net_line,
             grid,
             chart_bg,
+            groups: [Hsla::default(); GROUP_COLORS],
         },
     );
+    let graph = match graph {
+        Some(mut g) => {
+            match group_colors(obj, &name, strict)? {
+                Some(groups) => g.groups = groups,
+                None if strict => {
+                    return Err(ThemeParseError::MissingSlot {
+                        theme: name.clone(),
+                        key: "graph.groups",
+                    });
+                }
+                None => {}
+            }
+            Some(g)
+        }
+        None => None,
+    };
 
     let known = |k: &str| {
         matches!(k, "name" | "mode" | "status" | "graph")
@@ -628,5 +679,42 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Each built-in theme has 12 group colours, each at least 3:1 against `chart_bg` (the
+    /// WCAG floor for graphics) and all different (UI-PRF-060).
+    #[test]
+    fn group_colours_contrast_with_chart_bg() {
+        let mut failures = Vec::new();
+        for def in load().iter() {
+            let graph = def.graph.expect("built-in themes have graph colours");
+            assert!(!graph.groups_unset(), "{} has no group colours", def.name);
+            for (i, c) in graph.groups.iter().enumerate() {
+                let ratio = contrast(*c, graph.chart_bg);
+                if ratio < 3.0 {
+                    failures.push(format!("{}: group {i} is {ratio:.2} on chart_bg", def.name));
+                }
+                if graph.groups[..i].contains(c) {
+                    failures.push(format!("{}: group {i} repeats a colour", def.name));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn group_colours_are_optional_for_user_themes() {
+        let mut obj = dark_object();
+        let graph = obj.get_mut("graph").and_then(Value::as_object_mut).unwrap();
+        graph.remove("groups");
+        assert!(matches!(
+            parse_theme_object(&obj, true),
+            Err(ThemeParseError::MissingSlot {
+                key: "graph.groups",
+                ..
+            })
+        ));
+        let def = parse_theme_object(&obj, false).unwrap();
+        assert!(def.graph.unwrap().groups_unset());
     }
 }

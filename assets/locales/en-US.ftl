@@ -530,6 +530,17 @@ perf-mem-menu-composition = Show memory composition
 perf-mem-menu-swap = Show swap usage
 perf-mem-range-memory = Memory usage
 perf-mem-range-swap = Swap usage
+perf-mem-view-usage = Usage
+perf-mem-view-apps = By app
+perf-mem-apps-groups-shown = Groups shown
+perf-mem-apps-more = +{ $count } more
+perf-mem-apps-count = × { $count }
+perf-mem-apps-share = { $share } of in use
+perf-mem-apps-processes =
+    { $count ->
+        [one] { $count } process
+       *[other] { $count } processes
+    }
 perf-mem-composition-caption = Memory composition
 perf-mem-seg-in-use = In use
 perf-mem-seg-compressed = In use (compressed)
@@ -3390,6 +3401,7 @@ shell-settings-perf-overview-range = Overview time range
 shell-settings-perf-timeline-click = Timeline click
 shell-settings-perf-memory-composition = Show memory composition
 shell-settings-perf-swap = Show swap usage
+shell-settings-perf-memory-groups = Memory groups shown in By app
 shell-settings-perf-gpu-optional = Optional GPU graphs
 shell-settings-perf-gpu-power = Power
 shell-settings-perf-gpu-clocks = Clocks

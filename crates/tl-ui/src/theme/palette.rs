@@ -18,7 +18,13 @@ pub struct GraphPalette {
     pub net_line: Hsla,
     pub grid: Hsla,
     pub chart_bg: Hsla,
+    /// The categorical colours of the memory-by-app bands (D-036, UI-PRF-060). All twelve
+    /// transparent means "not set": `TlTheme::from_def` then takes the fallback theme's.
+    pub groups: [Hsla; GROUP_COLORS],
 }
+
+/// Colours in `GraphPalette.groups`.
+pub const GROUP_COLORS: usize = 12;
 
 /// The five device colour families used by Performance surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +37,11 @@ pub enum DeviceAccent {
 }
 
 impl GraphPalette {
+    /// True when no group colours are set (all twelve are transparent).
+    pub fn groups_unset(&self) -> bool {
+        self.groups.iter().all(|c| *c == Hsla::default())
+    }
+
     /// The line colour is the device accent. Overview frames, charts, meters and sidebar cards
     /// all resolve through this table, so a theme cannot give one device two competing hues.
     pub const fn device_accent(&self, device: DeviceAccent) -> Hsla {
@@ -119,6 +130,7 @@ mod tests {
             net_line: color(11),
             grid: color(12),
             chart_bg: color(13),
+            groups: [color(14); GROUP_COLORS],
         };
         assert_eq!(p.device_accent(DeviceAccent::Cpu), p.cpu_line);
         assert_eq!(p.device_accent(DeviceAccent::Memory), p.mem_line);

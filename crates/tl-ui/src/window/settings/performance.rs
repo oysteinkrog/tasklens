@@ -28,7 +28,7 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 use tl_model::devices::{DeviceIdentity, DeviceKind};
-use tl_model::settings::{DeviceVisibility, FanOverride, GRAPH_RANGES_S};
+use tl_model::settings::{DeviceVisibility, FanOverride, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::SensorKind;
 use tl_model::units;
@@ -206,6 +206,16 @@ pub fn page(cx: &mut App) -> PageBuilder {
     ] {
         page.switch(memory.clone(), key, tr(cx, label), None);
     }
+    // UI-PRF-060: the bands of the Memory page's "By app" chart.
+    let (min, _, max) = MEMORY_BY_APP_TOP_N;
+    page.number(
+        memory.clone(),
+        SettingKey::PerformanceMemoryByAppTopN,
+        tr(cx, "shell-settings-perf-memory-groups"),
+        i64::from(min)..=i64::from(max),
+        1,
+        SharedString::default(),
+    );
 
     let optional = CheckSection {
         heading: SharedString::default(),

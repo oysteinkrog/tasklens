@@ -294,7 +294,14 @@ impl TlTheme {
             version,
             builtin,
             accent: def.accent,
-            graph: def.graph.unwrap_or(fallback.graph),
+            graph: match def.graph {
+                Some(g) if g.groups_unset() => GraphPalette {
+                    groups: fallback.graph.groups,
+                    ..g
+                },
+                Some(g) => g,
+                None => fallback.graph,
+            },
             status: def.status.unwrap_or(fallback.status),
             derived: Derived::empty(),
             ..fallback.clone()
@@ -361,6 +368,7 @@ pub(crate) mod tests {
                 net_line: hex(0x1A2A3A),
                 grid: hex(0x1B2B3B),
                 chart_bg: hex(0x1C2C3C),
+                groups: [hex(0x1D2D3D); palette::GROUP_COLORS],
             },
             status: StatusColors {
                 success: hex(0x4CAF50),
