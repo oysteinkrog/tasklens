@@ -555,10 +555,18 @@ fn stacked_gap_in_middle_series() {
     assert!(has_vertex(band2, x(&data[2][100]), y(10.0)));
     assert!(has_vertex(band2, x(&data[2][99]), y(60.0)));
     assert!(has_vertex(band2, x(&data[2][101]), y(60.0)));
-    // Band 1 has its own gap there: no vertex at bucket 100.
+    // Band 1 has its own gap there: it ramps to zero height on top of band 0 at bucket 100, so
+    // no hole opens under band 2 (tasklens-o55.53).
     let x100 = x(&data[1][100]);
-    assert!(xs(&cache.fills[1]).all(|v| (v - x100).abs() > 0.01));
-    assert!(xs(&cache.fills[1]).any(|v| v < x100) && xs(&cache.fills[1]).any(|v| v > x100));
+    assert!(has_vertex(&cache.fills[1], x100, y(10.0)));
+    assert!(
+        cache.fills[1]
+            .path
+            .vertices
+            .iter()
+            .filter(|v| (v.xy_position.x.as_f32() - x100).abs() < 0.01)
+            .all(|v| (v.xy_position.y.as_f32() - y(10.0)).abs() < 0.01)
+    );
     // Dotted gaps come from series 0, which has none.
     assert!(cache.gaps.is_empty());
 }
@@ -641,6 +649,143 @@ fn stacked_all_bands_gap_together() {
         );
         assert!(xs(fill).any(|v| (v - x29).abs() < 0.01), "band {k} before");
         assert!(xs(fill).any(|v| (v - x30).abs() < 0.01), "band {k} after");
+    }
+}
+
+/// The y spans that the fill triangles of `fills` cover on the vertical line at `x`, merged.
+fn covered(fills: &[PathSet], x: f32) -> Vec<(f32, f32)> {
+    let mut spans: Vec<(f32, f32)> = Vec::new();
+    for set in fills {
+        for t in set.path.vertices.as_chunks::<3>().0 {
+            let p = |i: usize| (t[i].xy_position.x.as_f32(), t[i].xy_position.y.as_f32());
+            let mut ys: SmallVec<[f32; 4]> = SmallVec::new();
+            for (a, b) in [(p(0), p(1)), (p(1), p(2)), (p(2), p(0))] {
+                let (lo, hi) = (a.0.min(b.0), a.0.max(b.0));
+                if x < lo || x > hi {
+                    continue;
+                }
+                if hi - lo < 1e-4 {
+                    ys.extend([a.1, b.1]);
+                } else {
+                    ys.push(a.1 + (x - a.0) * (b.1 - a.1) / (b.0 - a.0));
+                }
+            }
+            if let (Some(lo), Some(hi)) = (
+                ys.iter().copied().reduce(f32::min),
+                ys.iter().copied().reduce(f32::max),
+            ) {
+                spans.push((lo, hi));
+            }
+        }
+    }
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (lo, hi) in spans {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1 + 0.01 => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    merged
+}
+
+/// The stacked fills at `x` form one span that reaches the baseline (plot height 100): no band
+/// spans a hole.
+fn assert_no_hole(fills: &[PathSet], x: f32) {
+    let spans = covered(fills, x);
+    assert_eq!(spans.len(), 1, "hole at x {x}: {spans:?}");
+    assert!(
+        (spans[0].1 - 100.0).abs() < 0.01,
+        "lifted at x {x}: {spans:?}"
+    );
+}
+
+/// Three bands of 10, 20 and 30 where `band` has samples only in `keep`: an invalid sample
+/// right after the range when it ends early, as the engine pushes for a group that leaves the
+/// top 20, and no samples before it when it starts late, as for a group that enters.
+fn with_band(band: usize, keep: std::ops::Range<usize>) -> Vec<Vec<Sample>> {
+    let vals = [10.0, 20.0, 30.0];
+    let mut data: Vec<Vec<Sample>> = vals
+        .iter()
+        .map(|&v| series(60, SEC, 10 * SEC, move |_| v))
+        .collect();
+    let s = &mut data[band];
+    if keep.end < s.len() {
+        s[keep.end] = Sample::gap(s[keep.end].t_ns);
+        s.truncate(keep.end + 1);
+    }
+    s.drain(..keep.start);
+    data
+}
+
+/// A group that leaves the top 20 gets one gap sample. Its band ramps to zero height at that
+/// time, so the bands above never span a hole (tasklens-o55.53, UI-PRF-060).
+#[test]
+fn stacked_group_exit_leaves_no_hole() {
+    let y = |v: f32| y_of(v, 0.0, 100.0, 100.0);
+    for band in [0, 1] {
+        let data = with_band(band, 0..30);
+        let map = exact_map(&data[2]);
+        let cache = stack_three(&data);
+        let x = |i: usize| map.x_local(data[2][i].t_ns);
+        let floor = if band == 0 { 0.0 } else { 10.0 };
+        // The band's last sample, then zero height at the gap.
+        assert!(has_vertex(
+            &cache.fills[band],
+            x(29),
+            y(floor + [10.0, 20.0][band])
+        ));
+        assert!(has_vertex(&cache.fills[band], x(30), y(floor)));
+        assert!(
+            xs(&cache.fills[band]).all(|v| v <= x(30) + 0.01),
+            "band {band}"
+        );
+        // Band 2 counts the gap as 0 from then on.
+        assert!(has_vertex(
+            &cache.fills[2],
+            x(30),
+            y(30.0 - [10.0, 20.0][band])
+        ));
+        for q in 0..59 * 8 {
+            let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
+            assert_no_hole(&cache.fills, at);
+        }
+        // The newest mark stays on the last real sample, not the ramp.
+        assert!(
+            cache
+                .newest
+                .iter()
+                .any(|(p, _)| (p.x.as_f32() - x(29)).abs() < 0.01
+                    && (p.y.as_f32() - y(floor + [10.0, 20.0][band])).abs() < 0.01),
+            "band {band} newest"
+        );
+    }
+}
+
+/// A group that enters the top 20 has no samples before. Its band ramps up from zero height at
+/// the sweep before, and one that comes back after a gap does the same (tasklens-o55.53).
+#[test]
+fn stacked_group_entry_leaves_no_hole() {
+    let y = |v: f32| y_of(v, 0.0, 100.0, 100.0);
+    let entered = with_band(1, 30..60);
+    let mut back = with_band(1, 0..60);
+    back[1][20] = Sample::gap(back[1][20].t_ns);
+    back[1][21].flags |= SampleFlags::GAP_BEFORE;
+    for data in [entered, back] {
+        let map = exact_map(&data[2]);
+        let cache = stack_three(&data);
+        for q in 0..59 * 8 {
+            let at = map.x_local(data[2][0].t_ns + q as u64 * SEC / 8);
+            assert_no_hole(&cache.fills, at);
+        }
+        let first = data[1]
+            .iter()
+            .rposition(|s| !s.flags.contains(SampleFlags::VALID))
+            .map_or(0, |g| g + 1);
+        let t = data[1][first].t_ns;
+        let x_prev = map.x_local(t - SEC);
+        assert!(has_vertex(&cache.fills[1], x_prev, y(10.0)), "ramp start");
+        assert!(has_vertex(&cache.fills[1], map.x_local(t), y(30.0)));
     }
 }
 

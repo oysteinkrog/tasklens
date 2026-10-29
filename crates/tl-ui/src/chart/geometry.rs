@@ -310,6 +310,9 @@ pub struct Scratch {
     pt_floors: Vec<f32>,
     acc: Vec<(u64, f32)>,
     acc_next: Vec<(u64, f32)>,
+    /// Stacked mode: the zero-height point each run that starts after a missing point ramps up
+    /// from, keyed by the run's first sample.
+    ramp_in: Vec<(usize, Pt)>,
     /// Grid cells: the decimated points after clipping to the cell, physical px.
     clipped: Vec<Point<Pixels>>,
     /// Grid cells: the last built cell's dotted-gap spans, chart-local physical px.
@@ -363,8 +366,15 @@ impl Scratch {
 /// half a period that no earlier sample of the same series took, so jitter still stacks. A sum
 /// takes at most one sample per series, so two samples less than a period apart never count a
 /// lower series twice.
+///
+/// A band next to a missing point ramps to zero height at the sweep time beside it: down to the
+/// gap sample's time where a run ends on one, and up from the lower series' previous time where
+/// a run starts after one or at the start of the series. The bands above count the missing point
+/// as 0 and slope across that period, so without the ramp a hole opens under them.
 struct StackGrid {
     half_ns: u64,
+    /// A ramp reaches at most this far from the run's end sample.
+    ramp_ns: u64,
 }
 
 impl StackGrid {
@@ -379,31 +389,57 @@ impl StackGrid {
         acc.clear();
         Self {
             half_ns: period_ns / 2,
+            ramp_ns: period_ns.saturating_mul(2),
         }
     }
 
     /// Copies `samples` into `out` with each valid value raised by the sum of the lower series at
     /// its time, and that sum into `floors`. A time that a lower series missed counts it as 0.
+    /// An invalid sample gets the lower sum at its time as its floor too, for the ramp down.
     /// `acc` holds the running sums as (time, sum) sorted by time; `next` gets them with the
-    /// valid values of `samples` added.
+    /// valid values of `samples` added. `ramp_in` gets the ramp start of each run that follows
+    /// an invalid sample, or the first sample when `series_start` says the series begins there.
+    #[allow(clippy::too_many_arguments)]
     fn stack(
         &self,
         samples: &[Sample],
+        series_start: bool,
         acc: &[(u64, f32)],
         next: &mut Vec<(u64, f32)>,
         out: &mut Vec<Sample>,
         floors: &mut Vec<f32>,
+        ramp_in: &mut Vec<(usize, Pt)>,
     ) {
         out.clear();
         floors.clear();
         next.clear();
+        ramp_in.clear();
         // Sums before `j` are taken or out of reach of every later sample.
         let mut j = 0;
-        for s in samples {
+        for (i, s) in samples.iter().enumerate() {
             let mut floor = 0.0;
+            let t = s.t_ns;
+            let reach = t.saturating_sub(self.half_ns)..=t.saturating_add(self.half_ns);
             if s.flags.contains(SampleFlags::VALID) {
-                let t = s.t_ns;
-                let reach = t.saturating_sub(self.half_ns)..=t.saturating_add(self.half_ns);
+                let after_missing = match i.checked_sub(1) {
+                    Some(p) => !samples[p].flags.contains(SampleFlags::VALID),
+                    None => series_start,
+                };
+                if after_missing {
+                    // The newest lower sum before this sweep, if it is the sweep before.
+                    let p = acc.partition_point(|e| e.0 < *reach.start());
+                    if let Some(&(at, sum)) = p.checked_sub(1).map(|p| &acc[p])
+                        && t - at <= self.ramp_ns
+                    {
+                        ramp_in.push((
+                            i,
+                            Pt {
+                                t_ns: at,
+                                value: sum,
+                            },
+                        ));
+                    }
+                }
                 while j < acc.len() && acc[j].0 < *reach.start() {
                     next.push(acc[j]);
                     j += 1;
@@ -429,6 +465,14 @@ impl StackGrid {
                     }
                     None => next.push((t, s.value)),
                 }
+            } else {
+                // The nearest lower sum in reach, read without taking it.
+                let p = acc.partition_point(|e| e.0 < *reach.start());
+                floor = acc[p..]
+                    .iter()
+                    .take_while(|e| reach.contains(&e.0))
+                    .min_by_key(|e| e.0.abs_diff(t))
+                    .map_or(0.0, |e| e.1);
             }
             out.push(Sample {
                 value: s.value + floor,
@@ -441,6 +485,18 @@ impl StackGrid {
         if !next.is_sorted_by_key(|e| e.0) {
             next.sort_unstable_by_key(|e| e.0);
         }
+    }
+
+    /// The zero-height point a run of stacked `samples` ramps down to: the invalid sample right
+    /// after it, at the lower sum in `floors`, when it is close enough.
+    fn ramp_out(&self, samples: &[Sample], floors: &[f32], run: Run) -> Option<Pt> {
+        let gap = samples.get(run.end)?;
+        let last = samples[run.end - 1].t_ns;
+        (!gap.flags.contains(SampleFlags::VALID) && gap.t_ns.saturating_sub(last) <= self.ramp_ns)
+            .then(|| Pt {
+                t_ns: gap.t_ns,
+                value: floors[run.end],
+            })
     }
 }
 
@@ -1147,8 +1203,9 @@ fn stroke_set(color: Hsla, dashed: bool, mesh: &mut StrokeMesh) -> Option<PathSe
 ///
 /// With `input.stack`, series are stacked in order: each valid sample of series `k` is raised by
 /// the values of series `0..k` at the same time, each lower sample counted once (`StackGrid`,
-/// UI-PRF-060), and its fill goes down to that floor instead of the baseline. Runs, gaps and
-/// decimation stay per series.
+/// UI-PRF-060), and its fill goes down to that floor instead of the baseline. A run next to an
+/// invalid sample, or at the start of its series, ramps to zero height at the sweep time beside
+/// it, so the bands above never span a hole. Runs, gaps and decimation stay per series.
 pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) {
     let map = &input.map;
     let Scratch {
@@ -1161,6 +1218,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         pt_floors,
         acc,
         acc_next,
+        ramp_in,
         line,
         live,
         stale,
@@ -1185,7 +1243,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         let (samples, from, band_floors): (&[Sample], usize, Option<&[f32]>) = match &grid {
             Some(g) => {
                 let window = &view.samples[from..];
-                g.stack(window, acc, acc_next, stacked, floors);
+                g.stack(window, from == 0, acc, acc_next, stacked, floors, ramp_in);
                 std::mem::swap(acc, acc_next);
                 (&stacked[..], 0, Some(&floors[..]))
             }
@@ -1221,6 +1279,13 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         // Stretches come in time order, so the last line vertex is the newest drawn sample.
         let mut newest = None;
         for run in runs.iter() {
+            let (ramp_up, ramp_down) = match (&grid, band_floors) {
+                (Some(g), Some(f)) => (
+                    ramp_in.iter().find(|r| r.0 == run.start).map(|r| r.1),
+                    g.ramp_out(samples, f, *run),
+                ),
+                _ => (None, None),
+            };
             for_each_stretch(samples, *run, |span, is_stale_flag| {
                 let (out, builders) = if is_stale_flag {
                     (&mut *stale_pts, &mut *stale)
@@ -1228,11 +1293,34 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                     (&mut *pts, &mut *live)
                 };
                 decimate(samples, span, bucket, out);
+                // The newest drawn sample, not the ramp after it.
+                let last = out.last().copied();
+                // A ramp goes with the stretch that holds its end sample. A stale stretch also
+                // takes one fresh sample on each side, so the span alone does not tell.
+                let owns =
+                    |i: usize| samples[i].flags.contains(SampleFlags::STALE) == is_stale_flag;
+                let ramp_down = ramp_down.filter(|_| span.end == run.end && owns(run.end - 1));
                 if let Some(f) = band_floors {
                     floors_of(samples, f, span, out, pt_floors);
+                    if let Some(p) = ramp_up.filter(|_| span.start == run.start && owns(run.start))
+                    {
+                        out.insert(0, p);
+                        pt_floors.insert(0, p.value);
+                    }
+                    if let Some(p) = ramp_down {
+                        out.push(p);
+                        pt_floors.push(p.value);
+                    }
                 }
                 builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input, line);
-                newest = line.line.last().copied().or(newest);
+                newest = match (ramp_down, last) {
+                    (Some(_), Some(p)) => Some(point(
+                        px(map.x_local(p.t_ns)),
+                        px(y_of(p.value, input.y_min, input.y_max, input.plot_height)),
+                    )),
+                    _ => line.line.last().copied(),
+                }
+                .or(newest);
             });
         }
         if let Some(p) = newest {
