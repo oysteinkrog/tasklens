@@ -222,6 +222,15 @@ impl MetaCache {
         }
     }
 
+    /// The cached metadata of `key` without a read or a refresh count, while `stat_comm_raw`
+    /// still matches the stat `comm` of the last read. `None` otherwise.
+    pub fn cached(&self, key: &ProcessKey, stat_comm_raw: &[u8]) -> Option<&RawMeta> {
+        self.entries
+            .get(key)
+            .filter(|e| e.stat_comm.as_slice() == stat_comm_raw)
+            .map(|e| &e.meta)
+    }
+
     /// Drops the entries of keys not in `live`.
     pub fn retain_live(&mut self, live: &FxHashSet<ProcessKey>) {
         self.entries.retain(|k, _| live.contains(k));

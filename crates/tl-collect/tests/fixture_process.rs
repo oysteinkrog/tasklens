@@ -1354,6 +1354,64 @@ fn sweep_fd_count_only_when_wanted() {
     assert_eq!(fd_count_fallbacks(), before + 1);
 }
 
+/// tasklens-8fx.45: in memory-only mode a pid of the last sweep gets only its `statm` read, with
+/// no `io` and no rates, until its tenth of the sweeps (pid 4201: sweep 11) reads `stat` again.
+#[test]
+fn sweep_mem_only_reads_statm_of_known_pid() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone());
+    core.set_mem_only(true);
+    // Asks for io and every status field: memory-only mode reads neither for a known pid.
+    let ctx = sweep_ctx(false);
+    let page = rustix::param::page_size() as u64;
+    let mut out = Vec::new();
+
+    let (status0, io0) = (status_reads(), io_reads());
+    core.sweep_core(&ctx, &mut out);
+    let key = only(&out).key;
+    assert_eq!(status_reads(), status0 + 1, "first sight reads status");
+    assert_eq!(io_reads(), io0);
+
+    fs::remove_file(root.proc_path("4201/stat")).expect("remove stat");
+    fs::remove_file(root.proc_path("4201/status")).expect("remove status");
+    fs::write(
+        root.proc_path("4201/statm"),
+        b"666958 70000 60000 181 0 58 0\n",
+    )
+    .expect("statm");
+    for _ in 2..=10 {
+        core.sweep_core(&ctx, &mut out);
+        let p = only(&out);
+        assert_eq!(p.key, key);
+        assert_eq!(p.rss_anon_bytes, 10_000 * page);
+        assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
+        assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+    }
+    assert_eq!(
+        status_reads(),
+        status0 + 1,
+        "no status read for a known pid"
+    );
+    assert_eq!(io_reads(), io0);
+
+    // The pid's tenth reads stat, and without it the process is skipped.
+    core.sweep_core(&ctx, &mut out);
+    assert!(out.is_empty());
+
+    // Off again: a full read with status and io.
+    set_stat(&root, 8812, 1204, 351_220);
+    fs::write(
+        root.proc_path("4201/status"),
+        fixture_bytes("process-edge", "proc/4201/status"),
+    )
+    .expect("restore status");
+    core.set_mem_only(false);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(only(&out).key.start_ticks, 351_220);
+    assert_eq!(status_reads(), status0 + 2);
+    assert_eq!(io_reads(), io0 + 1);
+}
+
 use tl_collect::proc::detail::{DetailRead, ThreadInfo, ThreadReader, WchanValue, thread_exists};
 
 /// process-edge 4201, which has threads 4201 and 4211.
@@ -2110,6 +2168,56 @@ fn sweep_full_snapshot() {
         })
         .collect();
     insta::assert_debug_snapshot!(rows);
+}
+
+sweep_clock!(mem_only_clock);
+
+/// tasklens-8fx.45: memory-only sweeps give the same processes, groups, users and RssAnon as a
+/// full sweep, read no metadata of a known process and sample no app unit.
+#[test]
+fn sweep_mem_only_matches_full_sweep() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut full = sampler(root.clone(), cache.path()).with_clock(mem_only_clock::now);
+    let want = sweep_n(&mut full, mem_only_clock::set, 1);
+
+    let mut s = sampler(root, cache.path()).with_clock(mem_only_clock::now);
+    s.set_mem_only(true);
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+    mem_only_clock::set(SEC, SEC);
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+    let meta = meta_file_reads();
+    for i in 2..=12 {
+        mem_only_clock::set(i * SEC, i * SEC);
+        s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+    }
+    assert_eq!(
+        meta_file_reads(),
+        meta,
+        "no metadata read for a known process"
+    );
+    assert!(out.apps.is_empty(), "no app unit sampled");
+
+    let rows = |o: &SweepOutput| {
+        o.records
+            .iter()
+            .zip(&o.extras)
+            .map(|(r, x)| {
+                (
+                    r.key,
+                    r.group,
+                    r.meta.name.clone(),
+                    r.uid,
+                    r.flags,
+                    r.rss_anon_bytes,
+                    x.unit.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(!want.records.is_empty());
+    assert_eq!(rows(&out), rows(&want));
 }
 
 sweep_clock!(app_member_clock);
