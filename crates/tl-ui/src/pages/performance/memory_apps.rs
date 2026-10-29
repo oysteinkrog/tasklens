@@ -43,6 +43,7 @@ use tl_model::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLO
 use tl_model::snapshot::Snapshot;
 use tl_model::time::now_boot_ns;
 use tl_model::units;
+use tracing::warn;
 
 use super::details::Template;
 use super::overview::parts::{ChartSettings, box_chart, class_probe};
@@ -1175,8 +1176,7 @@ impl MemoryAppsChart {
     }
 
     /// Opens the Processes tab filtered to group band `i` (`ProcessesPage::open_mem_group`).
-    /// "Other apps" and "Shared and kernel" open nothing. Nothing happens when that tab is not
-    /// built.
+    /// "Other apps" and "Shared and kernel" open nothing. Selecting the tab builds the page.
     pub fn open_group(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(band) = self
             .bands
@@ -1190,11 +1190,27 @@ impl MemoryAppsChart {
         {
             self.last_open = Some((Arc::clone(&key), name.clone()));
         }
-        let page = main_window_view(cx)
-            .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
-        if let Some(page) = page {
+        // The click listener runs inside this entity's update, and selecting the tab updates the
+        // Performance page and its children.
+        window.defer(cx, move |window, cx| {
+            let Some(view) = main_window_view(cx) else {
+                warn!(target: "tasklens::ui", "no main window for the memory legend click");
+                return;
+            };
+            if view
+                .read(cx)
+                .page_entity::<ProcessesPage>(Tab::Processes)
+                .is_none()
+            {
+                // Selecting the tab builds the page.
+                view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
+            }
+            let Some(page) = view.read(cx).page_entity::<ProcessesPage>(Tab::Processes) else {
+                warn!(target: "tasklens::ui", "no Processes page for the memory legend click");
+                return;
+            };
             page.update(cx, |p, cx| p.open_mem_group(key, name, window, cx));
-        }
+        });
     }
 
     /// One legend row: swatch, name, process count and value.

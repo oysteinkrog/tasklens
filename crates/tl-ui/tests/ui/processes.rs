@@ -8,7 +8,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::GroupKind;
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Settings, StartTab, UiState};
 use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery};
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -1911,6 +1911,24 @@ mod shell {
         state: UiState,
         perf: PageFactory,
     ) -> (Arc<FakeEngine>, VisualTestContext) {
+        open_start(cx, state, perf, None)
+    }
+
+    /// `perf` as the Performance tab, started on it (`--tab performance`), so the Processes tab
+    /// is never built.
+    pub(super) fn open_on_perf(
+        cx: &mut TestAppContext,
+        perf: PageFactory,
+    ) -> (Arc<FakeEngine>, VisualTestContext) {
+        open_start(cx, UiState::default(), perf, Some(StartTab::Performance))
+    }
+
+    fn open_start(
+        cx: &mut TestAppContext,
+        state: UiState,
+        perf: PageFactory,
+        tab: Option<StartTab>,
+    ) -> (Arc<FakeEngine>, VisualTestContext) {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         cx.update(|cx| {
@@ -1934,7 +1952,10 @@ mod shell {
             cx.set_global(GlobalDemand(demand));
             toast::init(cx);
             tl_ui::actions::bind_keys_global(cx);
-            cx.set_global(StartOptions::default());
+            cx.set_global(StartOptions {
+                tab,
+                ..StartOptions::default()
+            });
             set_test_page(cx, Tab::Performance, perf);
             shell::init(cx);
         });
@@ -2668,8 +2689,8 @@ mod jump {
 
         /// Groups p0 to p2 of 3 to 1 MiB with 2 processes each, "Other apps" 1 MiB and
         /// "Shared and kernel" 2 MiB.
-        fn publish_groups(r: &Rig) {
-            r.engine.publish_with(|s| {
+        fn publish_groups(engine: &FakeEngine) {
+            engine.publish_with(|s| {
                 let mut entries = vec![
                     entry(0, DeviceIdentity::CpuPackage, "CPU"),
                     entry(1, DeviceIdentity::Memory, "Memory"),
@@ -2728,11 +2749,12 @@ mod jump {
             });
         }
 
-        fn click_row(r: &mut Rig, row: usize) {
+        fn click_row(vcx: &mut VisualTestContext, row: usize) {
             let id: &'static str = Box::leak(format!("{LEGEND_ID}-{row}").into_boxed_str());
-            let at = r.vcx.debug_bounds(id).expect(id).center();
-            r.vcx.simulate_click(at, Modifiers::none());
-            r.draw();
+            let at = vcx.debug_bounds(id).expect(id).center();
+            vcx.simulate_click(at, Modifiers::none());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
         /// The main window with `perf` as the Performance tab, on that tab with the groups shown.
@@ -2746,7 +2768,7 @@ mod jump {
                 });
             });
             r.vcx.simulate_resize(size(px(1600.), px(1200.)));
-            publish_groups(&r);
+            publish_groups(&r.engine);
             select(&mut r.vcx, Tab::Performance);
             for _ in 0..3 {
                 r.draw();
@@ -2755,16 +2777,67 @@ mod jump {
 
             // Rows top first: Shared and kernel, Other apps, p2, p1, p0.
             for row in [0, 1] {
-                click_row(&mut r, row);
+                click_row(&mut r.vcx, row);
                 assert_eq!(r.active_tab(), Tab::Performance, "row {row} opens nothing");
                 assert_eq!(r.chip(), None, "row {row}");
             }
             assert_eq!(r.last_query().mem_group, None);
 
-            click_row(&mut r, 2);
+            click_row(&mut r.vcx, 2);
             assert_eq!(r.active_tab(), Tab::Processes);
             assert_eq!(r.last_query().mem_group.as_deref(), Some("exe:p2"));
             assert_eq!(r.chip().as_deref(), Some("Group: p2"));
+        }
+
+        /// Like [`legend_click`], but started on the Performance tab: the Processes page is not
+        /// built until the click selects the tab.
+        fn legend_click_cold(cx: &mut TestAppContext, perf: PageFactory) {
+            let (engine, mut vcx) = open_on_perf(cx, perf);
+            vcx.update(|_, cx| {
+                tl_ui::components::kv_grid::init(cx);
+                TlSettings::update(cx, |d| {
+                    d.settings.performance.memory_view = MemoryView::Apps
+                });
+            });
+            vcx.simulate_resize(size(px(1600.), px(1200.)));
+            publish_groups(&engine);
+            for _ in 0..3 {
+                vcx.run_until_parked();
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+            let built = |vcx: &mut VisualTestContext| {
+                vcx.update(|_, cx| {
+                    let main = main_window_view(cx).expect("main window open");
+                    let main = main.read(cx);
+                    (
+                        main.active_tab(),
+                        main.page_entity::<ProcessesPage>(Tab::Processes).is_some(),
+                    )
+                })
+            };
+            assert_eq!(built(&mut vcx), (Tab::Performance, false));
+
+            // Rows top first: Shared and kernel, Other apps, p2, p1, p0.
+            click_row(&mut vcx, 2);
+            assert_eq!(built(&mut vcx), (Tab::Processes, true));
+            let chip = vcx.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window open");
+                let filter = main.read(cx).filter_box().read(cx);
+                filter.group_chip().map(|t| t.to_string())
+            });
+            assert_eq!(chip.as_deref(), Some("Group: p2"));
+            let query = super::super::sent(&engine).pop().expect("a query was sent");
+            assert_eq!(query.mem_group.as_deref(), Some("exe:p2"));
+        }
+
+        #[gpui_kit::test]
+        fn mem_group_legend_click_cold_on_memory_page(cx: &mut TestAppContext) {
+            legend_click_cold(cx, memory_page);
+        }
+
+        #[gpui_kit::test]
+        fn mem_group_legend_click_cold_in_overview_box(cx: &mut TestAppContext) {
+            legend_click_cold(cx, mem_box);
         }
 
         #[gpui_kit::test]
