@@ -1054,14 +1054,18 @@ mod by_app {
         for row in 0..14 {
             let b = r
                 .vcx
-                .debug_bounds(&format!("{LEGEND_ID}-{row}"))
+                .debug_bounds(format!("{LEGEND_ID}-{row}").leak())
                 .unwrap_or_else(|| panic!("row {row}"));
             assert!(b.bottom() <= legend.bottom(), "row {row} is whole");
         }
-        assert!(r.vcx.debug_bounds(&format!("{LEGEND_ID}-14")).is_none());
+        assert!(
+            r.vcx
+                .debug_bounds(format!("{LEGEND_ID}-14").leak())
+                .is_none()
+        );
         let more = r
             .vcx
-            .debug_bounds(&format!("{LEGEND_ID}-more"))
+            .debug_bounds(format!("{LEGEND_ID}-more").leak())
             .expect("+n more row");
         assert!(more.bottom() <= legend.bottom());
     }

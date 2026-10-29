@@ -21,8 +21,9 @@ use std::sync::Arc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, SharedString, StyleRefinement,
-    Styled as _, Subscription, Window, canvas, div, px,
+    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
+    div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::DeviceIdentity;
@@ -513,7 +514,6 @@ impl MemoryAppsChart {
             hover: false,
             stack: true,
             background: ChartBg::Window,
-            ..ChartSpec::default()
         }
     }
 
