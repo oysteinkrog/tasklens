@@ -151,8 +151,9 @@ impl ProcessesPage {
             }
             q.set_mem_group(Some(key));
             q.bump_and_send(client);
+            let generation = q.generation();
             t.scroll_to_top(cx);
-            (q.generation(), app)
+            (generation, app)
         });
         self.jump.row = app.map(|group| PendingRow {
             id: ProcRowId::Group(group),
