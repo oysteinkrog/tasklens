@@ -990,10 +990,7 @@ fn card_column_width(card_w: Pixels, graph: bool, m: &UiMetrics) -> Pixels {
 /// `value_w`, the room it keeps for its widest text, fits there, else on a row of its own. That
 /// row shows "…" only when `live_w`, the width of the value as it reads now, is wider than
 /// `text_w`. `measure` returns the width of a string in a card font; `lock_w` is the width of
-/// one lock icon. A heading that is cut may use `inset` more, the
-/// space between the column and the card's border, so a short title such as "Overview" is never
-/// cut to "…" on a narrow sidebar.
-#[allow(clippy::too_many_arguments)]
+/// one lock icon.
 pub fn card_text_layout(
     lines: &CardLines,
     value_w: Pixels,
@@ -1001,10 +998,9 @@ pub fn card_text_layout(
     text_w: Pixels,
     gap: Pixels,
     lock_w: Pixels,
-    inset: Pixels,
     measure: &mut impl FnMut(CardFont, &str) -> Pixels,
 ) -> CardTextLayout {
-    let mut heading = wrap_line(
+    let heading = wrap_line(
         &lines.heading,
         &[],
         CardFont::Heading,
@@ -1013,20 +1009,6 @@ pub fn card_text_layout(
         lock_w,
         measure,
     );
-    if heading.cut {
-        let wider = wrap_line(
-            &lines.heading,
-            &[],
-            CardFont::Heading,
-            2,
-            text_w + inset,
-            lock_w,
-            measure,
-        );
-        if !wider.cut || heading.rows[0].text.as_ref() == "…" {
-            heading = wider;
-        }
-    }
     let last_w = heading.rows.last().map_or(Pixels::ZERO, |row| {
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
     });
@@ -1684,8 +1666,17 @@ impl DeviceCard {
             let column = |w: Pixels| card_column_width(w, card_shows_graph(w, edit_mode, &m), &m);
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
             let fits = |w: Pixels| column(w) >= value_w;
+            // The title comes before the button: the column keeps at most the room the title's
+            // longest word leaves, so a short title is never cut to "…" beside the button.
+            let title_w = self
+                .lines
+                .heading
+                .split(' ')
+                .map(|word| measure(CardFont::Heading, word))
+                .fold(Pixels::ZERO, Pixels::max);
+            let title_room = (column(self.width) - title_w).max(Pixels::ZERO);
             let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
-                edit_w
+                edit_w.min(title_room)
             } else {
                 Pixels::ZERO
             };
@@ -1698,7 +1689,6 @@ impl DeviceCard {
                 card_column_width(inner_w, graph, &m),
                 m.sp[3],
                 m.icon.xs,
-                m.sp[5],
                 &mut measure,
             );
             let height = layout.card_height(m.ui_scale);
@@ -2926,7 +2916,6 @@ mod tests {
             px(text_w),
             px(1.),
             px(2.),
-            px(0.),
             &mut mono,
         )
     }
@@ -3001,27 +2990,6 @@ mod tests {
         assert_eq!(&*card_tooltip(&lines, &l, None), [SharedString::from(name)]);
         // 18 + 2 × 16 + 16 = 66 of text, 8 px above and below and the border.
         assert_eq!(l.card_height(1.0), px(84.));
-    }
-
-    #[test]
-    fn card_text_layout_heading_word_may_use_the_inset() {
-        // "Overview" is 8 px wide in the test font: wider than the 6 px column, it fits 6 + 4.
-        let lines = card_text("Overview", "", "");
-        let with_inset = |inset: f32| {
-            card_text_layout(
-                &lines,
-                px(0.),
-                px(0.),
-                px(6.),
-                px(1.),
-                px(2.),
-                px(inset),
-                &mut mono,
-            )
-        };
-        assert_eq!(rows(&with_inset(4.).heading), ["Overview"]);
-        assert!(!with_inset(4.).heading.cut);
-        assert_eq!(rows(&with_inset(0.).heading), ["…"]);
     }
 
     #[test]
