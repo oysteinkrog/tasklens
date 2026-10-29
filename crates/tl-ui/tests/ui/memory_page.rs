@@ -1196,4 +1196,173 @@ mod by_app {
             .update(|_, cx| apps.read(cx).tooltip_lines(2, None, cx)[0].clone());
         assert_eq!(first, "p2");
     }
+
+    /// The stack always adds up to In use: at every sample the group bands, "Other apps" and
+    /// "Shared and kernel" sum to In use to the byte, while groups arrive and leave inside the
+    /// 10 s ranking pause and across rankings. Every group with a sample now is in exactly one
+    /// band.
+    #[gpui_kit::test]
+    fn memory_by_app_stack_sums_to_in_use(cx: &mut TestAppContext) {
+        const PERIOD: u64 = 1_000_000_000;
+        const STEPS: u64 = 40;
+        // (key, first step, step it leaves at, MiB, whether its memory then counts in "Other
+        // apps" as it left the engine's top 20; else its processes exit). Rankings run at
+        // steps 0, 10, 20 and 30.
+        let script: [(&str, u64, u64, u32, bool); 7] = [
+            ("exe:a", 0, STEPS, 400, false),
+            ("exe:b", 0, STEPS, 300, false),
+            // Leaves mid-pause into "Other apps".
+            ("exe:c", 0, 18, 200, true),
+            // Arrives mid-pause, the largest: in "Other apps" until the ranking at step 10.
+            ("exe:d", 3, STEPS, 1000, false),
+            // Arrives and exits inside one pause.
+            ("exe:e", 5, 8, 50, false),
+            ("exe:f", 12, STEPS, 250, false),
+            // Arrives mid-pause, too small for the top 3, leaves mid-pause into "Other apps".
+            ("exe:g", 22, 34, 600, true),
+        ];
+        let n = script.len();
+        let id = |device: DeviceIdx| SeriesId {
+            device,
+            metric: MetricId::MEM_GROUP,
+        };
+        let bytes = |mib: u32| f64::from(mib) * f64::from(MIB);
+
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        let base = now_boot_ns() - STEPS * PERIOD;
+        // The samples of each group, then "Other apps" and "Shared and kernel".
+        let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); n + 2];
+        for k in 0..STEPS {
+            let t = base + k * PERIOD;
+            let mut groups_mib = 0;
+            let mut other_mib = 100;
+            let mut published = Vec::new();
+            for (i, &(key, from, to, mib, into_other)) in script.iter().enumerate() {
+                if (from..to).contains(&k) {
+                    samples[i].push(Sample::valid(t, mib as f32 * MIB));
+                    groups_mib += mib;
+                    published.push(MemGroupBand {
+                        key: Arc::from(key),
+                        name: Arc::from(key),
+                        process_count: 2,
+                        device: group_dev(i as u16),
+                    });
+                } else if k == to {
+                    // The engine writes one gap sample when a group leaves its top 20.
+                    samples[i].push(Sample::gap(t));
+                }
+                if k >= to && into_other {
+                    other_mib += mib;
+                }
+            }
+            let in_use_mib = 4096 + 16 * (k % 5) as u32;
+            let shared_mib = in_use_mib - groups_mib - other_mib;
+            samples[n].push(Sample::valid(t, other_mib as f32 * MIB));
+            samples[n + 1].push(Sample::valid(t, shared_mib as f32 * MIB));
+
+            r.engine.publish_with(|s| {
+                let mut entries = vec![
+                    entry(0, DeviceIdentity::CpuPackage),
+                    entry(1, DeviceIdentity::Memory),
+                ];
+                let mut views = Vec::new();
+                for (i, &(key, from, ..)) in script.iter().enumerate() {
+                    let dev = group_dev(i as u16);
+                    // A group stays in the catalog once it has arrived.
+                    entries.push(if from <= k {
+                        mem_entry(dev, key, key)
+                    } else {
+                        entry(dev.0, DeviceIdentity::CpuPackage)
+                    });
+                }
+                while entries.len() < usize::from(OTHER.0) {
+                    let i = entries.len() as u16;
+                    entries.push(entry(i, DeviceIdentity::CpuPackage));
+                }
+                entries.push(mem_entry(OTHER, "other", "Other apps"));
+                entries.push(mem_entry(SHARED, "shared", "Shared and kernel"));
+                let devices = (0..n).map(|i| group_dev(i as u16)).chain([OTHER, SHARED]);
+                for (dev, list) in devices.zip(&samples) {
+                    if !list.is_empty() {
+                        views.push(Arc::new(SeriesView {
+                            id: id(dev),
+                            version: k + 1,
+                            period_ns: PERIOD,
+                            samples: list.clone().into(),
+                        }));
+                    }
+                }
+                views.sort_by_key(|v| v.id);
+                s.devices = Arc::new(DeviceCatalog {
+                    version: k + 2,
+                    entries: entries.into(),
+                });
+                s.series = Arc::new(SeriesSet {
+                    header: ComponentHeader {
+                        version: k + 2,
+                        ..ComponentHeader::default()
+                    },
+                    series: views.into(),
+                    slow: Arc::from([]),
+                });
+                let mut sys = (*s.system).clone();
+                sys.header.version += 1;
+                sys.memory.used = u64::from(in_use_mib) << 20;
+                sys.memory.groups = Arc::new(published);
+                s.system = Arc::new(sys);
+            });
+            draw(r.vcx);
+
+            let apps = r
+                .vcx
+                .update(|_, cx| r.page.read(cx).apps().cloned())
+                .expect("the By app chart");
+            let bands = r.vcx.read_entity(&apps, |a, _| a.bands().to_vec());
+            let sum: f64 = bands.iter().map(|b| b.value).sum();
+            assert_eq!(sum, bytes(in_use_mib), "step {k}: the stack is In use");
+            let shared = bands
+                .iter()
+                .find(|b| b.kind == BandKind::Shared)
+                .expect("the Shared and kernel band");
+            assert!(
+                shared.value >= 0.,
+                "step {k}: Shared and kernel is not negative"
+            );
+            assert_eq!(shared.value, bytes(shared_mib), "step {k}");
+            let groups = bands
+                .iter()
+                .filter(|b| matches!(b.kind, BandKind::Group(_)))
+                .count();
+            assert!(groups <= 3, "step {k}: at most top_n group bands");
+            for (i, &(key, from, to, ..)) in script.iter().enumerate() {
+                if (from..to).contains(&k) {
+                    let series = id(group_dev(i as u16));
+                    let count = bands
+                        .iter()
+                        .map(|b| b.series.iter().filter(|s| **s == series).count())
+                        .sum::<usize>();
+                    assert_eq!(count, 1, "step {k}: {key} is in exactly one band");
+                }
+            }
+
+            // The script reaches the cases it is for: exe:d arrives mid-pause into "Other
+            // apps" and gets its own band at the next ranking.
+            let band_of = |key: &str| bands.iter().find(|b| &*b.key == key).map(|b| b.kind);
+            let in_other = |i: u16| {
+                bands
+                    .iter()
+                    .find(|b| b.kind == BandKind::Other)
+                    .is_some_and(|b| b.series.contains(&id(group_dev(i))))
+            };
+            match k {
+                3..10 => assert!(in_other(3), "step {k}: exe:d waits in Other apps"),
+                10..20 => assert!(
+                    matches!(band_of("exe:d"), Some(BandKind::Group(_))),
+                    "step {k}: exe:d has its own band"
+                ),
+                22..30 => assert!(in_other(6), "step {k}: exe:g waits in Other apps"),
+                _ => {}
+            }
+        }
+    }
 }
