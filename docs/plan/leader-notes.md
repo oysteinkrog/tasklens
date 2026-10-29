@@ -1002,3 +1002,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-29 16:40 8fx.45 held: memory sweep limit raised from 20 ms to 60 ms median / 100 ms max; identity (pid, start_ticks) every sweep, group key cached and refreshed every 60 s.
 - 2026-10-29 17:42 o55.52 decided: derived chart series for the pre-split Shared and kernel band; k:* never ranked as groups (live bug since 8fx.46, blocks 1.0.9).
 - 2026-10-29 17:46 q4x76.1 decided: serde rc feature + derives; bootstrap = fixed prefix (u16 proto, u16-length version, u32 flags, LE) + postcard tail; Refused has reason code and text.
+- 2026-10-29 18:50 1.0.9 held: visual check found By app chart spikes and gaps under load (o55.53, P1). Legend click, Overview Processes click and six kernel bands passed. Release after o55.53, full suite and a new visual check, as 1.0.10 or 1.0.9 rebuilt.
