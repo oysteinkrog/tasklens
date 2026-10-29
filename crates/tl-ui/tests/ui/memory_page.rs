@@ -1228,7 +1228,7 @@ mod by_app {
         };
         let bytes = |mib: u32| f64::from(mib) * f64::from(MIB);
 
-        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        let r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         let base = now_boot_ns() - STEPS * PERIOD;
         // The samples of each group, then "Other apps" and "Shared and kernel".
         let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); n + 2];
