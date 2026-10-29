@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
-    Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
+    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
