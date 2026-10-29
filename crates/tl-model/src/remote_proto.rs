@@ -21,8 +21,25 @@ use serde::{Deserialize, Serialize};
 use crate::actions::ActionEvent;
 use crate::command::Command;
 use crate::demand::Demand;
+use crate::details::DetailsSnapshot;
+use crate::devices::DeviceCatalog;
+use crate::health::HealthSnapshot;
+use crate::history::HistoryView;
+use crate::ids::{GroupKey, NodeId, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::journal::{JournalControl, JournalEvent, JournalQuery};
-use crate::time::BootId;
+use crate::process::{
+    AppCgroupSample, Coverage, GroupRow, LowMemoryInfo, ProcFlags, ProcState, ProcessExtras,
+    ProcessExtrasP2, ProcessMeta, ProcessRecord, ProcessSnapshot,
+};
+use crate::series::{Sample, SeriesView};
+use crate::snapshot::{
+    ComponentHeader, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory, DeviceTimeline,
+    HistPoint, InventorySnapshot, ProcessSeriesSet, SeriesSet, ServicesSnapshot, StartupSnapshot,
+    SystemSnapshot, WindowsSnapshot,
+};
+use crate::table::{ProcessTableView, TableRow, TableTotals};
+use crate::time::{BootId, TimeNs};
+use crate::validity::FieldValidity;
 
 /// First 4 bytes of every frame.
 pub const MAGIC: [u8; 4] = *b"TLR1";
@@ -553,13 +570,246 @@ impl<'a> Cursor<'a> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StreamId(pub u32);
 
-/// Body of one snapshot frame (ADR-018 Snapshot deltas). tasklens-q4x76.3 adds the parts.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+/// Body of one snapshot frame (ADR-018 Snapshot deltas). Each part is `None` when it is the same
+/// as in the base frame. In a complete frame (`base` 0) every part is sent whole, except that a
+/// frame over the size limit leaves out `process_series` and `device_history`; the client then
+/// starts from their defaults. tl-remote's `delta` module builds and applies frames.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SnapshotFrame {
     /// Numbered from 1 per session.
     pub frame: u64,
     /// The frame this is a delta against; 0 means complete.
     pub base: u64,
+    pub epoch: u32,
+    pub boot_id: BootId,
+    pub published_ns: TimeNs,
+    pub system: Option<Arc<SystemSnapshot>>,
+    pub series: Option<Part<Arc<SeriesSet>, SeriesSetDelta>>,
+    pub processes: Option<Part<Arc<ProcessSnapshot>, ProcessesDelta>>,
+    pub table: Option<Part<Arc<ProcessTableView>, TableDelta>>,
+    pub connections: Option<Arc<ConnectionsSnapshot>>,
+    pub services: Option<Arc<ServicesSnapshot>>,
+    pub startup: Option<Arc<StartupSnapshot>>,
+    pub inventory: Option<Arc<InventorySnapshot>>,
+    pub devices: Option<Arc<DeviceCatalog>>,
+    pub health: Option<Arc<HealthSnapshot>>,
+    pub windows: Option<Arc<WindowsSnapshot>>,
+    pub details: Option<Arc<DetailsSnapshot>>,
+    pub history: Option<Arc<HistoryView>>,
+    pub process_series: Option<Part<Arc<ProcessSeriesSet>, ProcessSeriesDelta>>,
+    pub device_details: Option<Arc<DeviceDetailsSnapshot>>,
+    pub device_history: Option<Part<Arc<DeviceHistory>, DeviceHistoryDelta>>,
+}
+
+impl SnapshotFrame {
+    /// A frame with every part `None`: the same as `base`.
+    pub fn unchanged(
+        frame: u64,
+        base: u64,
+        epoch: u32,
+        boot_id: BootId,
+        published_ns: TimeNs,
+    ) -> Self {
+        SnapshotFrame {
+            frame,
+            base,
+            epoch,
+            boot_id,
+            published_ns,
+            system: None,
+            series: None,
+            processes: None,
+            table: None,
+            connections: None,
+            services: None,
+            startup: None,
+            inventory: None,
+            devices: None,
+            health: None,
+            windows: None,
+            details: None,
+            history: None,
+            process_series: None,
+            device_details: None,
+            device_history: None,
+        }
+    }
+}
+
+/// A value sent whole, or as a delta against the base frame's value.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum Part<W, D> {
+    Whole(W),
+    Delta(D),
+}
+
+/// A list kept partly from the base: the client builds `base[skip..skip + keep]` followed by
+/// `appended`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Tail<T> {
+    pub skip: u32,
+    pub keep: u32,
+    pub appended: Arc<[T]>,
+}
+
+/// Changes to a list sorted by key. `updates` and `removed` are sorted by key too. An update of a
+/// key the base does not have must be `Part::Whole`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct KeyedDelta<K, W, D> {
+    pub updates: Vec<(K, Part<W, D>)>,
+    pub removed: Vec<K>,
+}
+
+/// A series view whose samples continue the base's: same `id`, new `version` and `period_ns`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ViewTail {
+    pub version: u64,
+    pub period_ns: u64,
+    pub samples: Tail<Sample>,
+}
+
+pub type ViewsDelta<K> = KeyedDelta<K, Arc<SeriesView>, ViewTail>;
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SeriesSetDelta {
+    pub header: ComponentHeader,
+    pub series: ViewsDelta<SeriesId>,
+    pub slow: ViewsDelta<SeriesId>,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ProcessSeriesDelta {
+    pub header: ComponentHeader,
+    pub series: ViewsDelta<ProcessSeriesId>,
+    pub slow: ViewsDelta<ProcessSeriesId>,
+}
+
+/// One process with its index-aligned extras, sent whole.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ProcessRow {
+    pub record: ProcessRecord,
+    pub extras: ProcessExtras,
+    pub extras_p2: ProcessExtrasP2,
+}
+
+/// The changed fields of one process. Extras rows are sent whole when they changed.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ProcessChange {
+    pub record: Option<ProcessRecordPatch>,
+    pub extras: Option<ProcessExtras>,
+    pub extras_p2: Option<ProcessExtrasP2>,
+}
+
+/// Row delta of `ProcessSnapshot`, keyed by `ProcessKey`. `Part::Whole` is an added process.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ProcessesDelta {
+    pub header: ComponentHeader,
+    pub rows: KeyedDelta<ProcessKey, ProcessRow, ProcessChange>,
+    pub coverage: Option<Coverage>,
+    pub apps: Option<Arc<[AppCgroupSample]>>,
+    pub low_memory: Option<Option<Arc<LowMemoryInfo>>>,
+}
+
+/// Defines a patch struct with one `Option` per field of a record, except its key. The
+/// destructuring in `diff` fails to compile when the record gains a field the patch lacks.
+macro_rules! record_patch {
+    (
+        $(#[$meta:meta])*
+        $name:ident for $rec:ident, key $key:ident,
+        eq { $($e:ident: $et:ty,)* }
+        bits { $($b:ident,)* }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+        pub struct $name {
+            $(pub $e: Option<$et>,)*
+            $(pub $b: Option<f32>,)*
+        }
+
+        impl $name {
+            /// The fields of `new` that differ from `base`, or `None` when none do. Floats compare
+            /// by bits, so NaN equals NaN.
+            pub fn diff(base: &$rec, new: &$rec) -> Option<Self> {
+                let $rec { $key: _, $($e,)* $($b,)* } = new;
+                let patch = Self {
+                    $($e: (base.$e != *$e).then(|| $e.clone()),)*
+                    $($b: (base.$b.to_bits() != $b.to_bits()).then_some(*$b),)*
+                };
+                (patch != Self::default()).then_some(patch)
+            }
+
+            /// Writes the sent fields into `rec`.
+            pub fn apply(&self, rec: &mut $rec) {
+                $(if let Some(v) = &self.$e {
+                    rec.$e = v.clone();
+                })*
+                $(if let Some(v) = self.$b {
+                    rec.$b = v;
+                })*
+            }
+        }
+    };
+}
+
+record_patch! {
+    /// The changed fields of a `ProcessRecord`.
+    ProcessRecordPatch for ProcessRecord, key key,
+    eq {
+        ppid: u32,
+        uid: u32,
+        meta: Arc<ProcessMeta>,
+        group: GroupKey,
+        state: ProcState,
+        flags: ProcFlags,
+        nice: i8,
+        threads: u32,
+        rss_anon_bytes: u64,
+        rss_bytes: u64,
+        pss_bytes: u64,
+        uss_bytes: u64,
+        swap_bytes: u64,
+        gpu_mem_bytes: u64,
+        euid: Option<u32>,
+        net_shared: bool,
+        validity: FieldValidity,
+    }
+    bits {
+        cpu_pct,
+        io_read_bps,
+        io_write_bps,
+        net_rx_bps,
+        net_tx_bps,
+        gpu_util_pct,
+        cancelled_write_bps,
+    }
+}
+
+/// Row delta of `ProcessTableView`, keyed by `NodeId`. `rows` holds the added and changed rows
+/// whole. `order` lists every row's node in display order and is sent when the order or the set
+/// of rows changed; without it the rows are the base's, in the base's order.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct TableDelta {
+    pub header: ComponentHeader,
+    pub query_generation: u64,
+    pub rows: Vec<TableRow>,
+    pub order: Option<Arc<[NodeId]>>,
+    pub groups: Option<Arc<[GroupRow]>>,
+    pub subtree: Option<Arc<[GroupRow]>>,
+    pub totals: TableTotals,
+    pub total: u32,
+    pub shown: u32,
+    pub restricted: u32,
+}
+
+/// Points appended to the base's `DeviceHistory`. Sent only while `request`, `step_ns` and
+/// `realtime_offset_ns` are the base's; any change there sends the part whole.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DeviceHistoryDelta {
+    pub header: ComponentHeader,
+    pub since_realtime_ns: Option<i64>,
+    pub series: KeyedDelta<SeriesId, Arc<[HistPoint]>, Tail<HistPoint>>,
+    pub boots: Option<Arc<[i64]>>,
+    pub timeline: Option<Option<Arc<DeviceTimeline>>>,
 }
 
 /// Values of the host settings in `engine.toml`. tasklens-q4x76.9 adds the fields.
@@ -960,7 +1210,13 @@ mod tests {
 
     #[test]
     fn server_messages_round_trip() {
-        let mut msgs = vec![ServerMsg::Snapshot(SnapshotFrame { frame: 2, base: 1 })];
+        let mut msgs = vec![ServerMsg::Snapshot(SnapshotFrame::unchanged(
+            2,
+            1,
+            3,
+            BootId(42),
+            5,
+        ))];
         msgs.extend(all_action_states().into_iter().map(|state| {
             ServerMsg::Action(ActionEvent {
                 id: ActionId(9),
