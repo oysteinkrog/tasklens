@@ -1197,6 +1197,47 @@ mod by_app {
         assert_eq!(first, "p2");
     }
 
+    /// A theme change gives the bands new colours and keeps their values and process counts, so
+    /// the legend and the tooltip stay right before the next snapshot.
+    #[gpui_kit::test]
+    fn memory_by_app_theme_keeps_values(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 5);
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        let facts = |r: &mut Rig<'_>| {
+            r.vcx.read_entity(&apps, |a, _| {
+                a.bands()
+                    .iter()
+                    .map(|b| (b.key.clone(), b.value, b.processes))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = facts(&mut r);
+        assert!(before.iter().all(|&(_, v, _)| v > 0.), "{before:?}");
+        assert_eq!(before[0].2, Some(3));
+        let colour = |r: &mut Rig<'_>| r.vcx.read_entity(&apps, |a, _| a.bands()[0].color);
+        let dark = colour(&mut r);
+
+        r.vcx.update(|_, cx| {
+            tl_ui::theme::store::activate("Default Light", tl_ui::theme::ActivateSource::User, cx)
+                .expect("theme exists");
+        });
+        draw(r.vcx);
+        assert_ne!(
+            colour(&mut r),
+            dark,
+            "the bands take the new theme's colours"
+        );
+        assert_eq!(facts(&mut r), before);
+        let lines = r
+            .vcx
+            .update(|_, cx| apps.read(cx).tooltip_lines(0, None, cx));
+        assert_eq!(lines.len(), 4, "{lines:?}");
+    }
+
     /// The stack always adds up to In use: at every sample the group bands, "Other apps" and
     /// "Shared and kernel" sum to In use to the byte, while groups arrive and leave inside the
     /// 10 s ranking pause and across rankings. Every group with a sample now is in exactly one

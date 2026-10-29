@@ -597,6 +597,14 @@ impl MemoryAppsChart {
         find_tiered(&snap.series, series_id(device), self.settings.range_ns).0
     }
 
+    /// The time of the newest sample. The reference clock is the "Shared and kernel" band, which
+    /// gets a sample on every sweep.
+    fn newest(&self, snap: &Snapshot) -> Option<u64> {
+        self.shared
+            .and_then(|d| self.view(snap, d))
+            .and_then(|v| v.samples.last().map(|s| s.t_ns))
+    }
+
     /// Re-reads the groups, ranks them (sticky unless `force`), and rebuilds the bands and the
     /// spec when the bands changed. The legend values follow every call.
     fn refresh(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) {
@@ -618,9 +626,8 @@ impl MemoryAppsChart {
             }
         }
 
-        // The reference clock: the "Shared and kernel" band gets a sample on every sweep.
         let reference = self.shared.and_then(|d| self.view(snap, d));
-        let newest = reference.and_then(|v| v.samples.last().map(|s| s.t_ns));
+        let newest = self.newest(snap);
         let mut means: Vec<(Arc<str>, f64)> = Vec::new();
         if let (Some(reference), Some(newest)) = (reference, newest) {
             let from = newest.saturating_sub(self.settings.range_ns);
@@ -863,7 +870,11 @@ impl MemoryAppsChart {
             return;
         }
         self.style_version = version;
+        // New bands start at 0 bytes and unknown counts: fill them again from the snapshot, so
+        // the legend and tooltip do not wait for the next one.
         self.build_bands(cx);
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.update_values(&snap, self.newest(&snap).unwrap_or(0));
         self.rebuild_spec(cx);
         cx.notify();
     }
