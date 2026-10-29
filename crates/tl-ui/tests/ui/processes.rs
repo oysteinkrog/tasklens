@@ -8,7 +8,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::GroupKind;
-use tl_model::settings::{Settings, StartTab, UiState};
+use tl_model::settings::{Settings, UiState};
 use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery};
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -1849,7 +1849,7 @@ mod shell {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::settings::{AppearanceSettings, Settings, StartTab, ThemeSettings, UiState};
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::toast;
@@ -2570,7 +2570,7 @@ mod jump {
         use gpui_kit::{
             AnyView, AppContext as _, Context, EventEmitter, FocusHandle, InteractiveElement as _,
             IntoElement, Modifiers, ParentElement as _, Render, Styled as _, TestAppContext,
-            Window, div, px, size,
+            VisualTestContext, Window, div, px, size,
         };
         use tl_model::command::Tab;
         use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -2587,12 +2587,14 @@ mod jump {
         use tl_ui::pages::performance::memory_apps::LEGEND_ID;
         use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
         use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
+        use tl_ui::pages::processes::ProcessesPage;
         use tl_ui::settings_global::TlSettings;
-        use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage};
+        use tl_ui::testing::fake_engine::FakeEngine;
+        use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage, main_window_view};
         use tl_ui::window::status::StatusChanged;
 
-        use super::super::shell::{open_with_perf, select};
-        use super::{Rig, rig_on};
+        use super::super::shell::{open_on_perf, open_with_perf, select};
+        use super::rig_on;
 
         const MEMORY: DeviceIdx = DeviceIdx(1);
         const GROUPS: u16 = 3;
