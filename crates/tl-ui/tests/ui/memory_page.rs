@@ -826,7 +826,7 @@ mod by_app {
     use tl_model::system::MemGroupBand;
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
     use tl_ui::pages::performance::memory_apps::{
-        APPS_ID, BandKind, LEGEND_ID, Ranker, legend_fit, pick_colors,
+        APPS_ID, BandKind, LEGEND_ID, Ranker, TOOLTIP_ID, legend_fit, pick_colors,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue};
 
@@ -1077,5 +1077,50 @@ mod by_app {
             .debug_bounds(format!("{LEGEND_ID}-more").leak())
             .expect("+n more row");
         assert!(more.bottom() <= legend.bottom());
+    }
+
+    /// The fixed bands come with their devices, even when no group has data to rank.
+    #[gpui_kit::test]
+    fn memory_by_app_fixed_bands_arrive(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(10), system(64 * GIB, 80 * GIB, 0));
+        assert!(band_kinds(&mut r).is_empty());
+        publish_groups(&mut r, 0);
+        assert_eq!(band_kinds(&mut r), [BandKind::Other, BandKind::Shared]);
+    }
+
+    /// Hovering a legend row raises its band and shows its tooltip inside the chart box.
+    #[gpui_kit::test]
+    fn memory_by_app_legend_hover_tooltip(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 5);
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        // 5 bands, top first: Shared, Other, p2, p1, p0. Row 2 is band 2 (p2).
+        let row = r
+            .vcx
+            .debug_bounds(format!("{LEGEND_ID}-2").leak())
+            .expect("legend row 2");
+        r.vcx
+            .simulate_mouse_move(row.center(), None, gpui_kit::Modifiers::none());
+        draw(r.vcx);
+        assert_eq!(r.vcx.read_entity(&apps, |a, _| a.hovered()), Some(2));
+        let tip = r
+            .vcx
+            .debug_bounds(TOOLTIP_ID)
+            .expect("the legend row's tooltip");
+        let chart = r.vcx.debug_bounds(APPS_ID).expect("chart");
+        assert!(
+            tip.left() >= chart.left()
+                && tip.right() <= chart.right()
+                && tip.top() >= chart.top()
+                && tip.bottom() <= chart.bottom(),
+            "tooltip {tip:?} inside chart {chart:?}"
+        );
+        let first = r
+            .vcx
+            .update(|_, cx| apps.read(cx).tooltip_lines(2, None, cx)[0].clone());
+        assert_eq!(first, "p2");
     }
 }

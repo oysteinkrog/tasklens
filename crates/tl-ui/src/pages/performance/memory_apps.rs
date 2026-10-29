@@ -210,6 +210,23 @@ pub fn legend_fit(rows: usize, height: f32, row_h: f32) -> (usize, usize) {
     (shown, rows - shown)
 }
 
+/// Where the tooltip of legend-hovered band `band` points, in chart-local px: the chart's right
+/// edge (`chart_w`), level with the middle of the band's row. `None` when the row is not shown.
+/// The legend lists `rows` bands top first and shows `shown` of them, each `row_h` tall.
+pub fn legend_anchor(
+    rows: usize,
+    band: usize,
+    shown: usize,
+    row_h: f32,
+    chart_w: Pixels,
+) -> Option<Point<Pixels>> {
+    let row = rows.checked_sub(band + 1).filter(|&r| r < shown)?;
+    Some(Point {
+        x: chart_w,
+        y: px((row as f32 + 0.5) * row_h),
+    })
+}
+
 /// The bands of a chart with `top_n` own bands over `ranked` groups (rank order): the top N
 /// keys, then the keys that fold into "Other apps".
 pub fn split_top(ranked: &[Arc<str>], top_n: usize) -> (&[Arc<str>], &[Arc<str>]) {
@@ -542,6 +559,7 @@ impl MemoryAppsChart {
     /// Re-reads the groups, ranks them (sticky unless `force`), and rebuilds the bands and the
     /// spec when the bands changed. The legend values follow every call.
     fn refresh(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) {
+        let fixed = (self.other, self.shared);
         self.groups.clear();
         self.other = None;
         self.shared = None;
@@ -590,9 +608,12 @@ impl MemoryAppsChart {
 
         let (top, rest) = split_top(self.ranker.order(), self.settings.top_n);
         let total = snap.system.memory.total;
+        // A fixed band whose device arrives or moves needs new bands too, even with no group
+        // ranked.
         let structure_changed = top != self.top.as_slice()
             || rest != self.rest.as_slice()
             || total != self.total
+            || (self.other, self.shared) != fixed
             || force;
         if structure_changed {
             self.top = top.to_vec();
@@ -972,10 +993,25 @@ impl Render for MemoryAppsChart {
             .absolute()
             .inset_0();
 
-        let tooltip = self.hover.at.and_then(|(at, t)| {
-            let band = self.hover.band?;
-            Some(self.tooltip(self.tooltip_lines(band, Some(t), cx), at, cx))
-        });
+        // Top band first; whole rows only, the last row that fits says "+n more".
+        let rows = self.bands.len();
+        let row_h = LEGEND_ROW_H * m.ui_scale;
+        let (shown, more) = legend_fit(rows, h, row_h);
+
+        // Over the chart: the values at the pointer's time. Over a legend row: the newest values,
+        // at the chart's right edge level with the row.
+        let tooltip = match self.hover {
+            Hover {
+                band: Some(band),
+                at: Some((at, t)),
+            } => Some(self.tooltip(self.tooltip_lines(band, Some(t), cx), at, cx)),
+            Hover {
+                band: Some(band),
+                at: None,
+            } => legend_anchor(rows, band, shown, row_h, self.bounds.get().size.width)
+                .map(|at| self.tooltip(self.tooltip_lines(band, None, cx), at, cx)),
+            Hover { band: None, .. } => None,
+        };
         let chart = div()
             .id(APPS_ID)
             .debug_selector(|| APPS_ID.into())
@@ -999,9 +1035,6 @@ impl Render for MemoryAppsChart {
             }))
             .children(tooltip);
 
-        // Top band first; whole rows only, the last row that fits says "+n more".
-        let rows = self.bands.len();
-        let (shown, more) = legend_fit(rows, h, LEGEND_ROW_H * m.ui_scale);
         let mut legend = div()
             .debug_selector(|| LEGEND_ID.into())
             .flex()
@@ -1023,7 +1056,7 @@ impl Render for MemoryAppsChart {
             legend = legend.child(
                 div()
                     .debug_selector(move || format!("{LEGEND_ID}-more"))
-                    .h(px(LEGEND_ROW_H * m.ui_scale))
+                    .h(px(row_h))
                     .flex()
                     .items_center()
                     .text_color(theme.text_secondary)
