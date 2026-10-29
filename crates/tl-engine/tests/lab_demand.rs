@@ -213,7 +213,8 @@ fn hidden_recording_off_zero_samples_60s() {
 }
 
 /// ADR-008 verification: hidden with device history on gives exactly the 1 Hz sources of the
-/// "Not visible, device history on" column, with the engine's own rate tables (ADR-017).
+/// "Not visible, device history on" column, with the engine's own rate tables (ADR-017). The
+/// process sweep runs every 10 s for the memory group series (D-036, tasklens-8fx.45).
 #[test]
 fn hidden_device_history_keeps_its_1hz_sources() {
     use tl_engine::workers::{
@@ -237,13 +238,11 @@ fn hidden_device_history_keeps_its_1hz_sources() {
         ("sensors", sensors_period),
         ("gpu", gpu_period),
     ];
-    let off: [(&str, PeriodFn); 2] = [
-        ("processes", processes::processes_period),
-        ("connections", connections_period),
-    ];
+    let off: [(&str, PeriodFn); 1] = [("connections", connections_period)];
+    let slow: [(&str, PeriodFn); 1] = [("processes", processes::processes_period)];
     let mut handles = Vec::new();
     let mut logs = Vec::new();
-    for (name, period) in on.iter().chain(off.iter()) {
+    for (name, period) in on.iter().chain(off.iter()).chain(slow.iter()) {
         let (handle, log) =
             spawn_table(&mut fl, io(&updates, &demand, &settings, &control), *period);
         handles.push(handle);
@@ -256,8 +255,11 @@ fn hidden_device_history_keeps_its_1hz_sources() {
     for (name, log) in &logs[..on.len()] {
         assert_eq!(times_ms(log, "sample"), every_second, "{name}");
     }
-    for (name, log) in &logs[on.len()..] {
+    for (name, log) in &logs[on.len()..on.len() + off.len()] {
         assert_eq!(times_ms(log, "sample"), [0u64; 0], "{name}");
+    }
+    for (name, log) in &logs[on.len() + off.len()..] {
+        assert_eq!(times_ms(log, "sample"), [0], "{name}");
     }
 
     for handle in handles {
