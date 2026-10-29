@@ -541,6 +541,8 @@ perf-mem-apps-processes =
         [one] { $count } process
        *[other] { $count } processes
     }
+perf-mem-apps-shared-older = Shared and kernel (older data)
+perf-mem-apps-estimate = Estimate: the kernel does not list this memory
 perf-mem-composition-caption = Memory composition
 perf-mem-seg-in-use = In use
 perf-mem-seg-compressed = In use (compressed)

@@ -259,7 +259,10 @@ impl ChartView {
                 .series
                 .iter()
                 .filter(|s| s.process.is_none())
-                .any(|s| changed.tier_changed(s.id, range_ns))
+                .any(|s| {
+                    changed.tier_changed(s.id, range_ns)
+                        || s.minus.iter().any(|&b| changed.tier_changed(b, range_ns))
+                })
         };
         let device_appeared = ev.mask.contains(ComponentMask::DEVICES)
             && (self.series.len() != self.spec.series.len()
@@ -294,6 +297,8 @@ impl ChartView {
     /// With `with_device_history`, ranges over 10 minutes read `snap.device_history` instead
     /// ([`reads_history`]): each series becomes a view on CLOCK_REALTIME, and process series are
     /// absent. A held chart whose history has not answered yet (`with_hold`) has no series.
+    ///
+    /// A series with `minus` resolves to a new view from the same source ([`derived_view`]).
     pub fn resolve(&mut self, snap: &Snapshot) {
         self.paused = self.paused_in(snap);
         let set = &*snap.series;
@@ -312,10 +317,25 @@ impl ChartView {
             self.boots = Arc::clone(&hist.boots);
             self.tier_fallback = false;
             let stack = self.spec.stack;
+            let view_of = |id: SeriesId| {
+                hist.get(id)
+                    .map(|points| history_view(id, points, hist, stack))
+            };
             self.series.clear();
             self.series.extend(self.spec.series.iter().map(|s| {
-                let points = hist.get(s.id).filter(|_| s.process.is_none())?;
-                Some(Arc::new(history_view(s.id, points, hist, stack)))
+                if s.process.is_some() {
+                    return None;
+                }
+                let view = view_of(s.id)?;
+                if s.minus.is_empty() {
+                    return Some(Arc::new(view));
+                }
+                let minus: SmallVec<[Option<SeriesView>; 8]> =
+                    s.minus.iter().map(|&b| view_of(b)).collect();
+                Some(Arc::new(derived_view(
+                    &view,
+                    minus.iter().map(Option::as_ref),
+                )))
             }));
             return;
         }
@@ -331,7 +351,14 @@ impl ChartView {
                 None => find_tiered(set, s.id, range_ns),
             };
             fallback |= fell_back;
-            view.cloned()
+            if s.process.is_some() || s.minus.is_empty() {
+                return view.cloned();
+            }
+            let minus = s
+                .minus
+                .iter()
+                .map(|&b| find_tiered(set, b, range_ns).0.map(|v| &**v));
+            view.map(|a| Arc::new(derived_view(a, minus)))
         }));
         self.tier_fallback = fallback;
     }
@@ -718,6 +745,52 @@ pub(crate) fn history_view(
     }
 }
 
+/// `a` minus the sum of `minus`, clamped at 0 (`ChartSeries::minus`): one sample per sample of
+/// `a`, at its time. Each valid sample of `a` takes away the first valid sample of each `minus`
+/// series in the same period slot (`a`'s period, as the stacked bands align them); a series that
+/// is absent or has none there counts as 0. Gap samples of `a` stay gaps. A rest within f32
+/// rounding of `a`'s value is 0, so parts that sum to `a` leave nothing. The version changes
+/// whenever the version of `a` or of a present `minus` series does.
+pub fn derived_view<'a>(
+    a: &SeriesView,
+    minus: impl IntoIterator<Item = Option<&'a SeriesView>>,
+) -> SeriesView {
+    // Each of up to 8 terms rounds to within 6e-8 of its value; the rest must stay above that.
+    const REL_EPS: f32 = 1e-5;
+    let period = a.period_ns.max(1);
+    let slot = |t: u64| t.saturating_add(period / 2) / period;
+    let mut samples: Vec<Sample> = a.samples.to_vec();
+    let mut version = a.version;
+    for b in minus.into_iter().flatten() {
+        version = version.wrapping_mul(0x0100_0000_01b3) ^ b.version;
+        let mut j = 0;
+        for s in samples.iter_mut().filter(|s| s.is_valid()) {
+            let k = slot(s.t_ns);
+            while j < b.samples.len() && slot(b.samples[j].t_ns) < k {
+                j += 1;
+            }
+            if let Some(bs) = b.samples[j..]
+                .iter()
+                .take_while(|bs| slot(bs.t_ns) == k)
+                .find(|bs| bs.is_valid())
+            {
+                s.value -= bs.value;
+            }
+        }
+    }
+    for (s, a) in samples.iter_mut().zip(a.samples.iter()) {
+        if s.is_valid() && s.value <= a.value.abs() * REL_EPS {
+            s.value = 0.;
+        }
+    }
+    SeriesView {
+        id: a.id,
+        version,
+        period_ns: a.period_ns,
+        samples: samples.into(),
+    }
+}
+
 /// `id` in `set` for a chart of `range_ns`. Over 60 s it looks up the 1 Hz view first and falls
 /// back to the fast view when the snapshot has none; the bool is true when that fallback found
 /// the fast view.
@@ -910,6 +983,80 @@ mod tests {
         assert_eq!(newest_valid_sum(&empty), None);
         assert_eq!(newest_valid_sum(&[]), None);
         assert!(!newest_all_valid(&[]));
+    }
+
+    /// A derived series is `a` minus the sum of the others in each period slot, clamped at 0. A
+    /// slot without a valid sample of one of them counts that one as 0, and a gap of `a` stays a
+    /// gap.
+    #[test]
+    fn derived_view_subtracts_per_slot() {
+        const P: u64 = 1_000_000_000;
+        let a = view(
+            MetricId::MEM_GROUP,
+            vec![
+                Sample::valid(10 * P, 100.0),
+                Sample::valid(11 * P, 100.0),
+                Sample::gap(12 * P),
+                Sample::valid(13 * P, 100.0),
+                Sample::valid(14 * P, 100.0),
+                Sample::valid(15 * P, 7.0e9),
+            ],
+        )
+        .unwrap();
+        // b1 jitters by less than half a period, misses 11 and has a gap at 13.
+        let b1 = view(
+            MetricId::MEM_GROUP,
+            vec![
+                Sample::valid(10 * P + P / 3, 30.0),
+                Sample::gap(13 * P),
+                Sample::valid(14 * P - P / 3, 80.0),
+                Sample::valid(15 * P, 3.0e9 + 1.0e8),
+            ],
+        )
+        .unwrap();
+        let b2 = view(
+            MetricId::MEM_GROUP,
+            vec![
+                Sample::valid(10 * P, 20.0),
+                Sample::valid(13 * P, 40.0),
+                Sample::valid(14 * P, 80.0),
+                Sample::valid(15 * P, 3.9e9 - 1.0e8),
+            ],
+        )
+        .unwrap();
+        let d = derived_view(&a, [Some(&*b1), None, Some(&*b2)]);
+        let got: Vec<(u64, bool, f32)> = d
+            .samples
+            .iter()
+            .map(|s| (s.t_ns / P, s.is_valid(), s.value))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (10, true, 50.0),
+                // No b sample in this slot: all of a.
+                (11, true, 100.0),
+                (12, false, a.samples[2].value),
+                // b1's gap counts as 0.
+                (13, true, 60.0),
+                // Clamped at 0.
+                (14, true, 0.0),
+                // Parts that sum to a in u64 leave no f32 rounding rest.
+                (15, true, 0.0),
+            ]
+        );
+        assert_eq!(d.id, a.id);
+        assert_eq!(d.period_ns, a.period_ns);
+        // A new version of a part is a new version of the derived series.
+        let b2_new = SeriesView {
+            version: 2,
+            ..(*b2).clone()
+        };
+        let d2 = derived_view(&a, [Some(&*b1), None, Some(&b2_new)]);
+        assert_ne!(d.version, d2.version);
+        // Nothing to take away: a as it is.
+        let alone = derived_view(&a, [None]);
+        assert_eq!(alone.samples, a.samples);
     }
 
     /// A stacked history chart (the Memory composition) draws each point's mean only. With the

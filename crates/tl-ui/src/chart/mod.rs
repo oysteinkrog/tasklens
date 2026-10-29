@@ -29,6 +29,7 @@ pub use scale::{ScaleResult, ScaleState};
 pub use view::ChartView;
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui_kit::{Hsla, Path, Pixels, Point, SharedString, px};
 use smallvec::SmallVec;
@@ -95,6 +96,10 @@ pub struct ChartSeries {
     /// When above 0, the series is drawn as means of its valid samples over this many ns
     /// (one point per bucket), not sample by sample. Ignored in stacked charts.
     pub mean_ns: u64,
+    /// A derived series: when not empty, the chart draws `id` minus the sum of these series,
+    /// clamped at 0, at `id`'s sample times ([`view::derived_view`]). A series that is absent or
+    /// has no valid sample in a period slot counts as 0 there. Only for `id`, not `process`.
+    pub minus: Arc<[SeriesId]>,
 }
 
 /// How a gap between two runs of samples is drawn.
@@ -122,6 +127,7 @@ impl Default for ChartSeries {
             dashed: false,
             gap_style: GapStyle::Break,
             mean_ns: 0,
+            minus: Arc::from([]),
         }
     }
 }

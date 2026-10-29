@@ -2777,15 +2777,15 @@ mod jump {
             }
             assert_eq!(r.active_tab(), Tab::Performance);
 
-            // Rows top first: Shared and kernel, Other apps, p2, p1, p0.
-            for row in [0, 1] {
+            // Rows: Other apps, p2, p1, p0, then Shared and kernel under the divider.
+            for row in [0, 4] {
                 click_row(&mut r.vcx, row);
                 assert_eq!(r.active_tab(), Tab::Performance, "row {row} opens nothing");
                 assert_eq!(r.chip(), None, "row {row}");
             }
             assert_eq!(r.last_query().mem_group, None);
 
-            click_row(&mut r.vcx, 2);
+            click_row(&mut r.vcx, 1);
             assert_eq!(r.active_tab(), Tab::Processes);
             assert_eq!(r.last_query().mem_group.as_deref(), Some("exe:p2"));
             assert_eq!(r.chip().as_deref(), Some("Group: p2"));
@@ -2819,8 +2819,8 @@ mod jump {
             };
             assert_eq!(built(&mut vcx), (Tab::Performance, false));
 
-            // Rows top first: Shared and kernel, Other apps, p2, p1, p0.
-            click_row(&mut vcx, 2);
+            // Rows: Other apps, p2, p1, p0, then Shared and kernel under the divider.
+            click_row(&mut vcx, 1);
             assert_eq!(built(&mut vcx), (Tab::Processes, true));
             let chip = vcx.update(|_, cx| {
                 let main = main_window_view(cx).expect("main window open");

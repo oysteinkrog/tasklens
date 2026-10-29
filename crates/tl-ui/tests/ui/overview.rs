@@ -9957,18 +9957,18 @@ mod mem_by_app_box {
     #[gpui_kit::test]
     fn overview_memory_by_app_legend_click(cx: &mut TestAppContext) {
         let mut r = open(cx, 700., 400.);
-        // Rows top first: Shared, Other, p3, p2, p1, p0.
+        // Rows: Other, p3, p2, p1, p0, then the kernel band Shared under the divider.
         r.click(format!("{LEGEND_ID}-0"));
         assert_eq!(r.last_open(), None);
-        r.click(format!("{LEGEND_ID}-1"));
+        r.click(format!("{LEGEND_ID}-5"));
         assert_eq!(r.last_open(), None);
-        r.click(format!("{LEGEND_ID}-2"));
+        r.click(format!("{LEGEND_ID}-1"));
         assert_eq!(r.last_open().as_deref(), Some("exe:p3"));
         let name = r.vcx.read_entity(&r.apps, |a, _| {
             a.last_open.as_ref().map(|o| o.1.to_string())
         });
         assert_eq!(name.as_deref(), Some("p3"));
-        r.click(format!("{LEGEND_ID}-5"));
+        r.click(format!("{LEGEND_ID}-4"));
         assert_eq!(r.last_open().as_deref(), Some("exe:p0"));
     }
 

@@ -877,8 +877,8 @@ mod by_app {
     use tl_model::system::MemGroupBand;
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
     use tl_ui::pages::performance::memory_apps::{
-        APPS_ID, BandKind, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID, legend_fit, pick_colors,
-        split_top,
+        APPS_ID, BandKind, KERNEL_PARTS, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID,
+        legend_fit, legend_order, pick_colors, split_top,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue};
 
@@ -887,6 +887,77 @@ mod by_app {
     const MIB: f32 = 1_048_576.;
     const OTHER: DeviceIdx = DeviceIdx(100);
     const SHARED: DeviceIdx = DeviceIdx(101);
+    /// The first of the six parts of "Shared and kernel"; the others follow.
+    const PART0: u16 = 120;
+    const PART_NAMES: [&str; 6] = [
+        "Shared memory",
+        "Compressed swap",
+        "Kernel slab",
+        "Other kernel",
+        "Driver memory",
+        "File cache in use",
+    ];
+
+    fn part_dev(i: usize) -> DeviceIdx {
+        DeviceIdx(PART0 + i as u16)
+    }
+
+    /// Sets `entries[e.idx] = e`, padding with CPU packages so each entry sits at its idx.
+    fn put(entries: &mut Vec<DeviceEntry>, e: DeviceEntry) {
+        let i = usize::from(e.idx.0);
+        while entries.len() <= i {
+            let pad = entries.len() as u16;
+            entries.push(entry(pad, DeviceIdentity::CpuPackage));
+        }
+        entries[i] = e;
+    }
+
+    /// Publishes the six parts of "Shared and kernel" with `mib` each, at the times of the
+    /// `memgroup:shared` samples from sample `from` on: the samples before are history written
+    /// by 1.0.8, which has only `memgroup:shared`.
+    fn publish_parts(r: &mut Rig<'_>, mib: [f32; 6], from: usize) {
+        r.engine.publish_with(|s| {
+            let times: Vec<u64> = s
+                .series
+                .series
+                .iter()
+                .find(|v| v.id.device == SHARED)
+                .map(|v| v.samples.iter().map(|x| x.t_ns).collect())
+                .expect("the Shared and kernel series");
+            let mut entries: Vec<DeviceEntry> = s.devices.entries.to_vec();
+            let mut views: Vec<Arc<SeriesView>> = s.series.series.to_vec();
+            for (i, ((key, ..), value)) in KERNEL_PARTS.iter().zip(mib).enumerate() {
+                put(&mut entries, mem_entry(part_dev(i), key, PART_NAMES[i]));
+                views.push(Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: part_dev(i),
+                        metric: MetricId::MEM_GROUP,
+                    },
+                    version: 1,
+                    period_ns: 1_000_000_000,
+                    samples: times[from..]
+                        .iter()
+                        .map(|&t| Sample::valid(t, value * MIB))
+                        .collect::<Vec<_>>()
+                        .into(),
+                }));
+            }
+            views.sort_by_key(|v| v.id);
+            s.devices = Arc::new(DeviceCatalog {
+                version: s.devices.version + 1,
+                entries: entries.into(),
+            });
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: s.series.header.version + 1,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+    }
 
     fn group_dev(i: u16) -> DeviceIdx {
         DeviceIdx(2 + i)
@@ -1222,11 +1293,11 @@ mod by_app {
             .vcx
             .update(|_, cx| r.page.read(cx).apps().cloned())
             .expect("the By app chart");
-        // 5 bands, top first: Shared, Other, p2, p1, p0. Row 2 is band 2 (p2).
+        // 5 bands; rows Other, p2, p1, p0, then Shared under the divider. Row 1 is band 2 (p2).
         let row = r
             .vcx
-            .debug_bounds(format!("{LEGEND_ID}-2").leak())
-            .expect("legend row 2");
+            .debug_bounds(format!("{LEGEND_ID}-1").leak())
+            .expect("legend row 1");
         r.vcx
             .simulate_mouse_move(row.center(), None, gpui_kit::Modifiers::none());
         draw(r.vcx);
@@ -1285,11 +1356,11 @@ mod by_app {
                     .map(|(key, name)| (key.to_string(), name.to_string()))
             })
         };
-        // Rows top first: Shared, Other, p2, p1, p0.
+        // Rows: Other, p2, p1, p0, then the kernel band Shared.
         assert_eq!(click(&mut r, 0), None);
-        assert_eq!(click(&mut r, 1), None);
+        assert_eq!(click(&mut r, 4), None);
         assert_eq!(
-            click(&mut r, 2),
+            click(&mut r, 1),
             Some(("exe:p2".to_owned(), "p2".to_owned()))
         );
     }
@@ -1330,6 +1401,9 @@ mod by_app {
             s.system = Arc::new(sys);
         });
         draw(r.vcx);
+        // The six parts of Shared and kernel (2 MiB) start half way: the older half is 1.0.8
+        // history. Compressed swap is 0 and has no band.
+        publish_parts(&mut r, [0.5, 0., 0.5, 0.25, 0.25, 0.5], 30);
 
         // For each chart: each band's key, value and process count, bottom first, and the
         // stack sum.
@@ -1352,8 +1426,18 @@ mod by_app {
         assert_eq!(before.len(), 2, "the page and the box");
         assert_eq!(before[1], before[0], "the box shows what the page shows");
         let (bands, sum) = &before[0];
-        assert_eq!(bands.len(), 5, "{bands:?}");
-        assert!(bands.iter().all(|&(_, v, _)| v > 0.), "{bands:?}");
+        // p0..p2, Other apps, Shared and kernel (older data), and five parts.
+        assert_eq!(bands.len(), 10, "{bands:?}");
+        assert_eq!(&*bands[4].0, "shared", "{bands:?}");
+        assert_eq!(bands[4].1, 0., "the older data band is 0 now: {bands:?}");
+        assert!(
+            bands
+                .iter()
+                .enumerate()
+                .all(|(i, &(_, v, _))| i == 4 || v > 0.),
+            "{bands:?}"
+        );
+        assert!(!bands.iter().any(|b| &*b.0 == "k:zswap"), "{bands:?}");
         assert_eq!(bands[0].2, Some(3), "a group band's count");
         // "Other apps": its own 9 processes and the 3 of each of p3 and p4.
         assert_eq!(bands[3].2, Some(15), "the Other apps count");
@@ -1416,7 +1500,7 @@ mod by_app {
                 Some(12),
                 "chart {i}: Other apps holds p4 and its own"
             );
-            assert_eq!(bands[5], was[4], "chart {i} after top_n 3 to 4");
+            assert_eq!(bands[5..], was[4..], "chart {i} after top_n 3 to 4");
         }
         set_top_n(&mut r, 3);
         assert_eq!(facts(&mut r), before, "after top_n 4 to 3");
@@ -1469,15 +1553,14 @@ mod by_app {
         };
         r.engine.publish_with(|s| {
             let mut entries: Vec<DeviceEntry> = s.devices.entries.to_vec();
-            entries[usize::from(OTHER.0)] = entry(OTHER.0, DeviceIdentity::CpuPackage);
-            entries[usize::from(SHARED.0)] = entry(SHARED.0, DeviceIdentity::CpuPackage);
-            entries.push(mem_entry(DeviceIdx(102), "exe:p5", "p5"));
-            while entries.len() < usize::from(OTHER_NEW.0) {
-                let i = entries.len() as u16;
-                entries.push(entry(i, DeviceIdentity::CpuPackage));
-            }
-            entries.push(mem_entry(OTHER_NEW, "other", "Other apps"));
-            entries.push(mem_entry(SHARED_NEW, "shared", "Shared and kernel"));
+            put(&mut entries, entry(OTHER.0, DeviceIdentity::CpuPackage));
+            put(&mut entries, entry(SHARED.0, DeviceIdentity::CpuPackage));
+            put(&mut entries, mem_entry(DeviceIdx(102), "exe:p5", "p5"));
+            put(&mut entries, mem_entry(OTHER_NEW, "other", "Other apps"));
+            put(
+                &mut entries,
+                mem_entry(SHARED_NEW, "shared", "Shared and kernel"),
+            );
             s.devices = Arc::new(DeviceCatalog {
                 version: s.devices.version + 1,
                 entries: entries.into(),
@@ -1533,10 +1616,20 @@ mod by_app {
     /// "Shared and kernel" sum to In use to the byte, while groups arrive and leave inside the
     /// 10 s ranking pause and across rankings. Every group with a sample now is in exactly one
     /// band. The Memory page and the Overview Memory box both follow this (leader rule 08:30).
+    ///
+    /// The range spans the upgrade from 1.0.8 (o55.52): before step `UPGRADE` only
+    /// `memgroup:shared` has samples, from then on also its six parts. "Shared and kernel (older
+    /// data)" is all of it before and 0 after, the parts add up to it after, and the stack is In
+    /// use at every step. The parts are never ranked as groups, though most are larger than the
+    /// third group.
     #[gpui_kit::test]
     fn memory_by_app_stack_sums_to_in_use(cx: &mut TestAppContext) {
         const PERIOD: u64 = 1_000_000_000;
         const STEPS: u64 = 40;
+        const UPGRADE: u64 = 20;
+        // MiB of each part after the upgrade; the last, file cache in use, is the rest.
+        // Compressed swap is 0 and never gets a band.
+        const PARTS_MIB: [u32; 5] = [64, 0, 128, 96, 32];
         // (key, first step, step it leaves at, MiB, whether its memory then counts in "Other
         // apps" as it left the engine's top 20; else its processes exit). Rankings run at
         // steps 0, 10, 20 and 30.
@@ -1562,8 +1655,8 @@ mod by_app {
 
         let mut r = open_with_box(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
         let base = now_boot_ns() - STEPS * PERIOD;
-        // The samples of each group, then "Other apps" and "Shared and kernel".
-        let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); n + 2];
+        // The samples of each group, then "Other apps", "Shared and kernel" and its six parts.
+        let mut samples: Vec<Vec<Sample>> = vec![Vec::new(); n + 8];
         for k in 0..STEPS {
             let t = base + k * PERIOD;
             let mut groups_mib = 0;
@@ -1591,6 +1684,17 @@ mod by_app {
             let shared_mib = in_use_mib - groups_mib - other_mib;
             samples[n].push(Sample::valid(t, other_mib as f32 * MIB));
             samples[n + 1].push(Sample::valid(t, shared_mib as f32 * MIB));
+            let parts_mib: [u32; 6] = std::array::from_fn(|i| {
+                PARTS_MIB
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| shared_mib - PARTS_MIB.iter().sum::<u32>())
+            });
+            if k >= UPGRADE {
+                for (i, mib) in parts_mib.iter().enumerate() {
+                    samples[n + 2 + i].push(Sample::valid(t, *mib as f32 * MIB));
+                }
+            }
 
             r.engine.publish_with(|s| {
                 let mut entries = vec![
@@ -1613,7 +1717,15 @@ mod by_app {
                 }
                 entries.push(mem_entry(OTHER, "other", "Other apps"));
                 entries.push(mem_entry(SHARED, "shared", "Shared and kernel"));
-                let devices = (0..n).map(|i| group_dev(i as u16)).chain([OTHER, SHARED]);
+                if k >= UPGRADE {
+                    for (i, (key, ..)) in KERNEL_PARTS.iter().enumerate() {
+                        put(&mut entries, mem_entry(part_dev(i), key, PART_NAMES[i]));
+                    }
+                }
+                let devices = (0..n)
+                    .map(|i| group_dev(i as u16))
+                    .chain([OTHER, SHARED])
+                    .chain((0..6).map(part_dev));
                 for (dev, list) in devices.zip(&samples) {
                     if !list.is_empty() {
                         views.push(Arc::new(SeriesView {
@@ -1655,6 +1767,7 @@ mod by_app {
                     bytes(in_use_mib),
                     "chart {c} step {k}: the stack is In use"
                 );
+                // The older data band stays while 1.0.8 samples are in the 60 s range.
                 let shared = bands
                     .iter()
                     .find(|b| b.kind == BandKind::Shared)
@@ -1663,7 +1776,57 @@ mod by_app {
                     shared.value >= 0.,
                     "chart {c} step {k}: Shared and kernel is not negative"
                 );
-                assert_eq!(shared.value, bytes(shared_mib), "chart {c} step {k}");
+                let kernel: Vec<_> = bands
+                    .iter()
+                    .filter_map(|b| match b.kind {
+                        BandKind::Kernel(i) => Some((usize::from(i), b.value)),
+                        _ => None,
+                    })
+                    .collect();
+                if k < UPGRADE {
+                    assert_eq!(shared.value, bytes(shared_mib), "chart {c} step {k}");
+                    assert!(kernel.is_empty(), "chart {c} step {k}: {kernel:?}");
+                } else {
+                    assert_eq!(shared.value, 0., "chart {c} step {k}: older data is 0 now");
+                    assert_eq!(
+                        &*shared.name, "Shared and kernel (older data)",
+                        "chart {c} step {k}"
+                    );
+                    // Bottom first, without the 0 compressed swap.
+                    let want: Vec<(usize, f64)> = parts_mib
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &mib)| mib > 0)
+                        .map(|(i, &mib)| (i, bytes(mib)))
+                        .collect();
+                    assert_eq!(kernel, want, "chart {c} step {k}");
+                    let parts: f64 = kernel.iter().map(|p| p.1).sum();
+                    assert_eq!(parts, bytes(shared_mib), "chart {c} step {k}");
+                    // The kernel bands sit on top of the stack, older data first.
+                    let first = bands.iter().position(|b| b.kind.is_kernel()).unwrap();
+                    assert_eq!(bands[first].kind, BandKind::Shared);
+                    assert!(bands[first..].iter().all(|b| b.kind.is_kernel()));
+                }
+                // The parts are never memory groups: never ranked, never in "Other apps",
+                // never given a colour.
+                for b in &bands {
+                    let parts_in = (0..6)
+                        .filter(|&i| b.series.contains(&id(part_dev(i))))
+                        .count();
+                    match b.kind {
+                        BandKind::Kernel(_) => assert_eq!(parts_in, 1),
+                        _ => assert_eq!(
+                            parts_in, 0,
+                            "chart {c} step {k}: {} holds a part of Shared and kernel",
+                            b.key
+                        ),
+                    }
+                    assert!(
+                        !matches!(b.kind, BandKind::Group(_)) || !b.key.starts_with("k:"),
+                        "chart {c} step {k}: {} is ranked as a group",
+                        b.key
+                    );
+                }
                 let groups = bands
                     .iter()
                     .filter(|b| matches!(b.kind, BandKind::Group(_)))
@@ -1700,5 +1863,155 @@ mod by_app {
                 }
             }
         }
+
+        // The chart draws "Shared and kernel (older data)" as memgroup:shared minus the six
+        // parts: all of it before the upgrade, 0 after.
+        for apps in charts(&mut r) {
+            let chart = r.vcx.read_entity(&apps, |a, _| a.chart().clone());
+            let (minus, older) = r.vcx.read_entity(&chart, |v, _| {
+                let i = v
+                    .spec
+                    .series
+                    .iter()
+                    .position(|s| !s.minus.is_empty())
+                    .expect("the older data series");
+                (v.spec.series[i].minus.clone(), v.resolved()[i].clone())
+            });
+            let mut minus = minus.to_vec();
+            minus.sort();
+            assert_eq!(minus, (0..6).map(|i| id(part_dev(i))).collect::<Vec<_>>());
+            let older = older.expect("resolved");
+            let values: Vec<f32> = older.samples.iter().map(|s| s.value).collect();
+            let want: Vec<f32> = samples[n + 1]
+                .iter()
+                .enumerate()
+                .map(|(k, s)| if (k as u64) < UPGRADE { s.value } else { 0. })
+                .collect();
+            assert_eq!(values, want);
+        }
+        let saved = r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .memory_by_app
+                .colors
+                .clone()
+        });
+        assert!(saved.iter().all(|c| !c.key.starts_with("k:")), "{saved:?}");
+    }
+
+    /// The six parts of "Shared and kernel" are not memory groups, even when they are the
+    /// largest series: the top N are still the groups, "Other apps" holds only groups, and no
+    /// part gets a colour pick. Their legend rows follow "Other apps", under a divider, and
+    /// the two worked-out parts say in their tooltip that they are estimates.
+    #[gpui_kit::test]
+    fn memory_by_app_kernel_parts_are_not_groups(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 5);
+        // Shared and kernel is 2 MiB; parts as large as 8 MiB would top every group if ranked.
+        // The engine scales them down to Shared and kernel, so here they need not sum to it.
+        publish_parts(&mut r, [8., 0., 8., 8., 8., 8.], 0);
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        let bands = r.vcx.read_entity(&apps, |a, _| a.bands().to_vec());
+        let keys: Vec<&str> = bands.iter().map(|b| &*b.key).collect();
+        // The older data is 0 everywhere (clamped), so it has no band, nor has the 0 swap part.
+        assert_eq!(
+            keys,
+            [
+                "exe:p0",
+                "exe:p1",
+                "exe:p2",
+                "other",
+                "k:shmem",
+                "k:slab",
+                "k:kernel",
+                "k:driver",
+                "k:filecache"
+            ]
+        );
+        let other = bands.iter().find(|b| b.kind == BandKind::Other).unwrap();
+        assert_eq!(
+            other.series.as_slice(),
+            [group_dev(3), group_dev(4), OTHER].map(|device| SeriesId {
+                device,
+                metric: MetricId::MEM_GROUP,
+            })
+        );
+        let saved = r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .memory_by_app
+                .colors
+                .clone()
+        });
+        assert!(saved.iter().all(|c| !c.key.starts_with("k:")), "{saved:?}");
+
+        // Legend: Other apps and the groups top first, then the parts top first.
+        let rows: Vec<&str> = legend_order(&bands)
+            .into_iter()
+            .map(|i| &*bands[i].key)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "other",
+                "exe:p2",
+                "exe:p1",
+                "exe:p0",
+                "k:filecache",
+                "k:driver",
+                "k:kernel",
+                "k:slab",
+                "k:shmem"
+            ]
+        );
+
+        // Tooltips: name and value; the worked-out parts add that they are estimates.
+        let estimate = "Estimate: the kernel does not list this memory";
+        for (i, b) in bands.iter().enumerate() {
+            let lines = r
+                .vcx
+                .update(|_, cx| apps.read(cx).tooltip_lines(i, None, cx));
+            let worked_out = matches!(&*b.key, "k:driver" | "k:filecache");
+            assert_eq!(
+                lines.iter().any(|l| l == estimate),
+                worked_out,
+                "{}: {lines:?}",
+                b.key
+            );
+            if b.kind.is_kernel() {
+                assert_eq!(
+                    lines[0],
+                    PART_NAMES[KERNEL_PARTS.iter().position(|p| p.0 == &*b.key).unwrap()]
+                );
+            }
+        }
+        // A kernel row has no click.
+        let row = r
+            .vcx
+            .debug_bounds(format!("{LEGEND_ID}-4").leak())
+            .expect("the file cache row");
+        for down in [true, false] {
+            if down {
+                r.vcx.simulate_event(gpui_kit::MouseDownEvent {
+                    button: gpui_kit::MouseButton::Left,
+                    position: row.center(),
+                    modifiers: gpui_kit::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                });
+            } else {
+                r.vcx.simulate_event(gpui_kit::MouseUpEvent {
+                    button: gpui_kit::MouseButton::Left,
+                    position: row.center(),
+                    modifiers: gpui_kit::Modifiers::none(),
+                    click_count: 1,
+                });
+            }
+        }
+        draw(r.vcx);
+        assert_eq!(r.vcx.read_entity(&apps, |a, _| a.last_open.clone()), None);
     }
 }

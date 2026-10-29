@@ -1,17 +1,21 @@
 //! The memory-by-app chart (docs/ui/performance.md UI-PRF-060, D-036): memory in use as a stacked
 //! chart of memory groups. From the bottom: the top N groups, largest first, then "Other apps",
-//! then "Shared and kernel". The top of the stack is In use.
+//! then the six parts of "Shared and kernel" (`memgroup:k:*`, [`KERNEL_PARTS`]). The top of the
+//! stack is In use. History written by 1.0.8 has only `memgroup:shared`: the band "Shared and
+//! kernel (older data)" is that series minus the six parts (`ChartSeries::minus`), so it is the
+//! whole of it before the split and 0 after, and every sample still stacks to In use. A kernel
+//! band that is 0 over the visible range is left out.
 //!
-//! The engine publishes the top 20 groups and the two fixed bands as `MEM_GROUP` series on
-//! `DeviceIdentity::MemGroup` devices. This chart ranks every group with data in the visible
+//! The engine publishes the top 20 groups, the two fixed bands and the six parts as `MEM_GROUP`
+//! series on `DeviceIdentity::MemGroup` devices. This chart ranks every group with data in the visible
 //! range by its mean, keeps the order sticky ([`Ranker`]: at most every 10 s, and only for a 10%
 //! lead), draws the top N in their own colours and folds the rest into "Other apps". A group keeps
 //! its colour through `performance.memory_by_app.colors` ([`pick_colors`]).
 //!
-//! The legend lists the bands top first and shows whole rows only, with "+n more" for the rest
-//! ([`legend_fit`]). Hovering a band or its legend row raises it (the others drop to 40%) and
+//! The legend lists the group bands and "Other apps" top first, then under a divider the kernel
+//! bands top first, and shows whole rows only, with "+n more" for the rest ([`legend_fit`]). Hovering a band or its legend row raises it (the others drop to 40%) and
 //! shows a tooltip. Clicking a group's legend row opens the Processes tab filtered to that group
-//! (`ProcessesPage::open_mem_group`); "Other apps" and "Shared and kernel" rows have no click.
+//! (`ProcessesPage::open_mem_group`); "Other apps" and the kernel rows have no click.
 //! The Memory page puts "Groups shown" in its context menu.
 //!
 //! The chart sits on the Memory page ([`AppsPlace::Page`]) or in the Overview Memory box
@@ -49,7 +53,7 @@ use super::details::Template;
 use super::overview::parts::{ChartSettings, box_chart, class_probe};
 use super::overview::timeline::{self, OverviewPause};
 use crate::chart::geometry::right_edge_ns;
-use crate::chart::view::{HistoryClock, find_tiered, history_view, reads_history};
+use crate::chart::view::{HistoryClock, derived_view, find_tiered, history_view, reads_history};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale,
@@ -71,8 +75,20 @@ pub const TOOLTIP_ID: &str = "perf-mem-apps-tooltip";
 
 /// Key of the "Other apps" band (`memgroup:other`).
 pub const OTHER_KEY: &str = "other";
-/// Key of the "Shared and kernel" band (`memgroup:shared`).
+/// Key of the "Shared and kernel" band (`memgroup:shared`), the sum of the six parts.
 pub const SHARED_KEY: &str = "shared";
+/// Key prefix of the six parts of "Shared and kernel". They are never memory groups.
+pub const KERNEL_PREFIX: &str = "k:";
+/// The six parts of "Shared and kernel", bottom first (UI-PRF-060): key, fill alpha against
+/// `mem_fill`, and whether the value is worked out rather than read (the tooltip says so).
+pub const KERNEL_PARTS: [(&str, f32, bool); 6] = [
+    ("k:shmem", 0.25, false),
+    ("k:zswap", 0.30, false),
+    ("k:slab", 0.35, false),
+    ("k:kernel", 0.40, false),
+    ("k:driver", 0.45, true),
+    ("k:filecache", 0.50, true),
+];
 
 /// The chart re-ranks at most this often.
 pub const RERANK_NS: u64 = 10_000_000_000;
@@ -281,21 +297,32 @@ pub fn legend_fit(rows: usize, height: f32, row_h: f32) -> (usize, usize) {
     (shown, rows - shown)
 }
 
-/// Where the tooltip of legend-hovered band `band` points, in chart-local px: the chart's right
-/// edge (`chart_w`), level with the middle of the band's row. `None` when the row is not shown.
-/// The legend lists `rows` bands top first and shows `shown` of them, each `row_h` tall.
+/// Where the tooltip of the band in legend row `row` points, in chart-local px: the chart's
+/// right edge (`chart_w`), level with the middle of the row. `None` when the row is not among the
+/// `shown` rows, each `row_h` tall.
 pub fn legend_anchor(
-    rows: usize,
-    band: usize,
+    row: usize,
     shown: usize,
     row_h: f32,
     chart_w: Pixels,
 ) -> Option<Point<Pixels>> {
-    let row = rows.checked_sub(band + 1).filter(|&r| r < shown)?;
+    let row = Some(row).filter(|&r| r < shown)?;
     Some(Point {
         x: chart_w,
         y: px((row as f32 + 0.5) * row_h),
     })
+}
+
+/// The legend rows of `bands` (bottom first) as band indices, first row first: the group bands
+/// and "Other apps" top first, then the kernel bands top first (UI-PRF-060: they follow "Other
+/// apps", under a divider).
+pub fn legend_order(bands: &[Band]) -> Vec<usize> {
+    let top_first = (0..bands.len()).rev();
+    top_first
+        .clone()
+        .filter(|&i| !bands[i].kind.is_kernel())
+        .chain(top_first.filter(|&i| bands[i].kind.is_kernel()))
+        .collect()
 }
 
 /// The bands of a chart with `top_n` own bands over `ranked` groups (rank order): the top N
@@ -310,7 +337,18 @@ pub enum BandKind {
     /// One of the top N groups, with its colour slot.
     Group(u8),
     Other,
+    /// "Shared and kernel" where the six parts have no samples (history written by 1.0.8):
+    /// `memgroup:shared` minus the parts.
     Shared,
+    /// A part of "Shared and kernel", by its index in [`KERNEL_PARTS`].
+    Kernel(u8),
+}
+
+impl BandKind {
+    /// "Shared and kernel" or one of its parts: below the divider in the legend.
+    pub fn is_kernel(self) -> bool {
+        matches!(self, Self::Shared | Self::Kernel(_))
+    }
 }
 
 /// One band, bottom first in [`MemoryAppsChart::bands`].
@@ -319,10 +357,16 @@ pub struct Band {
     pub key: Arc<str>,
     pub name: SharedString,
     pub kind: BandKind,
+    /// The fill colour (a group band fills at [`GROUP_FILL_ALPHA`] of it).
     pub color: Hsla,
+    /// The line at the band's top: the 1 px separator `chart_bg` for the kernel parts.
+    pub line: Hsla,
     /// The series stacked for this band. "Other apps" has the groups outside the top N and the
     /// `memgroup:other` series.
     pub series: SmallVec<[SeriesId; 1]>,
+    /// The series the band's one series is drawn less of (`ChartSeries::minus`): the six parts
+    /// for [`BandKind::Shared`], else empty.
+    pub minus: Arc<[SeriesId]>,
     /// Processes in the band now; `None` when not known (a group outside the engine's top 20).
     pub processes: Option<u32>,
     /// Bytes at the newest sample.
@@ -378,6 +422,10 @@ pub struct AppsWords {
     pub share: Option<Template>,
     pub processes: Option<Template>,
     pub groups_shown: SharedString,
+    /// The name of [`BandKind::Shared`] while the parts are published.
+    pub shared_older: SharedString,
+    /// The tooltip line of the parts that are worked out.
+    pub estimate: SharedString,
 }
 
 impl AppsWords {
@@ -400,6 +448,8 @@ impl AppsWords {
                 0,
             )),
             groups_shown: tr(cx, "perf-mem-apps-groups-shown"),
+            shared_older: tr(cx, "perf-mem-apps-shared-older"),
+            estimate: tr(cx, "perf-mem-apps-estimate"),
         };
         true
     }
@@ -463,9 +513,15 @@ pub struct MemoryAppsChart {
     ranker: Ranker,
     /// Every group with a series, by key.
     groups: Vec<Group>,
-    /// Devices of the two fixed bands.
+    /// Devices of the two fixed bands and the six parts of "Shared and kernel".
     other: Option<DeviceIdx>,
     shared: Option<DeviceIdx>,
+    parts: [Option<DeviceIdx>; 6],
+    /// `memgroup:shared` minus the six parts, at the times of `memgroup:shared`.
+    older: Option<Arc<SeriesView>>,
+    /// Whether "Shared and kernel (older data)" and each part, in [`KERNEL_PARTS`] order, is
+    /// above 0 somewhere in the visible range; the others have no band.
+    kernel_on: [bool; 7],
     /// The ranked keys the bands were built from, and the "Other apps" keys.
     top: Vec<Arc<str>>,
     rest: Vec<Arc<str>>,
@@ -539,6 +595,9 @@ impl MemoryAppsChart {
             groups: Vec::new(),
             other: None,
             shared: None,
+            parts: [None; 6],
+            older: None,
+            kernel_on: [false; 7],
             top: Vec::new(),
             rest: Vec::new(),
             bands: Vec::new(),
@@ -624,15 +683,13 @@ impl MemoryAppsChart {
             } else {
                 1.
             };
-            let (line, fill) = match band.kind {
-                BandKind::Group(_) => (
-                    band.color,
-                    Hsla {
-                        a: band.color.a * GROUP_FILL_ALPHA,
-                        ..band.color
-                    },
-                ),
-                BandKind::Other | BandKind::Shared => (band.color, band.color),
+            let line = band.line;
+            let fill = match band.kind {
+                BandKind::Group(_) => Hsla {
+                    a: band.color.a * GROUP_FILL_ALPHA,
+                    ..band.color
+                },
+                BandKind::Other | BandKind::Shared | BandKind::Kernel(_) => band.color,
             };
             let last = band.series.len().saturating_sub(1);
             for (j, id) in band.series.iter().enumerate() {
@@ -653,6 +710,7 @@ impl MemoryAppsChart {
                         a: line.a * dim,
                         ..line
                     },
+                    minus: Arc::clone(&band.minus),
                     ..ChartSeries::default()
                 });
             }
@@ -793,19 +851,67 @@ impl MemoryAppsChart {
             .and_then(|v| v.samples.last().map(|s| s.t_ns))
     }
 
+    /// Builds [`older`](Self::older) from the views and returns which kernel bands are above 0
+    /// in the visible range up to `newest`.
+    fn kernel_bands_on(&mut self, newest: Option<u64>) -> [bool; 7] {
+        let part_views: SmallVec<[Option<&SeriesView>; 6]> = self
+            .parts
+            .iter()
+            .map(|p| p.and_then(|d| self.view(d)).map(|v| &**v))
+            .collect();
+        let older = self
+            .shared
+            .and_then(|d| self.view(d))
+            .map(|a| Arc::new(derived_view(a, part_views.iter().copied())));
+        let mut on = [false; 7];
+        if let Some(newest) = newest {
+            let from = newest.saturating_sub(self.settings.range_ns);
+            let above = |v: &SeriesView| {
+                v.samples
+                    .iter()
+                    .any(|s| s.t_ns > from && s.is_valid() && s.value > 0.)
+            };
+            on[0] = older.as_deref().is_some_and(above);
+            for (i, v) in part_views.iter().enumerate() {
+                on[i + 1] = v.is_some_and(above);
+            }
+        }
+        self.older = older;
+        on
+    }
+
+    /// The name of [`BandKind::Shared`]: "Shared and kernel (older data)" while the parts are
+    /// published, else the band's catalog name.
+    fn shared_name(&self, cx: &App) -> SharedString {
+        if self.parts.iter().any(Option::is_some) {
+            return self.words.shared_older.clone();
+        }
+        self.shared
+            .and_then(|d| self.hub.read(cx).current().devices.get(d))
+            .map(|e| SharedString::from(e.display_name.to_string()))
+            .unwrap_or_else(|| SharedString::from(SHARED_KEY))
+    }
+
     /// Re-reads the groups, ranks them (sticky unless `force`), and rebuilds the bands and the
     /// spec when the bands changed. The legend values follow every call.
     fn refresh(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) {
         self.resolve_views(snap, force, cx);
-        let fixed = (self.other, self.shared);
+        let fixed = (self.other, self.shared, self.parts);
         self.groups.clear();
         self.other = None;
         self.shared = None;
+        self.parts = [None; 6];
         for e in snap.devices.entries.iter() {
             if let DeviceIdentity::MemGroup { key } = &e.identity {
                 match &**key {
                     OTHER_KEY => self.other = Some(e.idx),
                     SHARED_KEY => self.shared = Some(e.idx),
+                    // The parts of "Shared and kernel" are never ranked or given a colour.
+                    k if k.starts_with(KERNEL_PREFIX) => {
+                        if let Some(i) = KERNEL_PARTS.iter().position(|p| p.0 == k) {
+                            self.parts[i] = Some(e.idx);
+                        }
+                    }
                     _ => self.groups.push(Group {
                         key: Arc::clone(key),
                         name: Arc::clone(&e.display_name),
@@ -842,6 +948,7 @@ impl MemoryAppsChart {
             }
         }
         self.ranker.rank(&means, newest.unwrap_or(0), force);
+        let kernel_on = self.kernel_bands_on(newest);
 
         let (top, rest) = split_top(self.ranker.order(), self.settings.top_n);
         let total = snap.system.memory.total;
@@ -850,12 +957,14 @@ impl MemoryAppsChart {
         let structure_changed = top != self.top.as_slice()
             || rest != self.rest.as_slice()
             || total != self.total
-            || (self.other, self.shared) != fixed
+            || (self.other, self.shared, self.parts) != fixed
+            || kernel_on != self.kernel_on
             || force;
         if structure_changed {
             self.top = top.to_vec();
             self.rest = rest.to_vec();
             self.total = total;
+            self.kernel_on = kernel_on;
             self.build_bands(cx);
             self.rebuild_spec(cx);
             cx.notify();
@@ -892,12 +1001,15 @@ impl MemoryAppsChart {
         let mut bands: Vec<Band> = Vec::with_capacity(self.top.len() + 2);
         for (key, &slot) in self.top.iter().zip(&slots) {
             let Some(g) = group(key) else { continue };
+            let color = theme.graph.groups[usize::from(slot) % theme.graph.groups.len()];
             bands.push(Band {
                 key: Arc::clone(key),
                 name: SharedString::from(g.name.to_string()),
                 kind: BandKind::Group(slot),
-                color: theme.graph.groups[usize::from(slot) % theme.graph.groups.len()],
+                color,
+                line: color,
                 series: smallvec![series_id(g.device)],
+                minus: Arc::from([]),
                 processes: None,
                 value: 0.,
             });
@@ -916,29 +1028,56 @@ impl MemoryAppsChart {
                 .map(|g| series_id(g.device))
                 .collect();
             series.push(series_id(other));
+            let color = Hsla {
+                a: theme.text_secondary.a * OTHER_ALPHA,
+                ..theme.text_secondary
+            };
             bands.push(Band {
                 key: Arc::from(OTHER_KEY),
                 name: name_of(OTHER_KEY, Some(other)),
                 kind: BandKind::Other,
-                color: Hsla {
-                    a: theme.text_secondary.a * OTHER_ALPHA,
-                    ..theme.text_secondary
-                },
+                color,
+                line: color,
                 series,
+                minus: Arc::from([]),
                 processes: None,
                 value: 0.,
             });
         }
-        if let Some(shared) = self.shared {
+        if let Some(shared) = self.shared
+            && self.kernel_on[0]
+        {
+            let color = Hsla {
+                a: theme.graph.mem_fill.a * SHARED_ALPHA,
+                ..theme.graph.mem_fill
+            };
             bands.push(Band {
                 key: Arc::from(SHARED_KEY),
-                name: name_of(SHARED_KEY, Some(shared)),
+                name: self.shared_name(cx),
                 kind: BandKind::Shared,
+                color,
+                line: color,
+                series: smallvec![series_id(shared)],
+                minus: self.parts.iter().flatten().map(|&d| series_id(d)).collect(),
+                processes: None,
+                value: 0.,
+            });
+        }
+        for (i, (&(key, alpha, _), part)) in KERNEL_PARTS.iter().zip(self.parts).enumerate() {
+            let Some(device) = part.filter(|_| self.kernel_on[i + 1]) else {
+                continue;
+            };
+            bands.push(Band {
+                key: Arc::from(key),
+                name: name_of(key, Some(device)),
+                kind: BandKind::Kernel(i as u8),
                 color: Hsla {
-                    a: theme.graph.mem_fill.a * SHARED_ALPHA,
+                    a: theme.graph.mem_fill.a * alpha,
                     ..theme.graph.mem_fill
                 },
-                series: smallvec![series_id(shared)],
+                line: theme.graph.chart_bg,
+                series: smallvec![series_id(device)],
+                minus: Arc::from([]),
                 processes: None,
                 value: 0.,
             });
@@ -959,28 +1098,17 @@ impl MemoryAppsChart {
                 .map(|b| b.process_count)
         };
         let mut changed = false;
-        let views = &self.views;
-        let view = |id: &SeriesId| {
-            views
-                .binary_search_by_key(&id.device, |(d, _)| *d)
-                .ok()
-                .map(|i| &views[i].1)
-        };
-        for band in &mut self.bands {
-            let value: f64 = band
-                .series
-                .iter()
-                .filter_map(view)
-                .map(|v| value_at(v, newest))
-                .sum();
-            let processes = match band.kind {
-                BandKind::Group(_) => count_of(&band.key),
-                BandKind::Shared => None,
+        for i in 0..self.bands.len() {
+            let value = self.band_value(&self.bands[i], newest);
+            let processes = match self.bands[i].kind {
+                BandKind::Group(_) => count_of(&self.bands[i].key),
+                BandKind::Shared | BandKind::Kernel(_) => None,
                 BandKind::Other => {
                     let rest: u32 = self.rest.iter().filter_map(|k| count_of(k)).sum();
                     count_of(OTHER_KEY).map(|n| n + rest)
                 }
             };
+            let band = &mut self.bands[i];
             if value != band.value || processes != band.processes {
                 band.value = value;
                 band.processes = processes;
@@ -1022,7 +1150,12 @@ impl MemoryAppsChart {
         None
     }
 
+    /// The value of `band` at `t`: the sum of its series, or for [`BandKind::Shared`] the part
+    /// of `memgroup:shared` the six parts do not cover.
     fn band_value(&self, band: &Band, t: u64) -> f64 {
+        if band.kind == BandKind::Shared {
+            return self.older.as_deref().map_or(0., |v| value_at(v, t));
+        }
         band.series
             .iter()
             .filter_map(|id| self.view(id.device))
@@ -1086,13 +1219,18 @@ impl MemoryAppsChart {
             return;
         }
         self.strings_version = version;
+        let shared = self.shared_name(cx);
+        for band in self.bands.iter_mut().filter(|b| b.kind == BandKind::Shared) {
+            band.name = shared.clone();
+        }
         let labels = Self::labels_of(self.place, &self.words);
         self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         cx.notify();
     }
 
     /// The tooltip lines of band `i` at time `t` (`None`: the newest sample): name, value,
-    /// share of In use and the process count.
+    /// share of In use and the process count, and for a worked-out kernel part that it is an
+    /// estimate.
     pub fn tooltip_lines(&self, i: usize, t: Option<u64>, _: &App) -> SmallVec<[String; 4]> {
         let Some(band) = self.bands.get(i) else {
             return SmallVec::new();
@@ -1124,6 +1262,11 @@ impl MemoryAppsChart {
             let mut text = String::new();
             let _ = processes.write_count(&mut text, u64::from(n), &[&n]);
             lines.push(text);
+        }
+        if let BandKind::Kernel(k) = band.kind
+            && KERNEL_PARTS[usize::from(k)].2
+        {
+            lines.push(self.words.estimate.to_string());
         }
         lines
     }
@@ -1213,8 +1356,15 @@ impl MemoryAppsChart {
         });
     }
 
-    /// One legend row: swatch, name, process count and value.
-    fn legend_row(&self, i: usize, row: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    /// One legend row: swatch, name, process count and value. `divider` draws the line above the
+    /// first kernel row.
+    fn legend_row(
+        &self,
+        i: usize,
+        row: usize,
+        divider: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let (m, theme) = (*metrics(cx), current(cx).clone());
         let band = &self.bands[i];
         let swatch = match band.kind {
@@ -1251,6 +1401,7 @@ impl MemoryAppsChart {
             .gap(m.sp[2])
             .h(px(LEGEND_ROW_H * m.ui_scale))
             .w_full()
+            .when(divider, |d| d.border_t_1().border_color(theme.divider))
             .when(dim, |d| d.opacity(0.6))
             .on_hover(cx.listener(move |this, on: &bool, _, cx| {
                 let band = if *on { Some(i) } else { None };
@@ -1305,8 +1456,10 @@ impl Render for MemoryAppsChart {
             .absolute()
             .inset_0();
 
-        // Top band first; whole rows only, the last row that fits says "+n more".
-        let rows = self.bands.len();
+        // Group bands and "Other apps" top first, then the kernel bands; whole rows only, the
+        // last row that fits says "+n more".
+        let order = legend_order(&self.bands);
+        let rows = order.len();
         let row_h = LEGEND_ROW_H * m.ui_scale;
         let page_h = super::page::GRAPH_H_OVERALL * m.ui_scale;
         let (below, shown, more) = match self.place {
@@ -1339,7 +1492,10 @@ impl Render for MemoryAppsChart {
             Hover {
                 band: Some(band),
                 at: None,
-            } => legend_anchor(rows, band, shown, row_h, chart_size.width)
+            } => order
+                .iter()
+                .position(|&i| i == band)
+                .and_then(|row| legend_anchor(row, shown, row_h, chart_size.width))
                 .map(|at| self.tooltip(self.tooltip_lines(band, None, cx), at, cx)),
             Hover { band: None, .. } => None,
         };
@@ -1384,9 +1540,11 @@ impl Render for MemoryAppsChart {
             legend.w(px(LEGEND_W * m.ui_scale)).h_full()
         };
         *legend.text_style() = t_sm(&m);
-        for row in 0..shown {
-            let i = rows - 1 - row;
-            legend = legend.child(self.legend_row(i, row, cx));
+        for (row, &i) in order.iter().enumerate().take(shown) {
+            let divider = row > 0
+                && self.bands[i].kind.is_kernel()
+                && !self.bands[order[row - 1]].kind.is_kernel();
+            legend = legend.child(self.legend_row(i, row, divider, cx));
         }
         if more > 0
             && let Some(t) = &self.words.more
