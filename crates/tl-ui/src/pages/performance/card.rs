@@ -990,7 +990,7 @@ fn card_column_width(card_w: Pixels, graph: bool, m: &UiMetrics) -> Pixels {
 /// `value_w`, the room it keeps for its widest text, fits there, else on a row of its own. That
 /// row shows "…" only when `live_w`, the width of the value as it reads now, is wider than
 /// `text_w`. `measure` returns the width of a string in a card font; `lock_w` is the width of
-/// one lock icon. A heading whose first word is wider than the column may use `inset` more, the
+/// one lock icon. A heading that is cut may use `inset` more, the
 /// space between the column and the card's border, so a short title such as "Overview" is never
 /// cut to "…" on a narrow sidebar.
 #[allow(clippy::too_many_arguments)]
@@ -1013,8 +1013,8 @@ pub fn card_text_layout(
         lock_w,
         measure,
     );
-    if heading.cut && heading.rows.len() == 1 && heading.rows[0].text.as_ref() == "…" {
-        heading = wrap_line(
+    if heading.cut {
+        let wider = wrap_line(
             &lines.heading,
             &[],
             CardFont::Heading,
@@ -1023,6 +1023,9 @@ pub fn card_text_layout(
             lock_w,
             measure,
         );
+        if !wider.cut || heading.rows[0].text.as_ref() == "…" {
+            heading = wider;
+        }
     }
     let last_w = heading.rows.last().map_or(Pixels::ZERO, |row| {
         measure(CardFont::Heading, &row.text) + lock_w * row.locks.len() as f32
@@ -1681,19 +1684,7 @@ impl DeviceCard {
             let column = |w: Pixels| card_column_width(w, card_shows_graph(w, edit_mode, &m), &m);
             let edit_w = px(EDIT_BUTTON_W * m.ui_scale) + m.sp[3];
             let fits = |w: Pixels| column(w) >= value_w;
-            // The title comes before the button: when its longest word does not fit beside the
-            // button, the button covers the card's corner and the title keeps its room.
-            let title_w = self
-                .lines
-                .heading
-                .split(' ')
-                .map(|word| measure(CardFont::Heading, word))
-                .fold(Pixels::ZERO, Pixels::max);
-            let title_fits = |w: Pixels| column(w) >= title_w;
-            let clear = if top
-                && title_fits(self.width - edit_w)
-                && (fits(self.width - edit_w) || !fits(self.width))
-            {
+            let clear = if top && (fits(self.width - edit_w) || !fits(self.width)) {
                 edit_w
             } else {
                 Pixels::ZERO
