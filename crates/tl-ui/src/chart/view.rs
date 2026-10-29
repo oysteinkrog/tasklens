@@ -1010,7 +1010,7 @@ mod tests {
                 Sample::valid(10 * P + P / 3, 30.0),
                 Sample::gap(13 * P),
                 Sample::valid(14 * P - P / 3, 80.0),
-                Sample::valid(15 * P, 3.0e9 + 1.0e8),
+                Sample::valid(15 * P, 3.1e9),
             ],
         )
         .unwrap();
@@ -1020,7 +1020,7 @@ mod tests {
                 Sample::valid(10 * P, 20.0),
                 Sample::valid(13 * P, 40.0),
                 Sample::valid(14 * P, 80.0),
-                Sample::valid(15 * P, 3.9e9 - 1.0e8),
+                Sample::valid(15 * P, 3.9e9),
             ],
         )
         .unwrap();
