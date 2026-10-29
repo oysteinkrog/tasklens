@@ -29,13 +29,13 @@ use crate::ids::{GroupKey, NodeId, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::journal::{JournalControl, JournalEvent, JournalQuery};
 use crate::process::{
     AppCgroupSample, Coverage, GroupRow, LowMemoryInfo, ProcFlags, ProcState, ProcessExtras,
-    ProcessExtrasP2, ProcessMeta, ProcessRecord, ProcessSnapshot,
+    ProcessExtrasP2, ProcessMeta, ProcessRecord,
 };
 use crate::series::{Sample, SeriesView};
 use crate::snapshot::{
     ComponentHeader, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory, DeviceTimeline,
-    HistPoint, InventorySnapshot, ProcessSeriesSet, SeriesSet, ServicesSnapshot, StartupSnapshot,
-    SystemSnapshot, WindowsSnapshot,
+    HistPoint, InventorySnapshot, ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot,
+    StartupSnapshot, SystemSnapshot, WindowsSnapshot,
 };
 use crate::table::{ProcessTableView, TableRow, TableTotals};
 use crate::time::{BootId, TimeNs};
@@ -873,7 +873,8 @@ impl ClientMsg {
 /// Server to client, after `Welcome`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
-    Snapshot(SnapshotFrame),
+    /// Boxed: a frame is about 1 KiB before its parts' heap data.
+    Snapshot(Box<SnapshotFrame>),
     Action(ActionEvent),
     Journal {
         stream: StreamId,
@@ -1210,13 +1211,13 @@ mod tests {
 
     #[test]
     fn server_messages_round_trip() {
-        let mut msgs = vec![ServerMsg::Snapshot(SnapshotFrame::unchanged(
+        let mut msgs = vec![ServerMsg::Snapshot(Box::new(SnapshotFrame::unchanged(
             2,
             1,
             3,
             BootId(42),
             5,
-        ))];
+        )))];
         msgs.extend(all_action_states().into_iter().map(|state| {
             ServerMsg::Action(ActionEvent {
                 id: ActionId(9),

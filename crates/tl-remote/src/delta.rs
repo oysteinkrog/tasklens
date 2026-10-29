@@ -25,14 +25,16 @@ use std::fmt;
 use std::sync::Arc;
 
 use tl_model::ids::{NodeId, ProcessSeriesId};
-use tl_model::process::{ProcessExtras, ProcessExtrasP2, ProcessRecord, ProcessSnapshot};
+use tl_model::process::{ProcessExtras, ProcessExtrasP2, ProcessRecord};
 use tl_model::remote_proto::{
     DeviceHistoryDelta, HEADER_LEN, KeyedDelta, MAX_FRAME_LEN, Part, ProcessChange,
     ProcessRecordPatch, ProcessRow, ProcessSeriesDelta, ProcessesDelta, ProtoError, SeriesSetDelta,
     SnapshotFrame, TableDelta, Tail, ViewTail, ViewsDelta, encode_message,
 };
 use tl_model::series::{Sample, SeriesView};
-use tl_model::snapshot::{DeviceHistory, HistPoint, ProcessSeriesSet, SeriesSet, Snapshot};
+use tl_model::snapshot::{
+    DeviceHistory, HistPoint, ProcessSeriesSet, ProcessSnapshot, SeriesSet, Snapshot,
+};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::time::TimeNs;
 
@@ -1054,7 +1056,7 @@ mod tests {
     }
 
     fn extras_p2(pid: u32) -> ProcessExtrasP2 {
-        if pid % 5 == 0 {
+        if pid.is_multiple_of(5) {
             ProcessExtrasP2 {
                 key: Some(key(pid)),
                 oom_score: Some(pid as i32),
@@ -1445,7 +1447,8 @@ mod tests {
             }),
             2 => edit_processes(s, |_, p| {
                 let mut records = p.records.to_vec();
-                if let Some(r) = records.get_mut(a as usize % records.len().max(1)) {
+                let i = a as usize % records.len().max(1);
+                if let Some(r) = records.get_mut(i) {
                     r.cpu_pct = b as f32 / 7.0;
                     r.rss_anon_bytes = b as u64;
                     r.state = ProcState::Running;
@@ -1454,19 +1457,22 @@ mod tests {
             }),
             3 => edit_processes(s, |_, p| {
                 let mut records = p.records.to_vec();
-                if let Some(r) = records.get_mut(a as usize % records.len().max(1)) {
+                let i = a as usize % records.len().max(1);
+                if let Some(r) = records.get_mut(i) {
                     r.meta = meta(b);
                 }
                 p.records = records.into();
             }),
             4 => edit_processes(s, |_, p| {
                 let mut ex = p.extras.to_vec();
-                if let Some(e) = ex.get_mut(a as usize % ex.len().max(1)) {
+                let i = a as usize % ex.len().max(1);
+                if let Some(e) = ex.get_mut(i) {
                     e.page_faults_delta = b as u64;
                 }
                 p.extras = ex.into();
                 let mut p2 = p.extras_p2.to_vec();
-                if let Some(e) = p2.get_mut(b as usize % p2.len().max(1)) {
+                let i = b as usize % p2.len().max(1);
+                if let Some(e) = p2.get_mut(i) {
                     e.power_w = Some(a as f32);
                 }
                 p.extras_p2 = p2.into();
@@ -1527,7 +1533,7 @@ mod tests {
                     .iter()
                     .map(|(k, v)| (k.clone(), push_samples(v, 1 + (a % 5) as u64, 62)))
                     .collect();
-                if b % 2 == 0 {
+                if b.is_multiple_of(2) {
                     ps.slow = Arc::from([]);
                 }
                 s.process_series = Arc::new(ps);

@@ -613,6 +613,9 @@ impl StartupKind {
     }
 }
 
+/// `&'static str` under another name, so serde does not take the field for a borrowed string.
+type StaticStr = &'static str;
+
 /// Reads a `StartupEntry::source_word` back as the static string of the `StartupKind` it names.
 fn source_word_from_wire<'de, D: serde::Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
     let word = std::borrow::Cow::<'de, str>::deserialize(d)?;
@@ -717,7 +720,7 @@ pub struct StartupEntry {
     pub file_exists: bool,
     /// Source word (UI-SYS-050), `kind.source_word()`.
     #[serde(deserialize_with = "source_word_from_wire")]
-    pub source_word: &'static str,
+    pub source_word: StaticStr,
     pub scope: StartupScope,
     /// Desktop `OnlyShowIn`, empty when not set.
     pub only_show_in: SmallVec<[Arc<str>; 2]>,
