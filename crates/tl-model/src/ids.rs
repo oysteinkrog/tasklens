@@ -795,7 +795,7 @@ impl<'de> Deserialize<'de> for ColumnId {
 ///
 /// Columns allowed as graph sources: `cpu`, `memory`, `disk`, `network`, `gpu`,
 /// `gpu_mem_dedicated`. The engine ignores others (R-154).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProcessSeriesId {
     pub target: GraphTarget,
     pub column: ColumnId,

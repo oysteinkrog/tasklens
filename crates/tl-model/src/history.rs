@@ -44,7 +44,7 @@ pub enum HistoryRange {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum HistorySource {
     #[default]
     None,
@@ -52,7 +52,7 @@ pub enum HistorySource {
     Store,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum HistoryLoadProblem {
     OpenFailed,
     EmptyOrTruncated,
@@ -62,7 +62,7 @@ pub enum HistoryLoadProblem {
     TimedOut,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum HistoryStoreState {
     #[default]
     Off,
@@ -72,14 +72,14 @@ pub enum HistoryStoreState {
 }
 
 /// One decimated bucket (ADR-009).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct HistoryPoint {
     pub t_ns: TimeNs,
     pub min: f32,
     pub max: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistorySeries {
     /// `None` is the system total.
     pub key: Option<ProcessKey>,
@@ -89,14 +89,14 @@ pub struct HistorySeries {
 
 /// Per bucket: the three largest per-process values of the metric and the sum of the rest,
 /// drawn stacked in the metric colour (R-169 OI-5, D-020).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct HistoryStackBucket {
     pub t_ns: TimeNs,
     pub top: [f32; 3],
     pub other: f32,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct HistoryPeaks {
     pub cpu_pct: f32,
     pub mem_anon_bytes: u64,
@@ -106,7 +106,7 @@ pub struct HistoryPeaks {
 }
 
 /// One process at the frame time, or over a span. Holds no command line (ADR-015).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryProcessRow {
     pub key: ProcessKey,
     pub name: Arc<str>,
@@ -127,14 +127,14 @@ pub struct HistoryProcessRow {
 }
 
 /// Averages over a `Span` (R-169 OI-5).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct HistoryTotals {
     pub cpu_pct: f32,
     pub mem_used_bytes: u64,
     pub mem_total_bytes: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryTopRow {
     pub key: ProcessKey,
     pub name: Arc<str>,
@@ -142,7 +142,7 @@ pub struct HistoryTopRow {
     pub value: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryTop {
     pub query_id: u64,
     pub t_ns: TimeNs,
@@ -153,7 +153,7 @@ pub struct HistoryTop {
 }
 
 /// The history component that answers `Command::HistoryQuery`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct HistoryView {
     pub header: ComponentHeader,
     /// Id of the Frame query this answers.

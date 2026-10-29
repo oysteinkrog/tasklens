@@ -71,7 +71,7 @@ impl SourceId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum SourceState {
     /// Not demanded; the worker sleeps (IDLE_RECHECK).
     #[default]
@@ -91,7 +91,7 @@ pub enum SourceState {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SourceHealth {
     pub state: SourceState,
     /// CLOCK_BOOTTIME of the last fresh update, for "No new data for 12 s".
@@ -105,7 +105,7 @@ pub struct SourceHealth {
 }
 
 /// Privileged helper state for the shield (UI-FND-028, ADR-006). P3; Missing before then.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum HelperState {
     #[default]
     Missing,
@@ -115,7 +115,7 @@ pub enum HelperState {
 }
 
 /// systemd manager connection state for the Services tab (ADR-003 ServicesSnapshot.managers).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum ManagerState {
     Connected,
     #[default]
@@ -125,7 +125,7 @@ pub enum ManagerState {
 
 /// Health of every source plus the helper state. Replaced as a whole `Arc` only when a state
 /// changes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HealthSnapshot {
     /// Bumps when any state, the helper state, helper_start, caps or setup changes.
     pub version: u64,
@@ -146,7 +146,7 @@ impl HealthSnapshot {
 }
 
 /// Result of a failed StartHelperSession (R-148 item 2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HelperStartOutcome {
     Cancelled,
     NotAuthorized,
@@ -155,7 +155,7 @@ pub enum HelperStartOutcome {
 
 bitflags::bitflags! {
     /// Engine capabilities the UI checks before it enables a menu item (R-141 item 5).
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
     pub struct EngineCaps: u16 {
         /// org.freedesktop.FileManager1 has an owner (set by the opener).
         const FILE_MANAGER1 = 1;

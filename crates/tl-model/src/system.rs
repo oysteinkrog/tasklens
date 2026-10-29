@@ -13,7 +13,7 @@ use crate::ids::{DeviceIdx, MetricId};
 use crate::validity::Validity;
 
 /// A value with its validity. Never read `value` unless `validity == Valid` or `Stale`.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Metric<T: Copy + Default> {
     pub value: T,
     pub validity: Validity,
@@ -107,7 +107,7 @@ pub enum CoreKind {
     Standard,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoreInfo {
     /// Core index in the order of (package, core_id).
     pub id: u16,
@@ -118,13 +118,13 @@ pub struct CoreInfo {
     pub kind: CoreKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CpuTopology {
     pub online: CpuSet,
     pub cores: Arc<[CoreInfo]>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct CpuTotals {
     /// 100 × Δbusy / Δtotal (ADR-008); also series CPU_TOTAL.
     pub util_pct: Metric<f32>,
@@ -169,7 +169,7 @@ pub struct CpuTotals {
 }
 
 /// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MemoryTotals {
     /// Of the meminfo read as a whole.
     pub validity: Validity,
@@ -216,7 +216,7 @@ pub struct MemoryTotals {
 
 /// More /proc/meminfo fields in bytes, from the same read as `MemoryTotals`. A field the
 /// kernel does not print is 0.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelMemory {
     pub shmem: u64,
     pub buffers: u64,
@@ -229,7 +229,7 @@ pub struct KernelMemory {
 }
 
 /// One band of the memory-by-app chart (D-036, UI-PRF-060).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemGroupBand {
     /// The memory group key (`app:<app id>`, `exe:<name>`, `system`, `comm:<comm>`), or
     /// `other` and `shared` for the two fixed bands. The device key is `memgroup:<key>`.
@@ -243,7 +243,7 @@ pub struct MemGroupBand {
 }
 
 /// zram `mm_stat` fields 1, 2 and 3.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZramTotals {
     pub orig_data: u64,
     pub compr_data: u64,
@@ -251,7 +251,7 @@ pub struct ZramTotals {
 }
 
 /// One per disk device (PERF-049).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DiskTotals {
     pub device: DeviceIdx,
     pub active_pct: Metric<f32>,
@@ -272,7 +272,7 @@ pub struct DiskTotals {
 }
 
 /// One per interface (PERF-056).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetTotals {
     pub device: DeviceIdx,
     /// Bytes per second.
@@ -308,7 +308,7 @@ pub enum LinkState {
 /// GPU values that do not change while the driver runs (PERF-066 to PERF-071). The worker builds
 /// one per probe `Hello` or DRM card scan, and every sample of that device shares it. `None`
 /// means the device or driver does not report the value.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GpuStaticInfo {
     /// The CUDA version the driver supports, for example "13.2". NVIDIA only.
     pub cuda_version: Option<Arc<str>>,
@@ -332,7 +332,7 @@ pub struct GpuStaticInfo {
 }
 
 /// One per GPU (PERF-063 to PERF-071).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GpuTotals {
     pub device: DeviceIdx,
     pub util_pct: Metric<f32>,
@@ -396,7 +396,7 @@ pub struct GpuTotals {
 bitflags::bitflags! {
     /// Reasons the GPU clocks are held down (PERF-066), from NVML
     /// `nvmlDeviceGetCurrentClocksEventReasons`. Bit values are frozen.
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
     pub struct ClockEventReasons: u16 {
         /// Nothing runs on the GPU.
         const IDLE = 1 << 0;
@@ -422,7 +422,7 @@ bitflags::bitflags! {
 /// One GPU engine (PERF-063). Each engine has a fixed key, stored in
 /// `performance.hidden_gpu_engines`, and a fixed series. Display order and names are per vendor
 /// and belong to the UI.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum GpuEngine {
     /// NVIDIA 3D / Compute, AMD Graphics. Same value as `GpuTotals.util_pct`.
     Gpu,
@@ -544,7 +544,7 @@ impl GpuEngine {
 
 /// Busy percent per `GpuEngine`, indexed by the enum. `Unsupported` marks an engine the device
 /// does not report; the UI does not list it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GpuEngines([Metric<f32>; GpuEngine::COUNT]);
 
 impl GpuEngines {
@@ -580,14 +580,14 @@ impl Default for GpuEngines {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SensorKind {
     Temperature,
     Fan,
 }
 
 /// One per hwmon temperature or fan device (PERF-076).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SensorReading {
     pub device: DeviceIdx,
     pub kind: SensorKind,

@@ -136,13 +136,13 @@ impl SetupStep {
 }
 
 /// Setup state, a versioned part of HealthSnapshot (R-149 item 1). Replaces the earlier SetupStatus and SetupEvent.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetupState {
     pub status: Option<SetupStatus>,
     pub run: Option<SetupRun>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RaplStatus {
     NoZone,
     Readable { tasklens_rule: bool },
@@ -150,7 +150,7 @@ pub enum RaplStatus {
 }
 
 /// The answer to `Command::SetupStatus`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SetupStatus {
     pub rapl: RaplStatus,
     pub journal_group: bool,
@@ -160,7 +160,7 @@ pub struct SetupStatus {
     pub sensors_conf: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SetupRun {
     pub seq: u64,
     pub step: SetupStep,
@@ -169,7 +169,7 @@ pub struct SetupRun {
     pub output: Arc<str>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SetupPhase {
     Running,
     Succeeded,

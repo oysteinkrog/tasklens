@@ -20,7 +20,7 @@ use crate::time::TimeNs;
 use crate::validity::FieldValidity;
 
 /// Text of one process. Shared by every record of that process until a field changes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessMeta {
     /// /proc/<pid>/comm, sanitized.
     pub comm: Arc<str>,
@@ -106,7 +106,7 @@ pub const fn linger_ms(processes_interval_ms: u32) -> u32 {
 }
 
 /// One process in one sweep. Fixed-size apart from `meta`, which clones share.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessRecord {
     pub key: ProcessKey,
     pub ppid: u32,
@@ -148,7 +148,7 @@ pub struct ProcessRecord {
 pub type GpuVram = SmallVec<[u64; 4]>;
 
 /// Group classification of a process (PROC-004). Exactly these four classes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GroupKind {
     /// cgroup app-*.scope or app-*.service under user@<uid>.service/app.slice.
     App { app_id: Arc<str> },
@@ -211,7 +211,7 @@ pub fn is_row_member(
 }
 
 /// What a group row of the table is (R-141 item 3). GroupKind stays the four PROC-004 classes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum GroupRowKind {
     App,
     Unit,
@@ -221,7 +221,7 @@ pub enum GroupRowKind {
 
 /// Aggregated values of one group row. Each member process is counted once (no double
 /// counting of descendants, ADR-009). Field meanings match ProcessRecord.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupRow {
     /// Table identity of the row (R-141 item 3).
     pub node: NodeId,
@@ -290,7 +290,7 @@ pub struct GroupRow {
 }
 
 /// Which expensive fields cover which keys (ADR-008). Keys not listed show WarmingUp for PSS and USS.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Coverage {
     /// Sorted ascending, so the UI can binary_search.
     pub pss_uss: Arc<[ProcessKey]>,
@@ -306,7 +306,7 @@ impl Coverage {
 /// order) (R-141 item 1).
 ///
 /// Privacy: `exe_path` is user data. Never log it above debug level (ADR-015).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessExtras {
     pub cpu_kernel_pct: f32,
     pub cpu_user_pct: f32,
@@ -345,7 +345,7 @@ pub struct ProcessExtras {
 }
 
 /// One app cgroup sample (R-141 item 2). Filled by the tl-collect sweep (E05-A1).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppCgroupSample {
     pub group: GroupKey,
     pub anon_bytes: u64,
@@ -366,7 +366,7 @@ pub struct AppCgroupSample {
 /// (R-163 items 2 and 9), and `gpu_vram_bytes` too. `None` means the value was not read.
 ///
 /// Privacy: `security_label` and `cwd` are user data. Never log them above debug level (ADR-015).
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProcessExtrasP2 {
     /// Some for a filled entry, None for a row outside detail_keys.
     pub key: Option<ProcessKey>,
@@ -417,7 +417,7 @@ pub struct ProcessExtrasP2 {
 }
 
 /// Owning package of an executable (R-163 item 1, PROC-027), from the E05-034 index.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PackageInfo {
     pub name: Arc<str>,
     pub version: Arc<str>,
@@ -428,7 +428,7 @@ pub struct PackageInfo {
 }
 
 /// PROC-027 Package status. `PackagedModified` only after a `pacman -Qkk` check (PROC-078).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PackageStatus {
     Packaged,
     PackagedModified,
@@ -441,7 +441,7 @@ pub enum PackageStatus {
 }
 
 /// One group of the low-memory sweep (R-150 item 2).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LowMemGroup {
     pub group: GroupKey,
     pub name: Arc<str>,
@@ -452,7 +452,7 @@ pub struct LowMemGroup {
 }
 
 /// Low-memory sweep data (R-150 item 2), moved from E32's types.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LowMemoryInfo {
     pub groups: Arc<[LowMemGroup]>,
     pub mem_total: u64,

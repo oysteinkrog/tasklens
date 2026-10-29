@@ -59,7 +59,7 @@ impl DetailTab {
 }
 
 /// The data of one tab. `AppProcesses` has no payload; it reads `Snapshot.processes`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TabPayload {
     General(Arc<GeneralDetail>),
     Threads(Arc<[ThreadRow]>),
@@ -72,7 +72,7 @@ pub enum TabPayload {
 }
 
 /// One tab of one target, with its own version and validity.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct TabSlot {
     pub payload: Option<Arc<TabPayload>>,
     pub version: u64,
@@ -80,7 +80,7 @@ pub struct TabSlot {
 }
 
 /// All tabs of one target, indexed by `DetailTab::index()`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct TargetDetail {
     pub tabs: [TabSlot; 9],
 }
@@ -92,7 +92,7 @@ impl TargetDetail {
 }
 
 /// Why the executable hashes failed (UI-PWN-008).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HashError {
     /// UI: "Failed to compute one or more hashes", with the errno text.
     ReadFailed { errno: i32 },
@@ -101,7 +101,7 @@ pub enum HashError {
 }
 
 /// SHA-256 and MD5 of the executable (UI-PWN-008).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum HashState {
     #[default]
     Pending,
@@ -113,7 +113,7 @@ pub enum HashState {
 }
 
 /// Result of checking the executable against the package database (UI-PWN-008).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PackageCheck {
     /// "Not verified"
     #[default]
@@ -132,14 +132,14 @@ pub enum PackageCheck {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Relro {
     Full,
     Partial,
     None,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Seccomp {
     Disabled,
     Strict,
@@ -147,7 +147,7 @@ pub enum Seccomp {
 }
 
 /// UI words: "x86-64", "x86 (32-bit)", "AArch64", "Unknown".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElfArch {
     X86_64,
     X86,
@@ -156,7 +156,7 @@ pub enum ElfArch {
 }
 
 /// Where the executable lives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExeLocation {
     TempDirectory,
     UserDownloads,
@@ -172,7 +172,7 @@ pub enum ExeLocation {
 }
 
 /// UI words: "3D", "Compute", "Video decode", "Video encode".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GpuEngine {
     ThreeD,
     Compute,
@@ -181,7 +181,7 @@ pub enum GpuEngine {
 }
 
 /// Real, effective, saved and filesystem IDs from /proc/<pid>/status.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdTriple {
     pub real: u32,
     pub effective: u32,
@@ -190,7 +190,7 @@ pub struct IdTriple {
 }
 
 /// Shown as "firefox 131.0-1".
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageInfo {
     pub name: Arc<str>,
     pub version: Arc<str>,
@@ -200,7 +200,7 @@ pub struct PackageInfo {
 /// The General tab values that are not in `ProcessRecord` (UI-PWN-006).
 ///
 /// Exe, cwd, root, personality, io and smaps of another user's process are `Restricted`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GeneralDetail {
     // Column 1.
     /// Unix seconds, shown as "Started:" YYYY-MM-DD HH:MM:SS local time.
@@ -268,7 +268,7 @@ pub struct GeneralDetail {
 }
 
 /// One row of the Threads tab (UI-PWN-010).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThreadRow {
     pub tid: u32,
     pub comm: Arc<str>,
@@ -291,7 +291,7 @@ pub struct ThreadRow {
 // ---- File descriptors (UI-PWN-012) ----
 
 /// The Type column of the File descriptors tab.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum FdKind {
     File,
     Directory,
@@ -348,7 +348,7 @@ impl FdKind {
 }
 
 /// One open file descriptor.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FdRow {
     pub fd: i32,
     pub kind: FdKind,
@@ -373,7 +373,7 @@ pub struct FdRow {
 }
 
 /// The File descriptors tab. `fdinfo_available` false is "Handle detail query unavailable."
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct FdDetail {
     pub rows: Arc<[FdRow]>,
     pub fdinfo_available: bool,
@@ -382,7 +382,7 @@ pub struct FdDetail {
 // ---- Memory maps (UI-PWN-013) ----
 
 /// One mapping from /proc/<pid>/maps.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MapRegion {
     pub start: u64,
     pub end: u64,
@@ -396,7 +396,7 @@ pub struct MapRegion {
 }
 
 /// One module node of the Memory maps tree.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MapNode {
     /// File name. The UI adds " (Primary)" or shows "Outside loaded modules".
     pub name: Arc<str>,
@@ -421,7 +421,7 @@ pub struct MapNode {
     pub regions: std::ops::Range<u32>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MapsDetail {
     pub nodes: Arc<[MapNode]>,
     pub regions: Arc<[MapRegion]>,
@@ -430,7 +430,7 @@ pub struct MapsDetail {
 // ---- Security (UI-PWN-014, UI-PWN-015) ----
 
 /// UI words: "Yes (root)", "Yes (capabilities)", "Setuid", "No".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Elevated {
     Root,
     Capabilities,
@@ -438,7 +438,7 @@ pub enum Elevated {
     No,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NsKind {
     User,
     Pid,
@@ -452,7 +452,7 @@ pub enum NsKind {
 
 /// UI words: "Shared with init", "Isolated (4026532211)", "Same as tasklens", "Isolated (inode)".
 /// The last two are used without access to PID 1.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NsState {
     SharedWithInit,
     Isolated { inode: u64 },
@@ -460,7 +460,7 @@ pub enum NsState {
     IsolatedFromTasklens { inode: u64 },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct NsRow {
     pub kind: NsKind,
     pub state: NsState,
@@ -468,7 +468,7 @@ pub struct NsRow {
 }
 
 /// One capability row. Names and descriptions are a UI table keyed by `cap`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CapRow {
     /// Linux capability number.
     pub cap: u8,
@@ -480,7 +480,7 @@ pub struct CapRow {
     pub risky: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupMembershipRow {
     pub name: Arc<str>,
     pub gid: u32,
@@ -492,7 +492,7 @@ pub struct GroupMembershipRow {
 }
 
 /// The Security tab.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SecurityDetail {
     pub uids: Total<IdTriple>,
     /// Real, effective, saved and fs user names.
@@ -527,7 +527,7 @@ pub struct SecurityDetail {
 
 /// The Environment tab. Values are secrets in practice: never log this or write it to disk.
 /// `Debug` prints only the number of variables and `truncated`.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EnvDetail {
     /// Name and value. Read once on open and on DetailRefresh.
     pub vars: Arc<[(Box<str>, Box<str>)]>,
@@ -625,7 +625,7 @@ pub enum StringEncoding {
 }
 
 /// One string found in process memory. `value` may hold secrets: never log it above debug level.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StringHit {
     pub address: u64,
     pub encoding: StringEncoding,
@@ -633,7 +633,7 @@ pub struct StringHit {
     pub value: Arc<str>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanPhase {
     Scanning,
     Finished,
@@ -652,7 +652,7 @@ pub enum ScanPhase {
 pub const SCAN_PTRACE_BLOCKED: &str = "ptrace-blocked";
 
 /// The Strings tab.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StringScanState {
     pub scan: ScanId,
     pub progress_pct: u8,
@@ -665,14 +665,14 @@ pub struct StringScanState {
 // ---- App Properties (UI-PWN-020) ----
 
 /// UI words: "App", "Unit".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AppKind {
     App,
     Unit,
 }
 
 /// The General tab of an app group.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppGeneralDetail {
     pub name: Arc<str>,
     pub kind: AppKind,
@@ -696,7 +696,7 @@ pub struct AppGeneralDetail {
 
 // ---- Set Affinity (UI-PWN-021) ----
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AffinityInfo {
     pub mask: CpuSet,
     pub cpuset_limit: CpuSet,
@@ -707,7 +707,7 @@ pub struct AffinityInfo {
 /// UI words: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total
 /// handles)", "Searching...", "Found 12 matches" / "Found 1 match" / "No results found.",
 /// "Search stopped. Found 12 matches", "Handle search failed".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum HandlePhase {
     Initializing,
     Retrieving,
@@ -718,7 +718,7 @@ pub enum HandlePhase {
 }
 
 /// UI words: "fd", "mmap", "cwd", "exe", "root".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum HandleKind {
     Fd,
     Mmap,
@@ -728,7 +728,7 @@ pub enum HandleKind {
 }
 
 /// One match. `path` may be private: never log it above debug level.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HandleHit {
     pub key: ProcessKey,
     pub name: Arc<str>,
@@ -738,7 +738,7 @@ pub struct HandleHit {
     pub path: Arc<str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HandleSearchState {
     pub search: SearchId,
     pub phase: HandlePhase,
@@ -757,7 +757,7 @@ pub struct HandleSearchState {
 
 // ---- The component ----
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DetailsSnapshot {
     pub header: ComponentHeader,
     /// At most 16 (`Demand.details`).

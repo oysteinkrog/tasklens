@@ -28,7 +28,7 @@ use crate::time::{BootId, TimeNs};
 use crate::validity::Validity;
 
 /// Common to every snapshot component. The default validity is `WarmingUp`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ComponentHeader {
     /// Bumps when the component content changes.
     pub version: u64,
@@ -39,7 +39,7 @@ pub struct ComponentHeader {
 
 /// One bit per `Snapshot` component, computed by the UI hub (ADR-005). Never stored, so the bit
 /// positions are not part of any file format. They follow the order ADR-003 lists them in.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct ComponentMask(pub u16);
 
 impl ComponentMask {
@@ -96,7 +96,7 @@ impl BitOrAssign for ComponentMask {
 }
 
 /// Every published system series. Unchanged series reuse their `Arc` across snapshots.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SeriesSet {
     pub header: ComponentHeader,
     /// Sorted by `SeriesId`.
@@ -122,7 +122,7 @@ impl SeriesSet {
 }
 
 /// Engine-sampled per-process series for `Demand.graph_targets` (R-154).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProcessSeriesSet {
     pub header: ComponentHeader,
     /// Fast tier views (60 s at the sweep period). Sorted by `ProcessSeriesId`.
@@ -155,7 +155,7 @@ fn find_process_view<'a>(
         .map(|i| &views[i].1)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProcessSnapshot {
     pub header: ComponentHeader,
     /// Sorted by `ProcessKey`.
@@ -182,7 +182,7 @@ impl ProcessSnapshot {
 }
 
 /// Machine totals. Per-device lists are sorted by `DeviceIdx`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SystemSnapshot {
     pub header: ComponentHeader,
     pub cpu: CpuTotals,
@@ -210,7 +210,7 @@ pub struct FrameGeometry {
 
 /// One KWin window (R-046, PROC-052). Captions are untrusted text from other programs: the UI
 /// shows them through its untrusted-text path and this crate never logs them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowEntry {
     /// KWin internalId, a braced UUID, as given.
     pub internal_id: Arc<str>,
@@ -229,7 +229,7 @@ pub struct WindowEntry {
     pub stack_index: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct WindowsSnapshot {
     /// Validity is `Unsupported` when the KWin bridge is not available.
     pub header: ComponentHeader,
@@ -250,13 +250,13 @@ impl WindowsSnapshot {
 }
 
 /// `seq` comes from `KWinCommand::Pick { seq }`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PickResult {
     pub seq: u64,
     pub outcome: PickOutcome,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PickOutcome {
     Picked { pid: u32 },
     NoWindow,
@@ -264,7 +264,7 @@ pub enum PickOutcome {
 }
 
 /// Services table status (SYS-003).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ServiceStatus {
     Running,
     Active,
@@ -296,7 +296,7 @@ impl ServiceStatus {
 }
 
 /// Startup type column, from the systemd UnitFileState word.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum StartupType {
     Enabled,
     EnabledRuntime,
@@ -332,13 +332,13 @@ impl StartupType {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ServiceBackend {
     Systemd,
     OpenRc,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ServiceCounts {
     pub total: u32,
     pub running: u32,
@@ -347,7 +347,7 @@ pub struct ServiceCounts {
 
 /// One unit as the Services table shows it (UI-SYS-015). Resource fields are `Missing` when the
 /// unit has no cgroup, so the column shows "-" and never 0 (SYS-003).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitRecord {
     pub unit: UnitRef,
     pub kind: UnitType,
@@ -388,7 +388,7 @@ pub struct UnitRecord {
 
 /// Which of the 7 Recovery keys the tasklens drop-in sets (UI-SYS-034). The engine replaces
 /// the whole file, so Apply sends these keys along with the changed ones.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct RecoveryKeySet {
     pub restart: bool,
     pub restart_sec: bool,
@@ -423,7 +423,7 @@ impl RecoveryKeySet {
 }
 
 /// Recovery tab values (SYS-013), all from unit properties. `None` shows "Not reported".
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct RecoverySettings {
     /// Restart= word.
     pub restart: Option<Arc<str>>,
@@ -444,7 +444,7 @@ pub struct RecoverySettings {
 }
 
 /// A dependency relation on the Dependencies tab (SYS-014).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Relation {
     // "Depends on:"
     Requires,
@@ -465,14 +465,14 @@ pub enum Relation {
     Before,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DepEntry {
     pub unit: UnitRef,
     pub relation: Relation,
 }
 
 /// Shown as "Runs as: uid 1000, gid 1000".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PidIds {
     pub uid: u32,
     pub gid: u32,
@@ -480,7 +480,7 @@ pub struct PidIds {
 
 /// What the Service Properties window shows for one unit. `exec_start_argv` can hold secrets
 /// passed on command lines: never log it above debug level (ADR-015).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnitDetails {
     // General (SYS-011, UI-SYS-031)
     pub id: Arc<str>,
@@ -521,7 +521,7 @@ pub struct UnitDetails {
 }
 
 /// The Services tab component (ADR-003). Filled by the systemd workers, read by the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ServicesSnapshot {
     pub header: ComponentHeader,
     pub rows: Arc<[SysRow]>,
@@ -556,7 +556,7 @@ impl Default for ServicesSnapshot {
 // ---- Startup Apps ----
 
 /// Startup Apps Status column (SYS-020).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum StartupStatus {
     Enabled,
     Disabled,
@@ -578,7 +578,7 @@ impl StartupStatus {
 }
 
 /// Startup Apps Type column (SYS-020).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum StartupKind {
     AutostartUser,
     AutostartSystem,
@@ -613,8 +613,23 @@ impl StartupKind {
     }
 }
 
+/// Reads a `StartupEntry::source_word` back as the static string of the `StartupKind` it names.
+fn source_word_from_wire<'de, D: serde::Deserializer<'de>>(d: D) -> Result<&'static str, D::Error> {
+    let word = std::borrow::Cow::<'de, str>::deserialize(d)?;
+    [
+        StartupKind::AutostartUser,
+        StartupKind::UserUnit,
+        StartupKind::PlasmaPreStartup,
+        StartupKind::PlasmaLogout,
+    ]
+    .into_iter()
+    .map(StartupKind::source_word)
+    .find(|w| *w == word)
+    .ok_or_else(|| serde::de::Error::custom("unknown startup source word"))
+}
+
 /// Whether a startup entry's file is the user's or the system's (SYS-026 Scope).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum StartupScope {
     User,
     System,
@@ -630,7 +645,7 @@ impl StartupScope {
 }
 
 /// Startup impact (SYS-021). Ascending sort follows the declared order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Impact {
     High,
     Medium,
@@ -655,7 +670,7 @@ impl Impact {
 }
 
 /// The raw numbers behind the impact tooltip (SYS-021).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ImpactDetail {
     /// ActiveEnterTimestampMonotonic minus InactiveExitTimestampMonotonic.
     pub activation_ms: u64,
@@ -670,7 +685,7 @@ pub struct ImpactDetail {
 
 /// One Startup Apps row (UI-SYS-042). `command` can hold secrets: never log it above debug
 /// level (ADR-015).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StartupEntry {
     pub id: StartupRef,
     pub name: Arc<str>,
@@ -701,6 +716,7 @@ pub struct StartupEntry {
     /// file. `false` when either is missing.
     pub file_exists: bool,
     /// Source word (UI-SYS-050), `kind.source_word()`.
+    #[serde(deserialize_with = "source_word_from_wire")]
     pub source_word: &'static str,
     pub scope: StartupScope,
     /// Desktop `OnlyShowIn`, empty when not set.
@@ -717,7 +733,7 @@ pub struct StartupEntry {
     pub overrides: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct StartupCounts {
     pub total: u32,
     pub enabled: u32,
@@ -725,7 +741,7 @@ pub struct StartupCounts {
 }
 
 /// The Startup Apps tab component (ADR-003). Filled by the Startup worker, read by the UI.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct StartupSnapshot {
     pub header: ComponentHeader,
     pub rows: Arc<[SysRow]>,
@@ -737,7 +753,7 @@ pub struct StartupSnapshot {
 // ---- Connections ----
 
 /// Connection State column (SYS-029). UNCONNECTED and CONNECTED are for UDP, the rest for TCP.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConnState {
     Listening,
     SynSent,
@@ -799,7 +815,7 @@ impl ConnState {
 }
 
 /// TCP_INFO values for the connection Properties window (SYS-034).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TcpInfoView {
     /// Shown as "RTT <ms> (var <ms>)".
     pub rtt_us: u32,
@@ -817,7 +833,7 @@ pub struct TcpInfoView {
 }
 
 /// One socket as the Connections table shows it (UI-SYS-062).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConnRecord {
     pub cookie: u64,
     pub proto: Proto,
@@ -851,7 +867,7 @@ pub struct ConnRecord {
 }
 
 /// A network namespace other than tasklens's own (SYS-037).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetnsRef {
     /// The inode of the namespace.
     pub ino: u64,
@@ -861,7 +877,7 @@ pub struct NetnsRef {
 }
 
 /// The state of the reverse DNS lookup for one connection's foreign address.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteHost {
     /// No lookup was asked for: the Remote host column is hidden, the row is not visible, or
     /// the foreign address is unspecified.
@@ -885,7 +901,7 @@ impl RemoteHost {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnCounts {
     pub total: u32,
     pub tcp: u32,
@@ -895,7 +911,7 @@ pub struct ConnCounts {
 }
 
 /// The Connections tab component (ADR-003). Filled by the Connections worker, read by the UI.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ConnectionsSnapshot {
     pub header: ComponentHeader,
     pub rows: Arc<[SysRow]>,
@@ -913,7 +929,7 @@ pub struct ConnectionsSnapshot {
 pub type InvField<T> = Total<T>;
 
 /// Operating System section (PERF-095).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct OsInfo {
     /// os-release PRETTY_NAME.
     pub name: InvField<Arc<str>>,
@@ -938,7 +954,7 @@ pub struct OsInfo {
 }
 
 /// Processor section (PERF-096).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProcessorInfo {
     pub name: InvField<Arc<str>>,
     pub vendor: InvField<Arc<str>>,
@@ -960,7 +976,7 @@ pub struct ProcessorInfo {
 }
 
 /// System section, static rows (PERF-097).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub pretty_hostname: InvField<Arc<str>>,
     pub static_hostname: InvField<Arc<str>>,
@@ -978,7 +994,7 @@ pub struct SystemInfo {
 }
 
 /// Memory section, static rows (PERF-098).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MemoryInfo {
     pub total_bytes: InvField<u64>,
     pub page_size: InvField<u64>,
@@ -992,7 +1008,7 @@ pub struct MemoryInfo {
 
 /// One memory module row (PERF-099). There is no serial field: DIMM serials are never read or
 /// stored (D-007, R-030).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MemoryModule {
     pub slot: InvField<Arc<str>>,
     pub capacity_bytes: InvField<u64>,
@@ -1008,7 +1024,7 @@ pub struct MemoryModule {
 }
 
 /// One disk drive row (PERF-100).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DiskDrive {
     /// The worker sends `None`; the reducer sets it from `name` (R-166).
     pub device: Option<DeviceIdx>,
@@ -1027,14 +1043,14 @@ pub struct DiskDrive {
     pub serial: InvField<Arc<str>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FirmwareType {
     Uefi,
     LegacyBios,
 }
 
 /// Firmware section (PERF-101).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct FirmwareInfo {
     pub firmware_type: InvField<Option<FirmwareType>>,
     pub bios_vendor: InvField<Arc<str>>,
@@ -1045,7 +1061,7 @@ pub struct FirmwareInfo {
 }
 
 /// Motherboard section (PERF-102).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct BoardInfo {
     pub manufacturer: InvField<Arc<str>>,
     pub product: InvField<Arc<str>>,
@@ -1058,7 +1074,7 @@ pub struct BoardInfo {
 }
 
 /// Display connector type, with the PERF-073 names. Windows-only names are left out.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum DisplayConnector {
     #[default]
     Unknown,
@@ -1112,7 +1128,7 @@ impl DisplayConnector {
 }
 
 /// One display mode, shown as "3840x2160 @ 144 Hz (primary)".
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct DisplayMode {
     pub width: u32,
     pub height: u32,
@@ -1131,7 +1147,7 @@ pub struct DisplayMode {
 }
 
 /// One graphics adapter, static rows (PERF-103).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct GraphicsAdapter {
     /// The worker sends `None`; the reducer sets it from `pci_slot` (R-166).
     pub device: Option<DeviceIdx>,
@@ -1150,7 +1166,7 @@ pub struct GraphicsAdapter {
 }
 
 /// One network adapter (PERF-104).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct NetworkAdapter {
     pub device: Option<DeviceIdx>,
     /// Connection name and type.
@@ -1165,7 +1181,7 @@ pub struct NetworkAdapter {
 
 /// Public IP fetch state (PERF-060). Never saved to disk. The UI sends
 /// `DeviceCommand::FetchPublicIp` and the Inventory worker runs the fetch (R-139 items 2 to 4).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum PublicIpState {
     #[default]
     NotFetched,
@@ -1182,7 +1198,7 @@ pub enum PublicIpState {
 /// The Information tab component (ADR-003): the static values of its ten sections. Live rows come
 /// from `SystemSnapshot`, `SeriesSet` and `DeviceCatalog`. The Inventory worker fills it on page
 /// open and on `RefreshNow`. A failed scan sets `header.validity` to `Failed`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct InventorySnapshot {
     pub header: ComponentHeader,
     pub os: OsInfo,
@@ -1206,14 +1222,14 @@ pub struct InventorySnapshot {
 // the index.
 
 /// One cache level (E12-010).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheLevelInfo {
     pub instances: u16,
     pub instance_kib: u64,
     pub total_kib: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheInfo {
     pub l1d: Option<CacheLevelInfo>,
     pub l1i: Option<CacheLevelInfo>,
@@ -1223,7 +1239,7 @@ pub struct CacheInfo {
 }
 
 /// `Default` exists only so `InvField<VirtState>` has one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VirtState {
     EnabledKvm,
     SupportedNoKvm,
@@ -1231,7 +1247,7 @@ pub enum VirtState {
     NotSupported,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecurityFeature {
     SecureBoot,
     LockdownIntegrity,
@@ -1241,7 +1257,7 @@ pub enum SecurityFeature {
     Iommu,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulnSummary {
     pub mitigated: u16,
     pub vulnerable: u16,
@@ -1249,7 +1265,7 @@ pub struct VulnSummary {
     pub unknown: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RaplState {
     NoZone,
     Unreadable,
@@ -1257,7 +1273,7 @@ pub enum RaplState {
 }
 
 /// CPU static rows (E12-010).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct CpuStaticInfo {
     pub cores: u16,
     pub logical: u16,
@@ -1279,7 +1295,7 @@ pub struct CpuStaticInfo {
 }
 
 /// One zram device (E12-011).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZramDetail {
     pub name: Arc<str>,
     pub disksize: u64,
@@ -1288,14 +1304,14 @@ pub struct ZramDetail {
     pub stats: Option<crate::system::ZramTotals>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZswapInfo {
     pub enabled: bool,
     pub compressor: Option<Arc<str>>,
     pub max_pool_percent: Option<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwapKindModel {
     Partition,
     File,
@@ -1303,7 +1319,7 @@ pub enum SwapKindModel {
     Other,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SwapDevice {
     pub name: Arc<str>,
     pub kind: SwapKindModel,
@@ -1313,14 +1329,14 @@ pub struct SwapDevice {
 }
 
 /// Memory details (E12-011).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct MemoryDetails {
     pub zram: Arc<[ZramDetail]>,
     pub zswap: InvField<Option<ZswapInfo>>,
     pub swaps: InvField<Arc<[SwapDevice]>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmartKind {
     Ata,
     Nvme,
@@ -1330,7 +1346,7 @@ pub enum SmartKind {
 }
 
 /// One ATA SMART attribute. Texts as E12-021.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SmartAttr {
     pub id: u8,
     pub name: Arc<str>,
@@ -1343,7 +1359,7 @@ pub struct SmartAttr {
     pub assessment: Arc<str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SmartData {
     pub updated_s: i64,
     pub health: InvField<Arc<str>>,
@@ -1354,7 +1370,7 @@ pub struct SmartData {
 }
 
 /// A process that blocks an eject. The reducer fills `app` from the process grouping (E12-022).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Blocker {
     pub key: ProcessKey,
     pub name: Arc<str>,
@@ -1362,7 +1378,7 @@ pub struct Blocker {
     pub paths: Arc<[Arc<str>]>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EjectState {
     Running,
     Blocked {
@@ -1375,7 +1391,7 @@ pub enum EjectState {
 
 /// One PERF-050 Partitions table row. tl-collect `parse/partitions.rs` (E04-031) builds it
 /// (R-140 item 4).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRow {
     pub name: Arc<str>,
     pub start_bytes: u64,
@@ -1392,7 +1408,7 @@ pub struct PartitionRow {
     pub unallocated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionTable {
     /// "GPT", "MBR" or "none".
     pub kind: Arc<str>,
@@ -1401,7 +1417,7 @@ pub struct PartitionTable {
 }
 
 /// Disk details. `Default` lets a source fill only its own fields; the reducer merges by field.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DiskDetails {
     /// PERF-049 "Type" row: the E04-021 DiskKind name (sysfs source).
     pub kind: Arc<str>,
@@ -1435,7 +1451,7 @@ pub struct DiskDetails {
 
 /// Wi-Fi link (R-139 field names). Values NetworkManager or nl80211 may not give are `Option`:
 /// missing is never zero.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WifiInfo {
     pub ssid: Arc<str>,
     /// nl80211 only.
@@ -1449,7 +1465,7 @@ pub struct WifiInfo {
     pub security: Arc<str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetDetails {
     /// PERF-054 "Type": Ethernet, Wi-Fi, Virtual, USB network, Bridge, Cellular, Tunnel, VPN or
     /// Other.
@@ -1469,7 +1485,7 @@ pub struct NetDetails {
 }
 
 /// Battery details (E12-023, history from E12-029).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatteryDetails {
     pub kind: Arc<str>,
     pub vendor: InvField<Arc<str>>,
@@ -1504,7 +1520,7 @@ pub struct BatteryDetails {
 
 /// The device details component (R-139 item 6; PERF-036 to PERF-046, PERF-050 to PERF-052,
 /// PERF-078).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DeviceDetailsSnapshot {
     pub header: ComponentHeader,
     pub cpu: Arc<CpuStaticInfo>,
@@ -1522,7 +1538,7 @@ pub struct DeviceDetailsSnapshot {
 
 /// One point of a stored device series (ADR-017). `mean` is NaN for a gap; `min` and `max` are
 /// then NaN too.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistPoint {
     /// Start of the point's bucket on CLOCK_REALTIME.
     pub t_realtime_ns: i64,
@@ -1540,7 +1556,7 @@ impl HistPoint {
 /// The device metric history for the Overview ranges (ADR-017, UI-PRF-055, mask bit
 /// `DEVICE_HISTORY`). The `MetricHistory` worker publishes it while `Demand.device_history_range`
 /// is set, and an empty one with `request: None` when the range is cleared.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DeviceHistory {
     pub header: ComponentHeader,
     /// The request this answers.
@@ -1564,7 +1580,7 @@ pub struct DeviceHistory {
 }
 
 /// The heat bands of the timeline, in [`DeviceTimeline::bands`] order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum TimelineBand {
     /// CPU total, percent.
     Cpu,
@@ -1581,7 +1597,7 @@ impl TimelineBand {
 }
 
 /// Kinds of timeline events (UI-PRF-057).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum TimelineEventKind {
     MemoryPressure,
     SwapStorm,
@@ -1594,7 +1610,7 @@ pub enum TimelineEventKind {
 }
 
 /// One stored event on CLOCK_REALTIME (ADR-017). Process names are `comm` only (ADR-015).
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub kind: TimelineEventKind,
     pub start_realtime_ns: i64,
@@ -1605,7 +1621,7 @@ pub struct TimelineEvent {
 
 /// The 24-hour timeline (ADR-017, UI-PRF-057): four bands of 1 min tier means, the events and
 /// the boots of the last 24 hours, and what the journal fetch could read.
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct DeviceTimeline {
     /// CLOCK_REALTIME end of the 24 hours the bands cover.
     pub end_realtime_ns: i64,
@@ -1635,7 +1651,7 @@ impl DeviceHistory {
 
 /// One published state of the engine (ADR-003). Unchanged components reuse their `Arc` across
 /// snapshots, and the UI hub compares versions to build the `ComponentMask` (ADR-005).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     /// Strictly increasing per engine process.
     pub sequence: u64,

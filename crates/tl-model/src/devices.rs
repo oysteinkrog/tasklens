@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::DeviceIdx;
 
 /// What makes a device the same device across disappear and return (ADR-003).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DeviceIdentity {
     /// The whole machine's CPU.
     CpuPackage,
@@ -69,7 +69,7 @@ pub enum AggregateKind {
 }
 
 /// Device class without the identity data, so pages can filter the catalog.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum DeviceKind {
     Cpu,
     CpuLogical,
@@ -104,7 +104,7 @@ impl DeviceIdentity {
 }
 
 /// One catalog entry. A device with `present = false` shows `Missing` for its live values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeviceEntry {
     pub idx: DeviceIdx,
     pub identity: DeviceIdentity,
@@ -126,7 +126,7 @@ pub struct DeviceEntry {
 
 /// All devices of the session. The reducer replaces the whole `Arc` only when something
 /// changes, and bumps `version` when it does.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct DeviceCatalog {
     pub version: u64,
     pub entries: Arc<[DeviceEntry]>,

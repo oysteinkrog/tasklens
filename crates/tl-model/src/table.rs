@@ -74,7 +74,7 @@ impl Default for TableQuery {
 /// One visible row of the process table, in display order.
 ///
 /// Not `Copy`: `NodeId::Unit` holds an `Arc` (R-141 item 3).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TableRow {
     pub node: NodeId,
     pub depth: u8,
@@ -91,14 +91,14 @@ pub struct TableRow {
 }
 
 /// One header total with its own validity. The default is a default value, `WarmingUp`.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Total<T> {
     pub value: T,
     pub validity: Validity,
 }
 
 /// The two-line header numbers of the process table (PROC-038, R-141 item 4).
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TableTotals {
     /// /proc/stat total, ADR-008 math.
     pub cpu_pct: Total<f32>,
@@ -128,7 +128,7 @@ pub struct TableTotals {
 ///
 /// `rows` and `groups` are shared slices, so a snapshot that does not change the table reuses
 /// them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct ProcessTableView {
     pub header: ComponentHeader,
     /// `TableQuery::generation` this view was built for.
@@ -527,7 +527,7 @@ pub struct SysTableQuery {
 }
 
 /// One visible row of a system table, in display order.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SysRow {
     pub node: SysNodeId,
     pub depth: u8,

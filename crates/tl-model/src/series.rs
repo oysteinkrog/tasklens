@@ -266,7 +266,7 @@ impl TieredRing {
 }
 
 /// Published, immutable, chronological copy of a ring.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SeriesView {
     pub id: SeriesId,
     /// Bumps on every append.
