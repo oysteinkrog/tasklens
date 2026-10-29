@@ -993,3 +993,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-29 03:25 paused tl-swarm-softstop.timer and tl-swarm-hardstop.timer so the memory-by-app beads run past 07:00 (owner asked for daytime runs on 2026-10-28). Start both again when the 1.0.8 loop ends: systemctl --user start tl-swarm-softstop.timer tl-swarm-hardstop.timer.
 - 2026-10-29 04:10 crw.101 decided: shared sidebar graph width shrinks (80 down to 40 px) so the Overview title fits beside the edit button; no ellipsis, no overlap; sweep test 180..=400. Not options a/b/c.
 - 2026-10-29 07:15 o55.48 held: legend click moved to crw.99 via new bead o55.49 (exact mem_group filter); colour collision rule: most recently shown pick keeps the slot.
+- 2026-10-29 07:36 o55.48 held again: code fixed, only the stack-sum test missing; requeued for that test. Spec: Other apps uses text_secondary at 50%.
