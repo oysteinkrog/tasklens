@@ -1092,7 +1092,7 @@ mod by_app {
                     let (next, changed) = pick_colors(&mut p, again);
                     assert!(!changed, "{case}: stable");
                     for (k, s) in again.iter().zip(next) {
-                        assert_eq!(s, at(&**k), "{case}: {k} keeps its slot");
+                        assert_eq!(s, at(k), "{case}: {k} keeps its slot");
                     }
                 }
             }
