@@ -634,6 +634,53 @@ fn stacked_same_slot_counts_once() {
     }
 }
 
+/// A narrow chart decimates 10 samples into each bucket. Band 0 spikes to 50 and later dips to
+/// 5 while band 1 moves the other way, so the stack total stays at 60 throughout. The boundary
+/// between them still reaches the spike and the dip, and the bands meet there
+/// (tasklens-o55.53, UI-PRF-060).
+#[test]
+fn stacked_decimation_keeps_each_band_spike() {
+    let lower = |i: usize| match i {
+        305 => 50.0,
+        405 => 5.0,
+        _ => 20.0,
+    };
+    let data = [
+        series(600, 100 * MS, 10 * SEC, lower),
+        series(600, 100 * MS, 10 * SEC, move |i| 60.0 - lower(i)),
+    ];
+    let map = TimeMap {
+        plot_width: 60.0,
+        ..exact_map(&data[0])
+    };
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+        .collect();
+    let mut cache = ChartCache::default();
+    let now = data[0][599].t_ns;
+    stack_build(&spec, map, now, 100.0, &mut cache, &mut Scratch::default());
+    let y = |v: f32| y_of(v, 0.0, 100.0, 100.0);
+
+    let mut drawn: Vec<f32> = xs(&cache.fills[0]).collect();
+    drawn.sort_by(f32::total_cmp);
+    drawn.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    assert!(
+        drawn.len() < 300,
+        "not decimated: {} x positions",
+        drawn.len()
+    );
+    for (i, v) in [(305, 50.0), (405, 5.0)] {
+        let x = map.x_local(data[0][i].t_ns);
+        assert!(has_vertex(&cache.fills[0], x, y(v)), "band 0 top at {i}");
+        assert!(has_vertex(&cache.fills[1], x, y(v)), "band 1 floor at {i}");
+        assert_bands_meet(&cache.fills, x);
+    }
+    assert!((y_span(&cache.fills[1]).0 - y(60.0)).abs() < 0.01);
+}
+
 /// A sweep late past the stale limit breaks every band at the same time: one empty column, no
 /// partial stack (tasklens-o55.53, UI-PRF-060).
 #[test]

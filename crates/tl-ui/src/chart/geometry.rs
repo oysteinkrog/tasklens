@@ -389,21 +389,19 @@ struct StackAxis {
     /// is stale.
     kept: Vec<usize>,
     stretches: Vec<(std::ops::Range<usize>, bool)>,
+    /// Decimation scratch: per band the min and max axis index of its top in the open bucket,
+    /// and the bucket's kept indices in time order.
+    extrema: Vec<(usize, usize)>,
+    picks: Vec<usize>,
     /// Per segment of one stretch: the band draws it.
     drawn: Vec<bool>,
 }
 
 impl StackAxis {
-    /// Lays every present series of `input` on the axis, stacks them, and decimates the axis by
-    /// the stack total in `bucket_ns` buckets. All bands keep the same axis points, so
-    /// decimation keeps each band's top on the next band's floor.
-    fn build(
-        &mut self,
-        input: &BuildInput,
-        bucket_ns: u64,
-        runs: &mut SmallVec<[Run; 8]>,
-        pts: &mut Vec<Pt>,
-    ) {
+    /// Lays every present series of `input` on the axis, stacks them, and decimates the axis in
+    /// `bucket_ns` buckets by every band's top (`decimate_stack`). All bands keep the same axis
+    /// points, so decimation keeps each band's top on the next band's floor.
+    fn build(&mut self, input: &BuildInput, bucket_ns: u64, runs: &mut SmallVec<[Run; 8]>) {
         let Self {
             bands,
             times,
@@ -413,6 +411,8 @@ impl StackAxis {
             marks,
             kept,
             stretches,
+            extrema,
+            picks,
             ..
         } = self;
         let map = &input.map;
@@ -536,18 +536,77 @@ impl StackAxis {
         split_runs(axis, 0, runs);
         for run in runs.iter() {
             for_each_stretch(axis, *run, |span, is_stale_flag| {
-                decimate(axis, span, bucket_ns, pts);
                 let start = kept.len();
-                let mut k = span.start;
-                for p in pts.iter() {
-                    while axis[k].t_ns != p.t_ns {
-                        k += 1;
-                    }
-                    kept.push(k);
-                }
+                decimate_stack(axis, tops, nb, span, bucket_ns, extrema, picks, kept);
                 stretches.push((start..kept.len(), is_stale_flag));
             });
         }
+    }
+}
+
+/// Decimates one stretch of the stack axis like `decimate`, but in each bucket it keeps the axis
+/// times of the min and max of every band's top, not only of the stack total. A band boundary
+/// so keeps its spikes when the bands move in opposite directions and the total stays flat.
+/// Every band keeps the same axis times, so each top still lies on the next band's floor. The
+/// stretch's first and last times are always kept. Appends the kept axis indices to `kept`.
+#[allow(clippy::too_many_arguments)]
+fn decimate_stack(
+    axis: &[Sample],
+    tops: &[f32],
+    nb: usize,
+    span: Run,
+    bucket_ns: u64,
+    extrema: &mut Vec<(usize, usize)>,
+    picks: &mut Vec<usize>,
+    kept: &mut Vec<usize>,
+) {
+    if span.start >= span.end {
+        return;
+    }
+    let n = axis.len();
+    let bucket_ns = bucket_ns.max(1);
+    kept.push(span.start);
+    let last = span.end - 1;
+    if last == span.start {
+        return;
+    }
+    let mut emitted = span.start;
+    let mut flush = |extrema: &[(usize, usize)], kept: &mut Vec<usize>| {
+        picks.clear();
+        picks.extend(extrema.iter().flat_map(|&(lo, hi)| [lo, hi]));
+        picks.sort_unstable();
+        picks.dedup();
+        for &p in picks.iter() {
+            if p > emitted {
+                kept.push(p);
+                emitted = p;
+            }
+        }
+    };
+    let mut bucket = axis[span.start].t_ns / bucket_ns;
+    extrema.clear();
+    extrema.resize(nb, (span.start, span.start));
+    for k in span.start + 1..=last {
+        let b = axis[k].t_ns / bucket_ns;
+        if b != bucket {
+            flush(extrema, kept);
+            bucket = b;
+            extrema.fill((k, k));
+            continue;
+        }
+        for (band, (lo, hi)) in extrema.iter_mut().enumerate() {
+            let top = &tops[band * n..(band + 1) * n];
+            if top[k] < top[*lo] {
+                *lo = k;
+            }
+            if top[k] > top[*hi] {
+                *hi = k;
+            }
+        }
+    }
+    flush(extrema, kept);
+    if last > emitted {
+        kept.push(last);
     }
 }
 
@@ -1337,7 +1396,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                 line,
             );
         }
-        stack.build(input, bucket, runs, pts);
+        stack.build(input, bucket, runs);
         build_stacked(
             input, stack, cache, pts, stale_pts, pt_floors, line, live, stale,
         );
