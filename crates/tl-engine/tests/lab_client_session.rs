@@ -110,9 +110,12 @@ impl Rig {
 /// A link and the wake receiver that keeps it open.
 fn link() -> (SessionLink, async_channel::Receiver<()>) {
     let (wake_tx, wake_rx) = async_channel::bounded(1);
+    // Nothing here sends actions, so the events receiver may go.
+    let (events_tx, _events_rx) = async_channel::bounded(1);
     let link = SessionLink {
         latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(BOOT, 1))),
         wake_tx,
+        events_tx,
     };
     (link, wake_rx)
 }

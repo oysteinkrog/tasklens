@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tl_model::actions::{ActionEvent, ActionState, RejectReason};
+use tl_model::actions::{ActionEvent, ActionId, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::{Demand, DetailDemand};
-use tl_model::details::{DetailTab, DetailTarget};
+use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
@@ -39,8 +39,10 @@ use super::process_series::ProcessSeries;
 use super::suspend::Transition;
 use super::sys_table::SysTableInput;
 use super::table::{self, PseudoInput, SweepTotals, TableInput};
-use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index};
-use crate::client_session::{ClientMsg, ClientSessionId};
+use super::{
+    ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
+};
+use crate::client_session::{ClientMsg, ClientSessionId, IdKind};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
@@ -693,7 +695,10 @@ impl Reducer {
     }
 
     /// Applies one command of session `id`, which is open. Table and system table queries are
-    /// that session's; every other command is shared (ADR-018).
+    /// that session's; every other command is shared (ADR-018). Action ids, scan ids, search ids
+    /// and eject `seq`s are the session's own: each request gets a new engine-wide id, and a
+    /// cancel names the engine id its client id got last. A cancel of an id the session never
+    /// used is dropped.
     fn apply_command(
         &mut self,
         cx: &Cx,
@@ -716,6 +721,14 @@ impl Reducer {
                 self.rebuild_sys_for(table, settings, Some(id));
             }
             Command::Action(req) => {
+                let events = match self.clients.get(id).and_then(|s| s.events()) {
+                    Some(tx) => tx.clone(),
+                    None => self.events_tx.clone(),
+                };
+                let route = ActionRoute {
+                    id: ActionId(self.clients.next_engine_id()),
+                    events,
+                };
                 if let Some(gate) = self.action_gate.as_mut() {
                     let exited = self.processes.exited_within_linger();
                     let view = AdmissionView {
@@ -723,14 +736,14 @@ impl Reducer {
                         live: self.processes.live_keys(),
                         exited_within_linger: &exited,
                     };
-                    gate.submit(cx, req, &view);
+                    gate.submit_routed(cx, req, &view, route);
                 } else {
                     let event = ActionEvent {
                         id: req.id,
                         target: None,
                         state: ActionState::Rejected(RejectReason::Unsupported),
                     };
-                    if self.events_tx.try_send(event).is_err() {
+                    if route.events.try_send(event).is_err() {
                         tracing::debug!(target: "tasklens::engine", "action event dropped: queue full or closed");
                     }
                 }
@@ -754,34 +767,52 @@ impl Reducer {
             Command::VerifyPackage(key) => {
                 self.forward(SourceId::ProcessDetail, WorkerCommand::VerifyPackage(key));
             }
-            Command::StringScan { scan, key, opts } => self.forward(
-                SourceId::ProcessDetail,
-                WorkerCommand::StringScan { scan, key, opts },
-            ),
+            Command::StringScan { scan, key, opts } => {
+                if let Some(engine) = self.clients.map_new(id, IdKind::Scan, scan.0) {
+                    self.forward(
+                        SourceId::ProcessDetail,
+                        WorkerCommand::StringScan {
+                            scan: ScanId(engine),
+                            key,
+                            opts,
+                        },
+                    );
+                }
+            }
             Command::CancelStringScan(scan) => {
-                self.forward(
-                    SourceId::ProcessDetail,
-                    WorkerCommand::CancelStringScan(scan),
-                );
+                if let Some(engine) = self.engine_id(id, IdKind::Scan, scan.0) {
+                    self.forward(
+                        SourceId::ProcessDetail,
+                        WorkerCommand::CancelStringScan(ScanId(engine)),
+                    );
+                }
             }
             Command::HandleSearch {
                 search,
                 pattern,
                 include_maps,
                 privileged,
-            } => self.forward(
-                SourceId::ProcessDetail,
-                WorkerCommand::HandleSearch {
-                    search,
-                    pattern,
-                    include_maps,
-                    privileged,
-                },
-            ),
-            Command::CancelHandleSearch(search) => self.forward(
-                SourceId::ProcessDetail,
-                WorkerCommand::CancelHandleSearch(search),
-            ),
+            } => {
+                if let Some(engine) = self.clients.map_new(id, IdKind::Search, search.0) {
+                    self.forward(
+                        SourceId::ProcessDetail,
+                        WorkerCommand::HandleSearch {
+                            search: SearchId(engine),
+                            pattern,
+                            include_maps,
+                            privileged,
+                        },
+                    );
+                }
+            }
+            Command::CancelHandleSearch(search) => {
+                if let Some(engine) = self.engine_id(id, IdKind::Search, search.0) {
+                    self.forward(
+                        SourceId::ProcessDetail,
+                        WorkerCommand::CancelHandleSearch(SearchId(engine)),
+                    );
+                }
+            }
             Command::HistoryQuery { id, range, what } => {
                 self.send_history(HistoryMsg::Query { id, range, what });
             }
@@ -789,6 +820,15 @@ impl Reducer {
             Command::SetupStatus => self.send_helper(HelperCommand::SetupStatus),
             Command::RunSetup { step } => self.send_helper(HelperCommand::RunSetup(step)),
             Command::Device(cmd) => {
+                let cmd = match cmd {
+                    DeviceCommand::Eject { seq, disk } => {
+                        let Some(engine) = self.clients.map_new(id, IdKind::Eject, seq) else {
+                            return;
+                        };
+                        DeviceCommand::Eject { seq: engine, disk }
+                    }
+                    other => other,
+                };
                 let target = match cmd {
                     DeviceCommand::SmartRead { .. }
                     | DeviceCommand::SmartReadAdmin { .. }
@@ -801,6 +841,16 @@ impl Reducer {
             Command::StartHelperSession => self.send_helper(HelperCommand::Start),
             Command::EndHelperSession => self.send_helper(HelperCommand::End),
         }
+    }
+
+    /// The engine id session `id`'s `client` id of `kind` got last. `None`, logged, when the
+    /// session never sent it or it is no longer kept.
+    fn engine_id(&self, id: ClientSessionId, kind: IdKind, client: u64) -> Option<u64> {
+        let engine = self.clients.get(id).and_then(|s| s.engine_id(kind, client));
+        if engine.is_none() {
+            tracing::debug!(target: "tasklens::engine", session = id.0, ?kind, client, "cancel of an unknown id dropped");
+        }
+        engine
     }
 
     /// Appends a `QueuedCommand` with the next `seq` to the control watch and keeps the newest

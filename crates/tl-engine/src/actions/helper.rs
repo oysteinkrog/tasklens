@@ -18,8 +18,8 @@ use asupersync::Cx;
 use futures_lite::FutureExt;
 use rustix::io::Errno;
 use tl_model::actions::{
-    ActionError, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef, DumpMode,
-    RejectReason, Signal,
+    ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef,
+    DumpMode, RejectReason, Signal,
 };
 use tl_model::health::HelperState;
 use tl_model::helper_proto::{
@@ -86,6 +86,7 @@ struct DumpArgs {
 pub(super) async fn run_privileged(
     cx: &Cx,
     actx: &ActionCtx,
+    events: &async_channel::Sender<ActionEvent>,
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     helper: &dyn PrivilegedOps,
@@ -126,7 +127,7 @@ pub(super) async fn run_privileged(
         }
         for (i, target) in req.targets.iter().enumerate() {
             log(&req.kind, target, &states[i]);
-            emit(actx, cx, event(req.id, Some(i), states[i].clone())).await;
+            emit(events, cx, event(req.id, Some(i), states[i].clone())).await;
         }
         return Some(summarize(&states));
     }
@@ -147,7 +148,7 @@ pub(super) async fn run_privileged(
             };
         }
         log(&req.kind, target, &states[i]);
-        emit(actx, cx, event(req.id, Some(i), states[i].clone())).await;
+        emit(events, cx, event(req.id, Some(i), states[i].clone())).await;
     }
     Some(summarize(&states))
 }

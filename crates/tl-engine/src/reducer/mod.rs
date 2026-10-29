@@ -115,9 +115,30 @@ pub struct Components {
     pub device_history: Arc<DeviceHistory>,
 }
 
+/// Where one client session's action reports (ADR-018). `id` is the engine-wide id that the
+/// gate, `ActionFinished` and `ActionGate::finished` use. Events carry the request's own id, the
+/// session's, and go to `events`.
+#[derive(Clone, Debug)]
+pub struct ActionRoute {
+    pub id: ActionId,
+    pub events: async_channel::Sender<ActionEvent>,
+}
+
 /// Action admission (E11). The reducer holds `None` until E11-A1 installs one.
 pub trait ActionGate: Send + 'static {
     fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>);
+    /// `submit` for one client session: `req.id` is the session's own id and `route` says where
+    /// its events go. The default ignores `route`, so events go where `submit` sends them.
+    fn submit_routed(
+        &mut self,
+        cx: &Cx,
+        req: ActionRequest,
+        view: &AdmissionView<'_>,
+        route: ActionRoute,
+    ) {
+        let _ = route;
+        self.submit(cx, req, view);
+    }
     /// The source to refresh after the action, if any.
     fn finished(&mut self, id: ActionId) -> Option<SourceId>;
     /// The capabilities the gate's ops reported when it was built. The session copies them
@@ -393,10 +414,10 @@ impl Reducer {
             devices: Arc::clone(&c.devices),
             health: Arc::clone(&c.health),
             windows: Arc::clone(&c.windows),
-            details: Arc::clone(&c.details),
+            details: Arc::clone(local.details()),
             history: Arc::clone(&c.history),
             process_series: Arc::clone(&c.process_series),
-            device_details: Arc::clone(&c.device_details),
+            device_details: Arc::clone(local.device_details()),
             device_history: Arc::clone(&c.device_history),
         }
     }

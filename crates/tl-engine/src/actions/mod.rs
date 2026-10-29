@@ -46,7 +46,7 @@ use tl_ops::OpsError;
 use crate::bridge::HookCtx;
 use crate::config::EngineConfig;
 use crate::dbus::ManagerConnSlot;
-use crate::reducer::{ActionGate, AdmissionView};
+use crate::reducer::{ActionGate, ActionRoute, AdmissionView};
 use crate::update::EngineMsg;
 
 /// Most requests running at once; one more is `Rejected(Busy)`.
@@ -709,11 +709,26 @@ impl ActionGate for Gate {
         self.caps
     }
 
+    /// Events go to the gate's own channel; the request's id is the engine id.
     fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>) {
+        let route = ActionRoute {
+            id: req.id,
+            events: self.ctx.events.clone(),
+        };
+        self.submit_routed(cx, req, view, route);
+    }
+
+    fn submit_routed(
+        &mut self,
+        cx: &Cx,
+        req: ActionRequest,
+        view: &AdmissionView<'_>,
+        route: ActionRoute,
+    ) {
         let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
             Admission::Reject(reason) => {
                 let ev = event(req.id, None, ActionState::Rejected(reason));
-                if self.ctx.events.try_send(ev).is_err() {
+                if route.events.try_send(ev).is_err() {
                     tracing::debug!(target: "tasklens::action", id = req.id.0, "rejected event dropped: queue full or closed");
                 }
                 return;
@@ -733,11 +748,11 @@ impl ActionGate for Gate {
                 }
             }
         }
-        let id = req.id;
+        let id = route.id;
         let kind = req.kind.clone();
         let ctx = Arc::clone(&self.ctx);
         let handle = cx
-            .spawn(move |cx| run_action(cx, ctx, req, per_target))
+            .spawn(move |cx| run_action_routed(cx, ctx, req, per_target, route))
             .expect("spawn");
         self.in_flight.insert(
             id,
@@ -862,28 +877,46 @@ pub async fn run_action(
     req: ActionRequest,
     per_target: Vec<Option<RejectReason>>,
 ) {
-    run_with(&cx, &actx, &req, &per_target, dispatch_boxed).await;
+    let route = ActionRoute {
+        id: req.id,
+        events: actx.events.clone(),
+    };
+    run_action_routed(cx, actx, req, per_target, route).await;
+}
+
+/// `run_action` for one client session (ADR-018): events carry `req.id` and go to
+/// `route.events`; `ActionFinished` carries the engine id `route.id`.
+pub async fn run_action_routed(
+    cx: Cx,
+    actx: Arc<ActionCtx>,
+    req: ActionRequest,
+    per_target: Vec<Option<RejectReason>>,
+    route: ActionRoute,
+) {
+    run_with(&cx, &actx, &route, &req, &per_target, dispatch_boxed).await;
 }
 
 async fn run_with(
     cx: &Cx,
     actx: &ActionCtx,
+    route: &ActionRoute,
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
 ) {
-    emit(actx, cx, event(req.id, None, ActionState::Started)).await;
-    let body = AssertUnwindSafe(run_body(cx, actx, req, per_target, dispatch))
+    let events = &route.events;
+    emit(events, cx, event(req.id, None, ActionState::Started)).await;
+    let body = AssertUnwindSafe(run_body(cx, actx, events, req, per_target, dispatch))
         .catch_unwind()
         .await;
     if body.is_err() {
-        emit(actx, cx, event(req.id, None, internal_error())).await;
+        emit(events, cx, event(req.id, None, internal_error())).await;
     }
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id = req.id.0, "action cancelled, ActionFinished not sent");
         return;
     }
-    let finished = EngineMsg::ActionFinished { id: req.id };
+    let finished = EngineMsg::ActionFinished { id: route.id };
     match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.msgs.send(cx, finished)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
@@ -899,6 +932,7 @@ async fn run_with(
 async fn run_body(
     cx: &Cx,
     actx: &ActionCtx,
+    events: &async_channel::Sender<ActionEvent>,
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
@@ -913,7 +947,7 @@ async fn run_body(
         // E29-014: through the helper. Without one the request is refused: it never falls back
         // to an unprivileged call.
         match actx.helper.as_deref() {
-            Some(h) => match helper::run_privileged(cx, actx, req, per_target, h).await {
+            Some(h) => match helper::run_privileged(cx, actx, events, req, per_target, h).await {
                 Some(summary) => summary,
                 None => return,
             },
@@ -941,12 +975,12 @@ async fn run_body(
                 pid = target_pid(target),
                 result = ?state,
             );
-            emit(actx, cx, event(req.id, Some(i), state.clone())).await;
+            emit(events, cx, event(req.id, Some(i), state.clone())).await;
             states.push(state);
         }
         summarize(&states)
     };
-    emit(actx, cx, event(req.id, None, summary)).await;
+    emit(events, cx, event(req.id, None, summary)).await;
 }
 
 /// Calls `process::kill_tree` once with the targets admission passed. A panic gives each of them
@@ -1106,13 +1140,13 @@ async fn dispatch(
 
 /// Sends one event with a 1 s timeout. When the UI is not draining, the event is dropped and the
 /// action continues.
-async fn emit(actx: &ActionCtx, cx: &Cx, ev: ActionEvent) {
+async fn emit(events: &async_channel::Sender<ActionEvent>, cx: &Cx, ev: ActionEvent) {
     let id = ev.id.0;
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id, "action cancelled, event dropped");
         return;
     }
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.events.send(ev)).await {
+    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.send(ev)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
             tracing::warn!(target: "tasklens::action", id, "event channel closed, event dropped");
@@ -1513,6 +1547,83 @@ mod tests {
     ) {
         let (ctx, events, msgs) = ctx();
         (Gate::new(ctx), events, msgs)
+    }
+
+    /// ADR-018: two sessions send action id 1. Each run's events carry id 1 and go only to its
+    /// own route; `ActionFinished` and `finished` use the engine ids.
+    #[test]
+    fn routed_actions_report_to_their_own_route() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (a_tx, a_rx) = async_channel::bounded(16);
+        let (b_tx, b_rx) = async_channel::bounded(16);
+        let finished: Arc<std::sync::Mutex<Vec<ActionId>>> = Arc::default();
+        let out = Arc::clone(&finished);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let (mut gate, own_events, mut msgs) = gate();
+                let f = Fixture::new();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &f.live,
+                    exited_within_linger: &f.exited,
+                };
+                // No openers, so the run ends with one `Rejected(Unsupported)` summary.
+                let open = request(
+                    ActionKind::OpenUri(Arc::from("https://example.org")),
+                    vec![],
+                );
+                for (engine, events) in [(10, a_tx), (11, b_tx)] {
+                    let route = ActionRoute {
+                        id: ActionId(engine),
+                        events,
+                    };
+                    gate.submit_routed(&cx, open.clone(), &view, route);
+                }
+                assert_eq!(gate.in_flight.len(), 2, "keyed by engine id");
+                for _ in 0..2 {
+                    match msgs.recv(&cx).await {
+                        Ok(EngineMsg::ActionFinished { id }) => {
+                            assert!(gate.finished(id).is_none());
+                            out.lock().expect("not poisoned").push(id);
+                        }
+                        _ => panic!("expected ActionFinished"),
+                    }
+                }
+                assert!(
+                    own_events.try_recv().is_err(),
+                    "nothing on the gate's own channel"
+                );
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        drop(handle);
+
+        let mut ids = finished.lock().expect("not poisoned").clone();
+        ids.sort();
+        assert_eq!(ids, [ActionId(10), ActionId(11)]);
+        for rx in [a_rx, b_rx] {
+            let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|e| (e.id, e.state.clone()))
+                    .collect::<Vec<_>>(),
+                [
+                    (ActionId(1), ActionState::Started),
+                    (
+                        ActionId(1),
+                        ActionState::Rejected(RejectReason::Unsupported)
+                    ),
+                ]
+            );
+        }
     }
 
     #[test]
@@ -2008,7 +2119,11 @@ mod run_tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    run_with(&cx, &actx, &req, &per_target, dispatch).await;
+                    let route = ActionRoute {
+                        id: req.id,
+                        events: actx.events.clone(),
+                    };
+                    run_with(&cx, &actx, &route, &req, &per_target, dispatch).await;
                 })
                 .expect("task is created");
             self.lab.scheduler.lock().schedule(task, 0);
@@ -2209,7 +2324,12 @@ mod run_tests {
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                emit(&actx, &cx, event(ActionId(1), None, ActionState::Started)).await;
+                emit(
+                    &actx.events,
+                    &cx,
+                    event(ActionId(1), None, ActionState::Started),
+                )
+                .await;
                 flag.store(true, Ordering::SeqCst);
             })
             .expect("task is created");
