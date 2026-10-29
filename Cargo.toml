@@ -6,6 +6,7 @@ members = [
   "crates/tl-ops",
   "crates/tl-engine",
   "crates/tl-history",
+  "crates/tl-remote",
   "crates/tl-gpu-probe",
   "crates/tl-ui",
   "crates/tl-app",
@@ -87,6 +88,7 @@ tl-ops     = { path = "crates/tl-ops" }
 tl-engine  = { path = "crates/tl-engine" }
 tl-ui      = { path = "crates/tl-ui" }
 tl-history = { path = "crates/tl-history" }
+tl-remote  = { path = "crates/tl-remote" }
 tl-tray    = { path = "crates/tl-tray" }
 
 [profile.dev]

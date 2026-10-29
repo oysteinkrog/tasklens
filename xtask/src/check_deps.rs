@@ -1,8 +1,8 @@
 //! `cargo xtask check-deps`: dependency and API rules from ADR-001 and ADR-004.
 //!
 //! Check 1 finds banned crates in the Linux normal graph of the shipped binaries. Check 2 holds
-//! each member's direct dependencies to its ADR-001 row and applies the asupersync and tl-ui
-//! closure rules. Check 3 finds `asupersync::` paths outside tl-engine. Check 4 finds banned asupersync APIs in tl-engine
+//! each member's direct dependencies to its ADR-001 row and applies the asupersync, tl-ui and
+//! tl-remote closure rules. Check 3 finds `asupersync::` paths outside tl-engine. Check 4 finds banned asupersync APIs in tl-engine
 //! production code. Every check runs before the command fails, so one run lists every violation.
 
 use std::collections::{BTreeSet, HashMap};
@@ -12,7 +12,14 @@ use std::process::{Command, Output};
 use anyhow::{Context, bail};
 
 /// Package names of the shipped binaries. `tl-app` builds the `tasklens` binary (R-158).
-pub const SHIPPED_BINARIES: &[&str] = &["tl-app", "tl-gpu-probe", "tl-helper", "tl-netmon"];
+/// `tl-server` builds `tasklens-engine` (ADR-018).
+pub const SHIPPED_BINARIES: &[&str] = &[
+    "tl-app",
+    "tl-gpu-probe",
+    "tl-helper",
+    "tl-netmon",
+    "tl-server",
+];
 
 /// Crates that must not appear in the normal graph of a shipped binary (ADR-001 "No Tokio").
 pub const BANNED_CRATES: &[&str] = &[
@@ -130,6 +137,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "tl-ui",
             "tl-ops",
             "tl-tray",
+            "tl-remote",
             "zbus",
             "toml",
             "serde",
@@ -154,6 +162,20 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "thiserror",
         ],
     ),
+    (
+        "tl-remote",
+        &["tl-model", "zstd", "arc-swap", "async-channel", "rustix"],
+    ),
+    (
+        "tl-server",
+        &[
+            "tl-model",
+            "tl-engine",
+            "tl-history",
+            "tl-remote",
+            "sd-notify",
+        ],
+    ),
     ("tl-tray", &["tl-model", "ksni", "async-channel"]),
     (
         "tl-helper",
@@ -169,8 +191,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
     ("xtask", &["serde", "serde_json", "anyhow"]),
 ];
 
-/// Members whose normal-dependency closure may contain asupersync (ADR-001 rule 2).
-const ASUPERSYNC_ALLOWED: &[&str] = &["tl-engine", "tl-app"];
+/// Members whose normal-dependency closure may contain asupersync (ADR-001 rule 2, ADR-018).
+const ASUPERSYNC_ALLOWED: &[&str] = &["tl-engine", "tl-app", "tl-server"];
 
 /// Names that must not be in tl-ui's normal-dependency closure (ADR-001 check 2).
 const UI_CLOSURE_BANNED: &[&str] = &["tl-engine", "tl-collect", "tl-ops", "arc-swap", "zbus"];
@@ -531,6 +553,14 @@ fn rows_and_closures(metadata: &serde_json::Value) -> anyhow::Result<Vec<String>
                 if reached.contains(name) {
                     violations.push(format!("tl-ui closure contains {name}"));
                 }
+            }
+        }
+        if member == "tl-remote" {
+            // No Tokio and no GPUI (ADR-018). asupersync is caught by the rule above.
+            for name in closure.iter().filter(|name| {
+                BANNED_CRATES.contains(name) || **name == "gpui" || name.starts_with("gpui-")
+            }) {
+                violations.push(format!("tl-remote closure contains {name}"));
             }
         }
     }
@@ -979,6 +1009,48 @@ mod tests {
                 "tl-ui closure contains tl-ops",
             ]
         );
+    }
+
+    #[test]
+    fn remote_closure_rule() {
+        let json = metadata(
+            &["tl-remote"],
+            &[("tl-remote", "tl-model", None), ("tl-remote", "zstd", None)],
+        );
+        assert_eq!(rows_and_closures(&json).unwrap(), Vec::<String>::new());
+
+        let json = metadata(
+            &["tl-remote"],
+            &[
+                ("tl-remote", "tl-model", None),
+                ("tl-model", "tokio", None),
+                ("tl-remote", "gpui-kit", None),
+                ("tl-remote", "async-channel", None),
+                ("async-channel", "asupersync", None),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec![
+                "tl-remote depends on gpui-kit, which is not in its ADR-001 row",
+                "asupersync in the closure of tl-remote",
+                "tl-remote closure contains gpui-kit",
+                "tl-remote closure contains tokio",
+            ]
+        );
+    }
+
+    #[test]
+    fn server_may_reach_asupersync() {
+        let json = metadata(
+            &["tl-server"],
+            &[
+                ("tl-server", "tl-engine", None),
+                ("tl-engine", "asupersync", None),
+                ("tl-server", "tl-remote", None),
+            ],
+        );
+        assert_eq!(rows_and_closures(&json).unwrap(), Vec::<String>::new());
     }
 
     #[test]
