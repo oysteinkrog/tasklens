@@ -4375,6 +4375,51 @@ mod page {
         assert_eq!(r.layout().split(BoxKind::Memory), Some(0.7));
     }
 
+    /// UI-PRF-060: "By app" shows the memory-by-app chart in its Overview place, saves the mode,
+    /// and the page asks for the process sweep only while the box shows it.
+    #[gpui_kit::test]
+    fn overview_memory_by_app_mode(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::memory_apps::{APPS_ID, AppsPlace};
+        use tl_ui::pages::performance::overview::mem_box::MEM_APPS_ID;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let sweep = |r: &mut Rig| {
+            r.vcx
+                .update(|_, cx| page.read(cx).demand_part().process_top)
+        };
+        assert!(!sweep(&mut r));
+        let menu = r.vcx.update(|_, cx| {
+            BoxKind::Memory
+                .modes()
+                .iter()
+                .any(|m| m.id == "apps" && tl_ui::i18n::tr(cx, m.label).as_ref() == "By app")
+        });
+        assert!(menu, "the Layout submenu lists By app");
+
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "memory".into(),
+            mode: "apps".into(),
+        });
+        assert!(r.vcx.debug_bounds(MEM_APPS_ID).is_some());
+        assert!(r.vcx.debug_bounds(APPS_ID).is_some());
+        let place = r.vcx.update(|_, cx| {
+            let mem = page.read(cx).mem_box().read(cx);
+            mem.apps().map(|a| a.read(cx).place())
+        });
+        assert_eq!(place, Some(AppsPlace::Overview));
+        assert!(sweep(&mut r));
+        let setting = r.saved();
+        assert_eq!(OverviewLayout::from_setting(setting.as_ref()), r.layout());
+        assert_eq!(r.layout().config(BoxKind::Memory).mode.id, "apps");
+
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "memory".into(),
+            mode: "rows".into(),
+        });
+        assert!(r.vcx.debug_bounds(APPS_ID).is_none());
+        assert!(!sweep(&mut r));
+    }
+
     #[gpui_kit::test]
     fn overview_mem_comp_chart_has_legend(cx: &mut TestAppContext) {
         use tl_ui::chart::labels::LabelKind;
@@ -8811,6 +8856,7 @@ mod sweep {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::DeviceKey;
+    use tl_ui::pages::performance::memory_apps;
     use tl_ui::pages::performance::overview::cpu_box::{
         CORE_CHARTS_ID, CPU_CHART_ID, CpuBox, POWER_STRIP_ID, core_chart_id,
     };
@@ -9117,6 +9163,8 @@ mod sweep {
                 ids.extend([
                     mem_box::MEM_USED_CHART_ID.to_owned(),
                     mem_box::MEM_COMP_CHART_ID.to_owned(),
+                    memory_apps::APPS_ID.to_owned(),
+                    memory_apps::LEGEND_ID.to_owned(),
                 ]);
                 for i in 0..5 {
                     ids.extend([
@@ -9587,5 +9635,404 @@ mod sweep {
                 format!("{:?} at {b:?} outside {inner:?}", t.text),
             );
         }
+    }
+}
+
+/// UI-PRF-060: the Overview Memory box in its "By app" mode: where the legend goes, the legend
+/// click, and the 24 h range from the device metric history.
+mod mem_by_app_box {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
+    use tl_model::system::MemGroupBand;
+    use tl_model::time::now_boot_ns;
+    use tl_model::validity::Validity;
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::memory_apps::{
+        APPS_ID, BandKind, LEGEND_ID, MemoryAppsChart, overview_legend,
+    };
+    use tl_ui::pages::performance::overview::mem_box::{MEM_APPS_ID, MemBox};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::metrics;
+
+    const MIB: f32 = 1_048_576.;
+    const GIB: u64 = 1 << 30;
+    const S: u64 = 1_000_000_000;
+    const MEMORY: DeviceIdx = DeviceIdx(1);
+    const OTHER: DeviceIdx = DeviceIdx(20);
+    const SHARED: DeviceIdx = DeviceIdx(21);
+    const GROUPS: u16 = 4;
+
+    fn group_dev(i: u16) -> DeviceIdx {
+        DeviceIdx(10 + i)
+    }
+
+    fn entry(idx: DeviceIdx, identity: DeviceIdentity, name: &str) -> DeviceEntry {
+        DeviceEntry {
+            idx,
+            identity,
+            generation: 0,
+            display_name: Arc::from(name),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+            hot_c: None,
+        }
+    }
+
+    fn mem_group(idx: DeviceIdx, key: &str, name: &str) -> DeviceEntry {
+        entry(
+            idx,
+            DeviceIdentity::MemGroup {
+                key: Arc::from(key),
+            },
+            name,
+        )
+    }
+
+    fn sid(device: DeviceIdx) -> SeriesId {
+        SeriesId {
+            device,
+            metric: MetricId::MEM_GROUP,
+        }
+    }
+
+    /// 60 live samples of `value`, one a second up to now.
+    fn flat(device: DeviceIdx, value: f32) -> Arc<SeriesView> {
+        let now = now_boot_ns();
+        Arc::new(SeriesView {
+            id: sid(device),
+            version: 1,
+            period_ns: S,
+            samples: (0..60u64)
+                .map(|k| Sample::valid(now - (59 - k) * S, value))
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    struct Host {
+        mem: Entity<MemBox>,
+        w: f32,
+        h: f32,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div().w(px(self.w)).h(px(self.h)).child(
+                    self.mem
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                ),
+            )
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    struct Rig<'a> {
+        engine: Arc<FakeEngine>,
+        host: Entity<Host>,
+        apps: Entity<MemoryAppsChart>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    impl Rig<'_> {
+        fn resize(&mut self, w: f32, h: f32) {
+            self.host.update(self.vcx, |host, cx| {
+                host.w = w;
+                host.h = h;
+                cx.notify();
+            });
+            draw(self.vcx);
+        }
+
+        fn bounds(&mut self, id: String) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+            self.vcx.debug_bounds(Box::leak(id.into_boxed_str()))
+        }
+
+        fn click(&mut self, id: String) {
+            let at = self.bounds(id.clone()).expect(&id).center();
+            self.vcx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            });
+            self.vcx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            });
+            draw(self.vcx);
+        }
+
+        fn last_open(&mut self) -> Option<String> {
+            self.vcx.read_entity(&self.apps, |a, _| {
+                a.last_open.as_ref().map(|o| o.0.to_string())
+            })
+        }
+    }
+
+    /// A Memory box in "By app" mode, `w` × `h`, at the 1 min range. Groups p0 to p3 hold 4 to
+    /// 1 MiB live with 3 processes each, "Other apps" 1 MiB and "Shared and kernel" 2 MiB.
+    fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            let mut entries = vec![entry(MEMORY, DeviceIdentity::Memory, "Memory")];
+            let mut views = Vec::new();
+            let mut bands = Vec::new();
+            for i in 0..GROUPS {
+                let key = format!("exe:p{i}");
+                entries.push(mem_group(group_dev(i), &key, &format!("p{i}")));
+                views.push(flat(group_dev(i), f32::from(GROUPS - i) * MIB));
+                bands.push(MemGroupBand {
+                    key: Arc::from(key),
+                    name: Arc::from(format!("p{i}")),
+                    process_count: 3,
+                    device: group_dev(i),
+                });
+            }
+            entries.push(mem_group(OTHER, "other", "Other apps"));
+            entries.push(mem_group(SHARED, "shared", "Shared and kernel"));
+            views.push(flat(OTHER, MIB));
+            views.push(flat(SHARED, 2. * MIB));
+            views.sort_by_key(|v| v.id);
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: entries.into(),
+            });
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version: 1,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.memory.validity = Validity::Valid;
+            sys.memory.total = 64 * GIB;
+            sys.memory.used = 23 * GIB;
+            sys.memory.available = 41 * GIB;
+            sys.memory.groups = Arc::new(bands);
+        });
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let mut settings = Settings::default();
+            settings.performance.overview_range = OverviewRange::M1;
+            cx.set_global(BootSettings {
+                settings,
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let (host, vcx) = cx.add_window_view(move |_, cx| {
+            let mem = cx.new(|cx| MemBox::new(&hub, MEMORY, cx));
+            mem.update(cx, |b, cx| b.set_mode("apps", cx));
+            Host { mem, w, h }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(1000.), px(700.)));
+        draw(vcx);
+        let apps = vcx.update(|_, cx| {
+            let mem = host.read(cx).mem.clone();
+            mem.read(cx).apps().cloned().expect("the By app chart")
+        });
+        Rig {
+            engine,
+            host,
+            apps,
+            vcx,
+        }
+    }
+
+    fn kinds(r: &mut Rig) -> Vec<BandKind> {
+        r.vcx
+            .read_entity(&r.apps, |a, _| a.bands().iter().map(|b| b.kind).collect())
+    }
+
+    /// The legend sits at the right of the chart in a body 480 px or wider, and below it in a
+    /// narrower one, where it takes at most half the body in whole rows with "+n more".
+    #[gpui_kit::test]
+    fn overview_memory_by_app_legend_place(cx: &mut TestAppContext) {
+        let mut r = open(cx, 700., 400.);
+        let m = r.vcx.update(|_, cx| *metrics(cx));
+        assert!(overview_legend(size(px(479.), px(300.)), 6, &m).0);
+        assert!(!overview_legend(size(px(480.), px(300.)), 6, &m).0);
+        assert_eq!(
+            overview_legend(size(px(400.), px(100.)), 6, &m),
+            (true, 1, 5)
+        );
+
+        let groups = vec![BandKind::Group(0); usize::from(GROUPS)];
+        let kinds_now = kinds(&mut r);
+        assert_eq!(kinds_now.len(), groups.len() + 2);
+        assert_eq!(kinds_now[4..], [BandKind::Other, BandKind::Shared]);
+        let body = r.bounds(MEM_APPS_ID.into()).expect("the By app part");
+        assert!(body.size.width >= px(480.), "{body:?}");
+        let chart = r.bounds(APPS_ID.into()).expect("chart");
+        let legend = r.bounds(LEGEND_ID.into()).expect("legend");
+        assert!(legend.left() >= chart.right(), "{chart:?} {legend:?}");
+        assert!(legend.right() <= body.right() + px(0.5));
+        for row in 0..6 {
+            assert!(
+                r.bounds(format!("{LEGEND_ID}-{row}")).is_some(),
+                "row {row}"
+            );
+        }
+
+        r.resize(400., 400.);
+        let body = r.bounds(MEM_APPS_ID.into()).expect("the By app part");
+        assert!(body.size.width < px(480.), "{body:?}");
+        let chart = r.bounds(APPS_ID.into()).expect("chart");
+        let legend = r.bounds(LEGEND_ID.into()).expect("legend");
+        assert!(legend.top() >= chart.bottom(), "{chart:?} {legend:?}");
+        assert!(legend.bottom() <= body.bottom() + px(0.5));
+        assert!(legend.size.height <= body.size.height / 2. + px(0.5));
+
+        // A low box: the legend below shows whole rows and "+n more".
+        r.resize(400., 180.);
+        let body = r.bounds(MEM_APPS_ID.into()).expect("the By app part");
+        let legend = r.bounds(LEGEND_ID.into()).expect("legend");
+        assert!(legend.size.height <= body.size.height / 2. + px(0.5));
+        let more = r.bounds(format!("{LEGEND_ID}-more")).expect("+n more row");
+        assert!(more.bottom() <= legend.bottom() + px(0.5));
+        assert!(r.bounds(format!("{LEGEND_ID}-5")).is_none());
+    }
+
+    /// A group's legend row opens Processes filtered to that group; "Other apps" and "Shared
+    /// and kernel" open nothing (UI-PRF-060, leader note 07:15).
+    #[gpui_kit::test]
+    fn overview_memory_by_app_legend_click(cx: &mut TestAppContext) {
+        let mut r = open(cx, 700., 400.);
+        // Rows top first: Shared, Other, p3, p2, p1, p0.
+        r.click(format!("{LEGEND_ID}-0"));
+        assert_eq!(r.last_open(), None);
+        r.click(format!("{LEGEND_ID}-1"));
+        assert_eq!(r.last_open(), None);
+        r.click(format!("{LEGEND_ID}-2"));
+        assert_eq!(r.last_open().as_deref(), Some("exe:p3"));
+        let name = r.vcx.read_entity(&r.apps, |a, _| {
+            a.last_open.as_ref().map(|o| o.1.to_string())
+        });
+        assert_eq!(name.as_deref(), Some("p3"));
+        r.click(format!("{LEGEND_ID}-5"));
+        assert_eq!(r.last_open().as_deref(), Some("exe:p0"));
+    }
+
+    /// At 24 h the chart is a box chart over 24 hours, and the ranking and the legend values
+    /// read the device metric history, not the live series.
+    #[gpui_kit::test]
+    fn overview_memory_by_app_reads_history(cx: &mut TestAppContext) {
+        let mut r = open(cx, 700., 400.);
+        let bottom = |r: &mut Rig| {
+            r.vcx
+                .read_entity(&r.apps, |a, _| a.bands()[0].key.to_string())
+        };
+        assert_eq!(bottom(&mut r), "exe:p0");
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.overview_range = OverviewRange::H24;
+            });
+        });
+        draw(r.vcx);
+        let range = r.vcx.update(|_, cx| {
+            let apps = r.apps.read(cx);
+            apps.chart().read(cx).spec.range_ns
+        });
+        assert_eq!(range, 24 * 3600 * S);
+
+        // The history has the order the other way round: p3 holds 13 MiB, p0 10 MiB.
+        let now = i64::try_from(jiff::Timestamp::now().as_nanosecond()).expect("fits");
+        let step = 60 * S;
+        let points = |mean: f32| -> Arc<[HistPoint]> {
+            (0..30i64)
+                .map(|k| HistPoint {
+                    t_realtime_ns: now - (30 - k) * step as i64,
+                    mean,
+                    min: mean,
+                    max: mean,
+                })
+                .collect()
+        };
+        let mut series: Vec<(SeriesId, Arc<[HistPoint]>)> = (0..GROUPS)
+            .map(|i| (sid(group_dev(i)), points(f32::from(10 + i) * MIB)))
+            .collect();
+        series.push((sid(OTHER), points(3. * MIB)));
+        series.push((sid(SHARED), points(5. * MIB)));
+        series.sort_by_key(|(id, _)| *id);
+        r.engine.publish_with(|s| {
+            let version = s.device_history.header.version + 1;
+            s.device_history = Arc::new(DeviceHistory {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                request: Some(DeviceHistoryRequest {
+                    range: DeviceRange::H24,
+                    end_realtime_ns: None,
+                }),
+                realtime_offset_ns: now - now_boot_ns() as i64,
+                since_realtime_ns: Some(now - 30 * step as i64),
+                step_ns: step,
+                series: series.into(),
+                boots: Arc::from([]),
+                timeline: None,
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(bottom(&mut r), "exe:p3");
+        let values: Vec<(String, f64)> = r.vcx.read_entity(&r.apps, |a, _| {
+            a.bands()
+                .iter()
+                .map(|b| (b.key.to_string(), b.value))
+                .collect()
+        });
+        let value = |key: &str| values.iter().find(|v| v.0 == key).map(|v| v.1);
+        assert_eq!(value("exe:p3"), Some(f64::from(13. * MIB)));
+        assert_eq!(value("exe:p0"), Some(f64::from(10. * MIB)));
+        assert_eq!(value("shared"), Some(f64::from(5. * MIB)));
+        assert_eq!(value("other"), Some(f64::from(3. * MIB)));
     }
 }

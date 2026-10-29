@@ -1197,6 +1197,51 @@ mod by_app {
         assert_eq!(first, "p2");
     }
 
+    /// Clicking a group's legend row opens Processes filtered to that group; "Other apps" and
+    /// "Shared and kernel" open nothing (UI-PRF-060, leader note 07:15).
+    #[gpui_kit::test]
+    fn memory_by_app_legend_click(cx: &mut TestAppContext) {
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups(&mut r, 5);
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        let click = |r: &mut Rig<'_>, row: usize| {
+            let at = r
+                .vcx
+                .debug_bounds(format!("{LEGEND_ID}-{row}").leak())
+                .expect("legend row")
+                .center();
+            r.vcx.simulate_event(gpui_kit::MouseDownEvent {
+                button: gpui_kit::MouseButton::Left,
+                position: at,
+                modifiers: gpui_kit::Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            });
+            r.vcx.simulate_event(gpui_kit::MouseUpEvent {
+                button: gpui_kit::MouseButton::Left,
+                position: at,
+                modifiers: gpui_kit::Modifiers::none(),
+                click_count: 1,
+            });
+            draw(r.vcx);
+            r.vcx.read_entity(&apps, |a, _| {
+                a.last_open
+                    .as_ref()
+                    .map(|(key, name)| (key.to_string(), name.to_string()))
+            })
+        };
+        // Rows top first: Shared, Other, p2, p1, p0.
+        assert_eq!(click(&mut r, 0), None);
+        assert_eq!(click(&mut r, 1), None);
+        assert_eq!(
+            click(&mut r, 2),
+            Some(("exe:p2".to_owned(), "p2".to_owned()))
+        );
+    }
+
     /// Every band rebuild keeps the values and process counts (leader rule 08:21). For each
     /// trigger (theme, `top_n`, range, view switch, device arrival) the legend values, the
     /// counts and the stack sum are the same right after the trigger, before any new samples.

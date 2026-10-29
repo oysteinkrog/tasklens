@@ -680,7 +680,7 @@ impl HistoryClock {
 /// so extrema would add a series to itself, and the maxima of different series need not happen
 /// together (the bands could top the total). The version is the component's, so a new publish
 /// rebuilds the geometry.
-fn history_view(
+pub(crate) fn history_view(
     id: SeriesId,
     points: &[HistPoint],
     hist: &DeviceHistory,

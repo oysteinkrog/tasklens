@@ -10,7 +10,16 @@
 //!
 //! The legend lists the bands top first and shows whole rows only, with "+n more" for the rest
 //! ([`legend_fit`]). Hovering a band or its legend row raises it (the others drop to 40%) and
-//! shows a tooltip. The Memory page puts "Groups shown" in its context menu.
+//! shows a tooltip. Clicking a group's legend row opens the Processes tab filtered to that group
+//! (`ProcessesPage::open_mem_group`); "Other apps" and "Shared and kernel" rows have no click.
+//! The Memory page puts "Groups shown" in its context menu.
+//!
+//! The chart sits on the Memory page ([`AppsPlace::Page`]) or in the Overview Memory box
+//! ([`AppsPlace::Overview`], mode `apps`). In the box it draws over the box range, and at 1 h,
+//! 24 h and 7 d, or while the Overview is held at a time, it reads the device metric history as
+//! the other box charts do; the ranking and the legend values then read the same history. The
+//! legend sits at the right, or below the chart when the body is narrower than
+//! [`LEGEND_BELOW_W`].
 //!
 //! The chart itself is a cached `ChartView`; this view re-renders for the legend and hover only.
 
@@ -20,12 +29,13 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    MouseMoveEvent, ParentElement as _, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
-    div, px,
+    AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Entity, Hsla,
+    InteractiveElement as _, IntoElement, MouseMoveEvent, ParentElement as _, Pixels, Point,
+    Render, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Subscription, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
+use tl_model::command::Tab;
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
@@ -35,17 +45,21 @@ use tl_model::time::now_boot_ns;
 use tl_model::units;
 
 use super::details::Template;
+use super::overview::parts::{ChartSettings, box_chart, class_probe};
+use super::overview::timeline::{self, OverviewPause};
 use crate::chart::geometry::right_edge_ns;
-use crate::chart::view::find_tiered;
+use crate::chart::view::{HistoryClock, find_tiered, history_view, reads_history};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale,
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::pages::processes::ProcessesPage;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
+use crate::window::main::main_window_view;
 
 /// Debug selector of the chart box.
 pub const APPS_ID: &str = "perf-mem-apps";
@@ -71,12 +85,36 @@ pub const GROUPS_SHOWN: [u8; 4] = [5, 10, 15, 20];
 /// Legend row height and width at 100%.
 pub const LEGEND_ROW_H: f32 = 20.;
 const LEGEND_W: f32 = 240.;
+/// In the Overview box the legend goes below the chart when the body is narrower than this,
+/// logical px at 100% (UI-PRF-060).
+pub const LEGEND_BELOW_W: f32 = 480.;
 const SWATCH: f32 = 10.;
 /// Fill alpha of a group band against its line colour.
 const GROUP_FILL_ALPHA: f32 = 0.6;
 /// "Other apps" is `text_secondary` at 50%; "Shared and kernel" is `mem_fill` at 40%.
 const OTHER_ALPHA: f32 = 0.5;
 const SHARED_ALPHA: f32 = 0.4;
+
+/// Where the chart sits (UI-PRF-060).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppsPlace {
+    /// The Memory page's "By app" view: `graph_h_overall` high, `graph_range_s` wide, the live
+    /// series, the legend at the right.
+    Page,
+    /// The Overview Memory box's `apps` mode: the box body, the box range from the live series
+    /// or the device metric history, the legend at the right or below.
+    Overview,
+}
+
+/// Where the series come from now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Live,
+    /// The device metric history, on CLOCK_REALTIME.
+    History,
+    /// The Overview is held at a time and the history has not answered yet: nothing to show.
+    Waiting,
+}
 
 /// The sticky order of the memory groups (UI-PRF-060).
 #[derive(Clone, Debug, Default)]
@@ -376,13 +414,26 @@ struct AppsSettings {
 }
 
 impl AppsSettings {
-    fn read(cx: &App) -> Self {
+    /// The Overview box takes its range and look from the box charts (UI-PRF-055).
+    fn read(place: AppsPlace, cx: &App) -> Self {
         let s = TlSettings::settings(cx);
-        Self {
-            top_n: usize::from(s.performance.memory_by_app.top_n),
-            range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
-            smooth: s.motion.smooth_graphs,
-            rounded: s.appearance.rounded_corners,
+        let top_n = usize::from(s.performance.memory_by_app.top_n);
+        match place {
+            AppsPlace::Page => Self {
+                top_n,
+                range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
+                smooth: s.motion.smooth_graphs,
+                rounded: s.appearance.rounded_corners,
+            },
+            AppsPlace::Overview => {
+                let box_chart = ChartSettings::from(s);
+                Self {
+                    top_n,
+                    range_ns: box_chart.range_ns,
+                    smooth: box_chart.smooth,
+                    rounded: box_chart.rounded,
+                }
+            }
         }
     }
 }
@@ -397,8 +448,17 @@ struct Hover {
 
 /// The memory-by-app chart with its legend (UI-PRF-060).
 pub struct MemoryAppsChart {
+    place: AppsPlace,
     chart: Entity<ChartView>,
     hub: Entity<SnapshotHub>,
+    /// The series of every memory group device for the chart range, sorted by device, from
+    /// [`source`](Self::source).
+    views: Vec<(DeviceIdx, Arc<SeriesView>)>,
+    /// The history clock while `views` come from the device metric history.
+    clock: Option<HistoryClock>,
+    /// What `views` were resolved from: the source, the device history version and the device
+    /// catalog version. History views are built again only when one changes.
+    views_from: (Source, u64, u64),
     ranker: Ranker,
     /// Every group with a series, by key.
     groups: Vec<Group>,
@@ -418,7 +478,12 @@ pub struct MemoryAppsChart {
     hover: Hover,
     /// The chart box bounds of the last paint, for pointer hit tests.
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    _subs: SmallVec<[Subscription; 4]>,
+    /// The Overview body size of the last paint, for the legend place and rows.
+    body: Rc<Cell<Size<Pixels>>>,
+    _subs: SmallVec<[Subscription; 5]>,
+    /// The group key and name the last legend click opened.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_open: Option<(Arc<str>, SharedString)>,
 }
 
 fn section_versions(cx: &App) -> [u64; 3] {
@@ -431,25 +496,44 @@ fn section_versions(cx: &App) -> [u64; 3] {
 }
 
 impl MemoryAppsChart {
+    /// The Memory page's chart.
     pub fn new(hub: Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
-        let settings = AppsSettings::read(cx);
+        Self::new_in(hub, AppsPlace::Page, cx)
+    }
+
+    /// The chart for `place`. In the Overview box the chart is a box chart: it reads the device
+    /// metric history at 1 h, 24 h and 7 d and holds while the Overview waits for a picked time.
+    pub fn new_in(hub: Entity<SnapshotHub>, place: AppsPlace, cx: &mut Context<Self>) -> Self {
+        let settings = AppsSettings::read(place, cx);
         let mut words = AppsWords::default();
         let mut strings_version = u64::MAX;
         words.refresh(&mut strings_version, cx);
         let snap = Arc::clone(hub.read(cx).current());
         let total = snap.system.memory.total;
         let spec = Self::spec_of(&[], None, total, settings);
-        let labels = Self::labels_of(&words);
-        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
-        let subs = smallvec![
+        let labels = Self::labels_of(place, &words);
+        let chart = match place {
+            AppsPlace::Page => {
+                cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            }
+            AppsPlace::Overview => box_chart(spec, labels, &hub, cx),
+        };
+        let mut subs: SmallVec<[Subscription; 5]> = smallvec![
             cx.subscribe(&hub, Self::on_snapshot),
             cx.observe_global::<TlSettings>(Self::sync_settings),
             cx.observe_global::<UiMetrics>(Self::sync_style),
             cx.observe_global::<Strings>(Self::sync_words),
         ];
+        if place == AppsPlace::Overview {
+            subs.push(cx.observe_global::<OverviewPause>(Self::on_pause));
+        }
         let mut this = Self {
+            place,
             chart,
             hub,
+            views: Vec::new(),
+            clock: None,
+            views_from: (Source::Live, u64::MAX, u64::MAX),
             ranker: Ranker::default(),
             groups: Vec::new(),
             other: None,
@@ -465,10 +549,17 @@ impl MemoryAppsChart {
             words,
             hover: Hover::default(),
             bounds: Rc::default(),
+            body: Rc::default(),
             _subs: subs,
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_open: None,
         };
         this.refresh(&snap, true, cx);
         this
+    }
+
+    pub fn place(&self) -> AppsPlace {
+        self.place
     }
 
     pub fn chart(&self) -> &Entity<ChartView> {
@@ -499,14 +590,26 @@ impl MemoryAppsChart {
         }
     }
 
-    fn labels_of(words: &AppsWords) -> ChartLabels {
-        ChartLabels {
-            heading: Some(words.heading.clone()),
-            value_fmt: ValueFormat::Bytes,
-            value_align: ValueAlign::Right,
-            range_word: words.range.clone(),
-            legend: SmallVec::new(),
-            show_axis_max: false,
+    /// The page chart has its heading, value and range word; the box frame draws those in the
+    /// Overview.
+    fn labels_of(place: AppsPlace, words: &AppsWords) -> ChartLabels {
+        match place {
+            AppsPlace::Page => ChartLabels {
+                heading: Some(words.heading.clone()),
+                value_fmt: ValueFormat::Bytes,
+                value_align: ValueAlign::Right,
+                range_word: words.range.clone(),
+                legend: SmallVec::new(),
+                show_axis_max: false,
+            },
+            AppsPlace::Overview => ChartLabels {
+                heading: None,
+                value_fmt: ValueFormat::Bytes,
+                value_align: ValueAlign::Hidden,
+                range_word: SharedString::default(),
+                legend: SmallVec::new(),
+                show_axis_max: false,
+            },
         }
     }
 
@@ -582,32 +685,117 @@ impl MemoryAppsChart {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        if !ev
-            .mask
-            .intersects(ComponentMask::SERIES | ComponentMask::SYSTEM | ComponentMask::DEVICES)
-        {
+        // While the views come from the history, live series ticks change nothing drawn here.
+        let series = match self.views_from.0 {
+            Source::Live => ComponentMask::SERIES,
+            Source::History | Source::Waiting => ComponentMask::DEVICE_HISTORY,
+        };
+        let wanted =
+            series | ComponentMask::DEVICE_HISTORY | ComponentMask::SYSTEM | ComponentMask::DEVICES;
+        if !ev.mask.intersects(wanted) {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
         self.refresh(&snap, false, cx);
     }
 
+    /// The Overview was held at a time or made live: the source may change.
+    fn on_pause(&mut self, cx: &mut Context<Self>) {
+        let snap = Arc::clone(self.hub.read(cx).current());
+        self.refresh(&snap, true, cx);
+    }
+
+    /// Where the series come from, as the box charts decide it (`ChartView::resolve`): the page
+    /// reads the live series; the box reads the history over 10 minutes and whenever the
+    /// history answers a request at a picked time for this range, and waits while the Overview
+    /// is held and the history has not answered.
+    fn source(&self, snap: &Snapshot, cx: &App) -> Source {
+        if self.place == AppsPlace::Page {
+            return Source::Live;
+        }
+        let range_ns = self.settings.range_ns;
+        let answered = snap
+            .device_history
+            .request
+            .is_some_and(|r| r.end_realtime_ns.is_some() && r.range.span_ns() == range_ns);
+        if timeline::paused(cx).is_some() && !answered {
+            Source::Waiting
+        } else if answered || reads_history(range_ns) {
+            Source::History
+        } else {
+            Source::Live
+        }
+    }
+
+    /// Fills `views` with the series of every memory group device. History views (band means
+    /// only, as a stacked chart draws them) are built again only when the history or the
+    /// catalog changed.
+    fn resolve_views(&mut self, snap: &Snapshot, force: bool, cx: &App) {
+        let source = self.source(snap, cx);
+        let from = (
+            source,
+            snap.device_history.header.version,
+            snap.devices.version,
+        );
+        if source != Source::Live && from == self.views_from && !force {
+            return;
+        }
+        self.views_from = from;
+        self.views.clear();
+        self.clock = None;
+        let hist = &*snap.device_history;
+        if source == Source::History {
+            self.clock = Some(HistoryClock {
+                offset_ns: hist.realtime_offset_ns,
+                end_ns: hist
+                    .request
+                    .and_then(|r| r.end_realtime_ns)
+                    .map(|t| t.max(0) as u64),
+            });
+        }
+        if source == Source::Waiting {
+            return;
+        }
+        for e in snap.devices.entries.iter() {
+            if !matches!(e.identity, DeviceIdentity::MemGroup { .. }) {
+                continue;
+            }
+            let id = series_id(e.idx);
+            let view = match source {
+                Source::History => hist
+                    .get(id)
+                    .map(|points| Arc::new(history_view(id, points, hist, true))),
+                _ => find_tiered(&snap.series, id, self.settings.range_ns)
+                    .0
+                    .cloned(),
+            };
+            if let Some(view) = view {
+                self.views.push((e.idx, view));
+            }
+        }
+        self.views.sort_by_key(|(d, _)| *d);
+    }
+
     /// The series view of `device` for the chart range.
-    fn view<'a>(&self, snap: &'a Snapshot, device: DeviceIdx) -> Option<&'a Arc<SeriesView>> {
-        find_tiered(&snap.series, series_id(device), self.settings.range_ns).0
+    fn view(&self, device: DeviceIdx) -> Option<&Arc<SeriesView>> {
+        self.views
+            .binary_search_by_key(&device, |(d, _)| *d)
+            .ok()
+            .map(|i| &self.views[i].1)
     }
 
     /// The time of the newest sample. The reference clock is the "Shared and kernel" band, which
     /// gets a sample on every sweep.
-    fn newest(&self, snap: &Snapshot) -> Option<u64> {
+    fn newest(&self) -> Option<u64> {
         self.shared
-            .and_then(|d| self.view(snap, d))
+            .and_then(|d| self.view(d))
             .and_then(|v| v.samples.last().map(|s| s.t_ns))
     }
 
     /// Re-reads the groups, ranks them (sticky unless `force`), and rebuilds the bands and the
     /// spec when the bands changed. The legend values follow every call.
     fn refresh(&mut self, snap: &Snapshot, force: bool, cx: &mut Context<Self>) {
+        self.resolve_views(snap, force, cx);
         let fixed = (self.other, self.shared);
         self.groups.clear();
         self.other = None;
@@ -626,8 +814,8 @@ impl MemoryAppsChart {
             }
         }
 
-        let reference = self.shared.and_then(|d| self.view(snap, d));
-        let newest = self.newest(snap);
+        let reference = self.shared.and_then(|d| self.view(d));
+        let newest = self.newest();
         let mut means: Vec<(Arc<str>, f64)> = Vec::new();
         if let (Some(reference), Some(newest)) = (reference, newest) {
             let from = newest.saturating_sub(self.settings.range_ns);
@@ -638,7 +826,7 @@ impl MemoryAppsChart {
                 .count()
                 .max(1);
             for g in &self.groups {
-                let Some(view) = self.view(snap, g.device) else {
+                let Some(view) = self.view(g.device) else {
                     continue;
                 };
                 let sum: f64 = view
@@ -673,6 +861,10 @@ impl MemoryAppsChart {
         }
         if self.update_values(snap, newest.unwrap_or(0)) {
             cx.notify();
+        }
+        if self.place == AppsPlace::Overview {
+            // The box frame shows the value.
+            return;
         }
         // The value is In use from the memory totals: a sum of the bands would show "-" while
         // a ranked group has no sample at the newest time.
@@ -766,12 +958,18 @@ impl MemoryAppsChart {
                 .map(|b| b.process_count)
         };
         let mut changed = false;
-        let range = self.settings.range_ns;
+        let views = &self.views;
+        let view = |id: &SeriesId| {
+            views
+                .binary_search_by_key(&id.device, |(d, _)| *d)
+                .ok()
+                .map(|i| &views[i].1)
+        };
         for band in &mut self.bands {
             let value: f64 = band
                 .series
                 .iter()
-                .filter_map(|id| find_tiered(&snap.series, *id, range).0)
+                .filter_map(view)
                 .map(|v| value_at(v, newest))
                 .sum();
             let processes = match band.kind {
@@ -792,28 +990,30 @@ impl MemoryAppsChart {
     }
 
     /// The band under chart-local `pos` and the time there, from the stacked values.
-    fn hit(&self, pos: Point<Pixels>, cx: &App) -> Option<(usize, u64)> {
+    fn hit(&self, pos: Point<Pixels>) -> Option<(usize, u64)> {
         let b = self.bounds.get();
         let (w, h) = (f32::from(b.size.width) - 2., f32::from(b.size.height) - 2.);
         if w <= 0. || h <= 0. || self.total == 0 {
             return None;
         }
-        let snap = self.hub.read(cx).current();
-        let reference = self.shared.and_then(|d| self.view(snap, d))?;
+        let reference = self.shared.and_then(|d| self.view(d))?;
         let newest = reference.samples.last()?.t_ns;
-        let right = right_edge_ns(
-            now_boot_ns(),
-            newest,
-            reference.period_ns,
-            self.settings.smooth,
-        );
+        let right = match self.clock {
+            Some(clock) => clock.right_edge_ns(now_boot_ns()),
+            None => right_edge_ns(
+                now_boot_ns(),
+                newest,
+                reference.period_ns,
+                self.settings.smooth,
+            ),
+        };
         let x = (f32::from(pos.x) - 1.).clamp(0., w);
         let ns = f64::from(w - x) * self.settings.range_ns as f64 / f64::from(w);
         let t = right.saturating_sub(ns.round() as u64);
         let level = f64::from((h - (f32::from(pos.y) - 1.)).clamp(0., h) / h) * self.total as f64;
         let mut top = 0.;
         for (i, band) in self.bands.iter().enumerate() {
-            top += self.band_value(snap, band, t);
+            top += self.band_value(band, t);
             if level <= top {
                 return Some((i, t));
             }
@@ -821,10 +1021,10 @@ impl MemoryAppsChart {
         None
     }
 
-    fn band_value(&self, snap: &Snapshot, band: &Band, t: u64) -> f64 {
+    fn band_value(&self, band: &Band, t: u64) -> f64 {
         band.series
             .iter()
-            .filter_map(|id| find_tiered(&snap.series, *id, self.settings.range_ns).0)
+            .filter_map(|id| self.view(id.device))
             .map(|v| value_at(v, t))
             .sum()
     }
@@ -832,7 +1032,7 @@ impl MemoryAppsChart {
     fn on_pointer(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
         let origin = self.bounds.get().origin;
         let pos = ev.position - origin;
-        let hover = match self.hit(pos, cx) {
+        let hover = match self.hit(pos) {
             Some((band, t)) => Hover {
                 band: Some(band),
                 at: Some((pos, t)),
@@ -855,7 +1055,7 @@ impl MemoryAppsChart {
             return;
         }
         self.settings_versions = versions;
-        let new = AppsSettings::read(cx);
+        let new = AppsSettings::read(self.place, cx);
         if new == self.settings {
             return;
         }
@@ -874,7 +1074,7 @@ impl MemoryAppsChart {
         // the legend and tooltip do not wait for the next one.
         self.build_bands(cx);
         let snap = Arc::clone(self.hub.read(cx).current());
-        self.update_values(&snap, self.newest(&snap).unwrap_or(0));
+        self.update_values(&snap, self.newest().unwrap_or(0));
         self.rebuild_spec(cx);
         cx.notify();
     }
@@ -885,24 +1085,23 @@ impl MemoryAppsChart {
             return;
         }
         self.strings_version = version;
-        let labels = Self::labels_of(&self.words);
+        let labels = Self::labels_of(self.place, &self.words);
         self.chart.update(cx, |v, cx| v.set_labels(labels, cx));
         cx.notify();
     }
 
     /// The tooltip lines of band `i` at time `t` (`None`: the newest sample): name, value,
     /// share of In use and the process count.
-    pub fn tooltip_lines(&self, i: usize, t: Option<u64>, cx: &App) -> SmallVec<[String; 4]> {
+    pub fn tooltip_lines(&self, i: usize, t: Option<u64>, _: &App) -> SmallVec<[String; 4]> {
         let Some(band) = self.bands.get(i) else {
             return SmallVec::new();
         };
-        let snap = self.hub.read(cx).current();
         let (value, in_use) = match t {
             Some(t) => (
-                self.band_value(snap, band, t),
+                self.band_value(band, t),
                 self.bands
                     .iter()
-                    .map(|b| self.band_value(snap, b, t))
+                    .map(|b| self.band_value(b, t))
                     .sum::<f64>(),
             ),
             None => (band.value, self.bands.iter().map(|b| b.value).sum::<f64>()),
@@ -975,6 +1174,29 @@ impl MemoryAppsChart {
         tip
     }
 
+    /// Opens the Processes tab filtered to group band `i` (`ProcessesPage::open_mem_group`).
+    /// "Other apps" and "Shared and kernel" open nothing. Nothing happens when that tab is not
+    /// built.
+    pub fn open_group(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(band) = self
+            .bands
+            .get(i)
+            .filter(|b| matches!(b.kind, BandKind::Group(_)))
+        else {
+            return;
+        };
+        let (key, name) = (Arc::clone(&band.key), band.name.clone());
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.last_open = Some((Arc::clone(&key), name.clone()));
+        }
+        let page = main_window_view(cx)
+            .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+        if let Some(page) = page {
+            page.update(cx, |p, cx| p.open_mem_group(key, name, window, cx));
+        }
+    }
+
     /// One legend row: swatch, name, process count and value.
     fn legend_row(&self, i: usize, row: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let (m, theme) = (*metrics(cx), current(cx).clone());
@@ -998,6 +1220,7 @@ impl MemoryAppsChart {
                 s
             });
         let dim = self.hover.band.is_some_and(|h| h != i);
+        let group = matches!(band.kind, BandKind::Group(_));
         let mut value_el = div()
             .flex_none()
             .text_color(theme.text_secondary)
@@ -1019,6 +1242,13 @@ impl MemoryAppsChart {
                     this.set_hovered(band, cx);
                 }
             }))
+            .when(group, |row| {
+                row.cursor_pointer().on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.open_group(i, window, cx);
+                    },
+                ))
+            })
             .child(div().flex_none().size(px(SWATCH * m.ui_scale)).bg(swatch))
             .child(
                 div()
@@ -1035,11 +1265,25 @@ impl MemoryAppsChart {
     }
 }
 
+/// The Overview layout of a body of `size` with `rows` legend rows: whether the legend goes
+/// below the chart, and the rows shown and behind "+n more". At the right the legend is the body
+/// height; below, it takes at most half the body, whole rows only.
+pub fn overview_legend(size: Size<Pixels>, rows: usize, m: &UiMetrics) -> (bool, usize, usize) {
+    let row_h = LEGEND_ROW_H * m.ui_scale;
+    let below = f32::from(size.width) < LEGEND_BELOW_W * m.ui_scale;
+    let height = if below {
+        (rows as f32 * row_h).min(f32::from(size.height) / 2.)
+    } else {
+        f32::from(size.height)
+    };
+    let (shown, more) = legend_fit(rows, height, row_h);
+    (below, shown, more)
+}
+
 impl Render for MemoryAppsChart {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let h = super::page::GRAPH_H_OVERALL * m.ui_scale;
         let bounds = Rc::clone(&self.bounds);
         let probe = canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
             .absolute()
@@ -1048,10 +1292,19 @@ impl Render for MemoryAppsChart {
         // Top band first; whole rows only, the last row that fits says "+n more".
         let rows = self.bands.len();
         let row_h = LEGEND_ROW_H * m.ui_scale;
-        let (shown, more) = legend_fit(rows, h, row_h);
+        let page_h = super::page::GRAPH_H_OVERALL * m.ui_scale;
+        let (below, shown, more) = match self.place {
+            AppsPlace::Page => {
+                let (shown, more) = legend_fit(rows, page_h, row_h);
+                (false, shown, more)
+            }
+            AppsPlace::Overview => overview_legend(self.body.get(), rows, &m),
+        };
 
         // Over the chart: the values at the pointer's time. Over a legend row: the newest values,
-        // at the chart's right edge level with the row.
+        // at the chart's right edge level with the row, or at its bottom right corner when the
+        // legend is below.
+        let chart_size = self.bounds.get().size;
         let tooltip = match self.hover {
             Hover {
                 band: Some(band),
@@ -1060,7 +1313,17 @@ impl Render for MemoryAppsChart {
             Hover {
                 band: Some(band),
                 at: None,
-            } => legend_anchor(rows, band, shown, row_h, self.bounds.get().size.width)
+            } if below => {
+                let at = Point {
+                    x: chart_size.width,
+                    y: chart_size.height,
+                };
+                Some(self.tooltip(self.tooltip_lines(band, None, cx), at, cx))
+            }
+            Hover {
+                band: Some(band),
+                at: None,
+            } => legend_anchor(rows, band, shown, row_h, chart_size.width)
                 .map(|at| self.tooltip(self.tooltip_lines(band, None, cx), at, cx)),
             Hover { band: None, .. } => None,
         };
@@ -1070,7 +1333,7 @@ impl Render for MemoryAppsChart {
             .relative()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .child(probe)
             .child(
                 self.chart
@@ -1086,15 +1349,24 @@ impl Render for MemoryAppsChart {
                 }
             }))
             .children(tooltip);
+        let chart = if below {
+            chart.w_full()
+        } else {
+            chart.h_full()
+        };
 
         let mut legend = div()
             .debug_selector(|| LEGEND_ID.into())
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(LEGEND_W * m.ui_scale))
-            .h_full()
             .overflow_hidden();
+        legend = if below {
+            let lines = shown + usize::from(more > 0);
+            legend.w_full().h(px(lines as f32 * row_h))
+        } else {
+            legend.w(px(LEGEND_W * m.ui_scale)).h_full()
+        };
         *legend.text_style() = t_sm(&m);
         for row in 0..shown {
             let i = rows - 1 - row;
@@ -1115,14 +1387,41 @@ impl Render for MemoryAppsChart {
                     .child(text),
             );
         }
-        div()
-            .flex()
-            .flex_row()
-            .gap(m.sp[4])
-            .w_full()
-            .h(px(h))
-            .child(chart)
-            .child(legend)
+        let frame = div().flex().gap(m.sp[4]).w_full();
+        let frame: AnyElement = match self.place {
+            AppsPlace::Page => frame
+                .flex_row()
+                .h(px(page_h))
+                .child(chart)
+                .child(legend)
+                .into_any_element(),
+            AppsPlace::Overview => {
+                // The probe re-renders this view when the body crosses the legend width rule
+                // or another number of legend rows fits.
+                let class = |(below, shown, more): (bool, usize, usize)| {
+                    u32::from(below) | ((shown as u32) << 1) | (u32::from(more > 0) << 31)
+                };
+                let probe_m = m;
+                let frame = if below {
+                    frame.flex_col()
+                } else {
+                    frame.flex_row()
+                };
+                frame
+                    .relative()
+                    .size_full()
+                    .child(chart)
+                    .child(legend)
+                    .child(class_probe(
+                        Rc::clone(&self.body),
+                        class((below, shown, more)),
+                        move |size| class(overview_legend(size, rows, &probe_m)),
+                        cx.entity_id(),
+                    ))
+                    .into_any_element()
+            }
+        };
+        frame
     }
 }
 

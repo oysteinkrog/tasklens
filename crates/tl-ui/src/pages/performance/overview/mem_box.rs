@@ -6,7 +6,8 @@
 //! column side by side with an inner splitter between them. `chart_rows` has a used chart over
 //! the rows, with a horizontal splitter. `chart` is the composition chart alone. `charts` (D-029)
 //! is one filled chart per row, each under a header with its name, value and percent, placed by
-//! the Arrange choice.
+//! the Arrange choice. `apps` (D-036, UI-PRF-060) is the memory-by-app stacked chart with its
+//! legend ([`MemoryAppsChart`] in its Overview place), made the first time the box shows it.
 //!
 //! The box is its own view and reads `SYSTEM` only, so a tick with only series changes does not
 //! touch it. It formats its text only when the memory totals' hash changes. Each sparkline is a
@@ -19,9 +20,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, relative, size,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
+    Styled as _, Subscription, Window, div, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -34,6 +35,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
+use super::super::memory_apps::{AppsPlace, MemoryAppsChart};
 use super::cpu_box::value_text;
 use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
@@ -85,7 +87,16 @@ pub const MODES: &[BoxMode] = &[
         label: "perf-overview-mode-charts",
         split: None,
     },
+    BoxMode {
+        id: APPS_MODE,
+        label: "perf-overview-mode-apps",
+        split: None,
+    },
 ];
+
+/// The id of the "By app" mode (UI-PRF-060). The page asks for the process sweep while the box
+/// shows it.
+pub const APPS_MODE: &str = "apps";
 
 /// The debug selector of the splitter between the text part and the sparkline column.
 pub const MEM_SPLITTER_ID: &str = "perf-overview-memory-splitter";
@@ -99,6 +110,8 @@ pub const MEM_CHART_SPLITTER_LINE_ID: &str = "perf-overview-memory-chart-splitte
 pub const MEM_USED_CHART_ID: &str = "perf-overview-memory-used-chart";
 /// The debug selector of the composition chart in `chart`.
 pub const MEM_COMP_CHART_ID: &str = "perf-overview-memory-comp-chart";
+/// The debug selector of the memory-by-app part in `apps`.
+pub const MEM_APPS_ID: &str = "perf-overview-memory-apps";
 
 /// The narrowest text part of `rows`, logical px (UI-PRF-019).
 const TEXT_PART_MIN_W: f32 = 128.;
@@ -130,6 +143,7 @@ enum MemMode {
     ChartRows,
     Chart,
     Charts,
+    Apps,
 }
 
 impl MemMode {
@@ -139,6 +153,7 @@ impl MemMode {
             "chart_rows" => Self::ChartRows,
             "chart" => Self::Chart,
             "charts" => Self::Charts,
+            APPS_MODE => Self::Apps,
             _ => Self::Rows,
         }
     }
@@ -149,6 +164,7 @@ impl MemMode {
             Self::ChartRows => MODES[1].id,
             Self::Chart => MODES[2].id,
             Self::Charts => MODES[3].id,
+            Self::Apps => MODES[4].id,
         }
     }
 }
@@ -458,6 +474,8 @@ pub struct MemBox {
     comp_chart: Entity<ChartView>,
     /// One chart per row for `charts`.
     cell_charts: [Entity<ChartView>; ROWS],
+    /// The memory-by-app chart of `apps`, made the first time the box shows it.
+    apps: Option<Entity<MemoryAppsChart>>,
     mode: MemMode,
     /// How `chart_rows` places its two parts and `charts` its cells (D-027).
     arrange: Arrange,
@@ -528,6 +546,7 @@ impl MemBox {
             used_chart,
             comp_chart,
             cell_charts,
+            apps: None,
             mode: MemMode::Rows,
             arrange: Arrange::Auto,
             spark_split: InnerSplit::new(
@@ -594,8 +613,18 @@ impl MemBox {
         let mode = MemMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            if mode == MemMode::Apps && self.apps.is_none() {
+                let hub = self.hub.clone();
+                self.apps =
+                    Some(cx.new(|cx| MemoryAppsChart::new_in(hub, AppsPlace::Overview, cx)));
+            }
             cx.notify();
         }
+    }
+
+    /// The memory-by-app chart, once the box has shown `apps`.
+    pub fn apps(&self) -> Option<&Entity<MemoryAppsChart>> {
+        self.apps.as_ref()
     }
 
     /// The shown mode's split as the box lays it out, after the clamps: the text part's share in
@@ -606,7 +635,7 @@ impl MemBox {
             MemMode::ChartRows => self
                 .chart_split
                 .share(self.chart_axis(), m.sp[5], m.ui_scale),
-            MemMode::Chart | MemMode::Charts => 0.,
+            MemMode::Chart | MemMode::Charts | MemMode::Apps => 0.,
         }
     }
 
@@ -640,7 +669,7 @@ impl MemBox {
         let changed = match self.mode {
             MemMode::Rows => self.spark_split.set_share(share),
             MemMode::ChartRows => self.chart_split.set_share(share),
-            MemMode::Chart | MemMode::Charts => false,
+            MemMode::Chart | MemMode::Charts | MemMode::Apps => false,
         };
         if changed {
             cx.notify();
@@ -1295,7 +1324,7 @@ impl Render for MemBox {
                 u32::from(row_wide(body_w, &m)),
                 Box::new(move |b| u32::from(row_wide(b.width, &probe_m))),
             ),
-            MemMode::Chart => (0, Box::new(|_| 0)),
+            MemMode::Chart | MemMode::Apps => (0, Box::new(|_| 0)),
             MemMode::Charts => {
                 let arrange = self.arrange;
                 (
@@ -1317,6 +1346,12 @@ impl Render for MemBox {
                         .clone()
                         .cached(StyleRefinement::default().size_full()),
                 )
+                .into_any_element(),
+            MemMode::Apps => div()
+                .debug_selector(|| MEM_APPS_ID.into())
+                .relative()
+                .size_full()
+                .children(self.apps.clone())
                 .into_any_element(),
         };
         let body = div()

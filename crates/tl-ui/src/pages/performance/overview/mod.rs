@@ -411,12 +411,13 @@ impl OverviewPage {
     }
 
     /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
-    /// processes box is placed, the device metric history for 1 h, 24 h and 7 d and for every
-    /// range while held at a time, and the timeline while its box is placed.
+    /// processes box is placed or the Memory box shows "By app" (its groups are summed on each
+    /// sweep, UI-PRF-060), the device metric history for 1 h, 24 h and 7 d and for every range
+    /// while held at a time, and the timeline while its box is placed.
     pub fn demand_part(&self) -> Demand {
         let (paused, at) = self.paused.unzip();
         Demand {
-            process_top: self.procs.is_some(),
+            process_top: self.procs.is_some() || mem_apps(&self.layout),
             device_history_range: history_request(self.range, paused, at.unwrap_or(0)),
             device_timeline: self.layout.has(BoxKind::Timeline),
             any_surface_visible: true,
@@ -773,6 +774,7 @@ impl OverviewPage {
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let timeline_moved = layout.has(BoxKind::Timeline) != self.layout.has(BoxKind::Timeline);
+        let mem_apps_moved = mem_apps(&layout) != mem_apps(&self.layout);
         let split = layout.split(BoxKind::Cpu);
         let cpu_arrange = layout.arrange(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
@@ -836,7 +838,7 @@ impl OverviewPage {
                 cx.new(|cx| ProcsBox::new(&hub, cx))
             });
             self.send_demand(cx);
-        } else if timeline_moved {
+        } else if timeline_moved || mem_apps_moved {
             self.send_demand(cx);
         }
         self.relayout(cx);
@@ -1367,4 +1369,9 @@ impl Render for OverviewPage {
         let root = root.child(header).children(toolbar).child(body);
         Self::with_actions(root, cx).into_any_element()
     }
+}
+
+/// Whether the Memory box is placed and shows "By app" (UI-PRF-060).
+fn mem_apps(layout: &OverviewLayout) -> bool {
+    layout.has(BoxKind::Memory) && layout.config(BoxKind::Memory).mode.id == mem_box::APPS_MODE
 }
