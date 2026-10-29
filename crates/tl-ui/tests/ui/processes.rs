@@ -2624,7 +2624,7 @@ mod jump {
             }
         }
 
-        fn slot(view: AnyView, cx: &mut Context<MainWindow>) -> PageSlot {
+        pub(super) fn slot(view: AnyView, cx: &mut Context<MainWindow>) -> PageSlot {
             let page = cx.new(|cx| Perf {
                 view,
                 focus: cx.focus_handle().tab_stop(true),
@@ -2850,6 +2850,101 @@ mod jump {
         #[gpui_kit::test]
         fn mem_group_legend_click_on_memory_page(cx: &mut TestAppContext) {
             legend_click(cx, memory_page);
+        }
+    }
+
+    /// A click on a row of the Overview Top processes box (crw.103).
+    mod top_procs {
+        use gpui_kit::{Context, Modifiers, TestAppContext, Window, px, size};
+        use tl_model::snapshot::Snapshot;
+        use tl_ui::hub::GlobalHub;
+        use tl_ui::pages::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
+        use tl_ui::window::main::{MainWindow, PageSlot};
+
+        use super::*;
+
+        /// The Performance tab's stand-in: the Top processes box alone.
+        fn procs(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let b = cx.new(|cx| ProcsBox::new(&hub, cx));
+            super::legend::slot(b.into(), cx)
+        }
+
+        /// Starts on the Performance tab, publishes the records with `TARGET` busiest, then clicks
+        /// its row. `cold` leaves the Processes page unbuilt until the click.
+        fn click_target(cx: &mut TestAppContext, cold: bool) -> Rig {
+            let (engine, mut vcx) = if cold {
+                super::super::shell::open_on_perf(cx, procs)
+            } else {
+                let opened = super::super::shell::open_with_perf(cx, UiState::default(), procs);
+                let (engine, mut vcx) = opened;
+                select(&mut vcx, Tab::Performance);
+                (engine, vcx)
+            };
+            vcx.simulate_resize(size(px(1600.), px(1200.)));
+            let mut recs = records();
+            for r in &mut recs {
+                if r.key == key(TARGET) {
+                    r.cpu_pct = 50.0;
+                }
+            }
+            let mut s = Snapshot::clone(&snapshot(2, Vec::new(), Vec::new(), recs));
+            s.sequence = engine.latest().sequence + 1;
+            Arc::make_mut(&mut s.processes).header.version = 2;
+            engine.publish(s);
+            for _ in 0..3 {
+                vcx.run_until_parked();
+                vcx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+            let state = |vcx: &mut VisualTestContext| {
+                vcx.update(|_, cx| {
+                    let main = main_window_view(cx).expect("main window open");
+                    let main = main.read(cx);
+                    (
+                        main.active_tab(),
+                        main.page_entity::<ProcessesPage>(Tab::Processes).is_some(),
+                    )
+                })
+            };
+            let built = !cold;
+            assert_eq!(state(&mut vcx), (Tab::Performance, built));
+
+            let id: &'static str =
+                Box::leak(format!("{PROC_ROW_ID_PREFIX}{TARGET}").into_boxed_str());
+            let at = vcx.debug_bounds(id).expect(id).center();
+            vcx.simulate_click(at, Modifiers::none());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(state(&mut vcx), (Tab::Processes, true));
+
+            let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+            let page = vcx
+                .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+                .expect("Processes built");
+            Rig {
+                engine,
+                vcx,
+                page,
+                version: 2,
+            }
+        }
+
+        fn check(cx: &mut TestAppContext, cold: bool) {
+            let mut r = click_target(cx, cold);
+            r.answer_with_target();
+            assert_eq!(r.selected(), [ProcRowId::Process(key(TARGET))]);
+            assert!(r.table_focused());
+            assert_eq!(r.toasts(), ["Switched to Processes tab"]);
+        }
+
+        #[gpui_kit::test]
+        fn top_procs_click_cold_selects_process(cx: &mut TestAppContext) {
+            check(cx, true);
+        }
+
+        #[gpui_kit::test]
+        fn top_procs_click_warm_selects_process(cx: &mut TestAppContext) {
+            check(cx, false);
         }
     }
 

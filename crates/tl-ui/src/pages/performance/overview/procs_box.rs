@@ -25,6 +25,7 @@ use tl_model::command::Tab;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
+use tracing::warn;
 
 use super::fit::whole_rows;
 use super::layout::BoxMode;
@@ -259,15 +260,33 @@ impl ProcsBox {
     }
 }
 
-/// Selects `key` on the Processes tab (PROC-071). Nothing happens when that tab is not built.
+/// Selects `key` on the Processes tab (PROC-071). Selecting the tab builds the page when it is
+/// not built yet.
 fn select_process(key: ProcessKey, window: &mut Window, cx: &mut App) {
-    let page =
-        main_window_view(cx).and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
-    if let Some(page) = page {
-        page.update(cx, |p, cx| {
-            p.select_by_key(key, JumpTexts::default(), window, cx)
-        });
-    }
+    // The click listener runs inside this box's update, and selecting the tab updates the
+    // Performance page and its children.
+    window.defer(cx, move |window, cx| {
+        let Some(view) = main_window_view(cx) else {
+            warn!(target: "tasklens::ui", "no main window for the Top processes click");
+            return;
+        };
+        let mut texts = JumpTexts::default();
+        if view
+            .read(cx)
+            .page_entity::<ProcessesPage>(Tab::Processes)
+            .is_none()
+        {
+            // Selecting the tab builds the page. The tab is then already Processes, so the
+            // jump would not show its "Switched to Processes tab" toast on its own.
+            view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
+            texts.success = Some(tr(cx, "processes-jump-switched-tab"));
+        }
+        let Some(page) = view.read(cx).page_entity::<ProcessesPage>(Tab::Processes) else {
+            warn!(target: "tasklens::ui", "no Processes page for the Top processes click");
+            return;
+        };
+        page.update(cx, |p, cx| p.select_by_key(key, texts, window, cx));
+    });
 }
 
 /// One row: name, PID, CPU text and meter. `key` `None` is the column header.

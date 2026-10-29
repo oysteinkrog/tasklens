@@ -8750,6 +8750,17 @@ mod wired {
         draw(r.vcx);
         let jumped = r.vcx.update(|_, cx| procs.read(cx).last_jump.get());
         assert_eq!(jumped, Some(proc_key(18)));
+        // The click switched to the Processes tab. The rest of the test needs the Performance tab.
+        let tab = r.vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .active_tab()
+        });
+        assert_eq!(tab, Tab::Processes);
+        r.vcx
+            .dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
+        draw(r.vcx);
 
         // Copy carries the rows.
         let page = overview(&mut r).expect("an OverviewPage");
