@@ -995,3 +995,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-29 07:15 o55.48 held: legend click moved to crw.99 via new bead o55.49 (exact mem_group filter); colour collision rule: most recently shown pick keeps the slot.
 - 2026-10-29 07:36 o55.48 held again: code fixed, only the stack-sum test missing; requeued for that test. Spec: Other apps uses text_secondary at 50%.
 - 2026-10-29 08:21 o55.48: rule 'a band rebuild never resets data', sweep test over every rebuild trigger.
+- 2026-10-29 13:20 release 1.0.8 (a2e976db, tag v1.0.8): memory by app (o55.48, crw.99, 8fx.44, yms.42, 8q0.45), Processes filter by memory group (o55.49), Overview fixes (crw.100-102), suite fixes (o55.50). Suite at ea1bfaf7: 6416 passed, 1 timing failure under load (lab_bridge, 0 of 20 on rerun, filed exm8m). Installed and restarted on office and home. Night stop timers started again.
