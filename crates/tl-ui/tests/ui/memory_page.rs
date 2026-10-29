@@ -941,6 +941,11 @@ mod by_app {
         assert!(r.vcx.debug_bounds(APPS_ID).is_some());
         assert!(r.vcx.debug_bounds(PHYSICAL_ID).is_none());
         assert!(r.vcx.debug_bounds(VIEW_SWITCH_ID).is_some());
+        // The By app view asks for the process sweep that sums the groups.
+        assert!(
+            r.vcx
+                .update(|_, cx| r.page.read(cx).demand_part().process_top)
+        );
         for n in [3u8, 10, 20] {
             r.vcx.update(|_, cx| {
                 TlSettings::set(
@@ -987,6 +992,10 @@ mod by_app {
             .vcx
             .update(|_, cx| TlSettings::settings(cx).performance.memory_view);
         assert_eq!(view, MemoryView::Usage);
+        assert!(
+            !r.vcx
+                .update(|_, cx| r.page.read(cx).demand_part().process_top)
+        );
     }
 
     #[test]

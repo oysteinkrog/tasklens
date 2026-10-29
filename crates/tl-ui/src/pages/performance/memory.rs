@@ -1952,12 +1952,14 @@ impl MemoryPage {
     }
 
     /// This page's demand part while it is active: memory, and the inventory for Details rows 7
-    /// to 11.
+    /// to 11. The "By app" view also asks for the process sweep (`process_top`, as the Overview
+    /// Top processes box does): the engine sums the memory groups on each sweep (UI-PRF-060).
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             memory: true,
             inventory: true,
+            process_top: self.settings.view == MemoryView::Apps,
             ..Demand::default()
         }
     }
@@ -2105,6 +2107,7 @@ impl MemoryPage {
         }
         if new.view != old.view {
             self.sync_apps(cx);
+            self.send_demand(cx);
             cx.notify();
         }
     }
