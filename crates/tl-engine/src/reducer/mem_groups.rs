@@ -792,7 +792,7 @@ mod tests {
         let b = groups.bands(&records, &extras, Some(500 * MIB));
         assert_eq!(b.top.len(), 1);
         let g = &b.top[0];
-        assert_eq!(&*g.group.key, "wine:/srv/backblaze/prefix:Backblaze");
+        assert_eq!(&*g.group.key, "wine:/srv/backblaze/prefix:backblaze");
         assert_eq!(&*g.group.name, "Backblaze");
         assert_eq!(g.processes, 5);
         let wine = g.wine.as_deref().expect("Wine info");

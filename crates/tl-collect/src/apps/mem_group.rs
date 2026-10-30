@@ -6,9 +6,9 @@
 //!
 //! 1. System: kernel threads and processes of other users. Key `system`.
 //! 2. Wine: a Windows program of the current user, by its install folder per Wine prefix (see
-//!    [`wine_app`]). Key `wine:<prefix>:<folder>`. Wine's own processes (`C:\windows\...`)
-//!    join the app of their prefix with the most processes, else form `wine:<prefix>`, named
-//!    "Wine (<prefix folder name>)".
+//!    [`wine_app`]). Key `wine:<prefix>:<folder in lower case>`, as Windows folder names ignore
+//!    case. Wine's own processes (`C:\windows\...`) join the app of their prefix with the most
+//!    processes, else form `wine:<prefix>`, named "Wine (<prefix folder name>)".
 //! 3. Unknown: the executable cannot be read. Key `comm:<comm>`.
 //! 4. App: in an app scope, executable in the directory of the scope's oldest process. Key
 //!    `app:<app id>`.
@@ -17,6 +17,7 @@
 //!
 //! Keys are stable across restarts and reboots, so the stored history continues a group.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -122,6 +123,24 @@ const WINE_USER_CONTAINERS: &[&[&str]] = &[
     &["Programs"],
 ];
 
+/// The Wine apps of the current user, by prefix and install folder in lower case.
+struct WineFolders<'a> {
+    /// The display spelling of each folder.
+    names: FxHashMap<(Option<&'a str>, Cow<'a, str>), &'a str>,
+    /// The folder in lower case and the display spelling of the app with the most processes in
+    /// each prefix.
+    main: FxHashMap<Option<&'a str>, (Cow<'a, str>, &'a str)>,
+}
+
+/// A Windows folder or file name in lower case, for comparing names that differ only in case.
+fn fold_case(name: &str) -> Cow<'_, str> {
+    if name.chars().any(char::is_uppercase) {
+        Cow::Owned(name.to_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 /// The executable of an app unit's oldest process.
 #[derive(Clone, Copy)]
 struct Reference<'a> {
@@ -157,7 +176,7 @@ impl MemGrouper {
         self.sweep += 1;
         out.clear();
         let refs = references(procs, self_uid);
-        let wine_main = wine_main_apps(procs, self_uid);
+        let wine_apps = wine_folders(procs, self_uid);
         for p in procs {
             let reference = p
                 .app_id
@@ -166,7 +185,7 @@ impl MemGrouper {
             let kind = group_of(
                 p,
                 reference,
-                &wine_main,
+                &wine_apps,
                 self_uid,
                 &mut self.key,
                 &mut self.name,
@@ -235,44 +254,66 @@ fn references<'a>(
     refs
 }
 
-/// The install folder of the app with the most processes in each Wine prefix of the current
-/// user. Equal counts go to the folder that sorts first.
-fn wine_main_apps<'a>(
-    procs: &[MemGroupInput<'a>],
-    self_uid: u32,
-) -> FxHashMap<Option<&'a str>, &'a str> {
-    let mut counts: FxHashMap<(Option<&'a str>, &'a str), u32> = FxHashMap::default();
+/// The install folders of the current user's Wine apps. Folder names that differ only in case
+/// are one folder. Its display spelling is the one most of its processes use, and the app with
+/// the most processes is the main app of its prefix. Equal counts go to the name that sorts
+/// first.
+fn wine_folders<'a>(procs: &[MemGroupInput<'a>], self_uid: u32) -> WineFolders<'a> {
+    let mut spellings: FxHashMap<(Option<&'a str>, &'a str), u32> = FxHashMap::default();
     for p in procs {
         let Some(wine) = p.wine else { continue };
         if p.kernel_thread || p.ruid != self_uid {
             continue;
         }
         if let WineApp::App(folder) = wine_app(wine.image.as_deref()) {
-            *counts.entry((wine.prefix.as_deref(), folder)).or_default() += 1;
+            *spellings
+                .entry((wine.prefix.as_deref(), folder))
+                .or_default() += 1;
         }
     }
-    let mut best: FxHashMap<Option<&str>, (&str, u32)> = FxHashMap::default();
-    for ((prefix, folder), n) in counts {
-        best.entry(prefix)
+    // Per folder: (display spelling, its count, all processes).
+    let mut folders: FxHashMap<(Option<&str>, Cow<'_, str>), (&str, u32, u32)> =
+        FxHashMap::default();
+    for ((prefix, spelling), n) in spellings {
+        folders
+            .entry((prefix, fold_case(spelling)))
+            .and_modify(|f| {
+                if n > f.1 || (n == f.1 && spelling < f.0) {
+                    (f.0, f.1) = (spelling, n);
+                }
+                f.2 += n;
+            })
+            .or_insert((spelling, n, n));
+    }
+    let mut main: FxHashMap<Option<&str>, (Cow<'_, str>, &str, u32)> = FxHashMap::default();
+    for ((prefix, folder), &(name, _, n)) in &folders {
+        main.entry(*prefix)
             .and_modify(|b| {
-                if n > b.1 || (n == b.1 && folder < b.0) {
-                    *b = (folder, n);
+                if n > b.2 || (n == b.2 && *folder < b.0) {
+                    *b = (folder.clone(), name, n);
                 }
             })
-            .or_insert((folder, n));
+            .or_insert_with(|| (folder.clone(), name, n));
     }
-    best.into_iter()
-        .map(|(prefix, (folder, _))| (prefix, folder))
-        .collect()
+    WineFolders {
+        names: folders
+            .into_iter()
+            .map(|(k, (name, _, _))| (k, name))
+            .collect(),
+        main: main
+            .into_iter()
+            .map(|(prefix, (folder, name, _))| (prefix, (folder, name)))
+            .collect(),
+    }
 }
 
 /// The group of one process. Writes its key into `key` and its display name into `name`, both
 /// cleared first. `reference` is the executable of the oldest process of the process's app
-/// unit. `wine_main` is the main app folder per Wine prefix.
+/// unit. `wine_apps` holds the Wine apps of the current user.
 fn group_of(
     p: &MemGroupInput<'_>,
     reference: Option<&str>,
-    wine_main: &FxHashMap<Option<&str>, &str>,
+    wine_apps: &WineFolders<'_>,
     self_uid: u32,
     key: &mut String,
     name: &mut String,
@@ -289,14 +330,21 @@ fn group_of(
         key.push_str("wine:");
         key.push_str(prefix.unwrap_or(""));
         let folder = match wine_app(wine.image.as_deref()) {
-            WineApp::App(folder) => Some(folder),
-            WineApp::System => wine_main.get(&prefix).copied(),
+            WineApp::App(spelling) => {
+                let folder = (prefix, fold_case(spelling));
+                let display = wine_apps.names.get(&folder).copied();
+                Some((folder.1, display.unwrap_or(spelling)))
+            }
+            WineApp::System => wine_apps
+                .main
+                .get(&prefix)
+                .map(|(folder, display)| (Cow::Borrowed(&**folder), *display)),
         };
         match folder {
-            Some(folder) => {
+            Some((folder, display)) => {
                 key.push(':');
-                key.push_str(folder);
-                name.push_str(folder);
+                key.push_str(&folder);
+                name.push_str(display);
             }
             None => {
                 name.push_str(WINE_NAME);

@@ -427,7 +427,7 @@ fn wine_backblaze_is_one_group() {
             "one group: {:?}",
             keys(&g)
         );
-        assert_eq!(&*g[0].key, "wine:/srv/backblaze/prefix:Backblaze");
+        assert_eq!(&*g[0].key, "wine:/srv/backblaze/prefix:backblaze");
         assert_eq!(&*g[0].name, "Backblaze");
         assert_eq!(g[0].kind, MemGroupKind::Wine);
         assert_eq!(g[0].wine_prefix.as_deref(), Some(BACKBLAZE));
@@ -449,10 +449,10 @@ fn wine_two_prefixes_stay_two_groups() {
     assert_eq!(
         keys(&g),
         [
-            "wine:/home/u/.wine:Backblaze",
-            "wine:/home/u/.wine:Backblaze",
-            "wine:/home/u/Games/other:Backblaze",
-            "wine:/home/u/Games/other:Backblaze",
+            "wine:/home/u/.wine:backblaze",
+            "wine:/home/u/.wine:backblaze",
+            "wine:/home/u/Games/other:backblaze",
+            "wine:/home/u/Games/other:backblaze",
         ]
     );
     assert!(!Arc::ptr_eq(&g[0], &g[2]));
@@ -492,10 +492,55 @@ fn wine_system_joins_the_app_with_most_processes() {
     ];
     let g = wine_groups(&procs, PRELOADER);
     assert_eq!(&*g[0].name, "Tool");
-    assert_eq!(&*g[3].key, "wine:/srv/backblaze/prefix:Backblaze");
+    assert_eq!(&*g[3].key, "wine:/srv/backblaze/prefix:backblaze");
     // A tie goes to the folder that sorts first.
     let g = wine_groups(&[procs[0], procs[1], procs[3]], PRELOADER);
     assert_eq!(&*g[2].name, "Backblaze");
+}
+
+#[test]
+fn wine_folder_names_ignore_case() {
+    let procs = [
+        (
+            1,
+            Some(BACKBLAZE),
+            "C:\\Program Files\\Backblaze\\bzbui.exe",
+        ),
+        (
+            2,
+            Some(BACKBLAZE),
+            "C:\\Program Files\\BACKBLAZE\\bzserv.exe",
+        ),
+        (
+            3,
+            Some(BACKBLAZE),
+            "c:\\program files\\backblaze\\bztransmit.exe",
+        ),
+        (
+            4,
+            Some(BACKBLAZE),
+            "C:\\Program Files\\Backblaze\\bzbuitray.exe",
+        ),
+        (5, Some(BACKBLAZE), "C:\\Program Files\\Tool\\a.exe"),
+        (6, Some(BACKBLAZE), "C:\\Program Files\\Tool\\b.exe"),
+        (7, Some(BACKBLAZE), "C:\\Program Files\\Tool\\c.exe"),
+        (8, Some(BACKBLAZE), "C:\\windows\\system32\\services.exe"),
+    ];
+    let g = wine_groups(&procs, PRELOADER);
+    // One group, named by the spelling most of its processes use.
+    for x in &g[..4] {
+        assert!(Arc::ptr_eq(x, &g[0]), "one group: {:?}", keys(&g));
+    }
+    assert_eq!(&*g[0].key, "wine:/srv/backblaze/prefix:backblaze");
+    assert_eq!(&*g[0].name, "Backblaze");
+    // Wine's own process joins Backblaze: four processes beat three of Tool, though no single
+    // spelling of Backblaze has more than two.
+    assert!(Arc::ptr_eq(&g[7], &g[0]));
+    assert_eq!(&*g[4].name, "Tool");
+    // Equal counts go to the spelling that sorts first.
+    let g = wine_groups(&[procs[1], procs[2]], PRELOADER);
+    assert!(Arc::ptr_eq(&g[0], &g[1]));
+    assert_eq!(&*g[0].name, "BACKBLAZE");
 }
 
 #[test]
