@@ -106,6 +106,8 @@ pub enum CpuSecondaryGraph {
     #[default]
     Power,
     Clock,
+    /// One clock line per physical core (tasklens-o55.57).
+    Clocks,
     Temperature,
 }
 
@@ -659,6 +661,10 @@ pub struct OverviewGridSetting {
         deserialize_with = "loose_some"
     )]
     pub power_placement: Option<String>,
+    /// Whether the CPU box shows its Core clocks chart under the CPU graph (tasklens-o55.57).
+    /// Only the CPU box has it; written only when on.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "loose")]
+    pub clocks: bool,
     /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
     /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
     /// Only the GPU box has it; written only when not empty.
@@ -731,6 +737,10 @@ pub struct OverviewBoxSetting {
         deserialize_with = "loose_some"
     )]
     pub power_placement: Option<String>,
+    /// Whether the CPU box shows its Core clocks chart under the CPU graph (tasklens-o55.57).
+    /// Only the CPU box has it; written only when on.
+    #[serde(skip_serializing_if = "is_false", deserialize_with = "loose")]
+    pub clocks: bool,
     /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
     /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
     /// Only the GPU box has it; written only when not empty.
@@ -848,6 +858,7 @@ impl Unreadable for OverviewBoxSetting {
             power: false,
             power_split: None,
             power_placement: None,
+            clocks: false,
             hidden: Vec::new(),
         }
     }
@@ -1136,6 +1147,7 @@ fn grid_from_rows(
                 power: b.power,
                 power_split: b.power_split,
                 power_placement: b.power_placement.clone(),
+                clocks: b.clocks,
                 hidden: b.hidden.clone(),
             });
             col += cols;
@@ -1185,8 +1197,8 @@ impl OverviewGridSetting {
     /// Drops a mode that `kind` does not have, a split outside [`OVERVIEW_SPLIT_RANGE`], an
     /// `arrange` not in [`OVERVIEW_ARRANGES`], a `power_split` outside
     /// [`OVERVIEW_POWER_SPLIT_RANGE`], a `power_placement` not in [`OVERVIEW_POWER_PLACEMENTS`],
-    /// `power` keys on a box that is not the CPU box, and `hidden` on a box that is not the GPU
-    /// box (UI-PRF-019). Returns `true` when it dropped anything.
+    /// `power` and `clocks` keys on a box that is not the CPU box, and `hidden` on a box that is
+    /// not the GPU box (UI-PRF-019). Returns `true` when it dropped anything.
     fn drop_invalid_mode(&mut self, kind: &str) -> bool {
         let mut changed = false;
         if self
@@ -1229,6 +1241,10 @@ impl OverviewGridSetting {
             self.power = false;
             self.power_split = None;
             self.power_placement = None;
+            changed = true;
+        }
+        if kind != "cpu" && self.clocks {
+            self.clocks = false;
             changed = true;
         }
         if kind != "gpu" && !self.hidden.is_empty() {
@@ -2367,6 +2383,7 @@ mod tests {
         assert_name(CpuSecondaryGraph::None, "none");
         assert_name(CpuSecondaryGraph::Power, "power");
         assert_name(CpuSecondaryGraph::Clock, "clock");
+        assert_name(CpuSecondaryGraph::Clocks, "clocks");
         assert_name(CpuSecondaryGraph::Temperature, "temperature");
         assert_name(GpuOptionalGraph::Power, "power");
         assert_name(GpuOptionalGraph::Clocks, "clocks");
@@ -2836,6 +2853,50 @@ mod tests {
         // An old row layout keeps it on the CPU box.
         let (s, _) = load_toml(&cpu_row_entry("power_placement = \"under_graph\""));
         assert_eq!(first(&s).power_placement.as_deref(), Some("under_graph"));
+    }
+
+    /// tasklens-o55.57: `clocks` is off by default, written only when on, and only the CPU box
+    /// has it; `cpu_secondary_graph = "clocks"` loads and saves.
+    #[test]
+    fn overview_cpu_clocks_and_secondary_clocks_round_trip() {
+        let (s, changed) = load_toml(&cpu_entry(""));
+        assert!(changed.is_empty(), "{changed:?}");
+        assert!(!first(&s).clocks);
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(!text.contains("clocks"), "{text}");
+
+        let (s, changed) = load_toml(&cpu_entry("clocks = true"));
+        assert!(changed.is_empty(), "{changed:?}");
+        assert!(first(&s).clocks);
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("clocks = true"), "{text}");
+        let (back, changed) = load_toml(&text);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert!(first(&back).clocks);
+
+        // A value of the wrong type loads as off.
+        let (s, _) = load_toml(&cpu_entry("clocks = \"yes\""));
+        assert!(!first(&s).clocks);
+        // Only the CPU box has it.
+        let text = "[performance.overview]\ngrid = [{ kind = \"memory\", col = 0, row = 0, \
+                    cols = 12, rows = 7, clocks = true }]\n";
+        let (s, changed) = load_toml(text);
+        assert!(!first(&s).clocks);
+        assert!(!changed.is_empty());
+        // An old row layout keeps it on the CPU box.
+        let (s, _) = load_toml(&cpu_row_entry("clocks = true"));
+        assert!(first(&s).clocks);
+
+        let (s, changed) = load_toml("[performance]\ncpu_secondary_graph = \"clocks\"\n");
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(s.performance.cpu_secondary_graph, CpuSecondaryGraph::Clocks);
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("cpu_secondary_graph = \"clocks\""), "{text}");
+        let (back, _) = load_toml(&text);
+        assert_eq!(
+            back.performance.cpu_secondary_graph,
+            CpuSecondaryGraph::Clocks
+        );
     }
 
     #[test]
