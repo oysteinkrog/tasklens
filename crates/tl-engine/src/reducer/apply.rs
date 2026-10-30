@@ -47,9 +47,9 @@ use crate::client_session::{
 };
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
-    ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
-    DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, MemorySample, NetSample,
-    SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
+    ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
+    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, MemorySample,
+    NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
 use crate::workers::history::HistoryMsg;
 use crate::workers::process_detail::pss_keys;
@@ -263,6 +263,7 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
             MetricId::CPU_TOTAL,
             MetricId::CPU_KERNEL,
             MetricId::CPU_FREQ,
+            MetricId::CPU_CORE_CLOCK,
         ],
         DeviceKind::Memory => &[
             MetricId::MEM_USED,
@@ -1372,6 +1373,7 @@ impl Reducer {
                 period,
             );
         }
+        self.push_core_clocks(&s.per_cpu, t, totals.freq_is_bogomips, ok, period)?;
         if ok {
             let st = &mut self.apply_state;
             st.irq_seen |= s.irq_pct > 0.0;
@@ -1385,6 +1387,55 @@ impl Reducer {
         self.system_mut(t).cpu = totals;
         self.sample_ok(SourceId::Cpu, t, period);
         self.mark(ComponentMask::SERIES);
+        Ok(())
+    }
+
+    /// One `CPU_CORE_CLOCK` sample per physical core, on the `CpuLogical` device of its lowest
+    /// online CPU: the highest clock among the core's SMT siblings, from the same per-CPU
+    /// values as `CPU_FREQ` (tasklens-o55.56). While the clock comes from BogoMIPS no series
+    /// starts, and one that already runs gets a gap.
+    fn push_core_clocks(
+        &mut self,
+        per_cpu: &[CpuCoreSample],
+        t: TimeNs,
+        bogomips: bool,
+        ok: bool,
+        period: u64,
+    ) -> Result<(), InvariantViolation> {
+        let topology = Arc::clone(&self.components.system.cpu_topology);
+        for core in topology.cores.iter() {
+            let Some(&head) = core.logical.first() else {
+                continue;
+            };
+            let id = DeviceIdentity::CpuLogical { id: head };
+            if bogomips {
+                if let Some(idx) = self.devices.idx(&id) {
+                    self.gaps(idx, &[MetricId::CPU_CORE_CLOCK], t);
+                }
+                continue;
+            }
+            let (idx, present) = self.sample_device(&id)?;
+            if !present {
+                // The per-CPU loop already gave this device its gaps.
+                continue;
+            }
+            let peak = core
+                .logical
+                .iter()
+                .filter_map(|&cpu| {
+                    let c = per_cpu.get(usize::from(cpu)).filter(|c| c.cpu == cpu)?;
+                    c.validity.is_valid().then_some(c.freq_mhz)?
+                })
+                .max();
+            self.push(
+                idx,
+                MetricId::CPU_CORE_CLOCK,
+                t,
+                peak.map_or(0.0, |f| f as f32),
+                ok && peak.is_some(),
+                period,
+            );
+        }
         Ok(())
     }
 

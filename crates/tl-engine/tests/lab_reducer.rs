@@ -48,8 +48,8 @@ use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
 use tl_model::system::{
-    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals, KernelMemory, LinkState,
-    MemoryTotals, Metric, NetTotals,
+    CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuEngine, GpuTotals,
+    KernelMemory, LinkState, MemoryTotals, Metric, NetTotals,
 };
 use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
@@ -807,6 +807,105 @@ fn cpu_secondary_series_fill() {
             .flags
             .contains(SampleFlags::VALID)
     );
+}
+
+/// A CPU sample of two cores with two SMT siblings each (CPUs 0-1 and 2-3) and `clocks` per
+/// CPU. A `None` clock has no reading.
+fn smt_clock_msg(t_ns: TimeNs, clocks: [Option<u32>; 4], bogomips: bool) -> EngineMsg {
+    let core = |id: u16, logical: [u16; 2]| CoreInfo {
+        id,
+        logical: SmallVec::from_slice(&logical),
+        l3_group: 0,
+        kind: CoreKind::Standard,
+    };
+    src(SourceUpdate::Cpu(CpuSample {
+        t_ns,
+        pressure_t_ns: t_ns,
+        totals: CpuTotals {
+            util_pct: Metric::valid(50.0),
+            freq_is_bogomips: bogomips,
+            ..CpuTotals::default()
+        },
+        irq_pct: 0.0,
+        per_cpu: (0..4)
+            .map(|cpu| CpuCoreSample {
+                cpu,
+                pct: 50.0,
+                kernel_pct: 0.0,
+                freq_mhz: clocks[usize::from(cpu)],
+                validity: Validity::Valid,
+            })
+            .collect(),
+        freq_mhz: Some(3000),
+        temp_c: None,
+        temp_validity: Validity::Unsupported,
+        topology: Some(Arc::new(CpuTopology {
+            online: cpus(4),
+            cores: Arc::from([core(0, [0, 1]), core(1, [2, 3])]),
+        })),
+        validity: Validity::Valid,
+    }))
+}
+
+/// The `CPU_CORE_CLOCK` series of logical CPU `cpu`'s device, if the snapshot has one.
+fn core_clock(rig: &Rig, cpu: u16) -> Option<Arc<[Sample]>> {
+    let device = rig.idx(&DeviceIdentity::CpuLogical { id: cpu });
+    rig.latest()
+        .series
+        .get(SeriesId {
+            device,
+            metric: MetricId::CPU_CORE_CLOCK,
+        })
+        .map(|view| Arc::clone(&view.samples))
+}
+
+#[test]
+fn core_clock_is_the_fastest_smt_sibling() {
+    let mut rig = Rig::new();
+    rig.run(vec![
+        smt_clock_msg(100 * MS, [Some(3000), Some(4500), None, Some(2000)], false),
+        smt_clock_msg(200 * MS, [Some(3100), Some(2900), None, None], false),
+    ])
+    .expect("no invariant violation");
+    // One series per core, on its lowest CPU; the siblings get none.
+    let first = core_clock(&rig, 0).expect("core 0 series on CPU 0");
+    let second = core_clock(&rig, 2).expect("core 1 series on CPU 2");
+    assert!(core_clock(&rig, 1).is_none());
+    assert!(core_clock(&rig, 3).is_none());
+    let values = |samples: &[Sample]| -> Vec<Option<f32>> {
+        samples
+            .iter()
+            .map(|s| s.flags.contains(SampleFlags::VALID).then_some(s.value))
+            .collect()
+    };
+    assert_eq!(values(&first), [Some(4500.0), Some(3100.0)]);
+    // A sibling without a reading does not count; no reading at all is a gap.
+    assert_eq!(values(&second), [Some(2000.0), None]);
+    rig.passed();
+}
+
+#[test]
+fn core_clock_has_no_series_from_bogomips() {
+    let mut rig = Rig::new();
+    rig.run(vec![
+        smt_clock_msg(100 * MS, [Some(6000); 4], true),
+        smt_clock_msg(200 * MS, [Some(6000); 4], true),
+    ])
+    .expect("no invariant violation");
+    for cpu in 0..4 {
+        assert!(core_clock(&rig, cpu).is_none(), "CPU {cpu}");
+    }
+    // A running series that switches to BogoMIPS gets a gap, not a BogoMIPS value.
+    rig.run(vec![
+        smt_clock_msg(300 * MS, [Some(4000); 4], false),
+        smt_clock_msg(400 * MS, [Some(6000); 4], true),
+    ])
+    .expect("no invariant violation");
+    let samples = core_clock(&rig, 0).expect("core 0 series");
+    let last = samples.last().expect("a sample");
+    assert!(!last.flags.contains(SampleFlags::VALID));
+    assert_eq!(samples.len(), 2);
+    rig.passed();
 }
 
 /// Copies the fixture trees in `parts` over each other into a fresh dir.
