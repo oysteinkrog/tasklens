@@ -18,8 +18,8 @@ use asupersync::Cx;
 use futures_lite::FutureExt;
 use rustix::io::Errno;
 use tl_model::actions::{
-    ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef,
-    DumpMode, RejectReason, Signal,
+    ActionError, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef, DumpMode,
+    RejectReason, Signal,
 };
 use tl_model::health::HelperState;
 use tl_model::helper_proto::{
