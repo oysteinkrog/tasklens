@@ -1,8 +1,9 @@
 //! LabRuntime tests for per-session id namespaces (q4x76.17, ADR-018): two sessions that use
 //! the same action ids, scan ids, search ids and eject `seq`s never see each other's events or
 //! results, and each one's ids reach the workers as distinct engine ids. A request's mapping
-//! lives until its end however many requests come after it, and a session has at most
-//! `ACTIVE_MAX` active requests per kind.
+//! lives until its one `RequestEvent` however many requests come after it, and a session has at
+//! most `ACTIVE_MAX` active requests per kind. `lab_request_lifecycle.rs` checks the lifecycle
+//! over random interleavings.
 //!
 //! Each `run` call gets its own task. The messages are queued before the task starts and the
 //! sender is dropped, so `run` drains the queue and then returns.
@@ -15,7 +16,7 @@ use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use smallvec::SmallVec;
 use tl_engine::client_session::{
-    ACTIVE_MAX, BUSY_TEXT, ClientMsg, ClientSessionId, IdKind, LOST_TEXT, STOPPED_TEXT, SessionLink,
+    ACTIVE_MAX, ClientMsg, ClientSessionId, IdKind, RequestEnd, RequestEvent, SessionLink,
 };
 use tl_engine::reducer::apply::QUEUE_MAX;
 use tl_engine::reducer::{ActionGate, ActionRoute, AdmissionView, Publisher, Reducer};
@@ -52,6 +53,8 @@ struct Rig {
     control: watch::Receiver<WorkerControl>,
     /// The local session's action events.
     events: async_channel::Receiver<ActionEvent>,
+    /// The local session's request events.
+    requests: async_channel::Receiver<RequestEvent>,
     _wake_rx: async_channel::Receiver<()>,
 }
 
@@ -69,13 +72,17 @@ impl Rig {
         };
         let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(100_000));
         let root = lab.state.create_root_region(Budget::INFINITE);
+        let mut reducer = Reducer::new(1, BOOT, control_tx, events_tx);
+        let (requests_tx, requests) = async_channel::unbounded();
+        reducer.clients.set_local_requests(requests_tx);
         Rig {
             lab,
             root,
-            reducer: Some(Reducer::new(1, BOOT, control_tx, events_tx)),
+            reducer: Some(reducer),
             publisher: Some(publisher),
             control,
             events,
+            requests,
             _wake_rx: wake_rx,
         }
     }
@@ -137,6 +144,7 @@ impl Rig {
 struct Remote {
     link: SessionLink,
     events: async_channel::Receiver<ActionEvent>,
+    requests: async_channel::Receiver<RequestEvent>,
     _wake_rx: async_channel::Receiver<()>,
 }
 
@@ -144,13 +152,16 @@ impl Remote {
     fn new() -> Self {
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (events_tx, events) = async_channel::bounded(64);
+        let (requests_tx, requests) = async_channel::unbounded();
         Remote {
             link: SessionLink {
                 latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(BOOT, 1))),
                 wake_tx,
                 events_tx,
+                requests_tx,
             },
             events,
+            requests,
             _wake_rx: wake_rx,
         }
     }
@@ -178,8 +189,12 @@ fn on(id: ClientSessionId, cmd: Command) -> EngineMsg {
     }
 }
 
-fn drain(rx: &async_channel::Receiver<ActionEvent>) -> Vec<ActionEvent> {
+fn drain<T>(rx: &async_channel::Receiver<T>) -> Vec<T> {
     std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn ended(kind: IdKind, id: u64, end: RequestEnd) -> RequestEvent {
+    RequestEvent { kind, id, end }
 }
 
 fn action(id: u64) -> Command {
@@ -396,13 +411,15 @@ fn same_scan_id_reaches_only_its_own_session() {
         "the remote window hides the local scan"
     );
 
-    // Then the remote scan replaces it in the shared slot, as the worker does.
-    // The local session sees its own scan stopped, not the remote one's progress.
+    // Then the remote scan replaces it in the shared slot, as the worker does. The local
+    // session gets its own scan's end, not the remote one's progress.
     let local = rig.run(vec![scan_state(remote_engine.0)]);
     assert_eq!(
-        scan_phase(&local, KEY),
-        Some((ScanId(1), ScanPhase::Cancelled))
+        drain(&rig.requests),
+        [ended(IdKind::Scan, 1, RequestEnd::Cancelled)]
     );
+    assert!(drain(&remote.requests).is_empty());
+    assert_eq!(scan_phase(&local, KEY), None);
     assert_eq!(
         scan_phase(&remote.snapshot(), KEY),
         Some((ScanId(1), ScanPhase::Scanning))
@@ -435,25 +452,19 @@ fn unchanged_scan_keeps_its_rewritten_arc() {
         },
     )]);
     assert_eq!(shown_scan(&first), None);
-    let engine = rig
-        .commands()
-        .iter()
-        .find_map(|c| match c {
-            WorkerCommand::StringScan { scan, .. } => Some(*scan),
-            _ => None,
-        })
-        .expect("the scan was forwarded");
+    let engine = last_engine(&rig);
 
-    let a = rig.run(vec![scan_state(engine.0)]);
+    let a = rig.run(vec![scan_state(engine)]);
     // Another tab of the same target changes; the Strings payload does not.
-    let b = rig.run(vec![EngineMsg::Source(SourceUpdate::Details(
-        DetailsUpdate::Tab {
+    let threads = || {
+        EngineMsg::Source(SourceUpdate::Details(DetailsUpdate::Tab {
             target: DetailTarget::Process(KEY),
             tab: DetailTab::Threads,
             payload: Arc::new(TabPayload::Threads(Arc::from([]))),
             validity: Validity::Valid,
-        },
-    ))]);
+        }))
+    };
+    let b = rig.run(vec![threads()]);
     let payload = |s: &Snapshot| {
         s.details.targets[&DetailTarget::Process(KEY)]
             .tab(DetailTab::Strings)
@@ -463,22 +474,22 @@ fn unchanged_scan_keeps_its_rewritten_arc() {
     };
     assert_eq!(shown_scan(&a), Some(ScanId(3)));
     assert!(Arc::ptr_eq(&payload(&a), &payload(&b)));
+
+    // The same holds for the end the session keeps after the mapping is gone.
+    let c = rig.run(vec![scan_payload(KEY, engine, ScanPhase::Finished)]);
+    let d = rig.run(vec![threads()]);
+    assert_eq!(scan_phase(&c, KEY), Some((ScanId(3), ScanPhase::Finished)));
+    assert!(Arc::ptr_eq(&payload(&c), &payload(&d)));
 }
 
 #[test]
 fn same_search_id_reaches_only_its_own_session() {
     let mut rig = Rig::new();
     let remote = Remote::new();
-    let search = || Command::HandleSearch {
-        search: SearchId(1),
-        pattern: Arc::from("*.log"),
-        include_maps: true,
-        privileged: false,
-    };
     rig.run(vec![
         remote.open(),
-        on(ClientSessionId::LOCAL, search()),
-        on(REMOTE, search()),
+        on(ClientSessionId::LOCAL, search(1)),
+        on(REMOTE, search(1)),
     ]);
     let engine: Vec<SearchId> = rig
         .commands()
@@ -501,17 +512,14 @@ fn same_search_id_reaches_only_its_own_session() {
         "local search hidden"
     );
 
-    // The remote search replaces it, as the worker does.
-    // The local session sees its own search stopped, not the remote one's progress.
+    // The remote search replaces it, as the worker does. The local session gets its own
+    // search's end, not the remote one's progress.
     let local = rig.run(vec![search_state(engine[1].0)]);
     assert_eq!(
-        local
-            .details
-            .handle_search
-            .as_ref()
-            .map(|s| (s.search, s.phase)),
-        Some((SearchId(1), HandlePhase::Stopped))
+        drain(&rig.requests),
+        [ended(IdKind::Search, 1, RequestEnd::Cancelled)]
     );
+    assert!(local.details.handle_search.is_none());
     let remote_search = remote.snapshot().details.handle_search.clone();
     assert_eq!(
         remote_search.map(|s| (s.search, s.phase)),
@@ -529,16 +537,10 @@ fn same_search_id_reaches_only_its_own_session() {
 fn same_eject_seq_reaches_only_its_own_session() {
     let mut rig = Rig::new();
     let remote = Remote::new();
-    let eject = || {
-        Command::Device(DeviceCommand::Eject {
-            seq: 1,
-            disk: Arc::from("sda"),
-        })
-    };
     rig.run(vec![
         remote.open(),
-        on(REMOTE, eject()),
-        on(ClientSessionId::LOCAL, eject()),
+        on(REMOTE, eject(1)),
+        on(ClientSessionId::LOCAL, eject(1)),
     ]);
     let engine: Vec<u64> = rig
         .commands()
@@ -555,7 +557,7 @@ fn same_eject_seq_reaches_only_its_own_session() {
     assert_eq!(shown_eject(&local), None, "remote eject hidden");
     assert_eq!(shown_eject(&remote.snapshot()), Some(1));
 
-    // The remote session sees its own eject replaced, not the local one running.
+    // The worker runs the local eject instead: the remote one ends.
     let local = rig.run(vec![disk_eject(engine[1])]);
     let eject_of = |snap: &Snapshot| {
         snap.device_details
@@ -564,10 +566,12 @@ fn same_eject_seq_reaches_only_its_own_session() {
             .find_map(|(_, d)| d.eject.clone())
     };
     assert_eq!(eject_of(&local), Some((1, EjectState::Running)));
+    assert_eq!(eject_of(&remote.snapshot()), None);
     assert_eq!(
-        eject_of(&remote.snapshot()),
-        Some((1, EjectState::Failed(Arc::from(STOPPED_TEXT))))
+        drain(&remote.requests),
+        [ended(IdKind::Eject, 1, RequestEnd::Cancelled)]
     );
+    assert!(drain(&rig.requests).is_empty());
 }
 
 fn scan(id: u64, key: ProcessKey) -> Command {
@@ -608,14 +612,17 @@ fn last_engine(rig: &Rig) -> u64 {
         .expect("a request was forwarded")
 }
 
-/// Active requests and all mappings of `kind` in session `id`.
-fn counts(rig: &mut Rig, id: ClientSessionId, kind: IdKind) -> (usize, usize) {
-    let session = rig
-        .reducer_mut()
+/// Active requests of `kind` in session `id`: each has a mapping.
+fn active(rig: &mut Rig, id: ClientSessionId, kind: IdKind) -> usize {
+    rig.reducer_mut()
         .clients
         .get(id)
-        .expect("the session is open");
-    (session.active(kind), session.mapped(kind))
+        .expect("the session is open")
+        .active(kind)
+}
+
+fn late(rig: &mut Rig) -> u64 {
+    rig.reducer_mut().clients.late()
 }
 
 fn scan_phase(snap: &Snapshot, key: ProcessKey) -> Option<(ScanId, ScanPhase)> {
@@ -662,10 +669,13 @@ fn long_scan_outlasts_100_short_scans() {
         );
     }
     assert_eq!(
-        counts(&mut rig, REMOTE, IdKind::Scan),
-        (1, 1),
+        active(&mut rig, REMOTE, IdKind::Scan),
+        1,
         "only the long scan is active and mapped"
     );
+    let ends = drain(&remote.requests);
+    assert_eq!(ends.len(), 100);
+    assert!(ends.iter().all(|e| e.end == RequestEnd::Done));
     assert_eq!(
         scan_phase(&remote.snapshot(), key(1099)),
         Some((ScanId(1099), ScanPhase::Finished)),
@@ -691,11 +701,16 @@ fn long_scan_outlasts_100_short_scans() {
         scan_phase(&remote.snapshot(), KEY),
         Some((ScanId(1), ScanPhase::Cancelled))
     );
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (0, 0));
+    assert_eq!(
+        drain(&remote.requests),
+        [ended(IdKind::Scan, 1, RequestEnd::Cancelled)]
+    );
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 0);
+    assert!(drain(&rig.requests).is_empty());
 }
 
-/// Leader test 2: `ACTIVE_MAX` active scans, one more is refused as Busy, and after one finishes
-/// a new one is admitted.
+/// Leader test 2: `ACTIVE_MAX` active scans, one more is refused with `Busy`, and after one
+/// finishes a new one is admitted.
 #[test]
 fn scan_past_active_max_is_busy_until_one_ends() {
     let mut rig = Rig::new();
@@ -705,20 +720,8 @@ fn scan_past_active_max_is_busy_until_one_ends() {
             .map(|&pid| on(ClientSessionId::LOCAL, scan(u64::from(pid), key(pid))))
             .collect(),
     );
-    // The worker reports each one, so it took them all.
-    let running: Vec<EngineMsg> = rig
-        .commands()
-        .iter()
-        .filter_map(|c| match c {
-            WorkerCommand::StringScan { scan, key, .. } => {
-                Some(scan_payload(*key, scan.0, ScanPhase::Scanning))
-            }
-            _ => None,
-        })
-        .collect();
-    rig.run(running);
     assert_eq!(
-        counts(&mut rig, ClientSessionId::LOCAL, IdKind::Scan).0,
+        active(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
         ACTIVE_MAX
     );
     let first = rig
@@ -735,19 +738,16 @@ fn scan_past_active_max_is_busy_until_one_ends() {
             .iter()
             .any(|c| matches!(c, WorkerCommand::StringScan { key, .. } if *key == k))
     };
-    // The process has a Properties window open: its target is in the details. Engine id 0 is
-    // never given out, so this payload is no session's.
-    rig.run(vec![scan_payload(key(500), 0, ScanPhase::Finished)]);
-    let local = rig.run(vec![on(ClientSessionId::LOCAL, scan(500, key(500)))]);
+    // No detail slot exists for this process: the refusal still reaches the session.
+    rig.run(vec![on(ClientSessionId::LOCAL, scan(500, key(500)))]);
     assert!(!forwarded_to(&rig, key(500)), "one more is refused: Busy");
     assert_eq!(
-        scan_phase(&local, key(500)),
-        Some((ScanId(500), ScanPhase::Failed(Arc::from(BUSY_TEXT)))),
-        "the session sees the refusal under its own id"
+        drain(&rig.requests),
+        [ended(IdKind::Scan, 500, RequestEnd::Busy)]
     );
     assert_eq!(
-        counts(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
-        (ACTIVE_MAX, ACTIVE_MAX)
+        active(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
+        ACTIVE_MAX
     );
 
     // Another session has its own limit.
@@ -756,6 +756,10 @@ fn scan_past_active_max_is_busy_until_one_ends() {
     assert!(forwarded_to(&rig, key(600)));
 
     rig.run(vec![scan_payload(key(0), first, ScanPhase::Finished)]);
+    assert_eq!(
+        drain(&rig.requests),
+        [ended(IdKind::Scan, 0, RequestEnd::Done)]
+    );
     rig.run(vec![on(ClientSessionId::LOCAL, scan(501, key(500)))]);
     assert!(
         forwarded_to(&rig, key(500)),
@@ -765,19 +769,12 @@ fn scan_past_active_max_is_busy_until_one_ends() {
     let local = rig.run(vec![scan_payload(key(500), engine, ScanPhase::Scanning)]);
     assert_eq!(
         scan_phase(&local, key(500)),
-        Some((ScanId(501), ScanPhase::Scanning)),
-        "the new scan replaces the refusal"
+        Some((ScanId(501), ScanPhase::Scanning))
     );
     assert_eq!(
-        counts(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
-        (ACTIVE_MAX, ACTIVE_MAX)
+        active(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
+        ACTIVE_MAX
     );
-    let session = rig
-        .reducer_mut()
-        .clients
-        .get(ClientSessionId::LOCAL)
-        .expect("the local session");
-    assert_eq!(session.ended(IdKind::Scan), 0);
 }
 
 /// Leader test 3: a session that ends frees all its mappings.
@@ -792,11 +789,25 @@ fn closed_session_frees_its_mappings() {
         on(REMOTE, eject(1)),
     ]);
     for kind in [IdKind::Scan, IdKind::Search, IdKind::Eject] {
-        assert_eq!(counts(&mut rig, REMOTE, kind), (1, 1));
+        assert_eq!(active(&mut rig, REMOTE, kind), 1);
     }
+    let scan_engine = rig
+        .commands()
+        .iter()
+        .find_map(|c| match c {
+            WorkerCommand::StringScan { scan, .. } => Some(scan.0),
+            _ => None,
+        })
+        .expect("the scan was forwarded");
 
     rig.run(vec![EngineMsg::Client(ClientMsg::Close(REMOTE))]);
     assert!(rig.reducer_mut().clients.get(REMOTE).is_none());
+
+    // A report of the closed session's scan reaches no session.
+    let before = late(&mut rig);
+    let local = rig.run(vec![scan_state(scan_engine)]);
+    assert_eq!(late(&mut rig), before + 1);
+    assert_eq!(shown_scan(&local), None);
 
     // The same session id again starts empty: the old ids are not known.
     let again = Remote::new();
@@ -806,7 +817,7 @@ fn closed_session_frees_its_mappings() {
         on(REMOTE, Command::CancelHandleSearch(SearchId(1))),
     ]);
     for kind in [IdKind::Scan, IdKind::Search, IdKind::Eject] {
-        assert_eq!(counts(&mut rig, REMOTE, kind), (0, 0));
+        assert_eq!(active(&mut rig, REMOTE, kind), 0);
     }
     assert!(
         !rig.commands().iter().any(|c| matches!(
@@ -815,18 +826,21 @@ fn closed_session_frees_its_mappings() {
         )),
         "cancels of the closed session's ids are dropped"
     );
+    assert!(drain(&remote.requests).is_empty(), "no event after close");
 }
 
 /// What ends one request in the sweep, given its engine id.
 type Ender = Box<dyn Fn(u64) -> Vec<EngineMsg>>;
 
-/// One sweep case: the kind, the request for a client id and its terminal events.
-type Case = (IdKind, fn(u64) -> Command, Ender);
+/// One sweep case: the kind, the request for a client id, its terminal events, the end the
+/// session gets, and whether its slot keeps showing the request.
+type Case = (IdKind, fn(u64) -> Command, Ender, RequestEnd, bool);
 
-/// Leader test 4: every terminal event of every kind ends the request and removes its mapping.
-/// The session still sees the end under its own id: the terminal state the worker reported, or
-/// for a request the worker dropped without one, a cancelled scan or failed eject. Actions keep
-/// no mapping: the gate routes them (`same_action_id_reaches_only_its_own_session`).
+/// Leader test 4: every terminal event of every kind ends the request with one event and
+/// removes its mapping. The session keeps the terminal state the worker reported under its
+/// own id; a request the worker dropped leaves the slot empty. A later report of the request
+/// is dropped and counted. Actions keep no mapping: the gate routes them
+/// (`same_action_id_reaches_only_its_own_session`).
 #[test]
 fn every_terminal_event_ends_its_request() {
     let blocked = || EjectState::Blocked {
@@ -843,64 +857,99 @@ fn every_terminal_event_ends_its_request() {
             DeviceDetailsUpdate::EjectDropped(e),
         ))]
     };
+    let on_key = |id| scan(id, KEY);
     let cases: Vec<Case> = vec![
         (
             IdKind::Scan,
-            |id| scan(id, KEY),
+            on_key,
             Box::new(|e| vec![scan_payload(KEY, e, ScanPhase::Finished)]),
+            RequestEnd::Done,
+            true,
         ),
         (
             IdKind::Scan,
-            |id| scan(id, KEY),
+            on_key,
             Box::new(|e| vec![scan_payload(KEY, e, ScanPhase::Cancelled)]),
+            RequestEnd::Cancelled,
+            true,
         ),
         (
             IdKind::Scan,
-            |id| scan(id, KEY),
+            on_key,
             Box::new(|e| vec![scan_payload(KEY, e, ScanPhase::StoppedLimit)]),
+            RequestEnd::Done,
+            true,
         ),
         (
             IdKind::Scan,
-            |id| scan(id, KEY),
+            on_key,
             Box::new(|e| vec![scan_payload(KEY, e, ScanPhase::StoppedExited)]),
+            RequestEnd::Done,
+            true,
         ),
         (
             IdKind::Scan,
-            |id| scan(id, KEY),
+            on_key,
             Box::new(|e| vec![scan_payload(KEY, e, ScanPhase::Failed(Arc::from("read")))]),
+            RequestEnd::Failed,
+            true,
         ),
-        (IdKind::Scan, |id| scan(id, KEY), Box::new(dropped_scan)),
+        (
+            IdKind::Scan,
+            on_key,
+            Box::new(dropped_scan),
+            RequestEnd::Cancelled,
+            false,
+        ),
         (
             IdKind::Search,
             search,
             Box::new(|e| vec![search_payload(e, HandlePhase::Done)]),
+            RequestEnd::Done,
+            true,
         ),
         (
             IdKind::Search,
             search,
             Box::new(|e| vec![search_payload(e, HandlePhase::Stopped)]),
+            RequestEnd::Cancelled,
+            true,
         ),
         (
             IdKind::Search,
             search,
             Box::new(|e| vec![search_payload(e, HandlePhase::Failed)]),
+            RequestEnd::Failed,
+            true,
         ),
         (
             IdKind::Eject,
             eject,
             Box::new(|e| vec![eject_payload(e, EjectState::Done)]),
+            RequestEnd::Done,
+            true,
         ),
         (
             IdKind::Eject,
             eject,
             Box::new(move |e| vec![eject_payload(e, blocked())]),
+            RequestEnd::Failed,
+            true,
         ),
         (
             IdKind::Eject,
             eject,
             Box::new(|e| vec![eject_payload(e, EjectState::Failed(Arc::from("x")))]),
+            RequestEnd::Failed,
+            true,
         ),
-        (IdKind::Eject, eject, Box::new(dropped_eject)),
+        (
+            IdKind::Eject,
+            eject,
+            Box::new(dropped_eject),
+            RequestEnd::Cancelled,
+            false,
+        ),
     ];
 
     let mut rig = Rig::new();
@@ -911,81 +960,52 @@ fn every_terminal_event_ends_its_request() {
         scan_payload(KEY, 0, ScanPhase::Finished),
         eject_payload(0, EjectState::Done),
     ]);
-    for (n, (kind, request, end)) in cases.into_iter().enumerate() {
+    let shown_of = |snap: &Snapshot, kind| match kind {
+        IdKind::Scan => scan_phase(snap, KEY).map(|(s, _)| s.0),
+        IdKind::Search => snap.details.handle_search.as_ref().map(|s| s.search.0),
+        IdKind::Eject => shown_eject(snap),
+    };
+    for (n, (kind, request, end, expected, keeps)) in cases.into_iter().enumerate() {
         let client = 10 + n as u64;
         rig.run(vec![on(REMOTE, request(client))]);
         let engine = last_engine(&rig);
-        assert_eq!(counts(&mut rig, REMOTE, kind), (1, 1), "case {n}: active");
+        assert_eq!(active(&mut rig, REMOTE, kind), 1, "case {n}: active");
         rig.run(end(engine));
         assert_eq!(
-            counts(&mut rig, REMOTE, kind),
-            (0, 0),
+            active(&mut rig, REMOTE, kind),
+            0,
             "case {n}: the terminal event removes the mapping"
         );
-        let snap = remote.snapshot();
-        let shown = match kind {
-            IdKind::Scan => scan_phase(&snap, KEY).map(|(s, _)| s.0),
-            IdKind::Search => snap.details.handle_search.as_ref().map(|s| s.search.0),
-            IdKind::Eject => shown_eject(&snap),
-        };
-        assert_eq!(shown, Some(client), "case {n}: the end stays shown");
-        // A later rebuild of the shared part keeps it shown.
-        rig.run(match kind {
-            IdKind::Eject => end(engine),
-            _ => vec![scan_payload(key(9), 0, ScanPhase::Finished)],
-        });
-        let snap = remote.snapshot();
-        let shown = match kind {
-            IdKind::Scan => scan_phase(&snap, KEY).map(|(s, _)| s.0),
-            IdKind::Search => snap.details.handle_search.as_ref().map(|s| s.search.0),
-            IdKind::Eject => shown_eject(&snap),
-        };
         assert_eq!(
-            shown,
-            Some(client),
-            "case {n}: still shown after the mapping is gone"
+            drain(&remote.requests),
+            [ended(kind, client, expected)],
+            "case {n}: one event"
         );
-    }
-    let snap = remote.snapshot();
-    assert_eq!(
-        snap.device_details
-            .disks
-            .iter()
-            .find_map(|(_, d)| d.eject.clone()),
-        Some((22, EjectState::Failed(Arc::from(STOPPED_TEXT)))),
-        "an eject the worker dropped shows as failed"
-    );
+        let shown = shown_of(&remote.snapshot(), kind);
+        assert_eq!(shown, keeps.then_some(client), "case {n}: what stays shown");
 
-    // A newer request of another session in the same slot ends the remote ones and takes the
-    // slot, so the remote session has no mapping left.
-    rig.run(vec![
-        on(ClientSessionId::LOCAL, scan(1, KEY)),
-        on(ClientSessionId::LOCAL, search(1)),
-        on(ClientSessionId::LOCAL, eject(1)),
-    ]);
-    let engines: Vec<u64> = rig
-        .commands()
-        .iter()
-        .rev()
-        .take(3)
-        .map(|c| match c {
-            WorkerCommand::StringScan { scan, .. } => scan.0,
-            WorkerCommand::HandleSearch { search, .. } => search.0,
-            WorkerCommand::Device(DeviceCommand::Eject { seq, .. }) => *seq,
-            other => panic!("unexpected command {other:?}"),
-        })
-        .collect();
-    let [eject_engine, search_engine, scan_engine] = engines[..] else {
-        panic!("three requests forwarded");
-    };
-    rig.run(vec![
-        scan_state(scan_engine),
-        search_state(search_engine),
-        disk_eject(eject_engine),
-    ]);
-    for kind in [IdKind::Scan, IdKind::Search, IdKind::Eject] {
-        assert_eq!(counts(&mut rig, REMOTE, kind), (0, 0), "{kind:?}");
+        // A progress report after the end is dropped, counted and not shown.
+        let before = late(&mut rig);
+        rig.run(vec![match kind {
+            IdKind::Scan => scan_state(engine),
+            IdKind::Search => search_state(engine),
+            IdKind::Eject => disk_eject(engine),
+        }]);
+        assert_eq!(late(&mut rig), before + 1, "case {n}: counted");
+        assert!(drain(&remote.requests).is_empty(), "case {n}: no event");
+        let snap = remote.snapshot();
+        assert_eq!(shown_of(&snap, kind), shown, "case {n}: view unchanged");
+        if kind == IdKind::Scan && keeps {
+            assert_ne!(
+                scan_phase(&snap, KEY).map(|(_, p)| p),
+                Some(ScanPhase::Scanning)
+            );
+        }
     }
+    assert!(
+        drain(&rig.requests).is_empty(),
+        "the local session saw none"
+    );
 }
 
 /// A newer request in the same slot ends an older one that never reported, in any session: the
@@ -1002,15 +1022,15 @@ fn newer_request_in_the_slot_ends_the_older_one() {
     rig.run(vec![on(ClientSessionId::LOCAL, scan(2, key(77)))]);
     let other = last_engine(&rig);
     rig.run(vec![scan_payload(key(77), other, ScanPhase::Scanning)]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan).0, 1);
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 1);
 
     rig.run(vec![scan_state(newer)]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (0, 0));
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 0);
     assert_eq!(
-        scan_phase(&remote.snapshot(), KEY),
-        Some((ScanId(1), ScanPhase::Cancelled)),
-        "the remote session sees its scan stopped"
+        drain(&remote.requests),
+        [ended(IdKind::Scan, 1, RequestEnd::Cancelled)]
     );
+    assert_eq!(scan_phase(&remote.snapshot(), KEY), None);
     rig.run(vec![on(REMOTE, Command::CancelStringScan(ScanId(1)))]);
     assert!(
         !rig.commands()
@@ -1029,8 +1049,9 @@ fn last_seq(rig: &Rig) -> u64 {
         .seq
 }
 
-/// A request whose command falls off the worker queue before the worker took it is lost: its
-/// mapping goes and the session sees it failed. One the worker already reported is not.
+/// A request whose command falls off the worker queue before a worker claimed it is lost: its
+/// mapping goes, the session gets `Lost`, and a worker that copied the queue earlier cannot
+/// claim it any more. One a worker claimed is the worker's to end.
 #[test]
 fn request_pushed_off_the_queue_is_lost() {
     let mut rig = Rig::new();
@@ -1040,33 +1061,36 @@ fn request_pushed_off_the_queue_is_lost() {
         scan_payload(KEY, 0, ScanPhase::Finished),
         on(REMOTE, scan(1, KEY)),
     ]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (1, 1));
+    let first = last_seq(&rig);
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 1);
 
     // QUEUE_MAX - 1 more commands keep it in the queue; one more pushes it out.
     let refresh = || on(REMOTE, Command::RefreshNow(SourceId::Cpu));
     rig.run((1..QUEUE_MAX).map(|_| refresh()).collect());
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (1, 1));
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 1);
     rig.run(vec![refresh()]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (0, 0));
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 0);
     assert_eq!(
-        scan_phase(&remote.snapshot(), KEY),
-        Some((ScanId(1), ScanPhase::Failed(Arc::from(LOST_TEXT))))
+        drain(&remote.requests),
+        [ended(IdKind::Scan, 1, RequestEnd::Lost)]
+    );
+    assert_eq!(scan_phase(&remote.snapshot(), KEY), None);
+    let progress = Arc::clone(&rig.control.borrow_and_clone().progress);
+    assert!(
+        !progress.claim(SourceId::ProcessDetail, first),
+        "a worker that copied the queue before cannot run it"
     );
 
-    // A scan the worker reported stays when its command leaves the queue.
+    // A scan a worker claimed stays when its command leaves the queue.
     rig.run(vec![on(REMOTE, scan(2, KEY))]);
-    let engine = last_engine(&rig);
-    rig.run(vec![scan_state(engine)]);
+    assert!(progress.claim(SourceId::ProcessDetail, last_seq(&rig)));
     rig.run((0..QUEUE_MAX).map(|_| refresh()).collect());
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (1, 1));
-    assert_eq!(
-        scan_phase(&remote.snapshot(), KEY),
-        Some((ScanId(2), ScanPhase::Scanning))
-    );
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Scan), 1);
+    assert!(drain(&remote.requests).is_empty());
 }
 
-/// A new worker generation reports the last command the old one took. The scans, searches and
-/// ejects up to it died with the old generation and are lost; later ones stay active.
+/// A new worker generation reports the last command the old one claimed. The scans, searches
+/// and ejects up to it died with the old generation and are lost; later ones stay active.
 #[test]
 fn worker_restart_loses_the_requests_it_took() {
     let mut rig = Rig::new();
@@ -1085,50 +1109,36 @@ fn worker_restart_loses_the_requests_it_took() {
         DetailsUpdate::RequestsLost { through },
     ))]);
     assert_eq!(
-        counts(&mut rig, REMOTE, IdKind::Scan),
-        (0, 0),
+        active(&mut rig, REMOTE, IdKind::Scan),
+        0,
         "the scan was taken"
     );
     assert_eq!(
-        counts(&mut rig, REMOTE, IdKind::Search),
-        (1, 1),
+        active(&mut rig, REMOTE, IdKind::Search),
+        1,
         "the search was queued after it"
     );
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Eject), 1, "another worker");
     assert_eq!(
-        counts(&mut rig, REMOTE, IdKind::Eject),
-        (1, 1),
-        "another worker"
-    );
-    assert_eq!(
-        scan_phase(&remote.snapshot(), KEY),
-        Some((ScanId(1), ScanPhase::Failed(Arc::from(LOST_TEXT))))
+        drain(&remote.requests),
+        [ended(IdKind::Scan, 1, RequestEnd::Lost)]
     );
 
     let through = last_seq(&rig);
     rig.run(vec![lost(SourceUpdate::DeviceDetails(
         DeviceDetailsUpdate::EjectsLost { through },
     ))]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Eject), (0, 0));
-    assert_eq!(
-        remote
-            .snapshot()
-            .device_details
-            .disks
-            .iter()
-            .find_map(|(_, d)| d.eject.clone()),
-        Some((3, EjectState::Failed(Arc::from(LOST_TEXT))))
-    );
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Eject), 0);
     rig.run(vec![lost(SourceUpdate::Details(
         DetailsUpdate::RequestsLost { through },
     ))]);
-    assert_eq!(counts(&mut rig, REMOTE, IdKind::Search), (0, 0));
+    assert_eq!(active(&mut rig, REMOTE, IdKind::Search), 0);
     assert_eq!(
-        remote
-            .snapshot()
-            .details
-            .handle_search
-            .as_ref()
-            .map(|s| (s.search, s.phase)),
-        Some((SearchId(2), HandlePhase::Failed))
+        drain(&remote.requests),
+        [
+            ended(IdKind::Eject, 3, RequestEnd::Lost),
+            ended(IdKind::Search, 2, RequestEnd::Lost)
+        ]
     );
+    assert!(remote.snapshot().details.handle_search.is_none());
 }
