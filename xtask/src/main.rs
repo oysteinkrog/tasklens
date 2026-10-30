@@ -4,6 +4,7 @@
 mod bench;
 mod capture_fixture;
 mod check_deps;
+mod check_timing;
 
 fn main() -> anyhow::Result<()> {
     dispatch(std::env::args().skip(1).collect())
@@ -18,6 +19,7 @@ fn dispatch(args: Vec<String>) -> anyhow::Result<()> {
         Some("bench") => bench::run(bench::parse_args(&rest)?),
         Some("capture-fixture") => capture_fixture::run(&rest),
         Some("check-deps") => check_deps::run(rest),
+        Some("check-timing") => check_timing::run(rest),
         Some(other) => anyhow::bail!("unknown xtask subcommand: {other}"),
         None => anyhow::bail!("usage: cargo xtask <subcommand> [args]"),
     }

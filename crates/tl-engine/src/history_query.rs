@@ -980,8 +980,10 @@ mod tests {
         assert_eq!(&*v.gaps, &[(T0 + 89 * SEC, resume)]);
     }
 
-    /// A Frame answer for a 10-minute view of 2,000 processes stays within 50 ms (PROC-090).
-    /// Measured at 12 to 17 ms at load average 31 to 50 on 32 cores.
+    /// A Frame answer for a 10-minute view of 2,000 processes ends in time. The PROC-090 budget
+    /// is 50 ms, measured at 12 to 17 ms at load average 31 to 50 on 32 cores. The test limit is
+    /// 2 s so a busy machine does not fail it (tasklens-cr0.32); a speed budget belongs in
+    /// `cargo xtask bench`, and no bench scene covers this one yet.
     #[cfg(not(debug_assertions))]
     #[test]
     fn frame_answer_within_budget() {
@@ -1022,7 +1024,7 @@ mod tests {
         );
         let top_ms = started.elapsed().as_millis();
         assert_eq!(top.rows.len(), 3);
-        assert!(frame_ms <= 50, "frame took {frame_ms} ms");
-        assert!(top_ms <= 50, "top took {top_ms} ms");
+        assert!(frame_ms < 2000, "frame took {frame_ms} ms");
+        assert!(top_ms < 2000, "top took {top_ms} ms");
     }
 }

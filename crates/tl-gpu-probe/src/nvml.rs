@@ -668,6 +668,7 @@ mod tests {
             eprintln!("sample {i}: {took:?}, t_ns {t_ns}");
             assert_eq!(devices.len(), backend.devices.len());
             assert!(processes.is_none());
+            // timing-lint: allow: #[ignore] owner-machine NVML budget (R-277), not a normal test
             assert!(took < std::time::Duration::from_millis(100), "{took:?}");
         }
     }

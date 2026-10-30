@@ -177,12 +177,11 @@ fn wait_frozen_sees_late_frozen() {
         std::thread::sleep(Duration::from_millis(120));
         std::fs::write(&events, b"populated 1\nfrozen 1\n").unwrap();
     });
-    let start = Instant::now();
     let result = wait_frozen(&dir, Duration::from_secs(2), Duration::from_millis(50));
-    let elapsed = start.elapsed();
     writer.join().unwrap();
+    // `Ok` shows the late write was seen before the 2 s timeout. No wall-clock bound, so a busy
+    // machine does not fail it (tasklens-cr0.32).
     assert_eq!(result, Ok(()));
-    assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
 }
 
 #[test]

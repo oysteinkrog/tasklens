@@ -248,7 +248,8 @@ fn eof_exits() {
         .expect("exit after EOF");
     let elapsed = closed.elapsed();
     assert_eq!(status.code(), Some(0));
-    assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
+    // 2 s holds on a busy machine and stays below the 5 s `wait_exit` limit (tasklens-cr0.32).
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 
 #[test]
@@ -263,8 +264,9 @@ fn idle_exit() {
     let elapsed = answered.elapsed();
     assert_eq!(status.code(), Some(0));
     // The helper's idle clock starts before the client sees the reply, so allow a little under 200.
+    // The upper bound is 2 s so a busy machine does not fail it (tasklens-cr0.32).
     assert!(
-        (Duration::from_millis(180)..=Duration::from_millis(400)).contains(&elapsed),
+        (Duration::from_millis(180)..=Duration::from_secs(2)).contains(&elapsed),
         "{elapsed:?}"
     );
 }
@@ -283,8 +285,10 @@ fn partial_frame_cannot_hold_idle_exit() {
         .expect("exit with a partial frame");
     let elapsed = answered.elapsed();
     assert_eq!(status.code(), Some(3));
+    // Exit 3 shows the deadline ended it. The upper bound is 2 s for a busy machine and stays
+    // below the 5 s `wait_exit` limit (tasklens-cr0.32).
     assert!(
-        (Duration::from_millis(200)..=Duration::from_millis(400)).contains(&elapsed),
+        (Duration::from_millis(200)..=Duration::from_secs(2)).contains(&elapsed),
         "{elapsed:?}"
     );
     assert_eq!(read_stderr(&mut h.child), "tl-helper: protocol error\n");

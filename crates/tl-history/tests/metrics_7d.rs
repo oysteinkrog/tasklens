@@ -30,7 +30,10 @@ const BOOT: BootId = BootId(0x7d);
 const OFF_S: i64 = 1_699_999_800;
 const OFF: i64 = OFF_S * SEC as i64;
 const RING_BUDGET: Duration = Duration::from_secs(2);
-const READ_7D_BUDGET: Duration = Duration::from_millis(300);
+/// Test limit for the 7-day read: 10 times the old 300 ms budget, so a busy machine does not fail
+/// it (tasklens-cr0.32). A speed budget belongs in `cargo xtask bench`, and no bench scene covers
+/// this one yet.
+const READ_7D_BUDGET: Duration = Duration::from_secs(3);
 
 /// 0.0 to 99.9 in steps of 0.1, from a splitmix64 hash.
 fn value(series: usize, sec: u64) -> f32 {

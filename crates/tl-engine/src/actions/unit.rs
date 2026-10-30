@@ -1193,6 +1193,7 @@ mod tests {
                 freezer_read(),
             ]
         );
+        // timing-lint: allow: lab virtual time
         assert!(
             (Duration::from_millis(100)..=Duration::from_millis(110)).contains(&elapsed),
             "{elapsed:?}"

@@ -11,7 +11,7 @@
 //! `ServicesUpdate` messages and the table version is set at publish.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
@@ -1425,8 +1425,10 @@ fn generated(n: u32) -> Vec<ProcessRecord> {
         .collect()
 }
 
+/// The old limit was 50 ms in a debug build. The test limit is now 2 s so a busy machine does not
+/// fail it (tasklens-cr0.32); the `table-2000` bench scene measures table speed.
 #[test]
-fn build_2000_rows_debug_under_50ms() {
+fn build_2000_rows_debug_within_2s() {
     let records = generated(2000);
     let mut expanded = headers();
     expanded.extend(records.iter().map(|r| NodeId::Group(r.group)));
@@ -1438,7 +1440,7 @@ fn build_2000_rows_debug_under_50ms() {
         let view = build(&records, &q, &settings);
         let took = start.elapsed();
         assert_eq!(view.shown, 2000);
-        assert!(took.as_millis() < 50, "run {run} took {took:?}");
+        assert!(took < Duration::from_secs(2), "run {run} took {took:?}");
     }
 }
 

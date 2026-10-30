@@ -365,13 +365,14 @@ mod tests {
         assert_eq!(h.join().unwrap(), ExitCode::SUCCESS);
     }
 
-    /// Waits for the probe thread with a 100 ms limit.
-    fn join_within_100ms(h: JoinHandle<ExitCode>) -> ExitCode {
+    /// Waits for the probe thread with a 2 s limit, loose enough for a busy machine
+    /// (tasklens-cr0.32).
+    fn join_within_2s(h: JoinHandle<ExitCode>) -> ExitCode {
         let start = Instant::now();
         while !h.is_finished() {
             assert!(
-                start.elapsed() < Duration::from_millis(100),
-                "probe did not exit within 100 ms"
+                start.elapsed() < Duration::from_secs(2),
+                "probe did not exit within 2 s"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -384,14 +385,14 @@ mod tests {
         send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         recv(&mut c);
         send(&mut c, &ProbeRequest::Shutdown);
-        assert_eq!(join_within_100ms(h), ExitCode::SUCCESS);
+        assert_eq!(join_within_2s(h), ExitCode::SUCCESS);
         assert_closed(&mut c);
 
         let (mut c, h) = spawn_probe(Arc::default());
         send(&mut c, &ProbeRequest::Hello { proto: PROTO });
         recv(&mut c);
         drop(c);
-        assert_eq!(join_within_100ms(h), ExitCode::SUCCESS);
+        assert_eq!(join_within_2s(h), ExitCode::SUCCESS);
     }
 
     #[test]
@@ -400,7 +401,7 @@ mod tests {
         let (mut c, h) = spawn_probe(made.clone());
         // A 2 MiB length prefix and no payload: the probe must exit, not wait for the bytes.
         c.write_all(&(2u32 << 20).to_le_bytes()).unwrap();
-        assert_eq!(join_within_100ms(h), ExitCode::SUCCESS);
+        assert_eq!(join_within_2s(h), ExitCode::SUCCESS);
         assert_closed(&mut c);
         assert!(!made.load(Ordering::SeqCst));
     }

@@ -137,6 +137,7 @@ fn real_ten_samples_valid() {
             "sample {i}: {d:?}"
         );
         assert!(sample.processes.is_none(), "sample {i} has process rows");
+        // timing-lint: allow: #[ignore] owner-machine NVML budget (R-277), not a normal test
         assert!(
             took < Duration::from_millis(100),
             "sample {i} took {took:?}"
@@ -224,7 +225,10 @@ fn real_kill_and_restart() {
         matches!(result, Err(ProbeError::Deadline(d)) if d == SAMPLE_DEADLINE),
         "{result:?}"
     );
-    assert!(took < Duration::from_millis(700), "took {took:?}");
+    assert!(
+        took < SAMPLE_DEADLINE + Duration::from_secs(2),
+        "took {took:?}"
+    );
     // Reaped, not a zombie: the /proc entry is gone.
     assert!(
         !std::path::Path::new(&format!("/proc/{pid}")).exists(),

@@ -716,7 +716,9 @@ mod tests {
     }
 
     /// A cancel check that turns true 50 ms after it is made, once the script wrote its pid,
-    /// and remembers when it first did.
+    /// and remembers when it first did. Tests hold the time after it fired to 2 s: loose enough
+    /// for a busy machine, and still below the slow path each test rules out (`HELLO_DEADLINE`
+    /// 3 s, `API_VERSIONS_DEADLINE` 5 s, [`SLOW_EXIT`] 3.6 s).
     struct CancelAfter {
         made: Instant,
         pid_file: PathBuf,
@@ -778,7 +780,7 @@ mod tests {
         let got = ProbeClient::start_or_cancel(&probe, &[], &|| cancel.check());
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{:?}", got.err());
-        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
         assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
 
@@ -791,7 +793,7 @@ mod tests {
         let got = api_versions_or_cancel(&probe, API_VERSIONS_DEADLINE, &|| cancel.check());
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
-        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
         assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
 
@@ -822,7 +824,7 @@ mod tests {
         let got = client.hello_or_cancel(&|| cancel.check());
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
-        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
         drop(client);
         assert!(not_reaped_yet(pid), "the caller waited for the child");
         assert!(reaped_soon(pid), "the probe was not reaped");
@@ -847,7 +849,7 @@ mod tests {
             matches!(got, Err(ProbeError::Deadline(d)) if d == deadline),
             "{got:?}"
         );
-        assert!(took < deadline + Duration::from_millis(100), "{took:?}");
+        assert!(took < deadline + Duration::from_secs(2), "{took:?}");
         drop(client);
         assert!(not_reaped_yet(pid), "the caller waited for the child");
         assert!(reaped_soon(pid), "the probe was not reaped");
@@ -877,7 +879,7 @@ mod tests {
         let got = ProbeClient::start_or_cancel(&probe, &[], &|| cancel.check());
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{:?}", got.err());
-        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
         assert!(start.elapsed() < HELLO_DEADLINE, "{:?}", start.elapsed());
         assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
@@ -905,7 +907,7 @@ mod tests {
             matches!(got, Err(ProbeError::Deadline(d)) if d == deadline),
             "{got:?}"
         );
-        assert!(took < deadline + Duration::from_millis(100), "{took:?}");
+        assert!(took < deadline + Duration::from_secs(2), "{took:?}");
         drop(client);
         assert!(reaped_soon(pid), "the probe was not reaped");
     }

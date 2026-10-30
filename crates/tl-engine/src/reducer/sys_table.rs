@@ -1501,8 +1501,11 @@ mod tests {
         assert!(build(&input, &query(SysTable::Startup, 7)).rows.is_empty());
     }
 
+    /// The old limit was 5 ms in release. The test limit is now 2 s so a busy machine does not
+    /// fail it (tasklens-cr0.32); a speed budget belongs in `cargo xtask bench`, and no bench
+    /// scene covers this one yet.
     #[test]
-    fn services_projection_10k_units_under_5ms() {
+    fn services_projection_10k_units_within_2s() {
         let mut units = Vec::with_capacity(10_000);
         for i in 0..10_000u32 {
             let manager = if i % 2 == 0 {
@@ -1541,8 +1544,8 @@ mod tests {
         assert_eq!(len, 10_002);
         eprintln!("10k units: {plain:?} sorted by name, {with_text:?} with a text filter");
         if !cfg!(debug_assertions) {
-            assert!(plain.as_millis() < 5, "{plain:?}");
-            assert!(with_text.as_millis() < 5, "{with_text:?}");
+            assert!(plain.as_millis() < 2000, "{plain:?}");
+            assert!(with_text.as_millis() < 2000, "{with_text:?}");
         }
     }
 

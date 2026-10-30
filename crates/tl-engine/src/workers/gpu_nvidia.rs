@@ -1303,7 +1303,8 @@ mod tests {
     }
 
     /// On the real runtime, cancelling the worker while `Hello` is pending stops the start job
-    /// within 100 ms, so the region drains and the runtime tears down (tasklens-cr0.30).
+    /// at once, so the region drains and the runtime tears down (tasklens-cr0.30). The 2 s
+    /// bounds hold on a busy machine and stay below the 5 s the fake start waits for a cancel.
     #[test]
     fn worker_cancel_during_start_returns_fast() {
         use asupersync::runtime::RootDrainOutcome;
@@ -1343,13 +1344,13 @@ mod tests {
         let drained = rt.drain_root_region(crate::bridge::DRAIN_BUDGET);
         let took = cancel_at.elapsed();
         assert_eq!(drained, RootDrainOutcome::Quiescent);
-        assert!(took < Duration::from_millis(100), "drain took {took:?}");
+        assert!(took < Duration::from_secs(2), "drain took {took:?}");
         let saw = slow
             .saw_cancel
             .lock()
             .expect("lock")
             .expect("start saw the cancel");
-        assert!(saw.duration_since(cancel_at) < Duration::from_millis(100));
+        assert!(saw.duration_since(cancel_at) < Duration::from_secs(2));
         let outcome = out.lock().expect("slot lock").take();
         assert!(matches!(outcome, Some(Outcome::Ok(()))), "{outcome:?}");
         assert!(rt.shutdown_timeout(crate::bridge::TEARDOWN_BUDGET));

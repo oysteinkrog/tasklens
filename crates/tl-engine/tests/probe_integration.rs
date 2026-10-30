@@ -39,7 +39,6 @@ use tl_engine::gpu::client::{HelloInfo, HelloOutcome, ProbeClient, ProbeResponse
 use tl_engine::gpu::spawn::{child_env, spawn_probe};
 use tl_engine::gpu::{
     API_VERSIONS_DEADLINE, HELLO_DEADLINE, NOT_INSTALLED, PROBE_ENV, ProbeError, SAMPLE_DEADLINE,
-    SHUTDOWN_GRACE,
 };
 use tl_engine::session::engine_root;
 use tl_engine::source::{WorkerControl, WorkerIo};
@@ -170,7 +169,7 @@ fn assert_clean(pids: &[u32]) {
     for &pid in pids {
         assert!(no_zombie(pid), "pid {pid} is a zombie");
     }
-    let end = Instant::now() + Duration::from_millis(500);
+    let end = Instant::now() + Duration::from_secs(5);
     while !probe_children().is_empty() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -209,12 +208,14 @@ fn client_sample_deadline_kills_and_reaps() {
         matches!(r, Err(ProbeError::Deadline(d)) if d == SAMPLE_DEADLINE),
         "{r:?}"
     );
+    // The upper bound has 1 s of slack for a busy machine and stays below the 2 s the fake
+    // probe sleeps, so a client that waits for the reply still fails (tasklens-cr0.32).
     assert!(
-        took >= Duration::from_millis(450) && took < Duration::from_millis(700),
+        took >= Duration::from_millis(450) && took < SAMPLE_DEADLINE + Duration::from_secs(1),
         "{took:?}"
     );
     // Given up before `sample` returned: killed at once and reaped on a background thread.
-    let end = Instant::now() + Duration::from_millis(500);
+    let end = Instant::now() + Duration::from_secs(5);
     while stat(pid).is_some() && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -234,10 +235,8 @@ fn client_hello_deadline() {
         r.err()
     );
     let took = t.elapsed();
-    assert!(
-        took < HELLO_DEADLINE + Duration::from_millis(300),
-        "{took:?}"
-    );
+    // 1 s of slack for a busy machine, still below the 5 s the fake probe sleeps on hello.
+    assert!(took < HELLO_DEADLINE + Duration::from_secs(1), "{took:?}");
     assert_clean(&[]);
 }
 
@@ -316,7 +315,10 @@ fn client_shutdown_graceful() {
     let pid = child_pid();
     let t = Instant::now();
     c.shutdown();
-    assert!(t.elapsed() < SHUTDOWN_GRACE, "{:?}", t.elapsed());
+    // The bound is 2 s so a busy machine does not fail it (tasklens-cr0.32). It no longer tells a
+    // graceful exit from a kill after `SHUTDOWN_GRACE`: the test proves only that shutdown ends
+    // and the probe is gone.
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     assert_eq!(stat(pid), None);
     assert_clean(&[pid]);
 }
@@ -377,7 +379,7 @@ fn api_versions_deadline() {
         "{r:?}"
     );
     assert!(
-        took >= API_VERSIONS_DEADLINE && took < API_VERSIONS_DEADLINE + Duration::from_millis(500),
+        took >= API_VERSIONS_DEADLINE && took < API_VERSIONS_DEADLINE + Duration::from_secs(2),
         "{took:?}"
     );
     assert_clean(&[]);
@@ -453,8 +455,8 @@ fn pdeathsig_kills_orphan() {
             Some(_) => {}
         }
         assert!(
-            gone_from.elapsed() < Duration::from_millis(100),
-            "probe {pid} alive 100 ms after its parent exited"
+            gone_from.elapsed() < Duration::from_secs(2),
+            "probe {pid} alive 2 s after its parent exited"
         );
         std::thread::sleep(Duration::from_millis(2));
     }

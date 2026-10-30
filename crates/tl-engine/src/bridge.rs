@@ -768,8 +768,10 @@ mod tests {
             .with_sys_root(SysRoot::at(&base));
         let begin = Instant::now();
         let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
+        // Start must not wait for a first sample. The bound is loose so a busy machine does not
+        // fail it (tasklens-cr0.32). No bench scene measures engine start.
         assert!(
-            begin.elapsed() < Duration::from_millis(100),
+            begin.elapsed() < Duration::from_secs(2),
             "start took {:?}",
             begin.elapsed()
         );
