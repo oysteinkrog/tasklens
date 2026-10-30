@@ -5,6 +5,12 @@
 //!
 //! The header words and the "Details" heading are `en-US.ftl` keys, translated once per strings
 //! version into the [`PageWords`] global that every page shares.
+//!
+//! The header ends in the range switch (1 min to 7 d) the Overview has. It writes the one shared
+//! range, `performance.overview_range`, which every page chart draws ([`page_range_ns`]); 1 h,
+//! 24 h and 7 d read the device metric history, which the page asks for with
+//! [`page_history_request`]. A chart whose series that history does not hold stays on its live
+//! window ([`live_range_ns`]) and shows [`live_only_note`] (crw.105).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -18,7 +24,9 @@ use gpui_kit::{
     canvas, div, px,
 };
 use smallvec::SmallVec;
+use tl_model::demand::DeviceHistoryRequest;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
+use tl_model::settings::OverviewRange;
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
@@ -42,7 +50,11 @@ use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
-use crate::text::style::label_style;
+use crate::pages::performance::overview::range::{
+    PAGE_SWITCH, current_range, history_request, page_range_switch,
+};
+use crate::settings_global::TlSettings;
+use crate::text::style::{label_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Page padding on every side, × ui_scale. `page_pad`.
@@ -69,6 +81,57 @@ const DETAILS_HEADING_H: f32 = 24.;
 
 /// Element id of the graph area.
 pub const GRAPH_AREA_ID: &str = "perf-graph-area";
+/// Debug selector of the range switch at the right end of the header.
+pub const RANGE_ID: &str = "perf-page-range-switch";
+/// Debug selector of the "Live only" note over a chart.
+pub const LIVE_ONLY_ID: &str = "perf-live-only";
+
+/// The range of a device page chart in ns: `performance.overview_range`, the range the Overview
+/// draws too. Over 10 minutes a chart made `with_device_history` reads the device metric history.
+pub fn page_range_ns(cx: &App) -> u64 {
+    current_range(cx).span_ns()
+}
+
+/// The range of a page chart that reads only the live series: the shared range at 1 min and
+/// 5 min, `performance.graph_range_s` (the sidebar tiles' window) at 1 h, 24 h and 7 d.
+pub fn live_range_ns(cx: &App) -> u64 {
+    let range = current_range(cx);
+    if range.from_history() && cx.has_global::<TlSettings>() {
+        u64::from(TlSettings::settings(cx).performance.graph_range_s) * 1_000_000_000
+    } else {
+        range.span_ns()
+    }
+}
+
+/// What a page whose charts draw `range_ns` asks the device metric history for: the range
+/// ending now for 1 h, 24 h and 7 d, nothing for 1 min and 5 min.
+pub fn page_history_request(range_ns: u64) -> Option<DeviceHistoryRequest> {
+    OverviewRange::ALL
+        .into_iter()
+        .find(|r| r.span_ns() == range_ns)
+        .and_then(|r| history_request(r, None, 0))
+}
+
+/// "Live only", right-aligned over a chart whose series the device metric history does not hold,
+/// while the shared range is 1 h, 24 h or 7 d. `None` at 1 min and 5 min.
+pub fn live_only_note(m: &UiMetrics, theme: &TlTheme, cx: &App) -> Option<AnyElement> {
+    if !current_range(cx).from_history() {
+        return None;
+    }
+    let mut note = div();
+    *note.text_style() = t_sm(m);
+    Some(
+        h_flex()
+            .w_full()
+            .justify_end()
+            .child(
+                note.debug_selector(|| LIVE_ONLY_ID.into())
+                    .text_color(theme.text_secondary)
+                    .child(tr(cx, "perf-page-live-only")),
+            )
+            .into_any_element(),
+    )
+}
 
 /// The header words and the "Details" heading, translated once per strings version. Shared by
 /// every page as a global; read it with [`page_words`].
@@ -435,6 +498,12 @@ impl DevicePageFrame<'_> {
                                 .child(toggle)
                         },
                     )),
+            )
+            .child(
+                div()
+                    .debug_selector(|| RANGE_ID.into())
+                    .flex_none()
+                    .child(page_range_switch(PAGE_SWITCH, cx)),
             );
 
         let graph_area = div()

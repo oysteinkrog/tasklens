@@ -242,6 +242,7 @@ perf-header-fan = Fan {$n}
 perf-header-battery = Battery
 perf-header-disks-count = {$k} disks
 perf-header-adapters-count = {$k} adapters
+perf-page-live-only = Live only
 perf-cpu-row-utilization = Utilization
 perf-cpu-row-kernel-time = Kernel time
 perf-cpu-row-speed = Speed

@@ -1,10 +1,11 @@
 //! The Overview time range and the range figures (UI-PRF-055, D-030).
 //!
-//! `performance.overview_range` sets the range of every Overview chart; the Overview ignores
-//! `graph_range_s`. 1 min and 5 min draw the live series; 1 h, 24 h and 7 d draw the device
-//! metric history (ADR-017), which the page asks for with `Demand.device_history_range`
-//! ([`history_request`]). The chart view picks its source from its range
-//! (`chart::view::reads_history`).
+//! `performance.overview_range` sets the range of every Overview chart and of the device page
+//! charts (one shared range, crw.105); both ignore `graph_range_s`, which only the sidebar tiles
+//! and the live-only page charts keep. 1 min and 5 min draw the live series; 1 h, 24 h and 7 d
+//! draw the device metric history (ADR-017), which the page asks for with
+//! `Demand.device_history_range` ([`history_request`]). The chart view picks its source from its
+//! range (`chart::view::reads_history`).
 //!
 //! While the timeline paused the Overview at a time (UI-PRF-057, [`super::timeline::Paused`]),
 //! every range is asked for at that time from the history, and the switch disables the ranges
@@ -62,6 +63,9 @@ pub const HEADER_SWITCH: &str = "perf-overview-range";
 /// The prefix of the switch at the right end of the status bar.
 pub const STATUS_SWITCH: &str = "perf-status-range";
 
+/// The prefix of the switch in a device page header.
+pub const PAGE_SWITCH: &str = "perf-page-range";
+
 /// `performance.overview_range`, the default before settings load.
 pub fn current_range(cx: &App) -> OverviewRange {
     if cx.has_global::<TlSettings>() {
@@ -113,8 +117,17 @@ pub fn history_kept(cx: &App) -> bool {
 /// at this resolution" (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are
 /// disabled with "Device history is off" (UI-PRF-060).
 pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
+    switch(prefix, timeline::paused(cx), cx)
+}
+
+/// The switch in a device page header: the same segments, but the Overview's pause does not
+/// apply, since the device pages always draw up to now.
+pub fn page_range_switch(prefix: &'static str, cx: &App) -> AnyElement {
+    switch(prefix, None, cx)
+}
+
+fn switch(prefix: &'static str, paused: Option<Paused>, cx: &App) -> AnyElement {
     let current = current_range(cx);
-    let paused = timeline::paused(cx);
     let now = timeline::now_realtime_ns();
     let kept = history_kept(cx);
     let mut row = div().flex().flex_row().flex_none();
