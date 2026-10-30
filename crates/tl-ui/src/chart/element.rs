@@ -17,9 +17,9 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, Path,
-    PathVertex, Pixels, Point, Style, Window, point, px, relative, size,
+    App, Bounds, ContentMask, Element, ElementId, Entity, EntityId, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent,
+    MouseMoveEvent, Path, PathVertex, Pixels, Point, Style, Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::series::{SampleFlags, SeriesView};
@@ -132,7 +132,7 @@ impl Element for ChartElement {
         };
         let view_id = self.view.entity_id();
         let out = self.view.update(cx, |view, cx| {
-            paint_view(view, bounds, hitbox.as_ref(), &env, window, cx)
+            paint_view(view, view_id, bounds, hitbox.as_ref(), &env, window, cx)
         });
 
         if out.moving {
@@ -176,7 +176,8 @@ pub fn take_plots() -> Vec<(gpui_kit::EntityId, Bounds<Pixels>)> {
 
 /// Pointer moves over the plot pin the sample time nearest the pointer; leaving the plot drops
 /// the pin. Any mouse button down drops it too. Both notify only when the pin changed, so moves
-/// inside one sample do not notify.
+/// inside one sample do not notify. A linked chart passes its pin to the link, which notifies
+/// the other members when the link's pin changed.
 fn register_hover_events(
     view: &Entity<ChartView>,
     hitbox: Hitbox,
@@ -194,24 +195,41 @@ fn register_hover_events(
             let x = f32::from(e.position.x - plot.left()) * sf;
             hover::snap_time(hover::pointer_time(&map, map.plot_width, x), grid)
         });
-        entity.update(cx, |v, cx| {
+        let others = entity.update(cx, |v, cx| {
             if v.hover.pinned_t_ns != t {
                 v.hover.pinned_t_ns = t;
                 cx.notify();
             }
+            link_pin(v, cx.entity_id(), t)
         });
+        notify_all(others, cx);
     });
     if out.pinned {
         let entity = view.clone();
         window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
             if phase.bubble() {
-                entity.update(cx, |v, cx| {
+                let others = entity.update(cx, |v, cx| {
                     if v.hover.clear() {
                         cx.notify();
                     }
+                    link_pin(v, cx.entity_id(), None)
                 });
+                notify_all(others, cx);
             }
         });
+    }
+}
+
+/// Passes chart `id`'s pin to its hover link. Returns the members to notify.
+fn link_pin(view: &ChartView, id: EntityId, t: Option<u64>) -> SmallVec<[EntityId; 2]> {
+    view.hover_link
+        .as_ref()
+        .map_or_else(SmallVec::new, |link| link.set(id, t))
+}
+
+fn notify_all(ids: SmallVec<[EntityId; 2]>, cx: &mut App) {
+    for id in ids {
+        App::notify(cx, id);
     }
 }
 
@@ -263,6 +281,7 @@ struct PaintOut {
 /// Steps 1 to 8 and 10 of the paint plan. Returns whether the chart wants the next frame.
 fn paint_view(
     view: &mut ChartView,
+    view_id: EntityId,
     bounds: Bounds<Pixels>,
     hitbox: Option<&Hitbox>,
     env: &PaintEnv,
@@ -281,8 +300,19 @@ fn paint_view(
     let state = view.derived_state(now);
     let value = view.value_at(now);
     // The readout shows only while the pointer is over the plot of an active window.
+    // A linked chart draws the cursor another member pinned, in an active window only.
+    let mut follow_t_ns = None;
     if !(hitbox.is_some_and(|h| h.is_hovered(window)) && window.is_window_active()) {
         view.hover.clear();
+        let others = link_pin(view, view_id, None);
+        if !others.is_empty() {
+            cx.defer(move |cx| notify_all(others, cx));
+        }
+        follow_t_ns = view
+            .hover_link
+            .as_ref()
+            .filter(|_| window.is_window_active())
+            .and_then(|link| link.follow(view_id));
     }
     let compact_scale = view.compact_scale;
     let frozen = view.frozen;
@@ -569,7 +599,7 @@ fn paint_view(
             theme: &env.theme,
             network_unit: env.network_unit,
         };
-        hover::paint(window, cx, hover_state, &hp);
+        hover::paint_linked(window, cx, hover_state, &hp, follow_t_ns);
     }
 
     let one_px_ns = range_ns / u64::from(pw.max(1));

@@ -58,6 +58,8 @@ pub struct ChartView {
     pub(crate) last_value_text: String,
     /// Hover pin and the shaped value box lines (E19-016).
     pub(crate) hover: hover::HoverState,
+    /// The charts that share this chart's hover cursor (`set_hover_link`).
+    pub(crate) hover_link: Option<hover::HoverLink>,
     /// The scale ceiling shows small in the plot's top-right corner (`set_compact_scale`).
     pub(crate) compact_scale: bool,
     /// Glow behind the newest 10% and a dot on each line's newest point (UI-PRF-058).
@@ -144,6 +146,7 @@ impl ChartView {
             value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
+            hover_link: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -536,6 +539,13 @@ impl ChartView {
             }
             cx.notify();
         }
+    }
+
+    /// Shares one hover cursor with the other charts of `link` (tasklens-o55.55): while the
+    /// pointer is over one of them, every member with `spec.hover` draws the marker and dots.
+    pub fn set_hover_link(&mut self, link: hover::HoverLink, cx: &mut Context<Self>) {
+        link.join(cx.entity_id());
+        self.hover_link = Some(link);
     }
 
     /// Stops the chart at its last samples for good (PERF-086: an ended process card). It keeps

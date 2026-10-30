@@ -10,9 +10,13 @@
 //! cache.
 
 use core::fmt::Write;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{App, BorderStyle, Bounds, FontWeight, Pixels, Window, fill, point, px, quad, size};
+use gpui_kit::{
+    App, BorderStyle, Bounds, EntityId, FontWeight, Pixels, Window, fill, point, px, quad, size,
+};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SeriesView};
 use tl_model::units;
@@ -88,6 +92,62 @@ impl HoverState {
         }
         #[cfg(not(any(test, feature = "test-hooks")))]
         let _ = shaped;
+    }
+}
+
+/// Charts that show one hover cursor (tasklens-o55.55): the time pinned over one member's plot
+/// draws the marker and dots on every member. Members are charts with `spec.hover`.
+#[derive(Clone, Default)]
+pub struct HoverLink(Rc<HoverLinkInner>);
+
+#[derive(Default)]
+struct HoverLinkInner {
+    /// The member under the pointer and the time it pinned.
+    pin: Cell<Option<(EntityId, u64)>>,
+    members: RefCell<SmallVec<[EntityId; 2]>>,
+}
+
+impl HoverLink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds chart `id`.
+    pub(crate) fn join(&self, id: EntityId) {
+        let mut members = self.0.members.borrow_mut();
+        if !members.contains(&id) {
+            members.push(id);
+        }
+    }
+
+    /// Takes member `id`'s pin: a time pins it, `None` drops the link's pin when `id` holds it.
+    /// Returns the other members when the link's pin changed, so the caller notifies them.
+    pub(crate) fn set(&self, id: EntityId, t: Option<u64>) -> SmallVec<[EntityId; 2]> {
+        let old = self.0.pin.get();
+        let new = match t {
+            Some(t) => Some((id, t)),
+            None if old.is_some_and(|(owner, _)| owner == id) => None,
+            None => old,
+        };
+        if new == old {
+            return SmallVec::new();
+        }
+        self.0.pin.set(new);
+        self.others(id)
+    }
+
+    /// The time another member pinned, for member `id` to follow.
+    pub(crate) fn follow(&self, id: EntityId) -> Option<u64> {
+        self.0
+            .pin
+            .get()
+            .filter(|(owner, _)| *owner != id)
+            .map(|(_, t)| t)
+    }
+
+    fn others(&self, id: EntityId) -> SmallVec<[EntityId; 2]> {
+        let members = self.0.members.borrow();
+        members.iter().copied().filter(|m| *m != id).collect()
     }
 }
 
@@ -218,14 +278,28 @@ pub struct HoverPaint<'a> {
 /// Paints the marker, the dots and the value box for `state.pinned_t_ns`. Paints nothing when
 /// there is no pin or series 0 has no valid sample in view.
 pub fn paint(window: &mut Window, cx: &mut App, state: &mut HoverState, p: &HoverPaint) {
+    paint_linked(window, cx, state, p, None);
+}
+
+/// [`paint`], and without a pin of its own the marker and dots at `follow_t_ns`, the time
+/// another chart of its [`HoverLink`] pinned. A followed time draws no value box.
+pub fn paint_linked(
+    window: &mut Window,
+    cx: &mut App,
+    state: &mut HoverState,
+    p: &HoverPaint,
+    follow_t_ns: Option<u64>,
+) {
     #[cfg(any(test, feature = "test-hooks"))]
     {
         state.last_box = None;
         state.last_marker_x = None;
     }
     state.index = None;
-    let Some(pinned) = state.pinned_t_ns else {
-        return;
+    let (pinned, own) = match (state.pinned_t_ns, follow_t_ns) {
+        (Some(t), _) => (t, true),
+        (None, Some(t)) => (t, false),
+        (None, None) => return,
     };
     let Some(first) = p.series.first().and_then(Option::as_deref) else {
         return;
@@ -317,6 +391,9 @@ pub fn paint(window: &mut Window, cx: &mut App, state: &mut HoverState, p: &Hove
                 BorderStyle::Solid,
             ));
         }
+        if !own {
+            return;
+        }
 
         // Value box.
         window.paint_quad(quad(
@@ -358,7 +435,7 @@ pub fn paint(window: &mut Window, cx: &mut App, state: &mut HoverState, p: &Hove
 
     #[cfg(any(test, feature = "test-hooks"))]
     {
-        state.last_box = Some(panel);
+        state.last_box = own.then_some(panel);
         state.last_marker_x = Some(x);
     }
 }
