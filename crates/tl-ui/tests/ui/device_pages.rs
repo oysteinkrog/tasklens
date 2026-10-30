@@ -397,34 +397,205 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui_kit::test]
-fn range_change_reaches_device_pages(cx: &mut TestAppContext) {
-    let mut r = open(cx);
-    select(&mut r, "memory");
-    let memory = view_of(&mut r, "memory")
-        .downcast::<MemoryPage>()
-        .expect("a MemoryPage");
+/// One shared range on every device page (crw.105): `performance.overview_range`, set from the
+/// range switch in any page header. `graph_range_s` keeps only the sidebar tiles and the charts
+/// that read only the live series.
+mod shared_range {
+    use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
+    use tl_model::ids::{MetricId, SeriesId};
+    use tl_model::settings::OverviewRange;
+    use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, segment_id};
+    use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
 
-    let performance = r.page.clone();
-    r.vcx.update(|window, cx| {
-        performance.read(cx).focus_handle(cx).focus(window, cx);
-    });
-    r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
-    draw(r.vcx);
+    use super::*;
 
-    let (setting, ranges) = r.vcx.update(|_, cx| {
-        let page = memory.read(cx);
-        (
-            TlSettings::settings(cx).performance.graph_range_s,
-            [
-                page.physical().read(cx).spec.range_ns,
-                page.commit().read(cx).spec.range_ns,
-                page.swap().read(cx).spec.range_ns,
-            ],
-        )
-    });
-    assert_eq!(setting, 30);
-    assert_eq!(ranges, [30_000_000_000; 3]);
+    const S: u64 = 1_000_000_000;
+    const FAN: &str = "fan:nct6797:2";
+    const PAGES: [&str; 7] = ["cpu", "memory", DISKS[0], "net:enp38s0", GPU, FAN, MOUSE];
+
+    fn segment(range: OverviewRange) -> &'static str {
+        Box::leak(segment_id(PAGE_SWITCH, range).into_boxed_str())
+    }
+
+    fn click_range(r: &mut Rig, range: OverviewRange) {
+        let at = r
+            .vcx
+            .debug_bounds(segment(range))
+            .expect("range segment")
+            .center();
+        r.vcx.simulate_click(at, gpui_kit::Modifiers::none());
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(200));
+        draw(r.vcx);
+    }
+
+    fn page<T: 'static>(r: &mut Rig, k: &str) -> Entity<T> {
+        view_of(r, k).downcast::<T>().ok().expect("page type")
+    }
+
+    /// The chart ranges in s: CPU Overall, Memory Physical, Disk Active, Network Throughput,
+    /// GPU Memory, Fan Speed (the shared range), then the CPU grid and the Battery chart (live
+    /// only).
+    fn ranges(r: &mut Rig) -> ([u64; 6], [u64; 2]) {
+        let cpu = page::<CpuPage>(r, "cpu");
+        let memory = page::<MemoryPage>(r, "memory");
+        let disk = page::<DiskPage>(r, DISKS[0]);
+        let net = page::<NetPage>(r, "net:enp38s0");
+        let gpu = page::<GpuPage>(r, GPU);
+        let fan = page::<FanPage>(r, FAN);
+        let bat = page::<BatteryPage>(r, MOUSE);
+        r.vcx.update(|_, cx| {
+            let ns = |c: &Entity<tl_ui::chart::ChartView>| c.read(cx).spec.range_ns / S;
+            (
+                [
+                    ns(cpu.read(cx).overall()),
+                    ns(memory.read(cx).physical()),
+                    ns(disk.read(cx).active_chart()),
+                    ns(net.read(cx).throughput()),
+                    ns(gpu.read(cx).memory()),
+                    ns(fan.read(cx).speed()),
+                ],
+                [
+                    cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
+                    ns(bat.read(cx).chart()),
+                ],
+            )
+        })
+    }
+
+    fn saved(r: &mut Rig) -> (OverviewRange, u32) {
+        r.vcx.update(|_, cx| {
+            let p = &TlSettings::settings(cx).performance;
+            (p.overview_range, p.graph_range_s)
+        })
+    }
+
+    /// Every page header has the switch; a click on one page moves every page's charts, and the
+    /// shown page asks for the device history at 1 h, 24 h and 7 d.
+    #[gpui_kit::test]
+    fn one_range_for_every_page(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        for k in PAGES {
+            select(&mut r, k);
+            assert!(r.vcx.debug_bounds(RANGE_ID).is_some(), "switch on {k}");
+            for range in OverviewRange::ALL {
+                let id = segment(range);
+                assert!(r.vcx.debug_bounds(id).is_some(), "{id} on {k}");
+            }
+        }
+        assert_eq!(ranges(&mut r), ([60; 6], [60; 2]), "1 min by default");
+
+        select(&mut r, "memory");
+        click_range(&mut r, OverviewRange::M5);
+        assert_eq!(
+            saved(&mut r),
+            (OverviewRange::M5, 60),
+            "graph_range_s stays"
+        );
+        assert_eq!(ranges(&mut r), ([300; 6], [300; 2]));
+        assert_eq!(last_demand(&r).device_history_range, None, "5 min is live");
+
+        select(&mut r, GPU);
+        click_range(&mut r, OverviewRange::H24);
+        assert_eq!(saved(&mut r).0, OverviewRange::H24);
+        // The live-only charts keep `graph_range_s`.
+        assert_eq!(ranges(&mut r), ([86_400; 6], [60; 2]));
+        assert_eq!(
+            last_demand(&r).device_history_range,
+            Some(DeviceHistoryRequest {
+                range: DeviceRange::H24,
+                end_realtime_ns: None,
+            })
+        );
+
+        // `graph_range_s` moves the live-only charts only.
+        let performance = r.page.clone();
+        r.vcx.update(|window, cx| {
+            performance.read(cx).focus_handle(cx).focus(window, cx);
+        });
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
+        draw(r.vcx);
+        assert_eq!(saved(&mut r), (OverviewRange::H24, 30));
+        assert_eq!(ranges(&mut r), ([86_400; 6], [30; 2]));
+
+        // Another page asks for the same history while it is shown.
+        select(&mut r, DISKS[0]);
+        assert_eq!(
+            last_demand(&r).device_history_range.map(|q| q.range),
+            Some(DeviceRange::H24)
+        );
+    }
+
+    /// The Battery chart and the CPU per-core grid read only the live series: at 1 h, 24 h and
+    /// 7 d they show "Live only". Charts the history serves show no note.
+    #[gpui_kit::test]
+    fn live_only_note(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        select(&mut r, MOUSE);
+        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "1 min is live");
+        click_range(&mut r, OverviewRange::H1);
+        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_some(), "battery");
+        select(&mut r, "cpu");
+        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_some(), "per-core grid");
+        for k in ["memory", DISKS[0], "net:enp38s0", FAN] {
+            select(&mut r, k);
+            assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "{k}");
+        }
+        select(&mut r, MOUSE);
+        click_range(&mut r, OverviewRange::M5);
+        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "5 min is live");
+    }
+
+    /// At 1 h a page chart draws the device history the engine answers with.
+    #[gpui_kit::test]
+    fn page_chart_reads_device_history(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        select(&mut r, DISKS[0]);
+        click_range(&mut r, OverviewRange::H1);
+        let id = SeriesId {
+            device: DeviceIdx(3),
+            metric: MetricId::DISK_ACTIVE,
+        };
+        let now = i64::try_from(jiff::Timestamp::now().as_nanosecond()).expect("fits");
+        let points: Arc<[HistPoint]> = (0..3)
+            .map(|i| HistPoint {
+                t_realtime_ns: now - (3 - i) * 60 * S as i64,
+                mean: 10.0 * i as f32,
+                min: 0.0,
+                max: 30.0,
+            })
+            .collect();
+        r.engine.publish_with(|s| {
+            s.device_history = Arc::new(DeviceHistory {
+                header: ComponentHeader {
+                    version: s.device_history.header.version + 1,
+                    ..ComponentHeader::default()
+                },
+                request: Some(DeviceHistoryRequest {
+                    range: DeviceRange::H1,
+                    end_realtime_ns: None,
+                }),
+                realtime_offset_ns: now - now_boot_ns() as i64,
+                since_realtime_ns: Some(now - 2 * 3_600 * S as i64),
+                step_ns: 60 * S,
+                series: Arc::from([(id, points)]),
+                boots: Arc::from([]),
+                timeline: None,
+            });
+        });
+        draw(r.vcx);
+        let disk = page::<DiskPage>(&mut r, DISKS[0]);
+        let n = r.vcx.update(|_, cx| {
+            disk.read(cx).active_chart().read(cx).resolved()[0]
+                .as_ref()
+                .map(|v| v.samples.len())
+        });
+        assert_eq!(n, Some(3), "the three history points");
+    }
 }
 
 #[gpui_kit::test]

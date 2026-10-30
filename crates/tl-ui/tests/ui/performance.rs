@@ -575,8 +575,13 @@ mod page_frame {
 
         let a = cx.debug_bounds("perf-page-toggle-0").expect("toggle 0");
         let b = cx.debug_bounds("perf-page-toggle-1").expect("toggle 1");
-        assert_eq!(b.right(), header.right(), "right-aligned");
         assert_eq!(b.left() - a.right(), px(8.), "sp4 apart");
+        // The range switch ends the header (crw.105), sp4 after the toggles.
+        let switch = cx
+            .debug_bounds("perf-page-range-switch")
+            .expect("range switch");
+        assert_eq!(switch.right(), header.right(), "right-aligned");
+        assert_eq!(switch.left() - b.right(), px(8.), "sp4 before the switch");
         for (i, t) in [a, b].into_iter().enumerate() {
             let button = cx
                 .debug_bounds(Box::leak(format!("TlButton-toggle-{i}").into_boxed_str()))
