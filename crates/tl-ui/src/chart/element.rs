@@ -152,10 +152,26 @@ impl Element for ChartElement {
             });
         }
 
+        #[cfg(any(test, feature = "test-hooks"))]
+        PLOTS.with(|p| p.borrow_mut().push((view_id, out.plot)));
+
         if let Some(hitbox) = hitbox.clone() {
             register_hover_events(&self.view, hitbox, &out, env.scale_factor, window);
         }
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static PLOTS: std::cell::RefCell<Vec<(gpui_kit::EntityId, Bounds<Pixels>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The plots that charts painted on this thread since the last call, with their chart's
+/// entity, in paint order (tasklens-o55.54).
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn take_plots() -> Vec<(gpui_kit::EntityId, Bounds<Pixels>)> {
+    PLOTS.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
 /// Pointer moves over the plot pin the sample time nearest the pointer; leaving the plot drops
