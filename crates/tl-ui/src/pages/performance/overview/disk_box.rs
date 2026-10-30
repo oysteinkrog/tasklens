@@ -45,7 +45,7 @@ use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
     ChartSettings, ListFit, PLOT_LINE, SPARK_GRID, box_chart, box_frame, chart_section_versions,
-    class_probe, edit_chrome, grid_cells, list_fit, opens_device, spark_chart,
+    class_probe, edit_chrome, grid_cells_gaps, list_fit_gaps, opens_device, spark_chart,
 };
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
@@ -346,10 +346,12 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
     size(px(CELL_MIN_W * m.ui_scale), px(CELL_MIN_H * m.ui_scale))
 }
 
-/// The `disk_charts` grid for `rows` cells in `body`, placed as `arrange` says (`list_fit`).
+/// The `disk_charts` grid for `rows` cells in `body`, placed as `arrange` says (`list_fit_gaps`).
 /// Only whole cells show (UI-PRF-059); a disk past `MAX_DISK_ROWS` or a cell that would be cut
-/// is counted in the "+n more" line, which takes its height from the body first. Cells sit
-/// 2 px apart. Before the first paint the body is empty and every disk gets a cell.
+/// is counted in the "+n more" line, which takes its height from the body first. Cells side
+/// by side sit 2 px apart; a cell under another starts right under its plot, so the plots get
+/// that height (tasklens-o55.54). Before the first paint the body is empty and every disk gets
+/// a cell.
 fn disk_fit(
     arrange: Arrange,
     body: Size<Pixels>,
@@ -357,15 +359,20 @@ fn disk_fit(
     total: usize,
     m: &UiMetrics,
 ) -> ListFit {
-    list_fit(
+    list_fit_gaps(
         arrange,
         rows,
         total,
         body,
         cell_min(m),
-        m.sp[1],
+        cell_gap(m),
         px(LABEL_ROW * m.ui_scale) + m.sp[2],
     )
+}
+
+/// The gap between `disk_charts` cells: 2 px between columns, none between rows.
+fn cell_gap(m: &UiMetrics) -> Size<Pixels> {
+    size(m.sp[1], m.sp[0])
 }
 
 /// The debug selector of a disk's `disk_charts` cell.
@@ -1223,13 +1230,13 @@ impl DiskBox {
         self.cells = fit.shown;
         self.expanded = 0;
         let words = [self.read_word.clone(), self.write_word.clone()];
-        let cells = grid_cells(
+        let cells = grid_cells_gaps(
             &fit.grid,
             self.rows
                 .iter()
                 .take(fit.shown)
                 .map(|r| chart_cell(r, fit.grid.cell, &words, m, theme)),
-            m.sp[1],
+            cell_gap(m),
             GRID_ID,
         );
         // A "+n more" line that does not fit whole is left out (UI-PRF-017).

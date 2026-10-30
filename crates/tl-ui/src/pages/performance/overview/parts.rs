@@ -1377,13 +1377,25 @@ pub fn fill_grid(
     gap: Pixels,
     bar: Pixels,
 ) -> GridFit {
+    fill_grid_gaps(n, area, min, size(gap, gap), bar)
+}
+
+/// [`fill_grid`] with `gap.width` between columns and `gap.height` between rows.
+fn fill_grid_gaps(
+    n: usize,
+    area: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Size<Pixels>,
+    bar: Pixels,
+) -> GridFit {
     if n == 0 {
         return GridFit::default();
     }
-    let (w, h, g) = (
+    let (w, h, g, rg) = (
         f32::from(area.width),
         f32::from(area.height),
-        f32::from(gap),
+        f32::from(gap.width),
+        f32::from(gap.height),
     );
     let (min_w, min_h) = (f32::from(min.width), f32::from(min.height));
     let cell_w = |w: f32, cols: usize| {
@@ -1394,7 +1406,7 @@ pub fn fill_grid(
     let mut best: Option<(f32, GridFit)> = None;
     for cols in 1..=grid_max_cols(n, w, min_w, g) {
         let rows = n.div_ceil(cols);
-        let raw = (h - g * (rows - 1) as f32) / rows as f32;
+        let raw = (h - rg * (rows - 1) as f32) / rows as f32;
         if raw + 1e-3 < min_h {
             continue;
         }
@@ -1453,19 +1465,32 @@ pub fn arrange_grid(
     gap: Pixels,
     bar: Pixels,
 ) -> GridFit {
+    arrange_grid_gaps(arrange, n, area, min, size(gap, gap), bar)
+}
+
+/// [`arrange_grid`] with `gap.width` between columns and `gap.height` between rows.
+fn arrange_grid_gaps(
+    arrange: Arrange,
+    n: usize,
+    area: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Size<Pixels>,
+    bar: Pixels,
+) -> GridFit {
     if n == 0 {
         return GridFit::default();
     }
-    let (w, h, g, b) = (
+    let (w, h, g, rg, b) = (
         f32::from(area.width),
         f32::from(area.height),
-        f32::from(gap),
+        f32::from(gap.width),
+        f32::from(gap.height),
         f32::from(bar),
     );
     match arrange {
-        Arrange::Auto => fill_grid(n, area, min, gap, bar),
+        Arrange::Auto => fill_grid_gaps(n, area, min, gap, bar),
         Arrange::Vertical => {
-            let (ch, cw, scrolls) = line_fit(n, h, w, f32::from(min.height), g, b);
+            let (ch, cw, scrolls) = line_fit(n, h, w, f32::from(min.height), rg, b);
             GridFit {
                 cols: 1,
                 rows: n,
@@ -1518,29 +1543,43 @@ pub fn list_fit(
     gap: Pixels,
     more_h: Pixels,
 ) -> ListFit {
+    list_fit_gaps(arrange, n, total, body, min, size(gap, gap), more_h)
+}
+
+/// [`list_fit`] with `gap.width` between columns and `gap.height` between rows.
+pub fn list_fit_gaps(
+    arrange: Arrange,
+    n: usize,
+    total: usize,
+    body: Size<Pixels>,
+    min: Size<Pixels>,
+    gap: Size<Pixels>,
+    more_h: Pixels,
+) -> ListFit {
     let less = |by: Pixels| size(body.width, (body.height - by).max(px(0.)));
     let more = if total > n { more_h } else { px(0.) };
-    let grid = arrange_grid(arrange, n, less(more), min, gap, px(0.));
+    let grid = arrange_grid_gaps(arrange, n, less(more), min, gap, px(0.));
     let unpainted = body.width == px(0.) && body.height == px(0.);
     if unpainted || (!grid.scrolls && !grid.scrolls_x) {
         return ListFit { grid, shown: n };
     }
     let area = less(more_h);
-    let (w, h, g) = (
+    let (w, h, g, rg) = (
         f32::from(area.width),
         f32::from(area.height),
-        f32::from(gap),
+        f32::from(gap.width),
+        f32::from(gap.height),
     );
     let (min_w, min_h) = (f32::from(min.width), f32::from(min.height));
-    let fits = |len: f32, min: f32| ((len + g) / (min + g) + 1e-3).floor().max(0.) as usize;
+    let fits = |len: f32, min: f32, g: f32| ((len + g) / (min + g) + 1e-3).floor().max(0.) as usize;
     let cap = match arrange {
-        Arrange::Auto => grid_max_cols(n, w, min_w, g) * fits(h, min_h),
-        Arrange::Vertical => fits(h, min_h),
-        Arrange::Horizontal => fits(w, min_w),
+        Arrange::Auto => grid_max_cols(n, w, min_w, g) * fits(h, min_h, rg),
+        Arrange::Vertical => fits(h, min_h, rg),
+        Arrange::Horizontal => fits(w, min_w, g),
     };
     let shown = cap.min(n);
     ListFit {
-        grid: arrange_grid(arrange, shown, area, min, gap, px(0.)),
+        grid: arrange_grid_gaps(arrange, shown, area, min, gap, px(0.)),
         shown,
     }
 }
@@ -1553,16 +1592,26 @@ pub fn grid_cells(
     gap: Pixels,
     id: impl Into<SharedString>,
 ) -> AnyElement {
+    grid_cells_gaps(fit, cells, size(gap, gap), id)
+}
+
+/// [`grid_cells`] with `gap.width` between columns and `gap.height` between rows.
+pub fn grid_cells_gaps(
+    fit: &GridFit,
+    cells: impl IntoIterator<Item = AnyElement>,
+    gap: Size<Pixels>,
+    id: impl Into<SharedString>,
+) -> AnyElement {
     let id = id.into();
     let mut cells = cells.into_iter();
-    let mut grid = div().flex().flex_col().flex_none().gap(gap);
+    let mut grid = div().flex().flex_col().flex_none().gap(gap.height);
     for _ in 0..fit.rows {
         grid = grid.child(
             div()
                 .flex()
                 .flex_row()
                 .flex_none()
-                .gap(gap)
+                .gap(gap.width)
                 .children(cells.by_ref().take(fit.cols.max(1))),
         );
     }
@@ -1571,7 +1620,10 @@ pub fn grid_cells(
         // report the viewport's width and never scroll.
         div()
             .size_full()
-            .child(grid.w(fit.content_w(gap)).h(fit.content_h(gap)))
+            .child(
+                grid.w(fit.content_w(gap.width))
+                    .h(fit.content_h(gap.height)),
+            )
             .overflow_x_scrollbar()
             .id(id)
             .into_any_element()
