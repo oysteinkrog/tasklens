@@ -3000,6 +3000,7 @@ fn raw_meta(exe: ExeLink, cgroup: Option<CgroupPath>) -> RawMeta {
         argv: Default::default(),
         cgroup,
         cgroup_denied: false,
+        wine: None,
     }
 }
 

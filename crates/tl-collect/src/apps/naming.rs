@@ -26,8 +26,18 @@ pub fn is_wine(exe_base: Option<&str>, comm: &str) -> bool {
 /// Returns the first argv token that ends with `.exe` (any case), cut to its last segment.
 /// Both `/` and `\` split segments, so `C:\Games\game.exe` gives `game.exe`.
 pub fn wine_exe_name(argv: &[Arc<str>]) -> Option<&str> {
-    let token = argv.iter().find(|t| ends_with_exe(t))?;
-    token.rsplit(['/', '\\']).next()
+    wine_exe_path(argv).map(windows_file_name)
+}
+
+/// Returns the first argv token that ends with `.exe` (any case), whole:
+/// `C:\Program Files\Backblaze\bztransmit.exe`.
+pub fn wine_exe_path(argv: &[Arc<str>]) -> Option<&str> {
+    argv.iter().find(|t| ends_with_exe(t)).map(|t| &**t)
+}
+
+/// The last segment of a Windows or Unix path. Both `/` and `\` split segments.
+pub fn windows_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Returns the image name: the Windows `.exe` name for Wine, else the exe basename.

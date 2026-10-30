@@ -352,6 +352,7 @@ mod values {
             pgrp: 0,
             sid: 0,
             last_cpu: 0,
+            wine: None,
         }
     }
 
@@ -2739,6 +2740,7 @@ mod group_fields {
             pgrp: 0,
             sid: 0,
             last_cpu: 0,
+            wine: None,
         }
     }
 
@@ -3295,6 +3297,7 @@ mod highlight {
             pgrp: 0,
             sid: 0,
             last_cpu: 0,
+            wine: None,
         }
     }
 
@@ -3822,6 +3825,7 @@ mod row_tooltip {
             pgrp: 0,
             sid: 0,
             last_cpu: 0,
+            wine: None,
         }
     }
 

@@ -342,6 +342,7 @@ proptest! {
             argv: Default::default(),
             cgroup: None,
             cgroup_denied: false,
+            wine: None,
         };
         let mut pkg = PackageIndex::new(Box::new(NoPackages));
         let p = ExtrasP2Reader::new().read(

@@ -1052,6 +1052,7 @@ mod tests {
             pgrp: pid,
             sid: pid,
             last_cpu: pid % 16,
+            wine: None,
         }
     }
 

@@ -34,7 +34,7 @@ use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     AppCgroupSample, Coverage, GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
-    ProcessMeta, ProcessRecord,
+    ProcessMeta, ProcessRecord, WineProcess,
 };
 use tl_model::system::CpuSet;
 use tl_model::table::{Manager, UnitRef};
@@ -759,6 +759,7 @@ struct MetaSlot {
     exe_path: Arc<str>,
     exe_deleted: bool,
     unit: Option<UnitRef>,
+    wine: Option<Arc<WineProcess>>,
 }
 
 /// The `io.stat` counters of one app unit at its last sample.
@@ -1441,6 +1442,7 @@ impl Build<'_, '_> {
             pgrp: u32::try_from(p.stat.pgrp).unwrap_or(0),
             sid: u32::try_from(p.stat.session).unwrap_or(0),
             last_cpu: u32::try_from(p.stat.processor).unwrap_or(0),
+            wine: slot.wine.clone(),
         });
         self.out.side.push(SweepSide {
             class: app.class,
@@ -1542,6 +1544,7 @@ fn build_meta(
         exe_path: exe.cloned().unwrap_or_else(|| empty.clone()),
         exe_deleted,
         unit,
+        wine: raw.wine.clone(),
         cgroup,
         meta,
         app,

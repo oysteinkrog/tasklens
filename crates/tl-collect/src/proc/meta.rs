@@ -16,9 +16,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::fd::{AsFd, BorrowedFd};
 use smallvec::SmallVec;
 use tl_model::ids::ProcessKey;
+use tl_model::process::WineProcess;
 
 use crate::CollectError;
+use crate::apps::naming::{exe_basename, is_wine, wine_exe_path};
 use crate::proc::cgroup::{CgroupPath, parse_cgroup_file};
+use crate::proc::detail::ENVIRON_MAX;
 use crate::proc::is_denied;
 use crate::sanitize::{
     CMDLINE_MAX, COMM_MAX, EXE_LINK_MAX, sanitize_cmdline, sanitize_comm, sanitize_link,
@@ -97,6 +100,8 @@ pub struct RawMeta {
     pub cgroup: Option<CgroupPath>,
     /// The `cgroup` file gave EACCES or EPERM.
     pub cgroup_denied: bool,
+    /// The Windows image and Wine prefix of a Wine process; `None` for every other process.
+    pub wine: Option<Arc<WineProcess>>,
 }
 
 impl RawMeta {
@@ -124,6 +129,7 @@ impl fmt::Debug for RawMeta {
             .field("argv_len", &self.argv.len())
             .field("cgroup", &self.cgroup.is_some())
             .field("cgroup_denied", &self.cgroup_denied)
+            .field("wine", &self.wine.is_some())
             .finish()
     }
 }
@@ -294,6 +300,17 @@ fn read_meta(
         Err(e) => (None, matches!(e, CollectError::PermissionDenied)),
     };
 
+    let exe_base = match &exe {
+        ExeLink::Path { path, .. } => Some(exe_basename(path)),
+        ExeLink::Restricted | ExeLink::None => None,
+    };
+    let wine = is_wine(exe_base, &comm).then(|| {
+        Arc::new(WineProcess {
+            prefix: read_wine_prefix(dir, bufs),
+            image: wine_exe_path(&argv).map(Arc::from),
+        })
+    });
+
     RawMeta {
         comm,
         exe,
@@ -301,7 +318,35 @@ fn read_meta(
         argv,
         cgroup,
         cgroup_denied,
+        wine,
     }
+}
+
+/// The Wine prefix of a Wine process from its `environ`: `WINEPREFIX`, else `$HOME/.wine`, as
+/// Wine picks it. Trailing `/` are removed. Only the two values are kept (ADR-015). `None` when
+/// the file cannot be read (another user's process) or has neither variable.
+fn read_wine_prefix(dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> Option<Arc<str>> {
+    count_read();
+    read_at(dir, "environ", &mut bufs.cmdline, ENVIRON_MAX).ok()?;
+    let mut home = None;
+    let mut prefix = None;
+    for var in bufs.cmdline.split(|&b| b == 0) {
+        if let Some(v) = var.strip_prefix(b"WINEPREFIX=") {
+            prefix = Some(v);
+        } else if let Some(v) = var.strip_prefix(b"HOME=") {
+            home = Some(v);
+        }
+    }
+    let (value, suffix) = match (prefix.filter(|v| !v.is_empty()), home) {
+        (Some(prefix), _) => (prefix, ""),
+        (None, Some(home)) if !home.is_empty() => (home, "/.wine"),
+        _ => return None,
+    };
+    sanitize_text(value, EXE_LINK_MAX, &mut bufs.text);
+    let trimmed = bufs.text.trim_end_matches('/').len();
+    bufs.text.truncate(trimmed);
+    bufs.text.push_str(suffix);
+    (!bufs.text.is_empty()).then(|| Arc::from(bufs.text.as_str()))
 }
 
 fn read_exe(dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> ExeLink {
@@ -494,6 +539,62 @@ fn file_mtime(path: &Path) -> Option<(i64, i64)> {
 mod tests {
     use super::*;
 
+    /// Reads the metadata of a fake `/proc/<pid>` directory.
+    fn meta_of(comm: &str, exe: &str, cmdline: &[u8], environ: &[u8]) -> RawMeta {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("comm"), format!("{comm}\n")).unwrap();
+        std::os::unix::fs::symlink(exe, dir.path().join("exe")).unwrap();
+        std::fs::write(dir.path().join("cmdline"), cmdline).unwrap();
+        std::fs::write(dir.path().join("environ"), environ).unwrap();
+        let fd = std::fs::File::open(dir.path()).unwrap();
+        let key = ProcessKey {
+            start_ticks: 1,
+            boot_id: tl_model::time::BootId(1),
+            pid: 7,
+        };
+        let mut cache = MetaCache::new();
+        let (meta, _) =
+            cache.get_or_refresh(key, fd.as_fd(), comm.as_bytes(), &mut ReadBufs::default());
+        meta.clone()
+    }
+
+    #[test]
+    fn wine_prefix_and_image_read() {
+        let preloader = "/usr/lib/wine/x86_64-unix/wine64-preloader";
+        let meta = meta_of(
+            "bztransmit.exe",
+            preloader,
+            b"C:\\Program Files\\Backblaze\\bztransmit.exe\0-x\0",
+            b"HOME=/home/u\0WINEPREFIX=/srv/backblaze/prefix/\0PATH=/bin\0",
+        );
+        let wine = meta.wine.expect("a Wine process");
+        assert_eq!(wine.prefix.as_deref(), Some("/srv/backblaze/prefix"));
+        assert_eq!(
+            wine.image.as_deref(),
+            Some("C:\\Program Files\\Backblaze\\bztransmit.exe")
+        );
+
+        // No WINEPREFIX: Wine uses ~/.wine.
+        let meta = meta_of(
+            "services.exe",
+            preloader,
+            b"C:\\windows\\system32\\services.exe\0",
+            b"WINEPREFIX=\0HOME=/home/u/\0",
+        );
+        let wine = meta.wine.expect("a Wine process");
+        assert_eq!(wine.prefix.as_deref(), Some("/home/u/.wine"));
+
+        // Neither variable.
+        let meta = meta_of("game.exe", preloader, b"game.exe\0", b"PATH=/bin\0");
+        let wine = meta.wine.expect("a Wine process");
+        assert_eq!(wine.prefix, None);
+        assert_eq!(wine.image.as_deref(), Some("game.exe"));
+
+        // Not Wine: the environment is not read.
+        let meta = meta_of("bash", "/usr/bin/bash", b"bash\0", b"WINEPREFIX=/p\0");
+        assert_eq!(meta.wine, None);
+    }
+
     #[test]
     fn interner_shares_arcs() {
         let mut i = Interner::new();
@@ -559,6 +660,7 @@ mod tests {
             argv: SmallVec::from_iter([Arc::from("firefox"), Arc::from("--token=hunter2")]),
             cgroup: None,
             cgroup_denied: false,
+            wine: None,
         };
         let text = format!("{meta:?}");
         assert!(text.contains("firefox"));
@@ -580,6 +682,7 @@ mod tests {
             ]),
             cgroup: None,
             cgroup_denied: false,
+            wine: None,
         };
         assert_eq!(meta.argv_has_prefix("--app-id=").as_deref(), Some("abc"));
         assert_eq!(

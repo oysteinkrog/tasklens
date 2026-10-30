@@ -342,6 +342,22 @@ pub struct ProcessExtras {
     pub sid: u32,
     /// /proc stat field 39: the CPU the process last ran on. 0 when the kernel gave a negative value.
     pub last_cpu: u32,
+    /// The Windows side of a Wine process, `None` for every other process. Shared by every
+    /// sweep until the process's metadata is read again.
+    pub wine: Option<Arc<WineProcess>>,
+}
+
+/// What a Wine process runs (memory groups, D-036). Read with the process's metadata.
+///
+/// Privacy: both paths are user data. Never log them above debug level (ADR-015).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WineProcess {
+    /// `WINEPREFIX` from the process environment, else `$HOME/.wine`, with trailing `/`
+    /// removed. `None` when the environment cannot be read or has neither variable.
+    pub prefix: Option<Arc<str>>,
+    /// The first argv token that ends in `.exe`, as Wine wrote it:
+    /// `C:\Program Files\Backblaze\bztransmit.exe`. `None` when argv has no such token.
+    pub image: Option<Arc<str>>,
 }
 
 /// One app cgroup sample (R-141 item 2). Filled by the tl-collect sweep (E05-A1).

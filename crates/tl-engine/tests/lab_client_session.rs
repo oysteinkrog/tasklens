@@ -247,6 +247,7 @@ fn proc_extras() -> ProcessExtras {
         pgrp: 0,
         sid: 0,
         last_cpu: 0,
+        wine: None,
     }
 }
 

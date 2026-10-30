@@ -1517,6 +1517,7 @@ fn made_meta(comm: &str, exe: Option<&str>, cgroup_path: &str) -> RawMeta {
         argv: exe.into_iter().map(Arc::from).collect(),
         cgroup: Some(cgroup(cgroup_path)),
         cgroup_denied: false,
+        wine: None,
     }
 }
 
