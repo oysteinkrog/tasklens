@@ -3367,12 +3367,12 @@ mod page {
     use tl_ui::pages::performance::actions::{
         PerfOverviewEditLayout, PerfOverviewResetBox, PerfOverviewResetLayout,
         PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, PerfOverviewSetBoxPower,
-        bind_keys_performance,
+        PerfOverviewSetBoxPowerPlacement, bind_keys_performance,
     };
     use tl_ui::pages::performance::overview::box_menu::gear_id;
     use tl_ui::pages::performance::overview::cpu_box::{
-        CORE_CHARTS_ID, CPU_BOX_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID, POWER_SPLITTER_ID,
-        POWER_STRIP_ID, core_chart_id,
+        CORE_CHARTS_ID, CPU_BOX_ID, CPU_CHART_ID, CPU_SPLITTER_ID, CPU_SPLITTER_LINE_ID,
+        POWER_SPLITTER_ID, POWER_STRIP_ID, core_chart_id,
     };
     use tl_ui::pages::performance::overview::edit::{
         GHOST_ID, TOOLBAR_ID, corner_id, hide_button_id, title_handle_id,
@@ -4411,6 +4411,207 @@ mod page {
             on: true,
         });
         assert_eq!(r.saved().map(|s| s.grid[1].power), Some(false));
+    }
+
+    /// Publishes 5 samples of the CPU total and both power draw series, 100 ms apart up to now.
+    fn publish_cpu_and_power(r: &mut Rig) {
+        r.version += 1;
+        let version = r.version;
+        let newest = now_boot_ns();
+        let mut views: Vec<_> = [
+            MetricId::CPU_TOTAL,
+            MetricId::CPU_POWER_PKG,
+            MetricId::CPU_POWER_CORE,
+        ]
+        .into_iter()
+        .map(|metric| {
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(0),
+                    metric,
+                },
+                version,
+                period_ns: 100_000_000,
+                samples: (0..5u64)
+                    .map(|k| Sample::valid(newest - (4 - k) * 100_000_000, 20. + k as f32))
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        })
+        .collect();
+        views.sort_by_key(|v| v.id);
+        r.engine.publish_with(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+    }
+
+    /// tasklens-o55.55: with `power_placement = "under_graph"` the power draw strip sits under
+    /// the total chart, as wide as it, and the core rows beside them keep the body's full
+    /// height. The two charts then share one hover cursor at one time. Full width is the
+    /// default, keeps today's layout and has no hover.
+    #[gpui_kit::test]
+    fn overview_cpu_power_under_graph(cx: &mut TestAppContext) {
+        use tl_model::snapshot::RaplState;
+        use tl_ui::pages::performance::overview::layout::PowerPlacement;
+        use tl_ui::pages::performance::overview::parts::core_spark_id;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.vcx.update(|window, _| window.activate_window());
+        r.set_row_unit(60);
+        r.set_rapl(Some(RaplState::Readable));
+        r.page_action(&PerfOverviewSetBoxPower {
+            kind: "cpu".into(),
+            on: true,
+        });
+        publish_cpu_and_power(&mut r);
+        let set_place = |r: &mut Rig, placement: &str| {
+            r.page_action(&PerfOverviewSetBoxPowerPlacement {
+                kind: "cpu".into(),
+                placement: placement.into(),
+            });
+        };
+        let saved = |r: &mut Rig| r.saved().and_then(|s| s.grid[0].power_placement.clone());
+        let page = r.page.clone();
+        let (total, power) = r.vcx.update(|_, cx| {
+            let b = page.read(cx).cpu_box().read(cx);
+            (
+                b.total_chart().clone(),
+                b.power_chart().expect("strip chart").clone(),
+            )
+        });
+        // The marker x and whether a value box was painted, for `chart`.
+        let cursor = |r: &mut Rig, chart: &Entity<ChartView>| {
+            r.vcx.read_entity(chart, |v, _| {
+                let h = v.hover_state();
+                (h.last_marker_x, h.last_box.is_some())
+            })
+        };
+        let hover = |r: &mut Rig, at: gpui_kit::Point<gpui_kit::Pixels>| {
+            r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+            draw(r.vcx);
+            draw(r.vcx);
+        };
+        let frame = r.bounds_of(CPU_BOX_ID.into());
+
+        // Full width by default: the strip spans the box under the core rows, and nothing is
+        // written.
+        assert_eq!(
+            r.layout().config(BoxKind::Cpu).power_placement,
+            PowerPlacement::FullWidth
+        );
+        assert_eq!(saved(&mut r), None);
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        let rows = r.bounds_of(core_spark_id(0));
+        assert!(rows.bottom() <= strip.top(), "{rows:?} {strip:?}");
+        assert!(f32::from(strip.size.width) > 500., "{strip:?}");
+        let chart = r.bounds_of(CPU_CHART_ID.into());
+        hover(&mut r, point(chart.right() - px(20.), center(chart).y));
+        assert_eq!(cursor(&mut r, &total).0, None, "no hover full width");
+
+        // Under the graph: the strip is the chart's width, under it in the left column, and
+        // the core rows' column reaches past the strip's top to the bottom of the body.
+        set_place(&mut r, "under_graph");
+        assert_eq!(saved(&mut r).as_deref(), Some("under_graph"));
+        assert_eq!(
+            r.layout().config(BoxKind::Cpu).power_placement,
+            PowerPlacement::UnderGraph
+        );
+        let chart = r.bounds_of(CPU_CHART_ID.into());
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        let rows = r.bounds_of(core_spark_id(0));
+        let gap = r.gap(CPU_SPLITTER_ID);
+        assert!(chart.bottom() <= strip.top(), "{chart:?} {strip:?}");
+        assert!(
+            (chart.left() - strip.left()).abs() <= px(1.),
+            "{chart:?} {strip:?}"
+        );
+        assert!(
+            (chart.right() - strip.right()).abs() <= px(1.),
+            "{chart:?} {strip:?}"
+        );
+        assert!(strip.size.height >= px(64.), "{strip:?}");
+        assert!(strip.right() <= gap.left() + px(1.) && gap.right() <= rows.left());
+        assert!(gap.bottom() >= strip.bottom() - px(1.), "{gap:?} {strip:?}");
+        assert!(
+            rows.top() < chart.bottom(),
+            "the rows start at the top of the body"
+        );
+        assert!(strip.bottom() <= frame.bottom());
+
+        // Hover on the chart: its readout, and the cursor on the strip at the same x.
+        hover(&mut r, point(chart.right() - px(20.), center(chart).y));
+        let (x_total, box_total) = cursor(&mut r, &total);
+        let (x_power, box_power) = cursor(&mut r, &power);
+        let x = x_total.expect("cursor on the chart");
+        assert!(
+            box_total && !box_power,
+            "one value box, on the hovered chart"
+        );
+        let x_power = x_power.expect("cursor on the strip");
+        assert!((x - x_power).abs() <= px(1.), "{x:?} {x_power:?}");
+
+        // Hover on the strip: the same the other way round.
+        hover(&mut r, point(strip.right() - px(20.), center(strip).y));
+        let (x_total, box_total) = cursor(&mut r, &total);
+        let (x_power, box_power) = cursor(&mut r, &power);
+        let x = x_power.expect("cursor on the strip");
+        assert!(box_power && !box_total);
+        let x_total = x_total.expect("cursor on the chart");
+        assert!((x - x_total).abs() <= px(1.), "{x:?} {x_total:?}");
+
+        // Off both charts: no cursor on either.
+        hover(&mut r, center(rows));
+        assert_eq!(cursor(&mut r, &total).0, None);
+        assert_eq!(cursor(&mut r, &power).0, None);
+
+        // Stacked, the strip stays under the chart and the core rows go under both.
+        r.page_action(&PerfOverviewSetBoxArrange {
+            kind: "cpu".into(),
+            arrange: "vertical".into(),
+        });
+        let chart = r.bounds_of(CPU_CHART_ID.into());
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        let rows = r.bounds_of(core_spark_id(0));
+        assert!(chart.bottom() <= strip.top() && strip.bottom() <= rows.top());
+
+        // Another mode draws the strip full width again; back in chart and cores it is under
+        // the graph, because the placement belongs to the box.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "cores".into(),
+        });
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        assert!(r.bounds_of(core_spark_id(0)).bottom() <= strip.top());
+        assert_eq!(saved(&mut r).as_deref(), Some("under_graph"));
+
+        // Full width again writes nothing; Reset Box clears it too.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "chart_cores".into(),
+        });
+        set_place(&mut r, "full_width");
+        assert_eq!(saved(&mut r), None);
+        set_place(&mut r, "under_graph");
+        r.page_action(&PerfOverviewResetBox { kind: "cpu".into() });
+        assert_eq!(saved(&mut r), None);
+        // An unknown value and another kind do nothing.
+        set_place(&mut r, "left");
+        assert_eq!(saved(&mut r), None);
+        r.page_action(&PerfOverviewSetBoxPowerPlacement {
+            kind: "memory".into(),
+            placement: "under_graph".into(),
+        });
+        assert_eq!(
+            r.saved().and_then(|s| s.grid[1].power_placement.clone()),
+            None
+        );
     }
 
     #[gpui_kit::test]
