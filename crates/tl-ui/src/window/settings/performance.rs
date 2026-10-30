@@ -121,6 +121,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
             ("shell-settings-perf-secondary-none", "none"),
             ("shell-settings-perf-secondary-power", "power"),
             ("shell-settings-perf-secondary-clock", "clock"),
+            ("shell-settings-perf-secondary-clocks", "clocks"),
             ("shell-settings-perf-secondary-temperature", "temperature"),
         ],
     );

@@ -272,8 +272,9 @@ impl PowerPlacement {
 /// A box's mode, split and arrangement. `split` is the first part's share, `None` in a mode
 /// with one part. `arrange` is `None` in a mode without a saved Arrange choice. `power` and
 /// `power_split` are the CPU box's power draw strip (D-028): it is shown and takes this share
-/// of the body, or of the graph's column with `power_placement` under the graph; other kinds
-/// keep them at their defaults.
+/// of the body, or of the graph's column with `power_placement` under the graph. `clocks` is
+/// the CPU box's Core clocks chart under the CPU graph (tasklens-o55.57). Other kinds keep
+/// them at their defaults.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxConfig {
     pub mode: &'static BoxMode,
@@ -282,6 +283,7 @@ pub struct BoxConfig {
     pub power: bool,
     pub power_split: f32,
     pub power_placement: PowerPlacement,
+    pub clocks: bool,
 }
 
 impl BoxConfig {
@@ -294,6 +296,7 @@ impl BoxConfig {
             power: false,
             power_split: POWER_SPLIT_DEFAULT,
             power_placement: PowerPlacement::FullWidth,
+            clocks: false,
         }
     }
 
@@ -335,6 +338,7 @@ impl BoxConfig {
                 .and_then(PowerPlacement::from_id)
                 .filter(|_| kind == BoxKind::Cpu)
                 .unwrap_or_default(),
+            clocks: kind == BoxKind::Cpu && b.clocks,
         }
     }
 
@@ -517,6 +521,7 @@ impl OverviewLayout {
                         power,
                         power_split,
                         power_placement,
+                        clocks: config.clocks,
                         hidden: if b.kind == BoxKind::Gpu {
                             self.hidden_gpu.clone()
                         } else {
@@ -584,7 +589,7 @@ impl OverviewLayout {
     }
 
     /// Switches `kind` to its mode `id` with that mode's default split and arrangement. The CPU
-    /// box keeps its power draw strip.
+    /// box keeps its power draw strip and its Core clocks chart.
     /// Returns `false` when the kind has no such mode or already shows it.
     pub fn set_mode(&mut self, kind: BoxKind, id: &str) -> bool {
         let Some(mode) = kind.mode(id).filter(|m| m.id != self.config(kind).mode.id) else {
@@ -596,6 +601,7 @@ impl OverviewLayout {
             power: old.power,
             power_split: old.power_split,
             power_placement: old.power_placement,
+            clocks: old.clocks,
             ..BoxConfig::of(kind, mode)
         };
         true
@@ -641,6 +647,17 @@ impl OverviewLayout {
             return false;
         }
         config.power_placement = placement;
+        true
+    }
+
+    /// Shows or hides the CPU box's Core clocks chart (tasklens-o55.57). Returns whether it
+    /// changed; any other kind has no such chart.
+    pub fn set_clocks(&mut self, kind: BoxKind, on: bool) -> bool {
+        let config = &mut self.configs[kind.index()];
+        if kind != BoxKind::Cpu || config.clocks == on {
+            return false;
+        }
+        config.clocks = on;
         true
     }
 
@@ -1094,6 +1111,30 @@ mod tests {
         // Reset Box puts the strip back across the box.
         assert!(layout.reset_box(BoxKind::Cpu));
         assert_eq!(cpu(&layout), PowerPlacement::FullWidth);
+    }
+
+    /// tasklens-o55.57: the Core clocks chart is off by default, saved only when on, kept
+    /// across a mode change, only on the CPU box, and Reset Box turns it off.
+    #[test]
+    fn clocks_converts_to_and_from_the_setting() {
+        let mut layout = OverviewLayout::grid_default();
+        let cpu = |l: &OverviewLayout| l.config(BoxKind::Cpu).clocks;
+        assert!(!cpu(&layout));
+        assert!(!layout.to_setting().grid[0].clocks);
+        assert!(layout.set_clocks(BoxKind::Cpu, true));
+        assert!(!layout.set_clocks(BoxKind::Cpu, true));
+        assert!(!layout.set_clocks(BoxKind::Memory, true));
+        let setting = layout.to_setting();
+        assert!(setting.grid[0].clocks);
+        assert_eq!(OverviewLayout::from_setting(Some(&setting)), layout);
+        assert!(layout.set_mode(BoxKind::Cpu, "chart"));
+        assert!(cpu(&layout));
+        let mut other = setting;
+        other.grid[1].clocks = true;
+        let back = OverviewLayout::from_setting(Some(&other));
+        assert!(!back.config(BoxKind::Memory).clocks);
+        assert!(layout.reset_box(BoxKind::Cpu));
+        assert!(!cpu(&layout));
     }
 
     #[test]

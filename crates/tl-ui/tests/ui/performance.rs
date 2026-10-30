@@ -1228,6 +1228,7 @@ mod perf_keys {
             CpuSecondaryGraph::None,
             CpuSecondaryGraph::Power,
             CpuSecondaryGraph::Clock,
+            CpuSecondaryGraph::Clocks,
             CpuSecondaryGraph::Temperature,
         ] {
             assert_eq!(CpuSecondaryGraph::from(CpuSecondaryGraphJson::from(m)), m);

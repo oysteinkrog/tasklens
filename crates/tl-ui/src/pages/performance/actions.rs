@@ -438,7 +438,7 @@ json_mirror!(
     /// JSON form of [`CpuSecondaryGraph`].
     CpuSecondaryGraphJson <-> CpuSecondaryGraph,
     "lowercase",
-    [None, Power, Clock, Temperature]
+    [None, Power, Clock, Clocks, Temperature]
 );
 json_mirror!(
     /// JSON form of [`GpuOptionalGraph`].

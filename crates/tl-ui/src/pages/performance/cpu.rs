@@ -113,6 +113,7 @@ const KEY_MENU_SECONDARY: &str = "perf-cpu-menu-secondary";
 const KEY_SECONDARY_NONE: &str = "perf-cpu-secondary-none";
 const KEY_SECONDARY_POWER: &str = "perf-cpu-secondary-power";
 const KEY_SECONDARY_CLOCK: &str = "perf-cpu-secondary-clock";
+const KEY_SECONDARY_CLOCKS: &str = "perf-cpu-secondary-clocks";
 const KEY_SECONDARY_TEMP: &str = "perf-cpu-secondary-temp";
 /// `{$shown}`: the name of the chart shown in place of Power draw.
 const KEY_SECONDARY_FALLBACK: &str = "perf-cpu-secondary-fallback";
@@ -231,6 +232,7 @@ pub fn effective_secondary(
         G::Power if avail.clock => Some((G::Clock, true)),
         G::Power => None,
         G::Clock => avail.clock.then_some((G::Clock, false)),
+        G::Clocks => avail.clock.then_some((G::Clocks, false)),
         G::Temperature => avail.temperature.then_some((G::Temperature, false)),
     }
 }
@@ -247,9 +249,9 @@ pub struct SecondaryItem {
     pub setup_after: bool,
 }
 
-/// The four items in menu order. Power draw is disabled with "Needs setup" when RAPL is
+/// The five items in menu order. Power draw is disabled with "Needs setup" when RAPL is
 /// unreadable, and the setup item follows it; Temperature is disabled without a CPU hwmon.
-pub fn secondary_items(avail: SecondaryAvail) -> [SecondaryItem; 4] {
+pub fn secondary_items(avail: SecondaryAvail) -> [SecondaryItem; 5] {
     use CpuSecondaryGraph as G;
     let needs_setup = avail.power == PowerState::NeedsSetup;
     let item = |choice, enabled| SecondaryItem {
@@ -267,6 +269,7 @@ pub fn secondary_items(avail: SecondaryAvail) -> [SecondaryItem; 4] {
             ..item(G::Power, !needs_setup)
         },
         item(G::Clock, true),
+        item(G::Clocks, true),
         item(G::Temperature, avail.temperature),
     ]
 }
@@ -277,6 +280,7 @@ pub const fn secondary_key(choice: CpuSecondaryGraph) -> &'static str {
         CpuSecondaryGraph::None => KEY_SECONDARY_NONE,
         CpuSecondaryGraph::Power => KEY_SECONDARY_POWER,
         CpuSecondaryGraph::Clock => KEY_SECONDARY_CLOCK,
+        CpuSecondaryGraph::Clocks => KEY_SECONDARY_CLOCKS,
         CpuSecondaryGraph::Temperature => KEY_SECONDARY_TEMP,
     }
 }
@@ -286,7 +290,8 @@ const fn secondary_index(choice: CpuSecondaryGraph) -> usize {
         CpuSecondaryGraph::None => 0,
         CpuSecondaryGraph::Power => 1,
         CpuSecondaryGraph::Clock => 2,
-        CpuSecondaryGraph::Temperature => 3,
+        CpuSecondaryGraph::Clocks => 3,
+        CpuSecondaryGraph::Temperature => 4,
     }
 }
 
@@ -318,8 +323,8 @@ pub struct Words {
     pub total: SharedString,
     pub kernel: SharedString,
     pub menu_secondary: SharedString,
-    /// In [`secondary_index`] order: None, Power draw, Clock speed, Temperature.
-    pub secondary: [SharedString; 4],
+    /// In [`secondary_index`] order: None, Power draw, Clock speed, Core clocks, Temperature.
+    pub secondary: [SharedString; 5],
     pub setup_power: SharedString,
     pub needs_setup: SharedString,
     /// "Power draw is not available. Showing Temperature." and "… Showing Clock speed."
@@ -352,6 +357,7 @@ impl Words {
             CpuSecondaryGraph::None,
             CpuSecondaryGraph::Power,
             CpuSecondaryGraph::Clock,
+            CpuSecondaryGraph::Clocks,
             CpuSecondaryGraph::Temperature,
         ]
         .map(|c| t(secondary_key(c)));
@@ -364,7 +370,7 @@ impl Words {
                 &[("shown", shown.to_string().into())],
             )
         };
-        self.fallback_temp = fallback(&self.secondary[3]);
+        self.fallback_temp = fallback(&self.secondary[4]);
         self.fallback_clock = fallback(&self.secondary[2]);
         true
     }
@@ -590,7 +596,7 @@ fn secondary_spec(
         ..ChartSeries::default()
     };
     let (series, y) = match shown.choice {
-        CpuSecondaryGraph::Clock => (
+        CpuSecondaryGraph::Clock | CpuSecondaryGraph::Clocks => (
             smallvec![
                 series(MetricId::CPU_FREQ, true, false),
                 series(MetricId::CPU_CLOCK_MAX, false, true),
@@ -634,7 +640,7 @@ fn secondary_labels(choice: CpuSecondaryGraph, words: &Words) -> ChartLabels {
     ChartLabels {
         heading: Some(word.clone()),
         value_fmt: match choice {
-            CpuSecondaryGraph::Clock => ValueFormat::Mhz,
+            CpuSecondaryGraph::Clock | CpuSecondaryGraph::Clocks => ValueFormat::Mhz,
             CpuSecondaryGraph::Temperature => ValueFormat::Celsius,
             CpuSecondaryGraph::Power | CpuSecondaryGraph::None => ValueFormat::Watts,
         },

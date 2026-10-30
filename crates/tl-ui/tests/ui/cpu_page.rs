@@ -1676,6 +1676,7 @@ mod page {
                 CpuSecondaryGraph::None,
                 CpuSecondaryGraph::Power,
                 CpuSecondaryGraph::Clock,
+                CpuSecondaryGraph::Clocks,
                 CpuSecondaryGraph::Temperature,
             ]
         );
@@ -1696,7 +1697,8 @@ mod page {
         };
         let items = secondary_items(readable);
         assert!(items[1].enabled && !items[1].setup_after);
-        assert!(!items[3].enabled);
+        assert!(items[3].enabled);
+        assert!(!items[4].enabled);
     }
 
     #[gpui_kit::test]
