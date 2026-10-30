@@ -1602,9 +1602,9 @@ mod labels {
         assert!(r.cache.borrow().painted.is_empty());
     }
 
-    /// An Overview chart's power strip: "Power draw" at the left of the title row, the value at
-    /// its right and the "100.0 W" scale label left of the value (UI-PRF-059). None of them
-    /// overlaps another or the plot, and a box too narrow for all three drops the scale label.
+    /// An Overview chart's power strip: "Power draw" at the left of the title row and the value
+    /// at its right; the "100.0 W" scale label sits inside the plot's top-right corner
+    /// (tasklens-o55.54). The heading and the value stay off the plot.
     #[gpui_kit::test]
     fn chart_title_and_scale_label_disjoint(cx: &mut TestAppContext) {
         let mut i = input(600., 120.);
@@ -1625,50 +1625,60 @@ mod labels {
             let heading = c.painted(LabelKind::Heading).expect("heading").bounds();
             let value = c.painted(LabelKind::Value).expect("value").bounds();
             let scale = c.painted(LabelKind::AxisMax).expect("scale label").bounds();
-            for (a, b) in [(heading, scale), (scale, value), (heading, value)] {
-                assert!(!a.intersects(&b), "{a:?} overlaps {b:?}");
-            }
-            for label in [heading, value, scale] {
+            assert!(
+                !heading.intersects(&value),
+                "{heading:?} overlaps {value:?}"
+            );
+            for label in [heading, value] {
                 assert!(
                     !label.intersects(&c.plot),
                     "{label:?} on the plot {:?}",
                     c.plot
                 );
             }
-            assert!(heading.left() < scale.left() && scale.right() < value.left());
+            assert!(
+                scale.top() >= c.plot.top() && scale.right() <= c.plot.right(),
+                "{scale:?} inside the plot {:?}",
+                c.plot
+            );
+            assert!(
+                f32::from(c.plot.right() - scale.right()) < 8.,
+                "{scale:?} at the plot's right"
+            );
             assert_eq!(heading.top(), px(0.), "title row at the top");
             assert_eq!(c.plot.top(), px(21.), "plot under the 20 px title row");
         }
 
-        // 140 px holds "Power draw" and "82.2 W" but not the scale label between them.
+        // 140 px holds "Power draw" and "82.2 W", and the scale label in the plot.
         r.set(|i| i.w = 140.);
         r.draw();
         let c = r.cache.borrow();
         assert!(c.painted(LabelKind::Heading).is_some());
         assert!(c.painted(LabelKind::Value).is_some());
-        assert!(c.painted(LabelKind::AxisMax).is_none(), "no room: dropped");
+        assert!(c.painted(LabelKind::AxisMax).is_some());
     }
 
-    /// A chart too short for both label rows drops the ticks first, then the scale label
-    /// (UI-PRF-059). Without a heading the title row goes with the scale label.
+    /// An Overview chart without a heading has no title row: its plot starts at the top and the
+    /// scale label sits in the plot (tasklens-o55.54). A chart too short for the tick row over a
+    /// `MIN_PLOT_H` plot drops the ticks, and a plot under 32 px drops the scale label.
     #[gpui_kit::test]
     fn chart_short_drops_ticks_then_scale(cx: &mut TestAppContext) {
         let at = |w: f32, h: f32| Bounds::new(point(px(0.), px(0.)), size(px(w), px(h)));
-        // 200 px: both rows over a 160 px plot.
+        // 200 px: the tick row under a 180 px plot.
         let r = LabelRows::of(at(600., 200.), false, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(18.), true));
-        // 130 px: both rows would leave a 90 px plot, under 100. The ticks go.
-        let r = LabelRows::of(at(600., 130.), false, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(0.), true));
-        // 50 px: the title row would leave a 28 px plot, under 32. The scale label goes, and
-        // with no heading the row too.
-        let r = LabelRows::of(at(600., 50.), false, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(18.), true));
+        // 110 px: the tick row would leave a 90 px plot, under 100. The ticks go.
+        let r = LabelRows::of(at(600., 110.), false, 1.0);
+        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(0.), true));
+        // 30 px: a 28 px plot, under 32. The scale label goes.
+        let r = LabelRows::of(at(600., 30.), false, 1.0);
         assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(0.), false));
+        // A heading keeps its title row even when the plot under it is too short for the scale.
         let r = LabelRows::of(at(600., 50.), true, 1.0);
         assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(0.), false));
         // Under 320 px wide there are no ticks at any height.
         let r = LabelRows::of(at(300., 400.), false, 1.0);
-        assert_eq!((r.top, r.bottom), (px(20.), px(0.)));
+        assert_eq!((r.top, r.bottom), (px(0.), px(0.)));
 
         // The paint follows the rows.
         let mut i = input(600., 200.);
@@ -1688,10 +1698,11 @@ mod labels {
             )
         };
         assert_eq!(drawn(&mut r), (true, true), "200 px: ticks and scale");
-        r.set(|i| i.h = 130.);
-        assert_eq!(drawn(&mut r), (false, true), "130 px: the ticks go first");
-        r.set(|i| i.h = 50.);
-        assert_eq!(drawn(&mut r), (false, false), "50 px: then the scale label");
+        assert_eq!(r.cache.borrow().plot.top(), px(1.), "no title row");
+        r.set(|i| i.h = 110.);
+        assert_eq!(drawn(&mut r), (false, true), "110 px: the ticks go first");
+        r.set(|i| i.h = 30.);
+        assert_eq!(drawn(&mut r), (false, false), "30 px: then the scale label");
         assert_eq!(r.cache.borrow().plot.top(), px(1.), "no title row");
     }
 

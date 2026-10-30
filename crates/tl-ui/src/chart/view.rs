@@ -58,7 +58,7 @@ pub struct ChartView {
     pub(crate) last_value_text: String,
     /// Hover pin and the shaped value box lines (E19-016).
     pub(crate) hover: hover::HoverState,
-    /// The scale ceiling shows small in the plot's top-left corner (`set_compact_scale`).
+    /// The scale ceiling shows small in the plot's top-right corner (`set_compact_scale`).
     pub(crate) compact_scale: bool,
     /// Glow behind the newest 10% and a dot on each line's newest point (UI-PRF-058).
     /// `with_newest_marks`.
@@ -455,9 +455,9 @@ impl ChartView {
     }
 
     /// Shows the scale ceiling ("100%", "16.00 GiB", "8 MiB/s") as one small line in place of
-    /// the axis max label (Overview boxes, TMOG). The chart then keeps a title row above its
-    /// plot, with the heading at the left and the ceiling at the right, and a row below it for
-    /// the x ticks (`labels::LabelRows`, UI-PRF-059).
+    /// the axis max label (Overview boxes, TMOG), in the plot's top-right corner. The chart then
+    /// keeps a title row above its plot only for a heading, and a row below it for the x ticks
+    /// (`labels::LabelRows`, UI-PRF-059).
     pub fn set_compact_scale(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.compact_scale != on {
             self.compact_scale = on;

@@ -261,28 +261,27 @@ impl LabelCache {
 }
 
 /// The rows an Overview chart keeps outside its plot (UI-PRF-059): a title row above it for the
-/// heading, the value and the scale label, and a tick row below it for the x ticks, so no label
-/// draws over data.
+/// heading and the value, and a tick row below it for the x ticks, so no label draws over data.
+/// The scale label draws inside the plot's top-right corner (tasklens-o55.54).
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct LabelRows {
-    /// The title row's height; 0 when the chart has none.
+    /// The title row's height; 0 when the chart has no heading.
     pub top: Pixels,
     /// The tick row's height; 0 when the ticks are dropped.
     pub bottom: Pixels,
-    /// Whether the scale label shows at the right of the title row.
+    /// Whether the scale label shows in the plot's top-right corner.
     pub scale: bool,
 }
 
 impl LabelRows {
-    /// The rows of a chart in `bounds` at `ui_scale` `s`; `heading` says whether it has a title.
-    /// The x ticks need a box at least `TICKS_MIN_BOX_W` wide. A chart too short for both rows
-    /// over a `MIN_PLOT_H` plot drops the ticks first. One too short for the title row over a
-    /// `COMPACT_MIN_PLOT_H` plot then drops the scale label, and the title row with it when
-    /// there is no heading.
+    /// The rows of a chart in `bounds` at `ui_scale` `s`; `heading` says whether it has a title,
+    /// and only then does it get the title row. The x ticks need a box at least
+    /// `TICKS_MIN_BOX_W` wide, and a chart too short for them over a `MIN_PLOT_H` plot drops
+    /// them. A plot under `COMPACT_MIN_PLOT_H` drops the scale label.
     pub fn of(bounds: Bounds<Pixels>, heading: bool, s: f32) -> Self {
         // The plot is the frame less its 1 px outline on each side.
         let plot_h = |top: f32, bottom: f32| f32::from(bounds.size.height) - top - bottom - 2.0;
-        let mut top = TITLE_ROW * s;
+        let top = if heading { TITLE_ROW * s } else { 0.0 };
         let mut bottom = if f32::from(bounds.size.width) >= TICKS_MIN_BOX_W * s {
             LABEL_ROW * s
         } else {
@@ -291,10 +290,7 @@ impl LabelRows {
         if plot_h(top, bottom) < MIN_PLOT_H * s {
             bottom = 0.0;
         }
-        let scale = plot_h(top, 0.0) >= COMPACT_MIN_PLOT_H * s;
-        if !scale && !heading {
-            top = 0.0;
-        }
+        let scale = plot_h(top, bottom) >= COMPACT_MIN_PLOT_H * s;
         Self {
             top: px(top),
             bottom: px(bottom),
@@ -326,7 +322,7 @@ pub struct LabelPaint<'a> {
     /// Axis max text from `scale::compute`, `None` when the scale has none.
     pub axis_text: Option<&'a str>,
     /// Draw the scale ceiling small in place of the axis max (`ChartView::set_compact_scale`):
-    /// at the right of the title row with `rows`, else in the plot's top-left corner.
+    /// in the plot's top-right corner with `rows`, else in its top-left corner.
     pub compact_scale: bool,
     /// The title and tick rows of an Overview chart, outside `plot` and inside `box_bounds`.
     /// `None` draws every label inside the box, over the plot.
@@ -383,11 +379,6 @@ pub fn paint(
         color: p.theme.text_secondary,
         tnum: false,
     };
-    // Where the text at the left of the title line ends, and where the text at its right
-    // starts: the scale label goes between them.
-    let mut left_end = b.left();
-    let mut right_start = b.right() - inset;
-
     // Heading.
     if let Some(heading) = p.labels.heading.as_ref().filter(|_| title_row) {
         let style = LineStyle {
@@ -400,7 +391,6 @@ pub fn paint(
         cache.shaped(shaped);
         let origin = point(b.left() + inset, title_y);
         paint_line(window, cx, &cache.heading, origin, title_h);
-        left_end = origin.x + cache.heading.width();
         #[cfg(any(test, feature = "test-hooks"))]
         cache.record(
             LabelKind::Heading,
@@ -438,11 +428,6 @@ pub fn paint(
                 p.theme.text_secondary,
                 cx,
             );
-            if left {
-                left_end = left_end.max(x + icon);
-            } else {
-                right_start = x;
-            }
             #[cfg(any(test, feature = "test-hooks"))]
             cache.record(
                 LabelKind::Lock,
@@ -495,11 +480,6 @@ pub fn paint(
             };
             let origin = point(x, title_y);
             paint_line(window, cx, &cache.value, origin, title_h);
-            if left {
-                left_end = left_end.max(x + w);
-            } else {
-                right_start = x;
-            }
             #[cfg(any(test, feature = "test-hooks"))]
             cache.record(LabelKind::Value, origin, w, title_h, color);
         }
@@ -507,6 +487,7 @@ pub fn paint(
 
     // Legend: in the plot's top-left corner of an Overview chart, else row 2, horizontal, or one
     // item per row when the box is narrow.
+    let mut legend_end = p.plot.left();
     if !p.labels.legend.is_empty() && tall && wide {
         let stack = f32::from(b.size.width) < LEGEND_STACK_BELOW_W * s;
         let colors = |i: usize| {
@@ -530,14 +511,27 @@ pub fn paint(
             m,
             p.theme,
         );
+        // The legend's right end, so the scale label in the same corner row keeps clear of it.
+        let item = |l: &CachedLine| px(SWATCH_W * s) + m.sp[2] + l.width();
+        legend_end = if stack {
+            cache
+                .legend
+                .iter()
+                .map(item)
+                .fold(origin.x, |end, w| end.max(origin.x + w))
+        } else {
+            let items = cache.legend.iter().map(item).fold(px(0.), |a, w| a + w);
+            let gaps = px(LEGEND_ITEM_GAP * s) * cache.legend.len().saturating_sub(1) as f32;
+            origin.x + items + gaps
+        };
     }
 
-    // Compact scale: at the right of the title row, left of a right-aligned value and clear of
-    // the heading, or without rows in the plot's top-left corner on plots from 32 px. A fixed
-    // scale has no axis text, so its ceiling is formatted here.
+    // Compact scale: in the plot's top-right corner, right-aligned with the y ticks under it, on
+    // plots from 32 px (tasklens-o55.54). An Overview chart leaves it out where it would reach
+    // its legend. A fixed scale has no axis text, so its ceiling is formatted here.
     let has_data = matches!(p.state, ChartState::Live | ChartState::Stale { .. });
     let scale_room = match p.rows {
-        Some(r) => r.scale && title_row,
+        Some(r) => r.scale,
         None => f32::from(p.plot.size.height) >= COMPACT_MIN_PLOT_H * s,
     };
     if p.compact_scale && scale_room {
@@ -565,20 +559,13 @@ pub fn paint(
             let w = cache.axis_max.width();
             let at = match p.rows {
                 Some(_) => {
-                    // A value at the right keeps a gap; the label is left out where it would
-                    // reach the heading.
-                    let end = if right_start < b.right() {
-                        right_start - m.sp[4]
+                    let x = p.plot.right() - m.sp[2] - w;
+                    let clear = if legend_end > p.plot.left() {
+                        legend_end + m.sp[4]
                     } else {
-                        right_start
+                        p.plot.left()
                     };
-                    let x = end - w;
-                    let clear = if left_end > b.left() {
-                        left_end + m.sp[4]
-                    } else {
-                        b.left()
-                    };
-                    (x >= clear).then_some((point(x, title_y), title_h))
+                    (x >= clear).then_some((point(x, p.plot.top() + m.sp[1]), row))
                 }
                 None => Some((point(p.plot.left() + m.sp[2], p.plot.top() + m.sp[1]), row)),
             };
