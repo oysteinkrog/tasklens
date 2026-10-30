@@ -781,13 +781,14 @@ impl Reducer {
                         id: req.id.0,
                         end: RequestEnd::Failed,
                     };
+                    // The end goes last: no event of the action follows it.
+                    if route.events.try_send(event).is_err() {
+                        tracing::debug!(target: "tasklens::engine", "action event dropped: queue full or closed");
+                    }
                     if let Some(tx) = &route.requests
                         && tx.try_send(end).is_err()
                     {
                         tracing::debug!(target: "tasklens::engine", "request end dropped: channel closed");
-                    }
-                    if route.events.try_send(event).is_err() {
-                        tracing::debug!(target: "tasklens::engine", "action event dropped: queue full or closed");
                     }
                 }
             }

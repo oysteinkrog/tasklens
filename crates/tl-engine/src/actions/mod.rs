@@ -698,6 +698,11 @@ struct InFlight {
 }
 
 impl Gate {
+    /// The actions admitted and not yet `finished`, which admission counts (ADR-006).
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.len()
+    }
+
     pub fn new(ctx: Arc<ActionCtx>) -> Self {
         let mut caps = tl_model::health::EngineCaps::empty();
         if ctx.ops.dump_available() {
@@ -737,11 +742,12 @@ impl ActionGate for Gate {
         let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
             Admission::Reject(reason) => {
                 let state = ActionState::Rejected(reason);
-                send_end(&route, req.id, action_end(&state));
+                let end = action_end(&state);
                 let ev = event(req.id, None, state);
                 if route.events.try_send(ev).is_err() {
                     tracing::debug!(target: "tasklens::action", id = req.id.0, "rejected event dropped: queue full or closed");
                 }
+                send_end(&route, req.id, end);
                 return;
             }
             Admission::Run { per_target } => per_target,
@@ -804,16 +810,15 @@ impl ActionGate for Gate {
 
 impl Drop for Gate {
     /// `TaskHandle` does not cancel on drop, so each action still in flight is aborted here. The
-    /// gate then ends it as `Lost`, unless its task already sent its end: the shared flag lets
-    /// exactly one of them send it. A best-effort `OutcomeUnknown` summary goes to the action
-    /// events too, for the UI's `ActionTracker`.
+    /// gate then ends it as `Lost`, unless its task already took the end: the shared flag lets
+    /// exactly one of them send it. A best-effort `OutcomeUnknown` summary for the UI's
+    /// `ActionTracker` goes to the action events first, so the end is the last event.
     fn drop(&mut self) {
         for flight in self.in_flight.values() {
             flight.handle.abort();
             if flight.ended.swap(true, Ordering::AcqRel) {
                 continue;
             }
-            send_end(&flight.route, flight.client, RequestEnd::Lost);
             let summary = ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED));
             if flight
                 .route
@@ -823,6 +828,7 @@ impl Drop for Gate {
             {
                 tracing::debug!(target: "tasklens::action", id = flight.client.0, "summary of an aborted action dropped: queue full or closed");
             }
+            send_end(&flight.route, flight.client, RequestEnd::Lost);
         }
     }
 }
@@ -979,8 +985,9 @@ pub async fn run_action_routed(
 }
 
 /// The action task. `ended` is shared with the gate: the task sends the action's
-/// `RequestEvent` only when it sets the flag first, and with no await between, so an abort
-/// cannot come between the two. A cancelled task sends no end; the gate that aborted it does.
+/// `RequestEvent` only when it sets the flag first. It then emits the summary and sends the end
+/// last. Cancellation is cooperative, so a task that set the flag still reaches the end after an
+/// abort. A task cancelled before it has a summary sends no end; the gate that aborted it does.
 async fn run_with(
     cx: &Cx,
     actx: &ActionCtx,
@@ -1004,8 +1011,10 @@ async fn run_with(
         tracing::debug!(target: "tasklens::action", id = req.id.0, "the gate ended the action first");
         return;
     }
-    send_end(route, req.id, action_end(&summary));
+    // The end goes last: no event of the action reaches the session after it.
+    let end = action_end(&summary);
     emit(events, cx, event(req.id, None, summary)).await;
+    send_end(route, req.id, end);
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id = req.id.0, "action cancelled, ActionFinished not sent");
         return;
@@ -2423,6 +2432,57 @@ mod run_tests {
 
     fn failed(e: ActionError) -> ActionState {
         ActionState::Failed(e)
+    }
+
+    /// ADR-018, q4x76.17: the action's end is its last event. An event queue of one holds each
+    /// event back until the client reads the one before, and the end waits for the summary.
+    #[test]
+    fn end_follows_the_summary() {
+        let mut rig = Rig::new();
+        let (events_tx, events) = async_channel::bounded(1);
+        let (requests_tx, requests) = async_channel::unbounded();
+        let actx = Arc::clone(&rig.actx);
+        let root = rig.lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = rig
+            .lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let req = term(&[1000]);
+                let route = ActionRoute {
+                    id: req.id,
+                    events: events_tx,
+                    requests: Some(requests_tx),
+                };
+                let ended = AtomicBool::new(false);
+                run_with(&cx, &actx, &route, &req, &[None], succeeds, &ended).await;
+            })
+            .expect("task is created");
+        rig.lab.scheduler.lock().schedule(task, 0);
+        rig.lab.run_until_idle();
+        // Each event, and whether the end was sent when the client read it.
+        let mut seen = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            seen.push((ev.target, ev.state, !requests.is_empty()));
+            rig.lab.run_until_idle();
+        }
+        assert_eq!(
+            seen,
+            [
+                (None, ActionState::Started, false),
+                (Some(0), ActionState::Succeeded, false),
+                (None, ActionState::Succeeded, true),
+            ]
+        );
+        let end = RequestEvent {
+            kind: IdKind::Action,
+            id: 1,
+            end: RequestEnd::Done,
+        };
+        assert_eq!(requests.try_recv(), Ok(end));
+        assert!(requests.is_empty());
+        assert_eq!(rig.finished(), 1);
+        rig.passed();
     }
 
     #[test]
