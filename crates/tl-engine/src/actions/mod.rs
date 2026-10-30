@@ -19,8 +19,9 @@ use std::future::Future;
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -689,7 +690,7 @@ struct InFlight {
     client: ActionId,
     route: ActionRoute,
     /// Set by whoever sends the action's `RequestEvent`: its task or `Drop`.
-    ended: Arc<AtomicBool>,
+    ended: Arc<EndLock>,
     kind: ActionKind,
     /// The admitted `Unit` targets, freed in `finished`.
     units: SmallVec<[UnitRef; 1]>,
@@ -769,7 +770,7 @@ impl ActionGate for Gate {
         let client = req.id;
         let kind = req.kind.clone();
         let ctx = Arc::clone(&self.ctx);
-        let ended = Arc::new(AtomicBool::new(false));
+        let ended = Arc::new(EndLock::default());
         let (task_route, task_ended) = (route.clone(), Arc::clone(&ended));
         let handle = cx
             .spawn(move |cx| async move {
@@ -810,15 +811,19 @@ impl ActionGate for Gate {
 
 impl Drop for Gate {
     /// `TaskHandle` does not cancel on drop, so each action still in flight is aborted here. The
-    /// gate then ends it as `Lost`, unless its task already took the end: the shared flag lets
-    /// exactly one of them send it. A best-effort `OutcomeUnknown` summary for the UI's
-    /// `ActionTracker` goes to the action events first, so the end is the last event.
+    /// gate then ends it as `Lost`, unless its task already sent the end: the shared `EndLock`
+    /// lets exactly one of them send it. A best-effort `OutcomeUnknown` summary for the UI's
+    /// `ActionTracker` goes to the action events first, so the end is the last event. Both go
+    /// out with the lock held, so an aborted task that is still running pushes nothing after
+    /// them.
     fn drop(&mut self) {
         for flight in self.in_flight.values() {
             flight.handle.abort();
-            if flight.ended.swap(true, Ordering::AcqRel) {
+            let mut ended = flight.ended.lock();
+            if *ended {
                 continue;
             }
+            *ended = true;
             let summary = ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED));
             if flight
                 .route
@@ -971,7 +976,7 @@ pub async fn run_action_routed(
     per_target: Vec<Option<RejectReason>>,
     route: ActionRoute,
 ) {
-    let ended = AtomicBool::new(false);
+    let ended = EndLock::default();
     run_with(
         &cx,
         &actx,
@@ -984,10 +989,10 @@ pub async fn run_action_routed(
     .await;
 }
 
-/// The action task. `ended` is shared with the gate: the task sends the action's
-/// `RequestEvent` only when it sets the flag first. It then emits the summary and sends the end
-/// last. Cancellation is cooperative, so a task that set the flag still reaches the end after an
-/// abort. A task cancelled before it has a summary sends no end; the gate that aborted it does.
+/// The action task. `ended` is shared with the gate, and every event goes out through it, so
+/// none follows the end. The summary push and the end are one step under the lock: the task
+/// sends the end only when the gate has not. A task cancelled before it has a summary sends no
+/// end; the gate that aborted it does.
 async fn run_with(
     cx: &Cx,
     actx: &ActionCtx,
@@ -995,9 +1000,12 @@ async fn run_with(
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
-    ended: &AtomicBool,
+    ended: &EndLock,
 ) {
-    let events = &route.events;
+    let events = &Emitter {
+        events: &route.events,
+        ended,
+    };
     emit(events, cx, event(req.id, None, ActionState::Started)).await;
     let body = AssertUnwindSafe(run_body(cx, actx, events, req, per_target, dispatch))
         .catch_unwind()
@@ -1007,14 +1015,30 @@ async fn run_with(
         Ok(None) => return,
         Err(_) => internal_error(),
     };
-    if ended.swap(true, Ordering::AcqRel) {
-        tracing::debug!(target: "tasklens::action", id = req.id.0, "the gate ended the action first");
-        return;
-    }
-    // The end goes last: no event of the action reaches the session after it.
     let end = action_end(&summary);
-    emit(events, cx, event(req.id, None, summary)).await;
-    send_end(route, req.id, end);
+    let end_now = |ended: &mut bool| {
+        *ended = true;
+        send_end(route, req.id, end);
+    };
+    let summary = event(req.id, None, summary);
+    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.push(summary, end_now)).await {
+        Ok(Some(Ok(()))) => {}
+        Ok(None) => {
+            tracing::debug!(target: "tasklens::action", id = req.id.0, "the gate ended the action first");
+            return;
+        }
+        Ok(Some(Err(_))) => {
+            tracing::warn!(target: "tasklens::action", id = req.id.0, "event channel closed, summary dropped");
+        }
+        Err(_) => {
+            tracing::warn!(target: "tasklens::action", id = req.id.0, "event channel full for 1 s, summary dropped");
+            let mut held = ended.lock();
+            if *held {
+                return;
+            }
+            end_now(&mut held);
+        }
+    }
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id = req.id.0, "action cancelled, ActionFinished not sent");
         return;
@@ -1036,7 +1060,7 @@ async fn run_with(
 async fn run_body(
     cx: &Cx,
     actx: &ActionCtx,
-    events: &async_channel::Sender<ActionEvent>,
+    events: &Emitter<'_>,
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
@@ -1239,17 +1263,62 @@ async fn dispatch(
     }
 }
 
+/// The lock on an action's end, shared by its task and the gate. Whoever sets it sends the
+/// action's `RequestEvent`. The task pushes each of its events with the lock held, so once the
+/// gate has ended the action no event of it reaches the session: neither one that waits for room
+/// in the channel nor one from a task that checked just before the gate took the lock.
+#[derive(Default)]
+struct EndLock(Mutex<bool>);
+
+impl EndLock {
+    fn lock(&self) -> MutexGuard<'_, bool> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Where an action task's events go: its route's channel, behind its `EndLock`.
+struct Emitter<'a> {
+    events: &'a async_channel::Sender<ActionEvent>,
+    ended: &'a EndLock,
+}
+
+impl Emitter<'_> {
+    /// Pushes `ev` unless the action has ended; `None` when it had. Each try holds the end lock,
+    /// and `pushed` runs under it right after the push, so the gate cannot end the action
+    /// between the check and the push.
+    async fn push(
+        &self,
+        ev: ActionEvent,
+        mut pushed: impl FnMut(&mut bool),
+    ) -> Option<Result<(), async_channel::SendError<ActionEvent>>> {
+        let mut send = std::pin::pin!(self.events.send(ev));
+        std::future::poll_fn(|task| {
+            let mut ended = self.ended.lock();
+            if *ended {
+                return Poll::Ready(None);
+            }
+            let sent = std::task::ready!(send.as_mut().poll(task));
+            pushed(&mut ended);
+            Poll::Ready(Some(sent))
+        })
+        .await
+    }
+}
+
 /// Sends one event with a 1 s timeout. When the UI is not draining, the event is dropped and the
-/// action continues.
-async fn emit(events: &async_channel::Sender<ActionEvent>, cx: &Cx, ev: ActionEvent) {
+/// action continues. An event of an action that has ended is dropped.
+async fn emit(events: &Emitter<'_>, cx: &Cx, ev: ActionEvent) {
     let id = ev.id.0;
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id, "action cancelled, event dropped");
         return;
     }
-    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.send(ev)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => {
+    match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, events.push(ev, |_| {})).await {
+        Ok(Some(Ok(()))) => {}
+        Ok(None) => {
+            tracing::debug!(target: "tasklens::action", id, "action ended, event dropped");
+        }
+        Ok(Some(Err(_))) => {
             tracing::warn!(target: "tasklens::action", id, "event channel closed, event dropped");
         }
         Err(_) => {
@@ -1742,6 +1811,69 @@ mod tests {
                 ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED))
             )]
         );
+    }
+
+    /// q4x76.17: an aborted task whose event waits for room in the channel pushes nothing after
+    /// the gate ended the action. The session's channel holds one event and is full, so the task
+    /// waits on `Started` when the gate is dropped. When the reader frees the room the task wakes
+    /// after the `Lost` end and must drop `Started`.
+    #[test]
+    fn dropped_gate_ends_an_action_waiting_for_room() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (events_tx, events) = async_channel::bounded(1);
+        let (requests_tx, requests) = async_channel::unbounded();
+        let (stop_tx, stop) = async_channel::bounded::<()>(1);
+        events_tx
+            .try_send(event(ActionId(99), None, ActionState::Started))
+            .expect("room for the filler");
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let (mut gate, _own_events, _msgs) = gate();
+                let f = Fixture::new();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &f.live,
+                    exited_within_linger: &f.exited,
+                };
+                let mut req = request(
+                    ActionKind::OpenUri(Arc::from("https://example.org")),
+                    vec![],
+                );
+                req.id = ActionId(1);
+                let route = ActionRoute {
+                    id: ActionId(10),
+                    events: events_tx,
+                    requests: Some(requests_tx),
+                };
+                gate.submit_routed(&cx, req, &view, route);
+                let _ = stop.recv().await;
+                drop(gate);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(requests.is_empty(), "the action waits to send Started");
+        stop_tx.try_send(()).expect("room to stop");
+        lab.run_until_idle();
+        assert!(handle.is_finished());
+        let end = RequestEvent {
+            kind: IdKind::Action,
+            id: 1,
+            end: RequestEnd::Lost,
+        };
+        assert_eq!(requests.try_recv().ok(), Some(end));
+        // The reader takes the filler; the waiting task wakes after the end.
+        assert_eq!(events.try_recv().ok().map(|e| e.id), Some(ActionId(99)));
+        lab.run_until_idle();
+        let after: Vec<ActionEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(after.is_empty(), "events after the end: {after:?}");
+        assert!(requests.is_empty(), "one end only");
     }
 
     /// ADR-018: two sessions send action id 1. Each run's events carry id 1 and go only to its
@@ -2320,7 +2452,7 @@ mod run_tests {
                         events: actx.events.clone(),
                         requests: None,
                     };
-                    let ended = AtomicBool::new(false);
+                    let ended = EndLock::default();
                     run_with(&cx, &actx, &route, &req, &per_target, dispatch, &ended).await;
                 })
                 .expect("task is created");
@@ -2454,7 +2586,7 @@ mod run_tests {
                     events: events_tx,
                     requests: Some(requests_tx),
                 };
-                let ended = AtomicBool::new(false);
+                let ended = EndLock::default();
                 run_with(&cx, &actx, &route, &req, &[None], succeeds, &ended).await;
             })
             .expect("task is created");
@@ -2573,12 +2705,11 @@ mod run_tests {
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                emit(
-                    &actx.events,
-                    &cx,
-                    event(ActionId(1), None, ActionState::Started),
-                )
-                .await;
+                let out = Emitter {
+                    events: &actx.events,
+                    ended: &EndLock::default(),
+                };
+                emit(&out, &cx, event(ActionId(1), None, ActionState::Started)).await;
                 flag.store(true, Ordering::SeqCst);
             })
             .expect("task is created");

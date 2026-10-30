@@ -28,8 +28,8 @@ use tl_model::helper_proto::{
 use tl_model::ids::ProcessKey;
 
 use super::{
-    ActionCtx, HelperCallError, PROMPT_DEADLINE, PrivilegedOps, QUICK_DEADLINE, dump, emit, event,
-    internal_error, kind_name, summarize, target_pid, with_deadline,
+    ActionCtx, Emitter, HelperCallError, PROMPT_DEADLINE, PrivilegedOps, QUICK_DEADLINE, dump,
+    emit, event, internal_error, kind_name, summarize, target_pid, with_deadline,
 };
 use crate::helper::HelperHandle;
 
@@ -86,7 +86,7 @@ struct DumpArgs {
 pub(super) async fn run_privileged(
     cx: &Cx,
     actx: &ActionCtx,
-    events: &async_channel::Sender<ActionEvent>,
+    events: &Emitter<'_>,
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     helper: &dyn PrivilegedOps,
