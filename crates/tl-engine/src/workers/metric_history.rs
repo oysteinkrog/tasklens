@@ -1556,9 +1556,9 @@ mod tests {
         );
     }
 
-    /// tasklens-o55.56: a 100 ms boost of one core's clock survives every tier. The 1 s tier
-    /// keeps the per-second maximum, and the 24 h and 7 d reads keep it as the bucket maximum
-    /// beside a mean that stays near the base clock.
+    /// tasklens-o55.56: a 100 ms boost of one core's clock survives every tier, and so does
+    /// the mean. The 1 s tier keeps each second's mean and maximum, so every bucket reads the
+    /// mean of its samples with the boost as its maximum.
     #[test]
     fn core_clock_boost_survives_downsampling() {
         let clock = sid(0, MetricId::CPU_CORE_CLOCK);
@@ -1584,6 +1584,8 @@ mod tests {
         }
         let now = t0 + 125 * SEC;
         st.tick(now).expect("tick");
+        // The mean of the 10 samples of each of `secs` seconds, one of them the boost.
+        let mean = |secs: f32| (5000.0 + (10.0 * secs - 1.0) * 3000.0) / (10.0 * secs);
         let read = |st: &mut State, range| -> Vec<HistPoint> {
             let h = st.answer(live(range), now).expect("read").expect("sent");
             h.get(clock)
@@ -1594,24 +1596,31 @@ mod tests {
                 .collect()
         };
 
-        // 1 h: one 4 s bucket holds the boost as its maximum.
+        // 1 h: one 4 s bucket holds the boost as its maximum, beside the mean of its 40
+        // samples, 3050 MHz. Second 120 is still open, so 120 seconds are readable.
         let h1 = read(&mut st, DeviceRange::H1);
+        assert_eq!(h1.len(), 30);
         let peaks: Vec<&HistPoint> = h1.iter().filter(|p| p.max == 5000.0).collect();
         assert_eq!(peaks.len(), 1);
-        assert_eq!(peaks[0].mean, 3500.0);
+        assert_eq!((peaks[0].mean, mean(4.0)), (3050.0, 3050.0));
         assert!(h1.iter().all(|p| p.min == 3000.0));
+        assert!(
+            h1.iter()
+                .all(|p| p.max == 5000.0 || (p.mean, p.max) == (3000.0, 3000.0))
+        );
 
         // 24 h: the 10 s tier in 90 s buckets, the second one partial.
         let h24 = read(&mut st, DeviceRange::H24);
         let max: Vec<f32> = h24.iter().map(|p| p.max).collect();
         assert_eq!(max, [5000.0, 3000.0]);
-        assert!(h24[0].mean > 3000.0 && h24[0].mean < 3100.0, "{:?}", h24[0]);
+        assert!((h24[0].mean - mean(90.0)).abs() < 0.01, "{:?}", h24[0]);
+        assert_eq!(h24[1].mean, 3000.0);
 
         // 7 d: the 1 min tier in one 600 s bucket.
         let d7 = read(&mut st, DeviceRange::D7);
         assert_eq!(d7.len(), 1);
         assert_eq!(d7[0].max, 5000.0);
-        assert!(d7[0].mean > 3000.0 && d7[0].mean < 3100.0, "{:?}", d7[0]);
+        assert!((d7[0].mean - mean(120.0)).abs() < 0.01, "{:?}", d7[0]);
     }
 
     #[test]
