@@ -253,6 +253,7 @@ use std::cell::RefCell;
 use arc_swap::ArcSwap;
 use asupersync::Cx;
 use asupersync::supervision::ManagedGeneration;
+use tl_engine::client_session::RequestEvent;
 use tl_engine::config::EngineConfig;
 use tl_engine::reducer::Publisher;
 use tl_engine::session::RootEndpoints;
@@ -454,6 +455,7 @@ pub struct UiSide {
     pub latest: Arc<ArcSwap<Snapshot>>,
     pub wake_rx: async_channel::Receiver<()>,
     pub events_rx: async_channel::Receiver<ActionEvent>,
+    pub requests_rx: async_channel::Receiver<RequestEvent>,
     pub demand_tx: watch::Sender<Demand>,
     pub settings_tx: watch::Sender<EngineSettings>,
     pub msgs_tx: mpsc::Sender<EngineMsg>,
@@ -470,6 +472,7 @@ pub fn root_endpoints(
     let (control, _) = watch::channel(WorkerControl::default());
     let (wake_tx, wake_rx) = async_channel::bounded(1);
     let (events_tx, events_rx) = async_channel::bounded(256);
+    let (requests_tx, requests_rx) = async_channel::bounded(256);
     let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(FAKE_BOOT, 0)));
     let ep = RootEndpoints {
         msgs,
@@ -483,6 +486,7 @@ pub fn root_endpoints(
             stop_publishing: false,
         },
         events_tx,
+        requests_tx,
         config,
         boot_id: FAKE_BOOT,
         hooks: tl_engine::bridge::EngineHooks::default(),
@@ -493,6 +497,7 @@ pub fn root_endpoints(
         latest,
         wake_rx,
         events_rx,
+        requests_rx,
         demand_tx,
         settings_tx,
         msgs_tx,

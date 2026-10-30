@@ -26,7 +26,10 @@
 //!   `EjectDropped`, or a newer request it reported in the same slot (the workers handle a slot's
 //!   requests in engine id order and keep one per slot);
 //! - the new worker generation, for the requests the stopped one claimed (`RequestsLost`,
-//!   `EjectsLost`): `Lost`.
+//!   `EjectsLost`): `Lost`;
+//! - the engine supervisor, for the local session's requests when the reducer stops
+//!   (`ClientSessions::reducer_stopped`): `Lost`. The local session outlives the reducer; the
+//!   others end with it.
 //!
 //! The mapping of a request is removed exactly when its event is sent. A report about a request
 //! that has no mapping is not shown to any session and is counted in `ClientSessions::late`.
@@ -38,6 +41,11 @@
 //! that ended without a value of its own (lost, dropped or replaced) leaves the slot empty. A
 //! slot that left the shared data (a detail target or disk gone, the handle search cleared)
 //! shows nothing, and is forgotten when it has no active request.
+//!
+//! The local session's request channel comes from `Engine::start` and is read through
+//! `EngineHandle::request_events`. A linked session ends when its channel is full; the local one
+//! cannot end, so a full local channel drops the event and counts it in
+//! `ClientSession::dropped`.
 //!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
 //! in the reducer, so a reducer restart drops every session but the local one.
@@ -53,6 +61,7 @@ use tl_model::details::{
     SearchId, StringScanState, TabPayload, TabSlot,
 };
 use tl_model::devices::DeviceIdentity;
+use tl_model::health::SourceId;
 use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
@@ -63,6 +72,7 @@ use tl_model::validity::Validity;
 
 use crate::reducer::sys_table::{self, SysTableInput};
 use crate::reducer::{Components, bump, sys_table_index};
+use crate::source::CommandProgress;
 
 /// Sessions at most, the local one included (ADR-018).
 pub const SESSIONS_MAX: usize = 8;
@@ -93,6 +103,14 @@ pub enum IdKind {
 impl IdKind {
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// The worker whose queue the requests of this kind go to.
+    fn source(self) -> SourceId {
+        match self {
+            IdKind::Scan | IdKind::Search => SourceId::ProcessDetail,
+            IdKind::Eject => SourceId::Udisks,
+        }
     }
 
     /// The snapshot part that shows requests of this kind.
@@ -369,6 +387,8 @@ pub struct ClientSession {
     requests_tx: Option<async_channel::Sender<RequestEvent>>,
     /// The request channel was full or closed: the session ends at the next publish.
     broken: bool,
+    /// Events the local session's full or closed request channel did not take.
+    dropped: u64,
     /// Parts this session rebuilt since its last publish, plus `DETAILS` and `DEVICE_DETAILS`
     /// when its views of those must be built.
     dirty: ComponentMask,
@@ -396,6 +416,7 @@ impl ClientSession {
             disks: None,
             requests_tx: link.as_ref().map(|l| l.requests_tx.clone()),
             broken: false,
+            dropped: 0,
             dirty: ComponentMask::DETAILS | ComponentMask::DEVICE_DETAILS,
             published: [0; SESSION_BITS.len()],
             link,
@@ -523,19 +544,32 @@ impl ClientSession {
             .any(|r| r.engine == engine)
     }
 
+    /// Events the local session's request channel did not take because it was full, closed or
+    /// not set. Always 0 for a linked session, which ends instead.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
     /// Sends `event` on the request channel. A full or closed channel ends a linked session at
-    /// the next publish, as a full action event queue does (ADR-018).
+    /// the next publish, as a full action event queue does (ADR-018). The local session cannot
+    /// end: its event is dropped, logged and counted.
     fn send(&mut self, event: RequestEvent) {
-        let Some(tx) = self.requests_tx.as_ref() else {
-            tracing::debug!(target: "tasklens::engine", ?event, "local session has no request channel: event not sent");
-            return;
-        };
         if self.broken {
             return;
         }
+        let Some(tx) = self.requests_tx.as_ref() else {
+            self.dropped += 1;
+            tracing::warn!(target: "tasklens::engine", ?event, "local session has no request channel: event dropped");
+            return;
+        };
         if let Err(e) = tx.try_send(event) {
-            tracing::debug!(target: "tasklens::engine", id = self.id.0, ?event, full = e.is_full(), "request channel full or closed");
-            self.broken = self.link.is_some();
+            if self.link.is_some() {
+                tracing::debug!(target: "tasklens::engine", id = self.id.0, ?event, full = e.is_full(), "request channel full or closed: session ends");
+                self.broken = true;
+            } else {
+                self.dropped += 1;
+                tracing::warn!(target: "tasklens::engine", ?event, full = e.is_full(), "local request channel full or closed: event dropped");
+            }
         }
     }
 
@@ -841,8 +875,8 @@ impl ClientSessions {
         }
     }
 
-    /// Gives the local session a request channel. Without one its request events are logged
-    /// and not sent; the in-process window reads its requests from the snapshot.
+    /// Gives the local session its request channel. `Engine::start` makes it, and
+    /// `EngineHandle::request_events` hands out the receiver.
     pub fn set_local_requests(&mut self, tx: async_channel::Sender<RequestEvent>) {
         self.sessions[0].requests_tx = Some(tx);
     }
@@ -982,6 +1016,27 @@ impl ClientSessions {
                 for engine in lost {
                     s.finish(kind, engine, RequestEnd::Lost, None);
                 }
+            }
+        }
+    }
+
+    /// The reducer stops: it restarts or the engine shuts down. The local session outlives it,
+    /// so each of its active requests ends as `Lost`. A command still in the worker queue is
+    /// evicted first, under the lock a worker's claim takes, so the next reducer's workers never
+    /// run a request that already ended; the unclaimed commands of that worker queued before it
+    /// are skipped with it. A command a worker claimed died with that worker.
+    pub fn reducer_stopped(&mut self, progress: &CommandProgress) {
+        let local = &mut self.sessions[0];
+        for kind in [IdKind::Scan, IdKind::Search, IdKind::Eject] {
+            let ended: Vec<(u64, u64)> = local.requests[kind.index()]
+                .iter()
+                .map(|r| (r.engine, r.queued))
+                .collect();
+            for (engine, queued) in ended {
+                if queued != 0 {
+                    progress.evict(kind.source(), queued);
+                }
+                local.finish(kind, engine, RequestEnd::Lost, None);
             }
         }
     }

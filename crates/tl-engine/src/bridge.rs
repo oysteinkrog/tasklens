@@ -25,6 +25,7 @@ use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
 use crate::EngineError;
+use crate::client_session::RequestEvent;
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
 use crate::helper::LinkEnv;
@@ -36,6 +37,8 @@ use crate::workers::{WorkerSpec, workers_for};
 
 /// Capacity of the action event channel (ADR-005).
 pub const EVENTS_CAPACITY: usize = 256;
+/// Capacity of the local session's request event channel, as the action event channel.
+pub const REQUESTS_CAPACITY: usize = 256;
 /// Capacity of the command and update queue (ADR-005).
 pub const MSGS_CAPACITY: usize = 256;
 /// How long `shutdown` waits for the root region to drain (ADR-004 step 2).
@@ -277,6 +280,7 @@ struct Inner {
 /// The UI-side channel ends that `shutdown` drops first.
 struct Links {
     events_rx: async_channel::Receiver<ActionEvent>,
+    requests_rx: async_channel::Receiver<RequestEvent>,
     demand_tx: watch::Sender<Demand>,
     settings_tx: watch::Sender<EngineSettings>,
     msgs_tx: mpsc::Sender<EngineMsg>,
@@ -290,6 +294,7 @@ impl EngineHandle {
         latest: Arc<ArcSwap<Snapshot>>,
         wake_rx: async_channel::Receiver<()>,
         events_rx: async_channel::Receiver<ActionEvent>,
+        requests_rx: async_channel::Receiver<RequestEvent>,
         demand_tx: watch::Sender<Demand>,
         settings_tx: watch::Sender<EngineSettings>,
         msgs_tx: mpsc::Sender<EngineMsg>,
@@ -303,6 +308,7 @@ impl EngineHandle {
                 wake_rx,
                 links: Mutex::new(Some(Links {
                     events_rx,
+                    requests_rx,
                     demand_tx,
                     settings_tx,
                     msgs_tx,
@@ -322,6 +328,17 @@ impl EngineHandle {
             .links
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The end of each of the local session's scans, handle searches and ejects, in order, with
+    /// the window's own ids (ADR-018). Exactly one UI task calls recv on it. The engine drops an
+    /// event while the channel is full (`REQUESTS_CAPACITY`) and logs it.
+    pub fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
+        match &*self.links() {
+            Some(links) => links.requests_rx.clone(),
+            // After `shutdown`: a receiver whose sender is already gone.
+            None => async_channel::bounded(1).1,
+        }
     }
 
     /// Stops the engine in the five ADR-004 steps and consumes the handle. Call it on the main
@@ -435,6 +452,7 @@ impl Engine {
 
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
+        let (requests_tx, requests_rx) = async_channel::bounded::<RequestEvent>(REQUESTS_CAPACITY);
         let (msgs_tx, msgs_rx) = mpsc::channel::<EngineMsg>(MSGS_CAPACITY);
         let (demand_tx, demand_rx) = watch::channel(Demand::default());
         let (settings_tx, settings_rx) = watch::channel(EngineSettings::default());
@@ -454,6 +472,7 @@ impl Engine {
                 stop_publishing: false,
             },
             events_tx,
+            requests_tx,
             config: Arc::new(config),
             boot_id,
             hooks,
@@ -469,6 +488,7 @@ impl Engine {
             latest,
             wake_rx,
             events_rx,
+            requests_rx,
             demand_tx,
             settings_tx,
             msgs_tx,
@@ -625,6 +645,7 @@ mod tests {
         let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(BootId(0), 0)));
         let (_wake_tx, wake_rx) = async_channel::bounded(1);
         let (_events_tx, events_rx) = async_channel::bounded(256);
+        let (_requests_tx, requests_rx) = async_channel::bounded(REQUESTS_CAPACITY);
         let (demand_tx, demand_rx) = watch::channel(Demand::default());
         let (settings_tx, _settings_rx) = watch::channel(EngineSettings::default());
         let (msgs_tx, msgs_rx) = mpsc::channel(QUEUE);
@@ -632,6 +653,7 @@ mod tests {
             latest,
             wake_rx,
             events_rx,
+            requests_rx,
             demand_tx,
             settings_tx,
             msgs_tx,

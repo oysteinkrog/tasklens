@@ -20,6 +20,7 @@ use asupersync::time::{TimeSource, VirtualClock};
 use asupersync::types::{CancelKind, CancelReason};
 use smallvec::SmallVec;
 use tl_engine::bridge::{EngineHooks, HookCtx};
+use tl_engine::client_session::{IdKind, RequestEnd, RequestEvent};
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::reducer::{ActionGate, AdmissionView};
 use tl_engine::session::{RESTART_DELAY, RootEndpoints, engine_root};
@@ -33,6 +34,7 @@ use tl_engine::workers::WorkerSpec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
 use tl_model::command::Command;
 use tl_model::demand::Demand;
+use tl_model::details::{ScanId, StringScanOpts};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::history::RecordSink;
@@ -262,6 +264,55 @@ fn reducer_panic_restarts_with_new_epoch() {
             view.id
         );
     }
+    rig.finish();
+}
+
+/// The local session outlives the reducer (ADR-018, q4x76.17): a local scan still queued when
+/// the reducer panics ends as `Lost` on the local request channel, once, and its command is
+/// evicted, so no worker of the next reducer runs it.
+#[test]
+fn reducer_restart_ends_local_requests_lost() {
+    let mut rig = Rig::new(Vec::new(), 0);
+    let control = rig.ep.as_ref().expect("not started").control.subscribe();
+    rig.start();
+    rig.send(EngineMsg::Command(Command::StringScan {
+        scan: ScanId(5),
+        key: ProcessKey {
+            start_ticks: 7,
+            boot_id: fake_sources::FAKE_BOOT,
+            pid: 42,
+        },
+        opts: StringScanOpts::default(),
+    }));
+    let queued = control
+        .borrow_and_clone()
+        .commands
+        .last()
+        .map(|q| q.seq)
+        .expect("the scan is queued");
+    assert!(
+        rig.ui.requests_rx.try_recv().is_err(),
+        "no end while the scan is queued"
+    );
+
+    rig.send(action(1));
+    let end = rig.ui.requests_rx.try_recv().expect("the scan ended");
+    assert_eq!(
+        end,
+        RequestEvent {
+            kind: IdKind::Scan,
+            id: 5,
+            end: RequestEnd::Lost,
+        }
+    );
+    let progress = control.borrow_and_clone().progress;
+    assert!(
+        !progress.claim(SourceId::ProcessDetail, queued),
+        "no worker runs the lost scan"
+    );
+    rig.fake.advance(RESTART_DELAY);
+    assert_eq!(rig.sessions(), 2);
+    assert!(rig.ui.requests_rx.try_recv().is_err(), "one end only");
     rig.finish();
 }
 

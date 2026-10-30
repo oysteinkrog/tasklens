@@ -31,6 +31,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::time::{BootId, now_boot_ns};
 
 use crate::bridge::{EngineHooks, HookCtx};
+use crate::client_session::RequestEvent;
 use crate::config::{EngineConfig, EngineMode};
 use crate::controller::SourceController;
 use crate::dbus::SharedHandles;
@@ -74,6 +75,8 @@ pub struct RootEndpoints {
     pub control: watch::Sender<WorkerControl>,
     pub publisher: Publisher,
     pub events_tx: async_channel::Sender<ActionEvent>,
+    /// The local session's request ends (ADR-018). Every reducer sends on it.
+    pub requests_tx: async_channel::Sender<RequestEvent>,
     pub config: Arc<EngineConfig>,
     pub boot_id: BootId,
     pub hooks: EngineHooks,
@@ -156,7 +159,11 @@ async fn engine_session(cx: &Cx, ep: &mut RootEndpoints, epoch: u32) -> Result<(
     // `watch::Sender` is not `Clone`, so the reducer borrows the root's sender for the session.
     let control = std::mem::replace(&mut ep.control, placeholder_control());
     let mut reducer = Reducer::new(epoch, ep.boot_id, control, ep.events_tx.clone());
+    reducer.clients.set_local_requests(ep.requests_tx.clone());
     let result = run_session(cx, ep, &mut reducer, epoch).await;
+    // The local session outlives this reducer, so its requests end here.
+    let progress = Arc::clone(&reducer.control.borrow().progress);
+    reducer.clients.reducer_stopped(&progress);
     ep.control = std::mem::replace(&mut reducer.control, placeholder_control());
     ep.next_sequence = reducer.sequence;
     result
