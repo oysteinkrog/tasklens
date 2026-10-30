@@ -545,9 +545,14 @@ enum LinkStep {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum LinkCall {
     Start(u32),
-    Sample { conn: u32, processes: bool },
+    Sample {
+        conn: u32,
+        processes: bool,
+    },
     ApiVersions(u32),
     Shutdown(u32),
+    /// The stop of a cancelled generation.
+    Kill(u32),
 }
 
 /// The script and the call log, shared by every connection the worker starts. [`Conn`] is the
@@ -619,6 +624,14 @@ impl FakeLink {
             .map(|conn| self.count(|c| *c == LinkCall::Shutdown(conn)))
             .collect()
     }
+
+    /// `kill` calls per connection, for every connection started.
+    fn kills_per_conn(&self) -> Vec<usize> {
+        let starts = u32::try_from(self.starts()).expect("fits");
+        (1..=starts)
+            .map(|conn| self.count(|c| *c == LinkCall::Kill(conn)))
+            .collect()
+    }
 }
 
 struct Conn {
@@ -630,7 +643,11 @@ struct Conn {
 impl ProbeLink for Conn {
     type Starter = Arc<FakeLink>;
 
-    fn start(link: Arc<FakeLink>, probe: &Path) -> Result<(Self, HelloOutcome), ProbeError> {
+    fn start(
+        link: Arc<FakeLink>,
+        probe: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<(Self, HelloOutcome), ProbeError> {
         assert_eq!(probe, Path::new(FAKE_PATH));
         let id = u32::try_from(link.starts()).expect("fits") + 1;
         link.log(LinkCall::Start(id));
@@ -642,7 +659,11 @@ impl ProbeLink for Conn {
         Ok((Conn { link, id, seq: 0 }, hello))
     }
 
-    fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError> {
+    fn sample(
+        &mut self,
+        processes: bool,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<ProbeResponseSample, ProbeError> {
         self.link.log(LinkCall::Sample {
             conn: self.id,
             processes,
@@ -664,7 +685,11 @@ impl ProbeLink for Conn {
         })
     }
 
-    fn api_versions(&self, probe: &Path) -> Result<ApiVersions, ProbeError> {
+    fn api_versions(
+        &self,
+        probe: &Path,
+        _cancel: &dyn Fn() -> bool,
+    ) -> Result<ApiVersions, ProbeError> {
         assert_eq!(probe, Path::new(FAKE_PATH));
         self.link.log(LinkCall::ApiVersions(self.id));
         match self.link.take(|s| matches!(s, LinkStep::Api(_))) {
@@ -675,6 +700,10 @@ impl ProbeLink for Conn {
 
     fn shutdown(self) {
         self.link.log(LinkCall::Shutdown(self.id));
+    }
+
+    fn kill(self) {
+        self.link.log(LinkCall::Kill(self.id));
     }
 }
 
@@ -1058,7 +1087,9 @@ fn worker_cancel_shuts_down_once() {
         ),
         "{out:?}"
     );
-    assert_eq!(link.shutdowns_per_conn(), vec![1]);
+    // A cancelled worker kills the probe at once instead of asking it to exit.
+    assert_eq!(link.kills_per_conn(), vec![1]);
+    assert_eq!(link.shutdowns_per_conn(), vec![0]);
     assert!(lab.run_until_quiescent_with_report().lab_test_passed());
 }
 
@@ -1278,7 +1309,8 @@ fn supervised_worker_backoff_half_then_one_second() {
     rig.stop();
     assert!(rig.handle.is_finished(), "controller returns after cancel");
     assert_eq!(rig.generations()[2].end, Some(End::Ok));
-    assert_eq!(link.shutdowns_per_conn(), vec![0, 0, 1]);
+    assert_eq!(link.kills_per_conn(), vec![0, 0, 1]);
+    assert_eq!(link.shutdowns_per_conn(), vec![0, 0, 0]);
     assert!(rig.lab.run_until_quiescent_with_report().lab_test_passed());
 }
 
@@ -1308,10 +1340,15 @@ fn explore_worker_restart() {
             }
         }
         rig.stop();
-        for (conn, n) in link.shutdowns_per_conn().iter().enumerate() {
+        let stops = link
+            .shutdowns_per_conn()
+            .into_iter()
+            .zip(link.kills_per_conn());
+        for (conn, (shutdowns, kills)) in stops.enumerate() {
+            let n = shutdowns + kills;
             assert!(
-                *n <= 1,
-                "seed {seed}: connection {} shut down {n} times",
+                n <= 1,
+                "seed {seed}: connection {} stopped {n} times",
                 conn + 1
             );
         }

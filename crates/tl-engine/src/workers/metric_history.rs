@@ -1010,6 +1010,7 @@ pub async fn run_metric_history(
             let job_journal = Arc::clone(&journal);
             let opens = lock(&state).opens();
             let job = cx.spawn_blocking(move |job_cx| {
+                let _running = crate::bridge::job_running("metric_history.journal_fetch");
                 let offset = lock(&job_state).realtime_offset_ns();
                 let fetch = lock(&job_journal)
                     .fetch(now_boot_ns(), offset, || job_cx.is_cancel_requested());
@@ -1087,8 +1088,11 @@ fn spawn<T: Send + 'static>(
     cx: &Cx,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<asupersync::runtime::TaskHandle<T>, Outcome<(), WorkerError>> {
-    cx.spawn_blocking(move |_| f())
-        .map_err(|e| Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())))
+    cx.spawn_blocking(move |_| {
+        let _running = crate::bridge::job_running("metric_history");
+        f()
+    })
+    .map_err(|e| Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())))
 }
 
 /// A joined job's value, or the loop's result: `Ok` when `cx` is cancelled.

@@ -27,6 +27,8 @@ pub const HELLO_DEADLINE: Duration = Duration::from_millis(3000);
 pub const SAMPLE_DEADLINE: Duration = Duration::from_millis(500);
 pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
 pub const API_VERSIONS_DEADLINE: Duration = Duration::from_secs(5);
+/// The longest a wait for the probe goes without checking for cancel.
+pub const CANCEL_POLL: Duration = Duration::from_millis(20);
 pub const NOT_INSTALLED: &str = "GPU probe not installed";
 pub const VERSION_MISMATCH: &str = "probe version mismatch";
 
@@ -51,6 +53,10 @@ pub enum ProbeError {
         kind: InitFailure,
         message: Arc<str>,
     },
+    /// The worker was cancelled while it waited for the probe. The child is already killed
+    /// and reaped.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl From<ProbeError> for WorkerError {

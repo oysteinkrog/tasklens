@@ -62,9 +62,8 @@ impl SourceController {
 
     /// Runs until `cx` is cancelled. Spawn with `cx.spawn(|cx| ctl.run(cx))` from the session.
     pub async fn run(self, cx: Cx) {
-        let name = self.name;
+        let _running = crate::bridge::task_running(self.name);
         self.run_inner(cx).await;
-        crate::bridge::log_worker_exit(name);
     }
 
     async fn run_inner(self, cx: Cx) {
@@ -249,7 +248,7 @@ fn outcome_kind(report: &ManagedSupervisorReport<WorkerError>) -> &'static str {
 /// A `tracing` target must be a constant, so each source gets its own `warn!` arm.
 macro_rules! source_names {
     ($($id:ident => $name:literal,)*) => {
-        fn source_name(id: SourceId) -> &'static str {
+        pub(crate) fn source_name(id: SourceId) -> &'static str {
             match id {
                 $(SourceId::$id => $name,)*
             }

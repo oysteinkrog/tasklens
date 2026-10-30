@@ -17,7 +17,11 @@
 //! `ChildSpec::depends_on`, `JoinHandle` from `RuntimeHandle::spawn` (use
 //! `spawn_checked`), and `Budget::with_poll_quota` on long-lived tasks.
 
+use std::sync::Arc;
+
 use asupersync::runtime::{Runtime, RuntimeBuilder};
+
+use crate::bridge::ShutdownTrace;
 
 /// One async worker thread.
 pub const WORKER_THREADS: usize = 1;
@@ -38,12 +42,26 @@ pub const THREAD_NAME_PREFIX: &str = "tl-engine";
     allow(dead_code, reason = "Engine::start (E09) is the first caller")
 )]
 pub(crate) fn build_runtime() -> Result<Runtime, asupersync::Error> {
+    builder().build()
+}
+
+/// `build_runtime` whose threads, the async worker and every blocking pool thread, all carry
+/// `trace`, so their tasks and jobs report to this engine's shutdown (`Engine::start`).
+#[allow(clippy::result_large_err)]
+pub(crate) fn build_traced_runtime(
+    trace: Arc<ShutdownTrace>,
+) -> Result<Runtime, asupersync::Error> {
+    builder()
+        .on_thread_start(move || ShutdownTrace::enter(&trace))
+        .build()
+}
+
+fn builder() -> RuntimeBuilder {
     RuntimeBuilder::new()
         .worker_threads(WORKER_THREADS)
         .blocking_threads(BLOCKING_THREADS_MIN, BLOCKING_THREADS_MAX)
         .thread_name_prefix(THREAD_NAME_PREFIX)
         .global_queue_limit(GLOBAL_QUEUE_LIMIT)
-        .build()
 }
 
 #[cfg(test)]

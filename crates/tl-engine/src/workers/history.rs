@@ -540,8 +540,11 @@ fn spawn<T: Send + 'static>(
     cx: &Cx,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<asupersync::runtime::TaskHandle<T>, Outcome<(), WorkerError>> {
-    cx.spawn_blocking(move |_| f())
-        .map_err(|e| Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())))
+    cx.spawn_blocking(move |_| {
+        let _running = crate::bridge::job_running("history");
+        f()
+    })
+    .map_err(|e| Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())))
 }
 
 /// A joined job's value, or the loop's result: `Ok` when `cx` is cancelled.

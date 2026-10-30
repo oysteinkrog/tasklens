@@ -361,7 +361,11 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
         let (s, update) = if cx.blocking_pool_handle().is_none() {
             // LabRuntime: `spawn_blocking` runs the sample inline in a child task, which keeps
             // the lab's schedule and catches a panic.
-            let mut job = match cx.spawn_blocking(move |_| src.sample()) {
+            let job_name = crate::controller::source_name(id);
+            let mut job = match cx.spawn_blocking(move |_| {
+                let _running = crate::bridge::job_running(job_name);
+                src.sample()
+            }) {
                 Ok(job) => job,
                 Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
             };
@@ -390,7 +394,8 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
                     }
                 },
             };
-            let Some(mut done) = thread.start(src) else {
+            let running = crate::bridge::job_running(crate::controller::source_name(id));
+            let Some(mut done) = thread.start(src, running) else {
                 return Outcome::Err(WorkerError::Other("sampling thread ended".into()));
             };
             // A sample still running after `LATE_COUNT` periods is hung: report `Late` now,
@@ -472,8 +477,13 @@ struct Sampler<S> {
     jobs: std::sync::mpsc::Sender<Job<S>>,
 }
 
-/// One sample request and where its result goes. `None` means `sample` panicked.
-type Job<S> = (S, oneshot::Sender<Option<(S, SourceUpdate)>>);
+/// One sample request, its shutdown trace guard and where its result goes. `None` means
+/// `sample` panicked.
+type Job<S> = (
+    S,
+    crate::bridge::RunGuard,
+    oneshot::Sender<Option<(S, SourceUpdate)>>,
+);
 
 impl<S: Source> Sampler<S> {
     fn spawn(id: SourceId) -> std::io::Result<Self> {
@@ -481,8 +491,9 @@ impl<S: Source> Sampler<S> {
         std::thread::Builder::new()
             .name(format!("tl-src-{id:?}"))
             .spawn(move || {
-                while let Ok((src, reply)) = requests.recv() {
+                while let Ok((src, running, reply)) = requests.recv() {
                     let done = std::panic::catch_unwind(AssertUnwindSafe(|| src.sample())).ok();
+                    drop(running);
                     // A failed send means the worker is gone; the next `recv` ends the thread.
                     let _ = reply.send_blocking(done);
                 }
@@ -490,10 +501,15 @@ impl<S: Source> Sampler<S> {
         Ok(Self { jobs })
     }
 
-    /// Hands `src` to the thread. Fails when the thread has ended.
-    fn start(&self, src: S) -> Option<oneshot::Receiver<Option<(S, SourceUpdate)>>> {
+    /// Hands `src` to the thread. Fails when the thread has ended. `running` ends when the
+    /// sample returns.
+    fn start(
+        &self,
+        src: S,
+        running: crate::bridge::RunGuard,
+    ) -> Option<oneshot::Receiver<Option<(S, SourceUpdate)>>> {
         let (reply, done) = oneshot::channel();
-        self.jobs.send((src, reply)).ok()?;
+        self.jobs.send((src, running, reply)).ok()?;
         Some(done)
     }
 }

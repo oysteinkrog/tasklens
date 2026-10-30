@@ -218,8 +218,10 @@ impl Drop for RunningEngine {
     fn drop(&mut self) {
         if let Some(engine) = self.0.take() {
             let report = engine.shutdown();
-            if !report.torn_down {
-                eprintln!("engine shutdown: {report:?}");
+            // Not a shutdown test, so `torn_down`, not `drained` (tasklens-cr0.30). A test that
+            // already failed keeps its own message; a second panic would abort.
+            if !std::thread::panicking() {
+                assert!(report.torn_down, "engine shutdown: {report:?}");
             }
         }
     }

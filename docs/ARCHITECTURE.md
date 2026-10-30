@@ -974,12 +974,14 @@ Loop: `recv(&cx)` one message, then drain with `try_recv` until empty (at most 2
 
 Reducer state is bounded: process metadata cache holds live processes plus at most 256 exited ones. Exited records are kept for the linger time, `2 × processes.interval_ms` clamped to 1..=3 s, then removed.
 
-**Shutdown** (`EngineHandle::shutdown(self, total: Duration) -> ShutdownReport`), called on the main thread after GPUI has stopped (ADR-010):
+**Shutdown** (`EngineHandle::shutdown(self) -> ShutdownReport`), called on the main thread after GPUI has stopped (ADR-010):
 1. Drop the UI-side senders (done by dropping the `EngineHandle` internals).
 2. `rt.drain_root_region(Duration::from_millis(1000))`.
 3. Drop every `RuntimeHandle` clone.
 4. `rt.shutdown_timeout(Duration::from_millis(500))`.
 5. If step 2 returned `TimedOut` or step 4 returned `false`, log a warning and return; `tl-app` then calls `std::process::exit(0)` without running further destructors.
+
+Blocking jobs that walk many items or wait on a child process check their job's cancel flag between items, or at least every 20 ms while they wait, and return early with an incomplete result that is never published. The GPU probe's `Hello`, `Sample` and `--api-versions` waits do this (tasklens-cr0.30). A single system call that is still running is not interrupted. The warning in step 5 names the session tasks and blocking jobs still running.
 
 ### Consequences
 
@@ -1476,7 +1478,7 @@ Restart backoff and the five-per-minute rule come from ADR-004. A child stuck in
 
 **Rates.** Device totals at 1 Hz while any GPU view, sidebar mini graph or tray graph is demanded; process data at 1 Hz only when a GPU process column is visible. Never faster than 1 Hz; the Refresh setting does not change the probe rate.
 
-**Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`.
+**Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`. A cancelled worker (engine shutdown) skips the `Shutdown` request and the wait: it sends SIGKILL and calls `wait()` at once, and a request in flight returns `ProbeError::Cancelled` within 20 ms of the cancel (tasklens-cr0.30).
 
 ### Consequences
 

@@ -14,6 +14,10 @@
 //! --api-versions` (E13-010) and sends `GpuApiVersions` before the first sample. A failure is
 //! logged at info and not retried; the UI shows `Unknown`.
 //!
+//! Every probe call runs as a blocking job that checks for cancel at least every 20 ms. A
+//! cancelled worker kills the probe at once instead of asking it to exit, so engine shutdown
+//! never waits for NVML (tasklens-cr0.30).
+//!
 //! The reducer maps pids and assigns `DeviceIdx`. The probe is not restarted after resume, so
 //! `reset_generation` is ignored. Device names are logged at debug only; pids never.
 
@@ -72,26 +76,47 @@ pub trait ProbeLink: Sized + Send + 'static {
     /// What `start` needs besides the probe path: `()` for the real client.
     type Starter: Send + 'static;
 
-    /// Starts the probe and runs `Hello`. Runs on the blocking pool.
-    fn start(starter: Self::Starter, probe: &Path) -> Result<(Self, HelloOutcome), ProbeError>;
+    /// Starts the probe and runs `Hello`. Runs on the blocking pool. Returns
+    /// [`ProbeError::Cancelled`] soon after `cancel` turns true, with the child reaped.
+    fn start(
+        starter: Self::Starter,
+        probe: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(Self, HelloOutcome), ProbeError>;
 
     /// One `Sample` request. Runs on the blocking pool. On `Err` the child is already gone.
-    fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError>;
+    fn sample(
+        &mut self,
+        processes: bool,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ProbeResponseSample, ProbeError>;
 
     /// Runs `probe --api-versions` in its own process under [`API_VERSIONS_DEADLINE`]. Runs on
     /// the blocking pool.
-    fn api_versions(&self, probe: &Path) -> Result<ApiVersions, ProbeError>;
+    fn api_versions(
+        &self,
+        probe: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ApiVersions, ProbeError>;
 
-    /// Asks the child to exit, then kills and reaps it. Blocks for at most about 200 ms.
+    /// Asks the child to exit, then kills and reaps it. Blocks for at most about 200 ms. The
+    /// stop of a generation that was not cancelled.
     fn shutdown(self);
+
+    /// Kills and reaps the child at once. The stop of a cancelled generation.
+    fn kill(self);
 }
 
 impl ProbeLink for ProbeClient {
     /// Where sysfs lives, for the PCIe link maximum.
     type Starter = SysRoot;
 
-    fn start(root: SysRoot, probe: &Path) -> Result<(Self, HelloOutcome), ProbeError> {
-        let client = ProbeClient::start(probe)?;
+    fn start(
+        root: SysRoot,
+        probe: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(Self, HelloOutcome), ProbeError> {
+        let client = ProbeClient::start_or_cancel(probe, &[], cancel)?;
         let hello = match (&client.info, &client.init_failed) {
             (Some(info), _) => HelloOutcome::Ready(with_sysfs_pcie_max(info.clone(), &root.sys)),
             (None, Some((kind, message))) => HelloOutcome::InitFailed {
@@ -107,16 +132,28 @@ impl ProbeLink for ProbeClient {
         Ok((client, hello))
     }
 
-    fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError> {
-        ProbeClient::sample(self, processes)
+    fn sample(
+        &mut self,
+        processes: bool,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ProbeResponseSample, ProbeError> {
+        ProbeClient::sample_or_cancel(self, processes, cancel)
     }
 
-    fn api_versions(&self, probe: &Path) -> Result<ApiVersions, ProbeError> {
-        crate::gpu::client::api_versions(probe, API_VERSIONS_DEADLINE)
+    fn api_versions(
+        &self,
+        probe: &Path,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ApiVersions, ProbeError> {
+        crate::gpu::client::api_versions_or_cancel(probe, API_VERSIONS_DEADLINE, cancel)
     }
 
     fn shutdown(self) {
         ProbeClient::shutdown(self);
+    }
+
+    fn kill(self) {
+        ProbeClient::kill(self);
     }
 }
 
@@ -163,7 +200,11 @@ pub async fn run_with<L: ProbeLink>(
     };
 
     let start_probe = probe.clone();
-    let started = match blocking(&cx, move || L::start(starter, &start_probe)).await {
+    let started = match blocking(&cx, "gpu_nvidia.start", move |cancel| {
+        L::start(starter, &start_probe, cancel)
+    })
+    .await
+    {
         Ok(started) => started,
         Err(stop) => return stop,
     };
@@ -171,7 +212,11 @@ pub async fn run_with<L: ProbeLink>(
         Ok((link, HelloOutcome::Ready(info))) => (link, info),
         Ok((link, HelloOutcome::InitFailed { kind, message })) => {
             tracing::debug!(?kind, "GPU probe init failed");
-            if let Err(stop) = blocking(&cx, move || link.shutdown()).await {
+            if let Err(stop) = blocking(&cx, "gpu_nvidia.shutdown", move |cancel| {
+                stop_link(link, cancel());
+            })
+            .await
+            {
                 return stop;
             }
             return match kind {
@@ -189,6 +234,7 @@ pub async fn run_with<L: ProbeLink>(
             tracing::debug!(proto, "GPU probe version mismatch");
             return park(&cx, &io, SourceState::Failed, VERSION_MISMATCH.into()).await;
         }
+        Err(ProbeError::Cancelled) => return Outcome::Ok(()),
         Err(e) => return Outcome::Err(e.into()),
     };
     for device in info.devices.iter() {
@@ -205,15 +251,16 @@ pub async fn run_with<L: ProbeLink>(
     ];
     for update in first {
         if let Some(stop) = send(&cx, &io, update).await {
-            link.shutdown();
+            stop_link(link, cx.is_cancel_requested());
             return stop;
         }
     }
 
     if !api_once.swap(true, Ordering::SeqCst) {
-        // On cancel the closure, and with it the link, is dropped, which kills the child.
-        let (back, result) = match blocking(&cx, move || {
-            let result = link.api_versions(&probe);
+        // On cancel the closure stops the child and returns; the link is then dropped, which
+        // kills the probe.
+        let (back, result) = match blocking(&cx, "gpu_nvidia.api_versions", move |cancel| {
+            let result = link.api_versions(&probe, cancel);
             (link, result)
         })
         .await
@@ -225,7 +272,7 @@ pub async fn run_with<L: ProbeLink>(
         match result {
             Ok(versions) => {
                 if let Some(stop) = send(&cx, &io, SourceUpdate::GpuApiVersions(versions)).await {
-                    link.shutdown();
+                    stop_link(link, cx.is_cancel_requested());
                     return stop;
                 }
             }
@@ -246,7 +293,7 @@ pub async fn run_with<L: ProbeLink>(
     loop {
         sleep_until(iv.deadline()).await;
         if cx.checkpoint().is_err() {
-            link.shutdown();
+            link.kill();
             return Outcome::Ok(());
         }
         iv.tick(cx.now());
@@ -276,9 +323,9 @@ pub async fn run_with<L: ProbeLink>(
             continue;
         }
 
-        // On cancel the closure, and with it the link, is dropped, which kills the child.
-        let (back, result) = match blocking(&cx, move || {
-            let result = link.sample(processes);
+        // On cancel the sample kills the child and returns, and the link is dropped.
+        let (back, result) = match blocking(&cx, "gpu_nvidia.sample", move |cancel| {
+            let result = link.sample(processes, cancel);
             (link, result)
         })
         .await
@@ -289,6 +336,7 @@ pub async fn run_with<L: ProbeLink>(
         link = back;
         let sample = match result {
             Ok(sample) => sample,
+            Err(ProbeError::Cancelled) => return Outcome::Ok(()),
             Err(e) => return Outcome::Err(e.into()),
         };
         let now = cx.now();
@@ -308,7 +356,7 @@ pub async fn run_with<L: ProbeLink>(
         )));
         for update in updates {
             if let Some(stop) = send(&cx, &io, update).await {
-                link.shutdown();
+                stop_link(link, cx.is_cancel_requested());
                 return stop;
             }
         }
@@ -583,12 +631,26 @@ async fn park(
     }
 }
 
-/// Runs `f` on the blocking pool. `Err` holds the worker's result when it must stop.
+/// Kills the probe of a cancelled generation at once; any other stop asks it to exit first.
+fn stop_link<L: ProbeLink>(link: L, cancelled: bool) {
+    if cancelled {
+        link.kill();
+    } else {
+        link.shutdown();
+    }
+}
+
+/// Runs `f` on the blocking pool as the job `name`. `f` gets the job's cancel check, which turns
+/// true when the worker is cancelled. `Err` holds the worker's result when it must stop.
 async fn blocking<R: Send + 'static>(
     cx: &Cx,
-    f: impl FnOnce() -> R + Send + 'static,
+    name: &'static str,
+    f: impl FnOnce(&dyn Fn() -> bool) -> R + Send + 'static,
 ) -> Result<R, Outcome<(), WorkerError>> {
-    let mut job = match cx.spawn_blocking(move |_| f()) {
+    let mut job = match cx.spawn_blocking(move |job_cx| {
+        let _running = crate::bridge::job_running(name);
+        f(&|| job_cx.is_cancel_requested())
+    }) {
         Ok(job) => job,
         Err(e) => {
             return Err(Outcome::Err(WorkerError::Other(
@@ -1070,6 +1132,7 @@ mod tests {
     struct Calls {
         starts: AtomicU32,
         shutdowns: AtomicU32,
+        kills: AtomicU32,
         api_versions: AtomicU32,
         /// The `processes` flag of each sample request.
         samples: Mutex<Vec<bool>>,
@@ -1114,7 +1177,11 @@ mod tests {
     impl ProbeLink for FakeLink {
         type Starter = Fake;
 
-        fn start(fake: Fake, _probe: &Path) -> Result<(Self, HelloOutcome), ProbeError> {
+        fn start(
+            fake: Fake,
+            _probe: &Path,
+            _cancel: &dyn Fn() -> bool,
+        ) -> Result<(Self, HelloOutcome), ProbeError> {
             fake.calls.starts.fetch_add(1, Ordering::SeqCst);
             let hello = match fake.hello {
                 Hello::Ready => HelloOutcome::Ready(hello_info()),
@@ -1132,7 +1199,11 @@ mod tests {
             Ok((link, hello))
         }
 
-        fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError> {
+        fn sample(
+            &mut self,
+            processes: bool,
+            _cancel: &dyn Fn() -> bool,
+        ) -> Result<ProbeResponseSample, ProbeError> {
             let mut samples = self.calls.samples.lock().expect("samples lock");
             samples.push(processes);
             if self.sample_err {
@@ -1159,7 +1230,11 @@ mod tests {
             })
         }
 
-        fn api_versions(&self, _probe: &Path) -> Result<ApiVersions, ProbeError> {
+        fn api_versions(
+            &self,
+            _probe: &Path,
+            _cancel: &dyn Fn() -> bool,
+        ) -> Result<ApiVersions, ProbeError> {
             self.calls.api_versions.fetch_add(1, Ordering::SeqCst);
             self.api
                 .clone()
@@ -1169,6 +1244,114 @@ mod tests {
         fn shutdown(self) {
             self.calls.shutdowns.fetch_add(1, Ordering::SeqCst);
         }
+
+        fn kill(self) {
+            self.calls.kills.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A probe whose `Hello` never comes: `start` waits until cancelled, at most 5 s, and
+    /// records when it saw the cancel.
+    struct SlowLink;
+
+    #[derive(Default)]
+    struct SlowStart {
+        running: AtomicBool,
+        saw_cancel: Mutex<Option<std::time::Instant>>,
+    }
+
+    impl ProbeLink for SlowLink {
+        type Starter = Arc<SlowStart>;
+
+        fn start(
+            slow: Arc<SlowStart>,
+            _probe: &Path,
+            cancel: &dyn Fn() -> bool,
+        ) -> Result<(Self, HelloOutcome), ProbeError> {
+            slow.running.store(true, Ordering::SeqCst);
+            let begin = std::time::Instant::now();
+            while begin.elapsed() < Duration::from_secs(5) {
+                if cancel() {
+                    *slow.saw_cancel.lock().expect("lock") = Some(std::time::Instant::now());
+                    return Err(ProbeError::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(ProbeError::Deadline(crate::gpu::HELLO_DEADLINE))
+        }
+
+        fn sample(
+            &mut self,
+            _processes: bool,
+            _cancel: &dyn Fn() -> bool,
+        ) -> Result<ProbeResponseSample, ProbeError> {
+            unreachable!("start never succeeds")
+        }
+
+        fn api_versions(
+            &self,
+            _probe: &Path,
+            _cancel: &dyn Fn() -> bool,
+        ) -> Result<ApiVersions, ProbeError> {
+            unreachable!("start never succeeds")
+        }
+
+        fn shutdown(self) {}
+
+        fn kill(self) {}
+    }
+
+    /// On the real runtime, cancelling the worker while `Hello` is pending stops the start job
+    /// within 100 ms, so the region drains and the runtime tears down (tasklens-cr0.30).
+    #[test]
+    fn worker_cancel_during_start_returns_fast() {
+        use asupersync::runtime::RootDrainOutcome;
+        use std::time::Instant;
+
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let (updates, _rx) = mpsc::channel::<EngineMsg>(256);
+        let (_demand, demand_rx) = watch::channel(visible_gpus());
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control, control_rx) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(
+            updates,
+            demand_rx,
+            settings,
+            control_rx,
+            crate::dbus::SharedHandles::default(),
+        );
+        let slow = Arc::new(SlowStart::default());
+        let starter = Arc::clone(&slow);
+        let out = Ended::default();
+        let sink = Arc::clone(&out);
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let locate = || Some(PathBuf::from("/fake/tl-gpu-probe"));
+                let outcome = run_with::<SlowLink>(cx, io, locate, starter, fresh_once()).await;
+                *sink.lock().expect("slot lock") = Some(outcome);
+            })
+            .expect("worker spawns");
+        let waited = Instant::now();
+        while !slow.running.load(Ordering::SeqCst) {
+            assert!(waited.elapsed() < Duration::from_secs(5), "start never ran");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        let cancel_at = Instant::now();
+        let drained = rt.drain_root_region(crate::bridge::DRAIN_BUDGET);
+        let took = cancel_at.elapsed();
+        assert_eq!(drained, RootDrainOutcome::Quiescent);
+        assert!(took < Duration::from_millis(100), "drain took {took:?}");
+        let saw = slow
+            .saw_cancel
+            .lock()
+            .expect("lock")
+            .expect("start saw the cancel");
+        assert!(saw.duration_since(cancel_at) < Duration::from_millis(100));
+        let outcome = out.lock().expect("slot lock").take();
+        assert!(matches!(outcome, Some(Outcome::Ok(()))), "{outcome:?}");
+        assert!(rt.shutdown_timeout(crate::bridge::TEARDOWN_BUDGET));
     }
 
     type Ended = Arc<Mutex<Option<Outcome<(), WorkerError>>>>;
@@ -1557,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_cancel_shuts_down_once() {
+    fn worker_cancel_kills_once() {
         let mut rig = Rig::start(true, Hello::Ready, Rows::Supported, false, visible_gpus());
         for _ in 0..3 {
             rig.advance(PERIOD);
@@ -1572,7 +1755,9 @@ mod tests {
         }
         let outcome = rig.take_outcome().expect("returned after the cancel");
         assert!(matches!(outcome, Outcome::Ok(())), "{outcome:?}");
-        assert_eq!(rig.calls.shutdowns.load(Ordering::SeqCst), 1);
+        // A cancelled worker kills the probe without the Shutdown request and its grace wait.
+        assert_eq!(rig.calls.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(rig.calls.shutdowns.load(Ordering::SeqCst), 0);
         let report = rig.lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
     }

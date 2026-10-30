@@ -43,37 +43,155 @@ pub const DRAIN_BUDGET: Duration = Duration::from_millis(1000);
 /// How long `shutdown` waits for runtime teardown (ADR-004 step 4).
 pub const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
 
-/// When the latest `shutdown` began, as nanoseconds after `SHUTDOWN_EPOCH`; 0 means never.
-static SHUTDOWN_BEGAN_NS: AtomicU64 = AtomicU64::new(0);
-static SHUTDOWN_EPOCH: OnceLock<Instant> = OnceLock::new();
-
-fn mark_shutdown_began() {
-    let epoch = SHUTDOWN_EPOCH.get_or_init(Instant::now);
-    // Add 1 so a shutdown in the first nanosecond still reads as started.
-    SHUTDOWN_BEGAN_NS.store(epoch.elapsed().as_nanos() as u64 + 1, Ordering::Release);
+/// One engine's shutdown diagnostics: when its `shutdown` began, and which tasks and blocking
+/// jobs are still running. Every thread of the engine's runtime holds it in a thread-local, set
+/// by the runtime's thread start hook, so two engines in one process never mix their times.
+#[derive(Default)]
+pub(crate) struct ShutdownTrace {
+    began: OnceLock<Instant>,
+    running: Mutex<Vec<(u64, Running)>>,
+    next_id: AtomicU64,
 }
 
-/// Time since the latest `shutdown` began, or `None` when none has. Workers log it on exit.
-pub(crate) fn since_shutdown_began() -> Option<Duration> {
-    let began = SHUTDOWN_BEGAN_NS.load(Ordering::Acquire);
-    let epoch = SHUTDOWN_EPOCH.get()?;
-    (began != 0).then(|| {
-        epoch
-            .elapsed()
-            .saturating_sub(Duration::from_nanos(began - 1))
-    })
+/// A task or blocking job that `ShutdownTrace` tracks.
+#[derive(Clone, Copy)]
+struct Running {
+    kind: RunKind,
+    name: &'static str,
+    since: Instant,
 }
 
-/// Logs that worker `name` ended, when a shutdown is in progress: a diagnostic for slow shutdowns.
-pub(crate) fn log_worker_exit(name: &str) {
-    if let Some(since) = since_shutdown_began() {
-        tracing::debug!(
-            target: "tasklens::engine",
-            worker = name,
-            since_shutdown_ms = since.as_millis() as u64,
-            "worker exited during shutdown",
-        );
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunKind {
+    Task,
+    Job,
+}
+
+thread_local! {
+    static TRACE: std::cell::RefCell<Option<Arc<ShutdownTrace>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl ShutdownTrace {
+    /// Makes `trace` the current thread's trace. The engine runtime calls it on every thread it
+    /// starts: the async worker and each blocking pool thread.
+    pub(crate) fn enter(trace: &Arc<ShutdownTrace>) {
+        TRACE.with(|slot| *slot.borrow_mut() = Some(Arc::clone(trace)));
     }
+
+    fn current() -> Option<Arc<ShutdownTrace>> {
+        TRACE.with(|slot| slot.borrow().clone())
+    }
+
+    fn begin(&self) {
+        let _ = self.began.set(Instant::now());
+    }
+
+    /// Time since this engine's `shutdown` began, or `None` before it.
+    fn since_began(&self) -> Option<Duration> {
+        self.began.get().map(Instant::elapsed)
+    }
+
+    fn running(&self) -> std::sync::MutexGuard<'_, Vec<(u64, Running)>> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// "name (job, 1234 ms)" for everything still running, oldest first.
+    fn still_running(&self) -> String {
+        let mut text = String::new();
+        for (_, run) in self.running().iter() {
+            let kind = match run.kind {
+                RunKind::Task => "task",
+                RunKind::Job => "job",
+            };
+            if !text.is_empty() {
+                text.push_str(", ");
+            }
+            let ms = run.since.elapsed().as_millis();
+            text.push_str(&format!("{} ({kind}, {ms} ms)", run.name));
+        }
+        text
+    }
+}
+
+/// Tracks one task or blocking job while it is alive. Dropping it logs the end when the engine
+/// is shutting down. On a thread outside an engine runtime it does nothing.
+pub(crate) struct RunGuard {
+    trace: Option<(Arc<ShutdownTrace>, u64)>,
+    run: Running,
+}
+
+impl RunGuard {
+    fn new(kind: RunKind, name: &'static str) -> Self {
+        let run = Running {
+            kind,
+            name,
+            since: Instant::now(),
+        };
+        let trace = ShutdownTrace::current().map(|trace| {
+            let id = trace.next_id.fetch_add(1, Ordering::Relaxed);
+            trace.running().push((id, run));
+            if kind == RunKind::Job {
+                match trace.since_began() {
+                    Some(since) => tracing::debug!(
+                        target: "tasklens::engine",
+                        job = name,
+                        since_shutdown_ms = since.as_millis() as u64,
+                        "blocking job started during shutdown",
+                    ),
+                    None => {
+                        tracing::trace!(target: "tasklens::engine", job = name, "blocking job started")
+                    }
+                }
+            }
+            (trace, id)
+        });
+        Self { trace, run }
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let Some((trace, id)) = self.trace.take() else {
+            return;
+        };
+        trace.running().retain(|(other, _)| *other != id);
+        let took_ms = self.run.since.elapsed().as_millis() as u64;
+        let name = self.run.name;
+        match (self.run.kind, trace.since_began()) {
+            (RunKind::Task, Some(since)) => tracing::debug!(
+                target: "tasklens::engine",
+                worker = name,
+                since_shutdown_ms = since.as_millis() as u64,
+                "worker exited during shutdown",
+            ),
+            (RunKind::Task, None) => {}
+            (RunKind::Job, Some(since)) => tracing::debug!(
+                target: "tasklens::engine",
+                job = name,
+                took_ms,
+                since_shutdown_ms = since.as_millis() as u64,
+                "blocking job finished during shutdown",
+            ),
+            (RunKind::Job, None) => tracing::trace!(
+                target: "tasklens::engine",
+                job = name,
+                took_ms,
+                "blocking job finished",
+            ),
+        }
+    }
+}
+
+/// Tracks session task `name` until the guard drops. Create it inside the task.
+pub(crate) fn task_running(name: &'static str) -> RunGuard {
+    RunGuard::new(RunKind::Task, name)
+}
+
+/// Tracks blocking job `name` until the guard drops, and logs its start and finish. Create it
+/// inside the job, or on the async side and move it into the job.
+pub(crate) fn job_running(name: &'static str) -> RunGuard {
+    RunGuard::new(RunKind::Job, name)
 }
 
 /// Opens one journal stream. Installed by E14-A4 through `EngineHooks`.
@@ -152,6 +270,8 @@ struct Inner {
     /// a live `EngineHandle` clone does not keep the runtime alive.
     rt_handle: Mutex<Option<RuntimeHandle>>,
     stopped: AtomicBool,
+    /// What `shutdown` names when the engine does not stop in time.
+    trace: Arc<ShutdownTrace>,
 }
 
 /// The UI-side channel ends that `shutdown` drops first.
@@ -165,6 +285,7 @@ struct Links {
 impl EngineHandle {
     /// Builds a handle from the channel ends `Engine::start` creates. The runtime slots start
     /// empty; the last demand starts as the demand channel's current value.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         latest: Arc<ArcSwap<Snapshot>>,
         wake_rx: async_channel::Receiver<()>,
@@ -173,6 +294,7 @@ impl EngineHandle {
         settings_tx: watch::Sender<EngineSettings>,
         msgs_tx: mpsc::Sender<EngineMsg>,
         journal: Option<JournalSpawner>,
+        trace: Arc<ShutdownTrace>,
     ) -> Self {
         let last_demand = Mutex::new(demand_tx.borrow().clone());
         Self {
@@ -190,6 +312,7 @@ impl EngineHandle {
                 rt: Mutex::new(None),
                 rt_handle: Mutex::new(None),
                 stopped: AtomicBool::new(false),
+                trace,
             }),
         }
     }
@@ -206,13 +329,16 @@ impl EngineHandle {
     /// never drops its app state, so `tl-app` cannot drop the UI's clone. They see a stopped
     /// engine afterwards.
     ///
-    /// `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the bounds, 1.5 s together. A blocking job that
-    /// is still running is not interrupted; teardown then goes on in the background and
-    /// `torn_down` is false.
+    /// `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the bounds, 1.5 s together. Blocking jobs that
+    /// wait on a child process or walk many items check for cancel and stop early. A single
+    /// system call that is still running is not interrupted; teardown then goes on in the
+    /// background and `torn_down` is false. A missed budget logs the tasks and blocking jobs
+    /// still running.
     pub fn shutdown(self) -> ShutdownReport {
         let begin = Instant::now();
-        mark_shutdown_began();
         let inner = self.inner;
+        let trace = Arc::clone(&inner.trace);
+        trace.begin();
         inner.stopped.store(true, Ordering::Release);
         // Step 1: drop the UI-side senders.
         drop(
@@ -237,6 +363,16 @@ impl EngineHandle {
         };
         // Step 2: cancel the root region with `CancelKind::Shutdown` and wait for it.
         let drained = rt.drain_root_region(DRAIN_BUDGET) == RootDrainOutcome::Quiescent;
+        let mut still_running = String::new();
+        if !drained {
+            still_running = trace.still_running();
+            tracing::warn!(
+                target: "tasklens::engine",
+                still_running = %still_running,
+                "engine did not drain within {} ms",
+                DRAIN_BUDGET.as_millis(),
+            );
+        }
         // Step 3: drop every `RuntimeHandle` clone. A live `EngineHandle` clone keeps `Inner`,
         // so take the handle out rather than wait for `Inner` to drop.
         drop(
@@ -249,6 +385,9 @@ impl EngineHandle {
         drop(inner);
         // Step 4.
         let torn_down = rt.shutdown_timeout(TEARDOWN_BUDGET);
+        if !torn_down {
+            still_running = trace.still_running();
+        }
         // Step 5.
         let report = ShutdownReport {
             drained,
@@ -261,6 +400,7 @@ impl EngineHandle {
                 drained,
                 torn_down,
                 elapsed_ms = report.elapsed.as_millis() as u64,
+                still_running = %still_running,
                 "engine shutdown did not finish cleanly",
             );
         }
@@ -288,7 +428,8 @@ impl Engine {
         hooks: EngineHooks,
         workers: Vec<WorkerSpec>,
     ) -> Result<EngineHandle, EngineError> {
-        let rt = crate::runtime::build_runtime()
+        let trace = Arc::new(ShutdownTrace::default());
+        let rt = crate::runtime::build_traced_runtime(Arc::clone(&trace))
             .map_err(|e| EngineError::Runtime(e.to_string().into()))?;
         let boot_id = read_boot_id(&config.sys_root);
 
@@ -332,6 +473,7 @@ impl Engine {
             settings_tx,
             msgs_tx,
             journal,
+            trace,
         );
         *handle
             .inner
@@ -494,6 +636,7 @@ mod tests {
             settings_tx,
             msgs_tx,
             journal,
+            Arc::default(),
         );
         Rig {
             handle,

@@ -12,6 +12,10 @@
 //!
 //! [`api_versions`] runs the one-shot `--api-versions` mode in its own process (E13-010). It
 //! needs no fd 3 and no `pre_exec`, so it is forked from the calling thread.
+//!
+//! The `_or_cancel` forms take a cancel check, which every wait calls at least once per
+//! [`CANCEL_POLL`]. On cancel the child is killed and reaped and the call returns
+//! [`ProbeError::Cancelled`], so engine shutdown never waits for a slow NVML call (tasklens-cr0.30).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -35,7 +39,7 @@ use tl_model::gpu_proto::{
 use tl_model::wire::{MAX_PROBE_FRAME, WireError, read_frame, write_frame};
 
 use super::spawn::{ProbeChild, child_env, spawn_probe};
-use super::{HELLO_DEADLINE, ProbeError, SAMPLE_DEADLINE, SHUTDOWN_GRACE};
+use super::{CANCEL_POLL, HELLO_DEADLINE, ProbeError, SAMPLE_DEADLINE, SHUTDOWN_GRACE};
 
 /// Name of the thread that forks the probe and stays alive while it runs (R-283).
 pub const SPAWN_THREAD_NAME: &str = "tl-gpu-spawn";
@@ -100,6 +104,16 @@ impl ProbeClient {
     /// [`start`](Self::start) with extra probe arguments after `--fd 3`, for example
     /// `--fake <script>` in tests.
     pub fn start_with_args(probe: &Path, extra_args: &[&OsStr]) -> Result<ProbeClient, ProbeError> {
+        Self::start_or_cancel(probe, extra_args, &never)
+    }
+
+    /// [`start_with_args`](Self::start_with_args) that stops waiting for `Hello` when `cancel`
+    /// returns true.
+    pub fn start_or_cancel(
+        probe: &Path,
+        extra_args: &[&OsStr],
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ProbeClient, ProbeError> {
         let (child, spawner) = SpawnThread::spawn(probe, extra_args)?;
         // `try_clone` sets CLOEXEC (F_DUPFD_CLOEXEC); a plain dup would leak into later children.
         let file = child
@@ -115,16 +129,20 @@ impl ProbeClient {
             seq: 0,
             _spawner: spawner,
         };
-        client.hello()?;
+        client.hello_or_cancel(cancel)?;
         Ok(client)
     }
 
     /// Sends `Hello { proto: GPU_PROTO_VERSION }` and reads the reply.
     pub fn hello(&mut self) -> Result<HelloOutcome, ProbeError> {
+        self.hello_or_cancel(&never)
+    }
+
+    fn hello_or_cancel(&mut self, cancel: &dyn Fn() -> bool) -> Result<HelloOutcome, ProbeError> {
         let req = ProbeRequest::Hello {
             proto: GPU_PROTO_VERSION,
         };
-        match self.request(&req, HELLO_DEADLINE)? {
+        match self.request(&req, HELLO_DEADLINE, cancel)? {
             ProbeResponse::Hello { proto, .. } if proto != GPU_PROTO_VERSION => {
                 self.kill_and_reap();
                 Err(ProbeError::VersionMismatch(proto))
@@ -158,9 +176,19 @@ impl ProbeClient {
     /// Sends `Sample { seq, processes }` with the next `seq` and reads the reply under
     /// [`SAMPLE_DEADLINE`]. A reply with another `seq` is a protocol error.
     pub fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError> {
+        self.sample_or_cancel(processes, &never)
+    }
+
+    /// [`sample`](Self::sample) that stops waiting when `cancel` returns true.
+    pub fn sample_or_cancel(
+        &mut self,
+        processes: bool,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<ProbeResponseSample, ProbeError> {
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        match self.request(&ProbeRequest::Sample { seq, processes }, SAMPLE_DEADLINE)? {
+        let req = ProbeRequest::Sample { seq, processes };
+        match self.request(&req, SAMPLE_DEADLINE, cancel)? {
             ProbeResponse::Sample {
                 seq: got,
                 t_ns,
@@ -196,10 +224,18 @@ impl ProbeClient {
         tracing::debug!(%status, "GPU probe shut down");
     }
 
+    /// Sends `SIGKILL` and reaps the child at once, without the `Shutdown` request and the
+    /// [`SHUTDOWN_GRACE`] wait. For a cancelled worker.
+    pub fn kill(mut self) {
+        let status = self.kill_and_reap();
+        tracing::debug!(%status, "GPU probe killed");
+    }
+
     fn request(
         &mut self,
         req: &ProbeRequest,
         deadline: Duration,
+        cancel: &dyn Fn() -> bool,
     ) -> Result<ProbeResponse, ProbeError> {
         let start = Instant::now();
         if let Err(e) = write_frame(&mut self.file, req, MAX_PROBE_FRAME) {
@@ -211,13 +247,17 @@ impl ProbeClient {
         }
 
         let revents = loop {
+            if cancel() {
+                self.kill_and_reap();
+                return Err(ProbeError::Cancelled);
+            }
             let Some(left) = remaining(deadline, start.elapsed()) else {
                 self.kill_and_reap();
                 return Err(ProbeError::Deadline(deadline));
             };
             let mut fds = [PollFd::new(&self.child.sock, PollFlags::IN)];
-            match poll(&mut fds, Some(&timespec(left))) {
-                // Timed out: the next turn sees the deadline as passed.
+            match poll(&mut fds, Some(&timespec(left.min(CANCEL_POLL)))) {
+                // Timed out: the next turn checks for cancel and the deadline again.
                 Ok(0) => {}
                 Ok(_) => break fds[0].revents(),
                 Err(Errno::INTR) => {}
@@ -272,6 +312,16 @@ impl ProbeClient {
 /// output or any read error the child is killed and reaped before the error is returned. A
 /// non-zero exit or a signal is [`ProbeError::Exited`].
 pub fn api_versions(probe: &Path, deadline: Duration) -> Result<ApiVersions, ProbeError> {
+    api_versions_or_cancel(probe, deadline, &never)
+}
+
+/// [`api_versions`] that kills the child and returns [`ProbeError::Cancelled`] when `cancel`
+/// returns true.
+pub fn api_versions_or_cancel(
+    probe: &Path,
+    deadline: Duration,
+    cancel: &dyn Fn() -> bool,
+) -> Result<ApiVersions, ProbeError> {
     let start = Instant::now();
     let mut child = Command::new(probe)
         .arg("--api-versions")
@@ -282,7 +332,7 @@ pub fn api_versions(probe: &Path, deadline: Duration) -> Result<ApiVersions, Pro
         .envs(child_env())
         .spawn()
         .map_err(|e| ProbeError::Spawn(e.to_string().into()))?;
-    let output = read_api_versions_output(&mut child, start, deadline);
+    let output = read_api_versions_output(&mut child, start, deadline, cancel);
     let output = match output {
         Ok(output) => output,
         Err(e) => {
@@ -290,7 +340,7 @@ pub fn api_versions(probe: &Path, deadline: Duration) -> Result<ApiVersions, Pro
             return Err(e);
         }
     };
-    let status = wait_until(&mut child, start, deadline)?;
+    let status = wait_until(&mut child, start, deadline, cancel)?;
     if !status.success() {
         return Err(ProbeError::Exited(status_text(status)));
     }
@@ -304,6 +354,7 @@ fn read_api_versions_output(
     child: &mut Child,
     start: Instant,
     deadline: Duration,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<Vec<u8>, ProbeError> {
     let Some(mut stdout) = child.stdout.take() else {
         return Err(ProbeError::Spawn("no stdout pipe".into()));
@@ -311,12 +362,15 @@ fn read_api_versions_output(
     let mut output = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
+        if cancel() {
+            return Err(ProbeError::Cancelled);
+        }
         let Some(left) = remaining(deadline, start.elapsed()) else {
             return Err(ProbeError::Deadline(deadline));
         };
         let mut fds = [PollFd::new(&stdout, PollFlags::IN)];
-        match poll(&mut fds, Some(&timespec(left))) {
-            // Timed out: the next turn sees the deadline as passed.
+        match poll(&mut fds, Some(&timespec(left.min(CANCEL_POLL)))) {
+            // Timed out: the next turn checks for cancel and the deadline again.
             Ok(0) | Err(Errno::INTR) => continue,
             Ok(_) => {}
             Err(e) => return Err(ProbeError::Protocol(format!("poll: {e}").into())),
@@ -335,15 +389,21 @@ fn read_api_versions_output(
 }
 
 /// Waits for the child to exit within the rest of `deadline`, checking every
-/// [`SHUTDOWN_POLL`]. A child that closed stdout but keeps running is killed at the deadline.
+/// [`SHUTDOWN_POLL`]. A child that closed stdout but keeps running is killed at the deadline
+/// or on cancel.
 fn wait_until(
     child: &mut Child,
     start: Instant,
     deadline: Duration,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<ExitStatus, ProbeError> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
+            Ok(None) if cancel() => {
+                kill_and_reap(child);
+                return Err(ProbeError::Cancelled);
+            }
             Ok(None) if remaining(deadline, start.elapsed()).is_none() => {
                 kill_and_reap(child);
                 return Err(ProbeError::Deadline(deadline));
@@ -380,6 +440,11 @@ fn status_text(status: ExitStatus) -> Arc<str> {
         (None, Some(sig)) => format!("signal {sig}").into(),
         (None, None) => "unknown status".into(),
     }
+}
+
+/// The cancel check of the plain forms: never cancelled.
+fn never() -> bool {
+    false
 }
 
 /// Time left of `deadline` after `elapsed`, or `None` when it has passed.
@@ -622,6 +687,74 @@ mod tests {
         let got = api_versions(&script, deadline);
         assert!(matches!(got, Err(ProbeError::Deadline(_))), "{got:?}");
         assert!(start.elapsed() < deadline + Duration::from_secs(1));
+    }
+
+    /// A cancel check that turns true 50 ms after it is made, once the script wrote its pid,
+    /// and remembers when it first did.
+    struct CancelAfter {
+        made: Instant,
+        pid_file: PathBuf,
+        fired: std::cell::Cell<Option<Instant>>,
+    }
+
+    impl CancelAfter {
+        fn new(scripts: &Scripts) -> Self {
+            Self {
+                made: Instant::now(),
+                pid_file: scripts.0.join("pid"),
+                fired: std::cell::Cell::new(None),
+            }
+        }
+
+        fn check(&self) -> bool {
+            if self.fired.get().is_none()
+                && self.made.elapsed() >= Duration::from_millis(50)
+                && self.pid_file.exists()
+            {
+                self.fired.set(Some(Instant::now()));
+            }
+            self.fired.get().is_some()
+        }
+
+        /// Time from the first true check until now.
+        fn since_fired(&self) -> Duration {
+            self.fired.get().expect("cancel fired").elapsed()
+        }
+    }
+
+    /// A probe that never answers: it writes its pid and sleeps.
+    fn silent_probe(scripts: &Scripts) -> PathBuf {
+        let pid = scripts.0.join("pid");
+        scripts.script(
+            "silent",
+            &format!("echo $$ > '{}'\nexec sleep 30", pid.display()),
+        )
+    }
+
+    #[test]
+    fn start_cancel_kills_and_reaps() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("start-cancel");
+        let probe = silent_probe(&scripts);
+        let cancel = CancelAfter::new(&scripts);
+        let got = ProbeClient::start_or_cancel(&probe, &[], &|| cancel.check());
+        let took = cancel.since_fired();
+        assert!(matches!(got, Err(ProbeError::Cancelled)), "{:?}", got.err());
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(reaped(scripts.pid()), "the probe was not reaped");
+    }
+
+    #[test]
+    fn api_versions_cancel_kills_and_reaps() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("api-cancel");
+        let probe = silent_probe(&scripts);
+        let cancel = CancelAfter::new(&scripts);
+        let got = api_versions_or_cancel(&probe, API_VERSIONS_DEADLINE, &|| cancel.check());
+        let took = cancel.since_fired();
+        assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(reaped(scripts.pid()), "the probe was not reaped");
     }
 
     #[test]

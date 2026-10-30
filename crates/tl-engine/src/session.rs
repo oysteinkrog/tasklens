@@ -187,15 +187,15 @@ async fn run_session(
             let (handle, queue) = helper_queue();
             let (env, updates) = (make(), ep.msgs_tx.clone());
             children.0.push(spawn(cx, move |cx| async move {
+                let _running = crate::bridge::task_running("helper");
                 helper_task_with(cx, queue, updates, env).await;
-                crate::bridge::log_worker_exit("helper");
             })?);
             let (tx, rx) = mpsc::channel::<HelperCommand>(HELPER_COMMANDS);
             reducer.helper_tx = Some(tx);
             let forward = handle.clone();
             children.0.push(spawn(cx, move |cx| async move {
+                let _running = crate::bridge::task_running("forward_helper");
                 forward_helper(cx, rx, forward).await;
-                crate::bridge::log_worker_exit("forward_helper");
             })?);
             Some(handle)
         }
@@ -284,14 +284,15 @@ async fn run_session(
     }
     let tick_tx = ep.msgs_tx.clone();
     children.0.push(spawn(cx, move |cx| async move {
+        let _running = crate::bridge::task_running("tick");
         tick(cx, tick_tx).await;
-        crate::bridge::log_worker_exit("tick");
     })?);
 
+    let running = crate::bridge::task_running("reducer");
     let run = AssertUnwindSafe(reducer.run(cx, &mut ep.msgs, &mut ep.publisher))
         .catch_unwind()
         .await;
-    crate::bridge::log_worker_exit("reducer");
+    drop(running);
     drop(children);
     match run {
         Ok(Ok(())) => Ok(()),

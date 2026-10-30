@@ -413,6 +413,7 @@ fn full_factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
         let pkg = io.shared.pkg.clone();
         async move {
             let make = move |_| {
+                let _running = crate::bridge::job_running("processes.open");
                 let src = ProcessesSource::new(cfg)?;
                 Ok::<_, CollectError>(match pkg {
                     Some(index) => src.with_package_index(index),
@@ -498,6 +499,7 @@ pub async fn package_batches(cx: &Cx, index: PackageIndex) {
         next_stamp = cx.now() + PKG_STAMP_CHECK;
         let job_index = index.clone();
         let spawned = cx.spawn_blocking(move |_| {
+            let _running = crate::bridge::job_running("processes.package_index");
             if batch {
                 job_index.run_batch().map(|_| ())
             } else {
