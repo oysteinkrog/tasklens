@@ -5338,11 +5338,12 @@ mod page {
             .update(|_, cx| page.read(cx).disk_box().read(cx).shown_more_text());
         assert_eq!(more.as_ref(), format!("+{} more", 3 - cs.len()));
 
-        // Automatic: the mode's grid, here two columns in a 222 px box, saved as `auto`. Edit
-        // Layout holds the row height, and a 650 px window is too short to fill at 32 px rows
-        // (D-037), so the box keeps the unit.
+        // Automatic: the mode's grid, saved as `auto`. At 30 px rows the box is too low for one
+        // column of three 60 px cells, so the grid has two columns. Edit Layout holds the row
+        // height, and a 650 px window is too short to fill at 30 px rows (D-037), so the box
+        // keeps the unit.
         r.page_action(&tl_ui::pages::performance::actions::PerfOverviewEditDone);
-        r.set_row_unit(32);
+        r.set_row_unit(30);
         r.vcx.simulate_resize(size(px(1200.), px(650.)));
         draw(r.vcx);
         r.edit_layout();
