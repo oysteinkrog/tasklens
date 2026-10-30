@@ -49,7 +49,7 @@ use tl_collect::inventory::{
 };
 use tl_collect::net::addrs::{AddrDump, AddrFamily, AddrScope, IfAddr, format_cidr};
 use tl_collect::parse::block::{self, BlockDevice, DiskKind};
-use tl_collect::parse::cpufreq::read_base_mhz;
+use tl_collect::parse::cpufreq::{read_base_mhz, read_max_mhz_per_cpu};
 use tl_collect::parse::meminfo::{MemInfo, parse_meminfo};
 use tl_collect::parse::mountinfo::{MountEntry, parse_mountinfo};
 use tl_collect::parse::netif;
@@ -70,6 +70,7 @@ use tl_model::snapshot::{
     GraphicsAdapter, InvField, InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo,
     ProcessorInfo, PublicIpState, SystemInfo,
 };
+use tl_model::system::CoreInfo;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
@@ -908,9 +909,17 @@ fn os_info(raw: &InventoryRaw) -> OsInfo {
 /// PERF-096.
 fn processor_info(raw: &InventoryRaw, root: &SysRoot) -> ProcessorInfo {
     let cpu = &raw.cpu;
-    let (cores, logical) = match read_topology(root) {
-        Ok(t) => (valid(u32::from(t.cores)), valid(u32::from(t.logical_count))),
-        Err(_) => (with(Validity::Failed), with(Validity::Failed)),
+    let (cores, logical, core_max_mhz) = match read_topology(root) {
+        Ok(t) => (
+            valid(u32::from(t.cores)),
+            valid(u32::from(t.logical_count)),
+            core_max_mhz(&read_max_mhz_per_cpu(root), &t.topology.cores),
+        ),
+        Err(_) => (
+            with(Validity::Failed),
+            with(Validity::Failed),
+            with(Validity::Failed),
+        ),
     };
     let base = read_base_mhz(root);
     ProcessorInfo {
@@ -927,6 +936,7 @@ fn processor_info(raw: &InventoryRaw, root: &SysRoot) -> ProcessorInfo {
             validity: base.validity,
         },
         max_mhz: opt(max_mhz(&root.sys)),
+        core_max_mhz,
         microcode: opt(cpu.microcode.clone()),
         virtualization: valid(Arc::from(virtualization_flag(cpu.flags))),
         avx512: valid(cpu.flags.contains(CpuFlags::AVX512F)),
@@ -972,6 +982,21 @@ fn max_mhz(sys: &Path) -> Option<u32> {
         })
         .max()
         .map(|khz| u32::try_from(khz.saturating_add(500) / 1000).unwrap_or(u32::MAX))
+}
+
+/// Each core's max clock, by `CoreInfo.id`: the highest of its CPUs' `per_cpu` values
+/// (tasklens-o55.56). `Unsupported` when no core has one.
+fn core_max_mhz(per_cpu: &[Option<u32>], cores: &[CoreInfo]) -> InvField<Arc<[Option<u32>]>> {
+    let max: Arc<[Option<u32>]> = cores
+        .iter()
+        .map(|core| {
+            core.logical
+                .iter()
+                .filter_map(|&cpu| per_cpu.get(usize::from(cpu)).copied().flatten())
+                .max()
+        })
+        .collect();
+    opt(max.iter().any(Option::is_some).then_some(max))
 }
 
 /// PERF-098 static rows. A meminfo that does not read or parse gives `Failed` for its rows.
@@ -1451,9 +1476,11 @@ mod tests {
     use asupersync::channel::watch;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
+    use smallvec::SmallVec;
     use tl_collect::inventory::{CpuInfo, KernelInfo, SecurityInfo};
     use tl_model::demand::Demand;
     use tl_model::settings::EngineSettings;
+    use tl_model::system::CoreKind;
 
     use crate::source::{QueuedCommand, WorkerControl};
 
@@ -1905,6 +1932,32 @@ mod tests {
     }
 
     #[test]
+    fn core_max_clock_is_the_fastest_sibling() {
+        let core = |id: u16, logical: &[u16]| CoreInfo {
+            id,
+            logical: SmallVec::from_slice(logical),
+            l3_group: 0,
+            kind: CoreKind::Standard,
+        };
+        let cores = [core(0, &[0, 1]), core(1, &[2, 3]), core(2, &[9])];
+        let got = core_max_mhz(&[Some(4000), Some(4500), None, None], &cores);
+        assert_eq!(got, valid(Arc::from([Some(4500), None, None])));
+        assert_eq!(
+            core_max_mhz(&[None; 4], &cores).validity,
+            Validity::Unsupported
+        );
+
+        // The owner desktop: 16 cores, every policy at 4061626 kHz.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tl-collect/tests/fixtures/owner-desktop");
+        let snap = scan_files(&InventoryPaths::under(&fixture), &SysRoot::at(&fixture));
+        assert_eq!(
+            snap.processor.core_max_mhz,
+            valid(Arc::from([Some(4062); 16]))
+        );
+    }
+
+    #[test]
     fn missing_files_degrade_per_field() {
         let root = SysRoot::at(Path::new("/nonexistent-tasklens-root"));
         let snap = from_raw(&raw("x86_64"), &root);
@@ -1915,6 +1968,7 @@ mod tests {
         assert_eq!(snap.processor.name.validity, Validity::Unsupported);
         assert_eq!(snap.processor.cores.validity, Validity::Failed);
         assert_eq!(snap.processor.max_mhz.validity, Validity::Unsupported);
+        assert_eq!(snap.processor.core_max_mhz.validity, Validity::Failed);
         assert_eq!(&*snap.processor.virtualization.value, "");
         assert_eq!(snap.memory.total_bytes.validity, Validity::Failed);
         assert_eq!(snap.memory.zram_bytes, valid(0));

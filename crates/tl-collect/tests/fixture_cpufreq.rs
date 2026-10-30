@@ -1,4 +1,4 @@
-//! `CpuFreq`, `read_base_mhz` and `read_static` against the captured `owner-desktop` fixture and
+//! `CpuFreq`, `read_base_mhz`, `read_max_mhz_per_cpu` and `read_static` against the captured `owner-desktop` fixture and
 //! the hand-made cpufreq edge fixtures (E04-010, E04-013).
 
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use tl_collect::SysRoot;
 use tl_collect::counters::Measured;
-use tl_collect::parse::cpufreq::{CpuFreq, FreqReading, FreqSource, read_base_mhz, read_static};
+use tl_collect::parse::cpufreq::{
+    CpuFreq, FreqReading, FreqSource, read_base_mhz, read_max_mhz_per_cpu, read_static,
+};
 use tl_model::validity::Validity;
 
 fn read(root: &SysRoot) -> FreqReading {
@@ -105,6 +107,26 @@ fn nothing_readable_is_unsupported() {
     assert_eq!(out.avg_mhz.validity, Validity::Unsupported);
     assert_eq!(out.max_mhz.validity, Validity::Unsupported);
     assert!(out.per_cpu_mhz.is_empty());
+}
+
+#[test]
+fn max_clock_per_cpu_from_its_policy() {
+    // One policy per CPU, each 4061626 kHz.
+    let owner = read_max_mhz_per_cpu(&common::fixture("owner-desktop"));
+    assert_eq!(owner, vec![Some(4062); 32]);
+
+    // policy0 covers CPUs 0-1, policy2 CPUs 2-3; neither has the file yet.
+    let copy = common::fixture_copy("cpufreq-mixed", None);
+    let policies = copy.path().join("sys/devices/system/cpu/cpufreq");
+    let root = SysRoot::at(copy.path());
+    assert_eq!(read_max_mhz_per_cpu(&root), [None; 4]);
+    fs::write(policies.join("policy0/cpuinfo_max_freq"), "4500000\n").unwrap();
+    fs::write(policies.join("policy2/cpuinfo_max_freq"), "3000400\n").unwrap();
+    assert_eq!(
+        read_max_mhz_per_cpu(&root),
+        [Some(4500), Some(4500), Some(3000), Some(3000)]
+    );
+    assert!(read_max_mhz_per_cpu(&SysRoot::at(&copy.path().join("missing"))).is_empty());
 }
 
 #[test]

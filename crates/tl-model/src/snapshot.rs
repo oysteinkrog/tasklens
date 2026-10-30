@@ -970,6 +970,9 @@ pub struct ProcessorInfo {
     pub logical: InvField<u32>,
     pub base_mhz: InvField<u32>,
     pub max_mhz: InvField<u32>,
+    /// `cpuinfo_max_freq` of each physical core in MHz, indexed by `CoreInfo.id`: the highest
+    /// of its CPUs' policies (tasklens-o55.56). `None` for a core that no policy covers.
+    pub core_max_mhz: InvField<Arc<[Option<u32>]>>,
     pub microcode: InvField<Arc<str>>,
     pub virtualization: InvField<Arc<str>>,
     pub avx512: InvField<bool>,
@@ -2387,6 +2390,7 @@ mod tests {
             p.logical.validity,
             p.base_mhz.validity,
             p.max_mhz.validity,
+            p.core_max_mhz.validity,
             p.microcode.validity,
             p.virtualization.validity,
             p.avx512.validity,

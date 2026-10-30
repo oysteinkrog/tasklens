@@ -232,6 +232,32 @@ pub fn read_base_mhz(root: &SysRoot) -> Measured<u32> {
     Measured::invalid(Validity::Unsupported)
 }
 
+/// Each logical CPU's `cpuinfo_max_freq` in MHz, from the policy that covers it, read once
+/// (tasklens-o55.56). Index is the logical CPU id; `None` where no policy covers the CPU or
+/// its file does not read.
+pub fn read_max_mhz_per_cpu(root: &SysRoot) -> Vec<Option<u32>> {
+    let dir = root.sys_path(CPUFREQ_DIR);
+    let mut buf = Vec::new();
+    let policies: Vec<(PathBuf, SmallVec<[u16; 4]>)> = policy_ids(&dir)
+        .into_iter()
+        .map(|id| {
+            let pdir = dir.join(format!("policy{id}"));
+            let cpus = policy_cpus(&pdir, &mut buf);
+            (pdir, cpus)
+        })
+        .collect();
+    let mut out = vec![None; cpu_count(policies.iter().map(|(_, cpus)| cpus))];
+    for (pdir, cpus) in &policies {
+        let Ok(khz) = read_u64(&pdir.join("cpuinfo_max_freq"), &mut buf) else {
+            continue;
+        };
+        for &cpu in cpus {
+            out[usize::from(cpu)] = Some(khz_to_mhz(khz));
+        }
+    }
+    out
+}
+
 /// Static cpufreq facts for the CPU page (PERF-035, PERF-031), read once at start.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CpuFreqStatic {
