@@ -652,6 +652,13 @@ pub struct OverviewGridSetting {
         deserialize_with = "loose_some"
     )]
     pub power_split: Option<f64>,
+    /// Where the CPU box draws its power draw strip, an id from [`OVERVIEW_POWER_PLACEMENTS`]
+    /// (tasklens-o55.55). `None` is `full_width`. Only the CPU box has it.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub power_placement: Option<String>,
     /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
     /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
     /// Only the GPU box has it; written only when not empty.
@@ -717,6 +724,13 @@ pub struct OverviewBoxSetting {
         deserialize_with = "loose_some"
     )]
     pub power_split: Option<f64>,
+    /// Where the CPU box draws its power draw strip, an id from [`OVERVIEW_POWER_PLACEMENTS`]
+    /// (tasklens-o55.55). `None` is `full_width`. Only the CPU box has it.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "loose_some"
+    )]
+    pub power_placement: Option<String>,
     /// The GPU box's engine charts the user left out, by en-US name, `"VRAM"` for the VRAM row
     /// (UI-PRF-019 "Shown engines", D-029). Names the GPU does not report are kept and ignored.
     /// Only the GPU box has it; written only when not empty.
@@ -740,6 +754,10 @@ pub const OVERVIEW_ARRANGES: [&str; 3] = ["auto", "vertical", "horizontal"];
 
 /// The range a box's `split` is accepted in.
 pub const OVERVIEW_SPLIT_RANGE: (f64, f64) = (0.2, 0.8);
+
+/// The values of the CPU box's `power_placement`, the default first: a strip across the whole
+/// box under every part, or under the CPU graph only, beside the core rows.
+pub const OVERVIEW_POWER_PLACEMENTS: [&str; 2] = ["full_width", "under_graph"];
 
 /// The range a box's `power_split` is accepted in.
 pub const OVERVIEW_POWER_SPLIT_RANGE: (f64, f64) = (0.1, 0.5);
@@ -829,6 +847,7 @@ impl Unreadable for OverviewBoxSetting {
             cpu_split: None,
             power: false,
             power_split: None,
+            power_placement: None,
             hidden: Vec::new(),
         }
     }
@@ -1116,6 +1135,7 @@ fn grid_from_rows(
                 arrange: b.arrange.clone(),
                 power: b.power,
                 power_split: b.power_split,
+                power_placement: b.power_placement.clone(),
                 hidden: b.hidden.clone(),
             });
             col += cols;
@@ -1164,9 +1184,9 @@ impl OverviewGridSetting {
 
     /// Drops a mode that `kind` does not have, a split outside [`OVERVIEW_SPLIT_RANGE`], an
     /// `arrange` not in [`OVERVIEW_ARRANGES`], a `power_split` outside
-    /// [`OVERVIEW_POWER_SPLIT_RANGE`], `power` keys on a box that is not the CPU box, and
-    /// `hidden` on a box that is not the GPU box (UI-PRF-019). Returns `true` when it dropped
-    /// anything.
+    /// [`OVERVIEW_POWER_SPLIT_RANGE`], a `power_placement` not in [`OVERVIEW_POWER_PLACEMENTS`],
+    /// `power` keys on a box that is not the CPU box, and `hidden` on a box that is not the GPU
+    /// box (UI-PRF-019). Returns `true` when it dropped anything.
     fn drop_invalid_mode(&mut self, kind: &str) -> bool {
         let mut changed = false;
         if self
@@ -1195,9 +1215,20 @@ impl OverviewGridSetting {
             self.power_split = None;
             changed = true;
         }
-        if kind != "cpu" && (self.power || self.power_split.is_some()) {
+        if self
+            .power_placement
+            .as_deref()
+            .is_some_and(|p| !OVERVIEW_POWER_PLACEMENTS.contains(&p))
+        {
+            self.power_placement = None;
+            changed = true;
+        }
+        if kind != "cpu"
+            && (self.power || self.power_split.is_some() || self.power_placement.is_some())
+        {
             self.power = false;
             self.power_split = None;
+            self.power_placement = None;
             changed = true;
         }
         if kind != "gpu" && !self.hidden.is_empty() {
@@ -2767,6 +2798,44 @@ mod tests {
         let b = first(&s);
         assert_eq!((b.power, b.power_split), (false, None));
         assert!(!changed.is_empty());
+    }
+
+    /// tasklens-o55.55: `power_placement` defaults to full width and is written only when the
+    /// strip sits under the CPU graph.
+    #[test]
+    fn overview_cpu_power_placement_round_trip_and_default() {
+        let (s, changed) = load_toml(&cpu_entry("power = true"));
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(first(&s).power_placement, None);
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(!text.contains("power_placement"), "{text}");
+
+        let (s, changed) = load_toml(&cpu_entry(
+            "power = true, power_placement = \"under_graph\"",
+        ));
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(first(&s).power_placement.as_deref(), Some("under_graph"));
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("power_placement = \"under_graph\""), "{text}");
+        let (back, changed) = load_toml(&text);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(first(&back).power_placement.as_deref(), Some("under_graph"));
+
+        // An unknown value or a value of the wrong type loads as the default.
+        for v in ["\"left\"", "3"] {
+            let (s, changed) = load_toml(&cpu_entry(&format!("power_placement = {v}")));
+            assert_eq!(first(&s).power_placement, None, "{v}");
+            assert!(!changed.is_empty(), "{v}");
+        }
+        // Only the CPU box has it.
+        let text = "[performance.overview]\ngrid = [{ kind = \"memory\", col = 0, row = 0, \
+                    cols = 12, rows = 7, power_placement = \"under_graph\" }]\n";
+        let (s, changed) = load_toml(text);
+        assert_eq!(first(&s).power_placement, None);
+        assert!(!changed.is_empty());
+        // An old row layout keeps it on the CPU box.
+        let (s, _) = load_toml(&cpu_row_entry("power_placement = \"under_graph\""));
+        assert_eq!(first(&s).power_placement.as_deref(), Some("under_graph"));
     }
 
     #[test]
