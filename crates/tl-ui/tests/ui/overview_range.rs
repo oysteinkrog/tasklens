@@ -791,6 +791,20 @@ fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
         let sys = Arc::make_mut(&mut s.system);
         sys.header.version += 1;
         sys.gpus = Arc::from([(DeviceIdx(2), gpu_totals(DeviceIdx(2)))]);
+        // An NVIDIA adapter, so the Overview shows all six engines.
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        inv.graphics = Arc::from(
+            [tl_model::snapshot::GraphicsAdapter {
+                device: Some(DeviceIdx(2)),
+                kernel_module: tl_model::snapshot::InvField {
+                    value: Arc::from("nvidia"),
+                    validity: tl_model::validity::Validity::Valid,
+                },
+                ..Default::default()
+            }]
+            .as_slice(),
+        );
     });
     let unit = r
         .vcx
