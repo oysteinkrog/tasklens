@@ -30,6 +30,7 @@ use super::overview::cpu_box::{CoreAverage, KEY_CORE, core_spec, newest};
 use super::overview::parts::{
     ChartSettings, CoreBarsLayout, CoreBarsModel, core_bars_layout, core_board, spark_labels,
 };
+use super::page::page_range_ns;
 use crate::chart::view::ChangedRuns;
 use crate::chart::{ChartBg, ChartSpec, ChartView, ValueFormat};
 use crate::components::button::{TlButton, TlButtonKind};
@@ -48,8 +49,6 @@ const KEY_HEADING: &str = "perf-cpu-board-heading";
 const KEY_SORT: &str = "perf-cpu-board-sort";
 const KEY_TIP_SORT: &str = "perf-cpu-board-tip-sort";
 
-const NS_PER_S: u64 = 1_000_000_000;
-
 /// The settings the board draws from.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct BoardSettings {
@@ -66,7 +65,8 @@ impl BoardSettings {
             smoothing: s.performance.overview_core_smoothing,
             chart: ChartSettings {
                 kernel: s.performance.cpu_kernel,
-                range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+                // The shared range of the page charts (crw.105).
+                range_ns: page_range_ns(cx),
                 // The sparklines step at the sample rate, as on the Overview: a sliding chart
                 // notifies every animation frame.
                 smooth: false,
@@ -262,7 +262,12 @@ impl CpuBoard {
             } else {
                 let hub = self.hub.clone();
                 let labels = spark_labels(ValueFormat::Percent);
-                let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+                let chart = cx.new(|cx| {
+                    let snap = Arc::clone(hub.read(cx).current());
+                    ChartView::new(spec, labels, &hub, cx)
+                        .with_newest_marks()
+                        .with_device_history(&snap)
+                });
                 self.sparks.push(chart);
             }
         }

@@ -43,7 +43,8 @@ use super::cpu_grid::CpuGrid;
 use super::details::KeyValueModel;
 use super::overview::cpu_box::core_gutter;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text, page_words,
+    DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text, live_only_note,
+    live_range_ns, page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::actions::OpenAdditionalSetup;
@@ -117,8 +118,6 @@ const KEY_SECONDARY_TEMP: &str = "perf-cpu-secondary-temp";
 const KEY_SECONDARY_FALLBACK: &str = "perf-cpu-secondary-fallback";
 const KEY_SETUP_POWER: &str = "perf-cpu-setup-power";
 const KEY_NEEDS_SETUP: &str = "perf-tip-needs-setup";
-
-const NS_PER_S: u64 = 1_000_000_000;
 
 /// One entry of the mode menu. `label` and `tooltip` are `en-US.ftl` keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,13 +459,29 @@ struct ModeFade {
     generation: u32,
 }
 
+/// A page chart that reads the device metric history at 1 h, 24 h and 7 d.
+fn history_chart(
+    spec: ChartSpec,
+    labels: ChartLabels,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut Context<ChartView>,
+) -> ChartView {
+    let snap = Arc::clone(hub.read(cx).current());
+    ChartView::new(spec, labels, hub, cx)
+        .with_newest_marks()
+        .with_device_history(&snap)
+}
+
 /// The settings the page draws from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageSettings {
     mode: CpuGraphMode,
     kernel: bool,
     secondary: CpuSecondaryGraph,
+    /// The shared range the charts draw.
     range_ns: u64,
+    /// The per-core grid's range: it reads only the live series.
+    live_range_ns: u64,
     smooth: bool,
     rounded: bool,
 }
@@ -486,7 +501,8 @@ impl PageSettings {
             mode: s.performance.cpu_graph_mode,
             kernel: s.performance.cpu_kernel,
             secondary: s.performance.cpu_secondary_graph,
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
+            live_range_ns: live_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
         }
@@ -839,7 +855,7 @@ impl CpuPage {
             Arc::clone(&topology),
             &logical,
             settings.kernel,
-            settings.range_ns,
+            settings.live_range_ns,
             settings.smooth,
             &theme,
             cx,
@@ -848,7 +864,7 @@ impl CpuPage {
         words.refresh(cx);
         let spec = overall_spec(row.idx, &settings, &theme);
         let labels = overall_labels(settings.kernel, &words);
-        let overall = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+        let overall = cx.new(|cx| history_chart(spec, labels, &hub, cx));
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -952,8 +968,7 @@ impl CpuPage {
                     all_cores_labels(false, &self.words),
                 );
                 let hub = self.hub.clone();
-                self.overlaid =
-                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
+                self.overlaid = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
                 self.sync_total_text(cx);
             }
             CpuGraphMode::AllCoresStacked if self.stacked.is_none() => {
@@ -962,8 +977,7 @@ impl CpuPage {
                     all_cores_labels(true, &self.words),
                 );
                 let hub = self.hub.clone();
-                self.stacked =
-                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
+                self.stacked = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
                 self.sync_total_text(cx);
             }
             CpuGraphMode::Board if self.board.is_none() => {
@@ -1185,8 +1199,7 @@ impl CpuPage {
             }),
             None => {
                 let hub = self.hub.clone();
-                self.secondary =
-                    Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
+                self.secondary = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
             }
         }
         want != old || force
@@ -1204,6 +1217,7 @@ impl CpuPage {
             cpu_fast: true,
             // The CPU worker reads RAPL and the clocks; the temperature needs the sensors.
             sensors: self.secondary_choice() == Some(CpuSecondaryGraph::Temperature),
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -1313,7 +1327,7 @@ impl CpuPage {
             let labels = overall_labels(new.kernel, &self.words);
             self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
         }
-        self.grid.set_range(new.range_ns, cx);
+        self.grid.set_range(new.live_range_ns, cx);
         self.grid.set_smooth(new.smooth, cx);
         let theme = current(cx).clone();
         let spec = overall_spec(self.row.idx, &new, &theme);
@@ -1325,6 +1339,8 @@ impl CpuPage {
             self.mode = new.mode;
             self.ensure_mode_chart(cx);
             self.start_fade(old.mode, cx);
+            self.send_demand(cx);
+        } else if new.range_ns != old.range_ns {
             self.send_demand(cx);
         }
         self.sync_secondary(true, cx);
@@ -1346,7 +1362,7 @@ impl CpuPage {
             Arc::clone(&self.topology),
             &self.logical,
             s.kernel,
-            s.range_ns,
+            s.live_range_ns,
             s.smooth,
             &theme,
             cx,
@@ -1591,7 +1607,15 @@ impl DevicePage for CpuPage {
 
     fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
+        // The per-core grid reads only the live series (crw.105).
+        let note = (self.mode == CpuGraphMode::PerCore)
+            .then(|| live_only_note(&m, current(cx), cx))
+            .flatten();
         let area = self.mode_area(&m, window, cx);
+        let area = match note {
+            Some(note) => v_flex().w_full().child(note).child(area).into_any_element(),
+            None => area,
+        };
         let Some(view) = &self.secondary else {
             return area;
         };
