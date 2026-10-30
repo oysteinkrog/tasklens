@@ -123,10 +123,13 @@ const WINE_USER_CONTAINERS: &[&[&str]] = &[
     &["Programs"],
 ];
 
-/// The Wine apps of the current user, by prefix and install folder in lower case.
+/// A Wine prefix and an install folder in it, in lower case.
+type WineFolder<'a> = (Option<&'a str>, Cow<'a, str>);
+
+/// The Wine apps of the current user, by prefix and install folder.
 struct WineFolders<'a> {
     /// The display spelling of each folder.
-    names: FxHashMap<(Option<&'a str>, Cow<'a, str>), &'a str>,
+    names: FxHashMap<WineFolder<'a>, &'a str>,
     /// The folder in lower case and the display spelling of the app with the most processes in
     /// each prefix.
     main: FxHashMap<Option<&'a str>, (Cow<'a, str>, &'a str)>,
@@ -272,8 +275,7 @@ fn wine_folders<'a>(procs: &[MemGroupInput<'a>], self_uid: u32) -> WineFolders<'
         }
     }
     // Per folder: (display spelling, its count, all processes).
-    let mut folders: FxHashMap<(Option<&str>, Cow<'_, str>), (&str, u32, u32)> =
-        FxHashMap::default();
+    let mut folders: FxHashMap<WineFolder<'a>, (&'a str, u32, u32)> = FxHashMap::default();
     for ((prefix, spelling), n) in spellings {
         folders
             .entry((prefix, fold_case(spelling)))
