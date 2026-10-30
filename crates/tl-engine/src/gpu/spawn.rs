@@ -405,15 +405,10 @@ mod tests {
         assert!(Path::new(&stat).exists());
 
         drop(child);
+        // The reap runs on a background thread, so the child may be a zombie for a moment.
+        // Within 200 ms its /proc entry is gone.
         let deadline = Instant::now() + Duration::from_millis(200);
-        loop {
-            match std::fs::read_to_string(&stat) {
-                Err(_) => break,
-                Ok(s) => {
-                    let state = s.rsplit_once(") ").map(|(_, rest)| &rest[..1]);
-                    assert_ne!(state, Some("Z"), "zombie after drop");
-                }
-            }
+        while Path::new(&stat).exists() {
             assert!(
                 Instant::now() < deadline,
                 "pid {pid} still present after 200 ms"
