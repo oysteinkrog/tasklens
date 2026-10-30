@@ -86,6 +86,9 @@ pub struct RootEndpoints {
     /// The last published sequence. Each session starts its reducer here, so the sequence
     /// grows across epochs.
     pub next_sequence: u64,
+    /// The last engine-wide request id. Each reducer continues after it, so an id from a
+    /// stopped reducer that is still in the worker queue never names a newer request.
+    pub last_engine_id: u64,
 }
 
 /// Why a session ended other than by cancel.
@@ -160,11 +163,13 @@ async fn engine_session(cx: &Cx, ep: &mut RootEndpoints, epoch: u32) -> Result<(
     let control = std::mem::replace(&mut ep.control, placeholder_control());
     let mut reducer = Reducer::new(epoch, ep.boot_id, control, ep.events_tx.clone());
     reducer.clients.set_local_requests(ep.requests_tx.clone());
+    reducer.clients.resume_engine_ids(ep.last_engine_id);
     let result = run_session(cx, ep, &mut reducer, epoch).await;
     // Every request still active ends here as `Lost`: the local session outlives this reducer.
     reducer.stopped();
     ep.control = std::mem::replace(&mut reducer.control, placeholder_control());
     ep.next_sequence = reducer.sequence;
+    ep.last_engine_id = reducer.clients.last_engine_id();
     result
 }
 

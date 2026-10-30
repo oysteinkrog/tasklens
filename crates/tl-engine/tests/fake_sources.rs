@@ -492,6 +492,7 @@ pub fn root_endpoints(
         hooks: tl_engine::bridge::EngineHooks::default(),
         workers,
         next_sequence: 0,
+        last_engine_id: 0,
     };
     let ui = UiSide {
         latest,

@@ -875,6 +875,18 @@ impl ClientSessions {
         self.last_engine_id
     }
 
+    /// The last engine id given out. `engine_session` hands it to the next reducer.
+    pub fn last_engine_id(&self) -> u64 {
+        self.last_engine_id
+    }
+
+    /// Gives out engine ids after `last`, the stopped reducer's `last_engine_id`. Ids then grow
+    /// across reducers too, so a command the stopped one left in the worker queue never names a
+    /// newer request.
+    pub fn resume_engine_ids(&mut self, last: u64) {
+        self.last_engine_id = self.last_engine_id.max(last);
+    }
+
     /// Reports and ends that arrived after their request had ended or its session had closed.
     /// For debugging only.
     pub fn late(&self) -> u64 {
@@ -891,14 +903,14 @@ impl ClientSessions {
         slot: IdSlot,
         client: u64,
     ) -> Result<u64, MapError> {
-        let index = self
+        let at = self
             .sessions
             .iter()
             .position(|s| s.id == id)
             .ok_or(MapError::NoSession)?;
         let kind = slot.kind();
-        if self.sessions[index].active(kind) >= ACTIVE_MAX {
-            self.sessions[index].send(RequestEvent {
+        if self.sessions[at].active(kind) >= ACTIVE_MAX {
+            self.sessions[at].send(RequestEvent {
                 kind,
                 id: client,
                 end: RequestEnd::Busy,
@@ -906,7 +918,7 @@ impl ClientSessions {
             return Err(MapError::Busy);
         }
         let engine = self.next_engine_id();
-        let session = &mut self.sessions[index];
+        let session = &mut self.sessions[at];
         session.requests[index(kind)].push(Request {
             client,
             engine,

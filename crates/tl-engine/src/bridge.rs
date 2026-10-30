@@ -466,6 +466,7 @@ impl Engine {
             hooks,
             workers,
             next_sequence: 0,
+            last_engine_id: 0,
         };
         let rt_handle = rt.handle();
         rt_handle
