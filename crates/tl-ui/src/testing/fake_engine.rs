@@ -1,8 +1,8 @@
 //! `FakeEngine`: the `EngineClient` every UI test uses instead of the real engine (ADR-013).
 //!
 //! Tests publish scripted snapshots and read back every demand, settings value, command and
-//! journal query the UI sent. The channels match the real engine (ADR-005): a one-token wake
-//! channel and a 256-slot action event channel.
+//! journal query the UI sent. The channels match the real engine (ADR-005, ADR-018): a one-token
+//! wake channel, a 256-slot action event channel and an unbounded request end channel.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -11,6 +11,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
@@ -22,6 +23,8 @@ pub struct FakeEngine {
     wake_rx: async_channel::Receiver<()>,
     ev_tx: async_channel::Sender<ActionEvent>,
     ev_rx: async_channel::Receiver<ActionEvent>,
+    req_tx: async_channel::Sender<RequestEvent>,
+    req_rx: async_channel::Receiver<RequestEvent>,
 }
 
 struct FakeState {
@@ -43,6 +46,7 @@ impl FakeEngine {
     pub fn new() -> Arc<Self> {
         let (wake_tx, wake_rx) = async_channel::bounded(1);
         let (ev_tx, ev_rx) = async_channel::bounded(256);
+        let (req_tx, req_rx) = async_channel::unbounded();
         Arc::new(Self {
             inner: Arc::new(Mutex::new(FakeState {
                 latest: Arc::new(empty_snapshot()),
@@ -57,6 +61,8 @@ impl FakeEngine {
             wake_rx,
             ev_tx,
             ev_rx,
+            req_tx,
+            req_rx,
         })
     }
 
@@ -82,6 +88,11 @@ impl FakeEngine {
     /// Queues one action event. A full channel drops the event.
     pub fn emit(&self, ev: ActionEvent) {
         let _ = self.ev_tx.try_send(ev);
+    }
+
+    /// Queues one request end. The channel is unbounded, so it is never dropped.
+    pub fn end_request(&self, ev: RequestEvent) {
+        let _ = self.req_tx.try_send(ev);
     }
 
     /// Every `set_demand` value, in call order.
@@ -133,6 +144,10 @@ impl EngineClient for FakeEngine {
 
     fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
         self.ev_rx.clone()
+    }
+
+    fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
+        self.req_rx.clone()
     }
 
     fn set_demand(&self, demand: Demand) {

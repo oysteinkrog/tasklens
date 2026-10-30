@@ -40,6 +40,7 @@ use tl_model::details::{
     StringScanState, TabPayload,
 };
 use tl_model::ids::ProcessKey;
+use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
@@ -79,6 +80,10 @@ gpui_kit::actions!(
 pub const VALUE_CUT: usize = 512;
 /// The next scan id. Process-global, so two windows never share one.
 static NEXT_SCAN: AtomicU64 = AtomicU64::new(1);
+
+/// The `Failed` reason of a scan the engine lost or refused. Never shown: the tab shows the
+/// failed texts.
+const SCAN_LOST: &str = "engine lost the scan";
 /// Options bar height, × ui_scale.
 const OPTIONS_H: f32 = 32.;
 /// Status row and limit banner height, × ui_scale.
@@ -853,6 +858,11 @@ impl StringsTab {
                 this.set_words(Rc::new(StringsWords::translated(cx)), cx);
             }
         }));
+        if let Some(ends) = crate::request_ends::global(cx) {
+            subs.push(cx.subscribe(&ends, |this, _, ev: &RequestEvent, cx| {
+                this.on_request_end(*ev, cx);
+            }));
+        }
         // Closing the window drops the tab: a running scan is cancelled.
         cx.on_release(|this, cx| {
             if let (true, Some(scan)) = (this.scan_running(), this.scan) {
@@ -1079,6 +1089,21 @@ impl StringsTab {
         self.set_phase(ScanPhase::Cancelled, cx);
         self.update_status(cx);
         true
+    }
+
+    /// The engine ended a request. When it is the running scan and it ended `Lost` or `Busy`, no
+    /// payload will say so, so the scan stops here as failed and Scan can start a new one. The
+    /// other ends come with the scan's last payload.
+    pub fn on_request_end(&mut self, ev: RequestEvent, cx: &mut Context<Self>) {
+        if ev.kind != IdKind::Scan
+            || self.scan != Some(ScanId(ev.id))
+            || !self.scan_running()
+            || !matches!(ev.end, RequestEnd::Lost | RequestEnd::Busy)
+        {
+            return;
+        }
+        self.set_phase(ScanPhase::Failed(Arc::from(SCAN_LOST)), cx);
+        self.update_status(cx);
     }
 
     /// Takes the tab's payload. A payload of another scan, or the same `Arc` again, does nothing.

@@ -4437,6 +4437,52 @@ mod window {
         assert!(!rig.vcx.read(|cx| rig.tab.read(cx).scan_running()));
     }
 
+    /// A scan the engine lost gets no payload, only its `RequestEvent` (ADR-018, q4x76.17). The
+    /// event reaches the tab, which stops waiting, so Scan works again. An end of another scan
+    /// does nothing.
+    #[gpui_kit::test]
+    fn strings_lost_scan_ends_from_its_request_event(cx: &mut TestAppContext) {
+        use tl_model::request::{IdKind, RequestEnd, RequestEvent};
+        let mut rig = strings_rig(cx, ProcFlags::default());
+        let scan = start_scan(&mut rig);
+        assert!(rig.vcx.read(|cx| rig.tab.read(cx).scan_running()));
+
+        rig.engine.end_request(RequestEvent {
+            kind: IdKind::Scan,
+            id: scan.0 + 1000,
+            end: RequestEnd::Lost,
+        });
+        rig.engine.end_request(RequestEvent {
+            kind: IdKind::Search,
+            id: scan.0,
+            end: RequestEnd::Lost,
+        });
+        draw(&mut rig.vcx);
+        assert!(
+            rig.vcx.read(|cx| rig.tab.read(cx).scan_running()),
+            "ends of other requests leave the scan running"
+        );
+
+        rig.engine.end_request(RequestEvent {
+            kind: IdKind::Scan,
+            id: scan.0,
+            end: RequestEnd::Lost,
+        });
+        draw(&mut rig.vcx);
+        assert!(!rig.vcx.read(|cx| rig.tab.read(cx).scan_running()));
+        assert!(matches!(
+            rig.vcx.read(|cx| rig.tab.read(cx).phase().cloned()),
+            Some(ScanPhase::Failed(_))
+        ));
+        assert_eq!(str_status(&mut rig), "Scan stopped. 0 strings found.");
+        assert_eq!(
+            rig.vcx.read(|cx| rig.tab.read(cx).body_text()).as_deref(),
+            Some("Failed to read process memory.")
+        );
+        let next = start_scan(&mut rig);
+        assert_ne!(next, scan, "Scan starts a new scan");
+    }
+
     #[gpui_kit::test]
     fn strings_kernel_thread_disabled(cx: &mut TestAppContext) {
         let mut rig = strings_rig(cx, ProcFlags::KERNEL_THREAD);
