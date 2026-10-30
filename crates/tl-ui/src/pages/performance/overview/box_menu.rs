@@ -22,7 +22,7 @@ use tl_model::settings::TimelineClick;
 
 use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind};
-use super::parts::TITLE_TOP;
+use super::parts::{TITLE_ROW, TITLE_TOP};
 use super::timeline;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
@@ -36,9 +36,9 @@ use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
 use crate::window::setup::OpenAdditionalSetup;
 
-/// The title line a right-click opens the box menu on: the 1 px top border and the 24 px title
-/// row of the box frame, logical px.
-const TITLE_LINE: f32 = 25.;
+/// The title line a right-click opens the box menu on: the 1 px top border, the space above the
+/// title row and the title row of the box frame, logical px.
+const TITLE_LINE: f32 = 1. + TITLE_TOP + TITLE_ROW;
 
 /// The "VRAM" item of the GPU box's Engines submenu and its name in the saved `hidden` list.
 pub const GPU_VRAM_ID: &str = "VRAM";

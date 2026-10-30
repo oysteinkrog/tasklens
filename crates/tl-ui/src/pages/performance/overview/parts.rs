@@ -76,18 +76,23 @@ const CORE_ROW_H: f32 = LABEL_ROW;
 /// The narrowest core cell: the name and the percent with their gap. Logical px before
 /// `ui_scale`.
 const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
-/// The box title row, logical px before `ui_scale`.
-const TITLE_ROW: f32 = 24.;
+/// The box title row, logical px before `ui_scale`: the 20 px icon and the 16 px value fit.
+pub const TITLE_ROW: f32 = 22.;
 /// The space between a box's top border and its title row, logical px before `ui_scale`
-/// (`sp2`, tasklens-o55.54).
-pub const TITLE_TOP: f32 = 4.;
-/// The space between the title row and the body, logical px before `ui_scale` (`sp1`).
-const BODY_TOP: f32 = 2.;
-/// The space between the body and the bottom border, logical px before `ui_scale` (`sp3`).
-const BODY_BOTTOM: f32 = 6.;
+/// (`sp1`, tasklens-o55.54).
+pub const TITLE_TOP: f32 = 2.;
+/// The space between the title row and the body, logical px before `ui_scale`. None: the
+/// title row's own line spacing parts them.
+const BODY_TOP: f32 = 0.;
+/// The space between the body and the bottom border, logical px before `ui_scale` (`sp2`).
+const BODY_BOTTOM: f32 = 4.;
 /// A box's chrome: its height less its body's, logical px before `ui_scale`. The two borders,
-/// the title row and the space around it and under the body: 38 px (tasklens-o55.54).
+/// the title row and the space around it and under the body: 30 px (tasklens-o55.54).
 pub const BOX_CHROME: f32 = 2. + TITLE_TOP + TITLE_ROW + BODY_TOP + BODY_BOTTOM;
+/// A label line right above a plot (a disk's name and rates, a GPU engine's name and percent,
+/// a Network rate line), logical px before `ui_scale`. The plot starts right under it, so the
+/// line is the only space a plot's label takes (tasklens-o55.54).
+pub const PLOT_LINE: f32 = 16.;
 
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;

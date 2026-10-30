@@ -38,7 +38,7 @@ use tl_model::settings::OVERVIEW_GRID_ROWS_MAX;
 
 use super::OverviewPage;
 use super::layout::{BoxKind, GRID_COLS, GridBox, GridMetrics, OverviewLayout, PlacedBox};
-use super::parts::{EditChrome, TITLE_TOP};
+use super::parts::{EditChrome, TITLE_ROW, TITLE_TOP};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::focus::TlFocusRing;
 use crate::components::icons::TlIcon;
@@ -55,10 +55,6 @@ use crate::theme::{current, metrics};
 
 /// The toolbar height, logical px.
 pub const TOOLBAR_H: f32 = 40.;
-
-/// The box title line, `TITLE_TOP` under the 1 px top border, logical px (the frame's
-/// `TITLE_ROW`).
-const TITLE_H: f32 = 24.;
 
 /// The grip and the Hide box button, logical px.
 const HANDLE: f32 = 16.;
@@ -934,7 +930,7 @@ impl OverviewPage {
                     .left(b.left())
                     .top(b.top())
                     .w(b.size.width)
-                    .h(title_top + px(TITLE_H * s))
+                    .h(title_top + px(TITLE_ROW * s))
                     .when(movable, |el| el.cursor_grab())
                     // No `occlude()`: it takes the Performance tab out of the hit test, so the
                     // tab's right-press capture never opens the box menu. The left press stops
