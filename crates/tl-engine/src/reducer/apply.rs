@@ -1523,6 +1523,7 @@ impl Reducer {
                 name: Arc::clone(&g.group.name),
                 process_count: g.processes,
                 device: idx,
+                wine: g.wine.clone(),
             });
         }
         let groups = &self.apply_state.mem_groups;
@@ -1549,6 +1550,7 @@ impl Reducer {
                 name,
                 process_count,
                 device: idx,
+                wine: None,
             });
         }
 

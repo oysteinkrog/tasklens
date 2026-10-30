@@ -10,10 +10,11 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use tl_collect::apps::mem_group::{MemGroup, MemGroupInput, MemGrouper};
+use tl_collect::apps::mem_group::{MemGroup, MemGroupInput, MemGroupKind, MemGrouper};
+use tl_collect::apps::naming::windows_file_name;
 use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcessExtras, ProcessRecord};
-use tl_model::system::MemoryTotals;
+use tl_model::system::{MemoryTotals, WineGroupInfo};
 use tl_model::validity::{ProcessField, Validity};
 
 use super::table::{GroupClass, group_class};
@@ -45,6 +46,8 @@ pub struct GroupSum {
     pub group: Arc<MemGroup>,
     pub bytes: u64,
     pub processes: u32,
+    /// The prefix and Windows image names of a Wine group in the top 20.
+    pub wine: Option<Arc<WineGroupInfo>>,
 }
 
 /// The bands of one sweep.
@@ -151,6 +154,7 @@ impl MemGroups {
                         .then(|| extras[i].unit.as_ref())
                         .flatten()
                         .map(|u| &*u.name),
+                    wine: aligned.then(|| extras[i].wine.as_deref()).flatten(),
                 }
             })
             .collect();
@@ -158,6 +162,8 @@ impl MemGroups {
 
         let mut sums: Vec<GroupSum> = Vec::new();
         let mut index: FxHashMap<&str, usize> = FxHashMap::default();
+        // The Windows image names per Wine group, by index in `sums`.
+        let mut images: FxHashMap<usize, Vec<&str>> = FxHashMap::default();
         let mut total = 0u64;
         self.keys.clear();
         for (&i, group) in live.iter().zip(&self.out) {
@@ -169,14 +175,33 @@ impl MemGroups {
                     group: Arc::clone(group),
                     bytes: 0,
                     processes: 0,
+                    wine: None,
                 });
                 sums.len() - 1
             });
             let sum = &mut sums[slot];
             sum.bytes = sum.bytes.saturating_add(bytes);
             sum.processes += 1;
+            if group.kind == MemGroupKind::Wine {
+                let image = aligned
+                    .then(|| extras[i].wine.as_ref()?.image.as_deref())
+                    .flatten()
+                    .map_or(&*records[i].meta.comm, windows_file_name);
+                let names = images.entry(slot).or_default();
+                if !names.contains(&image) {
+                    names.push(image);
+                }
+            }
         }
         drop(index);
+        for (slot, mut names) in images {
+            names.sort_unstable();
+            let sum = &mut sums[slot];
+            sum.wine = Some(Arc::new(WineGroupInfo {
+                prefix: sum.group.wine_prefix.clone(),
+                images: names.into_iter().map(Arc::from).collect(),
+            }));
+        }
 
         sums.sort_unstable_by(|a, b| {
             b.bytes
@@ -283,7 +308,7 @@ fn rss_anon(r: &ProcessRecord) -> u64 {
 mod tests {
     use tl_model::actions::SchedPolicy;
     use tl_model::ids::ProcessKey;
-    use tl_model::process::{GroupKind, ProcState, ProcessMeta};
+    use tl_model::process::{GroupKind, ProcState, ProcessMeta, WineProcess};
     use tl_model::system::{CpuSet, KernelMemory};
     use tl_model::table::{Manager, UnitRef};
     use tl_model::time::BootId;
@@ -738,6 +763,50 @@ mod tests {
             ]
         );
         assert_eq!(b.shared_bytes, Some(500 * MIB - 187 * MIB));
+    }
+
+    #[test]
+    fn wine_group_lists_images_and_prefix() {
+        let mut groups = MemGroups::new(UID);
+        let preloader = "/usr/lib/wine/x86_64-unix/wine-preloader";
+        let images = [
+            "C:\\Program Files\\Backblaze\\bztransmit.exe",
+            "C:\\Program Files\\Backblaze\\bzbui.exe",
+            "C:\\windows\\system32\\services.exe",
+            "C:\\windows\\system32\\conhost.exe",
+            "C:\\windows\\system32\\conhost.exe",
+        ];
+        let procs: Vec<Proc> = (0..images.len() as u32)
+            .map(|i| Proc {
+                comm: "x.exe",
+                ..proc(100 + i, preloader, (10 + u64::from(i)) * MIB)
+            })
+            .collect();
+        let (records, mut extras) = build(&procs);
+        for (e, image) in extras.iter_mut().zip(images) {
+            e.wine = Some(Arc::new(WineProcess {
+                prefix: Some(Arc::from("/srv/backblaze/prefix")),
+                image: Some(Arc::from(image)),
+            }));
+        }
+        let b = groups.bands(&records, &extras, Some(500 * MIB));
+        assert_eq!(b.top.len(), 1);
+        let g = &b.top[0];
+        assert_eq!(&*g.group.key, "wine:/srv/backblaze/prefix:Backblaze");
+        assert_eq!(&*g.group.name, "Backblaze");
+        assert_eq!(g.processes, 5);
+        let wine = g.wine.as_deref().expect("Wine info");
+        assert_eq!(wine.prefix.as_deref(), Some("/srv/backblaze/prefix"));
+        let names: Vec<&str> = wine.images.iter().map(|n| &**n).collect();
+        assert_eq!(
+            names,
+            ["bzbui.exe", "bztransmit.exe", "conhost.exe", "services.exe"]
+        );
+
+        // Other groups carry no Wine info.
+        let (records, extras) = build(&[proc(1, "/usr/bin/bash", MIB)]);
+        let b = groups.bands(&records, &extras, None);
+        assert_eq!(b.top[0].wine, None);
     }
 
     #[test]

@@ -2725,6 +2725,7 @@ mod jump {
                             name: Arc::from(name),
                             process_count: 2,
                             device: DeviceIdx(idx),
+                            wine: None,
                         });
                     }
                 }

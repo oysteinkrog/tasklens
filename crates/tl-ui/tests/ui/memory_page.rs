@@ -1009,6 +1009,7 @@ mod by_app {
                     name: Arc::from(format!("p{i}")),
                     process_count: 3,
                     device: group_dev(i),
+                    wine: None,
                 });
             }
             // Pad to idx 100 so the fixed bands sit at their own idx.
@@ -1395,6 +1396,7 @@ mod by_app {
                     name: Arc::from(key),
                     process_count: count,
                     device,
+                    wine: None,
                 });
             }
             sys.memory.groups = Arc::new(groups);
@@ -1671,6 +1673,7 @@ mod by_app {
                         name: Arc::from(key),
                         process_count: 2,
                         device: group_dev(i as u16),
+                        wine: None,
                     });
                 } else if k == to {
                     // The engine writes one gap sample when a group leaves its top 20.

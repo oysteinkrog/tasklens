@@ -9988,6 +9988,7 @@ mod mem_by_app_box {
                     name: Arc::from(format!("p{i}")),
                     process_count: 3,
                     device: group_dev(i),
+                    wine: None,
                 });
             }
             entries.push(mem_group(OTHER, "other", "Other apps"));

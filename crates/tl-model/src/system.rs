@@ -240,6 +240,19 @@ pub struct MemGroupBand {
     pub process_count: u32,
     /// The `DeviceIdentity::MemGroup` device whose `MEM_GROUP` series holds the band.
     pub device: DeviceIdx,
+    /// The Windows side of a Wine group (`wine:` key), for the legend tooltip.
+    pub wine: Option<Arc<WineGroupInfo>>,
+}
+
+/// What a Wine memory group runs (D-036).
+///
+/// Privacy: the prefix is user data. Never log it above debug level (ADR-015).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WineGroupInfo {
+    /// The Wine prefix of the group's processes, when known.
+    pub prefix: Option<Arc<str>>,
+    /// The Windows image names of the group's processes (`bztransmit.exe`), sorted, each once.
+    pub images: Arc<[Arc<str>]>,
 }
 
 /// zram `mm_stat` fields 1, 2 and 3.
