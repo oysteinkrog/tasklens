@@ -598,6 +598,15 @@ fn eject(seq: u64) -> Command {
     })
 }
 
+/// The workers claim every queued command, as they do before they run one, so a full queue
+/// no longer loses the requests.
+fn claim_all(rig: &Rig) {
+    let control = rig.control.borrow_and_clone();
+    for q in control.commands.iter() {
+        control.progress.claim(q.target, q.seq);
+    }
+}
+
 /// The engine id of the newest forwarded scan, search or eject.
 fn last_engine(rig: &Rig) -> u64 {
     rig.commands()
@@ -641,6 +650,7 @@ fn long_scan_outlasts_100_short_scans() {
     let mut rig = Rig::new();
     let remote = Remote::new();
     rig.run(vec![remote.open(), on(REMOTE, scan(1, KEY))]);
+    claim_all(&rig);
     let long = last_engine(&rig);
     rig.run(vec![scan_state(long)]);
 
@@ -651,6 +661,7 @@ fn long_scan_outlasts_100_short_scans() {
                 .map(|&pid| on(REMOTE, scan(u64::from(pid), key(pid))))
                 .collect(),
         );
+        claim_all(&rig);
         let engines: Vec<(ProcessKey, u64)> = rig
             .commands()
             .iter()
@@ -720,6 +731,7 @@ fn scan_past_active_max_is_busy_until_one_ends() {
             .map(|&pid| on(ClientSessionId::LOCAL, scan(u64::from(pid), key(pid))))
             .collect(),
     );
+    claim_all(&rig);
     assert_eq!(
         active(&mut rig, ClientSessionId::LOCAL, IdKind::Scan),
         ACTIVE_MAX

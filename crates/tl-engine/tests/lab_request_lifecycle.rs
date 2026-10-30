@@ -1011,7 +1011,7 @@ fn every_request_ends_once_on_its_own_session() {
         run_seed(seed, false, &mut seen);
     }
     // The runs reach every end of every kind.
-    for kind in 0..KINDS.len() {
+    for (kind, name) in KINDS.iter().enumerate() {
         for end in [
             RequestEnd::Done,
             RequestEnd::Failed,
@@ -1021,8 +1021,7 @@ fn every_request_ends_once_on_its_own_session() {
         ] {
             assert!(
                 seen.contains(&(kind, end)),
-                "no {:?} request ended {end:?}",
-                KINDS[kind]
+                "no {name:?} request ended {end:?}"
             );
         }
     }

@@ -27,6 +27,7 @@
 //!   requests in engine id order and keep one per slot);
 //! - the new worker generation, for the requests the stopped one claimed (`RequestsLost`,
 //!   `EjectsLost`): `Lost`.
+//!
 //! The mapping of a request is removed exactly when its event is sent. A report about a request
 //! that has no mapping is not shown to any session and is counted in `ClientSessions::late`.
 //! When a session ends, its mappings go with it and no event is sent. A session has at most
@@ -35,7 +36,8 @@
 //! Each session shows, per slot, its newest request: the shared value under the session's own
 //! id while the request is active, the value it had when the request ended after that. A request
 //! that ended without a value of its own (lost, dropped or replaced) leaves the slot empty. A
-//! slot that left the shared data and has no active request is forgotten.
+//! slot that left the shared data (a detail target or disk gone, the handle search cleared)
+//! shows nothing, and is forgotten when it has no active request.
 //!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
 //! in the reducer, so a reducer restart drops every session but the local one.
@@ -619,7 +621,7 @@ impl ClientSession {
             .filter(|(_, s)| !self.is_active(s.slot.kind(), s.engine))
             .filter(|(_, s)| match &s.slot {
                 IdSlot::Scan(key) => !c.details.targets.contains_key(&DetailTarget::Process(*key)),
-                IdSlot::Search => false,
+                IdSlot::Search => c.details.handle_search.is_none(),
                 IdSlot::Eject(disk) => disk_idx(c, disk)
                     .is_none_or(|idx| !c.device_details.disks.iter().any(|(i, _)| *i == idx)),
             })
@@ -652,7 +654,7 @@ impl ClientSession {
                     TabSlot {
                         payload: Some(Arc::clone(out)),
                         validity: if from_shared {
-                            tab.validity.clone()
+                            tab.validity
                         } else {
                             Validity::Valid
                         },
@@ -672,10 +674,15 @@ impl ClientSession {
                 .insert(*target, Arc::new(next));
         }
 
-        let search = self.shown.iter().find_map(|s| match &s.view {
-            Some(View::Search { out, .. }) => Some(Arc::clone(out)),
-            _ => None,
-        });
+        // The reducer clears the shared search once it ended and no window shows it.
+        let search = self
+            .shown
+            .iter()
+            .find_map(|s| match &s.view {
+                Some(View::Search { out, .. }) => Some(Arc::clone(out)),
+                _ => None,
+            })
+            .filter(|_| shared.handle_search.is_some());
         let search_same = match (&search, &shared.handle_search) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
