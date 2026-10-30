@@ -234,10 +234,46 @@ pub const POWER_SPLIT_RANGE: (f32, f32) = (0.1, 0.5);
 /// The default share of the CPU box body the power draw strip takes.
 pub const POWER_SPLIT_DEFAULT: f32 = 0.25;
 
+/// Where the CPU box draws its power draw strip (tasklens-o55.55): across the whole box under
+/// every part (the default), or under the CPU graph only, so the core rows beside it keep the
+/// box's full height.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PowerPlacement {
+    #[default]
+    FullWidth,
+    UnderGraph,
+}
+
+impl PowerPlacement {
+    /// The menu order.
+    pub const ALL: [Self; 2] = [Self::FullWidth, Self::UnderGraph];
+
+    /// The value of `power_placement` in `[performance.overview]`.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::FullWidth => "full_width",
+            Self::UnderGraph => "under_graph",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
+    }
+
+    /// The string key of its menu item.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FullWidth => "perf-overview-power-full-width",
+            Self::UnderGraph => "perf-overview-power-under-graph",
+        }
+    }
+}
+
 /// A box's mode, split and arrangement. `split` is the first part's share, `None` in a mode
 /// with one part. `arrange` is `None` in a mode without a saved Arrange choice. `power` and
 /// `power_split` are the CPU box's power draw strip (D-028): it is shown and takes this share
-/// of the body; other kinds keep them at their defaults.
+/// of the body, or of the graph's column with `power_placement` under the graph; other kinds
+/// keep them at their defaults.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BoxConfig {
     pub mode: &'static BoxMode,
@@ -245,6 +281,7 @@ pub struct BoxConfig {
     pub arrange: Option<Arrange>,
     pub power: bool,
     pub power_split: f32,
+    pub power_placement: PowerPlacement,
 }
 
 impl BoxConfig {
@@ -256,6 +293,7 @@ impl BoxConfig {
             arrange: kind.arrange(mode.id).and_then(ArrangeChoice::saved_default),
             power: false,
             power_split: POWER_SPLIT_DEFAULT,
+            power_placement: PowerPlacement::FullWidth,
         }
     }
 
@@ -291,14 +329,23 @@ impl BoxConfig {
                 .filter(|v| (POWER_SPLIT_RANGE.0..=POWER_SPLIT_RANGE.1).contains(v))
                 .filter(|_| kind == BoxKind::Cpu)
                 .unwrap_or(POWER_SPLIT_DEFAULT),
+            power_placement: b
+                .power_placement
+                .as_deref()
+                .and_then(PowerPlacement::from_id)
+                .filter(|_| kind == BoxKind::Cpu)
+                .unwrap_or_default(),
         }
     }
 
-    /// `power` when on, and `power_split` when not the default.
-    fn power_setting(self) -> (bool, Option<f64>) {
+    /// `power` when on, `power_split` when not the default, and `power_placement` when not
+    /// full width.
+    fn power_setting(self) -> (bool, Option<f64>, Option<String>) {
         let split = ((self.power_split - POWER_SPLIT_DEFAULT).abs() >= 5e-4)
             .then(|| f64::from(self.power_split));
-        (self.power, split)
+        let placement = (self.power_placement != PowerPlacement::FullWidth)
+            .then(|| self.power_placement.id().to_owned());
+        (self.power, split, placement)
     }
 
     /// The mode when not the kind's default, the split when not the mode's default, and the
@@ -457,7 +504,7 @@ impl OverviewLayout {
                 .map(|b| {
                     let config = self.config(b.kind);
                     let (mode, split, arrange) = config.to_setting(b.kind);
-                    let (power, power_split) = config.power_setting();
+                    let (power, power_split, power_placement) = config.power_setting();
                     OverviewGridSetting {
                         kind: b.kind.key().to_owned(),
                         col: i64::from(b.col),
@@ -469,6 +516,7 @@ impl OverviewLayout {
                         arrange,
                         power,
                         power_split,
+                        power_placement,
                         hidden: if b.kind == BoxKind::Gpu {
                             self.hidden_gpu.clone()
                         } else {
@@ -547,6 +595,7 @@ impl OverviewLayout {
         self.configs[kind.index()] = BoxConfig {
             power: old.power,
             power_split: old.power_split,
+            power_placement: old.power_placement,
             ..BoxConfig::of(kind, mode)
         };
         true
@@ -581,6 +630,17 @@ impl OverviewLayout {
             return false;
         }
         config.power = on;
+        true
+    }
+
+    /// Places the CPU box's power draw strip. Returns whether it changed; any other kind has
+    /// no strip.
+    pub fn set_power_placement(&mut self, kind: BoxKind, placement: PowerPlacement) -> bool {
+        let config = &mut self.configs[kind.index()];
+        if kind != BoxKind::Cpu || config.power_placement == placement {
+            return false;
+        }
+        config.power_placement = placement;
         true
     }
 
@@ -999,6 +1059,41 @@ mod tests {
         assert!(layout.reset_box(BoxKind::Cpu));
         assert!(!layout.reset_box(BoxKind::Cpu));
         assert_eq!(layout, OverviewLayout::grid_default());
+    }
+
+    /// tasklens-o55.55: the power draw placement is full width by default, saved only under
+    /// the graph, kept across a mode change and reset with the box.
+    #[test]
+    fn power_placement_converts_to_and_from_the_setting() {
+        let mut layout = OverviewLayout::grid_default();
+        let cpu = |l: &OverviewLayout| l.config(BoxKind::Cpu).power_placement;
+        assert_eq!(cpu(&layout), PowerPlacement::FullWidth);
+        assert_eq!(layout.to_setting().grid[0].power_placement, None);
+        assert!(layout.set_power_placement(BoxKind::Cpu, PowerPlacement::UnderGraph));
+        assert!(!layout.set_power_placement(BoxKind::Cpu, PowerPlacement::UnderGraph));
+        assert!(!layout.set_power_placement(BoxKind::Memory, PowerPlacement::UnderGraph));
+        let setting = layout.to_setting();
+        assert_eq!(
+            setting.grid[0].power_placement.as_deref(),
+            Some("under_graph")
+        );
+        assert_eq!(OverviewLayout::from_setting(Some(&setting)), layout);
+        // The placement belongs to the box, not to a mode.
+        assert!(layout.set_mode(BoxKind::Cpu, "chart"));
+        assert_eq!(cpu(&layout), PowerPlacement::UnderGraph);
+        // An unknown value, or the key on another box, is the default.
+        let mut bad = setting;
+        bad.grid[0].power_placement = Some("left".to_owned());
+        bad.grid[1].power_placement = Some("under_graph".to_owned());
+        let back = OverviewLayout::from_setting(Some(&bad));
+        assert_eq!(cpu(&back), PowerPlacement::FullWidth);
+        assert_eq!(
+            back.config(BoxKind::Memory).power_placement,
+            PowerPlacement::FullWidth
+        );
+        // Reset Box puts the strip back across the box.
+        assert!(layout.reset_box(BoxKind::Cpu));
+        assert_eq!(cpu(&layout), PowerPlacement::FullWidth);
     }
 
     #[test]

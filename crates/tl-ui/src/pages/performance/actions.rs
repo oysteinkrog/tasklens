@@ -124,6 +124,16 @@ pub struct PerfOverviewSetBoxPower {
     pub on: bool,
 }
 
+/// Places the power draw strip of the Overview box of `kind`: `full_width` or `under_graph`
+/// (the CPU box menu's "Power draw position" items, tasklens-o55.55).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxPowerPlacement {
+    pub kind: Arc<str>,
+    pub placement: Arc<str>,
+}
+
 /// Sets `performance.memory_by_app.top_n` to `count` (the Memory page menu's "Groups shown"
 /// items, UI-PRF-060).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

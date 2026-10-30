@@ -8,8 +8,8 @@
 //! Edit Layout mode the title handle names the box the same way, and a gear at the right end of
 //! each title line opens the same mode items.
 //!
-//! The items dispatch [`PerfOverviewSetBoxMode`], [`PerfOverviewSetBoxArrange`] and
-//! [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
+//! The items dispatch [`PerfOverviewSetBoxMode`], [`PerfOverviewSetBoxArrange`],
+//! [`PerfOverviewSetBoxPowerPlacement`] and [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
 //! new arrangement or the default, the box views follow, and the layout is saved.
 
 use gpui_kit::{
@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 use tl_model::settings::TimelineClick;
 
 use super::OverviewPage;
-use super::layout::{Arrange, ArrangeChoice, BoxKind};
+use super::layout::{Arrange, ArrangeChoice, BoxKind, PowerPlacement};
 use super::parts::{TITLE_ROW, TITLE_TOP};
 use super::timeline;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -30,7 +30,8 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
     PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxEngine,
-    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower, PerfOverviewSetTimelineClick,
+    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement,
+    PerfOverviewSetTimelineClick,
 };
 use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
@@ -56,14 +57,16 @@ pub fn gear_id(kind: BoxKind) -> String {
 }
 
 /// The box a right-click landed on, the mode it showed and the arrangement of that mode.
-/// `power` is the CPU box's power draw strip: `None` for any other box. `engines` is the GPU
-/// box's "Engines" list, each name with whether it is shown; empty for any other box.
+/// `power` is the CPU box's power draw strip and `power_placement` where it sits: `None` for any
+/// other box. `engines` is the GPU box's "Engines" list, each name with whether it is shown;
+/// empty for any other box.
 #[derive(Clone, PartialEq, Debug)]
 pub struct BoxMenuTarget {
     pub kind: BoxKind,
     pub mode: &'static str,
     pub arrange: Option<Arrange>,
     pub power: Option<(PowerState, bool)>,
+    pub power_placement: Option<PowerPlacement>,
     pub engines: Vec<(SharedString, bool)>,
 }
 
@@ -94,6 +97,7 @@ fn mode_items(
         );
     }
     menu = power_item(menu, &target, cx);
+    menu = power_placement_items(menu, &target, window, cx);
     menu = engine_items(menu, &target, window, cx);
     let Some(choice) = target.kind.arrange(target.mode) else {
         return menu;
@@ -177,6 +181,43 @@ fn power_item(menu: TlMenu, target: &BoxMenuTarget, cx: &App) -> TlMenu {
             )
         }
     }
+}
+
+/// The CPU box's "Power draw position" submenu (tasklens-o55.55): across the whole box, or
+/// under the CPU graph beside the core rows. Only while the strip is shown in the mode with the
+/// chart and the core rows, the one mode where the two differ.
+fn power_placement_items(
+    menu: TlMenu,
+    target: &BoxMenuTarget,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let Some(current) = target
+        .power_placement
+        .filter(|_| target.power == Some((PowerState::Readable, true)))
+        .filter(|_| target.mode == "chart_cores")
+    else {
+        return menu;
+    };
+    let kind: std::sync::Arc<str> = target.kind.key().into();
+    menu.submenu(
+        tr(cx, "perf-overview-power-placement"),
+        window,
+        cx,
+        move |mut menu, _, cx| {
+            for placement in PowerPlacement::ALL {
+                menu = menu.radio_item(
+                    tr(cx, placement.label()),
+                    placement == current,
+                    Box::new(PerfOverviewSetBoxPowerPlacement {
+                        kind: kind.clone(),
+                        placement: placement.id().into(),
+                    }),
+                );
+            }
+            menu
+        },
+    )
 }
 
 /// The "Arrange" items of `choice`, the shown arrangement selected. A saved choice has
@@ -296,6 +337,7 @@ impl OverviewPage {
             mode: config.mode.id,
             arrange: config.arrange,
             power: (kind == BoxKind::Cpu).then(|| (self.cpu.read(cx).power_state(), config.power)),
+            power_placement: (kind == BoxKind::Cpu).then_some(config.power_placement),
             engines,
         }
     }
@@ -372,6 +414,27 @@ impl OverviewPage {
         };
         let mut layout = self.layout.clone();
         if layout.set_power(kind, a.on) {
+            self.set_layout(layout, cx);
+            self.save_layout(cx);
+        }
+    }
+
+    /// `PerfOverviewSetBoxPowerPlacement`: the CPU box places its power draw strip and the
+    /// layout is saved. Any other kind, an unknown value, or the shown placement does nothing.
+    pub(super) fn on_set_box_power_placement(
+        &mut self,
+        a: &PerfOverviewSetBoxPowerPlacement,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(kind), Some(placement)) = (
+            BoxKind::from_key(&a.kind),
+            PowerPlacement::from_id(&a.placement),
+        ) else {
+            return;
+        };
+        let mut layout = self.layout.clone();
+        if layout.set_power_placement(kind, placement) {
             self.set_layout(layout, cx);
             self.save_layout(cx);
         }

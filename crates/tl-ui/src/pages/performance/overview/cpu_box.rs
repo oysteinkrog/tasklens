@@ -32,7 +32,9 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
-use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
+use super::layout::{
+    Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE, PowerPlacement,
+};
 use super::parts::{
     ChartSettings, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid, box_chart,
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_board, edit_chrome,
@@ -41,6 +43,7 @@ use super::parts::{
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
 use super::timeline::{self, OverviewPause};
+use crate::chart::hover::HoverLink;
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
@@ -235,7 +238,7 @@ impl CoreAverage {
 const SEP: &str = " · ";
 
 /// The total chart: total with fill, kernel as a line when `kernel`, 0..100.
-fn total_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+fn total_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme, hover: bool) -> ChartSpec {
     let mut series = smallvec![ChartSeries {
         id: SeriesId {
             device: cpu,
@@ -271,6 +274,7 @@ fn total_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
             vertical_at: None,
         },
         smooth: s.smooth,
+        hover,
         background: ChartBg::List,
         ..ChartSpec::default()
     }
@@ -303,7 +307,7 @@ pub(crate) fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -
 
 /// The power draw strip: package watts filled, core watts dashed, the same series, colours and
 /// scale as the Power draw chart of the CPU page.
-fn power_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+fn power_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme, hover: bool) -> ChartSpec {
     let series = |metric, fill: bool, dashed| ChartSeries {
         id: SeriesId {
             device: cpu,
@@ -329,6 +333,7 @@ fn power_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
             vertical_at: None,
         },
         smooth: s.smooth,
+        hover,
         background: ChartBg::List,
         ..ChartSpec::default()
     }
@@ -434,8 +439,15 @@ pub struct CpuBox {
     power_state: PowerState,
     /// The strip's chart, built the first time the strip is switched on.
     power_chart: Option<Entity<ChartView>>,
-    /// The gap above the strip. Its share is the parts' share of the body.
+    /// The gap above the strip. Its share is the parts' share of the body, or the graph's share
+    /// of its column when the strip sits under the graph.
     power_split: InnerSplit<PowerSplitChanged>,
+    /// Where the strip sits (tasklens-o55.55).
+    power_placement: PowerPlacement,
+    /// The total chart and the strip share one hover cursor; both have hover while the strip
+    /// sits under the graph ([`Self::power_under_graph`]).
+    hover_link: HoverLink,
+    hover_on: bool,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -451,9 +463,11 @@ impl CpuBox {
     pub fn new(hub: &Entity<SnapshotHub>, cpu: DeviceIdx, cx: &mut Context<Self>) -> Self {
         let theme = current(cx).clone();
         let settings = ChartSettings::read(cx);
-        let spec = total_spec(cpu, &settings, &theme);
+        let spec = total_spec(cpu, &settings, &theme, false);
         let labels = total_labels(tr(cx, KEY_RANGE), settings.kernel, cx);
         let total = box_chart(spec, labels, hub, cx);
+        let hover_link = HoverLink::new();
+        total.update(cx, |v, cx| v.set_hover_link(hover_link.clone(), cx));
         let snap = box_snapshot(hub, cx);
         let grid_size = size(px(0.), px(0.));
         let mut this = Self {
@@ -497,6 +511,9 @@ impl CpuBox {
             )
             .with_range(1. - POWER_SPLIT_RANGE.1, 1. - POWER_SPLIT_RANGE.0)
             .with_mins(PART_MIN, POWER_STRIP_MIN),
+            power_placement: PowerPlacement::FullWidth,
+            hover_link,
+            hover_on: false,
             settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -598,6 +615,7 @@ impl CpuBox {
         let mode = CpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            self.sync_hover(cx);
             cx.notify();
         }
     }
@@ -626,6 +644,39 @@ impl CpuBox {
         self.power && self.power_state == PowerState::Readable
     }
 
+    /// Where the strip sits.
+    pub fn power_placement(&self) -> PowerPlacement {
+        self.power_placement
+    }
+
+    /// Whether the box draws the strip under the total chart, beside the core rows: the strip
+    /// is shown, placed under the graph, and the mode has the chart and the core rows. Other
+    /// modes draw it full width.
+    pub fn power_under_graph(&self) -> bool {
+        self.power_shown()
+            && self.power_placement == PowerPlacement::UnderGraph
+            && self.mode == CpuMode::ChartCores
+    }
+
+    /// Gives the total chart and the strip hover, with one shared cursor, while the strip sits
+    /// under the graph, and takes it away otherwise.
+    fn sync_hover(&mut self, cx: &mut Context<Self>) {
+        let on = self.power_under_graph();
+        if on == self.hover_on {
+            return;
+        }
+        self.hover_on = on;
+        for chart in std::iter::once(&self.total).chain(&self.power_chart) {
+            chart.update(cx, |v, cx| {
+                let spec = ChartSpec {
+                    hover: on,
+                    ..v.spec.clone()
+                };
+                v.set_spec(spec, cx);
+            });
+        }
+    }
+
     /// The strip's chart, once it has been switched on.
     pub fn power_chart(&self) -> Option<&Entity<ChartView>> {
         self.power_chart.as_ref()
@@ -638,20 +689,33 @@ impl CpuBox {
             .share(SplitAxis::Column, m.sp[5], m.ui_scale)
     }
 
-    /// Takes the saved strip: shown or not, and its share of the body (`power_split`). Nothing
-    /// changes while the gap is held.
-    pub fn set_power(&mut self, on: bool, strip_share: f32, cx: &mut Context<Self>) {
+    /// Takes the saved strip: shown or not, its share of the body (`power_split`) and where it
+    /// sits. Nothing changes while the gap is held.
+    pub fn set_power(
+        &mut self,
+        on: bool,
+        strip_share: f32,
+        placement: PowerPlacement,
+        cx: &mut Context<Self>,
+    ) {
         let mut changed = self.power_split.set_share(1. - strip_share);
         if on != self.power {
             self.power = on;
             changed = true;
         }
+        if placement != self.power_placement {
+            self.power_placement = placement;
+            changed = true;
+        }
         if on && self.power_chart.is_none() {
             let theme = current(cx).clone();
-            let spec = power_spec(self.cpu, &self.settings, &theme);
+            let spec = power_spec(self.cpu, &self.settings, &theme, self.hover_on);
             let labels = power_labels(tr(cx, KEY_POWER));
-            self.power_chart = Some(box_chart(spec, labels, &self.hub, cx));
+            let chart = box_chart(spec, labels, &self.hub, cx);
+            chart.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
+            self.power_chart = Some(chart);
         }
+        self.sync_hover(cx);
         if changed {
             cx.notify();
         }
@@ -726,8 +790,9 @@ impl CpuBox {
         if system {
             changed |= self.sync_text(&snap, false);
         }
-        if system || details {
-            changed |= self.sync_power_state(&snap);
+        if (system || details) && self.sync_power_state(&snap) {
+            changed = true;
+            self.sync_hover(cx);
         }
         if changed {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -937,7 +1002,7 @@ impl CpuBox {
 
     fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let spec = total_spec(self.cpu, &self.settings, &theme);
+        let spec = total_spec(self.cpu, &self.settings, &theme, self.hover_on);
         // The x ticks give the range, so the chart keeps no range caption, as `box_chart` set it
         // up.
         let labels = total_labels(SharedString::default(), self.settings.kernel, cx);
@@ -946,7 +1011,7 @@ impl CpuBox {
             v.set_labels(labels, cx);
         });
         if let Some(chart) = &self.power_chart {
-            let spec = power_spec(self.cpu, &self.settings, &theme);
+            let spec = power_spec(self.cpu, &self.settings, &theme, self.hover_on);
             chart.update(cx, |v, cx| v.set_spec(spec, cx));
         }
         for (chart, &device) in self.sparks.iter().zip(&self.logical) {
@@ -1125,7 +1190,8 @@ impl CpuBox {
 
 impl CpuBox {
     /// `parts` over the power draw strip with a horizontal gap between them, the strip at the
-    /// bottom of the body and full width.
+    /// bottom and full width: of the body, or of the chart's column when it sits under the
+    /// graph.
     fn with_power_strip(
         &mut self,
         parts: AnyElement,
@@ -1197,6 +1263,16 @@ impl Render for CpuBox {
             CpuMode::CoreCharts => self.core_charts_part(&m, &theme, cx),
             CpuMode::ChartCores => {
                 let chart = self.chart_part();
+                // Under the graph the strip shares the chart's column and the core rows keep
+                // the body's full height (tasklens-o55.55).
+                let chart = match self
+                    .power_chart
+                    .clone()
+                    .filter(|_| self.power_under_graph())
+                {
+                    Some(power) => self.with_power_strip(chart, power, &m, cx),
+                    None => chart,
+                };
                 let rows = self.rows_part(&m, cx);
                 // Side by side the core rows keep their 188 px column; stacked they keep the
                 // usual part minimum.
@@ -1205,7 +1281,13 @@ impl Render for CpuBox {
                 } else {
                     PART_MIN
                 };
-                self.split.set_mins(PART_MIN, rows_min);
+                // Stacked, a chart part with the strip under it keeps room for both.
+                let chart_min = if !self.side && self.power_under_graph() {
+                    PART_MIN + POWER_STRIP_MIN + f32::from(m.sp[5]) / m.ui_scale
+                } else {
+                    PART_MIN
+                };
+                self.split.set_mins(chart_min, rows_min);
                 let share = self.split(&m);
                 let frame = div().flex().size_full().gap(core_gutter(&m));
                 // The chart part gives way when the body is smaller than its share, so the rows
@@ -1242,7 +1324,8 @@ impl Render for CpuBox {
                     .into_any_element()
             }
         };
-        let body = match self.power_chart.clone().filter(|_| self.power_shown()) {
+        let full_width = self.power_shown() && !self.power_under_graph();
+        let body = match self.power_chart.clone().filter(|_| full_width) {
             Some(chart) => self.with_power_strip(body, chart, &m, cx),
             None => body,
         };

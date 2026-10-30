@@ -288,7 +288,9 @@ impl OverviewPage {
             cpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         let power = layout.config(BoxKind::Cpu);
-        cpu.update(cx, |b, cx| b.set_power(power.power, power.power_split, cx));
+        cpu.update(cx, |b, cx| {
+            b.set_power(power.power, power.power_split, power.power_placement, cx);
+        });
         let mem = cx.new(|cx| MemBox::new(&hub, mem_idx, cx));
         let mem_mode = layout.config(BoxKind::Memory).mode.id;
         mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
@@ -792,7 +794,12 @@ impl OverviewPage {
             self.cpu.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         self.cpu.update(cx, |b, cx| {
-            b.set_power(cpu_power.power, cpu_power.power_split, cx);
+            b.set_power(
+                cpu_power.power,
+                cpu_power.power_split,
+                cpu_power.power_placement,
+                cx,
+            );
         });
         self.mem.update(cx, |b, cx| b.set_mode(mem_mode, cx));
         if let Some(split) = mem_split {
@@ -1185,6 +1192,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_set_box_mode))
             .on_action(cx.listener(Self::on_set_box_arrange))
             .on_action(cx.listener(Self::on_set_box_power))
+            .on_action(cx.listener(Self::on_set_box_power_placement))
             .on_action(cx.listener(Self::on_set_box_engine))
             .on_action(cx.listener(Self::on_reset_box))
             .on_action(cx.listener(Self::on_set_timeline_click))
