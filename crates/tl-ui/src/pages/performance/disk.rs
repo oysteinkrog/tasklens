@@ -38,7 +38,10 @@ use tl_model::validity::Validity;
 use super::actions::{PerfEject, PerfShowSmart};
 use super::details::{Fallback, KeyValueModel};
 use super::memory::flat_static_table;
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
+    page_words,
+};
 use super::sidebar::retain_whole_disks;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
@@ -109,8 +112,6 @@ pub const SMART_BUTTON_ID: &str = "perf-disk-smart";
 /// Debug selector of the `Eject` button.
 pub const EJECT_BUTTON_ID: &str = "perf-disk-eject";
 
-const NS_PER_S: u64 = 1_000_000_000;
-
 /// The page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]
 pub struct Words {
@@ -167,10 +168,15 @@ pub(super) struct PageSettings {
 }
 
 impl PageSettings {
+    /// The shared range the charts draw, in ns.
+    pub(super) fn range_ns(&self) -> u64 {
+        self.range_ns
+    }
+
     pub(super) fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
         }
@@ -1252,7 +1258,11 @@ impl DiskPage {
         let idx = row.idx;
         let active = {
             let (spec, labels) = (active_spec(idx, &settings, &theme), active_labels(&words));
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
         let transfer = {
             let (spec, labels) = (
@@ -1260,7 +1270,9 @@ impl DiskPage {
                 transfer_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
+                let mut view = ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap);
                 // The value is read plus write.
                 view.set_value_sum(true, cx);
                 view
@@ -1353,11 +1365,13 @@ impl DiskPage {
         self.is_active
     }
 
-    /// This page's demand part while it is active: disks only.
+    /// This page's demand part while it is active: disks, and the device metric history at
+    /// 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             disks: true,
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -1551,8 +1565,14 @@ impl DiskPage {
         self.settings_versions = versions;
         let new = PageSettings::read(cx);
         if new != self.settings {
+            let range_moved = new.range_ns != self.settings.range_ns;
             self.settings = new;
             self.rebuild_specs(cx);
+            if range_moved {
+                // The header switch shows the new range.
+                self.send_demand(cx);
+                cx.notify();
+            }
         }
         // `device_order` and the visibility settings move the number in "Disk N".
         if performance_moved {

@@ -33,7 +33,9 @@ use super::disk::{
     self, KIND_KEYS, PageSettings, health_state, kind_key, section_versions, transfer_spec,
 };
 use super::gpu;
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_words,
+};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{ChartLabels, ChartSeries, ChartView, ValueAlign, ValueFormat, YScale};
 use crate::components::menu::TlMenu;
@@ -424,7 +426,11 @@ impl AggregateDiskPage {
                 disk::active_spec(idx, &settings, &theme),
                 disk::active_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
         let transfer = {
             let (spec, labels) = (
@@ -432,7 +438,9 @@ impl AggregateDiskPage {
                 disk::transfer_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
+                let mut view = ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap);
                 // The value is read plus write.
                 view.set_value_sum(true, cx);
                 view
@@ -487,11 +495,13 @@ impl AggregateDiskPage {
         self.is_active
     }
 
-    /// This page's demand part while it is active: disks only.
+    /// This page's demand part while it is active: disks, and the device metric history at
+    /// 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             disks: true,
+            device_history_range: page_history_request(self.settings.range_ns()),
             ..Demand::default()
         }
     }
@@ -559,8 +569,14 @@ impl AggregateDiskPage {
         self.settings_versions = versions;
         let new = PageSettings::read(cx);
         if new != self.settings {
+            let range_moved = new.range_ns() != self.settings.range_ns();
             self.settings = new;
             self.rebuild_specs(cx);
+            if range_moved {
+                // The header switch shows the new range.
+                self.send_demand(cx);
+                cx.notify();
+            }
         }
     }
 
@@ -740,6 +756,18 @@ fn utilization_spec(
     disk::spec(series, y, s)
 }
 
+/// The summed VRAM chart over the shared range.
+fn aggregate_memory_spec(
+    device: DeviceIdx,
+    total: u64,
+    s: &PageSettings,
+    theme: &TlTheme,
+) -> crate::chart::ChartSpec {
+    let mut spec = gpu::memory_spec(device, false, total, theme);
+    spec.range_ns = s.range_ns();
+    spec
+}
+
 fn utilization_labels(w: &GpuWords) -> ChartLabels {
     ChartLabels {
         heading: Some(w.utilization.clone()),
@@ -797,12 +825,20 @@ impl AggregateGpuPage {
                 utilization_spec(idx, &settings, &theme),
                 utilization_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
         let memory = {
-            let spec = gpu::memory_spec(idx, false, memory_total, &theme);
+            let spec = aggregate_memory_spec(idx, memory_total, &settings, &theme);
             let labels = gpu::memory_labels(false, &words.memory);
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
 
         let mut subs = SmallVec::new();
@@ -854,13 +890,14 @@ impl AggregateGpuPage {
         self.is_active
     }
 
-    /// This page's demand part while it is active: the GPU component, and the inventory for the
-    /// adapters' VRAM sizes.
+    /// This page's demand part while it is active: the GPU component, the inventory for the
+    /// adapters' VRAM sizes, and the device metric history at 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             gpus: true,
             inventory: true,
+            device_history_range: page_history_request(self.settings.range_ns()),
             ..Demand::default()
         }
     }
@@ -926,14 +963,20 @@ impl AggregateGpuPage {
         self.settings_versions = versions;
         let new = PageSettings::read(cx);
         if new != self.settings {
+            let range_moved = new.range_ns() != self.settings.range_ns();
             self.settings = new;
             self.rebuild_specs(cx);
+            if range_moved {
+                // The header switch shows the new range.
+                self.send_demand(cx);
+                cx.notify();
+            }
         }
     }
 
     fn rebuild_memory(&self, cx: &mut App) {
         let theme = current(cx).clone();
-        let spec = gpu::memory_spec(self.row.idx, false, self.memory_total, &theme);
+        let spec = aggregate_memory_spec(self.row.idx, self.memory_total, &self.settings, &theme);
         self.memory.update(cx, |v, cx| v.set_spec(spec, cx));
     }
 
