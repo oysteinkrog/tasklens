@@ -236,7 +236,8 @@ impl Backend for FakeBackend {
         self.samples += 1;
         let first = self.samples == 1;
         match self.script {
-            Script::SleepOnSample if first => sleep(Duration::from_secs(2)),
+            // Longer than the engine test's 5 s limit on a sample deadline (tasklens-cr0.32).
+            Script::SleepOnSample if first => sleep(Duration::from_secs(6)),
             Script::SegvOnSample if first => segv(),
             Script::OversizeOnSample if first => self.write_oversize_and_exit(),
             Script::ExitAfter3 if self.samples > 3 => exit(0),

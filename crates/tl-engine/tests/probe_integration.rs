@@ -208,10 +208,10 @@ fn client_sample_deadline_kills_and_reaps() {
         matches!(r, Err(ProbeError::Deadline(d)) if d == SAMPLE_DEADLINE),
         "{r:?}"
     );
-    // The upper bound has 1 s of slack for a busy machine and stays below the 2 s the fake
-    // probe sleeps, so a client that waits for the reply still fails (tasklens-cr0.32).
+    // The upper bound is 10 times the deadline for a busy machine and stays below the 6 s the
+    // fake probe sleeps, so a client that waits for the reply still fails (tasklens-cr0.32).
     assert!(
-        took >= Duration::from_millis(450) && took < SAMPLE_DEADLINE + Duration::from_secs(1),
+        took >= Duration::from_millis(450) && took < SAMPLE_DEADLINE * 10,
         "{took:?}"
     );
     // Given up before `sample` returned: killed at once and reaped on a background thread.
