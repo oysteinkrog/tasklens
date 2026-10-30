@@ -874,7 +874,7 @@ mod details {
 mod by_app {
     use tl_model::settings::{GroupColor, MemoryView, OverviewRange};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
-    use tl_model::system::MemGroupBand;
+    use tl_model::system::{MemGroupBand, WineGroupInfo};
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
     use tl_ui::pages::performance::memory_apps::{
         APPS_ID, BandKind, KERNEL_PARTS, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID,
@@ -996,6 +996,15 @@ mod by_app {
     /// Publishes `n` groups `exe:p<i>` of `n - i` MiB each, with 3 processes, plus the two fixed
     /// bands.
     fn publish_groups(r: &mut Rig<'_>, n: u16) {
+        publish_groups_with(r, n, |_| None);
+    }
+
+    /// `publish_groups` with the Wine info of group `i` from `wine(i)`.
+    fn publish_groups_with(
+        r: &mut Rig<'_>,
+        n: u16,
+        wine: impl Fn(u16) -> Option<Arc<WineGroupInfo>>,
+    ) {
         r.engine.publish_with(|s| {
             let mut entries: Vec<DeviceEntry> = s.devices.entries.to_vec();
             let mut views = Vec::new();
@@ -1009,7 +1018,7 @@ mod by_app {
                     name: Arc::from(format!("p{i}")),
                     process_count: 3,
                     device: group_dev(i),
-                    wine: None,
+                    wine: wine(i),
                 });
             }
             // Pad to idx 100 so the fixed bands sit at their own idx.
@@ -1319,6 +1328,93 @@ mod by_app {
             .vcx
             .update(|_, cx| apps.read(cx).tooltip_lines(2, None, cx)[0].clone());
         assert_eq!(first, "p2");
+    }
+
+    /// A Wine group's tooltip lists its Windows image names and prefix, and stays inside the
+    /// chart box (tasklens-o55.58).
+    #[gpui_kit::test]
+    fn memory_by_app_wine_tooltip(cx: &mut TestAppContext) {
+        const IMAGES: [&str; 13] = [
+            "bzbui.exe",
+            "bzbuitray.exe",
+            "bzfilelist.exe",
+            "bzserv.exe",
+            "bztransmit.exe",
+            "conhost.exe",
+            "explorer.exe",
+            "lsass.exe",
+            "plugplay.exe",
+            "rpcss.exe",
+            "services.exe",
+            "svchost.exe",
+            "winedevice.exe",
+        ];
+        let mut r = open(cx, apps_settings(3), system(64 * GIB, 80 * GIB, 0));
+        publish_groups_with(&mut r, 3, |i| {
+            (i == 0).then(|| {
+                Arc::new(WineGroupInfo {
+                    prefix: Some(Arc::from("/srv/backblaze/prefix")),
+                    images: IMAGES.iter().map(|&n| Arc::from(n)).collect(),
+                })
+            })
+        });
+        let apps = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).apps().cloned())
+            .expect("the By app chart");
+        let (band, row) = r.vcx.update(|_, cx| {
+            let bands = apps.read(cx).bands();
+            let band = bands
+                .iter()
+                .position(|b| &*b.key == "exe:p0")
+                .expect("band p0");
+            let row = legend_order(bands)
+                .iter()
+                .position(|&b| b == band)
+                .expect("legend row");
+            (band, row)
+        });
+        let lines = r
+            .vcx
+            .update(|_, cx| apps.read(cx).tooltip_lines(band, None, cx));
+        assert_eq!(lines[0], "p0");
+        assert!(
+            lines.contains(&format!("Windows programs: {}", IMAGES.join(", "))),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"Wine prefix: /srv/backblaze/prefix".to_string()),
+            "{lines:?}"
+        );
+        // Other groups have no Wine lines.
+        let other = r.vcx.update(|_, cx| {
+            let a = apps.read(cx);
+            let i = a
+                .bands()
+                .iter()
+                .position(|b| &*b.key == "exe:p1")
+                .expect("band p1");
+            a.tooltip_lines(i, None, cx)
+        });
+        assert!(!other.iter().any(|l| l.starts_with("Wine")), "{other:?}");
+
+        let at = r
+            .vcx
+            .debug_bounds(format!("{LEGEND_ID}-{row}").leak())
+            .expect("legend row");
+        r.vcx
+            .simulate_mouse_move(at.center(), None, gpui_kit::Modifiers::none());
+        draw(r.vcx);
+        assert_eq!(r.vcx.read_entity(&apps, |a, _| a.hovered()), Some(band));
+        let tip = r.vcx.debug_bounds(TOOLTIP_ID).expect("the tooltip");
+        let chart = r.vcx.debug_bounds(APPS_ID).expect("chart");
+        assert!(
+            tip.left() >= chart.left()
+                && tip.right() <= chart.right()
+                && tip.top() >= chart.top()
+                && tip.bottom() <= chart.bottom(),
+            "tooltip {tip:?} inside chart {chart:?}"
+        );
     }
 
     /// Clicking a group's legend row opens Processes filtered to that group; "Other apps" and

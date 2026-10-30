@@ -548,6 +548,8 @@ perf-mem-apps-processes =
     }
 perf-mem-apps-shared-older = Shared and kernel (older data)
 perf-mem-apps-estimate = Estimate: the kernel does not list this memory
+perf-mem-apps-wine-images = Windows programs: { $names }
+perf-mem-apps-wine-prefix = Wine prefix: { $path }
 perf-mem-composition-caption = Memory composition
 perf-mem-seg-in-use = In use
 perf-mem-seg-compressed = In use (compressed)

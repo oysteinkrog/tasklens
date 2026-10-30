@@ -46,6 +46,7 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tl_model::snapshot::Snapshot;
+use tl_model::system::WineGroupInfo;
 use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tracing::warn;
@@ -371,6 +372,8 @@ pub struct Band {
     pub minus: Arc<[SeriesId]>,
     /// Processes in the band now; `None` when not known (a group outside the engine's top 20).
     pub processes: Option<u32>,
+    /// The prefix and Windows image names of a Wine group, from the newest snapshot.
+    pub wine: Option<Arc<WineGroupInfo>>,
     /// Bytes at the newest sample.
     pub value: f64,
 }
@@ -428,6 +431,8 @@ pub struct AppsWords {
     pub shared_older: SharedString,
     /// The tooltip line of the parts that are worked out.
     pub estimate: SharedString,
+    pub wine_images: Option<Template>,
+    pub wine_prefix: Option<Template>,
 }
 
 impl AppsWords {
@@ -452,6 +457,8 @@ impl AppsWords {
             groups_shown: tr(cx, "perf-mem-apps-groups-shown"),
             shared_older: tr(cx, "perf-mem-apps-shared-older"),
             estimate: tr(cx, "perf-mem-apps-estimate"),
+            wine_images: Some(Template::new(cx, "perf-mem-apps-wine-images", &["names"])),
+            wine_prefix: Some(Template::new(cx, "perf-mem-apps-wine-prefix", &["path"])),
         };
         true
     }
@@ -1020,6 +1027,7 @@ impl MemoryAppsChart {
                 series: smallvec![series_id(g.device)],
                 minus: Arc::from([]),
                 processes: None,
+                wine: None,
                 value: 0.,
             });
         }
@@ -1050,6 +1058,7 @@ impl MemoryAppsChart {
                 series,
                 minus: Arc::from([]),
                 processes: None,
+                wine: None,
                 value: 0.,
             });
         }
@@ -1069,6 +1078,7 @@ impl MemoryAppsChart {
                 series: smallvec![series_id(shared)],
                 minus: self.parts.iter().flatten().map(|&d| series_id(d)).collect(),
                 processes: None,
+                wine: None,
                 value: 0.,
             });
         }
@@ -1088,6 +1098,7 @@ impl MemoryAppsChart {
                 series: smallvec![series_id(device)],
                 minus: Arc::from([]),
                 processes: None,
+                wine: None,
                 value: 0.,
             });
         }
@@ -1106,6 +1117,12 @@ impl MemoryAppsChart {
                 .find(|b| &*b.key == key)
                 .map(|b| b.process_count)
         };
+        let wine_of = |key: &str| {
+            published
+                .iter()
+                .find(|b| &*b.key == key)
+                .and_then(|b| b.wine.clone())
+        };
         let mut changed = false;
         for i in 0..self.bands.len() {
             let value = self.band_value(&self.bands[i], newest);
@@ -1117,10 +1134,15 @@ impl MemoryAppsChart {
                     count_of(OTHER_KEY).map(|n| n + rest)
                 }
             };
+            let wine = match self.bands[i].kind {
+                BandKind::Group(_) => wine_of(&self.bands[i].key),
+                _ => None,
+            };
             let band = &mut self.bands[i];
-            if value != band.value || processes != band.processes {
+            if value != band.value || processes != band.processes || wine != band.wine {
                 band.value = value;
                 band.processes = processes;
+                band.wine = wine;
                 changed = true;
             }
         }
@@ -1238,8 +1260,8 @@ impl MemoryAppsChart {
     }
 
     /// The tooltip lines of band `i` at time `t` (`None`: the newest sample): name, value,
-    /// share of In use and the process count, and for a worked-out kernel part that it is an
-    /// estimate.
+    /// share of In use and the process count, for a Wine group its Windows image names and
+    /// prefix, and for a worked-out kernel part that it is an estimate.
     pub fn tooltip_lines(&self, i: usize, t: Option<u64>, _: &App) -> SmallVec<[String; 4]> {
         let Some(band) = self.bands.get(i) else {
             return SmallVec::new();
@@ -1272,6 +1294,21 @@ impl MemoryAppsChart {
             let _ = processes.write_count(&mut text, u64::from(n), &[&n]);
             lines.push(text);
         }
+        if let Some(wine) = &band.wine {
+            if let Some(images) = &self.words.wine_images
+                && !wine.images.is_empty()
+            {
+                let names = wine.images.join(", ");
+                let mut text = String::new();
+                let _ = images.write(&mut text, &[&names]);
+                lines.push(text);
+            }
+            if let (Some(prefix), Some(path)) = (&self.words.wine_prefix, &wine.prefix) {
+                let mut text = String::new();
+                let _ = prefix.write(&mut text, &[path]);
+                lines.push(text);
+            }
+        }
         if let BandKind::Kernel(k) = band.kind
             && KERNEL_PARTS[usize::from(k)].2
         {
@@ -1295,6 +1332,9 @@ impl MemoryAppsChart {
                 // lower or right half.
                 let size = self.bounds.get().size;
                 let gap = px(12. * m.ui_scale);
+                // A long line, such as a Wine group's image names, wraps in the half of the
+                // box the tooltip opens into.
+                let tip = tip.max_w((size.width / 2. - gap).max(px(160. * m.ui_scale)));
                 let tip = if at.x > size.width / 2. {
                     tip.right(size.width - at.x + gap)
                 } else {
