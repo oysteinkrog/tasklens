@@ -54,8 +54,12 @@ pub const SESSION_BITS: [ComponentMask; 4] = [
     ComponentMask::CONNECTIONS,
 ];
 
-/// Client ids kept per kind and session. The newest ones are kept; the shared parts hold only
-/// the latest scan per target, one handle search and the latest eject per disk.
+/// Client ids kept per kind and session beyond the live ones. A mapping whose engine id the
+/// shared details or device details still show is live and always kept, so a long scan keeps
+/// its results and can be cancelled however many requests come after it. The newest `IDS_KEPT`
+/// are kept too, for cancels of requests the workers have not reported on yet.
+/// The shared parts hold only the latest scan per target, one handle search and the latest
+/// eject per disk, so the live ones are few.
 pub const IDS_KEPT: usize = 64;
 
 /// The client-chosen ids the reducer maps into the engine-wide namespace.
@@ -75,17 +79,24 @@ impl IdKind {
     }
 }
 
-/// One session's client ids of one kind and the engine ids they got, oldest first, at most
-/// `IDS_KEPT`.
+/// One session's client ids of one kind and the engine ids they got, oldest first. `prune`
+/// keeps the live ones and the newest `IDS_KEPT`.
 #[derive(Default)]
 struct IdMap(VecDeque<(u64, u64)>);
 
 impl IdMap {
     fn insert(&mut self, client: u64, engine: u64) {
-        if self.0.len() == IDS_KEPT {
-            self.0.pop_front();
-        }
         self.0.push_back((client, engine));
+    }
+
+    /// Drops the mappings older than the newest `IDS_KEPT` whose engine id is not in `live`.
+    fn prune(&mut self, live: &[u64]) {
+        let old = self.0.len().saturating_sub(IDS_KEPT);
+        let mut i = 0;
+        self.0.retain(|(_, engine)| {
+            i += 1;
+            i > old || live.contains(engine)
+        });
     }
 
     /// The newest engine id given to `client`.
@@ -322,6 +333,35 @@ impl ClientSession {
         self.ids[kind.index()].client(engine)
     }
 
+    /// Prunes each id map, keeping the mappings whose engine id `c` still shows: the scan in
+    /// each target's Strings tab, the handle search and each disk's eject.
+    fn prune_ids(&mut self, c: &Components) {
+        if self.ids.iter().all(|m| m.0.len() <= IDS_KEPT) {
+            return;
+        }
+        let scans: Vec<u64> = c
+            .details
+            .targets
+            .values()
+            .filter_map(
+                |detail| match detail.tab(DetailTab::Strings).payload.as_deref()? {
+                    TabPayload::Strings(state) => Some(state.scan.0),
+                    _ => None,
+                },
+            )
+            .collect();
+        let searches: Vec<u64> = c.details.handle_search.iter().map(|s| s.search.0).collect();
+        let ejects: Vec<u64> = c
+            .device_details
+            .disks
+            .iter()
+            .filter_map(|(_, disk)| disk.eject.as_ref().map(|(seq, _)| *seq))
+            .collect();
+        self.ids[IdKind::Scan.index()].prune(&scans);
+        self.ids[IdKind::Search.index()].prune(&searches);
+        self.ids[IdKind::Eject.index()].prune(&ejects);
+    }
+
     /// `shared` with this session's string scans and handle search under its own ids, and the
     /// other sessions' hidden. Returns `shared` itself when nothing changes.
     fn view_details(&mut self, shared: &Arc<DetailsSnapshot>) -> Arc<DetailsSnapshot> {
@@ -434,6 +474,7 @@ impl ClientSession {
     /// gets version one above its last published one. The views of details and device details
     /// are rebuilt from `c` when their bit is set; they keep the shared header.
     pub(crate) fn prepare(&mut self, shared: ComponentMask, c: &Components) {
+        self.prune_ids(c);
         let dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE) | shared;
         if dirty.contains(ComponentMask::DETAILS) {
             self.details = self.view_details(&c.details);

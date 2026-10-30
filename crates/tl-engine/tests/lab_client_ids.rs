@@ -517,3 +517,49 @@ fn same_eject_seq_reaches_only_its_own_session() {
     assert_eq!(shown_eject(&local), Some(1));
     assert_eq!(shown_eject(&remote.snapshot()), None);
 }
+
+#[test]
+fn live_scan_outlasts_more_than_ids_kept_newer_scans() {
+    let mut rig = Rig::new();
+    let remote = Remote::new();
+    let scan = |id| Command::StringScan {
+        scan: ScanId(id),
+        key: KEY,
+        opts: StringScanOpts::default(),
+    };
+    rig.run(vec![remote.open(), on(REMOTE, scan(1))]);
+    let long = rig
+        .commands()
+        .iter()
+        .find_map(|c| match c {
+            WorkerCommand::StringScan { scan, .. } => Some(*scan),
+            _ => None,
+        })
+        .expect("the scan was forwarded");
+    rig.run(vec![scan_state(long.0)]);
+
+    // 70 newer scans, more than `IDS_KEPT`. None of them reports, so the long scan stays the
+    // one the Strings tab shows.
+    let newer = (100..170).map(|id| on(REMOTE, scan(id))).collect();
+    rig.run(newer);
+    assert_eq!(
+        shown_scan(&remote.snapshot()),
+        Some(ScanId(1)),
+        "the long scan keeps its results"
+    );
+
+    rig.run(vec![
+        on(REMOTE, Command::CancelStringScan(ScanId(1))),
+        on(REMOTE, Command::CancelStringScan(ScanId(100))),
+    ]);
+    let cancels: Vec<_> = rig
+        .commands()
+        .into_iter()
+        .filter(|c| matches!(c, WorkerCommand::CancelStringScan(_)))
+        .collect();
+    assert_eq!(
+        cancels,
+        [WorkerCommand::CancelStringScan(long)],
+        "the live scan can still be cancelled; the oldest scan that is not live is pruned"
+    );
+}
