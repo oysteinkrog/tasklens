@@ -177,6 +177,7 @@ fn aggregation_keeps_single_spike() {
     assert_eq!(s1_blocks.len(), 2);
     assert_eq!(s1_blocks[0].columns[0].mean[30], 100.0);
     assert!(s1_blocks[0].columns[0].min.is_none());
+    assert!(s1_blocks[0].columns[0].max.is_none());
     let s10 = blocks(&files(dir.path(), Tier::S10)[0]);
     let c = &s10[0].columns[0];
     assert_eq!(c.mean.len(), 6);
@@ -210,6 +211,65 @@ fn aggregation_keeps_single_spike() {
     let p = series(&m1, &k);
     assert_eq!(p[0].max, 100.0);
     assert_eq!(p[1].max, 0.0);
+}
+
+/// tasklens-o55.56: a core clock keeps the per-second mean as its 1 s value and the maximum
+/// beside it, so one 5000 MHz sample among 3000 MHz samples at 10 Hz leaves every tier with the
+/// true mean and the 5000 MHz peak. A reopened store loads both into its ring.
+#[test]
+fn core_clock_keeps_second_mean_and_peak() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _) = open(cfg(dir.path(), BOOT_A, OFF), 0);
+    let clock = h
+        .register(
+            &Arc::from("cpu:0"),
+            &Arc::from("CPU 0"),
+            MetricId::CPU_CORE_CLOCK,
+        )
+        .unwrap();
+    for tenth in 0..1200u64 {
+        let v = if tenth == 305 { 5000.0 } else { 3000.0 };
+        h.push(clock, Sample::valid(tenth * SEC / 10, v));
+        if tenth % 10 == 0 {
+            h.tick(tenth * SEC / 10).unwrap();
+        }
+    }
+    h.close(120 * SEC).unwrap();
+    let k = key("cpu:0", MetricId::CPU_CORE_CLOCK);
+    let to = OFF + 119 * SEC as i64;
+
+    // Second 30: (5000 + 9 x 3000) / 10 = 3200.
+    let check_s1 = |s1: &MetricSpan| {
+        let p = series(s1, &k);
+        assert_eq!(p.len(), 120);
+        assert_eq!((p[30].mean, p[30].max), (3200.0, 5000.0));
+        assert!(
+            p.iter()
+                .enumerate()
+                .all(|(i, p)| i == 30 || (p.mean, p.max) == (3000.0, 3000.0))
+        );
+    };
+    check_s1(&h.read(Tier::S1, OFF, to, 120 * SEC).unwrap());
+
+    let s1_blocks = blocks(&files(dir.path(), Tier::S1)[0]);
+    let c = &s1_blocks[0].columns[0];
+    assert_eq!((c.mean[30], c.max.as_ref().unwrap()[30]), (3200.0, 5000.0));
+
+    // The 10 s point of seconds 30 to 39 and the first minute: the mean of their samples.
+    let s10 = h.read(Tier::S10, OFF, to, 120 * SEC).unwrap();
+    let p = series(&s10, &k);
+    assert_eq!((p[3].mean, p[3].min, p[3].max), (3020.0, 3000.0, 5000.0));
+    assert!(p.iter().enumerate().all(|(i, p)| i == 3 || p.max == 3000.0));
+    let m1 = h.read(Tier::M1, OFF, to, 120 * SEC).unwrap();
+    let p = series(&m1, &k);
+    let want = (3200.0 + 59.0 * 3000.0) / 60.0;
+    assert!((p[0].mean - want).abs() < 1e-2, "{:?}", p[0]);
+    assert_eq!((p[0].max, p[1].max, p[1].mean), (5000.0, 3000.0, 3000.0));
+    drop(h);
+
+    let (mut h, report) = open(cfg(dir.path(), BOOT_A, OFF), 130 * SEC);
+    assert_eq!(report.ring_points, 120);
+    check_s1(&h.read(Tier::S1, OFF, to, 130 * SEC).unwrap());
 }
 
 /// ADR-017: a series written in one session and read back after its slot changed and after a

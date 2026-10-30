@@ -5,9 +5,14 @@
 //!
 //! | Tier | Point | Kept | Values per point | Segment |
 //! |---|---|---|---|---|
-//! | 1 s | 1 s | 1 h | the per-second maximum | 10 min |
+//! | 1 s | 1 s | 1 h | the per-second maximum; for core clocks the mean and the maximum | 10 min |
 //! | 10 s | 10 s | 24 h | mean, min and max of the ten 1 s points | 1 h |
 //! | 1 min | 60 s | 7 d | mean of the six 10 s means weighted by valid count, min, max | 24 h |
+//!
+//! A core clock series (`MetricId::CPU_CORE_CLOCK`, tasklens-o55.56) keeps the per-second mean
+//! as its 1 s value and the per-second maximum in the 1 s `max` column, so its means stay true
+//! at every range and a boost shorter than a second still shows as the maximum. Its 10 s and
+//! 1 min min is the lowest per-second mean.
 //!
 //! The 10 s and 1 min points also store how many valid 1 s values they hold. A read weights each
 //! point by that count, so a minute split by a restart, half in each session's segment, reads as
@@ -218,7 +223,7 @@ pub struct SeriesColumn {
     pub mean: Vec<f32>,
     /// 10 s and 1 min tiers only.
     pub min: Option<Vec<f32>>,
-    /// 10 s and 1 min tiers only.
+    /// 10 s and 1 min tiers, and the per-second maximum of a core clock in the 1 s tier.
     pub max: Option<Vec<f32>>,
     /// Valid 1 s values in each point: 1 to 10 or 1 to 60, 0 for an invalid point. 10 s and
     /// 1 min tiers only.
@@ -437,31 +442,44 @@ pub fn step_ns(tier: Tier, from_realtime_ns: i64, to_realtime_ns: i64) -> u64 {
     per_point.div_ceil(tier.point_ns()).max(1) * tier.point_ns()
 }
 
+/// Series whose 1 s value is the per-second mean, with the per-second maximum beside it
+/// (tasklens-o55.56). At 10 Hz one second can hold two clock readings, so the two differ.
+fn keeps_second_mean(metric: MetricId) -> bool {
+    metric == MetricId::CPU_CORE_CLOCK
+}
+
+/// The stored form of 1 s values: NaN (no value) becomes 0.
+fn zero_nan(v: &[f32]) -> Vec<f32> {
+    v.iter()
+        .map(|v| if v.is_nan() { 0.0 } else { *v })
+        .collect()
+}
+
 /// The three tier columns of one series for one minute of 1 s values (NaN = no value).
-fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
+/// `peaks` holds the per-second maxima of a series that `keeps_second_mean`; `secs` are then
+/// the per-second means.
+fn aggregate(slot: u16, secs: &[f32; 60], peaks: Option<&[f32; 60]>) -> [SeriesColumn; 3] {
     let s1 = SeriesColumn {
         slot,
         valid: bitmap(60, |i| !secs[i].is_nan()),
-        mean: secs
-            .iter()
-            .map(|v| if v.is_nan() { 0.0 } else { *v })
-            .collect(),
+        mean: zero_nan(secs),
         min: None,
-        max: None,
+        max: peaks.map(|p| zero_nan(p)),
         count: None,
     };
     let mut n10 = [0u32; 6];
     let mut mean10 = [0f32; 6];
     let mut min10 = [0f32; 6];
     let mut max10 = [0f32; 6];
-    for (j, chunk) in secs.as_chunks::<10>().0.iter().enumerate() {
+    for j in 0..6 {
         let mut sum = 0f64;
         let (mut lo, mut hi) = (f32::NAN, f32::NAN);
-        for v in chunk.iter().filter(|v| !v.is_nan()) {
+        for i in (j * 10..j * 10 + 10).filter(|&i| !secs[i].is_nan()) {
+            let v = secs[i];
             n10[j] += 1;
-            sum += f64::from(*v);
-            lo = lo.min(*v);
-            hi = hi.max(*v);
+            sum += f64::from(v);
+            lo = lo.min(v);
+            hi = hi.max(peaks.map_or(v, |p| p[i]));
         }
         if n10[j] > 0 {
             mean10[j] = (sum / f64::from(n10[j])) as f32;
@@ -498,6 +516,9 @@ fn aggregate(slot: u16, secs: &[f32; 60]) -> [SeriesColumn; 3] {
     };
     [s1, s10, m1]
 }
+
+/// One series' minute from `minute_values`: registry index, 1 s values, per-second maxima.
+type MinuteValues = (usize, [f32; 60], Option<[f32; 60]>);
 
 /// Slot to series key and device name, as the newest catalog of a segment says.
 type SlotTable = Vec<Option<(SeriesKey, Arc<str>)>>;
@@ -624,16 +645,50 @@ struct Series {
     name: Arc<str>,
     /// Registered in this session, so it is in the catalog written to disk.
     live: bool,
-    /// The last hour of 1 s points at `realtime second mod RING_SECS`. NaN is a gap.
+    /// The last hour of 1 s points at `realtime second mod RING_SECS`. NaN is a gap. The
+    /// per-second mean for a series that `keeps_second_mean`, the per-second maximum otherwise.
     ring: Option<Box<[f32]>>,
-    /// Boottime second of the point being built and its running maximum (NaN while no valid
-    /// sample came).
-    open: Option<(u64, f32)>,
+    /// The per-second maximum beside `ring`, for a series that `keeps_second_mean` only.
+    peak: Option<Box<[f32]>>,
+    /// The point being built.
+    open: Option<OpenPoint>,
     /// Last closed second; later samples from it are dropped.
     closed: Option<u64>,
     /// Realtime second after the newest point loaded from disk. Ring points before it are
     /// already stored, so a minute written after a restart leaves them out.
     stored_to: i64,
+}
+
+/// The 1 s point being built from the samples of one boottime second.
+#[derive(Clone, Copy)]
+struct OpenPoint {
+    sec: u64,
+    sum: f64,
+    /// Valid samples so far.
+    n: u32,
+    /// NaN while no valid sample came.
+    max: f32,
+}
+
+impl OpenPoint {
+    fn new(sec: u64) -> Self {
+        Self {
+            sec,
+            sum: 0.0,
+            n: 0,
+            max: f32::NAN,
+        }
+    }
+
+    fn add(&mut self, v: f32) {
+        self.sum += f64::from(v);
+        self.n += 1;
+        self.max = if self.max.is_nan() {
+            v
+        } else {
+            self.max.max(v)
+        };
+    }
 }
 
 /// Accumulated buckets of one series in a span. Bucket `idx` lives at `idx mod len`.
@@ -1009,6 +1064,7 @@ impl MetricHistory {
                 report.timed_out = true;
                 for s in &mut h.series {
                     s.ring = None;
+                    s.peak = None;
                     s.stored_to = i64::MIN;
                 }
                 h.ring_end = i64::MIN;
@@ -1050,7 +1106,8 @@ impl MetricHistory {
                     for (i, &v) in c.mean.iter().enumerate() {
                         let t = rt(b.start_t_ns + i as u64 * NS_PER_SEC, offset);
                         let r = t.div_euclid(NS_PER_SEC as i64);
-                        if bit(&c.valid, i) && r >= from_s && self.ring_write(idx, r, v) {
+                        let peak = c.max.as_ref().and_then(|m| m.get(i).copied()).unwrap_or(v);
+                        if bit(&c.valid, i) && r >= from_s && self.ring_write(idx, r, v, peak) {
                             let s = &mut self.series[idx];
                             s.stored_to = s.stored_to.max(r + 1);
                             points += 1;
@@ -1075,6 +1132,7 @@ impl MetricHistory {
             name: Arc::clone(name),
             live: false,
             ring: None,
+            peak: None,
             open: None,
             closed: None,
             stored_to: i64::MIN,
@@ -1106,7 +1164,8 @@ impl MetricHistory {
     }
 
     /// Folds one live sample into the 1 s point of its boottime second: the maximum of the valid
-    /// samples. A sample that is not valid is no input. `GAP_BEFORE` ends the point being built;
+    /// samples, and for a series that `keeps_second_mean` also their mean. A sample that is not
+    /// valid is no input. `GAP_BEFORE` ends the point being built;
     /// later samples of a closed second are dropped.
     pub fn push(&mut self, slot: MetricSlot, s: Sample) {
         let idx = usize::from(slot.0);
@@ -1118,10 +1177,10 @@ impl MetricHistory {
             self.close_point(idx);
         }
         match self.series[idx].open {
-            Some((open, _)) if sec < open => return,
-            Some((open, _)) if sec > open => {
+            Some(p) if sec < p.sec => return,
+            Some(p) if sec > p.sec => {
                 self.close_point(idx);
-                self.series[idx].open = Some((sec, f32::NAN));
+                self.series[idx].open = Some(OpenPoint::new(sec));
             }
             Some(_) => {}
             None => {
@@ -1129,14 +1188,14 @@ impl MetricHistory {
                 if closed || sec * NS_PER_SEC < self.written_to {
                     return;
                 }
-                self.series[idx].open = Some((sec, f32::NAN));
+                self.series[idx].open = Some(OpenPoint::new(sec));
             }
         }
         if s.is_valid()
             && s.value.is_finite()
-            && let Some((_, v)) = &mut self.series[idx].open
+            && let Some(p) = &mut self.series[idx].open
         {
-            *v = if v.is_nan() { s.value } else { v.max(s.value) };
+            p.add(s.value);
         }
     }
 
@@ -1160,32 +1219,41 @@ impl MetricHistory {
     }
 
     fn close_point(&mut self, idx: usize) {
-        let Some((sec, v)) = self.series[idx].open.take() else {
+        let Some(p) = self.series[idx].open.take() else {
             return;
         };
-        self.series[idx].closed = Some(sec);
-        if v.is_nan() || sec * NS_PER_SEC < self.written_to {
+        self.series[idx].closed = Some(p.sec);
+        if p.n == 0 || p.sec * NS_PER_SEC < self.written_to {
             return;
         }
-        let r = self.rt_sec(sec);
-        if self.ring_write(idx, r, v) {
-            self.pending.insert(minute_of(sec * NS_PER_SEC));
+        let v = if keeps_second_mean(self.series[idx].key.metric) {
+            (p.sum / f64::from(p.n)) as f32
+        } else {
+            p.max
+        };
+        let r = self.rt_sec(p.sec);
+        if self.ring_write(idx, r, v, p.max) {
+            self.pending.insert(minute_of(p.sec * NS_PER_SEC));
         }
     }
 
-    /// Writes one 1 s point at realtime second `r`. False when `r` is an hour or more older than
-    /// the newest point.
-    fn ring_write(&mut self, idx: usize, r: i64, v: f32) -> bool {
+    /// Writes one 1 s point at realtime second `r`: `v` into the ring and, for a series that
+    /// `keeps_second_mean`, `peak` beside it. False when `r` is an hour or more older than the
+    /// newest point.
+    fn ring_write(&mut self, idx: usize, r: i64, v: f32, peak: f32) -> bool {
         if r >= self.ring_end {
             self.ring_advance(r + 1);
         }
         if r < self.ring_end.saturating_sub(RING_SECS as i64) {
             return false;
         }
-        let ring = self.series[idx]
-            .ring
-            .get_or_insert_with(|| vec![f32::NAN; RING_SECS].into_boxed_slice());
-        ring[r.rem_euclid(RING_SECS as i64) as usize] = v;
+        let i = r.rem_euclid(RING_SECS as i64) as usize;
+        let s = &mut self.series[idx];
+        let new_ring = || vec![f32::NAN; RING_SECS].into_boxed_slice();
+        s.ring.get_or_insert_with(new_ring)[i] = v;
+        if keeps_second_mean(s.key.metric) {
+            s.peak.get_or_insert_with(new_ring)[i] = peak;
+        }
         true
     }
 
@@ -1195,7 +1263,7 @@ impl MetricHistory {
         for r in from..end {
             let i = r.rem_euclid(RING_SECS as i64) as usize;
             for s in &mut self.series {
-                if let Some(ring) = &mut s.ring {
+                for ring in [&mut s.ring, &mut s.peak].into_iter().flatten() {
                     ring[i] = f32::NAN;
                 }
             }
@@ -1212,8 +1280,8 @@ impl MetricHistory {
     }
 
     /// The 1 s values of the live series in boottime minute `m` that are not on disk yet, for
-    /// each series with one.
-    fn minute_values(&self, m: u64) -> Vec<(usize, [f32; 60])> {
+    /// each series with one, and the per-second maxima of a series that `keeps_second_mean`.
+    fn minute_values(&self, m: u64) -> Vec<MinuteValues> {
         let r0 = self.rt_sec(m / NS_PER_SEC);
         let mut out = Vec::new();
         for (idx, s) in self.series.iter().enumerate() {
@@ -1221,14 +1289,18 @@ impl MetricHistory {
                 continue;
             };
             let mut secs = [f32::NAN; 60];
-            for (i, v) in secs.iter_mut().enumerate() {
+            let mut peaks = s.peak.as_ref().map(|_| [f32::NAN; 60]);
+            for i in 0..60 {
                 let r = r0 + i as i64;
                 if r >= s.stored_to {
-                    *v = Self::ring_at(ring, self.ring_end, r);
+                    secs[i] = Self::ring_at(ring, self.ring_end, r);
+                    if let (Some(p), Some(peak)) = (&mut peaks, &s.peak) {
+                        p[i] = Self::ring_at(peak, self.ring_end, r);
+                    }
                 }
             }
             if secs.iter().any(|v| !v.is_nan()) {
-                out.push((idx, secs));
+                out.push((idx, secs, peaks));
             }
         }
         out
@@ -1243,7 +1315,7 @@ impl MetricHistory {
         for idx in 0..self.series.len() {
             let due = self.series[idx]
                 .open
-                .is_some_and(|(sec, _)| minute_of(sec * NS_PER_SEC) + METRIC_BLOCK_NS <= cutoff);
+                .is_some_and(|p| minute_of(p.sec * NS_PER_SEC) + METRIC_BLOCK_NS <= cutoff);
             if due {
                 self.close_point(idx);
             }
@@ -1339,9 +1411,12 @@ impl MetricHistory {
         } else {
             self.minute_values(m)
         };
-        for (idx, secs) in values {
+        for (idx, secs, peaks) in values {
             let slot = u16::try_from(idx).unwrap_or(u16::MAX);
-            for (tier, col) in aggregate(slot, &secs).into_iter().enumerate() {
+            for (tier, col) in aggregate(slot, &secs, peaks.as_ref())
+                .into_iter()
+                .enumerate()
+            {
                 columns[tier].push(col);
             }
         }
@@ -1664,8 +1739,8 @@ impl MetricHistory {
         let offset = self.cfg.realtime_offset_ns;
         let point = tier.point_ns();
         for &m in &self.pending {
-            for (idx, secs) in self.minute_values(m) {
-                let col = &aggregate(0, &secs)[tier.index()];
+            for (idx, secs, peaks) in self.minute_values(m) {
+                let col = &aggregate(0, &secs, peaks.as_ref())[tier.index()];
                 let points = overlay
                     .points
                     .entry(self.series[idx].key.clone())
@@ -1717,8 +1792,12 @@ impl MetricHistory {
             for r in first..=last {
                 let v = Self::ring_at(ring, self.ring_end, r);
                 if !v.is_nan() {
+                    let peak = s
+                        .peak
+                        .as_ref()
+                        .map_or(v, |p| Self::ring_at(p, self.ring_end, r));
                     let idx = (r * sec).div_euclid(step as i64);
-                    col.add((idx - lo) as usize, v, v, v, 1);
+                    col.add((idx - lo) as usize, v, v, peak, 1);
                     any = true;
                 }
             }
