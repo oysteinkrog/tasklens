@@ -100,6 +100,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
             ("shell-settings-perf-cpu-per-core", "per_core"),
             ("shell-settings-perf-cpu-overlaid", "all_cores_overlaid"),
             ("shell-settings-perf-cpu-stacked", "all_cores_stacked"),
+            ("shell-settings-perf-cpu-board", "board"),
         ],
     );
     page.dropdown(

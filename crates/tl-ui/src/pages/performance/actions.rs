@@ -422,7 +422,7 @@ json_mirror!(
     /// JSON form of [`CpuGraphMode`].
     CpuGraphModeJson <-> CpuGraphMode,
     "snake_case",
-    [Overall, PerCore, AllCoresOverlaid, AllCoresStacked]
+    [Overall, PerCore, AllCoresOverlaid, AllCoresStacked, Board]
 );
 json_mirror!(
     /// JSON form of [`CpuSecondaryGraph`].

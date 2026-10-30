@@ -1146,7 +1146,8 @@ mod page {
                 "Overall",
                 "Per core",
                 "All cores overlaid",
-                "All cores stacked"
+                "All cores stacked",
+                "Core board"
             ]
         );
         assert_eq!(words.kernel_toggle(true).as_ref(), "Kernel on");
@@ -1773,5 +1774,195 @@ mod page {
         });
         draw(r.vcx);
         assert!(!merged(&mut r).sensors, "Power draw does not");
+    }
+
+    // Core board (crw.104).
+
+    use std::collections::BTreeSet;
+
+    use gpui_kit::Modifiers;
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{CoreSmoothing, CoreSort};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::pages::performance::cpu::{BOARD_AREA_ID, BOARD_CHART_ID};
+    use tl_ui::pages::performance::cpu_board::{BOARD_ID, CpuBoard};
+    use tl_ui::pages::performance::overview::parts::{core_spark_id, take_core_labels};
+
+    /// The Core board mode with `sort`, and no smoothing, so the rows show the published loads.
+    fn board_settings(sort: CoreSort) -> Settings {
+        let mut s = with_mode(CpuGraphMode::Board);
+        s.performance.cpu_board_sort = sort;
+        s.performance.overview_core_smoothing = CoreSmoothing::Off;
+        s
+    }
+
+    fn board(r: &mut Rig) -> Entity<CpuBoard> {
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.read(cx).board().cloned())
+            .expect("board")
+    }
+
+    /// `CPU_TOTAL` of logical CPU `id` (device `100 + id`) from `pct[id]`, as the series set.
+    fn publish_loads(r: &mut Rig, pct: &[f32], version: u64) {
+        const PERIOD: u64 = 100_000_000;
+        let newest = now_boot_ns();
+        let views: Vec<Arc<SeriesView>> = pct
+            .iter()
+            .enumerate()
+            .map(|(id, &v)| {
+                Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(100 + id as u16),
+                        metric: MetricId::CPU_TOTAL,
+                    },
+                    version,
+                    period_ns: PERIOD,
+                    samples: (0..10u64)
+                        .map(|k| Sample::valid(newest - (9 - k) * PERIOD, v))
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+            })
+            .collect();
+        r.engine.publish_with(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+    }
+
+    /// The per-CPU clocks and the BogoMIPS flag, as the system snapshot.
+    fn publish_clocks(r: &mut Rig, mhz: &[Metric<u32>], bogomips: bool) {
+        let clocks: Arc<[Metric<u32>]> = Arc::from(mhz);
+        r.engine.publish_with(move |s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.cpu.per_cpu_mhz = clocks;
+            sys.cpu.freq_is_bogomips = bogomips;
+        });
+        draw(r.vcx);
+    }
+
+    /// The board shows the total chart at the left and one row per logical CPU at the right,
+    /// each with its sparkline, and the page asks for per-core samples.
+    #[gpui_kit::test]
+    fn cpu_board_one_row_per_logical_cpu(cx: &mut TestAppContext) {
+        take_core_labels();
+        let mut r = open(cx, board_settings(CoreSort::Number));
+        let painted: BTreeSet<usize> = take_core_labels().iter().map(|l| l.core).collect();
+        assert_eq!(
+            painted,
+            (0..16).collect(),
+            "one painted row per logical CPU"
+        );
+        let board = board(&mut r);
+        let (n, sparks, layout) = r.vcx.update(|_, cx| {
+            let b = board.read(cx);
+            (b.bars().len(), b.core_sparks().len(), b.core_layout())
+        });
+        assert_eq!((n, sparks), (16, 16));
+        assert_eq!(layout.cols * layout.rows, 16, "{layout:?}");
+
+        let area = r.vcx.debug_bounds(BOARD_AREA_ID).expect("board area");
+        let chart = r.vcx.debug_bounds(BOARD_CHART_ID).expect("total chart");
+        let rows = r.vcx.debug_bounds(BOARD_ID).expect("board");
+        assert_eq!(area.size.height, px(300.));
+        assert!(chart.right() < rows.left(), "the chart left of the board");
+        assert!(r.vcx.debug_bounds(GRID_ID).is_none(), "no per-core grid");
+        for i in 0..16 {
+            let spark = r.vcx.debug_bounds(&core_spark_id(i));
+            assert!(spark.is_some_and(|s| rows.contains(&s.origin)), "spark {i}");
+        }
+
+        // The total chart has the Kernel line while the toggle is on.
+        let page = r.page.clone();
+        let (series, kernel_on) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (p.overall().read(cx).spec.series.len(), p.kernel_enabled())
+        });
+        assert_eq!(series, 2);
+        assert!(kernel_on);
+
+        set_active(&mut r, true);
+        assert_eq!(merged(&mut r).cpu, CpuDemand::PerCore);
+        // The sort toggle joins the focus order.
+        assert_eq!(r.vcx.update(|_, cx| page.read(cx).focus_order().len()), 3);
+    }
+
+    /// Sorted by load, the rows put the busiest CPU first, both in the model and on screen.
+    /// The toggle saves the order.
+    #[gpui_kit::test]
+    fn cpu_board_sort_by_load(cx: &mut TestAppContext) {
+        let mut r = open(cx, board_settings(CoreSort::Load));
+        let board = board(&mut r);
+        let loads: Vec<f32> = (0..16).map(|id| ((id * 7) % 16) as f32 * 5.).collect();
+        take_core_labels();
+        publish_loads(&mut r, &loads, 1);
+        let order = r.vcx.update(|_, cx| board.read(cx).bars().order().to_vec());
+        let mut want: Vec<usize> = (0..16).collect();
+        want.sort_by(|&a, &b| loads[b].total_cmp(&loads[a]).then(a.cmp(&b)));
+        assert_eq!(order, want);
+        assert_eq!(order[0], 9, "CPU 9 has the highest load, 75%");
+
+        // The first painted row, top left, is the busiest CPU.
+        let labels = take_core_labels();
+        let first = labels
+            .iter()
+            .min_by(|a, b| {
+                (a.name.x, a.name.y)
+                    .partial_cmp(&(b.name.x, b.name.y))
+                    .expect("ordered")
+            })
+            .expect("painted");
+        assert_eq!(first.core, 9);
+
+        // The toggle sorts by number again and saves it.
+        let button = r
+            .vcx
+            .debug_bounds("TlButton-perf-cpu-board-sort")
+            .expect("sort toggle");
+        r.vcx.simulate_click(button.center(), Modifiers::none());
+        draw(r.vcx);
+        let (saved, order) = r.vcx.update(|_, cx| {
+            (
+                TlSettings::settings(cx).performance.cpu_board_sort,
+                board.read(cx).bars().order().to_vec(),
+            )
+        });
+        assert_eq!(saved, CoreSort::Number);
+        assert_eq!(order, (0..16).collect::<Vec<_>>());
+    }
+
+    /// The clock text is the snapshot's `per_cpu_mhz`: one decimal GHz, MHz under 1 GHz, "…"
+    /// without a reading, and the "(?)" mark for BogoMIPS.
+    #[gpui_kit::test]
+    fn cpu_board_clock_uses_per_cpu_mhz(cx: &mut TestAppContext) {
+        let mut r = open(cx, board_settings(CoreSort::Number));
+        let board = board(&mut r);
+        let clocks = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let labels = board.read(cx).bars().clock_labels().to_vec();
+                labels.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            })
+        };
+        let mut mhz: Vec<Metric<u32>> = (0..16).map(|_| Metric::valid(3000)).collect();
+        mhz[0] = Metric::valid(4270);
+        mhz[1] = Metric::valid(800);
+        mhz[2] = Metric::with(Validity::Unsupported);
+        publish_clocks(&mut r, &mhz, false);
+        let text = clocks(&mut r);
+        assert_eq!(text[..4], ["4.3 GHz", "800 MHz", "…", "3.0 GHz"]);
+
+        publish_clocks(&mut r, &mhz, true);
+        let text = clocks(&mut r);
+        assert_eq!(text[..3], ["4.3 GHz (?)", "800 MHz (?)", "…"]);
     }
 }

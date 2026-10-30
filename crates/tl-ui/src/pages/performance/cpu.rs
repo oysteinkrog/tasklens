@@ -1,5 +1,5 @@
-//! The CPU page: the Overall chart or the per-core grid, the mode and kernel toggles, the Details
-//! grid, and the demand that switches the engine to 10 Hz per-core sampling (docs/ui/performance.md
+//! The CPU page: the Overall chart, the per-core grid or the total chart beside the core board
+//! (crw.104), the mode and kernel toggles, the Details grid, and the demand that switches the engine to 10 Hz per-core sampling (docs/ui/performance.md
 //! UI-PRF-023, UI-PRF-053; PERF-027, PERF-028, PERF-029, PERF-033; ADR-008, ADR-014; R-126).
 //!
 //! The page re-renders only when its header, Details rows or toggles change. Both charts are
@@ -21,7 +21,7 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
     Bounds, Context, Entity, EntityId, FocusHandle, Focusable, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, WeakEntity, Window, canvas, div, px,
+    Subscription, WeakEntity, Window, canvas, div, px, relative,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
@@ -35,11 +35,13 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
+use super::cpu_board::CpuBoard;
 use super::cpu_details::{
     CpuLiveInputs, CpuSensor, cpu_details_model, cpu_temp_sensors, update_live, update_static,
 };
 use super::cpu_grid::CpuGrid;
 use super::details::KeyValueModel;
+use super::overview::cpu_box::core_gutter;
 use super::page::{
     DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text, page_words,
 };
@@ -74,6 +76,12 @@ pub const OVERALL_ID: &str = "perf-cpu-overall";
 pub const OVERLAID_ID: &str = "perf-cpu-overlaid";
 /// Debug selector of the box around the stacked chart.
 pub const STACKED_ID: &str = "perf-cpu-stacked";
+/// Debug selector of the Core board area: the total chart and the board.
+pub const BOARD_AREA_ID: &str = "perf-cpu-board-area";
+/// Debug selector of the total chart in the Core board area.
+pub const BOARD_CHART_ID: &str = "perf-cpu-board-chart";
+/// The total chart's share of the Core board area's width, as in the Overview CPU box.
+const BOARD_CHART_SHARE: f32 = 0.4;
 /// Debug selector of the box around the secondary chart.
 pub const SECONDARY_ID: &str = "perf-cpu-secondary";
 /// Debug selector of the fallback tooltip trigger over the secondary chart's heading.
@@ -89,6 +97,7 @@ const KEY_OVERALL: &str = "perf-cpu-mode-overall";
 const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";
 const KEY_OVERLAID: &str = "perf-cpu-mode-overlaid";
 const KEY_STACKED: &str = "perf-cpu-mode-stacked";
+const KEY_BOARD: &str = "perf-cpu-mode-board";
 const KEY_KERNEL_ON: &str = "perf-cpu-kernel-on";
 const KEY_KERNEL_OFF: &str = "perf-cpu-kernel-off";
 const KEY_TIP_MODE: &str = "perf-cpu-tip-mode";
@@ -121,9 +130,9 @@ pub struct ModeItem {
     pub tooltip: Option<&'static str>,
 }
 
-/// The four mode items in menu order. Overlaid and stacked are disabled until
+/// The five mode items in menu order. Overlaid and stacked are disabled until
 /// [`CPU_EXTRA_MODES_ENABLED`].
-pub const fn mode_items() -> [ModeItem; 4] {
+pub const fn mode_items() -> [ModeItem; 5] {
     const fn item(mode: CpuGraphMode, extra: bool) -> ModeItem {
         let enabled = !extra || CPU_EXTRA_MODES_ENABLED;
         ModeItem {
@@ -138,6 +147,7 @@ pub const fn mode_items() -> [ModeItem; 4] {
         item(CpuGraphMode::PerCore, false),
         item(CpuGraphMode::AllCoresOverlaid, true),
         item(CpuGraphMode::AllCoresStacked, true),
+        item(CpuGraphMode::Board, false),
     ]
 }
 
@@ -148,6 +158,7 @@ pub const fn mode_key(mode: CpuGraphMode) -> &'static str {
         CpuGraphMode::PerCore => KEY_PER_CORE,
         CpuGraphMode::AllCoresOverlaid => KEY_OVERLAID,
         CpuGraphMode::AllCoresStacked => KEY_STACKED,
+        CpuGraphMode::Board => KEY_BOARD,
     }
 }
 
@@ -158,6 +169,7 @@ const fn mode_index(mode: CpuGraphMode) -> usize {
         CpuGraphMode::PerCore => 1,
         CpuGraphMode::AllCoresOverlaid => 2,
         CpuGraphMode::AllCoresStacked => 3,
+        CpuGraphMode::Board => 4,
     }
 }
 
@@ -295,7 +307,7 @@ pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
     /// In [`mode_items`] order.
-    pub modes: [SharedString; 4],
+    pub modes: [SharedString; 5],
     pub kernel_on: SharedString,
     pub kernel_off: SharedString,
     pub tip_mode: SharedString,
@@ -375,11 +387,11 @@ impl Words {
     }
 }
 
-/// Adds the four mode radios; a mode not yet available is a disabled item with its tooltip.
+/// Adds the five mode radios; a mode not yet available is a disabled item with its tooltip.
 fn mode_menu(
     mut menu: TlMenu,
     current: CpuGraphMode,
-    labels: &[SharedString; 4],
+    labels: &[SharedString; 5],
     later: &SharedString,
 ) -> TlMenu {
     for (item, label) in mode_items().into_iter().zip(labels) {
@@ -751,6 +763,8 @@ pub struct CpuPage {
     overlaid: Option<Entity<ChartView>>,
     /// Created the first time the stacked mode is shown.
     stacked: Option<Entity<ChartView>>,
+    /// Created the first time the Core board mode is shown, with its sort toggle's focus.
+    board: Option<(Entity<CpuBoard>, FocusHandle)>,
     /// The mode change cross-fading now, if any.
     fade: Option<ModeFade>,
     fade_generation: u32,
@@ -852,6 +866,7 @@ impl CpuPage {
             grid,
             overlaid: None,
             stacked: None,
+            board: None,
             fade: None,
             fade_generation: 0,
             area_width: Rc::new(Cell::new(px(0.))),
@@ -909,6 +924,10 @@ impl CpuPage {
         self.stacked.as_ref()
     }
 
+    pub fn board(&self) -> Option<&Entity<CpuBoard>> {
+        self.board.as_ref().map(|(board, _)| board)
+    }
+
     /// The mode the graph area is fading from, while a mode change cross-fades.
     pub fn fading_from(&self) -> Option<CpuGraphMode> {
         self.fade.map(|f| f.from)
@@ -922,7 +941,7 @@ impl CpuPage {
         )
     }
 
-    /// Creates the overlaid or stacked chart the first time its mode is shown.
+    /// Creates the overlaid or stacked chart or the core board the first time its mode is shown.
     fn ensure_mode_chart(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let s = self.settings.view();
@@ -946,6 +965,12 @@ impl CpuPage {
                 self.stacked =
                     Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
                 self.sync_total_text(cx);
+            }
+            CpuGraphMode::Board if self.board.is_none() => {
+                let (hub, focus) = (self.hub.clone(), cx.focus_handle());
+                let sort_focus = focus.clone();
+                let board = cx.new(|cx| CpuBoard::new(&hub, sort_focus, cx));
+                self.board = Some((board, focus));
             }
             _ => {}
         }
@@ -1037,8 +1062,38 @@ impl CpuPage {
             CpuGraphMode::Overall => None,
             CpuGraphMode::AllCoresOverlaid => chart(OVERLAID_ID, self.overlaid.as_ref()),
             CpuGraphMode::AllCoresStacked => chart(STACKED_ID, self.stacked.as_ref()),
+            CpuGraphMode::Board => self.board().map(|b| self.board_element(b, metrics(cx))),
         };
         el.unwrap_or_else(|| self.overall_element(scale))
+    }
+
+    /// The total chart, with Kernel when on, at the left and the core board at the right, in a
+    /// full-width box of `GRAPH_H_OVERALL`.
+    fn board_element(&self, board: &Entity<CpuBoard>, m: &UiMetrics) -> AnyElement {
+        let cached = StyleRefinement::default().size_full();
+        div()
+            .debug_selector(|| BOARD_AREA_ID.into())
+            .flex()
+            .flex_row()
+            .gap(core_gutter(m))
+            .w_full()
+            .h(px(GRAPH_H_OVERALL * m.ui_scale))
+            .child(
+                div()
+                    .debug_selector(|| BOARD_CHART_ID.into())
+                    .flex_none()
+                    .w(relative(BOARD_CHART_SHARE))
+                    .h_full()
+                    .child(self.overall.clone().cached(cached.clone())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(board.clone().cached(cached)),
+            )
+            .into_any_element()
     }
 
     /// `view` in a full-width box of `GRAPH_H_OVERALL`.
@@ -1592,10 +1647,19 @@ impl DevicePage for CpuPage {
     }
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        smallvec![
+        let mut order = smallvec![
             self.mode_button_focus.clone(),
             self.kernel_button_focus.clone()
-        ]
+        ];
+        // The core board's sort toggle, while the board shows.
+        if let Some((_, focus)) = self
+            .board
+            .as_ref()
+            .filter(|_| self.mode == CpuGraphMode::Board)
+        {
+            order.push(focus.clone());
+        }
+        order
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {

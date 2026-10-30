@@ -10,6 +10,7 @@ pub mod actions;
 pub mod aggregate;
 pub mod card;
 pub mod cpu;
+pub mod cpu_board;
 pub mod cpu_details;
 pub mod cpu_grid;
 pub mod details;
