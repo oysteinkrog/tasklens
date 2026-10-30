@@ -44,8 +44,8 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_box::ROW_LABEL_W;
 use super::parts::{
-    ChartSettings, ListFit, SPARK_GRID, box_chart, box_frame, chart_section_versions, class_probe,
-    edit_chrome, grid_cells, list_fit, opens_device, spark_chart,
+    ChartSettings, ListFit, PLOT_LINE, SPARK_GRID, box_chart, box_frame, chart_section_versions,
+    class_probe, edit_chrome, grid_cells, list_fit, opens_device, spark_chart,
 };
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
@@ -348,8 +348,8 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
 
 /// The `disk_charts` grid for `rows` cells in `body`, placed as `arrange` says (`list_fit`).
 /// Only whole cells show (UI-PRF-059); a disk past `MAX_DISK_ROWS` or a cell that would be cut
-/// is counted in the "+n more" line, which takes its height from the body first. Before the
-/// first paint the body is empty and every disk gets a cell.
+/// is counted in the "+n more" line, which takes its height from the body first. Cells sit
+/// 2 px apart. Before the first paint the body is empty and every disk gets a cell.
 fn disk_fit(
     arrange: Arrange,
     body: Size<Pixels>,
@@ -363,7 +363,7 @@ fn disk_fit(
         total,
         body,
         cell_min(m),
-        m.sp[2],
+        m.sp[1],
         px(LABEL_ROW * m.ui_scale) + m.sp[2],
     )
 }
@@ -1054,7 +1054,7 @@ fn cell_head(
             .flex_none()
             .items_center()
             .gap(m.sp[4])
-            .h(px(LABEL_ROW * m.ui_scale))
+            .h(px(PLOT_LINE * m.ui_scale))
     };
     let head = if one_line {
         line().child(name).child(active).child(read).child(write)
@@ -1069,7 +1069,8 @@ fn cell_head(
     opens_device(head, Some(r.key.clone())).into_any_element()
 }
 
-/// A `disk_charts` cell of `cell` px: the header over the read and write chart.
+/// A `disk_charts` cell of `cell` px: the header over the read and write chart, which starts
+/// right under it.
 fn chart_cell(
     r: &DiskRow,
     cell: Size<Pixels>,
@@ -1086,7 +1087,6 @@ fn chart_cell(
         .w(cell.width)
         .h(cell.height)
         .overflow_hidden()
-        .gap(m.sp[2])
         .child(cell_head(r, cell.width, words, m, theme))
         .child(
             div()
@@ -1229,7 +1229,7 @@ impl DiskBox {
                 .iter()
                 .take(fit.shown)
                 .map(|r| chart_cell(r, fit.grid.cell, &words, m, theme)),
-            m.sp[2],
+            m.sp[1],
             GRID_ID,
         );
         // A "+n more" line that does not fit whole is left out (UI-PRF-017).

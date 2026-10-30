@@ -53,8 +53,8 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
 use super::parts::{
-    ChartSettings, ListFit, MIN_CHART_H, SPARK_GRID, arrange_min_h, box_chart, box_frame,
-    chart_section_versions, class_probe, edit_chrome, grid_cells, list_fit, meter_fits,
+    ChartSettings, ListFit, MIN_CHART_H, PLOT_LINE, SPARK_GRID, arrange_min_h, box_chart,
+    box_frame, chart_section_versions, class_probe, edit_chrome, grid_cells, list_fit, meter_fits,
     spark_chart, spark_row,
 };
 use super::picked::{box_mask, box_snapshot};
@@ -1448,7 +1448,7 @@ fn section_heading(
         .into_any_element()
 }
 
-/// One `engine_charts` cell of `cell` size: the engine name and percent over its chart.
+/// One `engine_charts` cell of `cell` size: the engine name and percent right over its chart.
 fn engine_cell(
     i: usize,
     e: &EngineRow,
@@ -1485,7 +1485,6 @@ fn engine_cell(
         .w(cell.width)
         .h(cell.height)
         .overflow_hidden()
-        .gap(m.sp[2])
         .child(
             div()
                 .flex()
@@ -1493,7 +1492,7 @@ fn engine_cell(
                 .flex_none()
                 .items_center()
                 .gap(m.sp[2])
-                .h(px(LABEL_ROW * m.ui_scale))
+                .h(px(PLOT_LINE * m.ui_scale))
                 .child(name)
                 .child(value),
         )

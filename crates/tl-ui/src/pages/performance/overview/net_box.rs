@@ -45,8 +45,8 @@ use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::parts::{
-    ChartSettings, ListFit, box_chart, box_frame, chart_section_versions, class_probe, edit_chrome,
-    grid_cells, list_fit,
+    ChartSettings, ListFit, PLOT_LINE, box_chart, box_frame, chart_section_versions, class_probe,
+    edit_chrome, grid_cells, list_fit,
 };
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
@@ -115,6 +115,10 @@ const GRID_CELL_MIN_H: f32 = 80.;
 
 /// The debug selector of the `adapter_charts` grid viewport.
 pub const GRID_ID: &str = "perf-overview-net-grid";
+
+/// The gap between the Download and Upload parts in `stacked`, as an `sp` step: 6 px
+/// (tasklens-o55.54).
+const STACK_GAP: usize = 3;
 
 /// The debug selector of the splitter between the stacked Download and Upload parts.
 pub const NET_STACK_SPLITTER_ID: &str = "perf-overview-net-stack-splitter";
@@ -635,9 +639,10 @@ impl NetBox {
     /// (width), after the clamps; 0 in the other modes.
     pub fn split(&self, m: &UiMetrics) -> f32 {
         match self.mode {
-            NetMode::Stacked => self
-                .stack_split
-                .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+            NetMode::Stacked => {
+                self.stack_split
+                    .share(SplitAxis::Column, m.sp[STACK_GAP], m.ui_scale)
+            }
             NetMode::Columns => self.col_split.share(SplitAxis::Row, m.sp[5], m.ui_scale),
             _ => 0.,
         }
@@ -1120,7 +1125,7 @@ fn stat_row(
         .items_center()
         .justify_between()
         .gap(m.sp[2])
-        .h(px(LABEL_ROW * m.ui_scale))
+        .h(px(PLOT_LINE * m.ui_scale))
         .child(label_el)
         .child(value_el)
 }
@@ -1165,13 +1170,12 @@ fn rate_line(
     .into_any_element()
 }
 
-/// One direction: its rate line over its chart.
-fn column(line: AnyElement, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElement {
+/// One direction: its rate line right over its chart.
+fn column(line: AnyElement, chart: &Entity<ChartView>) -> AnyElement {
     whole_rows()
         .flex_1()
         .min_w_0()
         .h_full()
-        .gap(m.sp[2])
         .child(line)
         .child(
             div()
@@ -1216,7 +1220,7 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .flex_none()
         .items_center()
         .gap(m.sp[4])
-        .h(px(LABEL_ROW * m.ui_scale))
+        .h(px(PLOT_LINE * m.ui_scale))
         .child(name)
         .child(rates)
         .into_any_element()
@@ -1252,7 +1256,7 @@ fn charts_fit(
     )
 }
 
-/// An `adapter_charts` cell of `cell` px: the header over the combined chart.
+/// An `adapter_charts` cell of `cell` px: the header right over the combined chart.
 fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let idx = a.idx;
     div()
@@ -1263,7 +1267,6 @@ fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlThem
         .w(cell.width)
         .h(cell.height)
         .overflow_hidden()
-        .gap(m.sp[2])
         .child(cell_head(a, m, theme))
         .child(
             div()
@@ -1292,14 +1295,14 @@ impl NetBox {
         self.cells = 0;
         let share = self.split(m);
         let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
-        let down = column(down_line, &self.down, m);
-        let up = column(up_line, &self.up, m);
+        let down = column(down_line, &self.down);
+        let up = column(up_line, &self.up);
         div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .gap(m.sp[5])
+            .gap(m.sp[STACK_GAP])
             // Clipped, so a box too low for both parts never draws below its body. It
             // gives way when the body is lower than its share.
             .child(
@@ -1325,7 +1328,7 @@ impl NetBox {
             .child(self.stack_split.gap(
                 SplitAxis::Column,
                 share,
-                m.sp[5],
+                m.sp[STACK_GAP],
                 Self::stack_inner_split,
                 cx,
             ))
@@ -1343,8 +1346,8 @@ impl NetBox {
         self.cells = 0;
         let share = self.split(m);
         let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
-        let down = column(down_line, &self.down, m);
-        let up = column(up_line, &self.up, m);
+        let down = column(down_line, &self.down);
+        let up = column(up_line, &self.up);
         div()
             .relative()
             .flex()
@@ -1412,7 +1415,6 @@ impl NetBox {
         let half = |line| div().flex().flex_col().flex_1().min_w_0().child(line);
         whole_rows()
             .size_full()
-            .gap(m.sp[2])
             .child(
                 div()
                     .flex()
