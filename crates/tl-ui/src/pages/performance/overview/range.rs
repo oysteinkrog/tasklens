@@ -29,7 +29,7 @@ use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 use super::timeline::{self, Paused};
 use crate::chart::view::find_tiered;
 use crate::components::button::{TlButton, TlButtonKind};
-use crate::i18n::tr;
+use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
 
@@ -126,6 +126,15 @@ pub fn page_range_switch(prefix: &'static str, cx: &App) -> AnyElement {
     switch(prefix, None, cx)
 }
 
+/// `key` in the current strings; en-US without strings (the page frame tests).
+pub fn word(cx: &App, key: &str) -> SharedString {
+    if cx.has_global::<Strings>() {
+        tr(cx, key)
+    } else {
+        tr_en(key, &[])
+    }
+}
+
 fn switch(prefix: &'static str, paused: Option<Paused>, cx: &App) -> AnyElement {
     let current = current_range(cx);
     let now = timeline::now_realtime_ns();
@@ -141,13 +150,13 @@ fn switch(prefix: &'static str, paused: Option<Paused>, cx: &App) -> AnyElement 
                 on: range == current,
             },
         )
-        .label(tr(cx, key))
+        .label(word(cx, key))
         .disabled(!stored || !servable)
         .on_click(move |_, _, cx| set_range(range, cx));
         if !stored {
-            button = button.tooltip(tr(cx, "perf-overview-range-history-off"));
+            button = button.tooltip(word(cx, "perf-overview-range-history-off"));
         } else if !servable {
-            button = button.tooltip(tr(cx, "perf-overview-range-not-kept"));
+            button = button.tooltip(word(cx, "perf-overview-range-not-kept"));
         }
         row = row.child(div().debug_selector(move || id.clone()).child(button));
     }

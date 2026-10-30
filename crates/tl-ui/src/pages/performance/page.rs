@@ -51,7 +51,7 @@ use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
 use crate::pages::performance::overview::range::{
-    PAGE_SWITCH, current_range, history_request, page_range_switch,
+    PAGE_SWITCH, current_range, history_request, page_range_switch, word,
 };
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, t_sm};
@@ -127,7 +127,7 @@ pub fn live_only_note(m: &UiMetrics, theme: &TlTheme, cx: &App) -> Option<AnyEle
             .child(
                 note.debug_selector(|| LIVE_ONLY_ID.into())
                     .text_color(theme.text_secondary)
-                    .child(tr(cx, "perf-page-live-only")),
+                    .child(word(cx, "perf-page-live-only")),
             )
             .into_any_element(),
     )
