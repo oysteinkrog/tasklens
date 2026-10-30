@@ -291,6 +291,7 @@ async fn run_session(
     let run = AssertUnwindSafe(reducer.run(cx, &mut ep.msgs, &mut ep.publisher))
         .catch_unwind()
         .await;
+    crate::bridge::log_worker_exit("reducer");
     drop(children);
     match run {
         Ok(Ok(())) => Ok(()),
