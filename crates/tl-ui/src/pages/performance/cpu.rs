@@ -7,8 +7,9 @@
 //! settings only when the Performance, Motion or Appearance section version moved.
 //!
 //! Under the graph area sits the secondary chart (UI-PRF-025; PERF-032, PERF-038 to PERF-040):
-//! power draw, clock speed or temperature, from `performance.cpu_secondary_graph`. When power
-//! is not available it shows temperature, else clock speed, without changing the setting.
+//! power draw, clock speed, core clocks (one line per physical core, tasklens-o55.57) or
+//! temperature, from `performance.cpu_secondary_graph`. When power is not available it shows
+//! temperature, else clock speed, without changing the setting.
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
@@ -35,6 +36,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
+use super::core_clocks::CoreClocks;
 use super::cpu_board::CpuBoard;
 use super::cpu_details::{
     CpuLiveInputs, CpuSensor, cpu_details_model, cpu_temp_sensors, update_live, update_static,
@@ -581,7 +583,8 @@ fn overall_labels(kernel: bool, words: &Words) -> ChartLabels {
 }
 
 /// The secondary chart (UI-PRF-025): package watts filled with core watts dashed, average MHz
-/// filled with the fastest core dashed, or the main temperature sensor.
+/// filled with the fastest core dashed, or the main temperature sensor. Core clocks takes
+/// [`secondary_base`] and gets its lines from [`CoreClocks`].
 fn secondary_spec(
     device: DeviceIdx,
     shown: SecondaryShown,
@@ -620,6 +623,13 @@ fn secondary_spec(
     ChartSpec {
         series,
         y,
+        ..secondary_base(s)
+    }
+}
+
+/// The range, grid, smoothing and hover of the secondary chart, without series.
+fn secondary_base(s: &PageSettings) -> ChartSpec {
+    ChartSpec {
         range_ns: s.range_ns,
         grid: GridStyle {
             lines: true,
@@ -791,6 +801,8 @@ pub struct CpuPage {
     area_width: Rc<Cell<Pixels>>,
     /// The secondary chart; `None` while no chart is shown.
     secondary: Option<Entity<ChartView>>,
+    /// The lines of the secondary chart while it shows Core clocks (tasklens-o55.57).
+    core_clocks: Option<CoreClocks>,
     secondary_shown: Option<SecondaryShown>,
     avail: SecondaryAvail,
     /// `cpuinfo_max_freq` from the inventory.
@@ -890,6 +902,7 @@ impl CpuPage {
             fade_generation: 0,
             area_width: Rc::new(Cell::new(px(0.))),
             secondary: None,
+            core_clocks: None,
             secondary_shown: None,
             avail: SecondaryAvail {
                 power: PowerState::Readable,
@@ -987,6 +1000,15 @@ impl CpuPage {
                 let (hub, focus) = (self.hub.clone(), cx.focus_handle());
                 let sort_focus = focus.clone();
                 let board = cx.new(|cx| CpuBoard::new(&hub, sort_focus, cx));
+                // A hovered row highlights its core in the Core clocks chart (tasklens-o55.57).
+                let page = cx.weak_entity();
+                board.read(cx).set_row_hover(move |cpu, cx| {
+                    let _ = page.update(cx, |p, cx| {
+                        if let Some(clocks) = &p.core_clocks {
+                            clocks.highlight_cpu(cpu, cx);
+                        }
+                    });
+                });
                 self.board = Some((board, focus));
             }
             _ => {}
@@ -1147,6 +1169,11 @@ impl CpuPage {
         self.secondary.as_ref()
     }
 
+    /// The Core clocks lines while the secondary chart shows them.
+    pub fn core_clocks(&self) -> Option<&CoreClocks> {
+        self.core_clocks.as_ref()
+    }
+
     /// The chart the secondary area shows, if any.
     pub fn secondary_choice(&self) -> Option<CpuSecondaryGraph> {
         self.secondary_shown.map(|s| s.choice)
@@ -1190,8 +1217,31 @@ impl CpuPage {
             self.send_demand(cx);
         }
         let Some(shown) = want else {
+            self.core_clocks = None;
             return self.secondary.take().is_some();
         };
+        // Core clocks has a chart of its own lines; a change to or from it builds a new chart.
+        let clocks = shown.choice == CpuSecondaryGraph::Clocks;
+        if clocks != self.core_clocks.is_some() {
+            self.core_clocks = None;
+            self.secondary = None;
+        }
+        if clocks {
+            let base = secondary_base(&self.settings);
+            match &mut self.core_clocks {
+                Some(c) => c.set_base(base, cx),
+                None => {
+                    let hub = self.hub.clone();
+                    let labels = secondary_labels(shown.choice, &self.words);
+                    let view = cx
+                        .new(|cx| history_chart(secondary_base(&self.settings), labels, &hub, cx));
+                    let snap = Arc::clone(self.hub.read(cx).current());
+                    self.secondary = Some(view.clone());
+                    self.core_clocks = Some(CoreClocks::new(view, base, true, &snap, cx));
+                }
+            }
+            return want != old || force;
+        }
         let theme = current(cx).clone();
         let spec = secondary_spec(self.row.idx, shown, &self.settings, &theme);
         let labels = secondary_labels(shown.choice, &self.words);
@@ -1213,8 +1263,13 @@ impl CpuPage {
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
+            // Core clocks plots each core, so it wants the per-CPU clocks in every mode.
             cpu: match self.mode {
-                CpuGraphMode::Overall => CpuDemand::Total,
+                CpuGraphMode::Overall
+                    if self.secondary_choice() != Some(CpuSecondaryGraph::Clocks) =>
+                {
+                    CpuDemand::Total
+                }
                 _ => CpuDemand::PerCore,
             },
             cpu_fast: true,
@@ -1292,6 +1347,11 @@ impl CpuPage {
         if system || mask.intersects(ComponentMask::DEVICE_DETAILS | ComponentMask::INVENTORY) {
             self.avail = SecondaryAvail::read(snap, &self.static_info);
             changed |= self.sync_secondary(false, cx);
+        }
+        if (system || devices || mask.contains(ComponentMask::INVENTORY))
+            && let Some(clocks) = &mut self.core_clocks
+        {
+            clocks.sync(snap, cx);
         }
         if mask.contains(ComponentMask::HEALTH) {
             let state = health_state(snap);

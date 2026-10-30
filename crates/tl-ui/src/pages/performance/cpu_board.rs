@@ -173,6 +173,11 @@ impl CpuBoard {
         self.bars.borrow()
     }
 
+    /// Calls `sink` with the CPU id of the row under the pointer (tasklens-o55.57).
+    pub fn set_row_hover(&self, sink: impl Fn(Option<usize>, &mut App) + 'static) {
+        self.bars.borrow_mut().set_hover_sink(sink);
+    }
+
     /// One sparkline per logical CPU.
     pub fn core_sparks(&self) -> &[Entity<ChartView>] {
         &self.sparks
