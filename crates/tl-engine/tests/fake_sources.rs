@@ -472,7 +472,7 @@ pub fn root_endpoints(
     let (control, _) = watch::channel(WorkerControl::default());
     let (wake_tx, wake_rx) = async_channel::bounded(1);
     let (events_tx, events_rx) = async_channel::bounded(256);
-    let (requests_tx, requests_rx) = async_channel::bounded(256);
+    let (requests_tx, requests_rx) = async_channel::unbounded();
     let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(FAKE_BOOT, 0)));
     let ep = RootEndpoints {
         msgs,

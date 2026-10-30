@@ -42,10 +42,12 @@
 //! slot that left the shared data (a detail target or disk gone, the handle search cleared)
 //! shows nothing, and is forgotten when it has no active request.
 //!
-//! The local session's request channel comes from `Engine::start` and is read through
-//! `EngineHandle::request_events`. A linked session ends when its channel is full; the local one
-//! cannot end, so a full local channel drops the event and counts it in
-//! `ClientSession::dropped`.
+//! An end is never dropped for a session that stays open. The local session's request channel
+//! comes from `Engine::start`, is unbounded and is read through `EngineHandle::request_events`;
+//! admission bounds what it holds (`ACTIVE_MAX` per kind, so 256 ends at most, actions
+//! included). Its event is only lost when the UI dropped the receiver, which is counted in
+//! `ClientSession::dropped`. A linked session's channel comes from the server and should be
+//! unbounded too; when it is full or closed, the session ends.
 //!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
 //! in the reducer, so a reducer restart drops every session but the local one.
@@ -89,36 +91,36 @@ pub const SESSION_BITS: [ComponentMask; 4] = [
 /// with `RequestEnd::Busy` until one of them ends.
 pub const ACTIVE_MAX: usize = 64;
 
-/// The client-chosen ids the reducer maps into the engine-wide namespace.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IdKind {
-    /// `ScanId` of `StringScan` and `CancelStringScan`.
-    Scan,
-    /// `SearchId` of `HandleSearch` and `CancelHandleSearch`.
-    Search,
-    /// `seq` of `DeviceCommand::Eject`.
-    Eject,
+pub use tl_model::request::{IdKind, RequestEnd, RequestEvent};
+
+/// The kinds the reducer maps here. Actions keep no mapping: the gate routes them.
+const MAPPED: [IdKind; 3] = [IdKind::Scan, IdKind::Search, IdKind::Eject];
+
+/// The place of `kind` in `ClientSession::requests`. The action list stays empty.
+fn index(kind: IdKind) -> usize {
+    match kind {
+        IdKind::Scan => 0,
+        IdKind::Search => 1,
+        IdKind::Eject => 2,
+        IdKind::Action => 3,
+    }
 }
 
-impl IdKind {
-    fn index(self) -> usize {
-        self as usize
+/// The worker whose queue the requests of `kind` go to. `None` for actions.
+fn source(kind: IdKind) -> Option<SourceId> {
+    match kind {
+        IdKind::Scan | IdKind::Search => Some(SourceId::ProcessDetail),
+        IdKind::Eject => Some(SourceId::Udisks),
+        IdKind::Action => None,
     }
+}
 
-    /// The worker whose queue the requests of this kind go to.
-    fn source(self) -> SourceId {
-        match self {
-            IdKind::Scan | IdKind::Search => SourceId::ProcessDetail,
-            IdKind::Eject => SourceId::Udisks,
-        }
-    }
-
-    /// The snapshot part that shows requests of this kind.
-    fn view_bit(self) -> ComponentMask {
-        match self {
-            IdKind::Scan | IdKind::Search => ComponentMask::DETAILS,
-            IdKind::Eject => ComponentMask::DEVICE_DETAILS,
-        }
+/// The snapshot part that shows requests of `kind`. None for actions.
+fn view_bit(kind: IdKind) -> ComponentMask {
+    match kind {
+        IdKind::Scan | IdKind::Search => ComponentMask::DETAILS,
+        IdKind::Eject => ComponentMask::DEVICE_DETAILS,
+        IdKind::Action => ComponentMask::NONE,
     }
 }
 
@@ -142,32 +144,6 @@ impl IdSlot {
             IdSlot::Eject(_) => IdKind::Eject,
         }
     }
-}
-
-/// How a request ended.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum RequestEnd {
-    /// A scan `Finished`, `StoppedLimit` or `StoppedExited`; a handle search or eject `Done`.
-    Done,
-    /// A scan or handle search `Failed`; an eject `Failed` or `Blocked`.
-    Failed,
-    /// A scan `Cancelled`, a handle search `Stopped`, or the worker dropped the request or ran a
-    /// newer one in its slot instead.
-    Cancelled,
-    /// Refused at admission: `ACTIVE_MAX` requests of its kind were active.
-    Busy,
-    /// The engine lost it: its command never reached a worker, or the worker that claimed it
-    /// stopped.
-    Lost,
-}
-
-/// The one end of one request, sent on its session's request channel.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RequestEvent {
-    pub kind: IdKind,
-    /// The session's own id: `ScanId`, `SearchId` or eject `seq`.
-    pub id: u64,
-    pub end: RequestEnd,
 }
 
 /// A worker's report of one request, as the shared data shows it.
@@ -313,8 +289,9 @@ pub struct SessionLink {
     pub wake_tx: async_channel::Sender<()>,
     /// The session's action events, with its own action ids.
     pub events_tx: async_channel::Sender<ActionEvent>,
-    /// The end of each of the session's scans, handle searches and ejects, with its own ids.
-    /// A full or closed channel ends the session.
+    /// The end of each of the session's actions, scans, handle searches and ejects, with its
+    /// own ids. Make it unbounded: admission bounds it. A full or closed channel ends the
+    /// session.
     pub requests_tx: async_channel::Sender<RequestEvent>,
 }
 
@@ -377,8 +354,8 @@ pub struct ClientSession {
     /// ejects, under its own ids. The header is the shared one.
     details: Arc<DetailsSnapshot>,
     device_details: Arc<DeviceDetailsSnapshot>,
-    /// The active requests, in `IdKind` order, oldest first.
-    requests: [Vec<Request>; 3],
+    /// The active requests by `index` of their kind, oldest first.
+    requests: [Vec<Request>; 4],
     /// Per slot, the newest request the session sent there.
     shown: Vec<Shown>,
     /// The shared disk list and the session's view of it, while no eject view changed.
@@ -387,7 +364,7 @@ pub struct ClientSession {
     requests_tx: Option<async_channel::Sender<RequestEvent>>,
     /// The request channel was full or closed: the session ends at the next publish.
     broken: bool,
-    /// Events the local session's full or closed request channel did not take.
+    /// Events the local session's request channel did not take: it was closed or not set.
     dropped: u64,
     /// Parts this session rebuilt since its last publish, plus `DETAILS` and `DEVICE_DETAILS`
     /// when its views of those must be built.
@@ -513,7 +490,7 @@ impl ClientSession {
 
     /// The engine id of the session's newest active request with `client` id of `kind`.
     pub fn engine_id(&self, kind: IdKind, client: u64) -> Option<u64> {
-        self.requests[kind.index()]
+        self.requests[index(kind)]
             .iter()
             .rev()
             .find(|r| r.client == client)
@@ -522,7 +499,7 @@ impl ClientSession {
 
     /// The session's own id for active request `engine` of `kind`.
     pub fn client_id(&self, kind: IdKind, engine: u64) -> Option<u64> {
-        self.requests[kind.index()]
+        self.requests[index(kind)]
             .iter()
             .find(|r| r.engine == engine)
             .map(|r| r.client)
@@ -530,7 +507,7 @@ impl ClientSession {
 
     /// The session's active requests of `kind`, each with its mapping.
     pub fn active(&self, kind: IdKind) -> usize {
-        self.requests[kind.index()].len()
+        self.requests[index(kind)].len()
     }
 
     /// The slots of `kind` the session shows a request in, active or ended.
@@ -539,20 +516,27 @@ impl ClientSession {
     }
 
     fn is_active(&self, kind: IdKind, engine: u64) -> bool {
-        self.requests[kind.index()]
+        self.requests[index(kind)]
             .iter()
             .any(|r| r.engine == engine)
     }
 
-    /// Events the local session's request channel did not take because it was full, closed or
-    /// not set. Always 0 for a linked session, which ends instead.
+    /// Events the local session's request channel did not take because the UI dropped its
+    /// receiver or no channel was set. Always 0 for a linked session, which ends instead.
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
 
-    /// Sends `event` on the request channel. A full or closed channel ends a linked session at
-    /// the next publish, as a full action event queue does (ADR-018). The local session cannot
-    /// end: its event is dropped, logged and counted.
+    /// The channel the session's request ends go to. `None` for the local session until
+    /// `ClientSessions::set_local_requests`.
+    pub fn requests_tx(&self) -> Option<&async_channel::Sender<RequestEvent>> {
+        self.requests_tx.as_ref()
+    }
+
+    /// Sends `event` on the request channel. The local channel is unbounded, so it only refuses
+    /// when the UI is gone; the event is then dropped, logged and counted. A full or closed
+    /// linked channel ends the session at the next publish, as a full action event queue does
+    /// (ADR-018).
     fn send(&mut self, event: RequestEvent) {
         if self.broken {
             return;
@@ -568,7 +552,7 @@ impl ClientSession {
                 self.broken = true;
             } else {
                 self.dropped += 1;
-                tracing::warn!(target: "tasklens::engine", ?event, full = e.is_full(), "local request channel full or closed: event dropped");
+                tracing::warn!(target: "tasklens::engine", ?event, full = e.is_full(), "local request channel refused the event: event dropped");
             }
         }
     }
@@ -577,7 +561,7 @@ impl ClientSession {
     /// then shows `last` when the request is still the newest there, else it keeps what it
     /// shows. False when the session does not have the request.
     fn finish(&mut self, kind: IdKind, engine: u64, end: RequestEnd, last: Option<View>) -> bool {
-        let list = &mut self.requests[kind.index()];
+        let list = &mut self.requests[index(kind)];
         let Some(at) = list.iter().position(|r| r.engine == engine) else {
             return false;
         };
@@ -600,7 +584,7 @@ impl ClientSession {
     }
 
     fn view_changed(&mut self, kind: IdKind) {
-        self.dirty |= kind.view_bit();
+        self.dirty |= view_bit(kind);
         if kind == IdKind::Eject {
             self.disks = None;
         }
@@ -612,7 +596,7 @@ impl ClientSession {
         let mut changed = Vec::new();
         for (i, shown) in self.shown.iter().enumerate() {
             let kind = shown.slot.kind();
-            if !shared.contains(kind.view_bit()) || !self.is_active(kind, shown.engine) {
+            if !shared.contains(view_bit(kind)) || !self.is_active(kind, shown.engine) {
                 continue;
             }
             let next = match &shown.slot {
@@ -920,7 +904,7 @@ impl ClientSessions {
         }
         let engine = self.next_engine_id();
         let session = &mut self.sessions[index];
-        session.requests[kind.index()].push(Request {
+        session.requests[index(kind)].push(Request {
             client,
             engine,
             slot: slot.clone(),
@@ -946,7 +930,7 @@ impl ClientSessions {
     /// Records that request `engine` of `kind` went to the worker queue as `seq`.
     pub fn queued(&mut self, kind: IdKind, engine: u64, seq: u64) {
         let request = self.sessions.iter_mut().find_map(|s| {
-            s.requests[kind.index()]
+            s.requests[index(kind)]
                 .iter_mut()
                 .find(|r| r.engine == engine)
         });
@@ -983,7 +967,7 @@ impl ClientSessions {
         let older: Vec<u64> = self
             .sessions
             .iter()
-            .flat_map(|s| s.requests[kind.index()].iter())
+            .flat_map(|s| s.requests[index(kind)].iter())
             .filter(|r| r.engine < engine && r.slot == *slot)
             .map(|r| r.engine)
             .collect();
@@ -1008,7 +992,7 @@ impl ClientSessions {
     pub fn restarted(&mut self, kinds: &[IdKind], through: u64) {
         for s in &mut self.sessions {
             for &kind in kinds {
-                let lost: Vec<u64> = s.requests[kind.index()]
+                let lost: Vec<u64> = s.requests[index(kind)]
                     .iter()
                     .filter(|r| r.queued != 0 && r.queued <= through)
                     .map(|r| r.engine)
@@ -1027,14 +1011,14 @@ impl ClientSessions {
     /// are skipped with it. A command a worker claimed died with that worker.
     pub fn reducer_stopped(&mut self, progress: &CommandProgress) {
         let local = &mut self.sessions[0];
-        for kind in [IdKind::Scan, IdKind::Search, IdKind::Eject] {
-            let ended: Vec<(u64, u64)> = local.requests[kind.index()]
+        for kind in MAPPED {
+            let ended: Vec<(u64, u64)> = local.requests[index(kind)]
                 .iter()
                 .map(|r| (r.engine, r.queued))
                 .collect();
             for (engine, queued) in ended {
-                if queued != 0 {
-                    progress.evict(kind.source(), queued);
+                if let Some(source) = source(kind).filter(|_| queued != 0) {
+                    progress.evict(source, queued);
                 }
                 local.finish(kind, engine, RequestEnd::Lost, None);
             }

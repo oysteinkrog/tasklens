@@ -9,6 +9,7 @@ use crate::actions::ActionEvent;
 use crate::command::{Command, CommandError};
 use crate::demand::Demand;
 use crate::journal::{JournalHandle, JournalQuery};
+use crate::request::RequestEvent;
 use crate::settings::EngineSettings;
 use crate::snapshot::Snapshot;
 
@@ -19,6 +20,13 @@ pub trait EngineClient: Send + Sync + 'static {
     fn wake(&self) -> async_channel::Receiver<()>;
     /// Ordered action events. Exactly one UI task calls recv on it.
     fn action_events(&self) -> async_channel::Receiver<ActionEvent>;
+    /// The one end of each action, scan, handle search and eject, in order (ADR-018). Exactly
+    /// one UI task calls recv on it. The engine's channel is unbounded, so an end is never
+    /// dropped. The default is a channel that is already closed: a client with no engine behind
+    /// it ends no request.
+    fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
+        async_channel::unbounded().1
+    }
     /// Replace demand. Never blocks. Last value wins.
     fn set_demand(&self, demand: Demand);
     /// Replace engine settings. Never blocks. Last value wins.
@@ -96,6 +104,12 @@ mod tests {
         let client = NullClient::new();
         assert_eq!(client.latest().sequence, 0);
         assert_eq!(client.latest().sequence, 0);
+    }
+
+    #[test]
+    fn default_request_events_are_closed() {
+        let client = NullClient::new();
+        assert!(client.request_events().is_closed());
     }
 
     #[test]

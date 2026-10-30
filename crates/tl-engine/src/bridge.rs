@@ -19,13 +19,13 @@ use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::history::RecordSink;
 use tl_model::journal::{JournalError, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{ComponentHeader, Snapshot, WindowsSnapshot};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
 use crate::EngineError;
-use crate::client_session::RequestEvent;
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
 use crate::helper::LinkEnv;
@@ -37,8 +37,6 @@ use crate::workers::{WorkerSpec, workers_for};
 
 /// Capacity of the action event channel (ADR-005).
 pub const EVENTS_CAPACITY: usize = 256;
-/// Capacity of the local session's request event channel, as the action event channel.
-pub const REQUESTS_CAPACITY: usize = 256;
 /// Capacity of the command and update queue (ADR-005).
 pub const MSGS_CAPACITY: usize = 256;
 /// How long `shutdown` waits for the root region to drain (ADR-004 step 2).
@@ -330,17 +328,6 @@ impl EngineHandle {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The end of each of the local session's scans, handle searches and ejects, in order, with
-    /// the window's own ids (ADR-018). Exactly one UI task calls recv on it. The engine drops an
-    /// event while the channel is full (`REQUESTS_CAPACITY`) and logs it.
-    pub fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
-        match &*self.links() {
-            Some(links) => links.requests_rx.clone(),
-            // After `shutdown`: a receiver whose sender is already gone.
-            None => async_channel::bounded(1).1,
-        }
-    }
-
     /// Stops the engine in the five ADR-004 steps and consumes the handle. Call it on the main
     /// thread after GPUI has stopped (ADR-010). Other `EngineHandle` clones may stay alive: GPUI
     /// never drops its app state, so `tl-app` cannot drop the UI's clone. They see a stopped
@@ -452,7 +439,8 @@ impl Engine {
 
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
-        let (requests_tx, requests_rx) = async_channel::bounded::<RequestEvent>(REQUESTS_CAPACITY);
+        // Unbounded: an end is never dropped, and admission bounds how many are outstanding.
+        let (requests_tx, requests_rx) = async_channel::unbounded::<RequestEvent>();
         let (msgs_tx, msgs_rx) = mpsc::channel::<EngineMsg>(MSGS_CAPACITY);
         let (demand_tx, demand_rx) = watch::channel(Demand::default());
         let (settings_tx, settings_rx) = watch::channel(EngineSettings::default());
@@ -563,6 +551,16 @@ impl EngineClient for EngineHandle {
         }
     }
 
+    /// The local session's channel, which `ClientSessions::set_local_requests` gives every
+    /// reducer.
+    fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
+        match &*self.links() {
+            Some(links) => links.requests_rx.clone(),
+            // After `shutdown`: a receiver whose sender is already gone.
+            None => async_channel::unbounded().1,
+        }
+    }
+
     fn set_demand(&self, demand: Demand) {
         let mut last = self
             .inner
@@ -645,7 +643,7 @@ mod tests {
         let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(BootId(0), 0)));
         let (_wake_tx, wake_rx) = async_channel::bounded(1);
         let (_events_tx, events_rx) = async_channel::bounded(256);
-        let (_requests_tx, requests_rx) = async_channel::bounded(REQUESTS_CAPACITY);
+        let (_requests_tx, requests_rx) = async_channel::unbounded();
         let (demand_tx, demand_rx) = watch::channel(Demand::default());
         let (settings_tx, _settings_rx) = watch::channel(EngineSettings::default());
         let (msgs_tx, msgs_rx) = mpsc::channel(QUEUE);
