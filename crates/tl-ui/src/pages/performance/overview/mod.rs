@@ -17,8 +17,8 @@
 //! splitters resize only in Edit Layout (D-033).
 //!
 //! [`range`] is the time range (UI-PRF-055): the switch in the header, the demand for the
-//! device metric history, and the min, avg and peak line and time axis start of each box, which
-//! the page works out from the snapshot and hands to the boxes.
+//! device metric history, and the min, avg and peak text of each box, which the page works out
+//! from the snapshot and hands to the boxes.
 //!
 //! [`timeline`] is the 24-hour timeline box (UI-PRF-057). A click on it can hold the page at a
 //! time; while held, the page asks for every range at that time and its header shows "Back to
@@ -87,7 +87,6 @@ use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{NetFormat, ValueFormat, format_value};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
@@ -108,9 +107,6 @@ const KEY_TITLE: &str = "perf-overview-title";
 
 /// The debug selector of the Overview header row that holds the range switch.
 pub const RANGE_HEADER_ID: &str = "perf-overview-range-header";
-
-/// The debug selector of the layout-grid icon before the Overview page title.
-pub const TITLE_ICON_ID: &str = "perf-overview-title-icon";
 
 /// How long the pointer rests on a gap before its accent line shows.
 pub const SPLITTER_HOVER_DELAY: Duration = Duration::from_millis(150);
@@ -252,11 +248,8 @@ pub struct OverviewPage {
     bar_on_overview: bool,
     /// `history.device_metrics`: with it off the range switches disable 24 h and 7 d.
     history_kept: bool,
-    /// The words of the range text: "min { $min }  avg { $avg }  peak { $peak }", "since
-    /// { $time }" and the time axis start of each range.
+    /// The words of the range text: "min { $min }  avg { $avg }  peak { $peak }".
     figures_words: Template,
-    since_words: Template,
-    ago_words: [SharedString; 5],
     _subs: SmallVec<[Subscription; 4]>,
     /// Window focus loss ends a drag, for the window of the last render.
     _activation: Option<Subscription>,
@@ -399,8 +392,6 @@ impl OverviewPage {
             bar_on_overview: status_bar::placement(cx) == StatusBarPlacement::Overview,
             history_kept: range::history_kept(cx),
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
-            since_words: Template::new(cx, "perf-overview-since", &["time"]),
-            ago_words: range::ago_words(cx),
             _subs: subs,
             _activation: None,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -651,22 +642,14 @@ impl OverviewPage {
         }
     }
 
-    /// Works out each device box's min, avg and peak line and the time axis start for the range,
-    /// and hands them to the boxes, which notify only when theirs changed (UI-PRF-055). The main
-    /// metric is CPU total, memory in use, the first GPU's utilization, the active time of the
-    /// busiest disk and the total throughput of the engine's aggregate of the counted interfaces,
-    /// the set the Network box charts.
+    /// Works out each device box's min, avg and peak text for the range, and hands it to the
+    /// boxes, which notify only when theirs changed (UI-PRF-055). The main metric is CPU total,
+    /// memory in use, the first GPU's utilization, the active time of the busiest disk and the
+    /// total throughput of the engine's aggregate of the counted interfaces, the set the Network
+    /// box charts.
     fn sync_range(&mut self, cx: &mut Context<Self>) {
         let snap = std::sync::Arc::clone(self.hub.read(cx).current());
         let range = self.range;
-        let now = timeline::now_realtime_ns();
-        let axis_start = range::axis_start(
-            range,
-            &snap.device_history,
-            now,
-            &self.ago_words,
-            &self.since_words,
-        );
         let id = |device, metric| SeriesId { device, metric };
         let idx = |identity| snap.devices.find(&identity).map(|e| e.idx);
         // Held at a time, the figures wait for the history's answer and never read live series.
@@ -683,10 +666,7 @@ impl OverviewPage {
             }
         };
         let words = &self.figures_words;
-        let text = |figures| RangeText {
-            figures,
-            axis_start: axis_start.clone(),
-        };
+        let text = |figures| RangeText { figures };
         let pct = |f| range::figures_text(words, f, range::whole_percent);
         let cpu =
             idx(DeviceIdentity::CpuPackage).and_then(|d| figures(&[id(d, MetricId::CPU_TOTAL)]));
@@ -1032,33 +1012,12 @@ impl OverviewPage {
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }
 
-    /// The Overview header: the page title, and the time range switch at its right end
-    /// (UI-PRF-055). While the status bar is on the Overview the bar carries the switch, so the
-    /// page shows one switch, not two; the title stays.
-    fn range_header(&self, cx: &App) -> AnyElement {
-        let m = metrics(cx);
-        let theme = current(cx);
-        // The page title at the left, with the Lucide layout-grid icon in `text_secondary`.
-        let title = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .gap(m.sp[3])
-            .child(
-                div()
-                    .debug_selector(|| TITLE_ICON_ID.into())
-                    .flex_none()
-                    .child(icon(TlIcon::LayoutGrid, m.icon.lg, theme.text_secondary)),
-            )
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .text_color(theme.text_primary)
-                    .child(self.header.0.clone()),
-            );
+    /// The Overview header row: the time range switch while the status bar does not carry it
+    /// (UI-PRF-055), and "Back to live" while held at a time (UI-PRF-057), at the right end.
+    /// The page has no title row: the sidebar names the page (tasklens-o55.54). `None` when the
+    /// row would be empty, so the boxes start right under the top strip.
+    fn range_header(&self, cx: &App) -> Option<AnyElement> {
         let switch = (!self.bar_on_overview).then(|| range::range_switch(range::HEADER_SWITCH, cx));
-        // UI-PRF-057: while held at a time, "Back to live" ends the pause.
         let live = self.paused.is_some().then(|| {
             div()
                 .debug_selector(|| timeline::BACK_TO_LIVE_ID.into())
@@ -1069,27 +1028,26 @@ impl OverviewPage {
                         .on_click(|_, _, cx| timeline::set_paused(None, cx)),
                 )
         });
-        let right = div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .gap(m.sp[4])
-            .children(live)
-            .children(switch);
-        div()
-            .debug_selector(|| RANGE_HEADER_ID.into())
-            .flex()
-            .flex_row()
-            .flex_none()
-            .justify_between()
-            .items_center()
-            .w_full()
-            .px(m.sp[5])
-            .pt(m.sp[4])
-            .child(title)
-            .child(right)
-            .into_any_element()
+        if switch.is_none() && live.is_none() {
+            return None;
+        }
+        let m = metrics(cx);
+        Some(
+            div()
+                .debug_selector(|| RANGE_HEADER_ID.into())
+                .flex()
+                .flex_row()
+                .flex_none()
+                .justify_end()
+                .items_center()
+                .gap(m.sp[4])
+                .w_full()
+                .px(m.sp[5])
+                .pt(m.sp[4])
+                .children(live)
+                .children(switch)
+                .into_any_element(),
+        )
     }
 
     /// The box view of `kind`, cached so it re-renders only for its own changes.
@@ -1377,7 +1335,7 @@ impl Render for OverviewPage {
         } else {
             root
         };
-        let root = root.child(header).children(toolbar).child(body);
+        let root = root.children(header).children(toolbar).child(body);
         Self::with_actions(root, cx).into_any_element()
     }
 }

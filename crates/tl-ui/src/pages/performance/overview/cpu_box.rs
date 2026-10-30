@@ -388,7 +388,7 @@ pub(super) fn value_text(validity: Validity, format: impl FnOnce(&mut String)) -
 
 /// The CPU box.
 pub struct CpuBox {
-    /// The range figures and time axis start the page gives (UI-PRF-055).
+    /// The range figures the page gives (UI-PRF-055).
     range_text: RangeText,
     hub: Entity<SnapshotHub>,
     cpu: DeviceIdx,
@@ -677,7 +677,7 @@ impl CpuBox {
         self.bars.borrow().copy_text(out);
     }
 
-    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// Takes the range figures the page worked out (UI-PRF-055). Notifies
     /// only when they changed.
     pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
         if self.range_text != text {
@@ -686,7 +686,7 @@ impl CpuBox {
         }
     }
 
-    /// The range figures and time axis start the box shows.
+    /// The range figures the box shows.
     pub fn range_text(&self) -> &RangeText {
         &self.range_text
     }
@@ -938,8 +938,8 @@ impl CpuBox {
     fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
         let spec = total_spec(self.cpu, &self.settings, &theme);
-        // The box frame draws the one time axis, so the chart keeps no range caption, as
-        // `box_chart` set it up.
+        // The x ticks give the range, so the chart keeps no range caption, as `box_chart` set it
+        // up.
         let labels = total_labels(SharedString::default(), self.settings.kernel, cx);
         self.total.update(cx, |v, cx| {
             v.set_spec(spec, cx);
@@ -1209,7 +1209,7 @@ impl Render for CpuBox {
                 let share = self.split(&m);
                 let frame = div().flex().size_full().gap(core_gutter(&m));
                 // The chart part gives way when the body is smaller than its share, so the rows
-                // never push it into the time axis.
+                // never push it past the bottom of the body.
                 let (frame, chart_part, rows_part) = if self.side {
                     (
                         frame.flex_row(),

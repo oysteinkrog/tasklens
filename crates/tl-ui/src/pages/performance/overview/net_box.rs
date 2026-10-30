@@ -448,7 +448,7 @@ struct AdapterCell {
 
 /// The Network box.
 pub struct NetBox {
-    /// The range figures and time axis start the page gives (UI-PRF-055).
+    /// The range figures the page gives (UI-PRF-055).
     range_text: RangeText,
     hub: Entity<SnapshotHub>,
     down: Entity<ChartView>,
@@ -819,7 +819,7 @@ impl NetBox {
         changed
     }
 
-    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// Takes the range figures the page worked out (UI-PRF-055). Notifies
     /// only when they changed.
     pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
         if self.range_text != text {
@@ -828,7 +828,7 @@ impl NetBox {
         }
     }
 
-    /// The range figures and time axis start the box shows.
+    /// The range figures the box shows.
     pub fn range_text(&self) -> &RangeText {
         &self.range_text
     }
@@ -1287,7 +1287,7 @@ impl NetBox {
             .flex_col()
             .size_full()
             .gap(m.sp[5])
-            // Clipped, so a box too low for both parts never draws over its time axis. It
+            // Clipped, so a box too low for both parts never draws below its body. It
             // gives way when the body is lower than its share.
             .child(
                 div()

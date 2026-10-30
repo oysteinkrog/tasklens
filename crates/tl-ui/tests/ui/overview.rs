@@ -1161,11 +1161,11 @@ mod boxes {
         assert_eq!((layout.cols, layout.rows), (2, 16));
     }
 
-    /// crw.74: stacked below 560 px, the last core meter keeps at least 4 px above the "Now"
-    /// label under the box.
+    /// crw.74: stacked below 560 px, the last core meter ends inside the box body, above the
+    /// bottom padding (tasklens-o55.54: the box has no "Now" label under it).
     #[gpui_kit::test]
     fn overview_stacked_core_meters_keep_gap_above_now(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::parts::{take_meter_quads, time_axis_label_id};
+        use tl_ui::pages::performance::overview::parts::{body_id, take_meter_quads};
         const N: usize = 8;
         let mut r = open_sized(cx, DeviceIdx(1), N as u16, (400., 516.));
         take_meter_quads();
@@ -1173,18 +1173,22 @@ mod boxes {
         r.publish_core_series(&pct, &[]);
         draw(r.vcx);
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
-        let id: &'static str = Box::leak(time_axis_label_id(CPU_BOX_ID, "end").into_boxed_str());
-        let now = r.vcx.debug_bounds(id).expect("Now label");
+        let id: &'static str = Box::leak(body_id(CPU_BOX_ID).into_boxed_str());
+        let body = r.vcx.debug_bounds(id).expect("body");
         let last = take_meter_quads()
             .into_iter()
-            .filter(|q| frame.contains(&q.origin) && q.bottom() <= now.top())
+            .filter(|q| frame.contains(&q.origin))
             .map(|q| q.bottom())
             .fold(px(0.), |a, b| a.max(b));
         assert!(last > px(0.), "core meters drawn");
         assert!(
-            now.top() - last >= px(4.),
-            "gap above Now: {:?}",
-            now.top() - last
+            last <= body.bottom(),
+            "last meter {last:?} inside the body {body:?}"
+        );
+        assert!(
+            frame.bottom() - last >= px(4.),
+            "gap above the bottom border: {:?}",
+            frame.bottom() - last
         );
     }
 
@@ -1582,9 +1586,7 @@ mod bottom {
     };
     use tl_ui::pages::performance::overview::layout::Arrange;
     use tl_ui::pages::performance::overview::net_box::NetBox;
-    use tl_ui::pages::performance::overview::parts::{
-        FIGURES_ROW, GridFit, TITLE_TOP, fill_grid, time_axis_id,
-    };
+    use tl_ui::pages::performance::overview::parts::{BOX_CHROME, GridFit, body_id, fill_grid};
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -1925,6 +1927,11 @@ mod bottom {
         s
     }
 
+    /// The box height that leaves a body of `body` px under the title line.
+    fn box_h(body: f32) -> f32 {
+        body + BOX_CHROME
+    }
+
     /// The height of `n` body rows: 18 px each, 4 px apart.
     fn rows_h(n: usize) -> f32 {
         n as f32 * 18. + (n - 1) as f32 * 4.
@@ -1968,9 +1975,9 @@ mod bottom {
         let (gpu, _, _) = r.boxes();
         let shown = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).shown());
         assert_eq!(shown(&mut r), 2);
-        // 344 px, the default 1200 × 900 row: a 284 px body is below the 306 px two need.
-        r.heights(344., 200.);
-        assert_eq!(shown(&mut r), 1, "344 px: one section");
+        // A 300 px body is below the 306 px two need.
+        r.heights(box_h(300.), 200.);
+        assert_eq!(shown(&mut r), 1, "300 px body: one section");
         r.heights(150., 200.);
         assert_eq!(shown(&mut r), 1, "150 px: one section");
         r.heights(450., 200.);
@@ -1987,7 +1994,7 @@ mod bottom {
             cx,
             devices("gpu", &[10, 11]),
             Vec::new(),
-            (410. + FIGURES_ROW + TITLE_TOP, 200.),
+            (box_h(350.), 200.),
         );
         r.system(|s| {
             let mut t11 = gpu_engines(false);
@@ -2003,22 +2010,22 @@ mod bottom {
             })
         };
         assert_eq!(state(&mut r), (2, false), "410 px: two full sections");
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        let axis = r.bounds(body_id(GPU_BOX_ID));
         for i in 0..2 {
             let rows = r.bounds(rows_id(i));
             assert_eq!(f32::from(rows.size.height), rows_h(5), "section {i}");
             assert!(
-                rows.bottom() <= axis.top(),
-                "section {i} rows end at {:?}, the time axis starts at {:?}",
+                rows.bottom() <= axis.bottom(),
+                "section {i} rows end at {:?}, the body ends at {:?}",
                 rows.bottom(),
-                axis.top()
+                axis.bottom()
             );
         }
         let first = r.bounds(rows_id(0));
         let second = r.bounds(engine_row_id(1, "gpu"));
         assert!(first.bottom() < second.top(), "{first:?} above {second:?}");
 
-        r.heights(409. + FIGURES_ROW + TITLE_TOP, 200.);
+        r.heights(box_h(349.), 200.);
         assert_eq!(
             state(&mut r),
             (1, false),
@@ -2028,33 +2035,38 @@ mod bottom {
         assert_eq!(f32::from(rows.size.height), rows_h(6));
     }
 
-    /// The first GPU section's rows end above the time axis, and are `n` rows high.
+    /// The first GPU section's rows end inside the body, and are `n` rows high.
     fn assert_rows_above_axis(r: &mut Rig, n: usize, what: &str) {
         let rows = r.bounds(rows_id(0));
-        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+        let axis = r.bounds(body_id(GPU_BOX_ID));
         assert!(
-            rows.bottom() <= axis.top(),
-            "{what}: rows end at {:?}, the time axis starts at {:?}",
+            rows.bottom() <= axis.bottom(),
+            "{what}: rows end at {:?}, the body ends at {:?}",
             rows.bottom(),
-            axis.top()
+            axis.bottom()
         );
         assert_eq!(f32::from(rows.size.height), rows_h(n), "{what}");
     }
 
     /// Two GPUs with 3 engines, VRAM and the temperature and power row (UI-PRF-019 GPU fit,
-    /// UI-PRF-059). The body is the box minus 68 px and minus 18 px for the range figures row.
+    /// UI-PRF-059). The body is the box minus the 38 px chrome (`BOX_CHROME`).
     /// The first section in full with the "+1 more" row needs 48 + 6 × 22 = 180 px, with its
     /// busiest engine and "+2 more engines" 158 px, and with "+3 more engines" 136 px.
-    /// - 220 px box, 134 px body: "+3 more engines", VRAM and "+1 more" (114 px); the
+    /// - 134 px body: "+3 more engines", VRAM and "+1 more" (114 px); the
     ///   temperature and power row gives way.
-    /// - 220 px plus the figures row, 152 px body: "+3 more engines", VRAM, temperature and
+    /// - 152 px body: "+3 more engines", VRAM, temperature and
     ///   power and "+1 more" (136 px).
     /// - 160 px body: the busiest engine and "+2 more engines" fit (158 px).
     /// - 100 px body, below the kind minimum: VRAM gives way too, so "+3 more engines" and
     ///   "+1 more" are 92 px.
     #[gpui_kit::test]
     fn gpu_box_min_height_shows_busiest_engine(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        let mut r = open(
+            cx,
+            devices("gpu", &[10, 11]),
+            Vec::new(),
+            (box_h(134.), 200.),
+        );
         r.system(|s| {
             let mut t10 = gpu_engines(false);
             t10.dec_pct = Metric::valid(50.);
@@ -2085,15 +2097,19 @@ mod bottom {
         };
 
         let (fit, more, _, engines_more_all) = state(&mut r);
-        assert_eq!(fit, (1, true, false, 1), "220 px");
+        assert_eq!(fit, (1, true, false, 1), "134 px body");
         assert_eq!(
             (more.as_str(), engines_more_all.as_str()),
             ("+1 more", "+3 more engines")
         );
-        no_engine_rows(&mut r, "220 px");
-        assert_rows_above_axis(&mut r, 3, "220 px: \"+3 more engines\", VRAM, \"+1 more\"");
+        no_engine_rows(&mut r, "134 px body");
+        assert_rows_above_axis(
+            &mut r,
+            3,
+            "134 px body: \"+3 more engines\", VRAM, \"+1 more\"",
+        );
 
-        r.heights(220. + FIGURES_ROW, 200.);
+        r.heights(box_h(152.), 200.);
         assert_eq!(state(&mut r).0, (1, true, false, 0), "152 px body");
         no_engine_rows(&mut r, "152 px body");
         assert_rows_above_axis(
@@ -2102,7 +2118,7 @@ mod bottom {
             "152 px body: \"+3 more engines\", VRAM, temperature and power, \"+1 more\"",
         );
 
-        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        r.heights(box_h(160.), 200.);
         let (fit, more, engines_more, _) = state(&mut r);
         assert_eq!(fit, (1, true, true, 0), "160 px body");
         assert_eq!(
@@ -2126,19 +2142,19 @@ mod bottom {
              \"+1 more\"",
         );
 
-        r.heights(100. + 68. + FIGURES_ROW, 200.);
+        r.heights(box_h(100.), 200.);
         assert_eq!(state(&mut r).0, (1, true, false, 2), "100 px body");
         assert_rows_above_axis(&mut r, 2, "100 px body: \"+3 more engines\", \"+1 more\"");
     }
 
     /// One GPU with 3 engines, VRAM and the temperature and power row: 158 px in full, 136 px
     /// with the busiest engine and "+2 more engines", 114 px with "+3 more engines".
-    /// - 220 px box, 134 px body: "+3 more engines", VRAM, temperature and power.
-    /// - 220 px plus the figures row, 152 px body: the busiest engine and "+2 more engines".
+    /// - 134 px body: "+3 more engines", VRAM, temperature and power.
+    /// - 152 px body: the busiest engine and "+2 more engines".
     /// - 160 px body: every engine row.
     #[gpui_kit::test]
     fn gpu_box_one_gpu_min_height_whole_rows(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (220., 200.));
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (box_h(134.), 200.));
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_engines(false))]));
         draw(r.vcx);
         let (gpu, _, _) = r.boxes();
@@ -2148,14 +2164,14 @@ mod bottom {
                 (g.collapsed(), g.busiest_shown(), g.cut_rows())
             })
         };
-        assert_eq!(state(&mut r), (true, false, 0), "220 px");
-        assert_rows_above_axis(&mut r, 3, "220 px");
+        assert_eq!(state(&mut r), (true, false, 0), "134 px body");
+        assert_rows_above_axis(&mut r, 3, "134 px body");
 
-        r.heights(220. + FIGURES_ROW, 200.);
+        r.heights(box_h(152.), 200.);
         assert_eq!(state(&mut r), (true, true, 0), "152 px body");
         assert_rows_above_axis(&mut r, 4, "152 px body");
 
-        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        r.heights(box_h(160.), 200.);
         assert!(!state(&mut r).0, "a 160 px body: not collapsed");
         for key in ["gpu", "enc", "dec"] {
             assert!(
@@ -2170,12 +2186,17 @@ mod bottom {
     /// the temperature and power row: a GPU with two engines collapses too (UI-PRF-019 GPU
     /// fit). The first section in full with "+1 more" needs 48 + 5 × 22 = 158 px, with
     /// "+2 more engines" 136 px.
-    /// - 220 px box, 134 px body: "+2 more engines", VRAM and "+1 more".
+    /// - 134 px body: "+2 more engines", VRAM and "+1 more".
     /// - 152 px body: "+2 more engines", VRAM, temperature and power and "+1 more".
     /// - 160 px body: both engine rows.
     #[gpui_kit::test]
     fn gpu_box_two_engines_collapse(cx: &mut TestAppContext) {
-        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (220., 200.));
+        let mut r = open(
+            cx,
+            devices("gpu", &[10, 11]),
+            Vec::new(),
+            (box_h(134.), 200.),
+        );
         r.system(|s| {
             let mut t11 = gpu_engines(true);
             t11.device = DeviceIdx(11);
@@ -2195,20 +2216,20 @@ mod bottom {
         });
         assert_eq!((engines, more_all.as_str()), (2, "+2 more engines"));
 
-        assert_eq!(state(&mut r), (1, true, false, 1), "220 px");
+        assert_eq!(state(&mut r), (1, true, false, 1), "134 px body");
         for key in ["gpu", "enc"] {
             assert!(
                 r.vcx.debug_bounds(leak(engine_row_id(0, key))).is_none(),
-                "220 px: {key}"
+                "134 px body: {key}"
             );
         }
-        assert_rows_above_axis(&mut r, 3, "220 px");
+        assert_rows_above_axis(&mut r, 3, "134 px body");
 
-        r.heights(220. + FIGURES_ROW, 200.);
+        r.heights(box_h(152.), 200.);
         assert_eq!(state(&mut r), (1, true, false, 0), "152 px body");
         assert_rows_above_axis(&mut r, 4, "152 px body");
 
-        r.heights(220. + FIGURES_ROW + TITLE_TOP, 200.);
+        r.heights(box_h(160.), 200.);
         let (shown, collapsed, _, cut) = state(&mut r);
         assert_eq!((shown, collapsed, cut), (1, false, 0), "160 px body");
         for key in ["gpu", "enc"] {
@@ -2223,11 +2244,9 @@ mod bottom {
     /// Every GPU layout draws only whole rows, top first, at every body height (UI-PRF-019 GPU
     /// fit). The body steps from 0 to 300 px in 2 px steps, for 1 and 2 GPUs with 2 and 3
     /// engines, in each mode and Arrange choice. Every drawn row, chart, grid and cell ends at
-    /// or above the time axis.
+    /// or above the body's bottom.
     #[gpui_kit::test]
     fn gpu_box_whole_rows_at_every_height(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::parts::figures_id;
-
         let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (300., 200.));
         let (gpu, _, _) = r.boxes();
         let layouts = [
@@ -2274,14 +2293,9 @@ mod bottom {
                     for body in (0..=300).step_by(2) {
                         let body = body as f32;
                         let what = format!("{gpus} GPUs, {engines} engines, {mode} {arrange:?}");
-                        r.heights(body + 68. + FIGURES_ROW, 200.);
-                        let axis = r.bounds(time_axis_id(GPU_BOX_ID));
-                        let figures = r.bounds(figures_id(GPU_BOX_ID));
-                        assert_eq!(
-                            f32::from(axis.top() - figures.bottom()),
-                            body,
-                            "{what}: body"
-                        );
+                        r.heights(box_h(body), 200.);
+                        let axis = r.bounds(body_id(GPU_BOX_ID));
+                        assert_eq!(f32::from(axis.size.height), body, "{what}: body");
                         let mut ids = Vec::new();
                         for i in 0..2 {
                             ids.extend([rows_id(i), chart_id(i), grid_id(i), vram_id(i)]);
@@ -2304,11 +2318,11 @@ mod bottom {
                                 drawn += 1;
                             }
                             assert!(
-                                b.bottom() <= axis.top() + px(0.01),
-                                "{what}, {body} px body: {id} ends at {:?}, the time axis \
-                                 starts at {:?}",
+                                b.bottom() <= axis.bottom() + px(0.01),
+                                "{what}, {body} px body: {id} ends at {:?}, the body \
+                                 ends at {:?}",
                                 b.bottom(),
-                                axis.top()
+                                axis.bottom()
                             );
                         }
                         if body < 22. {
@@ -2717,9 +2731,9 @@ mod bottom {
         // The rows under the grid: the VRAM row, with "+n more engines" above it when `rows` is 2.
         let check_vram = |r: &mut Rig, grid: gpui_kit::Bounds<gpui_kit::Pixels>, rows: f32| {
             let vram = r.bounds(vram_id(0));
-            let axis = r.bounds(time_axis_id(GPU_BOX_ID));
+            let axis = r.bounds(body_id(GPU_BOX_ID));
             assert!(grid.bottom() <= vram.top(), "{grid:?} above {vram:?}");
-            assert!(vram.bottom() <= axis.top(), "{vram:?} above {axis:?}");
+            assert!(vram.bottom() <= axis.bottom(), "{vram:?} above {axis:?}");
             assert_eq!(f32::from(vram.size.height), 18. * rows + 4. * (rows - 1.));
         };
 
@@ -2758,10 +2772,10 @@ mod bottom {
             check_vram(&mut r, grid, 1.);
         }
 
-        // 500 × 180: the cells do not all fit. Only whole cells show, the rest join
-        // "+n more engines" and nothing scrolls (UI-PRF-059), in each Arrange choice.
+        // 500 wide with a 94 px body: the cells do not all fit. Only whole cells show, the rest
+        // join "+n more engines" and nothing scrolls (UI-PRF-059), in each Arrange choice.
         r.gpu_width(500.);
-        r.heights(180., 200.);
+        r.heights(box_h(94.), 200.);
         let (gpu, _, _) = r.boxes();
         for arrange in [Arrange::Auto, Arrange::Vertical, Arrange::Horizontal] {
             r.vcx
@@ -2978,17 +2992,12 @@ mod bottom {
         );
     }
 
-    /// crw.55: in a 160 px body (7 lines; the 220 px row minimum plus the range figures row) 2
-    /// of 3 sections expand, the busiest first; at 300 px all 3.
+    /// crw.55: in a 152 px body (7 lines) 2 of 3 sections expand, the busiest first; at 300 px
+    /// all 3.
     #[gpui_kit::test]
     fn disk_box_collapse_follows_activity(cx: &mut TestAppContext) {
         let idx = [20, 21, 22];
-        let mut r = open(
-            cx,
-            Vec::new(),
-            devices("disk", &idx),
-            (200., 220. + FIGURES_ROW),
-        );
+        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., box_h(152.)));
         r.system(|s| s.disks = active_disks(&idx, &[10., 80., 40.]));
         draw(r.vcx);
         assert_eq!(disk_state(&mut r), (3, vec![false, true, true]));
@@ -3014,12 +3023,7 @@ mod bottom {
     #[gpui_kit::test]
     fn disk_box_rows_fit_height(cx: &mut TestAppContext) {
         let idx: Vec<u16> = (0..10).map(|i| 200 + i).collect();
-        let mut r = open(
-            cx,
-            Vec::new(),
-            devices("disk", &idx),
-            (200., 600. + FIGURES_ROW),
-        );
+        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., box_h(532.)));
         let (_, disk, _) = r.boxes();
         let state = |r: &mut Rig| {
             r.vcx.update(|_, cx| {
@@ -3037,7 +3041,7 @@ mod bottom {
         // expanded sections.
         assert_eq!(state(&mut r), (8, 2, 8, 7, "+2 more".into()));
         // 200 px and the figures row: a 140 px body, 6 lines: 5 headers and "+5 more".
-        r.heights(200., 200. + FIGURES_ROW);
+        r.heights(200., box_h(132.));
         assert_eq!(state(&mut r), (8, 2, 5, 0, "+5 more".into()));
     }
 
@@ -3708,22 +3712,23 @@ mod page {
     #[gpui_kit::test]
     fn overview_places_boxes_grid_default(cx: &mut TestAppContext) {
         let r = open(cx, true, 1200., 900.);
-        // The page title row sits above the boxes, also with the status bar on the Overview.
-        let header = r.vcx.debug_bounds(RANGE_HEADER_ID).expect("title row");
-        let top = header.bottom();
+        // With the status bar on the Overview the page has no title row: the boxes start at
+        // the top (tasklens-o55.54).
+        assert!(
+            r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
+            "no title row"
+        );
         let want = place(
             &OverviewLayout::grid_default(),
             |_| true,
-            size(px(1200.), px(900.) - top),
+            size(px(1200.), px(900.)),
             1.,
             ROW_UNIT_DEFAULT,
         );
         assert_eq!(want.boxes.len(), 6, "five device boxes and the timeline");
         for p in &want.boxes {
             let got = r.vcx.debug_bounds(box_id(p.kind)).expect("box drawn");
-            let mut at = p.bounds;
-            at.origin.y += top;
-            assert_eq!(got, at, "{:?}", p.kind);
+            assert_eq!(got, p.bounds, "{:?}", p.kind);
         }
         assert!(box_id(BoxKind::Cpu).starts_with(BOX_ID_PREFIX));
         let placed = r.vcx.update(|_, cx| r.page.read(cx).placement().clone());
@@ -3737,8 +3742,8 @@ mod page {
             r.vcx.debug_bounds(box_id(BoxKind::Gpu)).is_none(),
             "no GPU box"
         );
-        // UI-PRF-056: the GPU cells stay empty; Disk and Net keep their columns.
-        for (kind, x, w) in [(BoxKind::Disk, 407., 386.), (BoxKind::Net, 799., 385.)] {
+        // tasklens-o55.54: Disk and Net share the GPU's columns and fill the row.
+        for (kind, x, w) in [(BoxKind::Disk, 16., 581.), (BoxKind::Net, 603., 581.)] {
             let b = r.vcx.debug_bounds(box_id(kind)).expect("box drawn");
             assert_eq!((b.left(), b.size.width), (px(x), px(w)), "{kind:?}");
         }
@@ -4743,13 +4748,13 @@ mod page {
     }
 
     /// crw.73: in `chart_engines` a drag far down stops where every engine row and the VRAM row
-    /// still end above the time axis.
+    /// still end inside the body.
     #[gpui_kit::test]
     fn overview_gpu_chart_engines_drag_keeps_rows(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::gpu_box::{
             GPU_BOX_ID, GPU_SPLITTER_ID, engine_row_id, rows_id,
         };
-        use tl_ui::pages::performance::overview::parts::time_axis_id;
+        use tl_ui::pages::performance::overview::parts::body_id;
         let mut r = open_rooted(cx, true, 1280., 800.);
         r.edit_layout();
         r.page_action(&PerfOverviewSetBoxMode {
@@ -4761,12 +4766,15 @@ mod page {
         r.move_to(point(at.x, px(5000.)));
         r.release(point(at.x, px(5000.)));
         draw(r.vcx);
-        let axis = r.bounds_of(time_axis_id(GPU_BOX_ID));
+        let axis = r.bounds_of(body_id(GPU_BOX_ID));
         let rows = r.bounds_of(rows_id(0));
-        assert!(rows.bottom() <= axis.top(), "{rows:?} above {axis:?}");
+        assert!(rows.bottom() <= axis.bottom(), "{rows:?} above {axis:?}");
         for key in ["gpu", "enc", "dec"] {
             let row = r.bounds_of(engine_row_id(0, key));
-            assert!(row.bottom() <= axis.top(), "{key} {row:?} above {axis:?}");
+            assert!(
+                row.bottom() <= axis.bottom(),
+                "{key} {row:?} above {axis:?}"
+            );
         }
         let split = r.layout().split(BoxKind::Gpu).expect("a split");
         assert!(split > 0.5, "the drag moved the split: {split}");
@@ -6558,8 +6566,8 @@ mod page {
         out
     }
 
-    /// UI-PRF-059: every box's title line sits inside the border, 8 px under the 1 px top border,
-    /// with the icon and title in it and the body below it. In Edit Layout mode the grip, gear
+    /// UI-PRF-059: every box's title line sits inside the border, 4 px under the 1 px top border
+    /// (tasklens-o55.54), with the icon, title and range figures in it and the body below it. In Edit Layout mode the grip, gear
     /// and Hide box button sit on that line.
     #[gpui_kit::test]
     fn overview_box_title_inside_border(cx: &mut TestAppContext) {
@@ -6573,7 +6581,7 @@ mod page {
             for (kind, frame, [row, name, figures]) in &boxes {
                 assert_eq!(
                     row.top() - frame.top(),
-                    px(9.),
+                    px(5.),
                     "{w}x{h} {kind:?}: {row:?} in {frame:?}"
                 );
                 assert_eq!(row.size.height, px(24.), "{w}x{h} {kind:?}");
@@ -6583,9 +6591,12 @@ mod page {
                         && name.left() >= frame.left() + px(1.),
                     "{w}x{h} {kind:?}: {name:?} in {row:?}"
                 );
+                // In the title line after the title, or left out below it when the line is
+                // too narrow.
                 assert!(
-                    figures.top() >= row.bottom(),
-                    "{w}x{h} {kind:?}: body {figures:?} below the title {row:?}"
+                    (figures.top() == row.top() && figures.left() > name.right())
+                        || figures.top() >= row.bottom(),
+                    "{w}x{h} {kind:?}: figures {figures:?} and the title {row:?}"
                 );
             }
             r.edit_layout();
@@ -6608,18 +6619,19 @@ mod page {
     }
 
     /// UI-PRF-059: the title line and the body are 12 px in from the left and the right border
-    /// of every box, and the body ends 12 px above the bottom border. A `disk_charts` list that
-    /// does not fit keeps no scrollbar space, so its cells end 12 px from the right border too.
+    /// of every box, and the body ends 6 px above the bottom border (tasklens-o55.54). A
+    /// `disk_charts` list that does not fit keeps no scrollbar space, so its cells end 12 px
+    /// from the right border too.
     #[gpui_kit::test]
     fn overview_box_padding_equal(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::disk_box::{DISK_BOX_ID, cell_id};
-        use tl_ui::pages::performance::overview::parts::{time_axis_id, title_row_id};
+        use tl_ui::pages::performance::overview::parts::{body_id, title_row_id};
         // The 1 px border and the 12 px padding.
         let inset = px(13.);
         for (w, h) in [(1920., 1200.), (1280., 800.)] {
             let mut r = open_rooted(cx, true, w, h);
             draw(r.vcx);
-            let boxes = box_parts(&mut r, [title_row_id, time_axis_id]);
+            let boxes = box_parts(&mut r, [title_row_id, body_id]);
             assert_eq!(boxes.len(), 5, "{w}x{h}: every device box drawn");
             for (kind, frame, [row, axis]) in &boxes {
                 for (part, b) in [("title", row), ("body", axis)] {
@@ -6636,7 +6648,7 @@ mod page {
                 }
                 assert_eq!(
                     frame.bottom() - axis.bottom(),
-                    inset,
+                    px(7.),
                     "{w}x{h} {kind:?} bottom: {axis:?} in {frame:?}"
                 );
             }
@@ -7086,10 +7098,9 @@ mod page {
         // Out of the mode, Esc goes to the global rule.
         r.vcx.simulate_keystrokes("escape");
         assert_eq!(r.escapes.get(), 1);
-        // The boxes are back under the page title row.
-        let header = r.vcx.debug_bounds(RANGE_HEADER_ID).expect("title row");
+        // The boxes are back at the top of the page, 8 px down.
         let cpu = r.vcx.debug_bounds(box_id(Cpu)).expect("cpu");
-        assert_eq!(cpu.top(), header.bottom() + px(16.));
+        assert_eq!(cpu.top(), px(8.));
     }
 
     /// UI-PRF-056: a box moves by its title line in whole cells. The ghost outline shows the
@@ -7106,8 +7117,14 @@ mod page {
             r.vcx.debug_bounds(GHOST_ID).is_none(),
             "no ghost before a move"
         );
-        // 150 px is 3 rows of 46 px: CPU at row 3, GPU and Disk pushed below it.
-        r.move_to(point(from.x, from.y + px(150.)));
+        // Edit Layout holds the rows at the height they had: one row and its gutter apart.
+        let page = r.page.clone();
+        let pitch = r.vcx.update(|_, cx| {
+            let g = page.read(cx).placement().grid;
+            g.row + g.gutter
+        });
+        // 3 rows down: CPU at row 3, GPU and Disk pushed below it.
+        r.move_to(point(from.x, from.y + px(3. * pitch)));
         assert_eq!(cells(&mut r, Cpu), (0, 3, 8, 7));
         assert_eq!(cells(&mut r, Gpu), (0, 10, 4, 6));
         let ghost = r.vcx.debug_bounds(GHOST_ID).expect("ghost");
@@ -7115,7 +7132,7 @@ mod page {
         assert_eq!(r.saved(), None, "nothing is saved during the drag");
         // The button goes up 6 rows down, past the last move: GPU and Disk close up into
         // CPU's space and CPU goes under them.
-        r.release(point(from.x, from.y + px(276.)));
+        r.release(point(from.x, from.y + px(6. * pitch)));
         assert!(r.vcx.debug_bounds(GHOST_ID).is_none());
         assert_eq!(cells(&mut r, Gpu), (0, 0, 4, 6));
         assert_eq!(cells(&mut r, Disk), (4, 0, 4, 6));
@@ -7632,8 +7649,7 @@ mod wired {
     use tl_ui::pages::performance::overview::mem_box::MEM_BOX_ID;
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
     use tl_ui::pages::performance::overview::parts::{
-        TIME_AXIS_END, TIME_AXIS_START, box_accent, time_axis_id, time_axis_label_id,
-        title_name_id, title_row_id,
+        body_id, box_accent, title_name_id, title_row_id,
     };
     use tl_ui::pages::performance::overview::procs_box::{
         PROC_ROW_ID_PREFIX, PROCS_BOX_ID, ProcsBox,
@@ -8429,34 +8445,26 @@ mod wired {
             let name_id: &'static str = Box::leak(title_name_id(id).into_boxed_str());
             let row = r.vcx.debug_bounds(row_id).expect("title line");
             let name = r.vcx.debug_bounds(name_id).expect("title name");
-            // UI-PRF-059: the 1 px border, then 8 px, then the title line.
+            // UI-PRF-059: the 1 px border, then 4 px, then the title line (tasklens-o55.54).
             let row_inset = row.top() - frame.top();
             let name_inset = name.top() - frame.top();
             assert!(
-                (px(9.)..=px(10.)).contains(&row_inset),
+                (px(5.)..=px(6.)).contains(&row_inset),
                 "{id}: title line inset is {row_inset:?}"
             );
             assert!(
-                (px(9.)..=px(10.)).contains(&name_inset),
+                (px(5.)..=px(6.)).contains(&name_inset),
                 "{id}: title name inset is {name_inset:?}"
             );
             assert_eq!(name.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
-            let axis_id = selector_id(time_axis_id(id));
-            let axis_start_id = selector_id(time_axis_label_id(id, "start"));
-            let axis_end_id = selector_id(time_axis_label_id(id, "end"));
-            assert!(
-                r.vcx.debug_bounds(axis_id).is_some(),
-                "{id}: one box time axis"
-            );
-            assert!(
-                r.vcx.debug_bounds(axis_start_id).is_some(),
-                "{id}: {TIME_AXIS_START}"
-            );
-            assert!(
-                r.vcx.debug_bounds(axis_end_id).is_some(),
-                "{id}: {TIME_AXIS_END}"
-            );
+            // tasklens-o55.54: no time axis row under the body; the body ends 6 px above the
+            // bottom border.
+            let body = r
+                .vcx
+                .debug_bounds(selector_id(body_id(id)))
+                .expect("box body");
+            assert_eq!(frame.bottom() - body.bottom(), px(7.), "{id}: body bottom");
         }
 
         let overview = overview(r).expect("an OverviewPage");
@@ -8520,7 +8528,7 @@ mod wired {
         });
     }
 
-    /// crw.52: Default Dark uses the shared title frame, device accent and one box time axis.
+    /// crw.52: Default Dark uses the shared title frame and device accent.
     #[gpui_kit::test]
     fn overview_title_lines_and_device_accents(cx: &mut TestAppContext) {
         let mut r = open_with(cx, true);
@@ -8747,7 +8755,6 @@ mod wired {
         assert!(r.vcx.debug_bounds(PROCS_BOX_ID).is_some(), "placed");
         let title_row = selector_id(title_row_id(PROCS_BOX_ID));
         let title_name = selector_id(title_name_id(PROCS_BOX_ID));
-        let time_axis = selector_id(time_axis_id(PROCS_BOX_ID));
         assert!(r.vcx.debug_bounds(title_row).is_some(), "shared title line");
         assert!(
             r.vcx.debug_bounds(title_name).is_some(),
@@ -8755,10 +8762,6 @@ mod wired {
         );
         let theme = r.vcx.update(|_, cx| current(cx).clone());
         assert_eq!(box_accent(PROCS_BOX_ID, &theme), theme.graph.cpu_line);
-        assert!(
-            r.vcx.debug_bounds(time_axis).is_none(),
-            "a table-only box has no chart axis"
-        );
         let d = merged(&mut r);
         assert!(d.process_top && !d.process_table, "{d:?}");
 
@@ -8829,33 +8832,42 @@ mod wired {
     }
 }
 
-/// The box title line (UI-PRF-017, UI-PRF-058): a summary too long for the line stays on one
-/// row and ends in an ellipsis. Its text style once replaced its nowrap and ellipsis.
+/// The box title line (UI-PRF-017, UI-PRF-058, tasklens-o55.54): icon, title, summary, the range
+/// figures and the value on one line. A line too narrow for all of them leaves out the figures
+/// first, then the summary; what shows is never cut.
 mod title_row {
     use gpui_kit::{
-        Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
-        px, size,
+        AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px, size,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
-    use tl_ui::pages::performance::overview::parts::{box_frame, title_line_id};
+    use tl_ui::pages::performance::overview::parts::{
+        box_frame, figures_id, title_line_id, title_name_id, title_row_id, title_value_id,
+    };
+    use tl_ui::pages::performance::overview::range::RangeText;
     use tl_ui::theme::{current, metrics};
 
     const LONG: &str = "Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller";
 
-    struct Frame;
+    struct Frame {
+        w: f32,
+    }
 
     impl Render for Frame {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let m = *metrics(cx);
             let theme = current(cx).clone();
-            div().w(px(300.)).h(px(200.)).child(box_frame(
+            let range = RangeText {
+                figures: "min 2.2 Mbps  avg 10.9 Mbps  peak 50.2 Mbps".into(),
+            };
+            div().w(px(self.w)).h(px(200.)).child(box_frame(
                 NET_BOX_ID,
                 None,
                 "Network".into(),
                 "4.7 Mbps".into(),
                 LONG.into(),
-                &Default::default(),
+                &range,
                 div().into_any_element(),
                 false,
                 &m,
@@ -8864,8 +8876,13 @@ mod title_row {
         }
     }
 
+    fn bounds(vcx: &mut VisualTestContext, id: String) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        vcx.debug_bounds(Box::leak(id.into_boxed_str()))
+            .expect("drawn")
+    }
+
     #[gpui_kit::test]
-    fn title_line_summary_stays_one_row(cx: &mut TestAppContext) {
+    fn title_line_drops_figures_then_summary(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             tl_ui::theme::store::init(
@@ -8876,21 +8893,61 @@ mod title_row {
             );
             tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
-        let (_view, vcx) = cx.add_window_view(|_, _| Frame);
-        vcx.simulate_resize(size(px(400.), px(300.)));
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.draw(cx).clear(cx);
-        });
-        let id = title_line_id(NET_BOX_ID);
-        let line = vcx
-            .debug_bounds(Box::leak(id.into_boxed_str()))
-            .expect("title line drawn");
-        let frame = vcx.debug_bounds(NET_BOX_ID).expect("box drawn");
-        // One t_sm row (12 px at line height 1.3 is under 20 px), inside the box's width.
-        assert!(line.size.height < px(20.), "one row: {line:?}");
-        assert!(line.right() <= frame.right(), "{line:?} in {frame:?}");
+        let (view, vcx) = cx.add_window_view(|_, _| Frame { w: 2000. });
+        vcx.simulate_resize(size(px(2400.), px(300.)));
+        let at = |vcx: &mut VisualTestContext, w: f32| {
+            vcx.update(|_, cx| {
+                view.update(cx, |f, cx| {
+                    f.w = w;
+                    cx.notify();
+                })
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            let row = bounds(vcx, title_row_id(NET_BOX_ID));
+            let shown = |vcx: &mut VisualTestContext, id: String| {
+                let b = bounds(vcx, id);
+                assert!(
+                    b.top() == row.top() || b.top() >= row.bottom(),
+                    "{w}: {b:?} on the line {row:?} or under it"
+                );
+                b.top() == row.top()
+            };
+            let line = shown(vcx, title_line_id(NET_BOX_ID));
+            let figures = shown(vcx, figures_id(NET_BOX_ID));
+            let name = bounds(vcx, title_name_id(NET_BOX_ID));
+            let value = bounds(vcx, title_value_id(NET_BOX_ID));
+            for b in [name, value] {
+                assert!(
+                    b.top() >= row.top() && b.bottom() <= row.bottom(),
+                    "{w}: {b:?} in the line {row:?}"
+                );
+            }
+            (line, figures, row, name, value)
+        };
+        // Wide: everything on the line, the figures right before the value.
+        let (line, figures, _, name, value) = at(vcx, 2000.);
+        assert_eq!((line, figures), (true, true), "2000 px: all shown");
+        let summary_w = bounds(vcx, title_line_id(NET_BOX_ID)).size.width;
+        let figures_b = bounds(vcx, figures_id(NET_BOX_ID));
+        assert!(
+            figures_b.right() <= value.left() && value.left() - figures_b.right() <= px(9.),
+            "figures {figures_b:?} before the value {value:?}"
+        );
+        // The width outside the summary and figures part: the line's ends and its two gaps.
+        let middle = value.left() - name.right() - px(16.);
+        let fixed = 2000. - f32::from(middle);
+        let summary_w = f32::from(summary_w);
+        let figures_w = f32::from(figures_b.size.width);
+        // Room for the summary but not the figures: the figures go.
+        let (line, figures, ..) = at(vcx, fixed + summary_w + figures_w / 2.);
+        assert_eq!((line, figures), (true, false), "the figures go first");
+        // Room for neither: the summary goes too; the title and value stay.
+        let (line, figures, ..) = at(vcx, fixed + summary_w / 2.);
+        assert_eq!((line, figures), (false, false), "then the summary");
     }
 }
 
@@ -8929,7 +8986,7 @@ mod sweep {
     use tl_ui::pages::performance::overview::mem_box::{self, CHARTS_GRID_ID, MemBox};
     use tl_ui::pages::performance::overview::net_box::{self, NetBox};
     use tl_ui::pages::performance::overview::parts::{
-        CORE_ROWS_SCROLL_ID, core_spark_id, take_core_labels, time_axis_id, title_row_id,
+        CORE_ROWS_SCROLL_ID, body_id, core_spark_id, take_core_labels, title_row_id,
     };
     use tl_ui::pages::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
     use tl_ui::pages::performance::overview::timeline::{
@@ -9418,10 +9475,10 @@ mod sweep {
 
     /// For every box kind and every mode, at 600 x 400 px and at heights from the kind minimum
     /// down to 0 in 2 px steps and widths 200 to 600 px in 20 px steps: no row or text crosses
-    /// the time-axis band or the box edge, and every drawn value keeps its unit (UI-PRF-017,
-    /// UI-PRF-019).
+    /// the bottom of the box body or the box edge, and every drawn value keeps its unit
+    /// (UI-PRF-017, UI-PRF-019).
     #[gpui_kit::test]
-    fn overview_boxes_never_draw_into_time_axis(cx: &mut TestAppContext) {
+    fn overview_boxes_never_draw_below_body(cx: &mut TestAppContext) {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(catalog());
@@ -9510,7 +9567,7 @@ mod sweep {
             vcx.simulate_resize(size(px(700.), px(400.)));
             draw(vcx);
             let frame_id = leak(format!("perf-overview-box-{}", kind.key()));
-            let axis_id = leak(time_axis_id(frame_id));
+            let body_sel = leak(body_id(frame_id));
             let title_id = leak(title_row_id(frame_id));
             let part_ids: Vec<&'static str> = parts(kind).into_iter().map(leak).collect();
             let area_ids: Vec<(&'static str, Vec<&'static str>)> = scroll_areas(kind)
@@ -9555,13 +9612,13 @@ mod sweep {
                         failures.push(&what, "no box", String::new());
                         continue;
                     };
-                    // Inside the 1 px border, above the time axis when the box draws one.
+                    // Inside the 1 px border, above the body's bottom.
                     let mut inner = Bounds::new(
                         frame.origin + gpui_kit::point(px(1.), px(1.)),
                         size(frame.size.width - px(2.), frame.size.height - px(2.)),
                     );
-                    if let Some(axis) = vcx.debug_bounds(axis_id) {
-                        let bottom = inner.bottom().min(axis.top());
+                    if let Some(body) = vcx.debug_bounds(body_sel) {
+                        let bottom = inner.bottom().min(body.bottom());
                         inner.size.height = (bottom - inner.top()).max(px(0.));
                     }
                     let title = vcx.debug_bounds(title_id);

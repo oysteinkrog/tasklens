@@ -79,15 +79,15 @@ const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
 /// The box title row, logical px before `ui_scale`.
 const TITLE_ROW: f32 = 24.;
 /// The space between a box's top border and its title row, logical px before `ui_scale`
-/// (`sp4`, UI-PRF-059).
-pub const TITLE_TOP: f32 = 8.;
-/// The two labels on the one time axis shared by every device box. The start label follows the
-/// range (UI-PRF-055, [`RangeText::axis_start`]); this one shows until the page sets it.
-pub const TIME_AXIS_START: &str = "1 minute ago";
-pub const TIME_AXIS_END: &str = "Now";
-/// The min, avg and peak line under a device box's title (UI-PRF-055), logical px before
-/// `ui_scale`: one label row.
-pub const FIGURES_ROW: f32 = LABEL_ROW;
+/// (`sp2`, tasklens-o55.54).
+pub const TITLE_TOP: f32 = 4.;
+/// The space between the title row and the body, logical px before `ui_scale` (`sp1`).
+const BODY_TOP: f32 = 2.;
+/// The space between the body and the bottom border, logical px before `ui_scale` (`sp3`).
+const BODY_BOTTOM: f32 = 6.;
+/// A box's chrome: its height less its body's, logical px before `ui_scale`. The two borders,
+/// the title row and the space around it and under the body: 38 px (tasklens-o55.54).
+pub const BOX_CHROME: f32 = 2. + TITLE_TOP + TITLE_ROW + BODY_TOP + BODY_BOTTOM;
 
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;
@@ -978,18 +978,14 @@ pub fn title_name_id(box_id: &str) -> String {
     format!("{box_id}-title-name")
 }
 
-/// The debug selector of the one time axis below a device box's charts.
-pub fn time_axis_id(box_id: &str) -> String {
-    format!("{box_id}-time-axis")
+/// The debug selector of the frame's body area, the part under a box's title line that holds
+/// its plots: the box id with `-content` (a box view may name its own body `-body`).
+pub fn body_id(box_id: &str) -> String {
+    format!("{box_id}-content")
 }
 
-/// The debug selector of a device box's left or right time-axis label.
-pub fn time_axis_label_id(box_id: &str, end: &str) -> String {
-    format!("{box_id}-time-axis-{end}")
-}
-
-/// The debug selector of a device box's min, avg and peak line under its title: the box id with
-/// `-figures`.
+/// The debug selector of a device box's min, avg and peak text in its title line: the box id
+/// with `-figures`.
 pub fn figures_id(box_id: &str) -> String {
     format!("{box_id}-figures")
 }
@@ -1063,12 +1059,13 @@ fn box_highlight(m: &UiMetrics) -> Div {
 /// Alpha of the inner highlight ring.
 const HIGHLIGHT_ALPHA: f32 = 0.06;
 
-/// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its 24 px title
-/// line sits inside the border, `TITLE_TOP` below it (UI-PRF-059): the icon and title, a one-line
-/// summary that ellipsizes and the headline value at the right. Title and body are 12 px in
-/// from the left and right borders, and the body ends 12 px above the bottom border. A device box has the range figures under it and the time axis
-/// below `body`, both from `range` (UI-PRF-055). `body` fills the rest. A click on the title
-/// line opens `target`'s page.
+/// One Overview box: a `list_bg` card with a thin rounded device-accent frame. Its one 24 px
+/// title line sits inside the border, `TITLE_TOP` below it (UI-PRF-059, tasklens-o55.54): the
+/// icon and title, a one-line summary, the range figures of a device box (UI-PRF-055) and the
+/// headline value at the right. A line too narrow for all of them drops the figures first, then
+/// the summary. Title and body are 12 px in from the left and right borders; `body` fills the
+/// rest of the box, clipped, so the chrome is [`BOX_CHROME`]. A click on the title line opens
+/// `target`'s page.
 #[allow(
     clippy::too_many_arguments,
     reason = "one call per box, all positional parts"
@@ -1086,21 +1083,19 @@ pub fn box_frame(
     theme: &TlTheme,
 ) -> Div {
     let accent = box_accent(id, theme);
+    let s = m.ui_scale;
     // The title value and summary end before the edit controls (D-029).
     let title_pad_right = if edit {
-        (px(EDIT_TITLE_RESERVE * m.ui_scale) - m.sp[5]).max(px(0.))
+        (px(EDIT_TITLE_RESERVE * s) - m.sp[5]).max(px(0.))
     } else {
         px(0.)
     };
     let title_pad_left = if edit {
-        (px(EDIT_TITLE_LEAD * m.ui_scale) - m.sp[5]).max(px(0.))
+        (px(EDIT_TITLE_LEAD * s) - m.sp[5]).max(px(0.))
     } else {
         px(0.)
     };
-    let draws_time_axis = !matches!(
-        BoxKind::from_frame_id(id),
-        Some(BoxKind::TopProcs | BoxKind::Timeline)
-    );
+    let row_h = px(TITLE_ROW * s);
     // Each text style goes in first: it replaces the whole text refinement, so the nowrap,
     // ellipsis and colour set after it would otherwise be lost.
     let mut title_el = div();
@@ -1116,17 +1111,45 @@ pub fn box_frame(
         .text_color(theme.text_primary)
         .children(box_icon(id, m, theme))
         .child(title);
+    // The summary and the figures wrap onto a second line inside a one-line clip, so a part
+    // that does not fit whole is left out, never cut. The empty first part lets even the
+    // summary wrap away; the figures come after it, so they go first.
     let mut line_el = div();
     *line_el.text_style() = t_sm(m);
     let line_el = line_el
         .debug_selector(move || title_line_id(id))
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
+        .flex_none()
+        .h(row_h)
+        .flex()
+        .items_center()
         .whitespace_nowrap()
-        .text_ellipsis()
         .text_color(theme.text_secondary)
         .child(line);
+    let mut figures_el = div();
+    *figures_el.text_style() = t_xs(m);
+    let figures_el = figures_el
+        .debug_selector(move || figures_id(id))
+        .flex_none()
+        .ml_auto()
+        .pl(m.sp[4])
+        .h(row_h)
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
+        .text_color(theme.text_secondary)
+        .child(range.figures.clone());
+    let middle = div()
+        .flex_1()
+        .min_w_0()
+        .h(row_h)
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .content_start()
+        .overflow_hidden()
+        .child(div().flex_none().w(px(0.)).h(row_h))
+        .child(line_el)
+        .child(figures_el);
     let mut value_el = div();
     *value_el.text_style() = title_value_style(m);
     let value_el = value_el
@@ -1146,7 +1169,7 @@ pub fn box_frame(
         .border_1()
         .border_color(accent)
         .rounded(m.radius_card);
-    if let Some(shadow) = box_shadow(theme, m.ui_scale) {
+    if let Some(shadow) = box_shadow(theme, s) {
         frame.style().box_shadow = Some(vec![shadow]);
     }
     frame
@@ -1158,79 +1181,37 @@ pub fn box_frame(
                 .flex_none()
                 .items_center()
                 .gap(m.sp[4])
-                .h(px(TITLE_ROW * m.ui_scale))
-                .mt(px(TITLE_TOP * m.ui_scale))
+                .h(row_h)
+                .mt(px(TITLE_TOP * s))
                 .mx(m.sp[5])
                 .pl(title_pad_left)
                 .pr(title_pad_right)
                 .child(title_el)
-                .child(line_el)
+                .child(middle)
                 .child(value_el),
             target,
         ))
-        .child({
-            let mut body_el = div()
+        .child(
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .px(m.sp[5])
-                .pt(m.sp[2])
-                .pb(m.sp[5]);
-            if draws_time_axis {
-                let start = if range.axis_start.is_empty() {
-                    SharedString::from(TIME_AXIS_START)
-                } else {
-                    range.axis_start.clone()
-                };
-                let mut ago = div()
-                    .debug_selector(move || time_axis_label_id(id, "start"))
-                    .child(start);
-                *ago.text_style() = t_xs(m);
-                let mut now = div()
-                    .debug_selector(move || time_axis_label_id(id, "end"))
-                    .child(TIME_AXIS_END);
-                *now.text_style() = t_xs(m);
-                let mut figures = div();
-                *figures.text_style() = t_xs(m);
-                let figures = figures
-                    .debug_selector(move || figures_id(id))
-                    .flex_none()
-                    .h(px(FIGURES_ROW * m.ui_scale))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(theme.text_secondary)
-                    .child(range.figures.clone());
-                body_el = body_el
-                    .flex()
-                    .flex_col()
-                    .child(figures)
-                    // Clipped, so nothing draws in the time-axis band (UI-PRF-017).
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .overflow_hidden()
-                            .child(body),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(move || time_axis_id(id))
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_between()
-                            .h(px(LABEL_ROW * m.ui_scale))
-                            .text_color(theme.text_secondary)
-                            .child(ago)
-                            .child(now),
-                    );
-            } else {
-                body_el = body_el.child(body);
-            }
-            body_el
-        })
+                .pt(px(BODY_TOP * s))
+                .pb(px(BODY_BOTTOM * s))
+                // Clipped, so nothing draws over the bottom padding (UI-PRF-017).
+                .child(
+                    div()
+                        .debug_selector(move || body_id(id))
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(body),
+                ),
+        )
         // Last, so the ring paints over the title row and the body.
         .child(box_highlight(m))
 }
@@ -1724,8 +1705,8 @@ pub fn box_chart<T: 'static>(
     hub: &Entity<SnapshotHub>,
     cx: &mut Context<T>,
 ) -> Entity<ChartView> {
-    // The shared box frame draws one time axis. Individual charts must not repeat their range
-    // caption, especially in the GPU and Network boxes that can contain several charts.
+    // The x ticks give the range. Individual charts must not repeat a range caption, especially
+    // in the GPU and Network boxes that can contain several charts.
     labels.range_word = SharedString::default();
     cx.new(|cx| {
         let snap = std::sync::Arc::clone(hub.read(cx).current());

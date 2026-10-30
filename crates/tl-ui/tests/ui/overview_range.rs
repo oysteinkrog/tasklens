@@ -25,12 +25,14 @@ use tl_ui::components::kv_grid;
 use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::i18n::init_strings;
+use tl_ui::pages::performance::overview::parts::body_id;
 use tl_ui::pages::performance::overview::range::{
     HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id,
 };
 use tl_ui::pages::performance::overview::{
-    OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID, TITLE_ICON_ID,
+    BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
 };
+use tl_ui::pages::performance::status_bar::BAR_ID;
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -351,8 +353,8 @@ fn point(t: i64, min: f32, mean: f32, max: f32) -> HistPoint {
 }
 
 /// A click on "1 h" in the status bar's switch (the bar is on the Overview by default) saves the
-/// range, redraws every chart of every box at one hour, asks for the device history and
-/// relabels the time axis. With the bar elsewhere the switch moves to the Overview header.
+/// range, redraws every chart of every box at one hour and asks for the device history. With
+/// the bar elsewhere the switch moves to the Overview header.
 #[gpui_kit::test]
 fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -366,12 +368,11 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
 
     let header: &'static str =
         Box::leak(segment_id(HEADER_SWITCH, OverviewRange::H24).into_boxed_str());
-    // The bar carries the switch: the header keeps the title and its icon, without a switch.
+    // The bar carries the switch: the page has no header row (tasklens-o55.54).
     assert!(r.vcx.debug_bounds(header).is_none(), "one switch");
-    assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
     assert!(
-        r.vcx.debug_bounds(TITLE_ICON_ID).is_some(),
-        "layout-grid icon before the title with the bar on the Overview"
+        r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
+        "no header row with the bar on the Overview"
     );
     let id: &'static str = Box::leak(segment_id(STATUS_SWITCH, OverviewRange::H1).into_boxed_str());
     click(r.vcx, id);
@@ -397,17 +398,6 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
             end_realtime_ns: None,
         })
     );
-    // The next snapshot brings the new axis label to every box.
-    publish_history(
-        &mut r,
-        DeviceRange::H1,
-        now_realtime() - 2 * 3_600 * MIN,
-        vec![],
-    );
-    for text in range_texts(&mut r) {
-        assert_eq!(text.axis_start, "1 hour ago");
-    }
-
     // The bar off: the Overview header holds the switch.
     r.vcx.update(|_, cx| {
         TlSettings::update(cx, |d| {
@@ -416,10 +406,6 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     });
     draw(r.vcx);
     assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
-    assert!(
-        r.vcx.debug_bounds(TITLE_ICON_ID).is_some(),
-        "layout-grid icon before the title"
-    );
     assert!(r.vcx.debug_bounds(id).is_none(), "no status bar");
     click(r.vcx, header);
     for chart in box_charts(&mut r) {
@@ -681,29 +667,63 @@ fn overview_range_boot_marker(cx: &mut TestAppContext) {
     }
 }
 
-/// Until the history covers the range, the time axis says since when it has data.
+/// tasklens-o55.54: with the default layout and `overview_row_unit_px` 40, at 1920 × 1200 (and
+/// at 1280 × 800), every box's chrome, its height less the body that holds its plots, is at
+/// most 40 px, and the first box starts at most 8 px below the status bar on top.
 #[gpui_kit::test]
-fn overview_range_label_since(cx: &mut TestAppContext) {
+fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    set_range(&mut r, OverviewRange::H24);
-    let since = now_realtime() - 90 * MIN;
-    publish_history(&mut r, DeviceRange::H24, since, vec![]);
-    let clock = jiff::Timestamp::from_nanosecond(i128::from(since))
-        .expect("a time")
-        .to_zoned(jiff::tz::TimeZone::system())
-        .strftime("%H:%M")
-        .to_string();
-    for text in range_texts(&mut r) {
-        assert_eq!(text.axis_start, format!("since {clock}"));
-    }
-    // A history that reaches back past the range: the plain label.
-    publish_history(
-        &mut r,
-        DeviceRange::H24,
-        now_realtime() - 25 * 60 * MIN,
-        vec![],
-    );
-    for text in range_texts(&mut r) {
-        assert_eq!(text.axis_start, "24 hours ago");
+    let unit = r
+        .vcx
+        .update(|_, cx| TlSettings::settings(cx).performance.overview_row_unit_px);
+    assert_eq!(unit, 40);
+    let page = overview(&mut r);
+    for (w, h) in [(1920., 1200.), (1280., 800.)] {
+        r.vcx.simulate_resize(size(px(w), px(h)));
+        draw(r.vcx);
+        let bar = r
+            .vcx
+            .debug_bounds(BAR_ID)
+            .expect("status bar on the Overview");
+        assert!(
+            r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
+            "{w}x{h}: no title row"
+        );
+        let kinds: Vec<_> = r.vcx.update(|_, cx| {
+            page.read(cx)
+                .placement()
+                .boxes
+                .iter()
+                .map(|b| b.kind)
+                .collect()
+        });
+        assert_eq!(
+            kinds.len(),
+            6,
+            "{w}x{h}: five device boxes and the timeline"
+        );
+        let mut first = px(f32::MAX);
+        for kind in kinds {
+            let frame_id: &'static str =
+                Box::leak(format!("{BOX_ID_PREFIX}{}", kind.key()).into_boxed_str());
+            let body_sel: &'static str = Box::leak(body_id(frame_id).into_boxed_str());
+            let frame = r.vcx.debug_bounds(frame_id).expect(frame_id);
+            let body = r.vcx.debug_bounds(body_sel).expect(body_sel);
+            let chrome = frame.size.height - body.size.height;
+            assert!(
+                chrome <= px(40.),
+                "{w}x{h} {kind:?}: chrome {chrome:?} ({frame:?}, body {body:?})"
+            );
+            assert!(
+                body.top() >= frame.top() && body.bottom() <= frame.bottom(),
+                "{w}x{h} {kind:?}: body {body:?} in {frame:?}"
+            );
+            first = first.min(frame.top());
+        }
+        let gap = first - bar.bottom();
+        assert!(
+            gap >= px(0.) && gap <= px(8.),
+            "{w}x{h}: first box {gap:?} below the status bar"
+        );
     }
 }

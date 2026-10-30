@@ -11,10 +11,9 @@
 //! every range is asked for at that time from the history, and the switch disables the ranges
 //! the finest tier at that time cannot serve.
 //!
-//! [`RangeText`] is what a device box shows for the range: the "min 6%  avg 42%  peak 100%" line
-//! under its title ([`figures`]) and the start of its time axis ("1 hour ago", or "since 09:14"
-//! while the history does not cover the range yet, [`axis_start`]). The page works both out and
-//! hands each box its text, so a box notifies only when its own text changes.
+//! [`RangeText`] is what a device box shows for the range: the "min 6%  avg 42%  peak 100%" text
+//! in its title line ([`figures`]). The page works it out and hands each box its text, so a box
+//! notifies only when its own text changes.
 
 use gpui_kit::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -40,15 +39,6 @@ pub const SWITCH_KEYS: [&str; 5] = [
     "perf-overview-range-1h",
     "perf-overview-range-24h",
     "perf-overview-range-7d",
-];
-
-/// The time axis start labels, in [`OverviewRange::ALL`] order.
-pub const AGO_KEYS: [&str; 5] = [
-    "perf-overview-ago-1m",
-    "perf-overview-ago-5m",
-    "perf-overview-ago-1h",
-    "perf-overview-ago-24h",
-    "perf-overview-ago-7d",
 ];
 
 /// The debug selector of the switch segment for `range` in the switch `prefix`
@@ -186,8 +176,6 @@ fn switch(
 pub struct RangeText {
     /// "min 6%  avg 42%  peak 100%", empty while there is no valid sample in the range.
     pub figures: SharedString,
-    /// The start label of the time axis, empty before the page set it.
-    pub axis_start: SharedString,
 }
 
 /// The minimum, mean and peak of a box's main metric over the range.
@@ -368,47 +356,6 @@ pub fn figures_text(
 pub fn whole_percent(v: f32, out: &mut String) {
     use std::fmt::Write as _;
     let _ = write!(out, "{:.0}%", v.clamp(0., 100.));
-}
-
-/// The time axis start label: "1 minute ago" and so on, or `since` ("since 09:14") for a history
-/// range whose served history starts later than the range does. `now_realtime_ns` is the
-/// current CLOCK_REALTIME time.
-pub fn axis_start(
-    range: OverviewRange,
-    hist: &DeviceHistory,
-    now_realtime_ns: i64,
-    ago: &[SharedString; 5],
-    since: &Template,
-) -> SharedString {
-    let i = OverviewRange::ALL
-        .iter()
-        .position(|&r| r == range)
-        .unwrap_or(0);
-    let plain = ago[i].clone();
-    if !range.from_history() || hist.request.map(|r| r.range) != Some(range.device_range()) {
-        return plain;
-    }
-    let start = now_realtime_ns.saturating_sub(range.span_ns() as i64);
-    match hist.since_realtime_ns {
-        Some(oldest) if oldest > start => {
-            let Ok(ts) = jiff::Timestamp::from_nanosecond(i128::from(oldest)) else {
-                return plain;
-            };
-            let clock = ts
-                .to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%H:%M")
-                .to_string();
-            let mut out = String::new();
-            let _ = since.write(&mut out, &[&clock]);
-            out.into()
-        }
-        _ => plain,
-    }
-}
-
-/// The translated time axis start labels, in [`OverviewRange::ALL`] order.
-pub fn ago_words(cx: &App) -> [SharedString; 5] {
-    AGO_KEYS.map(|k| tr(cx, k))
 }
 
 #[cfg(test)]

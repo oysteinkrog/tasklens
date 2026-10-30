@@ -391,7 +391,7 @@ pub fn io_row_id(key: &DeviceKey, which: &str) -> String {
 
 /// The Disk box.
 pub struct DiskBox {
-    /// The range figures and time axis start the page gives (UI-PRF-055).
+    /// The range figures the page gives (UI-PRF-055).
     range_text: RangeText,
     hub: Entity<SnapshotHub>,
     /// The latest disk cards from the sidebar, including any entry whose parent was not known yet.
@@ -677,7 +677,7 @@ impl DiskBox {
         }
     }
 
-    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// Takes the range figures the page worked out (UI-PRF-055). Notifies
     /// only when they changed.
     pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
         if self.range_text != text {
@@ -686,7 +686,7 @@ impl DiskBox {
         }
     }
 
-    /// The range figures and time axis start the box shows.
+    /// The range figures the box shows.
     pub fn range_text(&self) -> &RangeText {
         &self.range_text
     }

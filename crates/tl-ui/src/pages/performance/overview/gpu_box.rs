@@ -8,7 +8,7 @@
 //! with a chart of at least 48 px (TMOG), and the spare height goes to the charts. The second
 //! section shows only when both fit. When one section's rows do not fit, it shows only the
 //! busiest engine and a "+n more engines" row, then only "+n more engines", and then the
-//! temperature and power row and the VRAM row give way, so no row crosses the time axis
+//! temperature and power row and the VRAM row give way, so no row crosses the body's bottom
 //! (UI-PRF-059). Then the count rows give way from the bottom. Below the chart's height the
 //! chart gives way too and only whole rows show, none below a 22 px body; `engine_charts` does
 //! the same with the rows under its grid. Narrow rows drop the meter and keep the sparkline
@@ -555,7 +555,7 @@ struct Fit {
     /// joins "+n more engines" too (UI-PRF-059).
     busiest: bool,
     /// How many of the first section's rows gave way after that (`kept`), so no row crosses
-    /// the time axis.
+    /// the body's bottom.
     cut: usize,
     /// The first section's chart shows. Below its height it gives way too, and only the rows
     /// that fit whole show.
@@ -708,7 +708,7 @@ pub fn chart_id(i: usize) -> String {
 
 /// The GPU box.
 pub struct GpuBox {
-    /// The range figures and time axis start the page gives (UI-PRF-055).
+    /// The range figures the page gives (UI-PRF-055).
     range_text: RangeText,
     hub: Entity<SnapshotHub>,
     sections: SmallVec<[GpuSection; 2]>,
@@ -1149,7 +1149,7 @@ impl GpuBox {
         self.more_text_fit = more(self.more + 1);
     }
 
-    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// Takes the range figures the page worked out (UI-PRF-055). Notifies
     /// only when they changed.
     pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
         if self.range_text != text {
@@ -1158,7 +1158,7 @@ impl GpuBox {
         }
     }
 
-    /// The range figures and time axis start the box shows.
+    /// The range figures the box shows.
     pub fn range_text(&self) -> &RangeText {
         &self.range_text
     }

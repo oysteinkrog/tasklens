@@ -1,8 +1,8 @@
 //! The one fit rule of every Overview box body (UI-PRF-017, UI-PRF-059, tasklens-crw.100).
 //!
 //! [`whole_rows`] is a column that draws a row only when the row fits whole, top first. A row
-//! that would end below the column is left out with every row after it, so nothing draws in the
-//! time-axis band. [`fit_text`] is a value that shortens itself
+//! that would end below the column is left out with every row after it, so nothing draws below
+//! the box body. [`fit_text`] is a value that shortens itself
 //! by dropping decimals until it fits its width, and draws nothing when even the form without
 //! decimals does not fit, so a drawn value never loses its unit.
 

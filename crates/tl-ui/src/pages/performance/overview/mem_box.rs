@@ -416,7 +416,7 @@ fn chart_grid(s: &ChartSettings) -> GridStyle {
     }
 }
 
-/// The labels of a box chart: no readout, no range word (the box frame draws the time axis).
+/// The labels of a box chart: no readout, no range word (the x ticks give the range).
 fn chart_labels() -> ChartLabels {
     ChartLabels {
         heading: None,
@@ -463,7 +463,7 @@ fn row_colors(theme: &TlTheme) -> [Hsla; ROWS] {
 
 /// The Memory box.
 pub struct MemBox {
-    /// The range figures and time axis start the page gives (UI-PRF-055).
+    /// The range figures the page gives (UI-PRF-055).
     range_text: RangeText,
     hub: Entity<SnapshotHub>,
     memory: DeviceIdx,
@@ -722,7 +722,7 @@ impl MemBox {
         }
     }
 
-    /// Takes the range figures and time axis start the page worked out (UI-PRF-055). Notifies
+    /// Takes the range figures the page worked out (UI-PRF-055). Notifies
     /// only when they changed.
     pub fn set_range_text(&mut self, text: RangeText, cx: &mut Context<Self>) {
         if self.range_text != text {
@@ -731,7 +731,7 @@ impl MemBox {
         }
     }
 
-    /// The range figures and time axis start the box shows.
+    /// The range figures the box shows.
     pub fn range_text(&self) -> &RangeText {
         &self.range_text
     }
