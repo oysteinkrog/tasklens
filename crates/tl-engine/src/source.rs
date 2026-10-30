@@ -18,8 +18,8 @@
 //! `WorkerCommand::StringScan` and `HandleSearch` carry search patterns. Never log them.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use asupersync::channel::{mpsc, oneshot, watch};
@@ -100,10 +100,16 @@ impl PartialEq for WorkerControl {
 /// Per source, the seq of the last command a worker started and the last one it finished
 /// (R-276). A new generation resumes after `started`. When `started > done`, the command at
 /// `started` was running when the old generation died, so it is reported and never rerun.
+///
+/// A worker copies the command list and starts each command later, so the reducer may push a
+/// command out of the list in between. `claim` and `evict` take one lock, so each command is
+/// either claimed by a worker or evicted by the reducer, never both (ADR-018).
 #[derive(Debug)]
 pub struct CommandProgress {
     started: [AtomicU64; SourceId::COUNT],
     done: [AtomicU64; SourceId::COUNT],
+    /// Per source, the newest seq the reducer evicted before a worker claimed it.
+    evicted: Mutex<[u64; SourceId::COUNT]>,
 }
 
 impl Default for CommandProgress {
@@ -111,6 +117,7 @@ impl Default for CommandProgress {
         Self {
             started: [const { AtomicU64::new(0) }; SourceId::COUNT],
             done: [const { AtomicU64::new(0) }; SourceId::COUNT],
+            evicted: Mutex::new([0; SourceId::COUNT]),
         }
     }
 }
@@ -130,6 +137,33 @@ impl CommandProgress {
 
     pub(crate) fn set_done(&self, id: SourceId, seq: u64) {
         self.done[id.index()].store(seq, Ordering::Release);
+    }
+
+    fn evicted(&self) -> MutexGuard<'_, [u64; SourceId::COUNT]> {
+        self.evicted.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The worker of `id` starts command `seq`: marks it started and returns true, or returns
+    /// false when the reducer evicted it first. Commands of one source are claimed in `seq`
+    /// order.
+    pub fn claim(&self, id: SourceId, seq: u64) -> bool {
+        let evicted = self.evicted();
+        if seq <= evicted[id.index()] {
+            return false;
+        }
+        self.started[id.index()].store(seq, Ordering::Release);
+        true
+    }
+
+    /// The reducer pushes command `seq` of `id` out of the list: returns true when no worker
+    /// claimed it, which then never runs. False when a worker claimed it and owns its end.
+    pub fn evict(&self, id: SourceId, seq: u64) -> bool {
+        let mut evicted = self.evicted();
+        if seq <= self.started(id) {
+            return false;
+        }
+        evicted[id.index()] = evicted[id.index()].max(seq);
+        true
     }
 }
 
@@ -336,7 +370,9 @@ pub async fn run<S: Source>(cx: Cx, mut io: WorkerIo, mut src: S) -> Outcome<(),
             if queued.target != id {
                 continue;
             }
-            progress.set_started(id, queued.seq);
+            if !progress.claim(id, queued.seq) {
+                continue;
+            }
             let wants_sample = match queued.command {
                 WorkerCommand::RefreshNow => true,
                 ref command => src.command(command),

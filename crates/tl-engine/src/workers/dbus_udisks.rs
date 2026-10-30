@@ -525,7 +525,11 @@ async fn run_commands<B: UdisksBus>(
         if cx.checkpoint().is_err() {
             return Some(Outcome::Ok(()));
         }
-        st.queue.progress.set_started(SourceId::Udisks, *seq);
+        // Evicted by the reducer after this batch was copied: the reducer ended its request.
+        if !st.queue.progress.claim(SourceId::Udisks, *seq) {
+            st.skip.remove(seq);
+            continue;
+        }
         let stop = match command {
             WorkerCommand::Device(DeviceCommand::SmartRead { disk, update }) => {
                 smart_read(cx, io, bus, objs, st, Arc::clone(disk), *update).await
