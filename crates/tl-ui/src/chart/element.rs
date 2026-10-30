@@ -29,6 +29,7 @@ use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint};
 use super::labels::{self, LabelPaint, LabelRows, NetFormat};
+use super::lines;
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
 use crate::anim::AnimationDriver;
@@ -331,6 +332,8 @@ fn paint_view(
         value_text,
         hover: hover_state,
         boots,
+        line_set,
+        lines: line_state,
         ..
     } = view;
 
@@ -438,8 +441,32 @@ fn paint_view(
             };
             geometry::build(&input, &mut cache, scratch);
             *built_right_edge_ns = right_edge;
+            line_state.dirty = true;
             #[cfg(any(test, feature = "test-hooks"))]
             view_hook_build(&view.build_count);
+        }
+        // A line set's peaks and highlighted line follow the main geometry (tasklens-o55.57).
+        if line_set.is_some() && line_state.dirty {
+            let ctx = lines::BuildCtx {
+                spec,
+                series,
+                map: TimeMap {
+                    anchor_ns: cache.anchor_ns,
+                    right_edge_ns: *built_right_edge_ns,
+                    range_ns,
+                    plot_width: pw as f32,
+                },
+                plot_height: ph as f32,
+                y_min: cache.y_min,
+                y_max: cache.y_max,
+                now_boot_ns: if frozen || history.is_some() {
+                    right_edge
+                } else {
+                    now
+                },
+                curved: env.curved,
+            };
+            lines::rebuild(line_state, &ctx);
         }
     }
 
@@ -550,16 +577,46 @@ fn paint_view(
                 }
             }
         };
+        // A line set with a highlighted line dims the others (tasklens-o55.57).
+        let dim = if line_set.is_some() && line_state.highlight.is_some() {
+            lines::DIM
+        } else {
+            1.0
+        };
         window.with_content_mask(Some(ContentMask { bounds: plot }), |window| {
             let live =
                 newest_marks && matches!(state, ChartState::Live) && grid::newest_marks_fit(frame);
             if live {
                 grid::paint_newest_glow(window, plot, gp.outline_color, env.reduce_motion);
             }
-            painted(window, &cache.fills, 1.0);
-            painted(window, &cache.stale_fills, STALE_ALPHA);
-            painted(window, &cache.strokes, 1.0);
-            painted(window, &cache.stale_strokes, STALE_ALPHA);
+            painted(window, &cache.fills, dim);
+            painted(window, &cache.stale_fills, STALE_ALPHA * dim);
+            painted(window, &cache.strokes, dim);
+            painted(window, &cache.stale_strokes, STALE_ALPHA * dim);
+            if let Some(set) = line_set.as_ref() {
+                if let Some(value) = set.reference {
+                    lines::paint_reference(
+                        window,
+                        value,
+                        plot,
+                        cache.y_min,
+                        cache.y_max,
+                        sf,
+                        &env.metrics,
+                        &env.theme,
+                    );
+                }
+                lines::paint_highlight(window, line_state, offset, sf);
+                lines::paint_peaks(
+                    window,
+                    line_state,
+                    spec,
+                    offset,
+                    sf,
+                    &env.metrics,
+                    env.theme.graph.chart_bg,
+                );
+            }
             if live {
                 for &(p, color) in &cache.newest {
                     let c = newest_point(p, offset, sf);
@@ -582,7 +639,31 @@ fn paint_view(
     grid::paint_outline(window, &gp);
     labels::paint(window, cx, text, &label_paint, last_value_text);
 
-    if spec.hover {
+    if let Some(set) = line_set.as_ref().filter(|_| spec.hover) {
+        let hp = lines::HoverInput {
+            plot,
+            map,
+            dx,
+            sf,
+            spec,
+            value_fmt: labels.value_fmt,
+            set,
+            series,
+            y_min: cache.y_min,
+            y_max: cache.y_max,
+            metrics: &env.metrics,
+            theme: &env.theme,
+            network_unit: env.network_unit,
+            viewport: window.viewport_size(),
+        };
+        lines::paint_hover(
+            window,
+            line_state,
+            hover_state.pinned_t_ns,
+            follow_t_ns,
+            &hp,
+        );
+    } else if spec.hover {
         let hp = HoverPaint {
             box_bounds: frame,
             plot,

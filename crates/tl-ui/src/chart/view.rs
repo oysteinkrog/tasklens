@@ -6,7 +6,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Context, Entity, Global, IntoElement, Render, SharedString, Subscription, Window,
+    App, Context, Entity, Global, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Window, deferred, div,
 };
 use smallvec::SmallVec;
 use tl_model::ids::{ProcessSeriesId, SeriesId};
@@ -18,7 +19,9 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::element::ChartElement;
-use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, scale};
+use super::{
+    ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, lines, scale,
+};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 
 pub struct ChartView {
@@ -60,6 +63,10 @@ pub struct ChartView {
     pub(crate) hover: hover::HoverState,
     /// The charts that share this chart's hover cursor (`set_hover_link`).
     pub(crate) hover_link: Option<hover::HoverLink>,
+    /// One line per item, with a reference line, peak rings, a highlight and a ranked readout
+    /// (`set_line_set`, tasklens-o55.57).
+    pub(crate) line_set: Option<lines::LineSet>,
+    pub(crate) lines: lines::LinesState,
     /// The scale ceiling shows small in the plot's top-right corner (`set_compact_scale`).
     pub(crate) compact_scale: bool,
     /// Glow behind the newest 10% and a dot on each line's newest point (UI-PRF-058).
@@ -147,6 +154,8 @@ impl ChartView {
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
             hover_link: None,
+            line_set: None,
+            lines: lines::LinesState::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -548,6 +557,37 @@ impl ChartView {
         self.hover_link = Some(link);
     }
 
+    /// Makes the chart one line per item (tasklens-o55.57, the core clocks chart): a dashed
+    /// line at `set.reference`, a ring at each line's peak in the range, and a hover readout
+    /// that lists every line by value, high to low, with its peak. `None` is a plain chart.
+    pub fn set_line_set(&mut self, set: Option<lines::LineSet>, cx: &mut Context<Self>) {
+        if self.line_set != set {
+            self.line_set = set;
+            self.lines.dirty = true;
+            cx.notify();
+        }
+    }
+
+    /// Highlights series `index` of a line set chart: it is drawn on top, wider and opaque, and
+    /// the other lines dim. `None` draws every line alike.
+    pub fn set_highlight(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        if self.lines.highlight != index {
+            self.lines.highlight = index;
+            self.lines.dirty = true;
+            cx.notify();
+        }
+    }
+
+    /// The highlighted series, by index in `spec.series`.
+    pub fn highlight(&self) -> Option<usize> {
+        self.lines.highlight
+    }
+
+    /// The line set state: the peaks and the readout of the last paint.
+    pub fn lines(&self) -> &lines::LinesState {
+        &self.lines
+    }
+
     /// Stops the chart at its last samples for good (PERF-086: an ended process card). It keeps
     /// the series it has, reads no new snapshot, pins its right edge at the newest valid sample
     /// and is never Stale, so it neither slides nor fades. The owner may then drop the series
@@ -618,7 +658,17 @@ impl Render for ChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
-        ChartElement::new(cx.entity())
+        let chart = ChartElement::new(cx.entity());
+        if self.line_set.is_none() || self.hover.pinned_t_ns.is_none() {
+            return chart.into_any_element();
+        }
+        // The readout of a line set chart paints after the window, unclipped.
+        let overlay = lines::ReadoutOverlay(std::rc::Rc::clone(&self.lines.readout));
+        div()
+            .size_full()
+            .child(chart)
+            .child(deferred(overlay).with_priority(1))
+            .into_any_element()
     }
 }
 
