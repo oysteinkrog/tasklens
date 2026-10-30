@@ -5007,8 +5007,11 @@ mod page {
             ));
         }
         cat.entries = Arc::from(entries);
-        cat.version += 1;
-        r.engine.publish_with(|s| s.devices = Arc::new(cat));
+        // Past the published version, so a second call is seen as a new catalog too.
+        r.engine.publish_with(|s| {
+            cat.version = cat.version.max(s.devices.version) + 1;
+            s.devices = Arc::new(cat);
+        });
         r.vcx.run_until_parked();
         draw(r.vcx);
         let page = r.page.clone();
