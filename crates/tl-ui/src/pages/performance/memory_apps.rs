@@ -52,6 +52,7 @@ use tracing::warn;
 use super::details::Template;
 use super::overview::parts::{ChartSettings, box_chart, class_probe};
 use super::overview::timeline::{self, OverviewPause};
+use super::page::page_range_ns;
 use crate::chart::geometry::right_edge_ns;
 use crate::chart::view::{HistoryClock, derived_view, find_tiered, history_view, reads_history};
 use crate::chart::{
@@ -115,8 +116,8 @@ const SHARED_ALPHA: f32 = 0.4;
 /// Where the chart sits (UI-PRF-060).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppsPlace {
-    /// The Memory page's "By app" view: `graph_h_overall` high, `graph_range_s` wide, the live
-    /// series, the legend at the right.
+    /// The Memory page's "By app" view: `graph_h_overall` high, the shared range wide (the live
+    /// series, or the device metric history at 1 h, 24 h and 7 d), the legend at the right.
     Page,
     /// The Overview Memory box's `apps` mode: the box body, the box range from the live series
     /// or the device metric history, the legend at the right or below.
@@ -472,7 +473,7 @@ impl AppsSettings {
         match place {
             AppsPlace::Page => Self {
                 top_n,
-                range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
+                range_ns: page_range_ns(cx),
                 smooth: s.motion.smooth_graphs,
                 rounded: s.appearance.rounded_corners,
             },
@@ -764,15 +765,19 @@ impl MemoryAppsChart {
         self.refresh(&snap, true, cx);
     }
 
-    /// Where the series come from, as the box charts decide it (`ChartView::resolve`): the page
-    /// reads the live series; the box reads the history over 10 minutes and whenever the
-    /// history answers a request at a picked time for this range, and waits while the Overview
-    /// is held and the history has not answered.
+    /// Where the series come from, as the box charts decide it (`ChartView::resolve`): both
+    /// read the history over 10 minutes. The box also reads it whenever the history answers a
+    /// request at a picked time for this range, and waits while the Overview is held and the
+    /// history has not answered; the page is never held.
     fn source(&self, snap: &Snapshot, cx: &App) -> Source {
-        if self.place == AppsPlace::Page {
-            return Source::Live;
-        }
         let range_ns = self.settings.range_ns;
+        if self.place == AppsPlace::Page {
+            return if reads_history(range_ns) {
+                Source::History
+            } else {
+                Source::Live
+            };
+        }
         let answered = snap
             .device_history
             .request

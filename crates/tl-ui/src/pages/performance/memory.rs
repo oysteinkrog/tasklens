@@ -43,7 +43,9 @@ use super::actions::{
 use super::details::{Fallback, KeyValueModel, render_details};
 use super::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
 use super::memory_bar::{Composition, CompositionBarView};
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_history_request, page_range_ns, page_words,
+};
 use super::{DeviceKey, DeviceRow};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
@@ -120,7 +122,6 @@ pub const SWAP_TABLE_ID: &str = "perf-mem-swap-table";
 /// The table shows at most this many rows; more rows scroll.
 pub const SWAP_TABLE_MAX_ROWS: usize = 8;
 
-const NS_PER_S: u64 = 1_000_000_000;
 /// Alpha of the dirty-bytes line against `mem_line`.
 const DIRTY_ALPHA: f32 = 0.6;
 
@@ -210,7 +211,7 @@ impl PageSettings {
     fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             composition: s.performance.memory_composition,
@@ -1717,21 +1718,33 @@ impl MemoryPage {
                 physical_spec(idx, totals.mem, &settings, &theme),
                 physical_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
         let commit = {
             let (spec, labels) = (
                 commit_spec(idx, totals.commit_limit, &settings, &theme),
                 commit_labels(&words, totals.commit_limit),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
         let swap = {
             let (spec, labels) = (
                 swap_spec(idx, totals.swap, &settings, &theme),
                 swap_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
+            cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            })
         };
 
         let mut subs = SmallVec::new();
@@ -1954,12 +1967,14 @@ impl MemoryPage {
     /// This page's demand part while it is active: memory, and the inventory for Details rows 7
     /// to 11. The "By app" view also asks for the process sweep (`process_top`, as the Overview
     /// Top processes box does): the engine sums the memory groups on each sweep (UI-PRF-060).
+    /// At 1 h, 24 h and 7 d it asks for the device metric history.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             memory: true,
             inventory: true,
             process_top: self.settings.view == MemoryView::Apps,
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -2095,6 +2110,11 @@ impl MemoryPage {
         self.settings = new;
         if (new.range_ns, new.smooth, new.rounded) != (old.range_ns, old.smooth, old.rounded) {
             self.rebuild_all_specs(cx);
+        }
+        if new.range_ns != old.range_ns {
+            // The header switch shows the new range.
+            self.send_demand(cx);
+            cx.notify();
         }
         if new.composition != old.composition {
             self.show_composition = new.composition;
