@@ -2813,9 +2813,19 @@ fn details_affinity_retain() {
 #[test]
 fn details_handle_search_state() {
     let mut rig = Rig::new();
-    rig.run(vec![src(SourceUpdate::Details(
-        DetailsUpdate::HandleSearch(handle_state(42)),
-    ))])
+    // A session shows only the searches it sent (ADR-018). This is the reducer's first engine
+    // id, so the worker's search 1 is the local session's search 1.
+    rig.run(vec![
+        cmd(Command::HandleSearch {
+            search: SearchId(1),
+            pattern: Arc::from("*.log"),
+            include_maps: false,
+            privileged: false,
+        }),
+        src(SourceUpdate::Details(DetailsUpdate::HandleSearch(
+            handle_state(42),
+        ))),
+    ])
     .expect("no invariant violation");
     let snap = rig.latest();
     let state = snap
