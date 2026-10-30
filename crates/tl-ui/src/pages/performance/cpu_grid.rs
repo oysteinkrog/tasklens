@@ -186,7 +186,10 @@ impl CpuGrid {
             hover: true,
         };
         Self {
-            view: cx.new(|cx| ChartGridView::new(spec, hub, cx)),
+            view: cx.new(|cx| {
+                let snap = Arc::clone(hub.read(cx).current());
+                ChartGridView::new(spec, hub, cx).with_device_history(&snap)
+            }),
             cores: topology,
             kernel,
             scratch,

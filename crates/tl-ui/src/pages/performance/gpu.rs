@@ -38,8 +38,8 @@ use super::actions::{PerfToggleGpuEngine, PerfToggleGpuOptionalGraph};
 use super::details::{Fallback, KeyValueModel};
 use super::menu::ClickedEngine;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, live_only_note, live_range_ns,
-    page_history_request, page_range_ns, page_words,
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
+    page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::labels::LABEL_ROW;
@@ -528,10 +528,8 @@ impl Words {
 /// The settings the page draws from.
 #[derive(Clone, Debug, PartialEq)]
 struct PageSettings {
-    /// The shared range the charts draw.
+    /// The shared range the charts and the engine grid draw.
     range_ns: u64,
-    /// The engine grid's range: it reads only the live series.
-    live_range_ns: u64,
     smooth: bool,
     rounded: bool,
     hidden: Vec<Arc<str>>,
@@ -544,7 +542,6 @@ impl PageSettings {
         let s = TlSettings::settings(cx);
         Self {
             range_ns: page_range_ns(cx),
-            live_range_ns: live_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             hidden: s
@@ -933,7 +930,7 @@ impl GpuPage {
             &mut engine_keys,
         );
         let shown_cells = spec.cells.len();
-        let engines = cx.new(|cx| ChartGridView::new(spec, &hub, cx));
+        let engines = cx.new(|cx| ChartGridView::new(spec, &hub, cx).with_device_history(&snap));
 
         let memory_shape = MemoryShape::of(totals);
         let spec = with_settings(
@@ -2606,7 +2603,7 @@ fn grid_spec(
             min: 0.0,
             max: 100.0,
         },
-        range_ns: s.live_range_ns,
+        range_ns: s.range_ns,
         smooth: s.smooth,
         cell_min_w: px(ENGINE_CELL_MIN_W * m.ui_scale),
         cell_h: px(ENGINE_CELL_H * m.ui_scale),
@@ -2637,13 +2634,8 @@ impl DevicePage for GpuPage {
             .gap(m.sp[4])
             .child(self.chart_box(&self.memory, MEMORY_ID, None, &m, window, cx))
             .child(self.chart_box(&self.temperature, TEMPERATURE_ID, None, &m, window, cx));
-        // The engine grid reads only the live series (crw.105).
-        let note = (self.probe != ProbeState::Missing && self.shown_cells > 0)
-            .then(|| live_only_note(&m, cx))
-            .flatten();
         let mut page = v_flex()
             .w_full()
-            .children(note)
             .child(self.engines_element(window, cx))
             .child(row2);
         // Row 3: one chart takes the full width, two split it; none leaves no row.

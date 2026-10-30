@@ -398,8 +398,8 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
 }
 
 /// One shared range on every device page (crw.105): `performance.overview_range`, set from the
-/// range switch in any page header. `graph_range_s` keeps only the sidebar tiles and the charts
-/// that read only the live series.
+/// range switch in any page header. `graph_range_s` keeps only the sidebar tiles and the Battery
+/// chart, which reads only the live series.
 mod shared_range {
     use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
     use tl_model::ids::{MetricId, SeriesId};
@@ -436,9 +436,9 @@ mod shared_range {
     }
 
     /// The chart ranges in s: CPU Overall, Memory Physical, Disk Active, Network Throughput,
-    /// GPU Memory, Fan Speed (the shared range), then the CPU grid and the Battery chart (live
-    /// only).
-    fn ranges(r: &mut Rig) -> ([u64; 6], [u64; 2]) {
+    /// GPU Memory, Fan Speed, the CPU per-core grid and the GPU engine grid (the shared range),
+    /// then the Battery chart (live only).
+    fn ranges(r: &mut Rig) -> ([u64; 8], u64) {
         let cpu = page::<CpuPage>(r, "cpu");
         let memory = page::<MemoryPage>(r, "memory");
         let disk = page::<DiskPage>(r, DISKS[0]);
@@ -456,11 +456,10 @@ mod shared_range {
                     ns(net.read(cx).throughput()),
                     ns(gpu.read(cx).memory()),
                     ns(fan.read(cx).speed()),
-                ],
-                [
                     cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
-                    ns(bat.read(cx).chart()),
+                    gpu.read(cx).engines().read(cx).spec.range_ns / S,
                 ],
+                ns(bat.read(cx).chart()),
             )
         })
     }
@@ -486,7 +485,7 @@ mod shared_range {
                 assert!(r.vcx.debug_bounds(id).is_some(), "{id} on {k}");
             }
         }
-        assert_eq!(ranges(&mut r), ([60; 6], [60; 2]), "1 min by default");
+        assert_eq!(ranges(&mut r), ([60; 8], 60), "1 min by default");
 
         select(&mut r, "memory");
         click_range(&mut r, OverviewRange::M5);
@@ -495,14 +494,14 @@ mod shared_range {
             (OverviewRange::M5, 60),
             "graph_range_s stays"
         );
-        assert_eq!(ranges(&mut r), ([300; 6], [300; 2]));
+        assert_eq!(ranges(&mut r), ([300; 8], 300));
         assert_eq!(last_demand(&r).device_history_range, None, "5 min is live");
 
         select(&mut r, GPU);
         click_range(&mut r, OverviewRange::H24);
         assert_eq!(saved(&mut r).0, OverviewRange::H24);
-        // The live-only charts keep `graph_range_s`.
-        assert_eq!(ranges(&mut r), ([86_400; 6], [60; 2]));
+        // The live-only Battery chart keeps `graph_range_s`.
+        assert_eq!(ranges(&mut r), ([86_400; 8], 60));
         assert_eq!(
             last_demand(&r).device_history_range,
             Some(DeviceHistoryRequest {
@@ -511,7 +510,7 @@ mod shared_range {
             })
         );
 
-        // `graph_range_s` moves the live-only charts only.
+        // `graph_range_s` moves the live-only chart only.
         let performance = r.page.clone();
         r.vcx.update(|window, cx| {
             performance.read(cx).focus_handle(cx).focus(window, cx);
@@ -519,7 +518,7 @@ mod shared_range {
         r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
         draw(r.vcx);
         assert_eq!(saved(&mut r), (OverviewRange::H24, 30));
-        assert_eq!(ranges(&mut r), ([86_400; 6], [30; 2]));
+        assert_eq!(ranges(&mut r), ([86_400; 8], 30));
 
         // Another page asks for the same history while it is shown.
         select(&mut r, DISKS[0]);
@@ -529,8 +528,9 @@ mod shared_range {
         );
     }
 
-    /// The Battery chart and the CPU per-core grid read only the live series: at 1 h, 24 h and
-    /// 7 d they show "Live only". Charts the history serves show no note.
+    /// The Battery chart reads only the live series: at 1 h, 24 h and 7 d it shows "Live only".
+    /// Charts and grids the history serves show no note, the CPU per-core grid and the GPU engine
+    /// grid included.
     #[gpui_kit::test]
     fn live_only_note(cx: &mut TestAppContext) {
         let mut r = open(cx);
@@ -539,9 +539,7 @@ mod shared_range {
         assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "1 min is live");
         click_range(&mut r, OverviewRange::H1);
         assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_some(), "battery");
-        select(&mut r, "cpu");
-        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_some(), "per-core grid");
-        for k in ["memory", DISKS[0], "net:enp38s0", FAN] {
+        for k in ["cpu", "memory", DISKS[0], "net:enp38s0", GPU, FAN] {
             select(&mut r, k);
             assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "{k}");
         }
@@ -597,6 +595,86 @@ mod shared_range {
         // No live samples exist, so the samples come from the three history points (with the
         // chart's own edge samples).
         assert!(n.is_some_and(|n| n >= 3), "history samples: {n:?}");
+    }
+
+    /// The device history the engine answers with at 1 h: three points per series, for `ids`.
+    fn publish_history(r: &mut Rig, ids: &[SeriesId]) {
+        let now = i64::try_from(jiff::Timestamp::now().as_nanosecond()).expect("fits");
+        let points: Arc<[HistPoint]> = (0..3)
+            .map(|i| HistPoint {
+                t_realtime_ns: now - (3 - i) * 60 * S as i64,
+                mean: 10.0 * i as f32,
+                min: 0.0,
+                max: 30.0,
+            })
+            .collect();
+        let series: Arc<[(SeriesId, Arc<[HistPoint]>)]> =
+            ids.iter().map(|&id| (id, Arc::clone(&points))).collect();
+        r.engine.publish_with(|s| {
+            s.device_history = Arc::new(DeviceHistory {
+                header: ComponentHeader {
+                    version: s.device_history.header.version + 1,
+                    ..ComponentHeader::default()
+                },
+                request: Some(DeviceHistoryRequest {
+                    range: DeviceRange::H1,
+                    end_realtime_ns: None,
+                }),
+                realtime_offset_ns: now - now_boot_ns() as i64,
+                since_realtime_ns: Some(now - 2 * 3_600 * S as i64),
+                step_ns: 60 * S,
+                series,
+                boots: Arc::from([]),
+                timeline: None,
+            });
+        });
+        draw(r.vcx);
+    }
+
+    /// At 1 h the CPU per-core grid and the GPU engine grid draw the device history the engine
+    /// answers with; at 5 min they read the live series again.
+    #[gpui_kit::test]
+    fn grids_read_device_history(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        publish_p2(&mut r);
+        select(&mut r, "cpu");
+        let cpu = page::<CpuPage>(&mut r, "cpu");
+        select(&mut r, GPU);
+        click_range(&mut r, OverviewRange::H1);
+        let gpu = page::<GpuPage>(&mut r, GPU);
+        let (cpu_grid, engines) = r.vcx.update(|_, cx| {
+            (
+                cpu.read(cx).grid().view.clone(),
+                gpu.read(cx).engines().clone(),
+            )
+        });
+        let ids: Vec<SeriesId> = r.vcx.update(|_, cx| {
+            [&cpu_grid, &engines]
+                .into_iter()
+                .flat_map(|g| g.read(cx).spec.cells.iter().map(|c| c.fill_series))
+                .collect::<Vec<_>>()
+        });
+        publish_history(&mut r, &ids);
+        r.vcx.update(|_, cx| {
+            for (name, g) in [("cpu grid", &cpu_grid), ("engine grid", &engines)] {
+                let g = g.read(cx);
+                assert!(g.reads_history_now(), "{name}");
+                assert!(!g.spec.cells.is_empty(), "{name} cells");
+                for (i, (fill, _)) in g.resolved().iter().enumerate() {
+                    let n = fill.as_ref().map(|v| v.samples.len());
+                    assert!(n.is_some_and(|n| n >= 3), "{name} cell {i}: {n:?}");
+                }
+            }
+        });
+
+        click_range(&mut r, OverviewRange::M5);
+        r.vcx.update(|_, cx| {
+            assert!(!cpu_grid.read(cx).reads_history_now(), "cpu grid at 5 min");
+            assert!(
+                !engines.read(cx).reads_history_now(),
+                "engine grid at 5 min"
+            );
+        });
     }
 }
 

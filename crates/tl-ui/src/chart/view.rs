@@ -680,7 +680,7 @@ pub struct HistoryClock {
 }
 
 impl HistoryClock {
-    fn of(hist: &DeviceHistory) -> Self {
+    pub(crate) fn of(hist: &DeviceHistory) -> Self {
         Self {
             offset_ns: hist.realtime_offset_ns,
             end_ns: hist

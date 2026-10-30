@@ -43,8 +43,8 @@ use super::cpu_grid::CpuGrid;
 use super::details::KeyValueModel;
 use super::overview::cpu_box::core_gutter;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text, live_only_note,
-    live_range_ns, page_history_request, page_range_ns, page_words,
+    DevicePage, DevicePageFrame, GRAPH_H_OVERALL, SECONDARY_GRAPH_H, header_text,
+    page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::actions::OpenAdditionalSetup;
@@ -478,10 +478,8 @@ struct PageSettings {
     mode: CpuGraphMode,
     kernel: bool,
     secondary: CpuSecondaryGraph,
-    /// The shared range the charts draw.
+    /// The shared range the charts and the per-core grid draw.
     range_ns: u64,
-    /// The per-core grid's range: it reads only the live series.
-    live_range_ns: u64,
     smooth: bool,
     rounded: bool,
 }
@@ -502,7 +500,6 @@ impl PageSettings {
             kernel: s.performance.cpu_kernel,
             secondary: s.performance.cpu_secondary_graph,
             range_ns: page_range_ns(cx),
-            live_range_ns: live_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
         }
@@ -855,7 +852,7 @@ impl CpuPage {
             Arc::clone(&topology),
             &logical,
             settings.kernel,
-            settings.live_range_ns,
+            settings.range_ns,
             settings.smooth,
             &theme,
             cx,
@@ -1327,7 +1324,7 @@ impl CpuPage {
             let labels = overall_labels(new.kernel, &self.words);
             self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
         }
-        self.grid.set_range(new.live_range_ns, cx);
+        self.grid.set_range(new.range_ns, cx);
         self.grid.set_smooth(new.smooth, cx);
         let theme = current(cx).clone();
         let spec = overall_spec(self.row.idx, &new, &theme);
@@ -1362,7 +1359,7 @@ impl CpuPage {
             Arc::clone(&self.topology),
             &self.logical,
             s.kernel,
-            s.live_range_ns,
+            s.range_ns,
             s.smooth,
             &theme,
             cx,
@@ -1607,15 +1604,7 @@ impl DevicePage for CpuPage {
 
     fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
-        // The per-core grid reads only the live series (crw.105).
-        let note = (self.mode == CpuGraphMode::PerCore)
-            .then(|| live_only_note(&m, cx))
-            .flatten();
         let area = self.mode_area(&m, window, cx);
-        let area = match note {
-            Some(note) => v_flex().w_full().child(note).child(area).into_any_element(),
-            None => area,
-        };
         let Some(view) = &self.secondary else {
             return area;
         };

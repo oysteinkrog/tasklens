@@ -24,6 +24,10 @@
 //! cell gets the `hover.rs` marker, dots and value box, with its fill series as series 0 and its
 //! overlay as series 1. One `HoverState` serves the grid, since only one cell is hovered at a
 //! time; a cell change resets its `last_index`, so the box lines are formatted again.
+//!
+//! Device history (crw.105): made `with_device_history`, the grid reads `Snapshot.device_history`
+//! at ranges over 10 minutes, as `ChartView` does (ADR-017, UI-PRF-055). The cells are then drawn
+//! on CLOCK_REALTIME, never slide or go Stale, and mark each boot inside the range.
 
 use std::cell::RefCell;
 use std::mem;
@@ -51,7 +55,7 @@ use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::hover::{self, HoverPaint, HoverState};
 use super::labels::{self, CachedLine, LabelCache, LineStyle, NetFormat};
-use super::view::{ChangedRuns, find_tiered};
+use super::view::{ChangedRuns, HistoryClock, find_tiered, history_view, reads_history};
 use super::{
     ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
     GridStyle, LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
@@ -227,6 +231,17 @@ pub struct ChartGridView {
     /// True when a cell series read its fast view in place of the 1 Hz view the range wants
     /// (see `ChartView::tier_fallback`).
     pub tier_fallback: bool,
+    /// The grid reads the device metric history for ranges over 10 minutes
+    /// (`with_device_history`).
+    device_history: bool,
+    /// With `device_history`: the history answers a paused request for this grid's range, so
+    /// the grid reads it at every range (as `ChartView`).
+    paused: bool,
+    /// Set while the grid reads the device metric history: the series are on CLOCK_REALTIME and
+    /// the cells are drawn against that clock.
+    history: Option<HistoryClock>,
+    /// While `history` is set: the CLOCK_REALTIME start of every boot inside the served range.
+    boots: Arc<[i64]>,
     headings: Vec<CachedLine>,
     values: Vec<CachedLine>,
     offline: CachedLine,
@@ -277,6 +292,9 @@ pub struct ChartGridView {
     /// shift), as `ChartView::last_gap_spans`.
     #[cfg(any(test, feature = "test-hooks"))]
     pub last_gap_spans: RefCell<Vec<(usize, Range<f32>)>>,
+    /// Boot marks the last paint drew, over every cell.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_boot_marks: std::cell::Cell<u32>,
 }
 
 impl ChartGridView {
@@ -294,6 +312,10 @@ impl ChartGridView {
             built_layout: None,
             series: Vec::new(),
             tier_fallback: false,
+            device_history: false,
+            paused: false,
+            history: None,
+            boots: Arc::from([]),
             headings: Vec::new(),
             values: Vec::new(),
             offline: CachedLine::default(),
@@ -327,9 +349,38 @@ impl ChartGridView {
             offline_reads: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             last_gap_spans: RefCell::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_boot_marks: std::cell::Cell::new(0),
         };
         this.resolve(hub.read(cx).current());
         this
+    }
+
+    /// Makes ranges over 10 minutes read `Snapshot.device_history`, as
+    /// `ChartView::with_device_history`: the CPU per-core grid and the GPU engine grid.
+    #[must_use]
+    pub fn with_device_history(mut self, snap: &Snapshot) -> Self {
+        self.device_history = true;
+        self.resolve(snap);
+        self
+    }
+
+    /// Whether this grid reads the device metric history now.
+    fn reads_device_history(&self) -> bool {
+        self.device_history && (reads_history(self.spec.range_ns) || self.paused)
+    }
+
+    /// Whether `snap`'s device history answers a paused request for this grid's range.
+    fn paused_in(&self, snap: &Snapshot) -> bool {
+        self.device_history
+            && snap.device_history.request.is_some_and(|r| {
+                r.end_realtime_ns.is_some() && r.range.span_ns() == self.spec.range_ns
+            })
+    }
+
+    /// Whether the last resolve read the device metric history.
+    pub fn reads_history_now(&self) -> bool {
+        self.history.is_some()
     }
 
     /// Notifies only when a cell's series changed, or when a device change may have brought an
@@ -340,6 +391,22 @@ impl ChartGridView {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
+        if ev.mask.contains(ComponentMask::DEVICE_HISTORY)
+            && self.paused_in(hub.read(cx).current()) != self.paused
+        {
+            // Paused or back to live: the source changes.
+            self.resolve(hub.read(cx).current());
+            cx.notify();
+            return;
+        }
+        if self.reads_device_history() {
+            // History series change only with the device history component.
+            if ev.mask.contains(ComponentMask::DEVICE_HISTORY) {
+                self.resolve(hub.read(cx).current());
+                cx.notify();
+            }
+            return;
+        }
         let range_ns = self.spec.range_ns;
         let runs = ChangedRuns::new(&ev.changed_series);
         let changed = |id: SeriesId| runs.tier_changed(id, range_ns);
@@ -363,7 +430,33 @@ impl ChartGridView {
 
     /// Looks up every cell's series in `snap` by binary search. Ranges over 60 s read the 1 Hz
     /// tier, as `ChartView::resolve`. Reuses the list's capacity.
+    ///
+    /// With `with_device_history`, ranges over 10 minutes read `snap.device_history` instead:
+    /// each series becomes a view on CLOCK_REALTIME ([`history_view`]).
     pub fn resolve(&mut self, snap: &Snapshot) {
+        self.paused = self.paused_in(snap);
+        if self.reads_device_history() {
+            let hist = &*snap.device_history;
+            self.history = Some(HistoryClock::of(hist));
+            self.boots = Arc::clone(&hist.boots);
+            self.tier_fallback = false;
+            let find = |id: SeriesId| {
+                hist.get(id)
+                    .map(|points| Arc::new(history_view(id, points, hist, false)))
+            };
+            self.series.clear();
+            self.series.extend(
+                self.spec
+                    .cells
+                    .iter()
+                    .map(|c| (find(c.fill_series), c.overlay_series.and_then(find))),
+            );
+            return;
+        }
+        self.history = None;
+        if !self.boots.is_empty() {
+            self.boots = Arc::from([]);
+        }
         let set = &*snap.series;
         let range_ns = self.spec.range_ns;
         let mut fallback = false;
@@ -488,6 +581,12 @@ impl ChartGridView {
                 x > x0 && x < x1 && y > y0 && y < y1
             })
             .count()
+    }
+
+    /// The resolved (fill, overlay) series per cell.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn resolved(&self) -> &[CellSeries] {
+        &self.series
     }
 
     /// Sets the resolved series directly, one pair per cell, bypassing the hub.
@@ -768,7 +867,9 @@ fn paint_grid_view(
     cx: &mut App,
 ) -> PaintOut {
     let sf = env.scale_factor;
-    let now = env.now;
+    // A grid that reads the device metric history runs on CLOCK_REALTIME (UI-PRF-055).
+    let history = view.history;
+    let now = history.map_or(env.now, |h| h.right_edge_ns(env.now));
     let n = view.spec.cells.len();
     let plot_cell = plot_cell.filter(|_| view.spec.hover && !view.blocked());
     // A cell change drops the pin and the formatted lines; the new cell is pinned below.
@@ -811,6 +912,7 @@ fn paint_grid_view(
         axis_text,
         value_text,
         hover: hover_state,
+        boots,
         ..
     } = view;
     let (cell_h, gap) = (spec.cell_h, spec.gap);
@@ -828,9 +930,11 @@ fn paint_grid_view(
     if period_ns == u64::MAX {
         period_ns = DEFAULT_PERIOD_NS;
     }
-    let sliding = spec.smooth && !env.reduce_motion && !env.power_saving;
-    let stale = newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
-    let right_edge = if newest_ns == 0 {
+    let sliding = history.is_none() && spec.smooth && !env.reduce_motion && !env.power_saving;
+    // History points are not live samples: their age says nothing about the source.
+    let stale = history.is_none() && newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
+    // A history grid ends at its request's end, so a stretch with no points before it shows.
+    let right_edge = if newest_ns == 0 || history.is_some() {
         now
     } else if stale {
         if sliding {
@@ -999,6 +1103,31 @@ fn paint_grid_view(
         });
     }
 
+    // A history grid marks each boot inside its range in every cell (UI-PRF-055).
+    let mut _boot_marks = 0;
+    if history.is_some() && !blocked {
+        for (i, cell) in spec.cells.iter().enumerate() {
+            if cell.offline {
+                continue;
+            }
+            let b = cell_bounds(bounds, &layout, i, cell_h, gap);
+            let gp = GridPaint {
+                plot: b.inset(px(1.)),
+                box_bounds: b,
+                map: &map,
+                dx: px(dx),
+                scale_factor: sf,
+                theme,
+                style: CELL_GRID,
+                outline_color: spec.line,
+                radius: px(0.),
+            };
+            _boot_marks += grid::paint_boots(window, &gp, boots);
+        }
+    }
+    #[cfg(any(test, feature = "test-hooks"))]
+    view.last_boot_marks.set(_boot_marks);
+
     // Labels: heading left and value right in row 1, the offline text in the middle, legend in
     // cell 0.
     let m = &env.metrics;
@@ -1081,7 +1210,11 @@ fn paint_grid_view(
             };
             (0.0, validity)
         } else {
-            cell_value(series.get(i).and_then(|(a, _)| a.as_deref()), now)
+            cell_value(
+                series.get(i).and_then(|(a, _)| a.as_deref()),
+                now,
+                history.is_some(),
+            )
         };
         value_text.clear();
         let color = match validity {
@@ -1306,8 +1439,8 @@ fn build_cells(
 }
 
 /// Newest valid value of `series` and its validity at `now`: Missing when absent, WarmingUp
-/// without a valid newest sample, Stale per R-051, else Valid.
-fn cell_value(series: Option<&SeriesView>, now: u64) -> (f32, Validity) {
+/// without a valid newest sample, Stale per R-051 (never for `history` points), else Valid.
+fn cell_value(series: Option<&SeriesView>, now: u64, history: bool) -> (f32, Validity) {
     let Some(s) = series else {
         return (0.0, Validity::Missing);
     };
@@ -1319,7 +1452,9 @@ fn cell_value(series: Option<&SeriesView>, now: u64) -> (f32, Validity) {
         .map_or(0.0, |s| s.value);
     let validity = match s.samples.last() {
         None => Validity::WarmingUp,
-        Some(last) if geometry::is_stale(last.t_ns, now, s.period_ns) => Validity::Stale,
+        Some(last) if !history && geometry::is_stale(last.t_ns, now, s.period_ns) => {
+            Validity::Stale
+        }
         Some(last) if last.is_valid() => Validity::Valid,
         Some(_) => Validity::WarmingUp,
     };
