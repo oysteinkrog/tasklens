@@ -7,9 +7,11 @@
 //! reports in slot order.
 //!
 //! Actions run through the real `actions::Gate` and its action task. Each is an `OpenUri` whose
-//! opener waits until the model answers it, so the model picks when an action succeeds, fails,
-//! or is still running when the reducer stops. `ActionFinished` goes to a queue the model
-//! delivers to the reducer later.
+//! opener waits until the model answers it, or a `UnitResetFailed` on one unit whose bus call
+//! waits the same way, so the model picks when an action succeeds, fails, or is still running
+//! when the reducer stops. `ActionFinished` goes to a queue the model delivers to the reducer
+//! later. A session's reader can stall: its action channel is full, so action tasks wait to
+//! push their events, and a reducer restart then ends actions whose events are still waiting.
 //!
 //! A reducer restart takes the path `engine_session` takes between epochs: `Reducer::stopped`
 //! (which drops the gate), then a new reducer with the same worker control, sequence and local
@@ -40,6 +42,7 @@ use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use tl_engine::actions::startup::StartupPaths;
+use tl_engine::actions::unit::{BusFuture, JobStream, UnitBus, UnitBusError, UnitBusOverride};
 use tl_engine::actions::{
     ActionCtx, ActionOps, ENGINE_STOPPED, Gate, LaunchOutcome, MAX_IN_FLIGHT, Openers, action_end,
 };
@@ -53,8 +56,8 @@ use tl_engine::reducer::{ActionGate, ActionRoute, AdmissionView, Publisher, Redu
 use tl_engine::source::{CommandProgress, QueuedCommand, WorkerCommand, WorkerControl};
 use tl_engine::update::{DetailsUpdate, DeviceDetailsUpdate, EngineMsg, SourceUpdate};
 use tl_model::actions::{
-    ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, LaunchSpec,
-    RejectReason,
+    ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
+    LaunchSpec, RejectReason,
 };
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::details::{
@@ -65,8 +68,10 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::ids::ProcessKey;
 use tl_model::snapshot::{DiskDetails, EjectState, Snapshot};
+use tl_model::table::{Manager, UnitRef};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
+use zbus::zvariant::{OwnedValue, Value};
 
 const BOOT: BootId = BootId(0x77);
 const RUNS: u64 = 5000;
@@ -75,6 +80,10 @@ const KINDS: [IdKind; 3] = [IdKind::Scan, IdKind::Search, IdKind::Eject];
 /// The model's kind index of actions, after the three `KINDS`.
 const ACTION: usize = 3;
 const KIND_NAMES: [&str; 4] = ["Scan", "Search", "Eject", "Action"];
+/// Room in each session's action channel. A step never fills it; a stalled reader does.
+const ACTION_ROOM: usize = 512;
+/// The id of the events a stalled reader leaves unread. Client ids start at 1.
+const FILLER: ActionId = ActionId(0);
 
 fn key(i: usize) -> ProcessKey {
     let pid = 100 + u32::try_from(i).expect("small");
@@ -108,15 +117,23 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The model's URI for request `i`: the opener reads the request back from it.
+/// The model's URI or unit name for request `i`: the opener or bus reads the request back from
+/// it.
 fn uri(i: usize) -> Arc<str> {
     Arc::from(format!("req/{i}"))
 }
 
-/// The openers the real action task calls. Each `OpenUri` waits until the model answers it.
+fn request_index(name: &str) -> usize {
+    name.strip_prefix("req/")
+        .and_then(|n| n.parse().ok())
+        .expect("a model URI")
+}
+
+/// The openers and the unit bus the real action task calls. Each `OpenUri` and each
+/// `ResetFailedUnit` call waits until the model answers it.
 #[derive(Default)]
 struct ModelOpeners {
-    /// By request index, the answer channel of each open call still waiting.
+    /// By request index, the answer channel of each call still waiting.
     waiting: Mutex<HashMap<usize, async_channel::Sender<Result<(), ActionError>>>>,
 }
 
@@ -141,6 +158,56 @@ impl ModelOpeners {
     fn fail_all(&self) {
         lock(&self.waiting).clear();
     }
+
+    /// A call for request `i` that waits until the model answers it.
+    fn wait(&self, i: usize) -> impl Future<Output = Result<(), ActionError>> + use<> {
+        let (tx, rx) = async_channel::bounded(1);
+        lock(&self.waiting).insert(i, tx);
+        async move {
+            rx.recv()
+                .await
+                .unwrap_or(Err(ActionError::PermissionDenied))
+        }
+    }
+}
+
+/// The unit bus of the targeted actions: `ResetFailedUnit` waits for the model's answer.
+struct ModelBus(Arc<ModelOpeners>);
+
+impl UnitBus for ModelBus {
+    fn call<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        method: &'a str,
+        args: &'a [Value<'static>],
+        _timeout: std::time::Duration,
+    ) -> BusFuture<'a, OwnedValue> {
+        assert_eq!(method, "ResetFailedUnit", "the model only resets units");
+        let Some(Value::Str(name)) = args.first() else {
+            panic!("ResetFailedUnit takes the unit name");
+        };
+        let answer = self.0.wait(request_index(name.as_str()));
+        Box::pin(async move {
+            match answer.await {
+                Ok(()) => Ok(OwnedValue::from(true)),
+                Err(_) => Err(UnitBusError::Closed),
+            }
+        })
+    }
+
+    fn job_removed<'a>(&'a self, _cx: &'a Cx) -> BusFuture<'a, JobStream> {
+        panic!("ResetFailedUnit waits for no job")
+    }
+
+    fn get_property<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _unit_path: &'a str,
+        _iface: &'a str,
+        _name: &'a str,
+    ) -> BusFuture<'a, OwnedValue> {
+        panic!("ResetFailedUnit reads no property")
+    }
 }
 
 impl Openers for ModelOpeners {
@@ -149,17 +216,7 @@ impl Openers for ModelOpeners {
         _cx: &Cx,
         target: &str,
     ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
-        let i = target
-            .strip_prefix("req/")
-            .and_then(|n| n.parse().ok())
-            .expect("a model URI");
-        let (tx, rx) = async_channel::bounded(1);
-        lock(&self.waiting).insert(i, tx);
-        Box::pin(async move {
-            rx.recv()
-                .await
-                .unwrap_or(Err(ActionError::PermissionDenied))
-        })
+        Box::pin(self.wait(request_index(target)))
     }
 
     fn show_in_file_manager(
@@ -190,6 +247,8 @@ struct GateLog {
     routes: Vec<(u64, ActionId, async_channel::Sender<ActionEvent>)>,
     /// `Gate::in_flight` of the current gate after its last call.
     in_flight: usize,
+    /// The engine ids of the actions a gate admitted.
+    admitted: HashSet<u64>,
 }
 
 /// The real `Gate`, with a record of what the reducer gave it. Dropping it drops the gate.
@@ -210,11 +269,17 @@ impl ActionGate for Recorded {
         view: &AdmissionView<'_>,
         route: ActionRoute,
     ) {
+        let engine = route.id.0;
         lock(&self.log)
             .routes
-            .push((route.id.0, req.id, route.events.clone()));
+            .push((engine, req.id, route.events.clone()));
+        let before = self.gate.in_flight();
         self.gate.submit_routed(cx, req, view, route);
-        lock(&self.log).in_flight = self.gate.in_flight();
+        let mut log = lock(&self.log);
+        log.in_flight = self.gate.in_flight();
+        if log.in_flight > before {
+            log.admitted.insert(engine);
+        }
     }
 
     fn finished(&mut self, id: ActionId) -> Option<SourceId> {
@@ -284,6 +349,8 @@ impl Rig {
     /// A new real gate, as the engine's action gate hook makes one per reducer.
     fn gate(&self) -> Box<dyn ActionGate> {
         let openers: Arc<dyn Openers> = self.openers.clone();
+        let bus = Arc::new(ModelBus(Arc::clone(&self.openers)));
+        let pick: UnitBusOverride = Arc::new(move |_| Some(Arc::clone(&bus) as Arc<dyn UnitBus>));
         let ctx = ActionCtx {
             events: self.local_actions.clone(),
             msgs: self.finished_tx.clone(),
@@ -299,7 +366,7 @@ impl Rig {
             openers: Some(openers),
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
-            unit_bus_override: None,
+            unit_bus_override: Some(pick),
             startup_paths: StartupPaths::from_env(),
         };
         lock(&self.gate_log).in_flight = 0;
@@ -397,6 +464,8 @@ struct Session {
     /// Keeps the wake channel open: a closed one ends the session.
     _wake: Option<async_channel::Receiver<()>>,
     open: bool,
+    /// The reader stalled: its action channel is full and the model reads nothing of it.
+    stalled: bool,
     /// The last client id used per kind index; ids start at 1 in every session, so they collide.
     last_id: [u64; 4],
 }
@@ -753,6 +822,9 @@ struct Model {
     gate_full: HashSet<usize>,
     /// The end each answered opener call gives its action.
     answered: HashMap<usize, RequestEnd>,
+    /// Actions refused or stopped while their session's reader stalled: the gate's best-effort
+    /// summary found no room, so the end may come alone.
+    summary_dropped: HashSet<usize>,
     steps: Vec<String>,
     trace: bool,
 }
@@ -786,7 +858,7 @@ fn on(id: ClientSessionId, cmd: Command) -> EngineMsg {
 impl Model {
     fn new(seed: u64, trace: bool) -> Self {
         let (local_tx, local_rx) = async_channel::unbounded();
-        let (actions_tx, actions) = async_channel::unbounded();
+        let (actions_tx, actions) = async_channel::bounded(ACTION_ROOM);
         let rig = Rig::new(local_tx, actions_tx.clone());
         let mut m = Model {
             seed,
@@ -800,6 +872,7 @@ impl Model {
                 link: None,
                 _wake: None,
                 open: true,
+                stalled: false,
                 last_id: [0; 4],
             }],
             next_session: 1,
@@ -811,6 +884,7 @@ impl Model {
             in_stopped_gate: HashSet::new(),
             gate_full: HashSet::new(),
             answered: HashMap::new(),
+            summary_dropped: HashSet::new(),
             steps: Vec::new(),
             trace,
         };
@@ -827,7 +901,7 @@ impl Model {
         let id = ClientSessionId(self.next_session);
         self.next_session += 1;
         let (wake_tx, wake) = async_channel::bounded(1);
-        let (events_tx, actions) = async_channel::unbounded();
+        let (events_tx, actions) = async_channel::bounded(ACTION_ROOM);
         let (requests_tx, requests) = async_channel::unbounded();
         let link = SessionLink {
             latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(BOOT, 1))),
@@ -847,6 +921,7 @@ impl Model {
             link: Some(link),
             _wake: Some(wake),
             open: true,
+            stalled: false,
             last_id: [0; 4],
         });
         msg
@@ -876,6 +951,9 @@ impl Model {
     /// sent before its end, so reading them first sees its summary before its end.
     fn read_events(&mut self) {
         for s in 0..self.sessions.len() {
+            if self.sessions[s].stalled {
+                continue;
+            }
             let actions: Vec<ActionEvent> = match &self.sessions[s].actions {
                 Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
                 None => Vec::new(),
@@ -914,6 +992,9 @@ impl Model {
     /// Action event `ev` reached session `s`: one of its own actions, before its end, with one
     /// summary at most.
     fn action_event(&mut self, s: usize, ev: &ActionEvent) {
+        if ev.id == FILLER {
+            return;
+        }
         let Some(&i) = self.by_client.get(&(s, ACTION, ev.id.0)) else {
             self.fail(&format!(
                 "session {s} got {ev:?} for an action it never sent"
@@ -938,6 +1019,14 @@ impl Model {
     /// Action `i` ended `end`: after its summary, which names the same end, from its one owner.
     fn check_action_end(&self, i: usize, end: RequestEnd) {
         let req = &self.reqs[i];
+        let alone = match end {
+            RequestEnd::Lost => self.in_stopped_gate.contains(&i),
+            RequestEnd::Busy => self.gate_full.contains(&i),
+            _ => false,
+        };
+        if req.summary.is_none() && alone && self.summary_dropped.contains(&i) {
+            return;
+        }
         let Some(summary) = &req.summary else {
             self.fail(&format!(
                 "action {} of session {} ended {end:?} before its summary",
@@ -1141,10 +1230,22 @@ impl Model {
                 seq: client,
                 disk: Arc::from(DISKS[d]),
             }),
-            Slot::Action => Command::Action(ActionRequest {
+            // Half the actions have a target, so a target event can wait for room too.
+            Slot::Action if self.rng.below(2) == 0 => Command::Action(ActionRequest {
                 id: ActionId(client),
                 kind: ActionKind::OpenUri(uri(i)),
                 targets: Default::default(),
+                privileged: false,
+            }),
+            Slot::Action => Command::Action(ActionRequest {
+                id: ActionId(client),
+                kind: ActionKind::UnitResetFailed,
+                targets: [ActionTarget::Unit(UnitRef {
+                    manager: Manager::System,
+                    name: uri(i),
+                })]
+                .into_iter()
+                .collect(),
                 privileged: false,
             }),
         };
@@ -1188,11 +1289,22 @@ impl Model {
             }
             self.reqs[i].engine = engine;
             if self.reqs[i].slot == Slot::Action {
-                // An admitted action's task ran and waits at its opener.
-                if self.rig.openers.is_waiting(i) {
+                let log = lock(&self.rig.gate_log);
+                let admitted = engine.is_some_and(|e| log.admitted.contains(&e));
+                let full = log.in_flight == MAX_IN_FLIGHT;
+                drop(log);
+                if admitted {
+                    // Its task waits at its opener or bus call, or to push `Started`.
+                    let waits = self.sessions[s].stalled || self.rig.openers.is_waiting(i);
+                    if !waits {
+                        self.fail(&format!("admitted action {i} does not wait at its call"));
+                    }
                     self.in_gate.insert(i);
-                } else if lock(&self.rig.gate_log).in_flight == MAX_IN_FLIGHT {
+                } else if full {
                     self.gate_full.insert(i);
+                    if self.sessions[s].stalled {
+                        self.summary_dropped.insert(i);
+                    }
                 }
             }
         }
@@ -1309,11 +1421,20 @@ impl Model {
             let _ = self.workers.restart(target, &progress, &mut self.log);
         }
         self.workers.disk_last = [None, None];
+        for i in &self.in_gate {
+            if self.sessions[self.reqs[*i].session].stalled {
+                self.summary_dropped.insert(*i);
+            }
+        }
         self.in_stopped_gate.extend(self.in_gate.drain());
         let active: Vec<usize> = (0..self.reqs.len())
             .filter(|i| self.sessions[self.reqs[*i].session].open && self.reqs[*i].end.is_none())
             .collect();
         self.rig.restart_reducer();
+        // The stalled readers read on, so action tasks that waited for room wake up after their
+        // ends. They must push nothing more.
+        self.unstall_all();
+        self.read_events();
         // The aborted action tasks wake up; they must not end their actions again.
         self.rig.openers.fail_all();
         self.rig.settle();
@@ -1338,7 +1459,7 @@ impl Model {
     fn one_op(&mut self) {
         let open = self.open_sessions();
         let s = open[self.rng.below(open.len())];
-        match self.rng.below(114) {
+        match self.rng.below(118) {
             0..=29 => {
                 let n = 1 + self.rng.below(3);
                 let slots = (0..n).map(|_| self.random_slot()).collect();
@@ -1406,6 +1527,7 @@ impl Model {
                 }
                 let s = remote[self.rng.below(remote.len())];
                 let id = self.sessions[s].id;
+                self.sessions[s].stalled = false;
                 self.step(
                     &format!("session {s} ends"),
                     vec![EngineMsg::Client(ClientMsg::Close(id))],
@@ -1422,13 +1544,40 @@ impl Model {
                 self.step("a session opens", vec![msg]);
             }
             100..=111 => self.action_step(),
+            112..=115 => self.stall_or_read_on(s),
             _ => self.reducer_restarts(),
+        }
+    }
+
+    /// Session `s`'s reader stalls: its action channel fills up and the model reads nothing of
+    /// it. A stalled reader reads on instead.
+    fn stall_or_read_on(&mut self, s: usize) {
+        if self.sessions[s].stalled {
+            self.sessions[s].stalled = false;
+            self.step(&format!("session {s} reads on"), Vec::new());
+            return;
+        }
+        let filler = ActionEvent {
+            id: FILLER,
+            target: None,
+            state: ActionState::Started,
+        };
+        while self.sessions[s].actions_tx.try_send(filler.clone()).is_ok() {}
+        self.sessions[s].stalled = true;
+        self.steps.push(format!("session {s} stalls"));
+    }
+
+    fn unstall_all(&mut self) {
+        for session in &mut self.sessions {
+            session.stalled = false;
         }
     }
 
     /// The workers take and finish everything, then every request of an open session has
     /// exactly one end and no session has an active request.
     fn drain(&mut self) {
+        self.unstall_all();
+        self.read_events();
         for _ in 0..8 {
             let progress = self.rig.progress();
             let commands = self.rig.commands();
