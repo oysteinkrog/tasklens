@@ -15,10 +15,10 @@ use std::rc::Rc;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, Corners, Div, Element, ElementId,
-    Entity, EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId,
-    InteractiveElement as _, IntoElement, LayoutId, MouseButton, ParentElement as _, Pixels,
-    SharedString, Size, Style, StyleRefinement, Styled as _, Window, canvas, div, fill, point, px,
-    relative, size,
+    Entity, EntityId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton,
+    MouseMoveEvent, ParentElement as _, Pixels, SharedString, Size, Style, StyleRefinement,
+    Styled as _, Window, canvas, div, fill, point, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::SmallVec;
@@ -296,6 +296,9 @@ pub struct CoreBarsModel {
     name_lines: Vec<CachedLine>,
     pct_lines: Vec<CachedLine>,
     ghz_lines: Vec<CachedLine>,
+    /// The CPU id of the row under the pointer, and who hears when it changes (tasklens-o55.57).
+    hovered: Option<usize>,
+    hover_sink: Option<RowHoverSink>,
     /// Paints of the element.
     #[cfg(any(test, feature = "test-hooks"))]
     pub paint_count: Cell<u32>,
@@ -304,7 +307,46 @@ pub struct CoreBarsModel {
     pub shape_count: Cell<u32>,
 }
 
+/// Hears the CPU id of the core row under the pointer, `None` when the pointer left the rows.
+#[derive(Clone)]
+pub struct RowHoverSink(pub Rc<RowHoverFn>);
+
+/// What a [`RowHoverSink`] calls.
+pub type RowHoverFn = dyn Fn(Option<usize>, &mut App);
+
+impl std::fmt::Debug for RowHoverSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RowHoverSink")
+    }
+}
+
 impl CoreBarsModel {
+    /// Calls `sink` with the CPU id of the row under the pointer each time it changes. The rows
+    /// then take pointer moves; without a sink they take none.
+    pub fn set_hover_sink(&mut self, sink: impl Fn(Option<usize>, &mut App) + 'static) {
+        self.hover_sink = Some(RowHoverSink(Rc::new(sink)));
+    }
+
+    /// The CPU id of the row under the pointer.
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
+    }
+
+    /// Takes the row under the pointer: calls the sink when it changed.
+    pub fn set_hovered(model: &Rc<RefCell<Self>>, cpu: Option<usize>, cx: &mut App) {
+        let sink = {
+            let mut m = model.borrow_mut();
+            if m.hovered == cpu {
+                return;
+            }
+            m.hovered = cpu;
+            m.hover_sink.clone()
+        };
+        if let Some(sink) = sink {
+            (sink.0)(cpu, cx);
+        }
+    }
+
     /// Sets the CPU names ("C0", "C1", …). Every value and clock goes back to no valid sample.
     pub fn set_cpus(&mut self, names: impl Iterator<Item = SharedString>) {
         self.names.clear();
@@ -799,7 +841,8 @@ impl IntoElement for CoreBars {
 
 impl Element for CoreBars {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// A hitbox over the rows while the model has a hover sink.
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -827,11 +870,16 @@ impl Element for CoreBars {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Window,
+        window: &mut Window,
         _: &mut App,
-    ) {
+    ) -> Option<Hitbox> {
+        self.model
+            .borrow()
+            .hover_sink
+            .is_some()
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -840,7 +888,7 @@ impl Element for CoreBars {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -867,6 +915,22 @@ impl Element for CoreBars {
         let parts = core_cell(&l, s);
         let gap = px(CELL_GAP * s);
         let bar_h = px(METER_H * s);
+        if let Some(hitbox) = hitbox.clone() {
+            // The row under the pointer goes to the sink; pointer moves notify nothing here.
+            let shared = Rc::clone(&self.model);
+            let order = model.order.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                if !phase.bubble() {
+                    return;
+                }
+                let cpu = hitbox
+                    .is_hovered(window)
+                    .then(|| row_at(&l, bounds, gap, e.position))
+                    .flatten()
+                    .and_then(|slot| order.get(slot).copied());
+                CoreBarsModel::set_hovered(&shared, cpu, cx);
+            });
+        }
         let name_style = LineStyle {
             size: m.text.xs,
             weight: FontWeight::NORMAL,
@@ -928,6 +992,28 @@ impl Element for CoreBars {
             let _ = shaped;
         }
     }
+}
+
+/// The row slot under `at` in a grid laid out as `l` over `bounds`: the cell's column and row,
+/// `None` in the gap between columns or past the last row.
+fn row_at(
+    l: &CoreBarsLayout,
+    bounds: Bounds<Pixels>,
+    gap: Pixels,
+    at: gpui_kit::Point<Pixels>,
+) -> Option<usize> {
+    let x = at.x - bounds.left();
+    let y = at.y - bounds.top();
+    if x < px(0.) || y < px(0.) || l.row_h <= px(0.) {
+        return None;
+    }
+    let pitch = l.cell_w + gap;
+    let col = (f32::from(x) / f32::from(pitch).max(1.)).floor() as usize;
+    if col >= l.cols || x - pitch * col as f32 > l.cell_w {
+        return None;
+    }
+    let row = (f32::from(y) / f32::from(l.row_h)).floor() as usize;
+    (row < l.rows).then_some(col * l.rows + row)
 }
 
 /// `el` selects `target`'s page on a left click (crw.44). A static hitbox: no hover style, so
