@@ -531,6 +531,9 @@ async fn run_commands<B: UdisksBus>(
                 skip_repeats(io, st, &batch[i + 1..], disk);
                 stop
             }
+            WorkerCommand::Device(DeviceCommand::Eject { seq: ui_seq, .. }) => {
+                send(cx, io, eject_dropped(*ui_seq)).await
+            }
             _ => None,
         };
         if stop.is_some() {
@@ -748,7 +751,7 @@ fn smart_failed(reason: &str) -> InvField<Arc<SmartData>> {
 // ---- Eject (E12-022) ----
 
 /// One `Eject`: `Running`, then `Done`, `Blocked` or `Failed`, sending the list after each
-/// change. A `seq` at or below the last one seen for the disk is ignored.
+/// change. A `seq` at or below the last one seen for the disk only sends `EjectDropped`.
 async fn run_eject<B: UdisksBus>(
     cx: &Cx,
     io: &WorkerIo,
@@ -759,7 +762,7 @@ async fn run_eject<B: UdisksBus>(
     disk: Arc<str>,
 ) -> Option<Outcome<(), WorkerError>> {
     if st.eject.get(&disk).is_some_and(|(last, _)| seq <= *last) {
-        return None;
+        return send(cx, io, eject_dropped(seq)).await;
     }
     let drive = disk_records(objs, st.fallback)
         .into_iter()
@@ -794,6 +797,11 @@ async fn run_eject<B: UdisksBus>(
     };
     st.eject.insert(disk, (seq, state));
     publish(cx, io, objs, st).await
+}
+
+/// The end of an `Eject` that ran no step, so the reducer can end its request (ADR-018).
+fn eject_dropped(seq: u64) -> SourceUpdate {
+    SourceUpdate::DeviceDetails(DeviceDetailsUpdate::EjectDropped(seq))
 }
 
 /// The plan's calls in order. Stops at the first error.
@@ -862,7 +870,7 @@ fn eject_error(e: &DbusError) -> String {
 }
 
 /// Marks the `Eject` commands for `disk` that were queued while it ran, in the rest of this
-/// batch or after it, so they are dropped.
+/// batch or after it, so they are dropped. Each one sends `EjectDropped` when it is reached.
 fn skip_repeats(io: &WorkerIo, st: &mut State, rest: &[(u64, WorkerCommand)], disk: &str) {
     let same = |command: &WorkerCommand| matches!(command, WorkerCommand::Device(DeviceCommand::Eject { disk: d, .. }) if &**d == disk);
     st.skip
@@ -2778,11 +2786,62 @@ mod tests {
             ]
         );
 
-        // The same page seq again does nothing.
+        // The same page seq again runs no step and only reports that it ended.
         rig.eject(2, 7, "sdb");
         rig.advance(SIGNAL_WAIT);
-        assert!(rig.drain().is_empty());
+        let got = rig.drain();
+        assert!(
+            matches!(
+                got[..],
+                [SourceUpdate::DeviceDetails(
+                    DeviceDetailsUpdate::EjectDropped(7)
+                )]
+            ),
+            "{got:?}"
+        );
         assert_eq!(eject_calls(&fake).len(), 4);
+        assert_eq!(rig.progress.done(SourceId::Udisks), 2);
+        rig.finish();
+    }
+
+    /// ADR-018: a repeat queued while an eject of the same disk ran is skipped and sends
+    /// `EjectDropped`, so the reducer ends its request.
+    #[test]
+    fn eject_repeat_sends_dropped() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(stick_eject_objects());
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        // Both in one batch, so the second is a repeat queued while the first ran.
+        let eject = |seq, ui_seq| QueuedCommand {
+            seq,
+            target: SourceId::Udisks,
+            command: WorkerCommand::Device(DeviceCommand::Eject {
+                seq: ui_seq,
+                disk: "sdb".into(),
+            }),
+        };
+        let control = WorkerControl {
+            reset_generation: 0,
+            commands: Arc::from([eject(1, 7), eject(2, 8)]),
+            progress: Arc::clone(&rig.progress),
+        };
+        rig.control_tx.send(control).expect("control send");
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(eject_of(&got[0], "sdb"), Some((7, EjectState::Running)));
+        assert_eq!(eject_of(&got[1], "sdb"), Some((7, EjectState::Done)));
+        assert!(
+            matches!(
+                got[2],
+                SourceUpdate::DeviceDetails(DeviceDetailsUpdate::EjectDropped(8))
+            ),
+            "{got:?}"
+        );
+        assert_eq!(eject_calls(&fake).len(), 4, "the repeat ran no step");
         assert_eq!(rig.progress.done(SourceId::Udisks), 2);
         rig.finish();
     }

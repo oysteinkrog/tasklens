@@ -18,10 +18,18 @@
 //! own scans, handle search and ejects, under its own ids. The local session is mapped the same
 //! way, so two windows never see each other's results.
 //!
+//! A scan, search or eject mapping is active from the request until its end: a terminal state in
+//! the worker's update, a newer request of the same slot in one (the workers handle each slot's
+//! requests in order and keep one per slot), or the worker's `ScanDropped` or `EjectDropped`. It
+//! is never dropped for being old. A session has at most `ACTIVE_MAX` active requests per kind;
+//! one more is refused as Busy. An ended mapping stays only while the shared details or device
+//! details still show its engine id, so the session keeps seeing a finished result under its own
+//! id. Actions keep no mapping: the gate routes each one by engine id until `ActionFinished`, and
+//! runs at most `MAX_ACTIONS_IN_FLIGHT` (16) at once, below `ACTIVE_MAX`.
+//!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
 //! in the reducer, so a reducer restart drops every session but the local one.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
@@ -33,7 +41,7 @@ use tl_model::details::{
     DetailTab, DetailTarget, DetailsSnapshot, HandleSearchState, ScanId, SearchId, StringScanState,
     TabPayload, TabSlot,
 };
-use tl_model::ids::DeviceIdx;
+use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
     ServicesSnapshot, Snapshot, StartupSnapshot,
@@ -54,13 +62,9 @@ pub const SESSION_BITS: [ComponentMask; 4] = [
     ComponentMask::CONNECTIONS,
 ];
 
-/// Client ids kept per kind and session beyond the live ones. A mapping whose engine id the
-/// shared details or device details still show is live and always kept, so a long scan keeps
-/// its results and can be cancelled however many requests come after it. The newest `IDS_KEPT`
-/// are kept too, for cancels of requests the workers have not reported on yet.
-/// The shared parts hold only the latest scan per target, one handle search and the latest
-/// eject per disk, so the live ones are few.
-pub const IDS_KEPT: usize = 64;
+/// Active requests per kind and session (scans, handle searches, ejects). One more is refused
+/// as Busy until one of them ends.
+pub const ACTIVE_MAX: usize = 64;
 
 /// The client-chosen ids the reducer maps into the engine-wide namespace.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,37 +83,90 @@ impl IdKind {
     }
 }
 
-/// One session's client ids of one kind and the engine ids they got, oldest first. `prune`
-/// keeps the live ones and the newest `IDS_KEPT`.
+/// What one request works on. The workers keep one request per slot and handle a slot's
+/// requests in engine id order, so a newer engine id seen in a slot ends every older one there.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum IdSlot {
+    /// A Strings scan of this process.
+    Scan(ProcessKey),
+    /// The one handle search.
+    Search,
+    /// An eject of this disk, by kernel name.
+    Eject(Arc<str>),
+}
+
+impl IdSlot {
+    pub fn kind(&self) -> IdKind {
+        match self {
+            IdSlot::Scan(_) => IdKind::Scan,
+            IdSlot::Search => IdKind::Search,
+            IdSlot::Eject(_) => IdKind::Eject,
+        }
+    }
+}
+
+/// Why `ClientSessions::map_new` gave no engine id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum MapError {
+    #[error("session not open")]
+    NoSession,
+    #[error("{ACTIVE_MAX} requests of this kind are active")]
+    Busy,
+}
+
+struct IdEntry {
+    client: u64,
+    engine: u64,
+    slot: IdSlot,
+    /// False once the request ended. The entry then stays only while its engine id is shown.
+    active: bool,
+}
+
+/// One session's client ids of one kind and the engine ids they got, oldest first.
 #[derive(Default)]
-struct IdMap(VecDeque<(u64, u64)>);
+struct IdMap(Vec<IdEntry>);
 
 impl IdMap {
-    fn insert(&mut self, client: u64, engine: u64) {
-        self.0.push_back((client, engine));
+    fn active(&self) -> usize {
+        self.0.iter().filter(|e| e.active).count()
     }
 
-    /// Drops the mappings older than the newest `IDS_KEPT` whose engine id is not in `live`.
-    fn prune(&mut self, live: &[u64]) {
-        let old = self.0.len().saturating_sub(IDS_KEPT);
-        let mut i = 0;
-        self.0.retain(|(_, engine)| {
-            i += 1;
-            i > old || live.contains(engine)
-        });
+    /// Ends the request with engine id `engine`. False when this map does not have it.
+    fn end(&mut self, engine: u64) -> bool {
+        match self.0.iter_mut().find(|e| e.engine == engine) {
+            Some(e) => {
+                e.active = false;
+                true
+            }
+            None => false,
+        }
     }
 
-    /// The newest engine id given to `client`.
+    /// Ends the requests in `slot` older than `engine`.
+    fn end_older(&mut self, slot: &IdSlot, engine: u64) {
+        for e in &mut self.0 {
+            if e.engine < engine && e.slot == *slot {
+                e.active = false;
+            }
+        }
+    }
+
+    /// Drops the ended entries whose engine id is not in `shown`.
+    fn prune(&mut self, shown: &[u64]) {
+        self.0.retain(|e| e.active || shown.contains(&e.engine));
+    }
+
+    /// The engine id of the newest active request with `client`.
     fn engine(&self, client: u64) -> Option<u64> {
         self.0
             .iter()
             .rev()
-            .find(|(c, _)| *c == client)
-            .map(|(_, e)| *e)
+            .find(|e| e.active && e.client == client)
+            .map(|e| e.engine)
     }
 
     fn client(&self, engine: u64) -> Option<u64> {
-        self.0.iter().find(|(_, e)| *e == engine).map(|(c, _)| *c)
+        self.0.iter().find(|e| e.engine == engine).map(|e| e.client)
     }
 }
 
@@ -202,7 +259,8 @@ pub struct ClientSession {
     /// ejects, under its own ids. The header is the shared one.
     details: Arc<DetailsSnapshot>,
     device_details: Arc<DeviceDetailsSnapshot>,
-    /// Client ids to engine ids, in `IdKind` order.
+    /// Client ids to engine ids, in `IdKind` order: the active requests and the ended ones that
+    /// are still shown.
     ids: [IdMap; 3],
     cache: ViewCache,
     /// Parts this session rebuilt since its last publish, plus `DETAILS` and `DEVICE_DETAILS`
@@ -323,7 +381,7 @@ impl ClientSession {
         self.link.as_ref().map(|l| &l.events_tx)
     }
 
-    /// The engine id the session's `client` id of `kind` got last, if it is still kept.
+    /// The engine id of the session's newest active request with `client` id of `kind`.
     pub fn engine_id(&self, kind: IdKind, client: u64) -> Option<u64> {
         self.ids[kind.index()].engine(client)
     }
@@ -333,10 +391,20 @@ impl ClientSession {
         self.ids[kind.index()].client(engine)
     }
 
-    /// Prunes each id map, keeping the mappings whose engine id `c` still shows: the scan in
-    /// each target's Strings tab, the handle search and each disk's eject.
+    /// The session's active requests of `kind`.
+    pub fn active(&self, kind: IdKind) -> usize {
+        self.ids[kind.index()].active()
+    }
+
+    /// The session's mappings of `kind`: the active ones and the ended ones still shown.
+    pub fn mapped(&self, kind: IdKind) -> usize {
+        self.ids[kind.index()].0.len()
+    }
+
+    /// Drops the ended mappings whose engine id `c` no longer shows: the scan in each target's
+    /// Strings tab, the handle search and each disk's eject.
     fn prune_ids(&mut self, c: &Components) {
-        if self.ids.iter().all(|m| m.0.len() <= IDS_KEPT) {
+        if self.ids.iter().all(|m| m.0.iter().all(|e| e.active)) {
             return;
         }
         let scans: Vec<u64> = c
@@ -574,14 +642,71 @@ impl ClientSessions {
         self.last_engine_id
     }
 
-    /// Gives session `id`'s `client` id of `kind` a new engine id and returns it. A client id
-    /// sent again gets a new engine id; the newest one is used for cancels. `None` when the
-    /// session is not open.
-    pub fn map_new(&mut self, id: ClientSessionId, kind: IdKind, client: u64) -> Option<u64> {
-        let index = self.sessions.iter().position(|s| s.id == id)?;
+    /// Gives session `id`'s request `client` in `slot` a new engine id and returns it. A client
+    /// id sent again gets a new engine id; cancels use the newest active one. Busy when the
+    /// session has `ACTIVE_MAX` active requests of the slot's kind.
+    pub fn map_new(
+        &mut self,
+        id: ClientSessionId,
+        slot: IdSlot,
+        client: u64,
+    ) -> Result<u64, MapError> {
+        let index = self
+            .sessions
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or(MapError::NoSession)?;
+        let map = &self.sessions[index].ids[slot.kind().index()];
+        if map.active() >= ACTIVE_MAX {
+            return Err(MapError::Busy);
+        }
         let engine = self.next_engine_id();
-        self.sessions[index].ids[kind.index()].insert(client, engine);
-        Some(engine)
+        self.sessions[index].ids[slot.kind().index()]
+            .0
+            .push(IdEntry {
+                client,
+                engine,
+                slot,
+                active: true,
+            });
+        Ok(engine)
+    }
+
+    /// Ends request `engine` of `kind`, whichever session owns it.
+    pub fn end(&mut self, kind: IdKind, engine: u64) {
+        for s in &mut self.sessions {
+            if s.ids[kind.index()].end(engine) {
+                return;
+            }
+        }
+    }
+
+    /// The worker reported request `engine` in `slot`: ends every older request in that slot,
+    /// in every session, and `engine` itself when `ended`.
+    pub fn seen(&mut self, slot: &IdSlot, engine: u64, ended: bool) {
+        let kind = slot.kind();
+        for s in &mut self.sessions {
+            s.ids[kind.index()].end_older(slot, engine);
+        }
+        if ended {
+            self.end(kind, engine);
+        }
+    }
+
+    /// Ends request `engine` of `kind` and the older ones in its slot. For a worker's
+    /// `ScanDropped` and `EjectDropped`, which carry no slot.
+    pub fn dropped(&mut self, kind: IdKind, engine: u64) {
+        let slot = self.sessions.iter().find_map(|s| {
+            s.ids[kind.index()]
+                .0
+                .iter()
+                .find(|e| e.engine == engine)
+                .map(|e| e.slot.clone())
+        });
+        match slot {
+            Some(slot) => self.seen(&slot, engine, true),
+            None => self.end(kind, engine),
+        }
     }
 
     /// Adds a session after the open ones. Its parts start as those of `empty`; the caller

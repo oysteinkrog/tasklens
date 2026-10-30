@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use tl_model::actions::{ActionId, CgroupRef};
 use tl_model::command::{Command, SetupState};
-use tl_model::details::{AffinityInfo, DetailTab, DetailTarget, HandleSearchState, TabPayload};
+use tl_model::details::{
+    AffinityInfo, DetailTab, DetailTarget, HandleSearchState, ScanId, TabPayload,
+};
 use tl_model::devices::{DeviceIdentity, NetKind};
 use tl_model::gpu_proto::{ApiVersions, GpuProcessSample};
 use tl_model::health::{HelperStartOutcome, HelperState, ManagerState, SourceId, SourceState};
@@ -148,6 +150,10 @@ pub enum DeviceDetailsUpdate {
     Batteries(Vec<(DeviceIdentity, BatteryDetails)>),
     /// `DeviceDetailsSnapshot::on_battery`, sent when it changes.
     OnBattery(Option<bool>),
+    /// The `Eject` with this `seq` ended without running: a repeat queued while an eject of the
+    /// same disk ran, or a `seq` at or below the disk's last one. Udisks sends it so the reducer
+    /// can end the request (ADR-018).
+    EjectDropped(u64),
 }
 
 /// Helper session state (R-150 item 1).
@@ -355,6 +361,10 @@ pub enum DetailsUpdate {
         entries: Vec<(ProcessKey, AffinityInfo)>,
     },
     HandleSearch(Arc<HandleSearchState>),
+    /// A Strings scan ended without a payload: a newer scan of its process replaced it, the
+    /// scan limit pushed it out, or its process left the demand. The reducer ends the request
+    /// (ADR-018).
+    ScanDropped(ScanId),
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +446,7 @@ pub fn source_of(update: &SourceUpdate) -> Option<SourceId> {
             DeviceDetailsUpdate::Batteries(_) | DeviceDetailsUpdate::OnBattery(_) => {
                 SourceId::UPower
             }
+            DeviceDetailsUpdate::EjectDropped(_) => SourceId::Udisks,
         }),
         SourceUpdate::Helper(_) => None,
         SourceUpdate::Setup(_) => None,

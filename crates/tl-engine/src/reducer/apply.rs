@@ -14,7 +14,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionId, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::{Demand, DetailDemand};
-use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId};
+use tl_model::details::{
+    DetailTab, DetailTarget, HandlePhase, ScanId, ScanPhase, SearchId, TabPayload,
+};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
@@ -42,7 +44,7 @@ use super::table::{self, PseudoInput, SweepTotals, TableInput};
 use super::{
     ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
 };
-use crate::client_session::{ClientMsg, ClientSessionId, IdKind};
+use crate::client_session::{ClientMsg, ClientSessionId, IdKind, IdSlot, MapError};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
@@ -609,12 +611,28 @@ impl Reducer {
                 tab,
                 payload,
                 validity,
-            }) => self.details.apply_tab(target, tab, payload, validity),
+            }) => {
+                if let (DetailTarget::Process(key), TabPayload::Strings(state)) =
+                    (target, &*payload)
+                {
+                    let ended = state.phase != ScanPhase::Scanning;
+                    self.clients.seen(&IdSlot::Scan(key), state.scan.0, ended);
+                }
+                self.details.apply_tab(target, tab, payload, validity);
+            }
             SourceUpdate::Details(DetailsUpdate::Affinity { entries, .. }) => {
                 self.details.apply_affinity(entries);
             }
             SourceUpdate::Details(DetailsUpdate::HandleSearch(state)) => {
+                let ended = matches!(
+                    state.phase,
+                    HandlePhase::Done | HandlePhase::Stopped | HandlePhase::Failed
+                );
+                self.clients.seen(&IdSlot::Search, state.search.0, ended);
                 self.details.apply_handle_search(state);
+            }
+            SourceUpdate::Details(DetailsUpdate::ScanDropped(scan)) => {
+                self.clients.dropped(IdKind::Scan, scan.0);
             }
             SourceUpdate::Services(s) => self.apply_services(s, settings),
             SourceUpdate::Connections(c) => self.apply_connections(c, settings),
@@ -768,7 +786,7 @@ impl Reducer {
                 self.forward(SourceId::ProcessDetail, WorkerCommand::VerifyPackage(key));
             }
             Command::StringScan { scan, key, opts } => {
-                if let Some(engine) = self.clients.map_new(id, IdKind::Scan, scan.0) {
+                if let Some(engine) = self.map_new(id, IdSlot::Scan(key), scan.0) {
                     self.forward(
                         SourceId::ProcessDetail,
                         WorkerCommand::StringScan {
@@ -793,7 +811,7 @@ impl Reducer {
                 include_maps,
                 privileged,
             } => {
-                if let Some(engine) = self.clients.map_new(id, IdKind::Search, search.0) {
+                if let Some(engine) = self.map_new(id, IdSlot::Search, search.0) {
                     self.forward(
                         SourceId::ProcessDetail,
                         WorkerCommand::HandleSearch {
@@ -822,7 +840,8 @@ impl Reducer {
             Command::Device(cmd) => {
                 let cmd = match cmd {
                     DeviceCommand::Eject { seq, disk } => {
-                        let Some(engine) = self.clients.map_new(id, IdKind::Eject, seq) else {
+                        let slot = IdSlot::Eject(Arc::clone(&disk));
+                        let Some(engine) = self.map_new(id, slot, seq) else {
                             return;
                         };
                         DeviceCommand::Eject { seq: engine, disk }
@@ -843,8 +862,23 @@ impl Reducer {
         }
     }
 
-    /// The engine id session `id`'s `client` id of `kind` got last. `None`, logged, when the
-    /// session never sent it or it is no longer kept.
+    /// A new engine id for session `id`'s request `client` in `slot`. `None`, logged, when the
+    /// session already has `ACTIVE_MAX` active requests of that kind (Busy): the request is
+    /// dropped.
+    fn map_new(&mut self, id: ClientSessionId, slot: IdSlot, client: u64) -> Option<u64> {
+        let kind = slot.kind();
+        match self.clients.map_new(id, slot, client) {
+            Ok(engine) => Some(engine),
+            Err(MapError::Busy) => {
+                tracing::debug!(target: "tasklens::engine", session = id.0, ?kind, client, "request refused: busy");
+                None
+            }
+            Err(MapError::NoSession) => None,
+        }
+    }
+
+    /// The engine id of session `id`'s newest active request with `client` id of `kind`.
+    /// `None`, logged, when the session never sent it or it has ended.
     fn engine_id(&self, id: ClientSessionId, kind: IdKind, client: u64) -> Option<u64> {
         let engine = self.clients.get(id).and_then(|s| s.engine_id(kind, client));
         if engine.is_none() {
@@ -1818,6 +1852,14 @@ impl Reducer {
             DeviceDetailsUpdate::Disks { from, entries } => {
                 let mut map = FxHashMap::default();
                 for (identity, details) in entries {
+                    if from == SourceId::Udisks
+                        && let DeviceIdentity::Disk { name, .. } = &identity
+                        && let Some((seq, state)) = &details.eject
+                    {
+                        let ended = !matches!(state, EjectState::Running);
+                        self.clients
+                            .seen(&IdSlot::Eject(Arc::clone(name)), *seq, ended);
+                    }
                     let (idx, _) = self.sample_device(&identity)?;
                     map.insert(idx, details);
                 }
@@ -1898,6 +1940,11 @@ impl Reducer {
                 self.mark(ComponentMask::SERIES);
             }
             DeviceDetailsUpdate::OnBattery(on) => next.on_battery = on,
+            // Ends the request only; the snapshot does not change.
+            DeviceDetailsUpdate::EjectDropped(seq) => {
+                self.clients.dropped(IdKind::Eject, seq);
+                return Ok(());
+            }
         }
         self.components.device_details = Arc::new(next);
         self.mark(ComponentMask::DEVICE_DETAILS);

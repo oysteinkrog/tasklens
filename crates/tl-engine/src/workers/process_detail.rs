@@ -66,7 +66,9 @@
 //! `Cancelled`, and no chunk is read after it. A scan whose process exits or turns zombie stops
 //! with `StoppedExited` and keeps the rows found so far ("Scan stopped: the process exited",
 //! UI-PWN-017). A scan whose process leaves the demand stops without a payload: its window
-//! closed.
+//! closed. Every scan that stops without a payload (that one, one replaced by a newer scan of
+//! its process, one pushed out at `DETAILS_MAX`) sends `DetailsUpdate::ScanDropped`, so the
+//! reducer can end its client's request (ADR-018).
 //!
 //! Handle search (PROC-096, tasklens-dwy.3): `HandleSearch` queues one search over the open
 //! handles of every process, and the next sample starts it with `HandleSearch::new`, so the proc
@@ -2157,8 +2159,21 @@ impl ProcessDetailSource {
                 .iter()
                 .any(|d| d.target == DetailTarget::Process(key))
         };
-        self.scan_requests.retain(|&(_, key, _)| shown(key));
-        self.scans.retain(|s| shown(s.key));
+        let extra = &mut self.extra;
+        self.scan_requests.retain(|&(scan, key, _)| {
+            let keep = shown(key);
+            if !keep {
+                extra.push_back(scan_dropped(scan));
+            }
+            keep
+        });
+        self.scans.retain(|s| {
+            let keep = shown(s.key);
+            if !keep {
+                extra.push_back(scan_dropped(s.scan));
+            }
+            keep
+        });
         for (scan, key, opts) in std::mem::take(&mut self.scan_requests) {
             let started = start_scan(
                 &self.cfg.sys_root,
@@ -2292,6 +2307,7 @@ impl ProcessDetailSource {
                 .any(|d| d.target == DetailTarget::Process(state.key));
             let Some(feed) = store.scans.get_mut(&state.scan).filter(|_| shown) else {
                 store.scans.remove(&state.scan);
+                self.extra.push_back(scan_dropped(state.scan));
                 return false;
             };
             if !feed.hits.is_empty() {
@@ -2326,13 +2342,17 @@ impl ProcessDetailSource {
         });
     }
 
-    /// Drops the helper scans of `key`, without a payload.
+    /// Drops the helper scans of `key` without a payload and queues their `ScanDropped`.
     fn drop_helper_scans(&mut self, key: ProcessKey) {
         let side = self.helper.as_ref();
+        let extra = &mut self.extra;
         self.helper_scans.retain(|s| {
             let keep = s.key != key;
-            if !keep && let Some(side) = side {
-                side.drop_scan(s.scan);
+            if !keep {
+                if let Some(side) = side {
+                    side.drop_scan(s.scan);
+                }
+                extra.push_back(scan_dropped(s.scan));
             }
             keep
         });
@@ -2584,17 +2604,32 @@ impl Source for ProcessDetailSource {
             }
             WorkerCommand::StringScan { scan, key, opts } => {
                 // A new scan of a process replaces the one it has.
-                self.scan_requests.retain(|r| r.1 != *key);
-                self.scans.retain(|s| s.key != *key);
+                let extra = &mut self.extra;
+                self.scan_requests.retain(|r| {
+                    let keep = r.1 != *key;
+                    if !keep {
+                        extra.push_back(scan_dropped(r.0));
+                    }
+                    keep
+                });
+                self.scans.retain(|s| {
+                    let keep = s.key != *key;
+                    if !keep {
+                        extra.push_back(scan_dropped(s.scan));
+                    }
+                    keep
+                });
                 self.drop_helper_scans(*key);
                 let running = self.scan_requests.len() + self.scans.len() + self.helper_scans.len();
                 if running >= DETAILS_MAX {
                     if !self.scans.is_empty() {
-                        self.scans.remove(0);
+                        let pushed_out = self.scans.remove(0).scan;
+                        self.extra.push_back(scan_dropped(pushed_out));
                     } else if let Some(oldest) = self.helper_scans.first().map(|s| s.key) {
                         self.drop_helper_scans(oldest);
                     } else {
-                        self.scan_requests.remove(0);
+                        let pushed_out = self.scan_requests.remove(0).0;
+                        self.extra.push_back(scan_dropped(pushed_out));
                     }
                 }
                 self.scan_requests.push((*scan, *key, *opts));
@@ -2630,6 +2665,11 @@ impl Source for ProcessDetailSource {
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         self.extra.pop_front()
     }
+}
+
+/// The end of a scan that stopped without a payload.
+fn scan_dropped(scan: ScanId) -> SourceUpdate {
+    SourceUpdate::Details(DetailsUpdate::ScanDropped(scan))
 }
 
 /// A Strings tab update. Every payload carries its `ScanId`, as the UI drops the payloads of
@@ -4649,6 +4689,51 @@ mod tests {
         assert_eq!(src.scans.len(), 10);
         let pcts: Vec<u8> = src.scans.iter().map(|s| s.scanner.progress_pct()).collect();
         assert!(pcts.iter().all(|&p| p > 0), "{pcts:?}");
+    }
+
+    /// ADR-018: a scan that stops without a payload sends `ScanDropped`: replaced by a newer
+    /// scan of its process, pushed out at `DETAILS_MAX`, or its process left the demand.
+    #[test]
+    fn scan_without_payload_sends_scan_dropped() {
+        let (_tmp, cfg, keys) = fake_procs(DETAILS_MAX as u32 + 1);
+        let mut src = ProcessDetailSource::new(cfg);
+        let scan = |src: &mut ProcessDetailSource, id, key| {
+            assert!(src.command(&WorkerCommand::StringScan {
+                scan: ScanId(id),
+                key,
+                opts: StringScanOpts::default(),
+            }));
+        };
+        let dropped = |src: &mut ProcessDetailSource| -> Vec<u64> {
+            std::iter::from_fn(|| src.take_extra())
+                .map(|u| match u {
+                    SourceUpdate::Details(DetailsUpdate::ScanDropped(s)) => s.0,
+                    other => panic!("expected ScanDropped, got {other:?}"),
+                })
+                .collect()
+        };
+
+        scan(&mut src, 1, keys[0]);
+        scan(&mut src, 2, keys[0]);
+        assert_eq!(dropped(&mut src), [1], "replaced by a newer scan");
+
+        for (id, &key) in (3..).zip(&keys[1..]) {
+            scan(&mut src, id, key);
+        }
+        assert_eq!(dropped(&mut src), [2], "pushed out at DETAILS_MAX");
+
+        // No process is shown, so the sample drops every waiting scan.
+        src.period(&Demand::default(), &every_ms(500));
+        let update;
+        (src, update) = src.sample_at(1_000 * MS);
+        // The sample returns the last queued update itself.
+        let mut left = dropped(&mut src);
+        match update {
+            SourceUpdate::Details(DetailsUpdate::ScanDropped(s)) => left.push(s.0),
+            other => panic!("expected ScanDropped, got {other:?}"),
+        }
+        left.sort_unstable();
+        assert_eq!(left, (3..3 + DETAILS_MAX as u64).collect::<Vec<_>>());
     }
 
     /// At most `DETAILS_MAX` hash requests wait; the oldest goes first.
