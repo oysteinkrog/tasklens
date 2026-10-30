@@ -666,10 +666,22 @@ fn overview_range_boot_marker(cx: &mut TestAppContext) {
     }
 }
 
-/// A GPU that reports 3D, encode and decode, with 4 of 16 GiB VRAM used.
+/// A GPU that reports the six engines of an NVIDIA card (3D / Compute, memory controller, video
+/// encode and decode, JPEG and optical flow), with 4 of 16 GiB VRAM used.
 fn gpu_totals(device: DeviceIdx) -> tl_model::system::GpuTotals {
-    use tl_model::system::Metric;
+    use tl_model::system::{GpuEngine, GpuEngines, Metric};
     const GIB: u64 = 1 << 30;
+    let mut engines = GpuEngines::none();
+    for (engine, pct) in [
+        (GpuEngine::Gpu, 25.),
+        (GpuEngine::MemCtl, 8.),
+        (GpuEngine::Enc, 10.),
+        (GpuEngine::Dec, 5.),
+        (GpuEngine::Jpeg, 0.),
+        (GpuEngine::Ofa, 0.),
+    ] {
+        engines.set(engine, Metric::valid(pct));
+    }
     tl_model::system::GpuTotals {
         device,
         util_pct: Metric::valid(25.),
@@ -694,7 +706,7 @@ fn gpu_totals(device: DeviceIdx) -> tl_model::system::GpuTotals {
         fan_pct: Metric::default(),
         pcie_rx_bps: Metric::default(),
         pcie_tx_bps: Metric::default(),
-        engines: Default::default(),
+        engines,
         throttling: Default::default(),
         fdinfo_partial: false,
         energy_since_boot: Metric::default(),
@@ -752,7 +764,7 @@ fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
     use tl_ui::pages::performance::overview::layout::BoxKind;
 
     let mut r = open(cx);
-    // Three disks and a GPU with three engines, as on the owner's machine. Catalog entries sit
+    // Three disks and a GPU with six engines in two rows, as on the owner's machine. Catalog entries sit
     // at their index.
     r.engine.publish_with(|s| {
         let disk = |idx: u16, minor: u32, name: &str| {
@@ -840,6 +852,9 @@ fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
             .collect();
         assert!(!plots.is_empty(), "{kind:?}: plots painted in {frame:?}");
         let (covered, rows) = plot_cover(&plots);
+        if kind == BoxKind::Gpu {
+            assert_eq!(rows, 2, "Gpu: six engines in two rows: {plots:?}");
+        }
         let lines = match kind {
             BoxKind::Cpu => 0,
             BoxKind::Gpu => rows + usize::from(r.vcx.debug_bounds(vram_sel).is_some()),
