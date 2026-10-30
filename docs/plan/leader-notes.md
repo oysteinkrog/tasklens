@@ -1026,3 +1026,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-30 crw.105 closed (range buttons on every page; CPU and GPU grids read history). Follow-ups filed P3: crw.106 caption 'over 1440 minutes' to largest whole unit, crw.107 Battery series into the history store (only charts still live only).
 - 2026-10-30 owner report: 'wine-preloader x15' in By app on home = Backblaze in Wine; mem_group has no Wine rule. Filed P2 (group by Windows install folder per WINEPREFIX, Wine system processes join the prefix's main app).
 - 2026-10-30 o55.54 held: chrome rule = box height - plot heights - 16 px per allowed label line (one per plot group or meter row) <= 40 px; x ticks overlay inside plots; Network peak inline, totals in tooltip; Memory/Timeline exempt. Requeued.
+- 2026-10-30 o55.54 round 2: the plot's 1 px outline counts as plot (dilate by the outline width only is approved); Disks (~42 px) takes its 2 px from cell gaps. Requeued.
