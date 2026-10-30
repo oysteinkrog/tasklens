@@ -6146,7 +6146,6 @@ mod page {
     /// ("1.4 Mbps, peak 4.4 Mbps"); the box has no Peak or Total rows.
     #[gpui_kit::test]
     fn overview_net_rate_lines_stay_on_one_line(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::fit::take_fit_texts;
         use tl_ui::pages::performance::overview::net_box::{DOWN_RATE_ID, NET_BOX_ID, UP_RATE_ID};
         let mut r = open_rooted(cx, true, 1280., 800.);
         r.engine.publish_with(|s| {
