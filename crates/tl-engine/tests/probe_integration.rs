@@ -229,7 +229,11 @@ fn client_hello_deadline() {
         "{:?}",
         r.err()
     );
-    assert!(t.elapsed() < HELLO_DEADLINE + Duration::from_millis(300));
+    let took = t.elapsed();
+    assert!(
+        took < HELLO_DEADLINE + Duration::from_millis(300),
+        "{took:?}"
+    );
     assert_clean(&[]);
 }
 
