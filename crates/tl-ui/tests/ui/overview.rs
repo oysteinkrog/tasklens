@@ -2049,7 +2049,7 @@ mod bottom {
     }
 
     /// Two GPUs with 3 engines, VRAM and the temperature and power row (UI-PRF-019 GPU fit,
-    /// UI-PRF-059). The body is the box minus the 38 px chrome (`BOX_CHROME`).
+    /// UI-PRF-059). The body is the box minus the 30 px chrome (`BOX_CHROME`).
     /// The first section in full with the "+1 more" row needs 48 + 6 × 22 = 180 px, with its
     /// busiest engine and "+2 more engines" 158 px, and with "+3 more engines" 136 px.
     /// - 134 px body: "+3 more engines", VRAM and "+1 more" (114 px); the
@@ -5045,8 +5045,8 @@ mod page {
         });
     }
 
-    /// D-026: with three disks at 1200 × 900 the Disk chart areas (each cell's chart below its
-    /// header and gap, measured) are about as tall as the GPU engine chart areas in the same row,
+    /// D-026: with three disks at 1200 × 900 the Disk chart areas (each cell's chart right below
+    /// its header, measured) are about as tall as the GPU engine chart areas in the same row,
     /// where the old cells were the 18 px rows. None is taller than the one Net adapter chart.
     #[gpui_kit::test]
     fn overview_disk_charts_as_tall_as_gpu(cx: &mut TestAppContext) {
@@ -5057,8 +5057,8 @@ mod page {
         use tl_ui::pages::performance::overview::net_box::{
             cell_id as net_cell_id, chart_id as net_chart_id,
         };
-        /// The header line of a cell: `LABEL_ROW` px at the test's `ui_scale` of 1.
-        const HEAD_LINE: f32 = 18.;
+        /// The header line of a cell: `PLOT_LINE` px at the test's `ui_scale` of 1.
+        const HEAD_LINE: f32 = 16.;
         let mut r = open_rooted(cx, true, 1200., 900.);
         let keys = three_disks(&mut r);
         set_disk_arrange(&mut r, "auto");
@@ -5082,7 +5082,7 @@ mod page {
             (gpu.size.width - disk.size.width).abs() <= px(1.),
             "{gpu:?} {disk:?}"
         );
-        // A chart area sits at the bottom of its cell, below the header and the gap.
+        // A chart area sits at the bottom of its cell, below the header.
         let chart_in = |chart: gpui_kit::Bounds<gpui_kit::Pixels>,
                         cell: gpui_kit::Bounds<gpui_kit::Pixels>,
                         what: &str| {
@@ -5094,8 +5094,8 @@ mod page {
                 "{what} chart {chart:?} in cell {cell:?}"
             );
             assert!(
-                chart.size.height < cell.size.height - px(HEAD_LINE),
-                "{what} gap"
+                chart.size.height <= cell.size.height - px(HEAD_LINE),
+                "{what} header"
             );
             f32::from(chart.size.height)
         };
@@ -5235,8 +5235,8 @@ mod page {
         use tl_ui::pages::performance::overview::parts::arrange_grid;
         let mut r = open_rooted(cx, true, 1800., 900.);
         let keys = three_disks(&mut r);
-        // A 282 px Disk box: at the default 40 px row unit its 270 px leaves a 184 px grid,
-        // below the 188 px three 60 px cells need, so the third disk would join "+1 more".
+        // A 42 px row unit, so the Disk box's grid has room for three 60 px cells and none
+        // joins "+1 more".
         r.set_row_unit(42);
         let page = r.page.clone();
         let shown = |r: &mut Rig| {
@@ -5250,7 +5250,7 @@ mod page {
                 .vcx
                 .update(|_, cx| page.read(cx).disk_box().read(cx).shown());
             let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
-            let fit = arrange_grid(arrange, n, grid.size, min, px(4.), px(0.));
+            let fit = arrange_grid(arrange, n, grid.size, min, px(2.), px(0.));
             let cs: Vec<_> = keys
                 .iter()
                 .take(n)
@@ -6607,9 +6607,9 @@ mod page {
         out
     }
 
-    /// UI-PRF-059: every box's title line sits inside the border, 4 px under the 1 px top border
-    /// (tasklens-o55.54), with the icon, title and range figures in it and the body below it. In Edit Layout mode the grip, gear
-    /// and Hide box button sit on that line.
+    /// UI-PRF-059: every box's 22 px title line sits inside the border, 2 px under the 1 px top
+    /// border (tasklens-o55.54), with the icon, title and range figures in it and the body below
+    /// it. In Edit Layout mode the grip, gear and Hide box button sit on that line.
     #[gpui_kit::test]
     fn overview_box_title_inside_border(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::edit::grip_id;
@@ -6622,10 +6622,10 @@ mod page {
             for (kind, frame, [row, name, figures]) in &boxes {
                 assert_eq!(
                     row.top() - frame.top(),
-                    px(5.),
+                    px(3.),
                     "{w}x{h} {kind:?}: {row:?} in {frame:?}"
                 );
-                assert_eq!(row.size.height, px(24.), "{w}x{h} {kind:?}");
+                assert_eq!(row.size.height, px(22.), "{w}x{h} {kind:?}");
                 assert!(
                     name.top() >= row.top()
                         && name.bottom() <= row.bottom()
@@ -6660,7 +6660,7 @@ mod page {
     }
 
     /// UI-PRF-059: the title line and the body are 12 px in from the left and the right border
-    /// of every box, and the body ends 6 px above the bottom border (tasklens-o55.54). A
+    /// of every box, and the body ends 4 px above the bottom border (tasklens-o55.54). A
     /// `disk_charts` list that does not fit keeps no scrollbar space, so its cells end 12 px
     /// from the right border too.
     #[gpui_kit::test]
@@ -6689,7 +6689,7 @@ mod page {
                 }
                 assert_eq!(
                     frame.bottom() - axis.bottom(),
-                    px(7.),
+                    px(5.),
                     "{w}x{h} {kind:?} bottom: {axis:?} in {frame:?}"
                 );
             }
@@ -8493,26 +8493,26 @@ mod wired {
             let name_id: &'static str = Box::leak(title_name_id(id).into_boxed_str());
             let row = r.vcx.debug_bounds(row_id).expect("title line");
             let name = r.vcx.debug_bounds(name_id).expect("title name");
-            // UI-PRF-059: the 1 px border, then 4 px, then the title line (tasklens-o55.54).
+            // UI-PRF-059: the 1 px border, then 2 px, then the title line (tasklens-o55.54).
             let row_inset = row.top() - frame.top();
             let name_inset = name.top() - frame.top();
             assert!(
-                (px(5.)..=px(6.)).contains(&row_inset),
+                (px(3.)..=px(4.)).contains(&row_inset),
                 "{id}: title line inset is {row_inset:?}"
             );
             assert!(
-                (px(5.)..=px(6.)).contains(&name_inset),
+                (px(3.)..=px(4.)).contains(&name_inset),
                 "{id}: title name inset is {name_inset:?}"
             );
             assert_eq!(name.size.height, row.size.height, "{id}: full title height");
             assert_eq!(box_accent(id, &theme), want, "{id}: device accent");
-            // tasklens-o55.54: no time axis row under the body; the body ends 6 px above the
+            // tasklens-o55.54: no time axis row under the body; the body ends 4 px above the
             // bottom border.
             let body = r
                 .vcx
                 .debug_bounds(selector_id(body_id(id)))
                 .expect("box body");
-            assert_eq!(frame.bottom() - body.bottom(), px(7.), "{id}: body bottom");
+            assert_eq!(frame.bottom() - body.bottom(), px(5.), "{id}: body bottom");
         }
 
         let overview = overview(r).expect("an OverviewPage");

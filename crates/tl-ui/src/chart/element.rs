@@ -153,7 +153,7 @@ impl Element for ChartElement {
         }
 
         #[cfg(any(test, feature = "test-hooks"))]
-        PLOTS.with(|p| p.borrow_mut().push((view_id, out.plot)));
+        PLOTS.with(|p| p.borrow_mut().push((view_id, out.plot.dilate(px(1.0)))));
 
         if let Some(hitbox) = hitbox.clone() {
             register_hover_events(&self.view, hitbox, &out, env.scale_factor, window);
@@ -167,8 +167,8 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The plots that charts painted on this thread since the last call, with their chart's
-/// entity, in paint order (tasklens-o55.54).
+/// The plots that charts painted on this thread since the last call, each with its 1 px
+/// outline, with their chart's entity, in paint order (tasklens-o55.54).
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn take_plots() -> Vec<(gpui_kit::EntityId, Bounds<Pixels>)> {
     PLOTS.with(|p| std::mem::take(&mut *p.borrow_mut()))

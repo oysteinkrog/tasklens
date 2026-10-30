@@ -25,7 +25,6 @@ use tl_ui::components::kv_grid;
 use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::overview::parts::body_id;
 use tl_ui::pages::performance::overview::range::{
     HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id,
 };
@@ -667,63 +666,198 @@ fn overview_range_boot_marker(cx: &mut TestAppContext) {
     }
 }
 
-/// tasklens-o55.54: with the default layout and `overview_row_unit_px` 40, at 1920 × 1200 (and
-/// at 1280 × 800), every box's chrome, its height less the body that holds its plots, is at
-/// most 40 px, and the first box starts at most 8 px below the status bar on top.
+/// A GPU that reports 3D, encode and decode, with 4 of 16 GiB VRAM used.
+fn gpu_totals(device: DeviceIdx) -> tl_model::system::GpuTotals {
+    use tl_model::system::Metric;
+    const GIB: u64 = 1 << 30;
+    tl_model::system::GpuTotals {
+        device,
+        util_pct: Metric::valid(25.),
+        mem_util_pct: Metric::default(),
+        mem_used: Metric::valid(4 * GIB),
+        mem_total: Metric::valid(16 * GIB),
+        shared_used: Metric::default(),
+        shared_total: Metric::default(),
+        mem_reserved: Metric::default(),
+        enc_pct: Metric::valid(10.),
+        dec_pct: Metric::valid(5.),
+        enc_sessions: Metric::default(),
+        enc_dec_shared: false,
+        temp_c: Metric::valid(62.),
+        temp_edge_c: Metric::default(),
+        temp_junction_c: Metric::default(),
+        temp_mem_c: Metric::default(),
+        power_w: Metric::valid(120.),
+        power_limit_w: Metric::default(),
+        clock_gfx_mhz: Metric::default(),
+        clock_mem_mhz: Metric::default(),
+        fan_pct: Metric::default(),
+        pcie_rx_bps: Metric::default(),
+        pcie_tx_bps: Metric::default(),
+        engines: Default::default(),
+        throttling: Default::default(),
+        fdinfo_partial: false,
+        energy_since_boot: Metric::default(),
+        clock_video_mhz: Metric::default(),
+        pstate: Metric::default(),
+        clock_event_reasons: Metric::default(),
+        fan_rpm: Metric::default(),
+        pcie_gen: Metric::default(),
+        pcie_width: Metric::default(),
+        info: Arc::default(),
+    }
+}
+
+/// The height `plots` cover from top to bottom, with plots side by side counted once, and the
+/// number of rows they sit in.
+fn plot_cover(plots: &[gpui_kit::Bounds<gpui_kit::Pixels>]) -> (f32, usize) {
+    let mut spans: Vec<(f32, f32)> = plots
+        .iter()
+        .map(|p| (f32::from(p.top()), f32::from(p.bottom())))
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut covered, mut rows) = (0., 0);
+    let mut open: Option<(f32, f32)> = None;
+    for (top, bottom) in spans {
+        match open {
+            Some((t, b)) if top < b => open = Some((t, b.max(bottom))),
+            _ => {
+                if let Some((t, b)) = open {
+                    covered += b - t;
+                }
+                rows += 1;
+                open = Some((top, bottom));
+            }
+        }
+    }
+    if let Some((t, b)) = open {
+        covered += b - t;
+    }
+    (covered, rows)
+}
+
+/// tasklens-o55.54, leader rule of 2026-10-30: with the default layout and
+/// `overview_row_unit_px` 40 at 1920 × 1200, each box's chrome is at most 40 px. Chrome is the
+/// box height less the height its plots cover as painted (each with its 1 px outline), less
+/// 16 px for each allowed label line: one per row of plots (a disk's name and rate, a GPU engine's name and %, the Network
+/// Download and Upload lines) and one for the GPU VRAM row. A sparkline under 32 px tall sits
+/// in a label row (VRAM, a core row) and is part of that row. The CPU chart has no label line.
+/// Memory and the timeline have no plots and are left out. The first box starts at most 8 px
+/// under the status bar.
 #[gpui_kit::test]
 fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
+    use gpui_kit::{Bounds, EntityId, Pixels};
+    use tl_ui::chart::element::take_plots;
+    use tl_ui::pages::performance::overview::gpu_box::vram_id;
+    use tl_ui::pages::performance::overview::layout::BoxKind;
+
     let mut r = open(cx);
+    // Three disks and a GPU with three engines, as on the owner's machine. Catalog entries sit
+    // at their index.
+    r.engine.publish_with(|s| {
+        let disk = |idx: u16, minor: u32, name: &str| {
+            entry(
+                idx,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor,
+                    name: Arc::from(name),
+                    wwn_or_serial: None,
+                },
+                None,
+            )
+        };
+        let mut entries = catalog();
+        entries.retain(|e| !matches!(e.identity, DeviceIdentity::Net { .. }));
+        entries.push(disk(4, 16, "sdb"));
+        entries.extend(catalog().into_iter().filter(|e| e.idx == DeviceIdx(5)));
+        entries.push(disk(6, 32, "sdc"));
+        s.devices = Arc::new(DeviceCatalog {
+            version: 2,
+            entries: Arc::from(entries),
+        });
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.gpus = Arc::from([(DeviceIdx(2), gpu_totals(DeviceIdx(2)))]);
+    });
     let unit = r
         .vcx
         .update(|_, cx| TlSettings::settings(cx).performance.overview_row_unit_px);
     assert_eq!(unit, 40);
     let page = overview(&mut r);
-    for (w, h) in [(1920., 1200.), (1280., 800.)] {
-        r.vcx.simulate_resize(size(px(w), px(h)));
-        draw(r.vcx);
-        let bar = r
-            .vcx
-            .debug_bounds(BAR_ID)
-            .expect("status bar on the Overview");
-        assert!(
-            r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
-            "{w}x{h}: no title row"
-        );
-        let kinds: Vec<_> = r.vcx.update(|_, cx| {
-            page.read(cx)
-                .placement()
-                .boxes
-                .iter()
-                .map(|b| b.kind)
-                .collect()
-        });
-        assert_eq!(
-            kinds.len(),
-            6,
-            "{w}x{h}: five device boxes and the timeline"
-        );
-        let mut first = px(f32::MAX);
-        for kind in kinds {
-            let frame_id: &'static str =
-                Box::leak(format!("{BOX_ID_PREFIX}{}", kind.key()).into_boxed_str());
-            let body_sel: &'static str = Box::leak(body_id(frame_id).into_boxed_str());
-            let frame = r.vcx.debug_bounds(frame_id).expect(frame_id);
-            let body = r.vcx.debug_bounds(body_sel).expect(body_sel);
-            let chrome = frame.size.height - body.size.height;
-            assert!(
-                chrome <= px(40.),
-                "{w}x{h} {kind:?}: chrome {chrome:?} ({frame:?}, body {body:?})"
-            );
-            assert!(
-                body.top() >= frame.top() && body.bottom() <= frame.bottom(),
-                "{w}x{h} {kind:?}: body {body:?} in {frame:?}"
-            );
-            first = first.min(frame.top());
+    // A 1 px wider window first, so every chart paints again at its place in the frames read.
+    r.vcx.simulate_resize(size(px(1921.), px(1200.)));
+    draw(r.vcx);
+    let _ = take_plots();
+    r.vcx.simulate_resize(size(px(1920.), px(1200.)));
+    draw(r.vcx);
+    let mut last: Vec<(EntityId, Bounds<Pixels>)> = Vec::new();
+    for (id, plot) in take_plots() {
+        match last.iter_mut().find(|e| e.0 == id) {
+            Some(e) => e.1 = plot,
+            None => last.push((id, plot)),
         }
-        let gap = first - bar.bottom();
-        assert!(
-            gap >= px(0.) && gap <= px(8.),
-            "{w}x{h}: first box {gap:?} below the status bar"
-        );
     }
+    let bar = r
+        .vcx
+        .debug_bounds(BAR_ID)
+        .expect("status bar on the Overview");
+    assert!(
+        r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
+        "no title row"
+    );
+    let kinds: Vec<_> = r.vcx.update(|_, cx| {
+        page.read(cx)
+            .placement()
+            .boxes
+            .iter()
+            .map(|b| b.kind)
+            .collect()
+    });
+    assert_eq!(kinds.len(), 6, "five device boxes and the timeline");
+    let vram_sel: &'static str = Box::leak(vram_id(0).into_boxed_str());
+    let mut first = px(f32::MAX);
+    let mut report = String::new();
+    let mut over = false;
+    for kind in kinds {
+        let frame_id: &'static str =
+            Box::leak(format!("{BOX_ID_PREFIX}{}", kind.key()).into_boxed_str());
+        let frame = r.vcx.debug_bounds(frame_id).expect(frame_id);
+        first = first.min(frame.top());
+        if matches!(kind, BoxKind::Memory | BoxKind::Timeline) {
+            continue;
+        }
+        let plots: Vec<_> = last
+            .iter()
+            .map(|e| e.1)
+            .filter(|p| {
+                p.size.height >= px(32.)
+                    && p.top() >= frame.top()
+                    && p.bottom() <= frame.bottom()
+                    && p.left() >= frame.left()
+                    && p.right() <= frame.right()
+            })
+            .collect();
+        assert!(!plots.is_empty(), "{kind:?}: plots painted in {frame:?}");
+        let (covered, rows) = plot_cover(&plots);
+        let lines = match kind {
+            BoxKind::Cpu => 0,
+            BoxKind::Gpu => rows + usize::from(r.vcx.debug_bounds(vram_sel).is_some()),
+            _ => rows,
+        };
+        let h = f32::from(frame.size.height);
+        let chrome = h - covered - 16. * lines as f32;
+        over |= chrome > 40.;
+        report.push_str(&format!(
+            "{kind:?}: box {h} px, {} plots cover {covered} px in {rows} rows, \
+             {lines} label lines: chrome {chrome} px\n",
+            plots.len()
+        ));
+    }
+    assert!(!over, "chrome over 40 px:\n{report}");
+    let gap = first - bar.bottom();
+    assert!(
+        gap >= px(0.) && gap <= px(8.),
+        "first box {gap:?} below the status bar"
+    );
 }
