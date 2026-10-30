@@ -37,7 +37,10 @@ use tl_model::validity::Validity;
 
 use super::actions::{PerfRenameFan, PerfSetFanTempSensor};
 use super::details::{Fallback, KeyValueModel};
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, live_only_note, live_range_ns,
+    page_history_request, page_range_ns, page_words,
+};
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
@@ -305,7 +308,10 @@ impl Words {
 /// The settings the page draws from.
 #[derive(Clone, Debug, PartialEq)]
 struct PageSettings {
+    /// The shared range the Fan charts draw.
     range_ns: u64,
+    /// The Battery chart's range: the battery series are not in the device metric history.
+    live_range_ns: u64,
     smooth: bool,
     rounded: bool,
     /// `[fans]` entry of this fan.
@@ -318,7 +324,8 @@ impl PageSettings {
         let s = TlSettings::settings(cx);
         let fan = s.fans.get(&*key.0);
         Self {
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
+            live_range_ns: live_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             label: fan
@@ -408,6 +415,14 @@ impl PageSettingsView {
             range_ns: s.range_ns,
             smooth: s.smooth,
             grid: plot_grid(s),
+        }
+    }
+
+    /// [`Self::of`] at the live range, for a chart that reads only the live series.
+    fn live(s: &PageSettings) -> Self {
+        Self {
+            range_ns: s.live_range_ns,
+            ..Self::of(s)
         }
     }
 }
@@ -632,10 +647,18 @@ impl FanPage {
         let view = PageSettingsView::of(&settings);
         let spec = speed_spec(row.idx, fan_max, &view, &theme);
         let labels = speed_labels(&words);
-        let speed = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+        let speed = cx.new(|cx| {
+            ChartView::new(spec, labels, &hub, cx)
+                .with_newest_marks()
+                .with_device_history(&snap)
+        });
         let spec = temperature_spec(sensor_device, &view, &theme);
         let labels = temperature_labels(sensor_device.is_some(), &words);
-        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+        let temperature = cx.new(|cx| {
+            ChartView::new(spec, labels, &hub, cx)
+                .with_newest_marks()
+                .with_device_history(&snap)
+        });
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -713,11 +736,13 @@ impl FanPage {
         self.active
     }
 
-    /// This page's demand part while it is active: the sensors component.
+    /// This page's demand part while it is active: the sensors component, and the device metric
+    /// history at 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             sensors: true,
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -911,8 +936,12 @@ impl FanPage {
         }
         let pairing = new.temp != self.settings.temp;
         let label = new.label != self.settings.label;
+        let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
         self.rebuild_all(cx);
+        if range_moved {
+            self.send_demand(cx);
+        }
         let snap = Arc::clone(self.hub.read(cx).current());
         if pairing {
             self.sync_sensor(&snap, cx);
@@ -1805,7 +1834,7 @@ impl BatteryPage {
         let mut words = BatWords::default();
         words.refresh(cx);
         let is_system = battery_of(&snap, row.idx).is_some_and(|b| b.power_supply);
-        let view = PageSettingsView::of(&settings);
+        let view = PageSettingsView::live(&settings);
         let spec = battery_spec(row.idx, is_system, &view, &theme);
         let labels = battery_labels(is_system, &words);
         let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
@@ -2028,7 +2057,7 @@ impl BatteryPage {
 
     fn rebuild_chart(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let view = PageSettingsView::of(&self.settings);
+        let view = PageSettingsView::live(&self.settings);
         let spec = battery_spec(self.row.idx, self.is_system, &view, &theme);
         let labels = battery_labels(self.is_system, &self.words);
         self.chart.update(cx, |v, cx| {
@@ -2087,7 +2116,9 @@ impl DevicePage for BatteryPage {
     fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let mut out = v_flex().w_full().child(
+        // The battery series are not in the device metric history (crw.105).
+        let note = live_only_note(&m, &theme, cx);
+        let mut out = v_flex().w_full().children(note).child(
             div()
                 .debug_selector(|| BATTERY_CHART_ID.into())
                 .w_full()
