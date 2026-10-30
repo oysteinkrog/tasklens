@@ -112,10 +112,12 @@ fn link() -> (SessionLink, async_channel::Receiver<()>) {
     let (wake_tx, wake_rx) = async_channel::bounded(1);
     // Nothing here sends actions, so the events receiver may go.
     let (events_tx, _events_rx) = async_channel::bounded(1);
+    let (requests_tx, _requests_rx) = async_channel::unbounded();
     let link = SessionLink {
         latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(BOOT, 1))),
         wake_tx,
         events_tx,
+        requests_tx,
     };
     (link, wake_rx)
 }

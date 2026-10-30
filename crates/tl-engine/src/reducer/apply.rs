@@ -14,9 +14,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionId, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::{Demand, DetailDemand};
-use tl_model::details::{
-    DetailTab, DetailTarget, HandlePhase, ScanId, ScanPhase, SearchId, TabPayload,
-};
+use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, TabPayload};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
@@ -44,7 +42,9 @@ use super::table::{self, PseudoInput, SweepTotals, TableInput};
 use super::{
     ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
 };
-use crate::client_session::{ClientMsg, ClientSessionId, IdKind, IdSlot, MapError};
+use crate::client_session::{
+    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, Report, RequestEnd,
+};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
@@ -625,8 +625,9 @@ impl Reducer {
                 if let (DetailTarget::Process(key), TabPayload::Strings(state)) =
                     (target, &*payload)
                 {
-                    let ended = state.phase != ScanPhase::Scanning;
-                    self.clients.seen(&IdSlot::Scan(key), state.scan.0, ended);
+                    let scan = state.scan.0;
+                    self.clients
+                        .report(&IdSlot::Scan(key), scan, Report::Scan(&payload));
                 }
                 self.details.apply_tab(target, tab, payload, validity);
             }
@@ -634,15 +635,13 @@ impl Reducer {
                 self.details.apply_affinity(entries);
             }
             SourceUpdate::Details(DetailsUpdate::HandleSearch(state)) => {
-                let ended = matches!(
-                    state.phase,
-                    HandlePhase::Done | HandlePhase::Stopped | HandlePhase::Failed
-                );
-                self.clients.seen(&IdSlot::Search, state.search.0, ended);
+                self.clients
+                    .report(&IdSlot::Search, state.search.0, Report::Search(&state));
                 self.details.apply_handle_search(state);
             }
             SourceUpdate::Details(DetailsUpdate::ScanDropped(scan)) => {
-                self.clients.dropped(IdKind::Scan, scan.0);
+                self.clients
+                    .finish(IdKind::Scan, scan.0, RequestEnd::Cancelled);
             }
             SourceUpdate::Details(DetailsUpdate::RequestsLost { through }) => {
                 self.clients
@@ -800,7 +799,7 @@ impl Reducer {
                 self.forward(SourceId::ProcessDetail, WorkerCommand::VerifyPackage(key));
             }
             Command::StringScan { scan, key, opts } => {
-                if let Some(engine) = self.map_new(id, IdSlot::Scan(key), scan.0) {
+                if let Some(engine) = self.admit(id, IdSlot::Scan(key), scan.0) {
                     self.forward_request(
                         SourceId::ProcessDetail,
                         WorkerCommand::StringScan {
@@ -825,7 +824,7 @@ impl Reducer {
                 include_maps,
                 privileged,
             } => {
-                if let Some(engine) = self.map_new(id, IdSlot::Search, search.0) {
+                if let Some(engine) = self.admit(id, IdSlot::Search, search.0) {
                     self.forward_request(
                         SourceId::ProcessDetail,
                         WorkerCommand::HandleSearch {
@@ -853,7 +852,7 @@ impl Reducer {
             Command::RunSetup { step } => self.send_helper(HelperCommand::RunSetup(step)),
             Command::Device(DeviceCommand::Eject { seq, disk }) => {
                 let slot = IdSlot::Eject(Arc::clone(&disk));
-                if let Some(engine) = self.map_new(id, slot, seq) {
+                if let Some(engine) = self.admit(id, slot, seq) {
                     self.forward_request(
                         SourceId::Udisks,
                         WorkerCommand::Device(DeviceCommand::Eject { seq: engine, disk }),
@@ -876,11 +875,11 @@ impl Reducer {
     }
 
     /// A new engine id for session `id`'s request `client` in `slot`. `None`, logged, when the
-    /// session already has `ACTIVE_MAX` active requests of that kind (Busy): the request is not
-    /// forwarded, and the session's views show it as failed.
-    fn map_new(&mut self, id: ClientSessionId, slot: IdSlot, client: u64) -> Option<u64> {
+    /// session already has `ACTIVE_MAX` active requests of that kind: the request is not
+    /// forwarded, and the session got `RequestEnd::Busy` for it.
+    fn admit(&mut self, id: ClientSessionId, slot: IdSlot, client: u64) -> Option<u64> {
         let kind = slot.kind();
-        match self.clients.map_new(id, slot, client) {
+        match self.clients.admit(id, slot, client) {
             Ok(engine) => Some(engine),
             Err(MapError::Busy) => {
                 tracing::debug!(target: "tasklens::engine", session = id.0, ?kind, client, "request refused: busy");
@@ -900,7 +899,7 @@ impl Reducer {
         engine
     }
 
-    /// `forward` for a scan, handle search or eject that `map_new` mapped. Records the queue
+    /// `forward` for a scan, handle search or eject that `admit` mapped. Records the queue
     /// `seq` of its command, or ends it as lost when the control watch is closed.
     fn forward_request(&mut self, target: SourceId, command: WorkerCommand) {
         let Some((kind, engine)) = request_of(&command) else {
@@ -908,7 +907,7 @@ impl Reducer {
         };
         match self.queue_command(target, command) {
             Some(seq) => self.clients.queued(kind, engine, seq),
-            None => self.clients.lost(kind, engine),
+            None => self.clients.finish(kind, engine, RequestEnd::Lost),
         }
     }
 
@@ -920,8 +919,9 @@ impl Reducer {
     }
 
     /// `forward`, returning the `seq`, or `None` when the watch is closed. A scan, handle search
-    /// or eject pushed out before its worker started it is lost: no worker will report it, so
-    /// its request ends here (ADR-018).
+    /// or eject pushed out before a worker claimed it is lost: `CommandProgress::evict` takes
+    /// the lock the worker's claim takes, so no worker runs it, and its request ends here
+    /// (ADR-018). One a worker claimed is the worker's to end.
     fn queue_command(&mut self, target: SourceId, command: WorkerCommand) -> Option<u64> {
         let kind = command.kind();
         let mut queued = None;
@@ -932,8 +932,9 @@ impl Reducer {
             let (gone, kept) = c.commands.split_at(c.commands.len() - keep);
             lost.extend(
                 gone.iter()
-                    .filter(|q| q.seq > c.progress.started(q.target))
-                    .filter_map(|q| request_of(&q.command)),
+                    .filter_map(|q| Some((q, request_of(&q.command)?)))
+                    .filter(|(q, _)| c.progress.evict(q.target, q.seq))
+                    .map(|(_, request)| request),
             );
             let mut next = Vec::with_capacity(keep + 1);
             next.extend_from_slice(kept);
@@ -951,7 +952,7 @@ impl Reducer {
         }
         for (kind, engine) in lost {
             tracing::debug!(target: "tasklens::engine", ?kind, engine, "request pushed off the worker queue: lost");
-            self.clients.lost(kind, engine);
+            self.clients.finish(kind, engine, RequestEnd::Lost);
         }
         queued
     }
@@ -1899,15 +1900,25 @@ impl Reducer {
             DeviceDetailsUpdate::Disks { from, entries } => {
                 let mut map = FxHashMap::default();
                 for (identity, details) in entries {
+                    let (idx, _) = self.sample_device(&identity)?;
                     if from == SourceId::Udisks
                         && let DeviceIdentity::Disk { name, .. } = &identity
                         && let Some((seq, state)) = &details.eject
                     {
-                        let ended = !matches!(state, EjectState::Running);
-                        self.clients
-                            .seen(&IdSlot::Eject(Arc::clone(name)), *seq, ended);
+                        // Every list repeats each disk's last eject: only a change is a report.
+                        let last = self
+                            .apply_state
+                            .disk_dbus
+                            .get(&idx)
+                            .and_then(|d| d.eject.as_ref());
+                        if last != details.eject.as_ref() {
+                            self.clients.report(
+                                &IdSlot::Eject(Arc::clone(name)),
+                                *seq,
+                                Report::Eject(state),
+                            );
+                        }
                     }
-                    let (idx, _) = self.sample_device(&identity)?;
                     map.insert(idx, details);
                 }
                 match from {
@@ -1989,7 +2000,8 @@ impl Reducer {
             DeviceDetailsUpdate::OnBattery(on) => next.on_battery = on,
             // Ends the request only; the snapshot does not change.
             DeviceDetailsUpdate::EjectDropped(seq) => {
-                self.clients.dropped(IdKind::Eject, seq);
+                self.clients
+                    .finish(IdKind::Eject, seq, RequestEnd::Cancelled);
                 return Ok(());
             }
             DeviceDetailsUpdate::EjectsLost { through } => {
