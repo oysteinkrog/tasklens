@@ -1469,7 +1469,7 @@ pub fn arrange_grid(
 }
 
 /// [`arrange_grid`] with `gap.width` between columns and `gap.height` between rows.
-fn arrange_grid_gaps(
+pub fn arrange_grid_gaps(
     arrange: Arrange,
     n: usize,
     area: Size<Pixels>,

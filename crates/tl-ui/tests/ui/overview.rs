@@ -5235,7 +5235,7 @@ mod page {
         use tl_ui::pages::performance::overview::disk_box::{
             CELL_MIN_H, CELL_MIN_W, GRID_ID, cell_id,
         };
-        use tl_ui::pages::performance::overview::parts::arrange_grid;
+        use tl_ui::pages::performance::overview::parts::arrange_grid_gaps;
         let mut r = open_rooted(cx, true, 1800., 900.);
         assert_eq!(three_disks(&mut r).len(), 3);
         // A 42 px row unit, so the Disk box's grid has room for three 60 px cells and none
@@ -5255,7 +5255,9 @@ mod page {
                 (disks.shown(), keys)
             });
             let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
-            let fit = arrange_grid(arrange, n, grid.size, min, px(2.), px(0.));
+            // Cells side by side sit 2 px apart, cells in a column touch.
+            let gap = size(px(2.), px(0.));
+            let fit = arrange_grid_gaps(arrange, n, grid.size, min, gap, px(0.));
             let cs: Vec<_> = keys
                 .iter()
                 .take(n)
