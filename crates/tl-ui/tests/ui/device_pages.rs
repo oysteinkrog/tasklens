@@ -432,7 +432,7 @@ mod shared_range {
     }
 
     fn page<T: 'static>(r: &mut Rig, k: &str) -> Entity<T> {
-        view_of(r, k).downcast::<T>().ok().expect("page type")
+        view_of(r, k).downcast::<T>().expect("page type")
     }
 
     /// The chart ranges in s: CPU Overall, Memory Physical, Disk Active, Network Throughput,
