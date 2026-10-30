@@ -134,6 +134,16 @@ pub struct PerfOverviewSetBoxPowerPlacement {
     pub placement: Arc<str>,
 }
 
+/// Shows (`on`) or hides the Core clocks chart of the Overview box of `kind` (the CPU box
+/// menu's "Show core clocks", tasklens-o55.57).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfOverviewSetBoxClocks {
+    pub kind: Arc<str>,
+    pub on: bool,
+}
+
 /// Sets `performance.memory_by_app.top_n` to `count` (the Memory page menu's "Groups shown"
 /// items, UI-PRF-060).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

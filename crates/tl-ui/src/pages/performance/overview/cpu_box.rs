@@ -30,6 +30,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
+use super::super::core_clocks::CoreClocks;
 use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{
@@ -71,6 +72,9 @@ pub const CPU_CHART_ID: &str = "perf-overview-cpu-chart";
 
 /// The debug selector of the power draw strip.
 pub const POWER_STRIP_ID: &str = "perf-overview-cpu-power-strip";
+
+/// The debug selector of the Core clocks chart's part (tasklens-o55.57).
+pub const CLOCKS_ID: &str = "perf-overview-cpu-clocks";
 
 /// The smallest power draw strip (UI-PRF-019 "Power draw strip"), logical px.
 pub const POWER_STRIP_MIN: f32 = 64.;
@@ -339,6 +343,24 @@ fn power_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme, hover: bool) -
     }
 }
 
+/// The Core clocks chart's range, grid and hover; [`CoreClocks`] adds the lines and the scale.
+fn clocks_base(s: &ChartSettings) -> ChartSpec {
+    ChartSpec {
+        range_ns: s.range_ns,
+        grid: GridStyle {
+            lines: true,
+            baseline: false,
+            outline: true,
+            rounded: s.rounded,
+            vertical_at: None,
+        },
+        smooth: s.smooth,
+        hover: true,
+        background: ChartBg::List,
+        ..ChartSpec::default()
+    }
+}
+
 /// "Power draw" and the current package watts at the right.
 fn power_labels(heading: SharedString) -> ChartLabels {
     ChartLabels {
@@ -444,10 +466,16 @@ pub struct CpuBox {
     power_split: InnerSplit<PowerSplitChanged>,
     /// Where the strip sits (tasklens-o55.55).
     power_placement: PowerPlacement,
-    /// The total chart and the strip share one hover cursor; both have hover while the strip
-    /// sits under the graph ([`Self::power_under_graph`]).
+    /// The total chart, the Core clocks chart and the strip share one hover cursor. The total
+    /// chart has hover while another chart sits under it in its column, the strip while it sits
+    /// under the graph ([`Self::power_under_graph`]). The Core clocks chart always has hover.
     hover_link: HoverLink,
     hover_on: bool,
+    power_hover_on: bool,
+    /// Whether the Core clocks chart is switched on (the saved `clocks`, tasklens-o55.57), and
+    /// its chart, built the first time it is switched on.
+    clocks: bool,
+    core_clocks: Option<CoreClocks>,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -514,6 +542,9 @@ impl CpuBox {
             power_placement: PowerPlacement::FullWidth,
             hover_link,
             hover_on: false,
+            power_hover_on: false,
+            clocks: false,
+            core_clocks: None,
             settings,
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -533,6 +564,15 @@ impl CpuBox {
         this.sync_devices(&snap, cx);
         this.sync_text(&snap, true);
         this.sync_power_state(&snap);
+        // A hovered core row highlights its core in the Core clocks chart.
+        let weak = cx.weak_entity();
+        this.bars.borrow_mut().set_hover_sink(move |cpu, cx| {
+            let _ = weak.update(cx, |b, cx| {
+                if let Some(clocks) = &b.core_clocks {
+                    clocks.highlight_cpu(cpu, cx);
+                }
+            });
+        });
         this
     }
 
@@ -658,18 +698,62 @@ impl CpuBox {
             && self.mode == CpuMode::ChartCores
     }
 
-    /// Gives the total chart and the strip hover, with one shared cursor, while the strip sits
-    /// under the graph, and takes it away otherwise.
+    /// Whether the box draws the Core clocks chart under the total chart: switched on, in a
+    /// mode with the total chart.
+    pub fn clocks_shown(&self) -> bool {
+        self.clocks && matches!(self.mode, CpuMode::ChartCores | CpuMode::Chart)
+    }
+
+    /// Whether the Core clocks chart is switched on (the saved `clocks`).
+    pub fn clocks_on(&self) -> bool {
+        self.clocks
+    }
+
+    /// The Core clocks chart, once it has been switched on.
+    pub fn core_clocks(&self) -> Option<&CoreClocks> {
+        self.core_clocks.as_ref()
+    }
+
+    /// Shows or hides the Core clocks chart under the total chart (tasklens-o55.57).
+    pub fn set_clocks(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.clocks {
+            return;
+        }
+        self.clocks = on;
+        if on && self.core_clocks.is_none() {
+            let labels = super::super::core_clocks::clocks_labels(false, cx);
+            let view = box_chart(clocks_base(&self.settings), labels, &self.hub, cx);
+            view.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
+            let snap = box_snapshot(&self.hub, cx);
+            let base = clocks_base(&self.settings);
+            self.core_clocks = Some(CoreClocks::new(view, base, false, &snap, cx));
+        }
+        self.sync_hover(cx);
+        cx.notify();
+    }
+
+    /// Gives the charts of the graph column hover with one shared cursor: the total chart while
+    /// the strip or the Core clocks chart sits under it, the strip while it sits under the
+    /// graph. Full width keeps the strip without hover.
     fn sync_hover(&mut self, cx: &mut Context<Self>) {
-        let on = self.power_under_graph();
-        if on == self.hover_on {
+        let on = self.power_under_graph() || self.clocks_shown();
+        let power_on = self.power_under_graph();
+        if (on, power_on) == (self.hover_on, self.power_hover_on) {
             return;
         }
         self.hover_on = on;
-        for chart in std::iter::once(&self.total).chain(&self.power_chart) {
+        self.power_hover_on = power_on;
+        let charts = [
+            (Some(&self.total), on),
+            (self.power_chart.as_ref(), power_on),
+        ];
+        for (chart, hover) in charts {
+            let Some(chart) = chart else {
+                continue;
+            };
             chart.update(cx, |v, cx| {
                 let spec = ChartSpec {
-                    hover: on,
+                    hover,
                     ..v.spec.clone()
                 };
                 v.set_spec(spec, cx);
@@ -709,7 +793,7 @@ impl CpuBox {
         }
         if on && self.power_chart.is_none() {
             let theme = current(cx).clone();
-            let spec = power_spec(self.cpu, &self.settings, &theme, self.hover_on);
+            let spec = power_spec(self.cpu, &self.settings, &theme, self.power_hover_on);
             let labels = power_labels(tr(cx, KEY_POWER));
             let chart = box_chart(spec, labels, &self.hub, cx);
             chart.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
@@ -766,7 +850,8 @@ impl CpuBox {
         let series = mask.contains(ComponentMask::SERIES);
         let system = mask.contains(ComponentMask::SYSTEM);
         let details = mask.contains(ComponentMask::DEVICE_DETAILS);
-        if !(devices || series || system || details) {
+        let inventory = mask.contains(ComponentMask::INVENTORY);
+        if !(devices || series || system || details || inventory) {
             return;
         }
         let snap = box_snapshot(&hub, cx);
@@ -793,6 +878,11 @@ impl CpuBox {
         if (system || details) && self.sync_power_state(&snap) {
             changed = true;
             self.sync_hover(cx);
+        }
+        if (devices || system || inventory)
+            && let Some(clocks) = &mut self.core_clocks
+        {
+            clocks.sync(&snap, cx);
         }
         if changed {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -988,6 +1078,9 @@ impl CpuBox {
             let labels = power_labels(tr(cx, KEY_POWER));
             chart.update(cx, |v, cx| v.set_labels(labels, cx));
         }
+        if let Some(clocks) = &self.core_clocks {
+            clocks.apply(cx);
+        }
         let (values, freqs) = {
             let bars = self.bars.borrow();
             (bars.values.clone(), bars.freqs.clone())
@@ -1011,8 +1104,11 @@ impl CpuBox {
             v.set_labels(labels, cx);
         });
         if let Some(chart) = &self.power_chart {
-            let spec = power_spec(self.cpu, &self.settings, &theme, self.hover_on);
+            let spec = power_spec(self.cpu, &self.settings, &theme, self.power_hover_on);
             chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
+        if let Some(clocks) = &mut self.core_clocks {
+            clocks.set_base(clocks_base(&self.settings), cx);
         }
         for (chart, &device) in self.sparks.iter().zip(&self.logical) {
             let spec = core_spec(device, &self.settings, &theme);
@@ -1032,6 +1128,36 @@ impl CpuBox {
                 self.total
                     .clone()
                     .cached(StyleRefinement::default().size_full()),
+            )
+            .into_any_element()
+    }
+
+    /// The total chart with the Core clocks chart under it when that is shown, on one time
+    /// axis: the two take equal shares of the column.
+    fn graph_part(&self, m: &UiMetrics) -> AnyElement {
+        let chart = self.chart_part();
+        let Some(clocks) = self.core_clocks.as_ref().filter(|_| self.clocks_shown()) else {
+            return chart;
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[5])
+            .child(div().relative().flex_1().min_h_0().w_full().child(chart))
+            .child(
+                div()
+                    .debug_selector(|| CLOCKS_ID.into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        clocks
+                            .view()
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
             )
             .into_any_element()
     }
@@ -1253,7 +1379,7 @@ impl Render for CpuBox {
             Arrange::Horizontal => true,
         };
         let body: AnyElement = match self.mode {
-            CpuMode::Chart => self.chart_part(),
+            CpuMode::Chart => self.graph_part(&m),
             // The last meter keeps a gap above the "Now" label under the box.
             CpuMode::Cores => div()
                 .size_full()
@@ -1262,7 +1388,7 @@ impl Render for CpuBox {
                 .into_any_element(),
             CpuMode::CoreCharts => self.core_charts_part(&m, &theme, cx),
             CpuMode::ChartCores => {
-                let chart = self.chart_part();
+                let chart = self.graph_part(&m);
                 // Under the graph the strip shares the chart's column and the core rows keep
                 // the body's full height (tasklens-o55.55).
                 let chart = match self
@@ -1281,12 +1407,16 @@ impl Render for CpuBox {
                 } else {
                     PART_MIN
                 };
-                // Stacked, a chart part with the strip under it keeps room for both.
-                let chart_min = if !self.side && self.power_under_graph() {
-                    PART_MIN + POWER_STRIP_MIN + f32::from(m.sp[5]) / m.ui_scale
-                } else {
-                    PART_MIN
-                };
+                // Stacked, a chart part with the strip or the Core clocks chart under it keeps
+                // room for each.
+                let gap = f32::from(m.sp[5]) / m.ui_scale;
+                let mut chart_min = PART_MIN;
+                if !self.side && self.power_under_graph() {
+                    chart_min += POWER_STRIP_MIN + gap;
+                }
+                if !self.side && self.clocks_shown() {
+                    chart_min += PART_MIN + gap;
+                }
                 self.split.set_mins(chart_min, rows_min);
                 let share = self.split(&m);
                 let frame = div().flex().size_full().gap(core_gutter(&m));

@@ -9,7 +9,8 @@
 //! each title line opens the same mode items.
 //!
 //! The items dispatch [`PerfOverviewSetBoxMode`], [`PerfOverviewSetBoxArrange`],
-//! [`PerfOverviewSetBoxPowerPlacement`] and [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
+//! [`PerfOverviewSetBoxPowerPlacement`], [`PerfOverviewSetBoxClocks`] and
+//! [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
 //! new arrangement or the default, the box views follow, and the layout is saved.
 
 use gpui_kit::{
@@ -29,9 +30,9 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
-    PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxEngine,
-    PerfOverviewSetBoxMode, PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement,
-    PerfOverviewSetTimelineClick,
+    PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxClocks,
+    PerfOverviewSetBoxEngine, PerfOverviewSetBoxMode, PerfOverviewSetBoxPower,
+    PerfOverviewSetBoxPowerPlacement, PerfOverviewSetTimelineClick,
 };
 use crate::pages::performance::cpu::PowerState;
 use crate::theme::metrics;
@@ -67,6 +68,8 @@ pub struct BoxMenuTarget {
     pub arrange: Option<Arrange>,
     pub power: Option<(PowerState, bool)>,
     pub power_placement: Option<PowerPlacement>,
+    /// The CPU box's Core clocks chart, on or off; `None` for any other box.
+    pub clocks: Option<bool>,
     pub engines: Vec<(SharedString, bool)>,
 }
 
@@ -98,6 +101,7 @@ fn mode_items(
     }
     menu = power_item(menu, &target, cx);
     menu = power_placement_items(menu, &target, window, cx);
+    menu = clocks_item(menu, &target, cx);
     menu = engine_items(menu, &target, window, cx);
     let Some(choice) = target.kind.arrange(target.mode) else {
         return menu;
@@ -181,6 +185,25 @@ fn power_item(menu: TlMenu, target: &BoxMenuTarget, cx: &App) -> TlMenu {
             )
         }
     }
+}
+
+/// The CPU box's "Show core clocks" check item (tasklens-o55.57): the Core clocks chart under
+/// the CPU graph. Only in the modes with the CPU graph.
+fn clocks_item(menu: TlMenu, target: &BoxMenuTarget, cx: &App) -> TlMenu {
+    let Some(on) = target
+        .clocks
+        .filter(|_| matches!(target.mode, "chart_cores" | "chart"))
+    else {
+        return menu;
+    };
+    menu.check_item(
+        tr(cx, "perf-overview-show-clocks"),
+        on,
+        Box::new(PerfOverviewSetBoxClocks {
+            kind: target.kind.key().into(),
+            on: !on,
+        }),
+    )
 }
 
 /// The CPU box's "Power draw position" submenu (tasklens-o55.55): across the whole box, or
@@ -338,6 +361,7 @@ impl OverviewPage {
             arrange: config.arrange,
             power: (kind == BoxKind::Cpu).then(|| (self.cpu.read(cx).power_state(), config.power)),
             power_placement: (kind == BoxKind::Cpu).then_some(config.power_placement),
+            clocks: (kind == BoxKind::Cpu).then_some(config.clocks),
             engines,
         }
     }
@@ -435,6 +459,24 @@ impl OverviewPage {
         };
         let mut layout = self.layout.clone();
         if layout.set_power_placement(kind, placement) {
+            self.set_layout(layout, cx);
+            self.save_layout(cx);
+        }
+    }
+
+    /// `PerfOverviewSetBoxClocks`: the CPU box shows or hides its Core clocks chart and the
+    /// layout is saved. Any other kind, or the shown state, does nothing.
+    pub(super) fn on_set_box_clocks(
+        &mut self,
+        a: &PerfOverviewSetBoxClocks,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(kind) = BoxKind::from_key(&a.kind) else {
+            return;
+        };
+        let mut layout = self.layout.clone();
+        if layout.set_clocks(kind, a.on) {
             self.set_layout(layout, cx);
             self.save_layout(cx);
         }
