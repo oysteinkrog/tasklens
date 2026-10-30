@@ -1,6 +1,7 @@
 //! The Overview page's Network box (UI-PRF-017, D-022, UI-PRF-032, PERF-054): the download and
-//! upload charts of all interfaces, with the summed rates, the 60 s peaks and the totals since
-//! boot. The busiest interface's name is on the title line.
+//! upload charts of all interfaces, with the summed rates and the 60 s peaks on one line per
+//! direction ("1.4 Mbps, peak 4.4 Mbps"). That line's tooltip gives the total since boot
+//! (tasklens-o55.54). The busiest interface's name is on the title line.
 //!
 //! The rates and totals sum the present interfaces other than `lo` whose class the
 //! `show_network_*` settings show, the set the engine's aggregate counts. The box formats its
@@ -10,8 +11,7 @@
 //! UI-PRF-019 gives the box four modes. `stacked` (the default) is Download over Upload with a
 //! horizontal splitter. `columns` is the Download and Upload columns above with a vertical
 //! splitter between them. Their Arrange choice (D-027) switches between the two. `combined` is
-//! one chart with download and upload as two lines, under a rate header and over the Peak and
-//! Total rows of both directions.
+//! one chart with download and upload as two lines, under the rate line of both directions.
 //! `adapter_charts` is a grid of one combined chart per counted adapter, in cells of at least
 //! 200 × 80 px. The adapter charts are built when the mode is shown and when the set of counted
 //! adapters changes, never per tick.
@@ -24,9 +24,9 @@ use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, relative, size, white,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
+    Styled as _, Subscription, Window, div, px, relative, size, white,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -38,6 +38,7 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::super::DeviceKey;
+use super::super::details::Template;
 use super::cpu_box::value_text;
 use super::disk_box::more_line;
 use super::fit::{fit_text, whole_rows};
@@ -55,6 +56,7 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
     ValueFormat, YScale, format_value,
 };
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings};
@@ -122,9 +124,10 @@ pub const NET_STACK_SPLITTER_LINE_ID: &str = "perf-overview-net-stack-splitter-l
 pub const NET_SPLITTER_ID: &str = "perf-overview-net-splitter";
 /// The debug selector of the splitter's accent line.
 pub const NET_SPLITTER_LINE_ID: &str = "perf-overview-net-splitter-line";
-/// The debug selectors of the Download and Upload Total values in `stacked` and `columns`.
-pub const DOWN_TOTAL_ID: &str = "perf-overview-net-down-total";
-pub const UP_TOTAL_ID: &str = "perf-overview-net-up-total";
+/// The debug selectors of the Download and Upload rate lines in `stacked`, `columns` and
+/// `combined`: the rate, its peak, and the total since boot in the tooltip.
+pub const DOWN_RATE_ID: &str = "perf-overview-net-down-rate";
+pub const UP_RATE_ID: &str = "perf-overview-net-up-rate";
 /// The debug selector of the `combined` chart.
 pub const COMBINED_CHART_ID: &str = "perf-overview-net-combined-chart";
 
@@ -184,6 +187,7 @@ const KEY_DOWNLOAD: &str = "perf-net-legend-download";
 const KEY_UPLOAD: &str = "perf-net-legend-upload";
 const KEY_PEAK: &str = "perf-overview-net-peak";
 const KEY_TOTAL: &str = "perf-overview-net-total";
+const KEY_WITH_PEAK: &str = "perf-overview-net-with-peak";
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_RANGE: &str = "perf-net-heading-throughput";
 
@@ -477,6 +481,11 @@ pub struct NetBox {
     up_peak: Option<f32>,
     down_peak_text: SharedString,
     up_peak_text: SharedString,
+    /// ", peak 4.4 Mbps" after each rate; empty while there is no peak.
+    down_peak_part: SharedString,
+    up_peak_part: SharedString,
+    /// The ", peak {peak}" text.
+    with_peak: Template,
     /// The busiest adapter's name, the title line.
     adapter: SharedString,
     peak_word: SharedString,
@@ -563,6 +572,9 @@ impl NetBox {
             up_peak: None,
             down_peak_text: SharedString::default(),
             up_peak_text: SharedString::default(),
+            down_peak_part: SharedString::default(),
+            up_peak_part: SharedString::default(),
+            with_peak: Template::new(cx, KEY_WITH_PEAK, &["peak"]),
             adapter: SharedString::default(),
             peak_word: tr(cx, KEY_PEAK),
             total_word: tr(cx, KEY_TOTAL),
@@ -937,6 +949,19 @@ impl NetBox {
         };
         self.down_peak_text = peak_text(self.down_peak);
         self.up_peak_text = peak_text(self.up_peak);
+        let part = |p: Option<f32>, text: &SharedString| {
+            let mut out = String::new();
+            if p.is_some() {
+                let _ = self.with_peak.write(&mut out, &[text]);
+            }
+            SharedString::from(out)
+        };
+        let (down_part, up_part) = (
+            part(self.down_peak, &self.down_peak_text),
+            part(self.up_peak, &self.up_peak_text),
+        );
+        self.down_peak_part = down_part;
+        self.up_peak_part = up_part;
         let paused = self.paused;
         let size = |bytes: u64| {
             if paused {
@@ -990,7 +1015,7 @@ impl NetBox {
         cx.notify();
     }
 
-    /// A new language: new title, words and the Peak and Total labels.
+    /// A new language: new title, words, the Peak and Total labels and the peak text.
     fn sync_strings(&mut self, cx: &mut Context<Self>) {
         let version = cx.global::<Strings>().strings_version;
         if version == self.strings_version {
@@ -1002,6 +1027,7 @@ impl NetBox {
         self.up_word = tr(cx, KEY_UPLOAD);
         self.peak_word = tr(cx, KEY_PEAK);
         self.total_word = tr(cx, KEY_TOTAL);
+        self.with_peak = Template::new(cx, KEY_WITH_PEAK, &["peak"]);
         let range = tr(cx, KEY_RANGE);
         for v in [self.down.clone(), self.up.clone(), self.combined.clone()]
             .into_iter()
@@ -1037,16 +1063,19 @@ impl NetBox {
 }
 
 /// A row with a label on the left and a value on the right. `id` is the value's debug selector.
+/// `extra` follows the value and gives way first ("1.4 Mbps" then ", peak 4.4 Mbps").
 fn stat_row(
     id: Option<&'static str>,
     label: &SharedString,
     value: &SharedString,
+    extra: &SharedString,
     m: &UiMetrics,
     theme: &TlTheme,
-) -> AnyElement {
+) -> Div {
     // Each text style goes in first: assigning it later would drop the nowrap, the ellipsis and
     // the color, and a long value would wrap onto the next row.
-    // The label gives way first, so the value keeps its width as long as it can.
+    // The extra part gives way first, then the label, so the value keeps its width as long as
+    // it can.
     let mut label_el = div();
     *label_el.text_style() = t_xs(m);
     let label_el = label_el
@@ -1061,11 +1090,26 @@ fn stat_row(
     *value_el.text_style() = numeric_style(m, m.text.sm);
     let mut value_el = value_el
         .flex()
+        .flex_row()
         .justify_end()
         .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(fit_text(value.clone()));
+    if !extra.is_empty() {
+        let mut extra_el = div();
+        *extra_el.text_style() = numeric_style(m, m.text.xs);
+        value_el = value_el.child(
+            extra_el
+                .flex()
+                .items_center()
+                .min_w_0()
+                .flex_shrink(EXTRA_SHRINK)
+                .whitespace_nowrap()
+                .text_color(theme.text_secondary)
+                .child(fit_text(extra.clone()).start()),
+        );
+    }
     if let Some(id) = id {
         value_el = value_el.debug_selector(move || id.into());
     }
@@ -1079,71 +1123,64 @@ fn stat_row(
         .h(px(LABEL_ROW * m.ui_scale))
         .child(label_el)
         .child(value_el)
-        .into_any_element()
 }
 
 /// The flex shrink of a stat row label: large, so the label shrinks to nothing before the value
 /// shrinks. A factor below 1 would not work: flex then removes only that part of the overflow.
 const LABEL_SHRINK: f32 = 1000.;
 
-/// One direction: "Download 1.2 Mbps", its chart, then the Peak and Total rows.
-struct Column<'a> {
-    chart: &'a Entity<ChartView>,
+/// The flex shrink of the part after a value: larger than `LABEL_SHRINK`, so the peak gives way
+/// before the label.
+const EXTRA_SHRINK: f32 = 1_000_000.;
+
+/// One direction's line: "Download 1.4 Mbps, peak 4.4 Mbps". Its tooltip gives the total since
+/// boot ("Total (since boot) 3.40 GiB"), formatted only when the tooltip opens.
+struct RateLine<'a> {
+    id: &'static str,
     word: &'a SharedString,
     rate: &'a SharedString,
-    peak_word: &'a SharedString,
     peak: &'a SharedString,
     total_word: &'a SharedString,
     total: &'a SharedString,
-    /// The debug selector of the Total value.
-    total_id: &'static str,
 }
 
-fn column(c: Column, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+fn rate_line(
+    l: RateLine,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let row = stat_row(Some(l.id), l.word, l.rate, l.peak, m, theme);
+    let (word, total) = (l.total_word.clone(), l.total.clone());
+    let state = HoverTooltip::state(l.id, window, cx);
+    HoverTooltip::attach(
+        &state,
+        row,
+        DELAY_CONTROL,
+        move |_, cx| TlTooltip::text(format!("{word} {total}")).view(cx),
+        window,
+        cx,
+    )
+    .into_any_element()
+}
+
+/// One direction: its rate line over its chart.
+fn column(line: AnyElement, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElement {
     whole_rows()
         .flex_1()
         .min_w_0()
         .h_full()
         .gap(m.sp[2])
-        .child(stat_row(None, c.word, c.rate, m, theme))
+        .child(line)
         .child(
-            div().relative().flex_1().min_h_0().w_full().child(
-                c.chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            ),
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(chart.clone().cached(StyleRefinement::default().size_full())),
         )
-        .child(stat_row(None, c.peak_word, c.peak, m, theme))
-        .child(stat_row(Some(c.total_id), c.total_word, c.total, m, theme))
-        .into_any_element()
-}
-
-/// A half of a `combined` row: label and value.
-fn half(label: &SharedString, value: &SharedString, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .child(stat_row(None, label, value, m, theme))
-        .into_any_element()
-}
-
-/// A `combined` row: the download half, then the upload half.
-fn pair_row(
-    label: (&SharedString, &SharedString),
-    down: &SharedString,
-    up: &SharedString,
-    m: &UiMetrics,
-    theme: &TlTheme,
-) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .flex_none()
-        .gap(m.sp[5])
-        .child(half(label.0, down, m, theme))
-        .child(half(label.1, up, m, theme))
         .into_any_element()
 }
 
@@ -1249,38 +1286,14 @@ impl NetBox {
         &mut self,
         m: &UiMetrics,
         theme: &TlTheme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.cells = 0;
         let share = self.split(m);
-        let down = column(
-            Column {
-                chart: &self.down,
-                word: &self.down_word,
-                rate: &self.down_text,
-                peak_word: &self.peak_word,
-                peak: &self.down_peak_text,
-                total_word: &self.total_word,
-                total: &self.down_total,
-                total_id: DOWN_TOTAL_ID,
-            },
-            m,
-            theme,
-        );
-        let up = column(
-            Column {
-                chart: &self.up,
-                word: &self.up_word,
-                rate: &self.up_text,
-                peak_word: &self.peak_word,
-                peak: &self.up_peak_text,
-                total_word: &self.total_word,
-                total: &self.up_total,
-                total_id: UP_TOTAL_ID,
-            },
-            m,
-            theme,
-        );
+        let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
+        let down = column(down_line, &self.down, m);
+        let up = column(up_line, &self.up, m);
         div()
             .relative()
             .flex()
@@ -1324,38 +1337,14 @@ impl NetBox {
         &mut self,
         m: &UiMetrics,
         theme: &TlTheme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.cells = 0;
         let share = self.split(m);
-        let down = column(
-            Column {
-                chart: &self.down,
-                word: &self.down_word,
-                rate: &self.down_text,
-                peak_word: &self.peak_word,
-                peak: &self.down_peak_text,
-                total_word: &self.total_word,
-                total: &self.down_total,
-                total_id: DOWN_TOTAL_ID,
-            },
-            m,
-            theme,
-        );
-        let up = column(
-            Column {
-                chart: &self.up,
-                word: &self.up_word,
-                rate: &self.up_text,
-                peak_word: &self.peak_word,
-                peak: &self.up_peak_text,
-                total_word: &self.total_word,
-                total: &self.up_total,
-                total_id: UP_TOTAL_ID,
-            },
-            m,
-            theme,
-        );
+        let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
+        let down = column(down_line, &self.down, m);
+        let up = column(up_line, &self.up, m);
         div()
             .relative()
             .flex()
@@ -1380,16 +1369,59 @@ impl NetBox {
             .into_any_element()
     }
 
-    /// `combined`: the rates, one chart with both lines, then the Peak and Total rows.
-    fn combined_body(&mut self, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    /// The Download and Upload rate lines, each with its peak and its total in the tooltip.
+    fn rate_lines(
+        &self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> [AnyElement; 2] {
+        let down = RateLine {
+            id: DOWN_RATE_ID,
+            word: &self.down_word,
+            rate: &self.down_text,
+            peak: &self.down_peak_part,
+            total_word: &self.total_word,
+            total: &self.down_total,
+        };
+        let up = RateLine {
+            id: UP_RATE_ID,
+            word: &self.up_word,
+            rate: &self.up_text,
+            peak: &self.up_peak_part,
+            total_word: &self.total_word,
+            total: &self.up_total,
+        };
+        [
+            rate_line(down, m, theme, window, cx),
+            rate_line(up, m, theme, window, cx),
+        ]
+    }
+
+    /// `combined`: the two rate lines side by side over one chart with both lines.
+    fn combined_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.cells = 0;
-        let words = (&self.down_word, &self.up_word);
-        let peak = (&self.peak_word, &self.peak_word);
-        let total = (&self.total_word, &self.total_word);
+        let [down, up] = self.rate_lines(m, theme, window, cx);
+        let half = |line| div().flex().flex_col().flex_1().min_w_0().child(line);
         whole_rows()
             .size_full()
             .gap(m.sp[2])
-            .child(pair_row(words, &self.down_text, &self.up_text, m, theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .gap(m.sp[5])
+                    .child(half(down))
+                    .child(half(up)),
+            )
             .child(
                 div()
                     .debug_selector(|| COMBINED_CHART_ID.into())
@@ -1403,14 +1435,6 @@ impl NetBox {
                             .cached(StyleRefinement::default().size_full()),
                     ),
             )
-            .child(pair_row(
-                peak,
-                &self.down_peak_text,
-                &self.up_peak_text,
-                m,
-                theme,
-            ))
-            .child(pair_row(total, &self.down_total, &self.up_total, m, theme))
             .into_any_element()
     }
 
@@ -1472,15 +1496,15 @@ impl NetBox {
 }
 
 impl Render for NetBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let body = match self.mode {
-            NetMode::Stacked => self.stacked_body(&m, &theme, cx),
-            NetMode::Columns => self.columns_body(&m, &theme, cx),
-            NetMode::Combined => self.combined_body(&m, &theme),
+            NetMode::Stacked => self.stacked_body(&m, &theme, window, cx),
+            NetMode::Columns => self.columns_body(&m, &theme, window, cx),
+            NetMode::Combined => self.combined_body(&m, &theme, window, cx),
             NetMode::AdapterCharts => self.charts_body(&m, &theme, cx),
         };
         box_frame(

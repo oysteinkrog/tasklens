@@ -3164,6 +3164,48 @@ mod bottom {
         );
     }
 
+    /// tasklens-o55.54: the Download line draws the rate, then its peak ("1.4 Mbps, peak 4.4
+    /// Mbps"); there are no Peak or Total rows, and hovering the line opens a tooltip with the
+    /// total since boot.
+    #[gpui_kit::test]
+    fn net_box_rate_line_has_peak_and_total_tooltip(cx: &mut TestAppContext) {
+        use tl_ui::components::tooltip::DELAY_CONTROL;
+        use tl_ui::pages::performance::overview::fit::take_fit_texts;
+        use tl_ui::pages::performance::overview::net_box::DOWN_RATE_ID;
+        let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
+        two_adapters(&mut r);
+        r.vcx.update(|window, _| window.activate_window());
+        let _ = take_fit_texts();
+        draw(r.vcx);
+        let unit = tl_model::settings::NetworkUnit::default();
+        let peak = format!(", peak {}", rate(unit, 8000.));
+        let texts = take_fit_texts();
+        assert!(
+            texts.iter().any(|t| t.whole == rate(unit, 6000.)),
+            "the download rate: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.whole == peak.as_str()),
+            "{peak:?} after it: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.whole == "3.00 GiB"),
+            "no Total row: {texts:?}"
+        );
+        assert!(r.vcx.debug_bounds("TlTooltip-text").is_none());
+        let line = r.vcx.debug_bounds(DOWN_RATE_ID).expect("the Download line");
+        r.vcx
+            .simulate_mouse_move(line.center(), None, gpui_kit::Modifiers::none());
+        r.vcx.executor().advance_clock(DELAY_CONTROL);
+        r.vcx.run_until_parked();
+        draw(r.vcx);
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds("TlTooltip-text").is_some(),
+            "the total since boot in a tooltip"
+        );
+    }
+
     #[gpui_kit::test]
     fn net_box_formats_like_network_page(cx: &mut TestAppContext) {
         use tl_model::settings::NetworkUnit;
@@ -6098,14 +6140,14 @@ mod page {
         assert!(shown >= 4, "Read and Write rows shown: {shown}");
     }
 
-    /// crw.71: at 1280 x 800 the Net box's Total values stay on one row inside the box, in
-    /// `stacked` and in the narrower `columns` mode. Narrower pages may leave a Total row out
-    /// when it does not fit whole (crw.100).
+    /// crw.71: at 1280 x 800 the Net box's rate lines stay on one row inside the box, in
+    /// `stacked` and in the narrower `columns` mode. Narrower pages may leave a line out when it
+    /// does not fit whole (crw.100). tasklens-o55.54: the line holds the rate and its peak
+    /// ("1.4 Mbps, peak 4.4 Mbps"); the box has no Peak or Total rows.
     #[gpui_kit::test]
-    fn overview_net_totals_stay_on_one_line(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::overview::net_box::{
-            DOWN_TOTAL_ID, NET_BOX_ID, UP_TOTAL_ID,
-        };
+    fn overview_net_rate_lines_stay_on_one_line(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::fit::take_fit_texts;
+        use tl_ui::pages::performance::overview::net_box::{DOWN_RATE_ID, NET_BOX_ID, UP_RATE_ID};
         let mut r = open_rooted(cx, true, 1280., 800.);
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
@@ -6147,21 +6189,21 @@ mod page {
                 r.vcx.simulate_resize(size(px(width), px(800.)));
                 draw(r.vcx);
                 let frame = r.bounds_of(NET_BOX_ID.into());
-                for id in [DOWN_TOTAL_ID, UP_TOTAL_ID] {
-                    // A narrow page stacks the boxes at their kind minimum, where a Total row
-                    // that does not fit whole is left out (UI-PRF-017, crw.100).
-                    let Some(total) = r.vcx.debug_bounds(id) else {
+                for id in [DOWN_RATE_ID, UP_RATE_ID] {
+                    // A narrow page stacks the boxes at their kind minimum, where a line that
+                    // does not fit whole is left out (UI-PRF-017, crw.100).
+                    let Some(line) = r.vcx.debug_bounds(id) else {
                         assert!(
-                            width < 720. || id == UP_TOTAL_ID,
+                            width < 720. || id == UP_RATE_ID,
                             "{mode} {width} {id} drawn"
                         );
                         continue;
                     };
                     // One t_sm row; a wrapped value is two rows tall.
-                    assert!(total.size.height < px(20.), "{mode} {width} {id} {total:?}");
+                    assert!(line.size.height < px(20.), "{mode} {width} {id} {line:?}");
                     assert!(
-                        total.right() <= frame.right(),
-                        "{mode} {width} {id} {total:?}"
+                        line.right() <= frame.right(),
+                        "{mode} {width} {id} {line:?}"
                     );
                 }
             }
@@ -9327,8 +9369,8 @@ mod sweep {
             }
             BoxKind::Net => {
                 ids.extend([
-                    net_box::DOWN_TOTAL_ID.to_owned(),
-                    net_box::UP_TOTAL_ID.to_owned(),
+                    net_box::DOWN_RATE_ID.to_owned(),
+                    net_box::UP_RATE_ID.to_owned(),
                     net_box::COMBINED_CHART_ID.to_owned(),
                     net_box::cell_id(DeviceIdx(30)),
                     net_box::cell_id(DeviceIdx(33)),

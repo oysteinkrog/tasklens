@@ -807,6 +807,7 @@ perf-overview-gpu-more-engines = +{$n} more engines
 perf-overview-more = +{$n} more
 perf-overview-net-peak = Peak
 perf-overview-net-total = Total (since boot)
+perf-overview-net-with-peak = , peak {$peak}
 perf-overview-box-gpu = GPU
 perf-overview-edit-layout = Edit Layout
 perf-overview-status-bar = Status bar
