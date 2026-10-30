@@ -21,8 +21,9 @@
 //! The chart sits on the Memory page ([`AppsPlace::Page`]) or in the Overview Memory box
 //! ([`AppsPlace::Overview`], mode `apps`). In the box it draws over the box range, and at 1 h,
 //! 24 h and 7 d, or while the Overview is held at a time, it reads the device metric history as
-//! the other box charts do; the ranking and the legend values then read the same history. The
-//! legend sits at the right, or below the chart when the body is narrower than
+//! the other box charts do; the ranking and the legend values then read the same history. On the
+//! page it draws over the shared range and reads the history at 1 h, 24 h and 7 d. The legend
+//! sits at the right, or below the chart when the body is narrower than
 //! [`LEGEND_BELOW_W`].
 //!
 //! The chart itself is a cached `ChartView`; this view re-renders for the legend and hover only.
@@ -571,9 +572,11 @@ impl MemoryAppsChart {
         let spec = Self::spec_of(&[], None, total, settings);
         let labels = Self::labels_of(place, &words);
         let chart = match place {
-            AppsPlace::Page => {
-                cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks())
-            }
+            AppsPlace::Page => cx.new(|cx| {
+                ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap)
+            }),
             AppsPlace::Overview => box_chart(spec, labels, &hub, cx),
         };
         let mut subs: SmallVec<[Subscription; 5]> = smallvec![
