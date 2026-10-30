@@ -8837,8 +8837,8 @@ mod wired {
 /// first, then the summary; what shows is never cut.
 mod title_row {
     use gpui_kit::{
-        AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, Window, div, px, size,
+        Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, px, size,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
