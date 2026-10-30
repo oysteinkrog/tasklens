@@ -397,9 +397,16 @@ fn same_scan_id_reaches_only_its_own_session() {
     );
 
     // Then the remote scan replaces it in the shared slot, as the worker does.
+    // The local session sees its own scan stopped, not the remote one's progress.
     let local = rig.run(vec![scan_state(remote_engine.0)]);
-    assert_eq!(shown_scan(&local), None);
-    assert_eq!(shown_scan(&remote.snapshot()), Some(ScanId(1)));
+    assert_eq!(
+        scan_phase(&local, KEY),
+        Some((ScanId(1), ScanPhase::Cancelled))
+    );
+    assert_eq!(
+        scan_phase(&remote.snapshot(), KEY),
+        Some((ScanId(1), ScanPhase::Scanning))
+    );
 
     // A cancel names the sender's own scan.
     rig.run(vec![on(REMOTE, Command::CancelStringScan(ScanId(1)))]);
@@ -495,10 +502,21 @@ fn same_search_id_reaches_only_its_own_session() {
     );
 
     // The remote search replaces it, as the worker does.
+    // The local session sees its own search stopped, not the remote one's progress.
     let local = rig.run(vec![search_state(engine[1].0)]);
-    assert!(local.details.handle_search.is_none());
+    assert_eq!(
+        local
+            .details
+            .handle_search
+            .as_ref()
+            .map(|s| (s.search, s.phase)),
+        Some((SearchId(1), HandlePhase::Stopped))
+    );
     let remote_search = remote.snapshot().details.handle_search.clone();
-    assert_eq!(remote_search.map(|s| s.search), Some(SearchId(1)));
+    assert_eq!(
+        remote_search.map(|s| (s.search, s.phase)),
+        Some((SearchId(1), HandlePhase::Searching))
+    );
 
     rig.run(vec![on(REMOTE, Command::CancelHandleSearch(SearchId(1)))]);
     assert_eq!(
@@ -537,9 +555,19 @@ fn same_eject_seq_reaches_only_its_own_session() {
     assert_eq!(shown_eject(&local), None, "remote eject hidden");
     assert_eq!(shown_eject(&remote.snapshot()), Some(1));
 
+    // The remote session sees its own eject replaced, not the local one running.
     let local = rig.run(vec![disk_eject(engine[1])]);
-    assert_eq!(shown_eject(&local), Some(1));
-    assert_eq!(shown_eject(&remote.snapshot()), None);
+    let eject_of = |snap: &Snapshot| {
+        snap.device_details
+            .disks
+            .iter()
+            .find_map(|(_, d)| d.eject.clone())
+    };
+    assert_eq!(eject_of(&local), Some((1, EjectState::Running)));
+    assert_eq!(
+        eject_of(&remote.snapshot()),
+        Some((1, EjectState::Failed(Arc::from(STOPPED_TEXT))))
+    );
 }
 
 fn scan(id: u64, key: ProcessKey) -> Command {
@@ -677,6 +705,18 @@ fn scan_past_active_max_is_busy_until_one_ends() {
             .map(|&pid| on(ClientSessionId::LOCAL, scan(u64::from(pid), key(pid))))
             .collect(),
     );
+    // The worker reports each one, so it took them all.
+    let running: Vec<EngineMsg> = rig
+        .commands()
+        .iter()
+        .filter_map(|c| match c {
+            WorkerCommand::StringScan { scan, key, .. } => {
+                Some(scan_payload(*key, scan.0, ScanPhase::Scanning))
+            }
+            _ => None,
+        })
+        .collect();
+    rig.run(running);
     assert_eq!(
         counts(&mut rig, ClientSessionId::LOCAL, IdKind::Scan).0,
         ACTIVE_MAX
@@ -990,7 +1030,7 @@ fn last_seq(rig: &Rig) -> u64 {
 }
 
 /// A request whose command falls off the worker queue before the worker took it is lost: its
-/// mapping goes and the session sees it failed.
+/// mapping goes and the session sees it failed. One the worker already reported is not.
 #[test]
 fn request_pushed_off_the_queue_is_lost() {
     let mut rig = Rig::new();
@@ -1011,6 +1051,17 @@ fn request_pushed_off_the_queue_is_lost() {
     assert_eq!(
         scan_phase(&remote.snapshot(), KEY),
         Some((ScanId(1), ScanPhase::Failed(Arc::from(LOST_TEXT))))
+    );
+
+    // A scan the worker reported stays when its command leaves the queue.
+    rig.run(vec![on(REMOTE, scan(2, KEY))]);
+    let engine = last_engine(&rig);
+    rig.run(vec![scan_state(engine)]);
+    rig.run((0..QUEUE_MAX).map(|_| refresh()).collect());
+    assert_eq!(counts(&mut rig, REMOTE, IdKind::Scan), (1, 1));
+    assert_eq!(
+        scan_phase(&remote.snapshot(), KEY),
+        Some((ScanId(2), ScanPhase::Scanning))
     );
 }
 

@@ -161,6 +161,8 @@ struct IdEntry {
     slot: IdSlot,
     /// The worker queue `seq` of its command, 0 until it is forwarded.
     queued: u64,
+    /// The worker reported it, so it took the command.
+    reported: bool,
     /// False once the request ended. The entry is removed at the next publish.
     active: bool,
 }
@@ -892,6 +894,7 @@ impl ClientSessions {
             engine,
             slot,
             queued: 0,
+            reported: false,
             active: true,
         });
         Ok(engine)
@@ -925,9 +928,18 @@ impl ClientSessions {
         self.end_with(kind, engine, None);
     }
 
-    /// Request `engine` of `kind` is lost: its command never reached the worker.
+    /// Request `engine` of `kind` is lost: its command never reached the worker. A request the
+    /// worker already reported is not: it took the command.
     pub fn lost(&mut self, kind: IdKind, engine: u64) {
-        self.end_with(kind, engine, Some(EndReason::Lost));
+        let reported = self.sessions.iter().any(|s| {
+            s.ids[kind.index()]
+                .0
+                .iter()
+                .any(|e| e.engine == engine && e.reported)
+        });
+        if !reported {
+            self.end_with(kind, engine, Some(EndReason::Lost));
+        }
     }
 
     /// The worker reported request `engine` in `slot`: ends every older request in that slot,
@@ -937,6 +949,13 @@ impl ClientSessions {
         for s in &mut self.sessions {
             for older in s.ids[kind.index()].older(slot, engine) {
                 s.end(kind, older, Some(EndReason::Stopped));
+            }
+            if let Some(e) = s.ids[kind.index()]
+                .0
+                .iter_mut()
+                .find(|e| e.engine == engine)
+            {
+                e.reported = true;
             }
         }
         if ended {
