@@ -1826,10 +1826,11 @@ mod tests {
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (events_tx, events) = async_channel::bounded(1);
         let (requests_tx, requests) = async_channel::unbounded();
-        let (stop_tx, stop) = async_channel::bounded::<()>(1);
         events_tx
             .try_send(event(ActionId(99), None, ActionState::Started))
             .expect("room for the filler");
+        let held: Arc<std::sync::Mutex<Option<Gate>>> = Arc::default();
+        let slot = Arc::clone(&held);
         let (task, handle) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
@@ -1852,16 +1853,15 @@ mod tests {
                     requests: Some(requests_tx),
                 };
                 gate.submit_routed(&cx, req, &view, route);
-                let _ = stop.recv().await;
-                drop(gate);
+                *slot.lock().expect("not poisoned") = Some(gate);
             })
             .expect("task is created");
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_idle();
-        assert!(requests.is_empty(), "the action waits to send Started");
-        stop_tx.try_send(()).expect("room to stop");
-        lab.run_until_idle();
         assert!(handle.is_finished());
+        assert!(requests.is_empty(), "the action waits to send Started");
+        // The reducer stops: `Reducer::stopped` drops the gate outside any action task.
+        drop(held.lock().expect("not poisoned").take());
         let end = RequestEvent {
             kind: IdKind::Action,
             id: 1,
