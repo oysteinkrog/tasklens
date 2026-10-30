@@ -1478,7 +1478,7 @@ Restart backoff and the five-per-minute rule come from ADR-004. A child stuck in
 
 **Rates.** Device totals at 1 Hz while any GPU view, sidebar mini graph or tray graph is demanded; process data at 1 Hz only when a GPU process column is visible. Never faster than 1 Hz; the Refresh setting does not change the probe rate.
 
-**Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`. A cancelled worker (engine shutdown) skips the `Shutdown` request and the wait: it sends SIGKILL and calls `wait()` at once, and a request in flight returns `ProbeError::Cancelled` within 20 ms of the cancel (tasklens-cr0.30).
+**Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`. A cancelled worker (engine shutdown) skips the `Shutdown` request and the wait: it sends SIGKILL at once and reaps the child on a short-lived thread, because a killed probe can take seconds to exit while the driver tears down its GPU context. A request in flight returns `ProbeError::Cancelled` within 20 ms of the cancel (tasklens-cr0.30).
 
 ### Consequences
 

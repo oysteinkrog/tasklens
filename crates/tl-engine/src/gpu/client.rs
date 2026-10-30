@@ -14,8 +14,9 @@
 //! needs no fd 3 and no `pre_exec`, so it is forked from the calling thread.
 //!
 //! The `_or_cancel` forms take a cancel check, which every wait calls at least once per
-//! [`CANCEL_POLL`]. On cancel the child is killed and reaped and the call returns
-//! [`ProbeError::Cancelled`], so engine shutdown never waits for a slow NVML call (tasklens-cr0.30).
+//! [`CANCEL_POLL`]. On cancel the child is killed, reaped on a background thread, and the call
+//! returns [`ProbeError::Cancelled`], so engine shutdown never waits for a slow NVML call or for
+//! the driver to tear down a killed probe (tasklens-cr0.30).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -38,7 +39,7 @@ use tl_model::gpu_proto::{
 };
 use tl_model::wire::{MAX_PROBE_FRAME, WireError, read_frame, write_frame};
 
-use super::spawn::{ProbeChild, child_env, spawn_probe};
+use super::spawn::{ProbeChild, child_env, kill_and_reap_in_background, spawn_probe};
 use super::{CANCEL_POLL, HELLO_DEADLINE, ProbeError, SAMPLE_DEADLINE, SHUTDOWN_GRACE};
 
 /// Name of the thread that forks the probe and stays alive while it runs (R-283).
@@ -224,11 +225,11 @@ impl ProbeClient {
         tracing::debug!(%status, "GPU probe shut down");
     }
 
-    /// Sends `SIGKILL` and reaps the child at once, without the `Shutdown` request and the
-    /// [`SHUTDOWN_GRACE`] wait. For a cancelled worker.
+    /// Sends `SIGKILL` at once, without the `Shutdown` request and the [`SHUTDOWN_GRACE`]
+    /// wait, and reaps the child on a background thread. For a cancelled worker.
     pub fn kill(mut self) {
-        let status = self.kill_and_reap();
-        tracing::debug!(%status, "GPU probe killed");
+        kill_and_reap_in_background(&mut self.child.child);
+        tracing::debug!("GPU probe killed");
     }
 
     fn request(
@@ -248,7 +249,7 @@ impl ProbeClient {
 
         let revents = loop {
             if cancel() {
-                self.kill_and_reap();
+                kill_and_reap_in_background(&mut self.child.child);
                 return Err(ProbeError::Cancelled);
             }
             let Some(left) = remaining(deadline, start.elapsed()) else {
@@ -335,6 +336,10 @@ pub fn api_versions_or_cancel(
     let output = read_api_versions_output(&mut child, start, deadline, cancel);
     let output = match output {
         Ok(output) => output,
+        Err(ProbeError::Cancelled) => {
+            kill_and_reap_in_background(&mut child);
+            return Err(ProbeError::Cancelled);
+        }
         Err(e) => {
             kill_and_reap(&mut child);
             return Err(e);
@@ -401,7 +406,7 @@ fn wait_until(
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) if cancel() => {
-                kill_and_reap(child);
+                kill_and_reap_in_background(child);
                 return Err(ProbeError::Cancelled);
             }
             Ok(None) if remaining(deadline, start.elapsed()).is_none() => {
@@ -722,6 +727,18 @@ mod tests {
         }
     }
 
+    /// [`reaped`] within 5 s: a cancelled probe is reaped on a background thread.
+    fn reaped_soon(pid: u32) -> bool {
+        let begin = Instant::now();
+        while begin.elapsed() < Duration::from_secs(5) {
+            if reaped(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
     /// A probe that never answers: it writes its pid and sleeps.
     fn silent_probe(scripts: &Scripts) -> PathBuf {
         let pid = scripts.0.join("pid");
@@ -741,7 +758,7 @@ mod tests {
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{:?}", got.err());
         assert!(took < Duration::from_millis(100), "{took:?}");
-        assert!(reaped(scripts.pid()), "the probe was not reaped");
+        assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
 
     #[test]
@@ -754,7 +771,7 @@ mod tests {
         let took = cancel.since_fired();
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
         assert!(took < Duration::from_millis(100), "{took:?}");
-        assert!(reaped(scripts.pid()), "the probe was not reaped");
+        assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
 
     #[test]

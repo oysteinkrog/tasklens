@@ -521,6 +521,11 @@ fn spawn_fd3_env_and_fds() {
     assert_eq!(got, want);
 
     drop(child);
+    // The drop kills the child and reaps it on a background thread.
+    let end = Instant::now() + Duration::from_millis(500);
+    while stat(pid).is_some() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(stat(pid), None, "drop kills and reaps");
     drop(sock);
     assert_clean(&[pid]);

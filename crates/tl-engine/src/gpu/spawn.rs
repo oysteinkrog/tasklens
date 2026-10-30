@@ -18,7 +18,9 @@ use std::process::{Child, Command, Stdio};
 
 use rustix::io::{Errno, FdFlags, dup2, fcntl_setfd};
 use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
-use rustix::process::{Signal, getpid, getppid, set_parent_process_death_signal};
+use rustix::process::{
+    Pid, Signal, WaitOptions, getpid, getppid, set_parent_process_death_signal, waitpid,
+};
 
 use super::ProbeError;
 
@@ -28,10 +30,14 @@ pub const CHILD_FD: RawFd = 3;
 /// Environment variable whose value the child gets as `RUST_LOG` (ADR-015).
 const LOG_ENV: &str = "TASKLENS_LOG";
 
+/// Name of the short-lived thread that reaps a killed probe.
+pub const REAP_THREAD_NAME: &str = "tl-gpu-reap";
+
 /// A running probe child and the parent end of its socket.
 ///
-/// Dropping it while the child still runs sends `SIGKILL` and reaps the child, so no zombie is
-/// left. The orderly shutdown path waits for the child before the drop.
+/// Dropping it while the child still runs sends `SIGKILL` and reaps the child on a background
+/// thread, so no zombie is left and the dropping thread never waits. The orderly shutdown path
+/// waits for the child before the drop.
 pub struct ProbeChild {
     pub child: Child,
     /// Parent end of the socketpair, `CLOEXEC`.
@@ -40,11 +46,28 @@ pub struct ProbeChild {
 
 impl Drop for ProbeChild {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            // The wait is bounded: SIGKILL cannot be caught or ignored.
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        kill_and_reap_in_background(&mut self.child);
+    }
+}
+
+/// Sends `SIGKILL` to a child that still runs and reaps it on a short-lived thread,
+/// [`REAP_THREAD_NAME`]. A killed probe can take seconds to exit while the driver tears down
+/// its GPU context (3.6 s measured for `--api-versions` on the office desktop), so a cancelled
+/// job and the engine thread never wait for it (tasklens-cr0.30). If the thread cannot start,
+/// the reap happens here.
+pub fn kill_and_reap_in_background(child: &mut Child) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+    let _ = child.kill();
+    let pid = Pid::from_child(child);
+    let reaper = std::thread::Builder::new()
+        .name(REAP_THREAD_NAME.to_owned())
+        .spawn(move || {
+            let _ = waitpid(Some(pid), WaitOptions::empty());
+        });
+    if reaper.is_err() {
+        let _ = child.wait();
     }
 }
 
