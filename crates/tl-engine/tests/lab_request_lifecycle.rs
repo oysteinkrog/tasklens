@@ -611,6 +611,7 @@ impl Workers {
                 self.disk_last[d] = Some((engine, state));
                 disks_msg(&self.disk_last)
             }
+            Slot::Action => unreachable!("the workers run no actions"),
         }
     }
 
