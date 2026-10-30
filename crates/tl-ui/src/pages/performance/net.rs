@@ -44,7 +44,7 @@ use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
 use super::details::{Fallback, KeyValueModel, Template};
 use super::page::{
     DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
-    page_words,
+    page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
 use crate::action_tracker::{GlobalActionTracker, ToastTexts};
@@ -106,7 +106,6 @@ pub struct NetSettingsDesktop(pub Option<SettingsDesktop>);
 
 impl Global for NetSettingsDesktop {}
 
-const NS_PER_S: u64 = 1_000_000_000;
 /// Alpha of the upload line against `net_line`.
 const UPLOAD_ALPHA: f32 = 0.7;
 /// Bits per second in one Mb/s, the unit of the sysfs `speed`.
@@ -160,7 +159,7 @@ impl PageSettings {
     fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             unit: s.units.network,
@@ -1105,7 +1104,9 @@ impl NetPage {
                 throughput_labels(&words),
             );
             cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx).with_newest_marks();
+                let mut view = ChartView::new(spec, labels, &hub, cx)
+                    .with_newest_marks()
+                    .with_device_history(&snap);
                 // The value is download plus upload.
                 view.set_value_sum(true, cx);
                 view
@@ -1234,11 +1235,13 @@ impl NetPage {
         &self.words
     }
 
-    /// This page's demand part while it is active: network only.
+    /// This page's demand part while it is active: network, and the device metric history at
+    /// 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             nets: true,
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -1472,11 +1475,16 @@ impl NetPage {
         if new == self.settings {
             return;
         }
+        let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
         self.rebuild_spec(cx);
         // The rates and the Display unit follow `units.network`.
         let snap = Arc::clone(self.hub.read(cx).current());
-        if self.sync_details(&snap) {
+        if range_moved {
+            // The header switch shows the new range.
+            self.send_demand(cx);
+        }
+        if self.sync_details(&snap) || range_moved {
             cx.notify();
         }
     }
