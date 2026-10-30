@@ -405,6 +405,7 @@ mod shared_range {
     use tl_model::ids::{MetricId, SeriesId};
     use tl_model::settings::OverviewRange;
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
+    use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
     use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, segment_id};
     use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
@@ -637,6 +638,30 @@ mod shared_range {
     fn grids_read_device_history(cx: &mut TestAppContext) {
         let mut r = open(cx);
         publish_p2(&mut r);
+        // Two logical CPUs on one core, so the per-core grid has cells.
+        r.engine.publish_with(|s| {
+            let mut entries = s.devices.entries.to_vec();
+            entries.extend(
+                (0..2u16).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id }, None)),
+            );
+            s.devices = Arc::new(DeviceCatalog {
+                version: s.devices.version + 1,
+                entries: Arc::from(entries),
+            });
+            let mut online = CpuSet::empty();
+            online.insert(0);
+            online.insert(1);
+            Arc::make_mut(&mut s.system).cpu_topology = Arc::new(CpuTopology {
+                online,
+                cores: Arc::from([CoreInfo {
+                    id: 0,
+                    logical: [0, 1].into_iter().collect(),
+                    l3_group: 0,
+                    kind: CoreKind::Standard,
+                }]),
+            });
+        });
+        draw(r.vcx);
         select(&mut r, "cpu");
         let cpu = page::<CpuPage>(&mut r, "cpu");
         select(&mut r, GPU);
