@@ -1467,18 +1467,20 @@ The probe gets per-process data from `process_utilization_stats(last_seen_timest
 
 | Event | Engine action | GPU data state |
 |---|---|---|
-| `Sample` deadline missed | send SIGKILL to the child, `wait()` it in the blocking job, return `Err` (supervisor restarts with backoff) | `Stale`, then `Failed` |
-| Child exit or crash (EOF, `waitpid` status) | reap, return `Err` | `Failed` |
+| `Sample` deadline missed | give the child up (below), return `Err` (supervisor restarts with backoff) | `Stale`, then `Failed` |
+| Child exit or crash (EOF, `waitpid` status) | check for its status every 10 ms for up to 100 ms, then give it up; return `Err` | `Failed` |
 | `tl-gpu-probe` not installed | health `Unsupported` with `last_error` "GPU probe not installed"; no child is spawned; the worker parks (checkpoint loop every 60 s) | `Unsupported` (terminal, never retried; R-155, R-252) |
 | `InitFailed { LibraryNotFound | DriverNotLoaded }` | health `Unsupported` with `last_error` `LibraryNotFound` or `DriverNotLoaded`; the worker shuts the child down and parks (checkpoint loop every 60 s); no retry | `Unsupported` (terminal, never retried; R-155, R-252) |
 | `InitFailed { NoPermission | Other }` | return `Err` (normal backoff) | `Failed` |
 | Per-metric `Unsupported` | none | that field `Unsupported` |
 
-Restart backoff and the five-per-minute rule come from ADR-004. A child stuck in uninterruptible kernel sleep cannot be reaped; the blocking job then waits in `wait()`, the worker's health shows `Late`, and the rest of the app is unaffected. This is a known limitation.
+Restart backoff and the five-per-minute rule come from ADR-004.
+
+**Giving a child up.** A probe child has exactly one owner at a time (tasklens-cr0.30). When the client gives it up (cancel, deadline, protocol error, an exit, or a drop), it moves the `Child` by value into a reaper, a short-lived `tl-gpu-reap` thread, so no other code can signal or wait on that pid again. The reaper sends SIGKILL, then calls `waitpid` until the child is reaped, retrying on `EINTR`; any other `waitpid` error is logged at warn and ends the reaper. No blocking job and no engine thread ever waits for a child to exit. A killed probe can take seconds to exit while the driver tears down its GPU context (3.6 s measured), and a child stuck in uninterruptible kernel sleep cannot be reaped at all; either way only the reaper thread waits. If the reaper thread cannot start, the killed child stays a zombie until the engine exits.
 
 **Rates.** Device totals at 1 Hz while any GPU view, sidebar mini graph or tray graph is demanded; process data at 1 Hz only when a GPU process column is visible. Never faster than 1 Hz; the Refresh setting does not change the probe rate.
 
-**Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`. A cancelled worker (engine shutdown) skips the `Shutdown` request and the wait: it sends SIGKILL at once and reaps the child on a short-lived thread, because a killed probe can take seconds to exit while the driver tears down its GPU context. A request in flight returns `ProbeError::Cancelled` within 20 ms of the cancel (tasklens-cr0.30).
+**Shutdown.** The worker sends `Shutdown` and checks every 10 ms, for up to 200 ms, whether the child has exited; a child that still runs then is given up. A cancelled worker (engine shutdown) skips the `Shutdown` request and the 200 ms: it gives the child up at once. A request in flight returns `ProbeError::Cancelled` within 20 ms of the cancel (tasklens-cr0.30).
 
 ### Consequences
 

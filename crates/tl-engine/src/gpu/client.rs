@@ -3,20 +3,22 @@
 //!
 //! Exactly one request is in flight: every call takes `&mut self`. A request is written as one
 //! frame, then the client waits with `poll` until the socket is readable or the deadline passes,
-//! then reads one frame. Any failure kills and reaps the child before the error is returned, so
-//! the supervisor can start a new one and no zombie is left.
+//! then reads one frame. On any failure the client gives the child up before the error is
+//! returned: the child moves into a reaper that kills it and reaps it on a background thread, so
+//! the supervisor can start a new one, no zombie is left, and no caller ever waits for a killed
+//! child to exit (tasklens-cr0.30).
 //!
 //! The probe is forked on its own long-lived thread, `tl-gpu-spawn`, never on the blocking pool
 //! (R-283). `PR_SET_PDEATHSIG` fires when the forking thread exits, and pool threads retire after
-//! 10 s idle. The thread lives until the client is dropped, after the child is reaped.
+//! 10 s idle. The thread lives until the client is dropped, after the child is given up.
 //!
 //! [`api_versions`] runs the one-shot `--api-versions` mode in its own process (E13-010). It
 //! needs no fd 3 and no `pre_exec`, so it is forked from the calling thread.
 //!
 //! The `_or_cancel` forms take a cancel check, which every wait calls at least once per
-//! [`CANCEL_POLL`]. On cancel the child is killed, reaped on a background thread, and the call
-//! returns [`ProbeError::Cancelled`], so engine shutdown never waits for a slow NVML call or for
-//! the driver to tear down a killed probe (tasklens-cr0.30).
+//! [`CANCEL_POLL`]. On cancel the child is given up at once and the call returns
+//! [`ProbeError::Cancelled`], so engine shutdown never waits for a slow NVML call or for the
+//! driver to tear down a killed probe (tasklens-cr0.30).
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -48,6 +50,13 @@ pub const SPAWN_THREAD_NAME: &str = "tl-gpu-spawn";
 /// How often `shutdown` checks whether the child has exited.
 const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 
+/// How long a child that closed its socket gets to exit on its own, so its own status is
+/// reported. Checked without blocking, every [`SHUTDOWN_POLL`], and cut short by a cancel.
+const EXIT_STATUS_GRACE: Duration = Duration::from_millis(100);
+
+/// The status text of a child that was still running when it was given up.
+const KILLED: &str = "killed";
+
 /// The smallest receive timeout set for the payload read. Zero would mean "no timeout".
 const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -55,7 +64,7 @@ const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 const MAX_API_VERSIONS_OUTPUT: usize = MAX_PROBE_FRAME + 4;
 
 pub struct ProbeClient {
-    /// Dropped first: kills and reaps the child if it still runs.
+    /// Dropped first: gives the child up if it still runs.
     child: ProbeChild,
     /// A `CLOEXEC` dup of `child.sock` for `Read` and `Write`.
     file: File,
@@ -115,6 +124,13 @@ impl ProbeClient {
         extra_args: &[&OsStr],
         cancel: &dyn Fn() -> bool,
     ) -> Result<ProbeClient, ProbeError> {
+        let mut client = Self::connect(probe, extra_args)?;
+        client.hello_or_cancel(cancel)?;
+        Ok(client)
+    }
+
+    /// Starts the probe without sending `Hello`.
+    fn connect(probe: &Path, extra_args: &[&OsStr]) -> Result<ProbeClient, ProbeError> {
         let (child, spawner) = SpawnThread::spawn(probe, extra_args)?;
         // `try_clone` sets CLOEXEC (F_DUPFD_CLOEXEC); a plain dup would leak into later children.
         let file = child
@@ -122,16 +138,14 @@ impl ProbeClient {
             .try_clone()
             .map(File::from)
             .map_err(|e| ProbeError::Spawn(format!("dup: {e}").into()))?;
-        let mut client = ProbeClient {
+        Ok(ProbeClient {
             child,
             file,
             info: None,
             init_failed: None,
             seq: 0,
             _spawner: spawner,
-        };
-        client.hello_or_cancel(cancel)?;
-        Ok(client)
+        })
     }
 
     /// Sends `Hello { proto: GPU_PROTO_VERSION }` and reads the reply.
@@ -145,7 +159,7 @@ impl ProbeClient {
         };
         match self.request(&req, HELLO_DEADLINE, cancel)? {
             ProbeResponse::Hello { proto, .. } if proto != GPU_PROTO_VERSION => {
-                self.kill_and_reap();
+                self.child.give_up();
                 Err(ProbeError::VersionMismatch(proto))
             }
             ProbeResponse::Hello {
@@ -209,26 +223,19 @@ impl ProbeClient {
         }
     }
 
-    /// Sends `Shutdown` (errors ignored), waits up to [`SHUTDOWN_GRACE`] for the child to
-    /// exit, then sends `SIGKILL` and reaps it.
+    /// Sends `Shutdown` (errors ignored) and checks every [`SHUTDOWN_POLL`], for at most
+    /// [`SHUTDOWN_GRACE`], whether the child has exited. A child that still runs then is given
+    /// up: killed and reaped on a background thread.
     pub fn shutdown(mut self) {
         let _ = write_frame(&mut self.file, &ProbeRequest::Shutdown, MAX_PROBE_FRAME);
-        let start = Instant::now();
-        loop {
-            match self.child.child.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) if start.elapsed() >= SHUTDOWN_GRACE => break,
-                Ok(None) => thread::sleep(SHUTDOWN_POLL),
-            }
-        }
-        let status = self.kill_and_reap();
+        let status = self.exit_status_within(SHUTDOWN_GRACE, &never);
         tracing::debug!(%status, "GPU probe shut down");
     }
 
-    /// Sends `SIGKILL` at once, without the `Shutdown` request and the [`SHUTDOWN_GRACE`]
-    /// wait, and reaps the child on a background thread. For a cancelled worker.
+    /// Gives the child up at once, without the `Shutdown` request and the [`SHUTDOWN_GRACE`]
+    /// wait: it is killed and reaped on a background thread. For a cancelled worker.
     pub fn kill(mut self) {
-        kill_and_reap_in_background(&mut self.child.child);
+        self.child.give_up();
         tracing::debug!("GPU probe killed");
     }
 
@@ -241,7 +248,7 @@ impl ProbeClient {
         let start = Instant::now();
         if let Err(e) = write_frame(&mut self.file, req, MAX_PROBE_FRAME) {
             // EPIPE or ECONNRESET: the child closed its end, most likely because it exited.
-            if let Ok(Some(status)) = self.child.child.try_wait() {
+            if let Some(status) = self.child.exited() {
                 return Err(ProbeError::Exited(status_text(status)));
             }
             return Err(self.protocol(&e.to_string()));
@@ -249,11 +256,11 @@ impl ProbeClient {
 
         let revents = loop {
             if cancel() {
-                kill_and_reap_in_background(&mut self.child.child);
+                self.child.give_up();
                 return Err(ProbeError::Cancelled);
             }
             let Some(left) = remaining(deadline, start.elapsed()) else {
-                self.kill_and_reap();
+                self.child.give_up();
                 return Err(ProbeError::Deadline(deadline));
             };
             let mut fds = [PollFd::new(&self.child.sock, PollFlags::IN)];
@@ -266,8 +273,10 @@ impl ProbeClient {
             }
         };
         if !revents.contains(PollFlags::IN) {
-            // HUP or ERR with nothing to read: the child is gone.
-            return Err(ProbeError::Exited(self.kill_and_reap()));
+            // HUP or ERR with nothing to read: the child is exiting.
+            return Err(ProbeError::Exited(
+                self.exit_status_within(EXIT_STATUS_GRACE, cancel),
+            ));
         }
 
         // The prefix is there, but the payload may still be on its way. Bound that read by the
@@ -278,32 +287,44 @@ impl ProbeClient {
         }
         match read_frame::<_, ProbeResponse>(&mut self.file, MAX_PROBE_FRAME) {
             Ok(resp) => Ok(resp),
-            Err(WireError::Eof | WireError::Truncated) => {
-                Err(ProbeError::Exited(self.kill_and_reap()))
-            }
+            Err(WireError::Eof | WireError::Truncated) => Err(ProbeError::Exited(
+                self.exit_status_within(EXIT_STATUS_GRACE, cancel),
+            )),
             Err(WireError::Io(e))
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                self.kill_and_reap();
+                self.child.give_up();
                 Err(ProbeError::Deadline(deadline))
             }
             Err(e) => Err(self.protocol(&e.to_string())),
         }
     }
 
-    /// Kills and reaps the child, then returns [`ProbeError::Protocol`] with `text`.
+    /// Gives the child up, then returns [`ProbeError::Protocol`] with `text`.
     fn protocol(&mut self, text: &str) -> ProbeError {
-        let status = self.kill_and_reap();
-        tracing::debug!(%status, text, "GPU probe protocol error");
+        self.child.give_up();
+        tracing::debug!(text, "GPU probe protocol error");
         ProbeError::Protocol(text.into())
     }
 
-    /// [`kill_and_reap`] for the probe child.
-    fn kill_and_reap(&mut self) -> Arc<str> {
-        kill_and_reap(&mut self.child.child)
+    /// The child's own status if it exits within `grace`, checked without blocking every
+    /// [`SHUTDOWN_POLL`]. Otherwise, or as soon as `cancel` returns true, the child is given up
+    /// and the text is [`KILLED`].
+    fn exit_status_within(&mut self, grace: Duration, cancel: &dyn Fn() -> bool) -> Arc<str> {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child.exited() {
+                return status_text(status);
+            }
+            if cancel() || start.elapsed() >= grace {
+                self.child.give_up();
+                return KILLED.into();
+            }
+            thread::sleep(SHUTDOWN_POLL);
+        }
     }
 }
 
@@ -333,19 +354,16 @@ pub fn api_versions_or_cancel(
         .envs(child_env())
         .spawn()
         .map_err(|e| ProbeError::Spawn(e.to_string().into()))?;
-    let output = read_api_versions_output(&mut child, start, deadline, cancel);
-    let output = match output {
-        Ok(output) => output,
-        Err(ProbeError::Cancelled) => {
-            kill_and_reap_in_background(&mut child);
-            return Err(ProbeError::Cancelled);
-        }
+    let run = read_api_versions_output(&mut child, start, deadline, cancel).and_then(|output| {
+        wait_until(&mut child, start, deadline, cancel).map(|status| (output, status))
+    });
+    let (output, status) = match run {
+        Ok(run) => run,
         Err(e) => {
-            kill_and_reap(&mut child);
+            kill_and_reap_in_background(child);
             return Err(e);
         }
     };
-    let status = wait_until(&mut child, start, deadline, cancel)?;
     if !status.success() {
         return Err(ProbeError::Exited(status_text(status)));
     }
@@ -354,7 +372,7 @@ pub fn api_versions_or_cancel(
 }
 
 /// Reads the child's stdout until EOF, waiting with `poll` for at most the rest of `deadline`.
-/// The caller kills and reaps the child on `Err`.
+/// The caller gives the child up on `Err`.
 fn read_api_versions_output(
     child: &mut Child,
     start: Instant,
@@ -394,8 +412,8 @@ fn read_api_versions_output(
 }
 
 /// Waits for the child to exit within the rest of `deadline`, checking every
-/// [`SHUTDOWN_POLL`]. A child that closed stdout but keeps running is killed at the deadline
-/// or on cancel.
+/// [`SHUTDOWN_POLL`] without blocking. The caller gives a child that closed stdout but keeps
+/// running up on `Err`: at the deadline, on cancel or when the check fails.
 fn wait_until(
     child: &mut Child,
     start: Instant,
@@ -405,36 +423,13 @@ fn wait_until(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
-            Ok(None) if cancel() => {
-                kill_and_reap_in_background(child);
-                return Err(ProbeError::Cancelled);
-            }
+            Ok(None) if cancel() => return Err(ProbeError::Cancelled),
             Ok(None) if remaining(deadline, start.elapsed()).is_none() => {
-                kill_and_reap(child);
                 return Err(ProbeError::Deadline(deadline));
             }
             Ok(None) => thread::sleep(SHUTDOWN_POLL),
-            Err(e) => {
-                kill_and_reap(child);
-                return Err(ProbeError::Exited(format!("wait failed: {e}").into()));
-            }
+            Err(e) => return Err(ProbeError::Exited(format!("wait failed: {e}").into())),
         }
-    }
-}
-
-/// Sends `SIGKILL` and waits for the child. Returns "status N" or "signal N". A child that
-/// already exited is only reaped, so its own status is reported.
-fn kill_and_reap(child: &mut Child) -> Arc<str> {
-    let status = match child.try_wait() {
-        Ok(Some(status)) => Ok(status),
-        _ => {
-            let _ = child.kill();
-            child.wait()
-        }
-    };
-    match status {
-        Ok(status) => status_text(status),
-        Err(e) => format!("wait failed: {e}").into(),
     }
 }
 
@@ -637,7 +632,7 @@ mod tests {
             took < API_VERSIONS_DEADLINE + Duration::from_secs(1),
             "{took:?}"
         );
-        assert!(reaped(scripts.pid()), "the probe was not reaped");
+        assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
     }
 
     #[test]
@@ -727,7 +722,7 @@ mod tests {
         }
     }
 
-    /// [`reaped`] within 5 s: a cancelled probe is reaped on a background thread.
+    /// [`reaped`] within 5 s: a given-up probe is reaped on a background thread.
     fn reaped_soon(pid: u32) -> bool {
         let begin = Instant::now();
         while begin.elapsed() < Duration::from_secs(5) {
@@ -772,6 +767,64 @@ mod tests {
         assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
         assert!(took < Duration::from_millis(100), "{took:?}");
         assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
+    }
+
+    /// How long [`slow_exit_wait`] takes: the longest exit of a killed probe measured on the
+    /// office desktop, while the driver tore down its GPU context.
+    const SLOW_EXIT: Duration = Duration::from_millis(3600);
+
+    /// A reaper wait for a child that takes [`SLOW_EXIT`] to exit after `SIGKILL`.
+    fn slow_exit_wait(pid: rustix::process::Pid) -> Result<(), Errno> {
+        thread::sleep(SLOW_EXIT);
+        rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).map(drop)
+    }
+
+    /// The pid still has a `/proc` entry, running or a zombie: nobody has reaped it yet.
+    fn not_reaped_yet(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    #[test]
+    fn cancel_during_slow_exit_returns_at_once() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("slow-exit-cancel");
+        let probe = silent_probe(&scripts);
+        let mut client = ProbeClient::connect(&probe, &[]).expect("connect");
+        client.child.set_reap_wait(slow_exit_wait);
+        let pid = client.child.id();
+        let cancel = CancelAfter::new(&scripts);
+        let got = client.hello_or_cancel(&|| cancel.check());
+        let took = cancel.since_fired();
+        assert!(matches!(got, Err(ProbeError::Cancelled)), "{got:?}");
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        drop(client);
+        assert!(not_reaped_yet(pid), "the caller waited for the child");
+        assert!(reaped_soon(pid), "the probe was not reaped");
+    }
+
+    #[test]
+    fn deadline_during_slow_exit_does_not_block() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("slow-exit-deadline");
+        let probe = silent_probe(&scripts);
+        let mut client = ProbeClient::connect(&probe, &[]).expect("connect");
+        client.child.set_reap_wait(slow_exit_wait);
+        let pid = client.child.id();
+        let deadline = Duration::from_millis(200);
+        let req = ProbeRequest::Hello {
+            proto: GPU_PROTO_VERSION,
+        };
+        let start = Instant::now();
+        let got = client.request(&req, deadline, &never);
+        let took = start.elapsed();
+        assert!(
+            matches!(got, Err(ProbeError::Deadline(d)) if d == deadline),
+            "{got:?}"
+        );
+        assert!(took < deadline + Duration::from_millis(100), "{took:?}");
+        drop(client);
+        assert!(not_reaped_yet(pid), "the caller waited for the child");
+        assert!(reaped_soon(pid), "the probe was not reaped");
     }
 
     #[test]

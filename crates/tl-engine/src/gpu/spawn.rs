@@ -14,7 +14,8 @@ use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread::JoinHandle;
 
 use rustix::io::{Errno, FdFlags, dup2, fcntl_setfd};
 use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
@@ -35,39 +36,106 @@ pub const REAP_THREAD_NAME: &str = "tl-gpu-reap";
 
 /// A running probe child and the parent end of its socket.
 ///
-/// Dropping it while the child still runs sends `SIGKILL` and reaps the child on a background
-/// thread, so no zombie is left and the dropping thread never waits. The orderly shutdown path
-/// waits for the child before the drop.
+/// The child has exactly one owner at any time (tasklens-cr0.30). [`ProbeChild::give_up`] and
+/// the drop move it by value into the reaper, so no code here can signal or wait on its pid
+/// after that, and a reused pid is never hit. Neither ever waits for the child.
 pub struct ProbeChild {
-    pub child: Child,
+    /// `None` once the child is given up.
+    child: Option<Child>,
+    pid: u32,
     /// Parent end of the socketpair, `CLOEXEC`.
     pub sock: OwnedFd,
+    /// The wait the reaper runs. Tests replace it to make a child slow to exit.
+    reap_wait: WaitFn,
+}
+
+impl ProbeChild {
+    /// The child's pid, also after it was given up.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// The exit status if the child has exited, without blocking. `None` while it runs, after
+    /// it was given up, or when the check fails.
+    pub fn exited(&mut self) -> Option<ExitStatus> {
+        self.child.as_mut()?.try_wait().ok().flatten()
+    }
+
+    /// Gives the child up: a child that still runs gets `SIGKILL` and is reaped on a
+    /// background thread. Does nothing the second time.
+    pub fn give_up(&mut self) {
+        if let Some(child) = self.child.take() {
+            reap_with(child, self.reap_wait);
+        }
+    }
+
+    /// Replaces the reaper's wait, so a test can make the child slow to exit.
+    #[cfg(test)]
+    pub(crate) fn set_reap_wait(&mut self, wait: WaitFn) {
+        self.reap_wait = wait;
+    }
 }
 
 impl Drop for ProbeChild {
     fn drop(&mut self) {
-        kill_and_reap_in_background(&mut self.child);
+        self.give_up();
     }
 }
 
-/// Sends `SIGKILL` to a child that still runs and reaps it on a short-lived thread,
-/// [`REAP_THREAD_NAME`]. A killed probe can take seconds to exit while the driver tears down
-/// its GPU context (3.6 s measured for `--api-versions` on the office desktop), so a cancelled
-/// job and the engine thread never wait for it (tasklens-cr0.30). If the thread cannot start,
-/// the reap happens here.
-pub fn kill_and_reap_in_background(child: &mut Child) {
+/// A blocking wait for one child, as `waitpid(pid, 0)`.
+pub(crate) type WaitFn = fn(Pid) -> Result<(), Errno>;
+
+/// `waitpid(pid, 0)`, the reaper's wait outside tests.
+fn wait_pid(pid: Pid) -> Result<(), Errno> {
+    waitpid(Some(pid), WaitOptions::empty()).map(drop)
+}
+
+/// Takes a child the caller gives up, sends it `SIGKILL` if it still runs and reaps it on a
+/// short-lived thread, [`REAP_THREAD_NAME`]. A killed probe can take seconds to exit while the
+/// driver tears down its GPU context (3.6 s measured for `--api-versions` on the office
+/// desktop), so neither a cancelled job nor the engine thread ever waits for it
+/// (tasklens-cr0.30). The child moves into the thread, so the caller cannot touch its pid again.
+pub fn kill_and_reap_in_background(child: Child) {
+    reap_with(child, wait_pid);
+}
+
+/// [`kill_and_reap_in_background`] with the wait `wait`. Returns the reaper thread, or `None`
+/// when the child had already exited or the thread could not start.
+fn reap_with(mut child: Child, wait: WaitFn) -> Option<JoinHandle<()>> {
+    // `try_wait` reaps a child that has exited, and `Err` means it is not ours to wait on.
     if !matches!(child.try_wait(), Ok(None)) {
-        return;
+        return None;
     }
     let _ = child.kill();
-    let pid = Pid::from_child(child);
+    let pid = child.id();
     let reaper = std::thread::Builder::new()
         .name(REAP_THREAD_NAME.to_owned())
-        .spawn(move || {
-            let _ = waitpid(Some(pid), WaitOptions::empty());
-        });
-    if reaper.is_err() {
-        let _ = child.wait();
+        .spawn(move || reap(child, wait));
+    match reaper {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            // The child moved into the closure that failed to start and is gone, so the pid
+            // stays a zombie until this process exits. Waiting here instead would block the
+            // caller for as long as the driver takes.
+            tracing::warn!(pid, error = %e, "GPU probe left unreaped: no reaper thread");
+            None
+        }
+    }
+}
+
+/// Waits for the killed `child` until it is reaped, retrying on `EINTR`. Any other error is
+/// logged and ends the wait.
+fn reap(child: Child, mut wait: impl FnMut(Pid) -> Result<(), Errno>) {
+    let pid = Pid::from_child(&child);
+    loop {
+        match wait(pid) {
+            Ok(()) => return,
+            Err(Errno::INTR) => {}
+            Err(e) => {
+                tracing::warn!(pid = child.id(), error = %e, "GPU probe reap failed");
+                return;
+            }
+        }
     }
 }
 
@@ -117,8 +185,10 @@ pub fn spawn_probe(probe: &Path, extra_args: &[&OsStr]) -> Result<ProbeChild, Pr
     let child = cmd.spawn().map_err(|e| spawn_error(&e))?;
     drop(child_end);
     Ok(ProbeChild {
-        child,
+        pid: child.id(),
+        child: Some(child),
         sock: parent,
+        reap_wait: wait_pid,
     })
 }
 
@@ -248,7 +318,7 @@ mod tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
-        assert!(child.child.id() > 0);
+        assert!(child.id() > 0);
         hello(&child);
     }
 
@@ -291,7 +361,7 @@ mod tests {
         // new image, and until then `environ` reads empty. The reply comes after.
         hello(&child);
 
-        let environ = std::fs::read(format!("/proc/{}/environ", child.child.id())).unwrap();
+        let environ = std::fs::read(format!("/proc/{}/environ", child.id())).unwrap();
         let got: BTreeSet<Vec<u8>> = environ
             .split(|&b| b == 0)
             .filter(|e| !e.is_empty())
@@ -327,7 +397,7 @@ mod tests {
         // ld.so opens each shared library and closes it again, and `open_fd` in tl-gpu-probe
         // opens a pidfd for a moment and keeps a copy of fd 3. So an extra fd is fine when it
         // is the same socket as fd 3 or when it closes within 1 s.
-        let pid = child.child.id();
+        let pid = child.id();
         let target = |fd: i32| {
             std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
                 .map(|t| t.to_string_lossy().into_owned())
@@ -400,7 +470,7 @@ mod tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
-        let pid = child.child.id();
+        let pid = child.id();
         let stat = format!("/proc/{pid}/stat");
         assert!(Path::new(&stat).exists());
 
@@ -415,6 +485,61 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A killed `sleep 30`, not yet reaped.
+    fn killed_child() -> (Child, u32) {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        child.kill().expect("kill sleep");
+        let pid = child.id();
+        (child, pid)
+    }
+
+    #[test]
+    fn reap_retries_eintr() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (child, pid) = killed_child();
+        let mut calls = 0;
+        reap(child, |pid| {
+            calls += 1;
+            if calls <= 2 {
+                Err(Errno::INTR)
+            } else {
+                wait_pid(pid)
+            }
+        });
+        assert_eq!(calls, 3);
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "pid {pid} not reaped"
+        );
+    }
+
+    #[test]
+    fn reap_ends_on_other_errors() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (child, _) = killed_child();
+        let mut calls = 0;
+        reap(child, |pid| {
+            calls += 1;
+            // Reap it for real, so no zombie is left, then report a failed wait.
+            wait_pid(pid)?;
+            Err(Errno::CHILD)
+        });
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn give_up_twice_is_harmless() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(probe) = test_probe() else { return };
+        let mut child = spawn(&probe);
+        child.give_up();
+        child.give_up();
+        assert!(child.exited().is_none());
     }
 
     #[test]

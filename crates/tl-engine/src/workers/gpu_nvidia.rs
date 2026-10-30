@@ -99,11 +99,12 @@ pub trait ProbeLink: Sized + Send + 'static {
         cancel: &dyn Fn() -> bool,
     ) -> Result<ApiVersions, ProbeError>;
 
-    /// Asks the child to exit, then kills and reaps it. Blocks for at most about 200 ms. The
-    /// stop of a generation that was not cancelled.
+    /// Asks the child to exit and gives it 200 ms; a child that still runs then is killed and
+    /// reaped on a background thread. The stop of a generation that was not cancelled.
     fn shutdown(self);
 
-    /// Kills and reaps the child at once. The stop of a cancelled generation.
+    /// Kills the child at once and reaps it on a background thread. The stop of a cancelled
+    /// generation.
     fn kill(self);
 }
 

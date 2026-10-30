@@ -213,8 +213,12 @@ fn client_sample_deadline_kills_and_reaps() {
         took >= Duration::from_millis(450) && took < Duration::from_millis(700),
         "{took:?}"
     );
-    // Killed and reaped before `sample` returned.
-    assert_eq!(stat(pid), None);
+    // Given up before `sample` returned: killed at once and reaped on a background thread.
+    let end = Instant::now() + Duration::from_millis(500);
+    while stat(pid).is_some() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(stat(pid), None, "deadline kills and reaps");
     drop(c);
     assert_clean(&[pid]);
 }
@@ -411,7 +415,7 @@ fn pdeathsig_orphan_helper() {
     };
     write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
     let mut out = std::io::stdout().lock();
-    writeln!(out, "probe-pid {}", child.child.id()).expect("write pid");
+    writeln!(out, "probe-pid {}", child.id()).expect("write pid");
     out.flush().expect("flush");
     // No cleanup: neither the kill in `ProbeChild::drop` nor closing the socket runs.
     std::mem::forget(child);
@@ -464,7 +468,7 @@ fn spawn_fd3_env_and_fds() {
     let _g = real();
     let probe = fake_probe();
     let child = spawn_probe(&probe, &[OsStr::new("--fake"), OsStr::new("normal")]).expect("spawn");
-    let pid = child.child.id();
+    let pid = child.id();
 
     // `/proc` is read only after the `Hello` reply. `spawn` returns when exec closes the
     // CLOEXEC fds, which is before the kernel has loaded the new image, so `environ` may still
@@ -1046,7 +1050,7 @@ fn worker_sample_error_restarts() {
         matches!(&out, Outcome::Err(WorkerError::Probe(text)) if text.contains("deadline")),
         "{out:?}"
     );
-    // The client already reaped the child, so no `shutdown`.
+    // The client already gave the child up, so no `shutdown`.
     assert_eq!(
         link.calls(),
         vec![
