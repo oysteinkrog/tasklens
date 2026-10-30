@@ -27,7 +27,7 @@ fn shutdown_after(delay: Duration, keep_clone: bool) {
     let clone = keep_clone.then(|| handle.clone());
     std::thread::sleep(delay);
     let begin = Instant::now();
-    let report = handle.shutdown(Duration::from_millis(1500));
+    let report = handle.shutdown();
     let waited = begin.elapsed();
     assert!(report.drained, "delay {delay:?}: {report:?}");
     assert!(report.torn_down, "delay {delay:?}: {report:?}");

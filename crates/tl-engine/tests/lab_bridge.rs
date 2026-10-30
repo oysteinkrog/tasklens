@@ -390,7 +390,7 @@ fn end_to_end_engine_real_runtime() {
     // A clean report means teardown joined the runtime's worker and blocking threads. Other
     // tests of this binary start threads at the same time, and the logind worker leaves the
     // process-wide zbus and async-io threads running, so the thread count is not checked.
-    let report = handle.shutdown(Duration::from_secs(2));
+    let report = handle.shutdown();
     assert!(report.clean(), "{report:?}");
 }
 
@@ -427,7 +427,7 @@ fn start_wall_cpu() -> tl_engine::EngineHandle {
 #[test]
 fn shutdown_clean_with_fake_workers() {
     let handle = start_wall_cpu();
-    let report = handle.shutdown(Duration::from_secs(2));
+    let report = handle.shutdown();
     assert!(report.drained, "{report:?}");
     assert!(report.torn_down, "{report:?}");
     assert!(report.clean());
@@ -488,7 +488,7 @@ fn shutdown_clean_with_blocked_sample() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let report = handle.shutdown(Duration::from_secs(2));
+    let report = handle.shutdown();
     // The sample is not interrupted, but it runs on the source's own sampling thread, not on
     // the blocking pool. Shutdown leaves that thread detached and does not wait for it
     // (tasklens-wlf.30).
@@ -503,7 +503,7 @@ fn shutdown_clean_with_blocked_sample() {
 fn shutdown_torn_down_with_live_clone() {
     let handle = start_wall_cpu();
     let clone = handle.clone();
-    let report = handle.shutdown(Duration::from_secs(2));
+    let report = handle.shutdown();
     // The clone still holds `Inner`, but `shutdown` took its `RuntimeHandle` out, as `tl-app`
     // needs: GPUI never drops the UI's clone (tasklens-8hz.13).
     assert!(report.torn_down, "{report:?}");

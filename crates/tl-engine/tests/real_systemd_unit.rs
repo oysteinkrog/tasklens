@@ -31,7 +31,6 @@ const TEST_UNIT: &str = "tasklens-test.service";
 /// The bead's bound for every wait.
 const WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
-const SHUTDOWN_LIMIT: Duration = Duration::from_millis(1500);
 
 /// The tests share the user manager and the unit name, so they run one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -218,8 +217,8 @@ impl RunningEngine {
 impl Drop for RunningEngine {
     fn drop(&mut self) {
         if let Some(engine) = self.0.take() {
-            let report = engine.shutdown(SHUTDOWN_LIMIT);
-            if !report.clean() {
+            let report = engine.shutdown();
+            if !report.torn_down {
                 eprintln!("engine shutdown: {report:?}");
             }
         }

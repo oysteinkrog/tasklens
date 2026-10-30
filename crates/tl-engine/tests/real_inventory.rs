@@ -513,6 +513,7 @@ fn p2_real_host_once() {
         assert_eq!(totals.util_pct.validity, Validity::Valid);
     }
 
-    let report = engine.shutdown(Duration::from_millis(1500));
-    assert!(report.clean(), "{report:?}");
+    let report = engine.shutdown();
+    // Not a shutdown test: `drained` is left to the shutdown tests (ADR-004 fixed budgets).
+    assert!(report.torn_down, "{report:?}");
 }

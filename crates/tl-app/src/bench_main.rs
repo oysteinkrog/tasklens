@@ -84,7 +84,7 @@ pub fn run(args: BenchArgs) -> i32 {
     };
 
     if let Some(engine) = engine {
-        let report = engine.shutdown(Duration::from_millis(1500));
+        let report = engine.shutdown();
         info!(target: "tasklens::perf", drained = report.drained, torn_down = report.torn_down,
             elapsed_ms = report.elapsed.as_millis() as u64, "bench engine shutdown");
     }

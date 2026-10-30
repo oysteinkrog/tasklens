@@ -371,7 +371,7 @@ fn finish(
 ) -> ! {
     // Pending changes are written before anything else on exit (ADR-011).
     store.flush();
-    let report = engine.shutdown(Duration::from_millis(1500));
+    let report = engine.shutdown();
     if !report.clean() {
         warn!(target: "tasklens::engine", drained = report.drained, torn_down = report.torn_down,
             "engine shutdown timed out");

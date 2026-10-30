@@ -26,7 +26,7 @@ use gpui_kit::{AppContext as _, Context, Entity, TestAppContext, VisualTestConte
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::EngineHandle;
-use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
+use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode, ShutdownReport};
 use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
@@ -311,7 +311,7 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     });
     let hidden = vcx.update(|_, cx| cx.global::<GlobalHub>().0.read(cx).is_hidden());
     let engine_records = engine.latest().processes.records.len();
-    let report = engine.shutdown(Duration::from_millis(1500));
+    let report = engine.shutdown();
 
     let (rows, records, cpu, memory) = last;
     eprintln!(
@@ -324,7 +324,15 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     assert!(rows > 0, "the table shows process rows");
     assert_eq!(cpu, Validity::Valid, "CPU total filled");
     assert_eq!(memory, Validity::Valid, "Memory total filled");
-    assert!(report.drained, "engine drained on shutdown");
+    assert_stopped(&report);
+}
+
+/// These tests are about the UI, not about shutdown, so they check that shutdown returned and
+/// teardown finished, never `drained`. The drain bound is fixed at 1 s by ADR-004 and a single
+/// engine thread starved by a loaded machine can miss it. Drain is tested in `tl-engine`
+/// (`lab_bridge`, `shutdown_during_start`).
+fn assert_stopped(report: &ShutdownReport) {
+    assert!(report.torn_down, "engine torn down on shutdown: {report:?}");
 }
 
 /// The Startup page state against the real engine: activation turns the startup demand on and
@@ -373,7 +381,7 @@ fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
         last = read(cx);
     }
     let demand_on = cx.update(|cx| demand.read(cx).merged());
-    let report = engine.shutdown(Duration::from_millis(1500));
+    let report = engine.shutdown();
 
     let (generation, validity, rows) = last;
     eprintln!(
@@ -384,7 +392,7 @@ fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
     assert!(query.accepts(generation), "the view is for the query sent");
     assert_eq!(validity, Validity::Valid, "the startup scan ran");
     assert!(page.note_data(validity, rows), "first data seen");
-    assert!(report.drained, "engine drained on shutdown");
+    assert_stopped(&report);
 }
 
 /// The Startup arm of the page match, until tasklens-9o0.13 registers it in `app.rs`.
@@ -451,7 +459,7 @@ fn startup_page_fills_from_real_engine(cx: &mut TestAppContext) {
         last = read(&mut vcx);
     }
     let demand_on = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
-    let report = engine.shutdown(Duration::from_millis(1500));
+    let report = engine.shutdown();
 
     let (body, status, rows, hub_rows, counts) = last;
     eprintln!("body {body:?}, status {status:?}, rows {rows}, hub rows {hub_rows}, {counts:?}");
@@ -470,7 +478,7 @@ fn startup_page_fills_from_real_engine(cx: &mut TestAppContext) {
         status.starts_with(&format!("{total} Total | ")),
         "the status text shows the engine's counts"
     );
-    assert!(report.drained, "engine drained on shutdown");
+    assert_stopped(&report);
 }
 
 /// `base` with a services list of one expanded sshd.service unit and one child row per key.
@@ -591,7 +599,7 @@ fn services_child_demand_runs_process_sweep(cx: &mut TestAppContext) {
     toggle(&mut vcx);
     step(&mut vcx, &mut cpu_ticks, &pumped);
     let collapsed = merged(&mut vcx);
-    let report = engine.shutdown(Duration::from_millis(1500));
+    let report = engine.shutdown();
 
     eprintln!(
         "records {}, child {child:?}, pid text {pid_text:?}, detail keys {detail_keys:?}",
@@ -621,5 +629,5 @@ fn services_child_demand_runs_process_sweep(cx: &mut TestAppContext) {
         "collapsing the last unit withdraws the sweep"
     );
     assert!(collapsed.detail_keys.is_empty());
-    assert!(report.drained, "engine drained on shutdown");
+    assert_stopped(&report);
 }

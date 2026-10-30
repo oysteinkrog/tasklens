@@ -62,6 +62,20 @@ impl SourceController {
 
     /// Runs until `cx` is cancelled. Spawn with `cx.spawn(|cx| ctl.run(cx))` from the session.
     pub async fn run(self, cx: Cx) {
+        let name = self.name;
+        self.run_inner(cx).await;
+        // Diagnostic for slow shutdowns: which worker ended, and how long after `shutdown` began.
+        if let Some(since) = crate::bridge::since_shutdown_began() {
+            tracing::debug!(
+                target: "tasklens::engine",
+                worker = name,
+                since_shutdown_ms = since.as_millis() as u64,
+                "worker exited during shutdown",
+            );
+        }
+    }
+
+    async fn run_inner(self, cx: Cx) {
         // True once a supervisor ran: the next pass restarts a worker that stopped.
         let mut restart = false;
         loop {

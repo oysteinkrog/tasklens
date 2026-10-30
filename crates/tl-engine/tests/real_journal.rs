@@ -25,8 +25,6 @@ const LINES: usize = 1000;
 /// Upper bound for every wait in this file.
 const WAIT: Duration = Duration::from_secs(30);
 const MAX_LOAD_OLDER: usize = 10;
-/// `DRAIN_BUDGET` plus `TEARDOWN_BUDGET` (ADR-004).
-const SHUTDOWN_LIMIT: Duration = Duration::from_millis(1500);
 
 /// The user-unit tests share one unit name, so they run one at a time.
 static UNIT_LOCK: Mutex<()> = Mutex::new(());
@@ -106,8 +104,9 @@ fn start_engine(name: &str) -> EngineHandle {
 }
 
 fn stop_engine(engine: EngineHandle) {
-    let report = engine.shutdown(SHUTDOWN_LIMIT);
-    assert!(report.clean(), "engine shutdown: {report:?}");
+    let report = engine.shutdown();
+    // Not a shutdown test: `drained` is left to the shutdown tests (ADR-004 fixed budgets).
+    assert!(report.torn_down, "engine shutdown: {report:?}");
 }
 
 fn query(manager: Manager, name: &str, follow: bool) -> JournalQuery {

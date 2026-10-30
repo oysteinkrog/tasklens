@@ -5,8 +5,8 @@
 //! which is `#[doc(hidden)]` and used only inside the crate and by E11's gate factory, and
 //! `Engine::start_with_workers`, which is `#[doc(hidden)]` and used only by tests.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -42,6 +42,27 @@ pub const MSGS_CAPACITY: usize = 256;
 pub const DRAIN_BUDGET: Duration = Duration::from_millis(1000);
 /// How long `shutdown` waits for runtime teardown (ADR-004 step 4).
 pub const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
+
+/// When the latest `shutdown` began, as nanoseconds after `SHUTDOWN_EPOCH`; 0 means never.
+static SHUTDOWN_BEGAN_NS: AtomicU64 = AtomicU64::new(0);
+static SHUTDOWN_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn mark_shutdown_began() {
+    let epoch = SHUTDOWN_EPOCH.get_or_init(Instant::now);
+    // Add 1 so a shutdown in the first nanosecond still reads as started.
+    SHUTDOWN_BEGAN_NS.store(epoch.elapsed().as_nanos() as u64 + 1, Ordering::Release);
+}
+
+/// Time since the latest `shutdown` began, or `None` when none has. Workers log it on exit.
+pub(crate) fn since_shutdown_began() -> Option<Duration> {
+    let began = SHUTDOWN_BEGAN_NS.load(Ordering::Acquire);
+    let epoch = SHUTDOWN_EPOCH.get()?;
+    (began != 0).then(|| {
+        epoch
+            .elapsed()
+            .saturating_sub(Duration::from_nanos(began - 1))
+    })
+}
 
 /// Opens one journal stream. Installed by E14-A4 through `EngineHooks`.
 pub type JournalSpawner = Arc<dyn Fn(JournalQuery) -> JournalHandle + Send + Sync>;
@@ -173,11 +194,11 @@ impl EngineHandle {
     /// never drops its app state, so `tl-app` cannot drop the UI's clone. They see a stopped
     /// engine afterwards.
     ///
-    /// `total` is advisory. `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the real bounds, 1.5 s
-    /// together. A blocking job that is still running is not interrupted; teardown then goes on
+    /// `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the bounds, 1.5 s together. A blocking job that is still running is not interrupted; teardown then goes on
     /// in the background and `torn_down` is false.
-    pub fn shutdown(self, total: Duration) -> ShutdownReport {
+    pub fn shutdown(self) -> ShutdownReport {
         let begin = Instant::now();
+        mark_shutdown_began();
         let inner = self.inner;
         inner.stopped.store(true, Ordering::Release);
         // Step 1: drop the UI-side senders.
@@ -227,7 +248,6 @@ impl EngineHandle {
                 drained,
                 torn_down,
                 elapsed_ms = report.elapsed.as_millis() as u64,
-                total_ms = total.as_millis() as u64,
                 "engine shutdown did not finish cleanly",
             );
         }

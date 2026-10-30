@@ -13,7 +13,8 @@ use tl_model::demand::{ColumnSet, CpuDemand, Demand};
 
 const ROUNDS: usize = 5;
 /// `DRAIN_BUDGET` plus `TEARDOWN_BUDGET` (ADR-004).
-const LIMIT: Duration = Duration::from_millis(1500);
+const LIMIT: Duration =
+    tl_engine::bridge::DRAIN_BUDGET.saturating_add(tl_engine::bridge::TEARDOWN_BUDGET);
 
 /// Every surface visible: all workers registered so far sample at their fastest rate.
 fn every_surface() -> Demand {
@@ -52,7 +53,7 @@ fn shutdown_under_load_within_1500ms() {
         );
 
         let begin = Instant::now();
-        let report = handle.shutdown(LIMIT);
+        let report = handle.shutdown();
         let wall = begin.elapsed();
         eprintln!("round {round}: {report:?}, wall {wall:?}");
         assert!(report.clean(), "round {round}: {report:?}");
