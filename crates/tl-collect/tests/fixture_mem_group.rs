@@ -14,6 +14,7 @@ use tl_collect::proc::meta::{ExeLink, MetaCache, RawMeta, ReadBufs};
 use tl_collect::proc::pid_stat::{PidStat, is_kernel_thread, parse_pid_stat};
 use tl_collect::proc::status::{PidStatus, parse_status};
 use tl_model::ids::ProcessKey;
+use tl_model::process::WineProcess;
 use tl_model::time::BootId;
 
 const UID: u32 = 1000;
@@ -172,6 +173,7 @@ fn groups(procs: &[Proc]) -> Vec<Arc<MemGroup>> {
             app_id: r.app_id.as_deref(),
             app_name: r.app_id.as_deref().and_then(app_name),
             unit: r.unit.as_deref(),
+            wine: r.meta.wine.as_deref(),
         })
         .collect();
     let mut out = Vec::new();
@@ -346,6 +348,7 @@ fn mem_group_keys_dropped_when_unused() {
         app_id: None,
         app_name: None,
         unit: None,
+        wine: None,
     };
     grouper.classify(&[input("/usr/bin/a")], UID, &mut out);
     let first = out[0].clone();
@@ -355,4 +358,165 @@ fn mem_group_keys_dropped_when_unused() {
     grouper.classify(&[input("/usr/bin/a")], UID, &mut out);
     assert!(!Arc::ptr_eq(&first, &out[0]), "an unused group was dropped");
     assert_eq!(&*out[0].key, "exe:a");
+}
+
+/// The Wine prefix of the owner's Backblaze install (tasklens-o55.58).
+const BACKBLAZE: &str = "/srv/backblaze/prefix";
+const PRELOADER: &str = "/usr/lib/wine/x86_64-unix/wine-preloader";
+
+/// A Wine process of the current user: (pid, prefix, Windows image).
+fn wine_groups(procs: &[(u32, Option<&str>, &str)], exe: &str) -> Vec<Arc<MemGroup>> {
+    let wines: Vec<WineProcess> = procs
+        .iter()
+        .map(|&(_, prefix, image)| WineProcess {
+            prefix: prefix.map(Arc::from),
+            image: Some(Arc::from(image)),
+        })
+        .collect();
+    let inputs: Vec<MemGroupInput<'_>> = procs
+        .iter()
+        .zip(&wines)
+        .map(|(&(pid, _, image), wine)| MemGroupInput {
+            pid,
+            start_ticks: u64::from(pid),
+            ruid: UID,
+            kernel_thread: false,
+            comm: image.rsplit('\\').next().unwrap_or(image),
+            exe: Some(exe),
+            app_id: None,
+            app_name: None,
+            unit: None,
+            wine: Some(wine),
+        })
+        .collect();
+    let mut out = Vec::new();
+    MemGrouper::new().classify(&inputs, UID, &mut out);
+    out
+}
+
+const BACKBLAZE_IMAGES: [&str; 15] = [
+    "C:\\Program Files\\Backblaze\\bzbui.exe",
+    "C:\\Program Files\\Backblaze\\bzserv.exe",
+    "C:\\Program Files\\Backblaze\\bzbuitray.exe",
+    "C:\\Program Files\\Backblaze\\bztransmit.exe",
+    "C:\\Program Files\\Backblaze\\bzfilelist.exe",
+    "C:\\windows\\system32\\services.exe",
+    "C:\\windows\\system32\\winedevice.exe",
+    "C:\\windows\\system32\\winedevice.exe",
+    "C:\\windows\\system32\\svchost.exe",
+    "C:\\windows\\system32\\plugplay.exe",
+    "C:\\windows\\explorer.exe",
+    "C:\\windows\\system32\\rpcss.exe",
+    "C:\\windows\\system32\\lsass.exe",
+    "C:\\windows\\system32\\conhost.exe",
+    "C:\\windows\\system32\\conhost.exe",
+];
+
+#[test]
+fn wine_backblaze_is_one_group() {
+    for exe in [PRELOADER, "/usr/lib/wine/x86_64-unix/wine64-preloader"] {
+        let procs: Vec<_> = BACKBLAZE_IMAGES
+            .iter()
+            .enumerate()
+            .map(|(i, &image)| (100 + i as u32, Some(BACKBLAZE), image))
+            .collect();
+        let g = wine_groups(&procs, exe);
+        assert_eq!(g.len(), 15);
+        assert!(
+            g.iter().all(|x| Arc::ptr_eq(x, &g[0])),
+            "one group: {:?}",
+            keys(&g)
+        );
+        assert_eq!(&*g[0].key, "wine:/srv/backblaze/prefix:Backblaze");
+        assert_eq!(&*g[0].name, "Backblaze");
+        assert_eq!(g[0].kind, MemGroupKind::Wine);
+        assert_eq!(g[0].wine_prefix.as_deref(), Some(BACKBLAZE));
+        assert_eq!(g[0].app_id, None);
+    }
+}
+
+#[test]
+fn wine_two_prefixes_stay_two_groups() {
+    let a = "/home/u/.wine";
+    let b = "/home/u/Games/other";
+    let procs = [
+        (1, Some(a), "C:\\Program Files\\Backblaze\\bzbui.exe"),
+        (2, Some(a), "C:\\windows\\system32\\services.exe"),
+        (3, Some(b), "C:\\Program Files\\Backblaze\\bzbui.exe"),
+        (4, Some(b), "C:\\windows\\system32\\services.exe"),
+    ];
+    let g = wine_groups(&procs, PRELOADER);
+    assert_eq!(
+        keys(&g),
+        [
+            "wine:/home/u/.wine:Backblaze",
+            "wine:/home/u/.wine:Backblaze",
+            "wine:/home/u/Games/other:Backblaze",
+            "wine:/home/u/Games/other:Backblaze",
+        ]
+    );
+    assert!(!Arc::ptr_eq(&g[0], &g[2]));
+    assert_eq!(&*g[2].name, "Backblaze");
+}
+
+#[test]
+fn wine_prefix_without_app() {
+    let procs = [
+        (1, Some(BACKBLAZE), "C:\\windows\\system32\\services.exe"),
+        (2, Some(BACKBLAZE), "C:\\windows\\system32\\winedevice.exe"),
+        (3, None, "C:\\windows\\system32\\services.exe"),
+    ];
+    let g = wine_groups(&procs, PRELOADER);
+    assert_eq!(&*g[0].key, "wine:/srv/backblaze/prefix");
+    assert_eq!(&*g[0].name, "Wine (prefix)");
+    assert!(Arc::ptr_eq(&g[0], &g[1]));
+    assert_eq!(&*g[2].key, "wine:");
+    assert_eq!(&*g[2].name, "Wine");
+}
+
+#[test]
+fn wine_system_joins_the_app_with_most_processes() {
+    let procs = [
+        (1, Some(BACKBLAZE), "C:\\Program Files\\Tool\\tool.exe"),
+        (
+            2,
+            Some(BACKBLAZE),
+            "C:\\Program Files\\Backblaze\\bzbui.exe",
+        ),
+        (
+            3,
+            Some(BACKBLAZE),
+            "C:\\Program Files\\Backblaze\\bzserv.exe",
+        ),
+        (4, Some(BACKBLAZE), "C:\\windows\\system32\\services.exe"),
+    ];
+    let g = wine_groups(&procs, PRELOADER);
+    assert_eq!(&*g[0].name, "Tool");
+    assert_eq!(&*g[3].key, "wine:/srv/backblaze/prefix:Backblaze");
+    // A tie goes to the folder that sorts first.
+    let g = wine_groups(&[procs[0], procs[1], procs[3]], PRELOADER);
+    assert_eq!(&*g[2].name, "Backblaze");
+}
+
+#[test]
+fn wine_process_of_another_user_is_system() {
+    let wine = WineProcess {
+        prefix: Some(Arc::from(BACKBLAZE)),
+        image: Some(Arc::from("C:\\Program Files\\Backblaze\\bzbui.exe")),
+    };
+    let input = MemGroupInput {
+        pid: 1,
+        start_ticks: 1,
+        ruid: UID + 1,
+        kernel_thread: false,
+        comm: "bzbui.exe",
+        exe: None,
+        app_id: None,
+        app_name: None,
+        unit: None,
+        wine: Some(&wine),
+    };
+    let mut out = Vec::new();
+    MemGrouper::new().classify(&[input], UID, &mut out);
+    assert_eq!(&*out[0].key, "system");
 }

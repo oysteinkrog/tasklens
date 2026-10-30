@@ -4,26 +4,34 @@
 //! executable sits beside the app's own; every other process of the user groups by program. Each
 //! process gets the first rule that applies:
 //!
-//! 1. App: in an app scope, executable in the directory of the scope's oldest process. Key
+//! 1. System: kernel threads and processes of other users. Key `system`.
+//! 2. Wine: a Windows program of the current user, by its install folder per Wine prefix (see
+//!    [`wine_app`]). Key `wine:<prefix>:<folder>`. Wine's own processes (`C:\windows\...`)
+//!    join the app of their prefix with the most processes, else form `wine:<prefix>`, named
+//!    "Wine (<prefix folder name>)".
+//! 3. Unknown: the executable cannot be read. Key `comm:<comm>`.
+//! 4. App: in an app scope, executable in the directory of the scope's oldest process. Key
 //!    `app:<app id>`.
-//! 2. Program: any other process of the current user with a readable executable. Key
+//! 5. Program: any other process of the current user with a readable executable. Key
 //!    `exe:<name>`.
-//! 3. System: kernel threads and processes of other users. Key `system`.
-//! 4. Unknown: the executable cannot be read. Key `comm:<comm>`.
 //!
 //! Keys are stable across restarts and reboots, so the stored history continues a group.
 
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use tl_model::process::WineProcess;
 
 use crate::apps::cgroup_app::is_bwrap;
-use crate::apps::naming::exe_basename;
+use crate::apps::naming::{exe_basename, windows_file_name};
 
 /// Key of the System group.
 pub const SYSTEM_KEY: &str = "system";
 /// Display name of the System group.
 pub const SYSTEM_NAME: &str = "System";
+
+/// Display name of a Wine prefix group without an app: "Wine (<prefix folder name>)".
+pub const WINE_NAME: &str = "Wine";
 
 /// Program name to display name. Names not in the table show as they are.
 pub const PROGRAM_NAMES: &[(&str, &str)] = &[("claude", "Claude Code")];
@@ -54,18 +62,22 @@ pub enum MemGroupKind {
     Program,
     System,
     Unknown,
+    Wine,
 }
 
 /// One memory group.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemGroup {
-    /// `app:<app id>`, `exe:<name>`, `system` or `comm:<comm>`.
+    /// `app:<app id>`, `exe:<name>`, `wine:<prefix>[:<folder>]`, `system` or `comm:<comm>`.
     pub key: Arc<str>,
-    /// The desktop entry name, the program's display name, "System" or the `comm`.
+    /// The desktop entry name, the program's display name, the Wine install folder,
+    /// "Wine (<prefix folder name>)", "System" or the `comm`.
     pub name: Arc<str>,
     pub kind: MemGroupKind,
     /// The desktop id of an `App` group, for its icon.
     pub app_id: Option<Arc<str>>,
+    /// The Wine prefix of a `Wine` group, when known.
+    pub wine_prefix: Option<Arc<str>>,
 }
 
 /// What the grouping needs to know about one process.
@@ -87,7 +99,28 @@ pub struct MemGroupInput<'a> {
     /// The app unit the process runs in (its scope or service). Processes with the same app id
     /// and unit share one oldest process.
     pub unit: Option<&'a str>,
+    /// Set for a Wine process: its prefix and Windows image.
+    pub wine: Option<&'a WineProcess>,
 }
+
+/// What a Wine process's Windows image says about its group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WineApp<'a> {
+    /// An app, by its install folder or, outside one, its file name without `.exe`.
+    App(&'a str),
+    /// Wine's own processes in `<drive>:\windows`, and a process whose image is not known.
+    System,
+}
+
+/// Windows folders that hold the install folders of many apps.
+const WINE_CONTAINERS: &[&str] = &["ProgramData"];
+/// Folders under `users\<name>` that hold install folders, in order. Each is skipped when it
+/// is there.
+const WINE_USER_CONTAINERS: &[&[&str]] = &[
+    &["AppData"],
+    &["Local", "Roaming", "LocalLow"],
+    &["Programs"],
+];
 
 /// The executable of an app unit's oldest process.
 #[derive(Clone, Copy)]
@@ -104,6 +137,7 @@ pub struct MemGrouper {
     groups: FxHashMap<Box<str>, (Arc<MemGroup>, u64)>,
     sweep: u64,
     key: String,
+    name: String,
 }
 
 impl MemGrouper {
@@ -123,19 +157,34 @@ impl MemGrouper {
         self.sweep += 1;
         out.clear();
         let refs = references(procs, self_uid);
+        let wine_main = wine_main_apps(procs, self_uid);
         for p in procs {
             let reference = p
                 .app_id
                 .and_then(|id| refs.get(&(id, p.unit)))
                 .map(|r| r.exe);
-            let (kind, name) = group_of(p, reference, self_uid, &mut self.key);
-            out.push(self.intern(kind, name, p.app_id));
+            let kind = group_of(
+                p,
+                reference,
+                &wine_main,
+                self_uid,
+                &mut self.key,
+                &mut self.name,
+            );
+            let prefix = p.wine.and_then(|w| w.prefix.as_ref());
+            out.push(self.intern(kind, p.app_id, prefix));
         }
         let sweep = self.sweep;
         self.groups.retain(|_, (_, seen)| *seen == sweep);
     }
 
-    fn intern(&mut self, kind: MemGroupKind, name: &str, app_id: Option<&str>) -> Arc<MemGroup> {
+    fn intern(
+        &mut self,
+        kind: MemGroupKind,
+        app_id: Option<&str>,
+        wine_prefix: Option<&Arc<str>>,
+    ) -> Arc<MemGroup> {
+        let name = self.name.as_str();
         // A renamed desktop entry gives a new group with the same key.
         if let Some((group, seen)) = self.groups.get_mut(self.key.as_str())
             && &*group.name == name
@@ -148,6 +197,7 @@ impl MemGrouper {
             name: Arc::from(name),
             kind,
             app_id: app_id.filter(|_| kind == MemGroupKind::App).map(Arc::from),
+            wine_prefix: wine_prefix.filter(|_| kind == MemGroupKind::Wine).cloned(),
         });
         self.groups
             .insert(Box::from(self.key.as_str()), (group.clone(), self.sweep));
@@ -185,35 +235,160 @@ fn references<'a>(
     refs
 }
 
-/// The group of one process. Writes its key into `key`, which is cleared first. `reference` is
-/// the executable of the oldest process of the process's app unit.
-fn group_of<'a>(
-    p: &MemGroupInput<'a>,
+/// The install folder of the app with the most processes in each Wine prefix of the current
+/// user. Equal counts go to the folder that sorts first.
+fn wine_main_apps<'a>(
+    procs: &[MemGroupInput<'a>],
+    self_uid: u32,
+) -> FxHashMap<Option<&'a str>, &'a str> {
+    let mut counts: FxHashMap<(Option<&'a str>, &'a str), u32> = FxHashMap::default();
+    for p in procs {
+        let Some(wine) = p.wine else { continue };
+        if p.kernel_thread || p.ruid != self_uid {
+            continue;
+        }
+        if let WineApp::App(folder) = wine_app(wine.image.as_deref()) {
+            *counts.entry((wine.prefix.as_deref(), folder)).or_default() += 1;
+        }
+    }
+    let mut best: FxHashMap<Option<&str>, (&str, u32)> = FxHashMap::default();
+    for ((prefix, folder), n) in counts {
+        best.entry(prefix)
+            .and_modify(|b| {
+                if n > b.1 || (n == b.1 && folder < b.0) {
+                    *b = (folder, n);
+                }
+            })
+            .or_insert((folder, n));
+    }
+    best.into_iter()
+        .map(|(prefix, (folder, _))| (prefix, folder))
+        .collect()
+}
+
+/// The group of one process. Writes its key into `key` and its display name into `name`, both
+/// cleared first. `reference` is the executable of the oldest process of the process's app
+/// unit. `wine_main` is the main app folder per Wine prefix.
+fn group_of(
+    p: &MemGroupInput<'_>,
     reference: Option<&str>,
+    wine_main: &FxHashMap<Option<&str>, &str>,
     self_uid: u32,
     key: &mut String,
-) -> (MemGroupKind, &'a str) {
+    name: &mut String,
+) -> MemGroupKind {
     key.clear();
+    name.clear();
     if p.kernel_thread || p.ruid != self_uid {
         key.push_str(SYSTEM_KEY);
-        return (MemGroupKind::System, SYSTEM_NAME);
+        name.push_str(SYSTEM_NAME);
+        return MemGroupKind::System;
+    }
+    if let Some(wine) = p.wine {
+        let prefix = wine.prefix.as_deref();
+        key.push_str("wine:");
+        key.push_str(prefix.unwrap_or(""));
+        let folder = match wine_app(wine.image.as_deref()) {
+            WineApp::App(folder) => Some(folder),
+            WineApp::System => wine_main.get(&prefix).copied(),
+        };
+        match folder {
+            Some(folder) => {
+                key.push(':');
+                key.push_str(folder);
+                name.push_str(folder);
+            }
+            None => {
+                name.push_str(WINE_NAME);
+                if let Some(dir) = prefix.and_then(|p| p.rsplit('/').next()) {
+                    name.push_str(" (");
+                    name.push_str(dir);
+                    name.push(')');
+                }
+            }
+        }
+        return MemGroupKind::Wine;
     }
     let Some(exe) = p.exe else {
         key.push_str("comm:");
         key.push_str(p.comm);
-        return (MemGroupKind::Unknown, p.comm);
+        name.push_str(p.comm);
+        return MemGroupKind::Unknown;
     };
     if let (Some(app_id), Some(reference)) = (p.app_id, reference)
         && beside(exe, reference)
     {
         key.push_str("app:");
         key.push_str(app_id);
-        return (MemGroupKind::App, p.app_name.unwrap_or(app_id));
+        name.push_str(p.app_name.unwrap_or(app_id));
+        return MemGroupKind::App;
     }
-    let name = program_name(exe);
+    let program = program_name(exe);
     key.push_str("exe:");
-    key.push_str(name);
-    (MemGroupKind::Program, program_display_name(name))
+    key.push_str(program);
+    name.push_str(program_display_name(program));
+    MemGroupKind::Program
+}
+
+/// The app a Wine process's Windows image belongs to.
+///
+/// - `<drive>:\windows\...` and an unknown image: [`WineApp::System`].
+/// - In `Program Files`, `Program Files (x86)`, `ProgramData` or
+///   `users\<name>\AppData\{Local,Roaming,LocalLow}\Programs`: the first folder inside it.
+///   `C:\Program Files\Backblaze\bztransmit.exe` gives `Backblaze`.
+/// - In any other folder of a drive: that drive's first-level folder.
+/// - On drive `Z:`, which Wine maps to the Unix root, outside a folder, or with no drive: the
+///   file name without `.exe`.
+pub fn wine_app(image: Option<&str>) -> WineApp<'_> {
+    let Some(image) = image else {
+        return WineApp::System;
+    };
+    let file = windows_file_name(image);
+    let stem = WineApp::App(
+        file.len()
+            .checked_sub(4)
+            .filter(|&n| file.is_char_boundary(n) && file[n..].eq_ignore_ascii_case(".exe"))
+            .map_or(file, |n| &file[..n]),
+    );
+    let dir = &image[..image.len() - file.len()];
+    let mut dirs = dir.split(['\\', '/']).filter(|s| !s.is_empty());
+    let is_drive = |d: &str| {
+        let b = d.as_bytes();
+        b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    };
+    match dirs.next() {
+        Some(drive) if is_drive(drive) && !drive.eq_ignore_ascii_case("z:") => {}
+        _ => return stem,
+    }
+    let Some(first) = dirs.next() else {
+        return stem;
+    };
+    let folder = if first.eq_ignore_ascii_case("windows") {
+        return WineApp::System;
+    } else if starts_with_ignore_case(first, "Program Files")
+        || WINE_CONTAINERS
+            .iter()
+            .any(|c| first.eq_ignore_ascii_case(c))
+    {
+        dirs.next()
+    } else if first.eq_ignore_ascii_case("users") {
+        // The user name.
+        dirs.next();
+        let mut next = dirs.next();
+        for names in WINE_USER_CONTAINERS {
+            if next.is_some_and(|d| names.iter().any(|n| d.eq_ignore_ascii_case(n))) {
+                next = dirs.next();
+            }
+        }
+        next
+    } else {
+        Some(first)
+    };
+    folder.map_or(stem, WineApp::App)
+}
+
+fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 /// True when `exe` is in the same directory as `reference`. In a [`SHARED_BIN_DIRS`] directory
@@ -299,6 +474,38 @@ mod tests {
         assert_eq!(program_name("/versions/2.0"), "2.0");
         assert_eq!(program_display_name("claude"), "Claude Code");
         assert_eq!(program_display_name("node"), "node");
+    }
+
+    #[test]
+    fn wine_apps() {
+        let app = |image| wine_app(Some(image));
+        assert_eq!(
+            app("C:\\Program Files\\Backblaze\\bztransmit.exe"),
+            WineApp::App("Backblaze")
+        );
+        assert_eq!(
+            app("c:\\program files (x86)\\Steam\\bin\\steam.exe"),
+            WineApp::App("Steam")
+        );
+        assert_eq!(app("C:\\ProgramData\\Tool\\t.exe"), WineApp::App("Tool"));
+        assert_eq!(
+            app("C:\\users\\u\\AppData\\Local\\Programs\\Code\\code.exe"),
+            WineApp::App("Code")
+        );
+        assert_eq!(
+            app("C:\\users\\u\\AppData\\Roaming\\Zoom\\bin\\zoom.exe"),
+            WineApp::App("Zoom")
+        );
+        assert_eq!(app("C:\\Games\\Foo\\foo.exe"), WineApp::App("Games"));
+        assert_eq!(app("D:/Backblaze/bzbui.exe"), WineApp::App("Backblaze"));
+        assert_eq!(app("C:\\windows\\system32\\services.exe"), WineApp::System);
+        assert_eq!(app("C:\\WINDOWS\\explorer.exe"), WineApp::System);
+        assert_eq!(wine_app(None), WineApp::System);
+        // Outside a folder, on the Unix root drive or with no path: the file name.
+        assert_eq!(app("C:\\setup.exe"), WineApp::App("setup"));
+        assert_eq!(app("C:\\Program Files\\x.EXE"), WineApp::App("x"));
+        assert_eq!(app("Z:\\home\\u\\bin\\Tool.exe"), WineApp::App("Tool"));
+        assert_eq!(app("UiMcpHost.exe"), WineApp::App("UiMcpHost"));
     }
 
     #[test]
