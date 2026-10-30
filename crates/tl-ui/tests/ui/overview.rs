@@ -5234,7 +5234,7 @@ mod page {
         };
         use tl_ui::pages::performance::overview::parts::arrange_grid;
         let mut r = open_rooted(cx, true, 1800., 900.);
-        let keys = three_disks(&mut r);
+        assert_eq!(three_disks(&mut r).len(), 3);
         // A 42 px row unit, so the Disk box's grid has room for three 60 px cells and none
         // joins "+1 more".
         r.set_row_unit(42);
@@ -5246,9 +5246,11 @@ mod page {
         // The cells shown, checked against the helper's fit for the measured grid.
         let cells = |r: &mut Rig, arrange: Arrange| {
             let grid = r.bounds_of(GRID_ID.into());
-            let n = r
-                .vcx
-                .update(|_, cx| page.read(cx).disk_box().read(cx).shown());
+            let (n, keys): (usize, Vec<DeviceKey>) = r.vcx.update(|_, cx| {
+                let disks = page.read(cx).disk_box().read(cx);
+                let keys = disks.rows().iter().map(|d| d.key.clone()).collect();
+                (disks.shown(), keys)
+            });
             let min = size(px(CELL_MIN_W), px(CELL_MIN_H));
             let fit = arrange_grid(arrange, n, grid.size, min, px(2.), px(0.));
             let cs: Vec<_> = keys
@@ -5338,12 +5340,12 @@ mod page {
             .update(|_, cx| page.read(cx).disk_box().read(cx).shown_more_text());
         assert_eq!(more.as_ref(), format!("+{} more", 3 - cs.len()));
 
-        // Automatic: the mode's grid, saved as `auto`. At 30 px rows the box is too low for one
-        // column of three 60 px cells, so the grid has two columns. Edit Layout holds the row
-        // height, and a 650 px window is too short to fill at 30 px rows (D-037), so the box
-        // keeps the unit.
+        // Automatic with a fourth disk: the mode's grid, here two columns in a 222 px box, saved
+        // as `auto`. Edit Layout holds the row height, and a 650 px window is too short to fill
+        // at 32 px rows (D-037), so the box keeps the unit.
         r.page_action(&tl_ui::pages::performance::actions::PerfOverviewEditDone);
-        r.set_row_unit(30);
+        r.set_row_unit(32);
+        assert_eq!(more_disks(&mut r, 2).len(), 4);
         r.vcx.simulate_resize(size(px(1200.), px(650.)));
         draw(r.vcx);
         r.edit_layout();
@@ -5361,7 +5363,7 @@ mod page {
         pick_arrange(&mut r, BoxKind::Disk, "Stack vertically");
         let (grid, cs, fit) = cells(&mut r, Arrange::Vertical);
         assert!(
-            cs.len() < 3 && col(&cs) && !fit.scrolls,
+            cs.len() < 4 && col(&cs) && !fit.scrolls,
             "{cs:?} in {grid:?}"
         );
         assert!(
