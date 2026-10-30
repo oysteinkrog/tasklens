@@ -35,6 +35,10 @@ pub const STACK_W: f32 = 720.;
 /// The gap between stacked boxes, logical px.
 const STACK_GAP: f32 = 8.;
 
+/// The space above the first row of boxes, logical px (`sp4`): the boxes start right under the
+/// top strip (tasklens-o55.54). The other three sides keep `PAGE_PAD`.
+pub const TOP_PAD: f32 = 8.;
+
 /// The Overview boxes: the five device boxes and the 24-hour timeline of the default layout
 /// (UI-PRF-057), and the opt-in Top processes box (crw.45).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -659,8 +663,9 @@ pub struct PlacedBox {
 }
 
 /// The grid's cell sizes on a page, in px (logical px × scale): the column width `cw`, the row
-/// unit `unit`, the drawn row height `row` (at least `unit`, D-037), the `gutter` between cells
-/// and the page padding `pad`. Kind minimums count in `unit`; boxes and drags in `row`.
+/// unit `unit`, the drawn row height `row` (at least `unit`, D-037), the `gutter` between cells,
+/// the page padding `pad` and the space `top` above the first row. Kind minimums count in
+/// `unit`; boxes and drags in `row`.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct GridMetrics {
     pub cw: f32,
@@ -668,6 +673,7 @@ pub struct GridMetrics {
     pub row: f32,
     pub gutter: f32,
     pub pad: f32,
+    pub top: f32,
     /// The UI scale, for the kind minimums.
     pub scale: f32,
 }
@@ -685,6 +691,7 @@ impl GridMetrics {
             row: unit * scale,
             gutter,
             pad,
+            top: TOP_PAD * scale,
             scale,
         }
     }
@@ -696,7 +703,7 @@ impl GridMetrics {
 
     /// The top edge of row `row`.
     pub fn y(&self, row: u16) -> f32 {
-        self.pad + f32::from(row) * (self.row + self.gutter)
+        self.top + f32::from(row) * (self.row + self.gutter)
     }
 
     /// The width of `cols` columns: `cols·cw + (cols − 1)·gutter`.
@@ -758,10 +765,13 @@ fn snapped(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 /// are × `scale`; `unit` is the row unit in logical px.
 ///
 /// - 12 columns over the page width and rows of at least `unit`, `sp3` gutters, padding
-///   `PAGE_PAD`. Edges round to whole px. An absent kind leaves its cells empty.
+///   `PAGE_PAD` at the sides and the bottom and `TOP_PAD` at the top. Edges round to whole px.
 /// - Fill (D-037): when the boxes end above the bottom, every row grows by the same amount so
-///   the lowest box ends at the bottom padding: `max(unit, (H − 2·pad − (R − 1)·gutter) / R)`,
+///   the lowest box ends at the bottom padding: `max(unit, (H − top − pad − (R − 1)·gutter) / R)`,
 ///   `R` the largest `row + rows` of the present boxes.
+/// - Row width (tasklens-o55.54): outside Edit Layout, boxes that share their rows with no other
+///   box fill the page width by their column spans, so a gap or an absent kind in that row
+///   leaves no empty space ([`fill_row_width`]).
 /// - The page scrolls when the boxes go past the bottom.
 /// - Below `STACK_W` the boxes stack in reading order, full width, each at its kind minimum
 ///   height, 8 px apart.
@@ -803,7 +813,7 @@ pub fn place_rows(
         placement.stacked = true;
         let inner_w = (w - 2. * pad).max(0.);
         let gap = STACK_GAP * scale;
-        let mut y = pad;
+        let mut y = grid.top;
         for (i, b) in shown.iter().enumerate() {
             if i > 0 {
                 y += gap;
@@ -828,7 +838,7 @@ pub fn place_rows(
         }
         None => {
             let rows = shown.iter().map(|b| b.bottom()).max().unwrap_or(1).max(1);
-            let free = h - 2. * pad - f32::from(rows - 1) * grid.gutter;
+            let free = h - grid.top - pad - f32::from(rows - 1) * grid.gutter;
             let row = free / f32::from(rows);
             let filled = row > grid.unit;
             if filled {
@@ -848,11 +858,55 @@ pub fn place_rows(
             bounds,
         });
     }
+    if frozen.is_none() {
+        fill_row_width(&shown, &grid, &mut placement.boxes);
+    }
     let content_h = bottom + pad;
     placement.content_h = px(content_h);
     // A filled grid fits by its formula; edge rounding may add half a px.
     placement.scrolls = !filled && content_h > h;
     placement
+}
+
+/// Stretches the boxes of each row across the page width by their column spans (tasklens-o55.54).
+/// A row is the boxes of `shown` with the same first row and row span, when no other box takes
+/// any of those rows. Its `n` boxes keep their order and the gutter between them, and box `i`
+/// gets `cols_i·c + (cols_i − 1)·gutter` with `c = (W − (T − 1)·gutter) / T`, `T` the row's
+/// columns and `W` the width of all 12. A row that already spans the 12 columns keeps its grid
+/// edges. `placed` holds the boxes of `shown` in the same order.
+fn fill_row_width(shown: &[GridBox], grid: &GridMetrics, placed: &mut [PlacedBox]) {
+    let full = grid.w(GRID_COLS);
+    let mut done: SmallVec<[(u16, u16); 8]> = SmallVec::new();
+    for b in shown {
+        let band = (b.row, b.rows);
+        if done.contains(&band) {
+            continue;
+        }
+        done.push(band);
+        let crosses = shown
+            .iter()
+            .any(|o| (o.row, o.rows) != band && o.row < b.bottom() && b.row < o.bottom());
+        if crosses {
+            continue;
+        }
+        let mut row: SmallVec<[usize; 8]> = (0..shown.len())
+            .filter(|&i| (shown[i].row, shown[i].rows) == band)
+            .collect();
+        row.sort_by_key(|&i| shown[i].col);
+        let total: u16 = row.iter().map(|&i| shown[i].cols).sum();
+        if total == 0 {
+            continue;
+        }
+        let c = (full - f32::from(total - 1) * grid.gutter) / f32::from(total);
+        let mut x = grid.x(0);
+        for i in row {
+            let cols = f32::from(shown[i].cols);
+            let w = cols * c + (cols - 1.) * grid.gutter;
+            let old = placed[i].bounds;
+            placed[i].bounds = snapped(x, f32::from(old.top()), w, f32::from(old.size.height));
+            x += w + grid.gutter;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1057,9 +1111,9 @@ mod tests {
         let last = p.boxes.last().expect("placed");
         assert_eq!(last.kind, BoxKind::Timeline);
         assert!(last.bounds.top() > procs.bounds.bottom());
-        // 24 rows are 1098 px plus the padding.
+        // 24 rows are 1098 px plus 8 px above and 16 px below.
         assert!(p.scrolls);
-        assert_eq!(p.content_h, px(1130.));
+        assert_eq!(p.content_h, px(1122.));
     }
 
     fn rect_left(p: &Placement, kind: BoxKind) -> Pixels {
@@ -1081,15 +1135,15 @@ mod tests {
         // cw = (1200 − 32 − 66) / 12 = 91.83; rows of 40 with 6 px gutters.
         let p = unit_rows(&OverviewLayout::grid_default(), 1200., 900.);
         assert!(!p.stacked && !p.scrolls);
-        assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 777., 316.));
-        assert_eq!(rect(&p, BoxKind::Memory), (799., 16., 385., 316.));
-        assert_eq!(rect(&p, BoxKind::Gpu), (16., 338., 385., 270.));
-        assert_eq!(rect(&p, BoxKind::Disk), (407., 338., 386., 270.));
-        assert_eq!(rect(&p, BoxKind::Net), (799., 338., 385., 270.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (16., 8., 777., 316.));
+        assert_eq!(rect(&p, BoxKind::Memory), (799., 8., 385., 316.));
+        assert_eq!(rect(&p, BoxKind::Gpu), (16., 330., 385., 270.));
+        assert_eq!(rect(&p, BoxKind::Disk), (407., 330., 386., 270.));
+        assert_eq!(rect(&p, BoxKind::Net), (799., 330., 385., 270.));
         // The timeline over all 12 columns from row 13, 4 rows high (UI-PRF-057).
-        assert_eq!(rect(&p, BoxKind::Timeline), (16., 614., 1168., 178.));
-        // 17 rows: 17 × 40 + 16 × 6 = 776, plus the padding.
-        assert_eq!(p.content_h, px(808.));
+        assert_eq!(rect(&p, BoxKind::Timeline), (16., 606., 1168., 178.));
+        // 17 rows: 17 × 40 + 16 × 6 = 776, plus 8 px above and 16 px below.
+        assert_eq!(p.content_h, px(800.));
         let order: Vec<BoxKind> = p.boxes.iter().map(|b| b.kind).collect();
         assert_eq!(
             order,
@@ -1113,7 +1167,8 @@ mod tests {
         );
         assert_eq!(rect_right(&p, BoxKind::Net), px(1184.));
 
-        // A missing kind leaves its cells empty; the boxes do not widen.
+        // In Edit Layout (frozen rows) a missing kind leaves its cells empty; the boxes do not
+        // widen.
         let p = place_rows(
             &OverviewLayout::grid_default(),
             |k| k != BoxKind::Gpu,
@@ -1123,7 +1178,7 @@ mod tests {
             Some(ROW_UNIT_DEFAULT),
         );
         assert!(p.boxes.iter().all(|b| b.kind != BoxKind::Gpu));
-        assert_eq!(rect(&p, BoxKind::Disk), (407., 338., 386., 270.));
+        assert_eq!(rect(&p, BoxKind::Disk), (407., 330., 386., 270.));
         // A taller row unit makes the boxes taller and the page scroll.
         let p = place(
             &OverviewLayout::grid_default(),
@@ -1134,6 +1189,63 @@ mod tests {
         );
         assert_eq!(rect(&p, BoxKind::Cpu).3, 7. * 80. + 6. * 6.);
         assert!(p.scrolls);
+    }
+
+    /// tasklens-o55.54: boxes that share their rows fill the page width by their column spans,
+    /// in order, with the gutter between them. The owner's last row (Disk at 0..3 and Network
+    /// at 4..7) leaves no gap and no empty space at the right; a row that already spans the 12
+    /// columns keeps its grid edges, and Edit Layout keeps the grid.
+    #[test]
+    fn overview_rows_fill_page_width() {
+        use BoxKind::*;
+        let l = layout(&[
+            (Memory, 0, 0, 12, 9),
+            (Cpu, 0, 9, 8, 10),
+            (Gpu, 8, 9, 4, 10),
+            (Disk, 0, 19, 3, 6),
+            (Net, 4, 19, 3, 6),
+        ]);
+        let p = placed(&l, 1660., 1100.);
+        let (left, right) = (16., 1644.);
+        for kind in [Memory, Disk] {
+            assert_eq!(rect_left(&p, kind), px(left), "{kind:?}");
+        }
+        for kind in [Memory, Gpu, Net] {
+            assert_eq!(rect_right(&p, kind), px(right), "{kind:?}");
+        }
+        assert_eq!(rect_right(&p, Disk) + px(6.), rect_left(&p, Net));
+        // Equal spans, equal widths (within the 1 px of edge rounding).
+        let (dw, nw) = (rect(&p, Disk).2, rect(&p, Net).2);
+        assert!((dw - nw).abs() <= 1., "{dw} and {nw}");
+        // A full row keeps its grid edges.
+        let grid = p.grid.bounds(GridBox {
+            kind: Cpu,
+            col: 0,
+            row: 9,
+            cols: 8,
+            rows: 10,
+        });
+        assert_eq!(rect_left(&p, Cpu), grid.left());
+        assert_eq!(rect_right(&p, Cpu), grid.right());
+        // An absent kind's cells go to the rest of its row.
+        let p = placed(&OverviewLayout::grid_default(), 1200., 900.);
+        let without_gpu = place(
+            &OverviewLayout::grid_default(),
+            |k| k != Gpu,
+            area(1200., 900.),
+            1.,
+            ROW_UNIT_DEFAULT,
+        );
+        assert_eq!(rect_left(&without_gpu, Disk), px(16.));
+        assert_eq!(rect_right(&without_gpu, Net), rect_right(&p, Net));
+        // A box that shares its rows with a taller box is left on the grid.
+        let l = layout(&[(Cpu, 0, 0, 6, 8), (Disk, 6, 0, 3, 4)]);
+        let p = placed(&l, 1200., 900.);
+        assert!(rect_right(&p, Disk) < px(1184.));
+        // Edit Layout keeps the grid edges.
+        let l = layout(&[(Disk, 0, 0, 3, 6), (Net, 4, 0, 3, 6)]);
+        let p = unit_rows(&l, 1200., 900.);
+        assert!(rect_right(&p, Net) < px(1184.));
     }
 
     #[test]
@@ -1180,12 +1292,13 @@ mod tests {
         let p = placed(&OverviewLayout::grid_default(), 700., 900.);
         assert!(p.stacked);
         assert!(p.boxes.iter().all(|b| b.bounds.size.width == px(668.)));
-        // Each box at its kind minimum: 280 + 4 × 220 + 160, 5 gaps of 8 and 2 × 16 padding.
-        assert_eq!(p.content_h, px(1392.));
+        // Each box at its kind minimum: 280 + 4 × 220 + 160, 5 gaps of 8, 8 px above and 16 px
+        // below.
+        assert_eq!(p.content_h, px(1384.));
         assert!(p.scrolls);
-        assert_eq!(rect(&p, BoxKind::Memory), (16., 304., 668., 220.));
-        assert_eq!(rect(&p, BoxKind::Net), (16., 988., 668., 220.));
-        assert_eq!(rect(&p, BoxKind::Timeline), (16., 1216., 668., 160.));
+        assert_eq!(rect(&p, BoxKind::Memory), (16., 296., 668., 220.));
+        assert_eq!(rect(&p, BoxKind::Net), (16., 980., 668., 220.));
+        assert_eq!(rect(&p, BoxKind::Timeline), (16., 1208., 668., 160.));
     }
 
     #[test]
@@ -1202,7 +1315,7 @@ mod tests {
         assert!(p.stacked);
         let order: Vec<BoxKind> = p.boxes.iter().map(|b| b.kind).collect();
         assert_eq!(order, [Memory, Disk, Net, Cpu]);
-        assert_eq!(rect(&p, Disk), (16., 244., 687., 220.));
+        assert_eq!(rect(&p, Disk), (16., 236., 687., 220.));
         assert_eq!(rect(&p, Cpu).3, 280.);
         // From 720 px the grid places them again.
         assert!(!placed(&l, 720., 900.).stacked);
@@ -1218,8 +1331,8 @@ mod tests {
             ROW_UNIT_DEFAULT,
             Some(ROW_UNIT_DEFAULT),
         );
-        assert_eq!(rect(&p, BoxKind::Cpu), (32., 32., 1553., 632.));
-        assert_eq!(rect(&p, BoxKind::Memory), (1597., 32., 771., 632.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (32., 16., 1553., 632.));
+        assert_eq!(rect(&p, BoxKind::Memory), (1597., 16., 771., 632.));
         // Filled, the rows grow in px: the timeline ends at the bottom padding, 32 px.
         let p = place(
             &OverviewLayout::grid_default(),
@@ -1241,8 +1354,8 @@ mod tests {
         l.boxes.retain(|b| b.kind != Timeline);
         assert_eq!(l.boxes.iter().map(|b| b.bottom()).max(), Some(13));
         let p = placed(&l, 1160., 1200.);
-        // (1200 − 32 − 12 × 6) / 13 = 84.31 px rows.
-        assert!((p.grid.row - 1096. / 13.).abs() < 1e-3, "{}", p.grid.row);
+        // (1200 − 8 − 16 − 12 × 6) / 13 = 84.92 px rows.
+        assert!((p.grid.row - 1104. / 13.).abs() < 1e-3, "{}", p.grid.row);
         assert_eq!(p.grid.unit, ROW_UNIT_DEFAULT, "the unit stays");
         assert!(!p.scrolls);
         assert_eq!(p.content_h, px(1200.));
@@ -1251,8 +1364,8 @@ mod tests {
         }
         // CPU's 7 rows and GPU's 6 rows, with the 6 px gutter between them.
         let (_, cpu_y, _, cpu_h) = rect(&p, Cpu);
-        assert_eq!(cpu_y, 16.);
-        assert_eq!(cpu_h, (7. * 1096_f32 / 13. + 36. + 16.).round() - 16.);
+        assert_eq!(cpu_y, 8.);
+        assert_eq!(cpu_h, (7. * 1104_f32 / 13. + 36. + 8.).round() - 8.);
         assert_eq!(rect(&p, Gpu).1, cpu_y + cpu_h + 6.);
         assert_eq!(rect(&p, Memory).3, cpu_h);
         // The kind minimums still count in the unit.
@@ -1292,22 +1405,22 @@ mod tests {
     /// D-037: a layout taller than the page keeps rows of the unit and scrolls.
     #[test]
     fn overview_grid_tall_layout_scrolls() {
-        // 24 rows are 24 × 40 + 23 × 6 = 1098 px plus the padding, over 900.
+        // 24 rows are 24 × 40 + 23 × 6 = 1098 px plus 8 px above and 16 px below, over 900.
         let l = OverviewLayout::from_setting(Some(&OverviewLayoutSetting::with_top_procs(40)));
         let p = placed(&l, 1200., 900.);
         assert_eq!(p.grid.row, ROW_UNIT_DEFAULT);
         assert!(p.scrolls);
-        assert_eq!(p.content_h, px(1130.));
-        assert_eq!(rect(&p, BoxKind::Cpu), (16., 16., 777., 316.));
+        assert_eq!(p.content_h, px(1122.));
+        assert_eq!(rect(&p, BoxKind::Cpu), (16., 8., 777., 316.));
         // Exactly the page: rows stay at the unit, nothing scrolls.
-        let p = placed(&l, 1200., 1130.);
+        let p = placed(&l, 1200., 1122.);
         assert_eq!(p.grid.row, ROW_UNIT_DEFAULT);
         assert!(!p.scrolls);
         // 24 px taller and each of the 24 rows grows by 1 px, still without scrolling.
-        let p = placed(&l, 1200., 1154.);
+        let p = placed(&l, 1200., 1146.);
         assert_eq!(p.grid.row, ROW_UNIT_DEFAULT + 1.);
         assert!(!p.scrolls);
-        assert_eq!(p.content_h, px(1154.));
+        assert_eq!(p.content_h, px(1146.));
         // A larger unit: the default grid at rows of 80 is taller than 900 and scrolls.
         let p = place(
             &OverviewLayout::grid_default(),
