@@ -125,6 +125,11 @@ impl CpuTicks {
 /// The engine on `root`, app lookups on the tl-collect app fixtures and the icon cache in
 /// `dir`, so the test never writes the real `~/.cache`. No helper task.
 fn start_engine(dir: &Path, root: &Path) -> tl_engine::EngineHandle {
+    // Prints the engine workers' exit lines (`tasklens::engine`, debug) with `--nocapture`.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("tasklens::engine=debug")
+        .with_test_writer()
+        .try_init();
     let share = |name: &str| fixtures().join(name).join("usr/share");
     let dirs = [share("apps-desktop"), share("apps-icons")];
     let paths = AppPaths {
@@ -332,6 +337,8 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
 /// engine thread starved by a loaded machine can miss it. Drain is tested in `tl-engine`
 /// (`lab_bridge`, `shutdown_during_start`).
 fn assert_stopped(report: &ShutdownReport) {
+    // Diagnostic for tasklens-cr0.30: `--nocapture` shows `drained` and the worker-exit lines.
+    eprintln!("shutdown report: {report:?}");
     assert!(report.torn_down, "engine torn down on shutdown: {report:?}");
 }
 

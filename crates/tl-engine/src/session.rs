@@ -186,15 +186,17 @@ async fn run_session(
         Some(make) => {
             let (handle, queue) = helper_queue();
             let (env, updates) = (make(), ep.msgs_tx.clone());
-            children.0.push(spawn(cx, move |cx| {
-                helper_task_with(cx, queue, updates, env)
+            children.0.push(spawn(cx, move |cx| async move {
+                helper_task_with(cx, queue, updates, env).await;
+                crate::bridge::log_worker_exit("helper");
             })?);
             let (tx, rx) = mpsc::channel::<HelperCommand>(HELPER_COMMANDS);
             reducer.helper_tx = Some(tx);
             let forward = handle.clone();
-            children
-                .0
-                .push(spawn(cx, move |cx| forward_helper(cx, rx, forward))?);
+            children.0.push(spawn(cx, move |cx| async move {
+                forward_helper(cx, rx, forward).await;
+                crate::bridge::log_worker_exit("forward_helper");
+            })?);
             Some(handle)
         }
         None => None,
@@ -281,7 +283,10 @@ async fn run_session(
         reducer.metric_sink = Some(MetricSink::new(slot));
     }
     let tick_tx = ep.msgs_tx.clone();
-    children.0.push(spawn(cx, move |cx| tick(cx, tick_tx))?);
+    children.0.push(spawn(cx, move |cx| async move {
+        tick(cx, tick_tx).await;
+        crate::bridge::log_worker_exit("tick");
+    })?);
 
     let run = AssertUnwindSafe(reducer.run(cx, &mut ep.msgs, &mut ep.publisher))
         .catch_unwind()

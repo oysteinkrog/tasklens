@@ -64,6 +64,18 @@ pub(crate) fn since_shutdown_began() -> Option<Duration> {
     })
 }
 
+/// Logs that worker `name` ended, when a shutdown is in progress: a diagnostic for slow shutdowns.
+pub(crate) fn log_worker_exit(name: &str) {
+    if let Some(since) = since_shutdown_began() {
+        tracing::debug!(
+            target: "tasklens::engine",
+            worker = name,
+            since_shutdown_ms = since.as_millis() as u64,
+            "worker exited during shutdown",
+        );
+    }
+}
+
 /// Opens one journal stream. Installed by E14-A4 through `EngineHooks`.
 pub type JournalSpawner = Arc<dyn Fn(JournalQuery) -> JournalHandle + Send + Sync>;
 
@@ -194,8 +206,9 @@ impl EngineHandle {
     /// never drops its app state, so `tl-app` cannot drop the UI's clone. They see a stopped
     /// engine afterwards.
     ///
-    /// `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the bounds, 1.5 s together. A blocking job that is still running is not interrupted; teardown then goes on
-    /// in the background and `torn_down` is false.
+    /// `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the bounds, 1.5 s together. A blocking job that
+    /// is still running is not interrupted; teardown then goes on in the background and
+    /// `torn_down` is false.
     pub fn shutdown(self) -> ShutdownReport {
         let begin = Instant::now();
         mark_shutdown_began();

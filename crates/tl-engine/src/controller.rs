@@ -64,15 +64,7 @@ impl SourceController {
     pub async fn run(self, cx: Cx) {
         let name = self.name;
         self.run_inner(cx).await;
-        // Diagnostic for slow shutdowns: which worker ended, and how long after `shutdown` began.
-        if let Some(since) = crate::bridge::since_shutdown_began() {
-            tracing::debug!(
-                target: "tasklens::engine",
-                worker = name,
-                since_shutdown_ms = since.as_millis() as u64,
-                "worker exited during shutdown",
-            );
-        }
+        crate::bridge::log_worker_exit(name);
     }
 
     async fn run_inner(self, cx: Cx) {
