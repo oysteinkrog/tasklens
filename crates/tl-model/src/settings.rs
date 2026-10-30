@@ -83,6 +83,19 @@ pub enum CpuGraphMode {
     PerCore,
     AllCoresOverlaid,
     AllCoresStacked,
+    /// The total chart beside the core board (crw.104).
+    Board,
+}
+
+/// `performance.cpu_board_sort` (crw.104): the order of the CPU page's core board.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoreSort {
+    /// By logical CPU number.
+    #[default]
+    Number,
+    /// By load, the busiest core first.
+    Load,
 }
 
 /// `performance.cpu_secondary_graph`.
@@ -441,6 +454,8 @@ pub struct PerformanceSettings {
     /// One of `GRAPH_RANGES_S`.
     pub graph_range_s: u16,
     pub cpu_graph_mode: CpuGraphMode,
+    /// The order of the core board (crw.104).
+    pub cpu_board_sort: CoreSort,
     pub cpu_kernel: bool,
     pub cpu_secondary_graph: CpuSecondaryGraph,
     pub gpu_optional_graphs: Vec<GpuOptionalGraph>,
@@ -1211,6 +1226,7 @@ impl Default for PerformanceSettings {
         Self {
             graph_range_s: 60,
             cpu_graph_mode: CpuGraphMode::PerCore,
+            cpu_board_sort: CoreSort::Number,
             cpu_kernel: true,
             cpu_secondary_graph: CpuSecondaryGraph::Power,
             gpu_optional_graphs: Vec::new(),
@@ -2222,6 +2238,7 @@ mod tests {
         let p = &s.performance;
         assert_eq!(p.graph_range_s, 60);
         assert_eq!(p.cpu_graph_mode, CpuGraphMode::PerCore);
+        assert_eq!(p.cpu_board_sort, CoreSort::Number);
         assert!(p.cpu_kernel);
         assert_eq!(p.cpu_secondary_graph, CpuSecondaryGraph::Power);
         assert!(p.gpu_optional_graphs.is_empty());
@@ -2313,6 +2330,9 @@ mod tests {
         assert_name(CpuGraphMode::PerCore, "per_core");
         assert_name(CpuGraphMode::AllCoresOverlaid, "all_cores_overlaid");
         assert_name(CpuGraphMode::AllCoresStacked, "all_cores_stacked");
+        assert_name(CpuGraphMode::Board, "board");
+        assert_name(CoreSort::Number, "number");
+        assert_name(CoreSort::Load, "load");
         assert_name(CpuSecondaryGraph::None, "none");
         assert_name(CpuSecondaryGraph::Power, "power");
         assert_name(CpuSecondaryGraph::Clock, "clock");
@@ -2601,6 +2621,22 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("memory_view = \"apps\""), "{text}");
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
+    }
+
+    /// crw.104: the board mode and its sort are written and read back.
+    #[test]
+    fn cpu_board_mode_and_sort_round_trip() {
+        let mut s = Settings::default();
+        s.performance.cpu_graph_mode = CpuGraphMode::Board;
+        s.performance.cpu_board_sort = CoreSort::Load;
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("cpu_graph_mode = \"board\""), "{text}");
+        assert!(text.contains("cpu_board_sort = \"load\""), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).expect("parses"), s);
+        // A file without the key sorts by number.
+        let old = text.replace("cpu_board_sort = \"load\"\n", "");
+        let back = toml::from_str::<Settings>(&old).expect("parses");
+        assert_eq!(back.performance.cpu_board_sort, CoreSort::Number);
     }
 
     #[test]
