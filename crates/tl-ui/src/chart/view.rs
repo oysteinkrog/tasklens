@@ -583,6 +583,11 @@ impl ChartView {
         self.lines.highlight
     }
 
+    /// The line set, `None` on a plain chart.
+    pub fn line_set(&self) -> Option<&lines::LineSet> {
+        self.line_set.as_ref()
+    }
+
     /// The line set state: the peaks and the readout of the last paint.
     pub fn lines(&self) -> &lines::LinesState {
         &self.lines

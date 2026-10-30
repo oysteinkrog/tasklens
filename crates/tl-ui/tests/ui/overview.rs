@@ -4614,6 +4614,200 @@ mod page {
         );
     }
 
+    /// Publishes 2 physical cores (CPUs 0 and 2, 1 and 3), their maximum and base clocks, and 5
+    /// samples 100 ms apart of the CPU total, both power series and each core's
+    /// `CPU_CORE_CLOCK` (core 0 at 3000 MHz, core 1 at 4000 MHz, each 500 MHz higher in its
+    /// oldest sample).
+    fn publish_core_clocks(r: &mut Rig) {
+        use smallvec::smallvec;
+        use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
+        r.version += 1;
+        let version = r.version;
+        let newest = now_boot_ns();
+        let series = |device: u16, metric, base: f32| {
+            Arc::new(SeriesView {
+                id: SeriesId {
+                    device: DeviceIdx(device),
+                    metric,
+                },
+                version,
+                period_ns: 100_000_000,
+                samples: (0..5u64)
+                    .map(|k| {
+                        let v = if k == 0 { base + 500. } else { base };
+                        Sample::valid(newest - (4 - k) * 100_000_000, v)
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        };
+        let mut views = vec![
+            series(0, MetricId::CPU_TOTAL, 20.),
+            series(0, MetricId::CPU_POWER_PKG, 40.),
+            series(0, MetricId::CPU_POWER_CORE, 30.),
+            series(100, MetricId::CPU_CORE_CLOCK, 3000.),
+            series(101, MetricId::CPU_CORE_CLOCK, 4000.),
+        ];
+        views.sort_by_key(|v| v.id);
+        r.engine.publish_with(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let mut online = CpuSet::empty();
+            for id in 0..CPUS {
+                online.insert(id);
+            }
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.cpu_topology = Arc::new(CpuTopology {
+                online,
+                cores: (0..2u16)
+                    .map(|c| CoreInfo {
+                        id: c,
+                        logical: smallvec![c, c + 2],
+                        l3_group: 0,
+                        kind: CoreKind::Standard,
+                    })
+                    .collect(),
+            });
+            let inv = Arc::make_mut(&mut s.inventory);
+            inv.header.version += 1;
+            inv.processor.core_max_mhz = tl_model::snapshot::InvField {
+                value: Arc::from([Some(5000), Some(5000)]),
+                validity: tl_model::validity::Validity::Valid,
+            };
+            inv.processor.base_mhz = tl_model::snapshot::InvField {
+                value: 3400,
+                validity: tl_model::validity::Validity::Valid,
+            };
+        });
+        draw(r.vcx);
+    }
+
+    /// tasklens-o55.57: "Show core clocks" puts a Core clocks chart, one line per physical
+    /// core, under the CPU graph in the left column. Full width, the power strip stays across
+    /// the box; under the graph, the column stacks the CPU graph, Core clocks and Power draw.
+    /// The charts of the column share one hover cursor, the readout lists the cores fastest
+    /// first, and a hovered core row highlights its core's line.
+    #[gpui_kit::test]
+    fn overview_cpu_core_clocks(cx: &mut TestAppContext) {
+        use tl_model::snapshot::RaplState;
+        use tl_ui::pages::performance::actions::PerfOverviewSetBoxClocks;
+        use tl_ui::pages::performance::overview::cpu_box::CLOCKS_ID;
+        use tl_ui::pages::performance::overview::parts::core_spark_id;
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.vcx.update(|window, _| window.activate_window());
+        r.set_row_unit(60);
+        r.set_rapl(Some(RaplState::Readable));
+        publish_core_clocks(&mut r);
+        let set_clocks = |r: &mut Rig, on: bool| {
+            r.page_action(&PerfOverviewSetBoxClocks {
+                kind: "cpu".into(),
+                on,
+            });
+        };
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none(), "off by default");
+        set_clocks(&mut r, true);
+        assert_eq!(r.saved().map(|s| s.grid[0].clocks), Some(true));
+        assert!(r.layout().config(BoxKind::Cpu).clocks);
+        let page = r.page.clone();
+        let (total, clocks, lines) = r.vcx.update(|_, cx| {
+            let b = page.read(cx).cpu_box().read(cx);
+            let c = b.core_clocks().expect("core clocks");
+            (b.total_chart().clone(), c.view().clone(), c.lines().clone())
+        });
+        assert_eq!(lines.devices.len(), 2, "one line per physical core");
+        publish_core_clocks(&mut r);
+
+        // Under the CPU graph, as wide as it, beside the core rows.
+        let chart = r.bounds_of(CPU_CHART_ID.into());
+        let under = r.bounds_of(CLOCKS_ID.into());
+        let rows = r.bounds_of(core_spark_id(0));
+        assert!(chart.bottom() <= under.top(), "{chart:?} {under:?}");
+        assert!((chart.left() - under.left()).abs() <= px(1.));
+        assert!((chart.right() - under.right()).abs() <= px(1.));
+        assert!(under.right() < rows.left(), "{under:?} {rows:?}");
+
+        // Hover on Core clocks: its readout, fastest core first, and the cursor on the CPU
+        // graph at the same x without a value box.
+        let hover = |r: &mut Rig, at: gpui_kit::Point<gpui_kit::Pixels>| {
+            r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+            draw(r.vcx);
+            draw(r.vcx);
+        };
+        hover(&mut r, point(under.right() - px(20.), center(under).y));
+        let (order, panel, x_clocks) = r.vcx.read_entity(&clocks, |v, _| {
+            let l = v.lines();
+            let order: Vec<usize> = l.readout_rows().map(|row| row.0).collect();
+            (order, l.readout_panel(), v.hover_state().last_marker_x)
+        });
+        assert_eq!(order, [1, 0], "core 1 is faster");
+        assert!(panel.is_some(), "readout painted");
+        let (x_total, box_total) = r.vcx.read_entity(&total, |v, _| {
+            let h = v.hover_state();
+            (h.last_marker_x, h.last_box.is_some())
+        });
+        assert!(
+            x_total.is_some() && !box_total,
+            "cursor only on the CPU graph"
+        );
+        let _ = x_clocks;
+
+        // A hovered core row highlights its core: CPU 3 is core 1's sibling.
+        let row = r.bounds_of(core_spark_id(3));
+        hover(&mut r, center(row));
+        assert_eq!(r.vcx.read_entity(&clocks, |v, _| v.highlight()), Some(1));
+        hover(&mut r, center(chart));
+        assert_eq!(r.vcx.read_entity(&clocks, |v, _| v.highlight()), None);
+
+        // Power draw full width: the strip spans the box under the rows; Core clocks stays in
+        // the column.
+        r.page_action(&PerfOverviewSetBoxPower {
+            kind: "cpu".into(),
+            on: true,
+        });
+        let under = r.bounds_of(CLOCKS_ID.into());
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        let rows = r.bounds_of(core_spark_id(0));
+        assert!(under.bottom() <= strip.top() && rows.bottom() <= strip.top());
+        assert!(
+            strip.size.width > under.size.width * 1.5,
+            "{strip:?} {under:?}"
+        );
+
+        // Power draw under the graph: CPU graph, Core clocks and Power draw in one column.
+        r.page_action(&PerfOverviewSetBoxPowerPlacement {
+            kind: "cpu".into(),
+            placement: "under_graph".into(),
+        });
+        let chart = r.bounds_of(CPU_CHART_ID.into());
+        let under = r.bounds_of(CLOCKS_ID.into());
+        let strip = r.bounds_of(POWER_STRIP_ID.into());
+        assert!(chart.bottom() <= under.top() && under.bottom() <= strip.top());
+        assert!((under.left() - strip.left()).abs() <= px(1.));
+        assert!((under.right() - strip.right()).abs() <= px(1.));
+
+        // Only in the modes with the CPU graph; off again writes nothing.
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "cores".into(),
+        });
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "cpu".into(),
+            mode: "chart".into(),
+        });
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_some());
+        set_clocks(&mut r, false);
+        assert!(r.vcx.debug_bounds(CLOCKS_ID).is_none());
+        assert_eq!(r.saved().map(|s| s.grid[0].clocks), Some(false));
+    }
+
     #[gpui_kit::test]
     fn overview_memory_modes_render(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::mem_box::{

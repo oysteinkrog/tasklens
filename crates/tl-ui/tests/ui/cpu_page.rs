@@ -1968,4 +1968,140 @@ mod page {
         let text = clocks(&mut r);
         assert_eq!(text[..3], ["4.3 GHz (?)", "800 MHz (?)", "…"]);
     }
+
+    /// Publishes a `CPU_CORE_CLOCK` series for each of the 8 cores, on its first CPU's device
+    /// (`100 + core`): 10 samples 100 ms apart, the oldest `3500 + 100 × core` MHz, the others
+    /// `3000 + 100 × core`. The inventory gives every core a 5200 MHz maximum (core 3 5000) and a
+    /// 3000 MHz base clock.
+    fn publish_core_clocks(r: &mut Rig, version: u64) {
+        const PERIOD: u64 = 100_000_000;
+        let newest = now_boot_ns();
+        let views: Vec<Arc<SeriesView>> = (0..8u16)
+            .map(|core| {
+                let base = 3000. + 100. * f32::from(core);
+                Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(100 + core),
+                        metric: MetricId::CPU_CORE_CLOCK,
+                    },
+                    version,
+                    period_ns: PERIOD,
+                    samples: (0..10u64)
+                        .map(|k| {
+                            let v = if k == 0 { base + 500. } else { base };
+                            Sample::valid(newest - (9 - k) * PERIOD, v)
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                })
+            })
+            .collect();
+        r.engine.publish_with(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+            let inv = Arc::make_mut(&mut s.inventory);
+            inv.header.version += 1;
+            let max: Arc<[Option<u32>]> = (0..8)
+                .map(|c| Some(if c == 3 { 5000 } else { 5200 }))
+                .collect();
+            inv.processor.core_max_mhz = tl_model::snapshot::InvField {
+                value: max,
+                validity: Validity::Valid,
+            };
+            inv.processor.base_mhz = tl_model::snapshot::InvField {
+                value: 3000,
+                validity: Validity::Valid,
+            };
+        });
+        draw(r.vcx);
+    }
+
+    /// tasklens-o55.57: Core clocks draws one line per physical core (8 for 16 logical CPUs),
+    /// from 0 to the highest core maximum, with a reference line at the base clock. It asks for
+    /// per-core samples, lists every core fastest first under the pointer with its peak, and a
+    /// hovered core board row highlights its core's line.
+    #[gpui_kit::test]
+    fn secondary_core_clocks(cx: &mut TestAppContext) {
+        let mut s = board_settings(CoreSort::Number);
+        s.performance.cpu_secondary_graph = CpuSecondaryGraph::Clocks;
+        // The rig has no animation driver: charts with data must not slide.
+        s.motion.smooth_graphs = false;
+        let mut r = open(cx, s);
+        r.vcx.update(|window, _| window.activate_window());
+        publish_core_clocks(&mut r, 1);
+        let page = r.page.clone();
+        let (lines, view) = r.vcx.update(|_, cx| {
+            let c = page.read(cx).core_clocks().expect("core clocks");
+            (c.lines().clone(), c.view().clone())
+        });
+        assert_eq!(lines.devices.len(), 8, "one line per physical core");
+        assert_eq!(lines.line_of_cpu[9], Some(1), "CPU 9 is core 1's sibling");
+        let (spec, set) = r
+            .vcx
+            .read_entity(&view, |v, _| (v.spec.clone(), v.line_set().cloned()));
+        assert_eq!(spec.series.len(), 8);
+        assert!(
+            spec.series
+                .iter()
+                .all(|s| s.id.metric == MetricId::CPU_CORE_CLOCK)
+        );
+        assert_eq!(
+            spec.y,
+            YScale::Fixed {
+                min: 0.0,
+                max: 5200.0
+            }
+        );
+        let set = set.expect("line set");
+        assert_eq!(set.reference, Some(3000.0));
+        assert_eq!(set.names[1].as_ref(), "Core 1");
+        set_active(&mut r, true);
+        draw(r.vcx);
+        assert_eq!(merged(&mut r).cpu, CpuDemand::PerCore);
+
+        // Hover: every core, fastest first, each with its peak in the range.
+        let chart = r.vcx.debug_bounds(SECONDARY_ID).expect("secondary chart");
+        let at = gpui_kit::point(chart.right() - px(10.), chart.center().y);
+        r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        draw(r.vcx);
+        let (rows, panel) = r.vcx.read_entity(&view, |v, _| {
+            let l = v.lines();
+            (l.readout_rows().collect::<Vec<_>>(), l.readout_panel())
+        });
+        let order: Vec<usize> = rows.iter().map(|row| row.0).collect();
+        assert_eq!(order, [7, 6, 5, 4, 3, 2, 1, 0], "{rows:?}");
+        for &(core, value, peak) in &rows {
+            let base = 3000. + 100. * core as f32;
+            assert_eq!(value, Some(base), "{rows:?}");
+            assert_eq!(peak, Some(base + 500.), "{rows:?}");
+        }
+        let panel = panel.expect("readout painted");
+        let viewport = r.vcx.update(|window, _| window.viewport_size());
+        assert!(panel.left() >= px(0.) && panel.top() >= px(0.), "{panel:?}");
+        assert!(
+            panel.right() <= viewport.width && panel.bottom() <= viewport.height,
+            "{panel:?} {viewport:?}"
+        );
+
+        // A hovered board row highlights its core's line; leaving the rows clears it.
+        let spark: &'static str = Box::leak(core_spark_id(9).into_boxed_str());
+        let at = r.vcx.debug_bounds(spark).expect("row of CPU 9").center();
+        r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        draw(r.vcx);
+        let (highlight, strokes) = r
+            .vcx
+            .read_entity(&view, |v, _| (v.highlight(), v.lines().highlight_strokes()));
+        assert_eq!(highlight, Some(1), "CPU 9 belongs to core 1");
+        assert!(strokes > 0, "the highlighted line is drawn on top");
+        r.vcx
+            .simulate_mouse_move(chart.center(), None, Modifiers::none());
+        draw(r.vcx);
+        assert_eq!(r.vcx.read_entity(&view, |v, _| v.highlight()), None);
+    }
 }
