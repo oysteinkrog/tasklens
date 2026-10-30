@@ -4,8 +4,9 @@
 //! [`Meter`] and [`CoreBars`] follow the custom `Element` pattern of `memory_bar.rs`
 //! (UI-PRF-027): quads plus cached shaped text, no child elements. `TlProgress` is not allowed in
 //! charts or cards (ADR-009). [`CoreBars`] re-formats and re-shapes a percent label only when its
-//! 1% bucket changes (U-47), and a GHz label only when its 0.1 GHz bucket changes. The core
+//! 1% bucket changes (U-47), and a clock label only when its [`clock_bucket`] changes. The core
 //! sparklines are cached chart views in [`core_sparks`], a flex grid over the painted cells.
+//! [`core_board`] is the whole board; the CPU page draws it too (crw.104).
 
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
@@ -58,8 +59,12 @@ const NAME_W: f32 = 28.;
 pub const CORE_SPARK_W: f32 = 48.;
 /// The percent column ("100%"), logical px before `ui_scale`.
 const PCT_W: f32 = 36.;
-/// The GHz column ("3.9 GHz"), logical px before `ui_scale`.
+/// The clock column ("3.9 GHz", "800 MHz"), logical px before `ui_scale`.
 const GHZ_W: f32 = 44.;
+/// The room the BogoMIPS mark (" (?)") adds to the clock column, logical px before `ui_scale`.
+const CLOCK_MARK_W: f32 = 20.;
+/// Marks a clock read from BogoMIPS, as the CPU page's Speed row does (PERF-033).
+const BOGOMIPS_MARK: &str = " (?)";
 /// The gap between the parts of a core cell, logical px before `ui_scale`.
 const PART_GAP: f32 = 4.;
 /// The meter width a core cell keeps while its sparkline shrinks. Logical px before `ui_scale`.
@@ -87,14 +92,29 @@ pub const FIGURES_ROW: f32 = LABEL_ROW;
 /// `buckets` entry for a core with no valid sample.
 const NO_BUCKET: u16 = u16::MAX;
 
-/// The 0.1 GHz bucket of a clock in MHz: 3949 MHz is 39 ("3.9 GHz"), 3950 MHz is 40.
-pub fn ghz_bucket(mhz: f32) -> u16 {
-    (mhz.max(0.) / 100.).round().min(f32::from(NO_BUCKET - 1)) as u16
+/// The shown clock of a clock in MHz, in MHz: whole MHz under 1 GHz, else whole 0.1 GHz.
+/// 812.4 MHz is 812 ("812 MHz"), 3949 MHz is 3900 ("3.9 GHz"), 3950 MHz is 4000.
+pub fn clock_bucket(mhz: f32) -> u16 {
+    let mhz = mhz.max(0.);
+    let shown = if mhz.round() < 1000. {
+        mhz.round()
+    } else {
+        (mhz / 100.).round() * 100.
+    };
+    shown.min(f32::from(NO_BUCKET - 1)) as u16
 }
 
-/// "3.9 GHz" for a 0.1 GHz bucket.
-fn ghz_text(bucket: u16) -> SharedString {
-    format!("{}.{} GHz", bucket / 10, bucket % 10).into()
+/// "812 MHz" or "3.9 GHz" for a [`clock_bucket`], with " (?)" when `mark`.
+fn clock_text(bucket: u16, mark: bool) -> SharedString {
+    let mut out = if bucket < 1000 {
+        format!("{bucket} MHz")
+    } else {
+        format!("{}.{} GHz", bucket / 1000, bucket / 100 % 10)
+    };
+    if mark {
+        out.push_str(BOGOMIPS_MARK);
+    }
+    out.into()
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -245,7 +265,8 @@ impl Element for Meter {
     }
 }
 
-/// The per-core rows' data: one name, value, percent label and GHz label per logical CPU.
+/// The per-core rows' data: one name, value, percent label and clock label per logical CPU, and
+/// the order the rows show in.
 #[derive(Default, Debug)]
 pub struct CoreBarsModel {
     /// Percent per logical CPU id; `None` is no valid sample.
@@ -254,12 +275,18 @@ pub struct CoreBarsModel {
     pub freqs: Vec<Option<f32>>,
     /// The 1% bucket of each value, or `NO_BUCKET`.
     buckets: Vec<u16>,
-    /// The 0.1 GHz bucket of each clock, or `NO_BUCKET`.
+    /// The [`clock_bucket`] of each clock, or `NO_BUCKET`.
     ghz_buckets: Vec<u16>,
+    /// The clocks come from BogoMIPS: every clock label ends in " (?)".
+    clock_mark: bool,
+    /// The rows by load, highest first, rather than by CPU id.
+    by_load: bool,
+    /// The CPU id each row shows, top of the first column first.
+    order: Vec<usize>,
     names: Vec<SharedString>,
     /// "12%", or "…" for no valid sample.
     pct_text: Vec<SharedString>,
-    /// "3.9 GHz", or "…" for no valid sample.
+    /// "3.9 GHz", "800 MHz", or "…" for no valid sample.
     ghz_text: Vec<SharedString>,
     name_lines: Vec<CachedLine>,
     pct_lines: Vec<CachedLine>,
@@ -294,6 +321,69 @@ impl CoreBarsModel {
         self.name_lines.resize_with(n, CachedLine::default);
         self.pct_lines.resize_with(n, CachedLine::default);
         self.ghz_lines.resize_with(n, CachedLine::default);
+        self.order.clear();
+        self.order.extend(0..n);
+    }
+
+    /// The number of CPUs.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// The CPU id each row shows, in row order.
+    pub fn order(&self) -> &[usize] {
+        &self.order
+    }
+
+    /// Orders the rows by load, highest first, or by CPU id. True when the order changed.
+    pub fn set_by_load(&mut self, by_load: bool) -> bool {
+        if by_load == self.by_load {
+            return false;
+        }
+        self.by_load = by_load;
+        self.sort()
+    }
+
+    /// Sorts the rows: by CPU id, or by the shown percent, highest first, then by CPU id. A CPU
+    /// without a valid sample goes last. True when the order changed.
+    fn sort(&mut self) -> bool {
+        let before = self.order.clone();
+        let buckets = &self.buckets;
+        if self.by_load {
+            let load = |i: usize| match buckets[i] {
+                NO_BUCKET => -1,
+                b => i32::from(b),
+            };
+            self.order
+                .sort_unstable_by(|&a, &b| load(b).cmp(&load(a)).then(a.cmp(&b)));
+        } else {
+            self.order.sort_unstable();
+        }
+        self.order != before
+    }
+
+    /// Whether the clocks come from BogoMIPS.
+    pub fn clock_mark(&self) -> bool {
+        self.clock_mark
+    }
+
+    /// Marks every clock " (?)" when it comes from BogoMIPS (PERF-033). True when that changed;
+    /// the clock labels are formatted again.
+    pub fn set_clock_mark(&mut self, mark: bool) -> bool {
+        if mark == self.clock_mark {
+            return false;
+        }
+        self.clock_mark = mark;
+        for (b, text) in self.ghz_buckets.iter().zip(&mut self.ghz_text) {
+            if *b != NO_BUCKET {
+                *text = clock_text(*b, mark);
+            }
+        }
+        true
     }
 
     /// Takes one value per CPU; missing values count as no valid sample. True when a 1% bucket
@@ -317,19 +407,22 @@ impl CoreBarsModel {
             };
             changed = true;
         }
+        if changed && self.by_load {
+            self.sort();
+        }
         changed
     }
 
     /// Takes one clock in MHz per CPU; missing clocks count as no valid sample. True when a
-    /// 0.1 GHz bucket ([`ghz_bucket`]) or a None/Some state changed. Re-formats only those
-    /// labels ("3.9 GHz").
+    /// [`clock_bucket`] or a None/Some state changed. Re-formats only those labels ("3.9 GHz",
+    /// "800 MHz").
     pub fn set_freqs(&mut self, mhz: impl Iterator<Item = Option<f32>>) -> bool {
         let mut mhz = mhz;
         let mut changed = false;
         for i in 0..self.names.len() {
             let f = mhz.next().flatten();
             self.freqs[i] = f;
-            let b = f.map_or(NO_BUCKET, ghz_bucket);
+            let b = f.map_or(NO_BUCKET, clock_bucket);
             if b == self.ghz_buckets[i] {
                 continue;
             }
@@ -337,7 +430,7 @@ impl CoreBarsModel {
             self.ghz_text[i] = if b == NO_BUCKET {
                 SharedString::new_static(WARMING)
             } else {
-                ghz_text(b)
+                clock_text(b, self.clock_mark)
             };
             changed = true;
         }
@@ -354,8 +447,8 @@ impl CoreBarsModel {
         self.pct_text.get(i).map_or(WARMING, |t| t)
     }
 
-    /// The GHz label of each CPU: "3.9 GHz", or "…" for no valid sample.
-    pub fn ghz_labels(&self) -> &[SharedString] {
+    /// The clock label of each CPU: "3.9 GHz", "800 MHz", or "…" for no valid sample.
+    pub fn clock_labels(&self) -> &[SharedString] {
         &self.ghz_text
     }
 
@@ -403,6 +496,8 @@ pub struct CoreBarsLayout {
     pub rows: usize,
     pub cell_w: Pixels,
     pub row_h: Pixels,
+    /// The clock column, wider when the clocks carry the BogoMIPS mark.
+    pub clock_w: Pixels,
     /// True when 18 px rows do not fit in 4 columns: the rows scroll under a scrollbar.
     pub scrolls: bool,
     pub fit: CoreCellFit,
@@ -447,7 +542,19 @@ const CORE_SPARK_MIN_CELL_W: f32 = NAME_W + CORE_SPARK_MIN_W + PCT_W + 3. * PART
 /// rows stay 18 px and scroll, with room for the scrollbar. A cell never gets narrower than its
 /// name and percent, so a narrow part takes fewer columns and scrolls sooner.
 pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsLayout {
+    core_bars_layout_marked(n, w, h, scale, false)
+}
+
+/// [`core_bars_layout`] with a clock column that has room for the BogoMIPS mark when `mark`.
+pub fn core_bars_layout_marked(
+    n: usize,
+    w: Pixels,
+    h: Pixels,
+    scale: f32,
+    mark: bool,
+) -> CoreBarsLayout {
     let n = n.max(1);
+    let mark_w = if mark { CLOCK_MARK_W } else { 0. };
     let gap = CELL_GAP * scale;
     let (w, h) = (f32::from(w).max(0.), f32::from(h).max(0.));
     let row_h = CORE_ROW_H * scale;
@@ -466,7 +573,7 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
     // The fewest columns for those rows, so no column is left empty.
     let cols = n.div_ceil(rows);
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
-    let fit = if cell_w >= CORE_FULL_W * scale {
+    let fit = if cell_w >= (CORE_FULL_W + mark_w) * scale {
         CoreCellFit::Full
     } else if cell_w >= CORE_NO_GHZ_W * scale {
         CoreCellFit::NoGhz
@@ -482,6 +589,7 @@ pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsL
         rows,
         cell_w: px(cell_w),
         row_h: px(row_h),
+        clock_w: px((GHZ_W + mark_w) * scale),
         scrolls,
         fit,
     }
@@ -508,11 +616,7 @@ pub fn core_cell(l: &CoreBarsLayout, scale: f32) -> CoreCell {
     let gap = px(PART_GAP * scale);
     let spark_x = px(NAME_W * scale) + gap;
     let ghz = l.fit == CoreCellFit::Full;
-    let pct_right = if ghz {
-        cell - px(GHZ_W * scale) - gap
-    } else {
-        cell
-    };
+    let pct_right = if ghz { cell - l.clock_w - gap } else { cell };
     // The meter ends one gap before the percent column.
     let meter_end = pct_right - px(PCT_W * scale) - gap;
     let (spark_w, meter_x) = match l.fit {
@@ -549,10 +653,15 @@ pub fn core_spark_id(i: usize) -> String {
 pub const CORE_ROWS_SCROLL_ID: &str = "perf-overview-core-rows-scroll";
 
 /// The sparklines over a [`CoreBars`] grid laid out as `l`, one cached chart per core in
-/// `charts`. A flex grid of the same columns, rows and gaps, with the cores in the same
-/// column-first order, so each sparkline sits in its painted cell at any size inside `l`'s
-/// class. Empty when the cells have no room for a sparkline.
-pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetrics) -> Div {
+/// `charts`, row `k` showing core `order[k]`. A flex grid of the same columns, rows and gaps,
+/// with the rows in the same column-first order, so each sparkline sits in its painted cell at
+/// any size inside `l`'s class. Empty when the cells have no room for a sparkline.
+pub fn core_sparks(
+    charts: &[Entity<ChartView>],
+    order: &[usize],
+    l: &CoreBarsLayout,
+    m: &UiMetrics,
+) -> Div {
     let s = m.ui_scale;
     let mut grid = div()
         .absolute()
@@ -577,9 +686,10 @@ pub fn core_sparks(charts: &[Entity<ChartView>], l: &CoreBarsLayout, m: &UiMetri
             .flex_none()
             .h(l.row_h);
         for c in 0..l.cols {
-            let i = c * l.rows + r;
+            let slot = c * l.rows + r;
             let mut cell = div().relative().flex_1().min_w_0().h_full();
-            if let Some(chart) = charts.get(i) {
+            let core = order.get(slot).and_then(|&i| Some((i, charts.get(i)?)));
+            if let Some((i, chart)) = core {
                 let spark = div()
                     .debug_selector(move || core_spark_id(i))
                     .absolute()
@@ -610,12 +720,13 @@ pub fn core_rows(
     l: &CoreBarsLayout,
     m: &UiMetrics,
 ) -> AnyElement {
+    let sparks = core_sparks(charts, model.borrow().order(), l, m);
     let rows = div()
         .relative()
         .child(CoreBars {
             model: Rc::clone(model),
         })
-        .child(core_sparks(charts, l, m));
+        .child(sparks);
     if !l.scrolls {
         return rows.size_full().into_any_element();
     }
@@ -640,6 +751,37 @@ pub fn core_rows(
                 .id(CORE_ROWS_SCROLL_ID),
         )
         .into_any_element()
+}
+
+/// The core board (crw.104): [`core_rows`] filling the part, and the probe that renders `view`
+/// again when the part's size moves the grid into another class. `grid_size` is the part's size
+/// at the last paint. Returns the board and the layout it used.
+pub fn core_board(
+    model: &Rc<RefCell<CoreBarsModel>>,
+    charts: &[Entity<ChartView>],
+    grid_size: &Rc<Cell<Size<Pixels>>>,
+    m: &UiMetrics,
+    view: EntityId,
+) -> (AnyElement, CoreBarsLayout) {
+    let (n, mark) = {
+        let model = model.borrow();
+        (model.len(), model.clock_mark())
+    };
+    let s = m.ui_scale;
+    let size = grid_size.get();
+    let l = core_bars_layout_marked(n, size.width, size.height, s, mark);
+    let board = div()
+        .relative()
+        .size_full()
+        .child(core_rows(model, charts, &l, m))
+        .child(class_probe(
+            Rc::clone(grid_size),
+            l.class(),
+            move |size| core_bars_layout_marked(n, size.width, size.height, s, mark).class(),
+            view,
+        ))
+        .into_any_element();
+    (board, l)
 }
 
 impl IntoElement for CoreBars {
@@ -710,7 +852,13 @@ impl Element for CoreBars {
         if n == 0 {
             return;
         }
-        let l = core_bars_layout(n, bounds.size.width, bounds.size.height, s);
+        let l = core_bars_layout_marked(
+            n,
+            bounds.size.width,
+            bounds.size.height,
+            s,
+            model.clock_mark,
+        );
         let parts = core_cell(&l, s);
         let gap = px(CELL_GAP * s);
         let bar_h = px(METER_H * s);
@@ -724,8 +872,9 @@ impl Element for CoreBars {
             tnum: true,
             ..name_style
         };
-        for i in 0..n {
-            let (col, row) = l.cell_of(i);
+        for slot in 0..n {
+            let i = model.order.get(slot).copied().unwrap_or(slot);
+            let (col, row) = l.cell_of(slot);
             let x = bounds.left() + (l.cell_w + gap) * col as f32;
             let y = bounds.top() + l.row_h * row as f32;
             if parts.meter_w > px(0.) {
@@ -1615,6 +1764,18 @@ pub const SPARK_GRID: GridStyle = GridStyle {
     vertical_at: None,
 };
 
+/// A sparkline's labels: no heading, no value, no range word, no scale label.
+pub fn spark_labels(value_fmt: ValueFormat) -> ChartLabels {
+    ChartLabels {
+        heading: None,
+        value_fmt,
+        value_align: ValueAlign::Hidden,
+        range_word: SharedString::default(),
+        legend: SmallVec::new(),
+        show_axis_max: false,
+    }
+}
+
 /// A sparkline chart for a spark row: no heading, no value, no range word, no scale label. The
 /// newest-point marks are on, and a sparkline under `grid::MARKS_MIN_HEIGHT` tall draws none.
 /// While the Overview is paused it waits for the history, as [`box_chart`] does.
@@ -1624,14 +1785,7 @@ pub fn spark_chart<T: 'static>(
     hub: &Entity<SnapshotHub>,
     cx: &mut Context<T>,
 ) -> Entity<ChartView> {
-    let labels = ChartLabels {
-        heading: None,
-        value_fmt,
-        value_align: ValueAlign::Hidden,
-        range_word: SharedString::default(),
-        legend: SmallVec::new(),
-        show_axis_max: false,
-    };
+    let labels = spark_labels(value_fmt);
     cx.new(|cx| {
         let snap = std::sync::Arc::clone(hub.read(cx).current());
         ChartView::new(spec, labels, hub, cx)

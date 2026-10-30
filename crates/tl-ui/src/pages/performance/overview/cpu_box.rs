@@ -1,6 +1,7 @@
 //! The Overview page's CPU box (UI-PRF-017, D-022, UI-PRF-023): the total chart and one row per
-//! logical CPU (crw.53): name, sparkline, meter, percent and GHz. The rows are 18 px high
-//! and flow top to bottom into up to 4 columns, then scroll (D-029).
+//! logical CPU (crw.53): name, sparkline, meter, percent and clock. The rows are 18 px high
+//! and flow top to bottom into up to 4 columns, then scroll (D-029). The CPU page's core board
+//! draws the same rows (crw.104).
 //!
 //! The core rows show a moving average of each core's `CPU_TOTAL` (UI-PRF-018, D-024), and the
 //! core sparklines plot 1-second means. The total chart and the title value stay raw.
@@ -34,7 +35,7 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE};
 use super::parts::{
     ChartSettings, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid, box_chart,
-    box_frame, chart_section_versions, class_probe, core_bars_layout, core_rows, edit_chrome,
+    box_frame, chart_section_versions, class_probe, core_bars_layout, core_board, edit_chrome,
     grid_cells, is_wide, spark_chart, width_probe,
 };
 use super::picked::{box_mask, box_snapshot};
@@ -189,7 +190,7 @@ impl EventEmitter<InnerSplitChanged> for CpuBox {}
 pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
 
 const KEY_TITLE: &str = "perf-card-heading-cpu";
-const KEY_CORE: &str = "perf-overview-core";
+pub(crate) const KEY_CORE: &str = "perf-overview-core";
 const KEY_RANGE: &str = "perf-cpu-heading-utilization";
 const KEY_LEGEND_TOTAL: &str = "perf-legend-total";
 const KEY_LEGEND_KERNEL: &str = "perf-legend-kernel";
@@ -200,17 +201,17 @@ const SPARK_MEAN_NS: u64 = 1_000_000_000;
 
 /// One core's exponential moving average of `CPU_TOTAL`.
 #[derive(Clone, Copy, Debug, Default)]
-struct CoreAverage {
+pub(crate) struct CoreAverage {
     /// Time of the newest sample taken in.
     t_ns: u64,
     /// The average; `None` before the first valid sample and after an invalid one.
-    value: Option<f32>,
+    pub(crate) value: Option<f32>,
 }
 
 impl CoreAverage {
     /// Takes in the samples newer than `t_ns`: `s += (x − s) · (1 − e^(−Δt/τ))`. An invalid
     /// sample clears the average, and the next valid sample starts it again.
-    fn advance(&mut self, samples: &[Sample], tau_s: f32) {
+    pub(crate) fn advance(&mut self, samples: &[Sample], tau_s: f32) {
         let from = samples.partition_point(|s| s.t_ns <= self.t_ns);
         for s in &samples[from..] {
             self.value = if !s.is_valid() {
@@ -276,7 +277,7 @@ fn total_spec(cpu: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
 }
 
 /// A core sparkline: `CPU_TOTAL` of logical CPU `device`, filled, 0..100.
-fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+pub(crate) fn core_spec(device: DeviceIdx, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     ChartSpec {
         series: smallvec![ChartSeries {
             id: SeriesId {
@@ -362,7 +363,7 @@ fn total_labels(range_word: SharedString, kernel: bool, cx: &App) -> ChartLabels
 }
 
 /// The newest valid sample of `id`.
-pub(super) fn newest(snap: &Snapshot, id: SeriesId) -> Option<f32> {
+pub(crate) fn newest(snap: &Snapshot, id: SeriesId) -> Option<f32> {
     snap.series
         .get(id)?
         .samples
@@ -832,7 +833,8 @@ impl CpuBox {
             bars.set_values(self.logical_ids.iter().map(|id| newest(snap, *id)))
         };
         let ghz = bars.set_freqs(self.freq_ids.iter().map(|id| newest(snap, *id)));
-        pct || ghz
+        let mark = bars.set_clock_mark(snap.system.cpu.freq_is_bogomips);
+        pct || ghz || mark
     }
 
     /// The value (utilization) and line (clock, temperature) when their inputs changed, or
@@ -971,21 +973,9 @@ impl CpuBox {
 
     /// The core rows with their sparklines.
     fn rows_part(&mut self, m: &UiMetrics, cx: &mut Context<Self>) -> AnyElement {
-        let n = self.logical.len();
-        let s = m.ui_scale;
-        let grid_size = self.grid_size.get();
-        self.grid = core_bars_layout(n, grid_size.width, grid_size.height, s);
-        div()
-            .relative()
-            .size_full()
-            .child(core_rows(&self.bars, &self.sparks, &self.grid, m))
-            .child(class_probe(
-                Rc::clone(&self.grid_size),
-                self.grid.class(),
-                move |size| core_bars_layout(n, size.width, size.height, s).class(),
-                cx.entity_id(),
-            ))
-            .into_any_element()
+        let (rows, grid) = core_board(&self.bars, &self.sparks, &self.grid_size, m, cx.entity_id());
+        self.grid = grid;
+        rows
     }
 
     /// One filled chart per logical CPU in a grid, each with "C{n}" and the smoothed percent.

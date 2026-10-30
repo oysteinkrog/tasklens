@@ -4,7 +4,8 @@
 
 use gpui_kit::px;
 use tl_ui::pages::performance::overview::parts::{
-    CoreBarsModel, CoreCell, CoreCellFit, core_bars_layout, core_cell, ghz_bucket, meter_fill_w,
+    CoreBarsModel, CoreCell, CoreCellFit, clock_bucket, core_bars_layout, core_bars_layout_marked,
+    core_cell, meter_fill_w,
 };
 
 #[test]
@@ -189,24 +190,72 @@ fn core_cell_shrinks_spark_then_meter() {
 
 #[test]
 fn core_ghz_bucket_change_only() {
-    assert_eq!(ghz_bucket(3949.), 39);
-    assert_eq!(ghz_bucket(3950.), 40);
-    assert_eq!(ghz_bucket(-5.), 0);
+    assert_eq!(clock_bucket(3949.), 3900);
+    assert_eq!(clock_bucket(3950.), 4000);
+    assert_eq!(clock_bucket(-5.), 0);
+    // Whole MHz under 1 GHz; 999.6 MHz rounds up to "1.0 GHz".
+    assert_eq!(clock_bucket(812.4), 812);
+    assert_eq!(clock_bucket(999.6), 1000);
     let mut model = CoreBarsModel::default();
     model.set_cpus((0..2).map(|i| format!("C{i}").into()));
-    assert_eq!(model.ghz_labels()[0].as_ref(), "…");
+    assert_eq!(model.clock_labels()[0].as_ref(), "…");
     assert!(model.set_freqs([Some(3900.), Some(4630.)].into_iter()));
-    assert_eq!(model.ghz_labels()[0].as_ref(), "3.9 GHz");
-    assert_eq!(model.ghz_labels()[1].as_ref(), "4.6 GHz");
+    assert_eq!(model.clock_labels()[0].as_ref(), "3.9 GHz");
+    assert_eq!(model.clock_labels()[1].as_ref(), "4.6 GHz");
     assert!(!model.set_freqs([Some(3920.), Some(4610.)].into_iter()));
     assert_eq!(model.freqs[0], Some(3920.));
     assert!(model.set_freqs([Some(3960.), Some(4610.)].into_iter()));
-    assert_eq!(model.ghz_labels()[0].as_ref(), "4.0 GHz");
+    assert_eq!(model.clock_labels()[0].as_ref(), "4.0 GHz");
     assert!(model.set_freqs([Some(3960.), None].into_iter()));
-    assert_eq!(model.ghz_labels()[1].as_ref(), "…");
+    assert_eq!(model.clock_labels()[1].as_ref(), "…");
     let mut text = String::new();
     model.copy_text(&mut text);
     assert_eq!(text, "C0\t…\t4.0 GHz\nC1\t…\n");
+
+    // crw.104: MHz under 1 GHz, and the BogoMIPS mark on every clock.
+    assert!(model.set_freqs([Some(3960.), Some(800.)].into_iter()));
+    assert_eq!(model.clock_labels()[1].as_ref(), "800 MHz");
+    assert!(model.set_clock_mark(true));
+    assert!(!model.set_clock_mark(true));
+    assert_eq!(model.clock_labels()[0].as_ref(), "4.0 GHz (?)");
+    assert_eq!(model.clock_labels()[1].as_ref(), "800 MHz (?)");
+    assert!(model.set_freqs([Some(4270.), Some(800.)].into_iter()));
+    assert_eq!(model.clock_labels()[0].as_ref(), "4.3 GHz (?)");
+}
+
+/// crw.104: the clock column makes room for the BogoMIPS mark, so a marked cell needs 20 px
+/// more before it shows the clock.
+#[test]
+fn core_clock_column_widens_for_the_mark() {
+    let l = core_bars_layout(32, px(438.), px(456.), 1.);
+    assert_eq!((l.fit, l.clock_w), (CoreCellFit::Full, px(44.)));
+    let marked = core_bars_layout_marked(32, px(438.), px(456.), 1., true);
+    assert_eq!((marked.fit, marked.clock_w), (CoreCellFit::Full, px(64.)));
+    assert_eq!(core_cell(&marked, 1.).pct_right, marked.cell_w - px(68.));
+    // A 200 px cell has the clock unmarked, not marked.
+    let l = core_bars_layout(1, px(200.), px(18.), 1.);
+    assert_eq!(l.fit, CoreCellFit::Full);
+    let l = core_bars_layout_marked(1, px(200.), px(18.), 1., true);
+    assert_eq!(l.fit, CoreCellFit::NoGhz);
+}
+
+/// crw.104: sorted by load the rows put the busiest CPU first, ties and CPUs without a sample
+/// by number, and back by number when the sort is off.
+#[test]
+fn core_rows_sort_by_load() {
+    let mut model = CoreBarsModel::default();
+    model.set_cpus((0..5).map(|i| format!("C{i}").into()));
+    assert_eq!(model.order(), [0, 1, 2, 3, 4]);
+    model.set_values([Some(10.), Some(80.), None, Some(80.), Some(30.)].into_iter());
+    assert_eq!(model.order(), [0, 1, 2, 3, 4], "by number by default");
+    assert!(model.set_by_load(true));
+    assert_eq!(model.order(), [1, 3, 4, 0, 2]);
+    // A new load reorders.
+    assert!(model.set_values([Some(95.), Some(80.), None, Some(80.), Some(30.)].into_iter()));
+    assert_eq!(model.order(), [0, 1, 3, 4, 2]);
+    assert!(model.set_by_load(false));
+    assert_eq!(model.order(), [0, 1, 2, 3, 4]);
+    assert!(!model.set_by_load(false));
 }
 
 #[test]
@@ -1000,8 +1049,8 @@ mod boxes {
         }
     }
 
-    /// crw.53: the GHz column follows each core's `CPU_FREQ` series, and the box notifies only
-    /// when a 0.1 GHz bucket changes.
+    /// crw.53: the clock column follows each core's `CPU_FREQ` series, and the box notifies only
+    /// when a shown clock changes: 0.1 GHz steps, whole MHz under 1 GHz (crw.104).
     #[gpui_kit::test]
     fn cpu_box_ghz_follows_freq_series(cx: &mut TestAppContext) {
         let mut r = open(cx);
@@ -1012,17 +1061,17 @@ mod boxes {
             r.vcx.update(|_, cx| {
                 let c = cpu.read(cx);
                 let bars = c.bars();
-                bars.ghz_labels()
+                bars.clock_labels()
                     .iter()
                     .map(|s| s.to_string())
                     .collect::<Vec<_>>()
             })
         };
-        assert_eq!(ghz(&mut r), ["3.9 GHz", "4.0 GHz", "4.6 GHz", "0.8 GHz"]);
+        assert_eq!(ghz(&mut r), ["3.9 GHz", "4.0 GHz", "4.6 GHz", "800 MHz"]);
         let before = r.counts();
 
-        // Inside every 0.1 GHz bucket: no notify.
-        r.publish_core_series(&pct, &[3920., 3980., 4610., 820.]);
+        // Inside every shown clock: no notify.
+        r.publish_core_series(&pct, &[3920., 3980., 4610., 800.3]);
         assert_eq!(r.counts()[1], before[1], "same buckets, no notify");
 
         // One clock crosses a bucket: one notify.
