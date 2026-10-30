@@ -186,7 +186,8 @@ fn segv() -> ! {
 impl Backend for FakeBackend {
     fn hello(&mut self) -> Result<HelloInfo, InitFailed> {
         match self.script {
-            Script::SleepOnHello => sleep(Duration::from_secs(5)),
+            // Longer than the engine test's 5 s limit on the hello deadline (tasklens-cr0.32).
+            Script::SleepOnHello => sleep(Duration::from_secs(8)),
             Script::SegvOnHello => segv(),
             Script::Init(kind) => {
                 return Err(InitFailed {

@@ -232,8 +232,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         conn.request_name(WATCHER).expect("retake watcher name");
 
-        let took = wait_for_calls(&calls, 2, Duration::from_secs(1));
-        assert!(took < Duration::from_secs(1));
+        let took = wait_for_calls(&calls, 2, Duration::from_secs(2));
+        assert!(took < Duration::from_secs(2));
         assert_eq!(calls.lock().expect("calls lock")[1], name);
         assert_eq!(icon(&conn, &name), first);
 

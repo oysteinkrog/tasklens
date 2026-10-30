@@ -41,6 +41,11 @@ use tl_model::validity::Validity;
 const PUBLISHES: u64 = 10_000;
 /// Command queue size from ADR-005.
 const QUEUE: usize = 256;
+/// Test limit for a shutdown: the ADR-004 drain and teardown budgets plus 2 s of slack for a busy
+/// machine (tasklens-cr0.32). A hung shutdown still fails it.
+const SHUTDOWN_LIMIT: Duration = DRAIN_BUDGET
+    .saturating_add(TEARDOWN_BUDGET)
+    .saturating_add(Duration::from_secs(2));
 
 /// A publisher over a new slot and wake channel, and the UI's ends of both.
 fn publisher() -> (
@@ -115,7 +120,7 @@ fn publish_never_blocks_without_reader() {
     publish_range(&mut publisher, &base, 1, PUBLISHES);
     let took = begin.elapsed();
     assert!(
-        took < Duration::from_secs(1),
+        took < Duration::from_secs(2),
         "{PUBLISHES} publishes took {took:?}"
     );
     assert_eq!(latest.load().sequence, PUBLISHES);
@@ -432,10 +437,7 @@ fn shutdown_clean_with_fake_workers() {
     assert!(report.drained, "{report:?}");
     assert!(report.torn_down, "{report:?}");
     assert!(report.clean());
-    assert!(
-        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
-        "{report:?}"
-    );
+    assert!(report.elapsed < SHUTDOWN_LIMIT, "{report:?}");
 }
 
 /// Set when `BlockedCpu::sample` starts. Only `shutdown_clean_with_blocked_sample` reads it.
@@ -494,10 +496,7 @@ fn shutdown_clean_with_blocked_sample() {
     // the blocking pool. Shutdown leaves that thread detached and does not wait for it
     // (tasklens-wlf.30).
     assert!(report.clean(), "{report:?}");
-    assert!(
-        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
-        "{report:?}"
-    );
+    assert!(report.elapsed < SHUTDOWN_LIMIT, "{report:?}");
 }
 
 #[test]
@@ -508,10 +507,7 @@ fn shutdown_torn_down_with_live_clone() {
     // The clone still holds `Inner`, but `shutdown` took its `RuntimeHandle` out, as `tl-app`
     // needs: GPUI never drops the UI's clone (tasklens-8hz.13).
     assert!(report.torn_down, "{report:?}");
-    assert!(
-        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
-        "{report:?}"
-    );
+    assert!(report.elapsed < SHUTDOWN_LIMIT, "{report:?}");
     // The clone sees the stopped engine.
     assert_eq!(
         clone.send(Command::ResetBaselines),

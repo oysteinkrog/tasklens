@@ -187,7 +187,7 @@ fn sleep_on_sample_delays() {
     let start = Instant::now();
     send(&mut c, &sample(2));
     assert!(matches!(recv(&mut c), ProbeResponse::Sample { seq: 2, .. }));
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(2));
     send(&mut c, &ProbeRequest::Shutdown);
     assert_eq!(wait(&mut child).code(), Some(0));
 }

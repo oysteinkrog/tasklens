@@ -235,8 +235,8 @@ fn client_hello_deadline() {
         r.err()
     );
     let took = t.elapsed();
-    // 1 s of slack for a busy machine, still below the 5 s the fake probe sleeps on hello.
-    assert!(took < HELLO_DEADLINE + Duration::from_secs(1), "{took:?}");
+    // 2 s of slack for a busy machine, still below the 8 s the fake probe sleeps on hello.
+    assert!(took < HELLO_DEADLINE + Duration::from_secs(2), "{took:?}");
     assert_clean(&[]);
 }
 
@@ -446,7 +446,7 @@ fn pdeathsig_kills_orphan() {
         .find_map(|l| l.strip_prefix("probe-pid ")?.parse().ok())
         .unwrap_or_else(|| panic!("no probe pid in helper output: {stdout}"));
     // The orphan is reaped by init or a subreaper, not by us, so a dead but not yet reaped
-    // probe (`Z`) also counts as killed. Without the signal it would sleep on for 5 s.
+    // probe (`Z`) also counts as killed. Without the signal it would sleep on for 8 s.
     loop {
         match stat(pid) {
             None => break,

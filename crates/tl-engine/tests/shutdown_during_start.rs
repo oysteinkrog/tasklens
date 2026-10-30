@@ -13,6 +13,11 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 
 const DELAYS_MS: [u64; 3] = [50, 200, 1000];
+/// Test limit for a shutdown: the ADR-004 drain and teardown budgets plus 2 s of slack for a busy
+/// machine (tasklens-cr0.32). A hung shutdown still fails it.
+const SHUTDOWN_LIMIT: Duration = DRAIN_BUDGET
+    .saturating_add(TEARDOWN_BUDGET)
+    .saturating_add(Duration::from_secs(2));
 
 fn fixture_config() -> EngineConfig {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,7 +37,7 @@ fn shutdown_after(delay: Duration, keep_clone: bool) {
     assert!(report.drained, "delay {delay:?}: {report:?}");
     assert!(report.torn_down, "delay {delay:?}: {report:?}");
     assert!(
-        waited < DRAIN_BUDGET + TEARDOWN_BUDGET,
+        waited < SHUTDOWN_LIMIT,
         "delay {delay:?}: shutdown took {waited:?}"
     );
     if let Some(clone) = clone {

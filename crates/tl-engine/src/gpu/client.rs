@@ -654,8 +654,9 @@ mod tests {
         let took = start.elapsed();
         assert!(matches!(got, Err(ProbeError::Deadline(d)) if d == API_VERSIONS_DEADLINE));
         assert!(took >= API_VERSIONS_DEADLINE, "{took:?}");
+        // 2 s of slack for a busy machine, still below the 60 s the fake reply hangs.
         assert!(
-            took < API_VERSIONS_DEADLINE + Duration::from_secs(1),
+            took < API_VERSIONS_DEADLINE + Duration::from_secs(2),
             "{took:?}"
         );
         assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
@@ -712,7 +713,7 @@ mod tests {
         let start = Instant::now();
         let got = api_versions(&script, deadline);
         assert!(matches!(got, Err(ProbeError::Deadline(_))), "{got:?}");
-        assert!(start.elapsed() < deadline + Duration::from_secs(1));
+        assert!(start.elapsed() < deadline + Duration::from_secs(2));
     }
 
     /// A cancel check that turns true 50 ms after it is made, once the script wrote its pid,

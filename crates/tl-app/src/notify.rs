@@ -164,7 +164,8 @@ mod tests {
             .and_then(|b| b.method_timeout(TIMEOUT).build());
         assert!(conn.is_err());
         send_on(conn, Fatal::DeviceLost);
-        assert!(start.elapsed() < TIMEOUT);
+        // Both calls fail at once; 2 s leaves room for a busy machine (tasklens-cr0.32).
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

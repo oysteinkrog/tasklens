@@ -1,12 +1,13 @@
-//! `cargo xtask check-timing`: wall-clock limits under 1 s in test asserts (tasklens-cr0.32).
+//! `cargo xtask check-timing`: wall-clock limits under 2 s in test asserts (tasklens-cr0.32).
 //!
 //! A test may assert ordering, or that something finished. A wall-clock upper limit in a normal
-//! test must be at least 2 s or 10 times the measured median, whichever is larger: a limit under
-//! 1 s fails when the machine is busy. Real performance budgets belong in `cargo xtask bench`.
+//! test must be at least 2 s: a shorter limit fails when the machine is busy. Where the work
+//! itself can take longer under load, the test uses a larger limit and says why in a comment.
+//! Real performance budgets belong in `cargo xtask bench`.
 //!
 //! The check reads every `.rs` file under `crates/*/src` and `crates/*/tests`. It takes each
 //! `assert!` statement from `assert!(` to its closing parenthesis, over several lines when
-//! needed, and flags it when it holds a timing word and an upper limit under 1 s. A justified
+//! needed, and flags it when it holds a timing word and an upper limit under 2 s. A justified
 //! case carries `// timing-lint: allow: <reason>` on the line above the assert. Plain string
 //! scanning: xtask has no regex crate. Every file is scanned before the command fails, so one
 //! run lists every site.
@@ -19,8 +20,12 @@ const ASSERT: &str = "assert!(";
 
 const ALLOW_COMMENT: &str = "// timing-lint: allow:";
 
+/// The shortest wall-clock limit a normal test may assert, in seconds.
+const FLOOR_SECS: f64 = 2.0;
+
 /// Duration constructors and the value at which each reaches 1 s.
 const CONSTRUCTORS: &[(&str, f64)] = &[
+    ("from_secs(", 1.0),
     ("from_millis(", 1e3),
     ("from_micros(", 1e6),
     ("from_nanos(", 1e9),
@@ -76,7 +81,7 @@ fn scan_workspace(root: &Path) -> anyhow::Result<Vec<String>> {
         let display = relative.to_string_lossy().replace('\\', "/");
         for line in scan_source(&text) {
             violations.push(format!(
-                "wall-clock limit under 1 s in an assert at {display}:{line}"
+                "wall-clock limit under 2 s in an assert at {display}:{line}"
             ));
         }
     }
@@ -140,7 +145,7 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// True when the assert reads a clock: an identifier such as `elapsed`, `took`, `duration_since`,
-/// `as_millis` or a name that ends in `_ms`.
+/// `as_millis`, `as_secs` or a name that ends in `_ms`.
 fn has_timing_word(body: &str) -> bool {
     body.split(|c: char| !is_ident_char(c)).any(|ident| {
         ident.contains("elapsed")
@@ -149,12 +154,12 @@ fn has_timing_word(body: &str) -> bool {
             || ident.starts_with("as_millis")
             || ident.starts_with("as_micros")
             || ident.starts_with("as_nanos")
-            || ident.starts_with("as_secs_f")
+            || ident.starts_with("as_secs")
             || ident.ends_with("_ms")
     })
 }
 
-/// True when any clause of the assert has an upper limit under 1 s. Clauses are split at `,`,
+/// True when any clause of the assert has an upper limit under 2 s. Clauses are split at `,`,
 /// `&&` and `||`, so a message argument or a second condition is a clause of its own.
 fn has_short_upper_limit(body: &str) -> bool {
     body.replace("&&", ",")
@@ -176,19 +181,21 @@ fn clause_has_short_upper_limit(clause: &str) -> bool {
     };
     if CONSTRUCTORS.iter().any(|&(name, one_second)| {
         limit.match_indices(name).any(|(start, _)| {
-            leading_number(&limit[start + name.len()..]).is_some_and(|n| n < one_second)
+            leading_number(&limit[start + name.len()..])
+                .is_some_and(|n| n < FLOOR_SECS * one_second)
         })
     }) {
         return true;
     }
     match (adjacent, bare_number_unit(clause)) {
-        (Some(n), Some(one_second)) => n < one_second,
+        (Some(n), Some(one_second)) => n < FLOOR_SECS * one_second,
         _ => false,
     }
 }
 
 /// The value of 1 s in the unit a clause measures in, when it compares a bare number with
-/// `as_millis()`, `as_micros()`, `as_nanos()`, `as_secs_f64()` or a name ending in `_ms`.
+/// `as_millis()`, `as_micros()`, `as_nanos()`, `as_secs()`, `as_secs_f64()` or a name ending in
+/// `_ms`.
 fn bare_number_unit(clause: &str) -> Option<f64> {
     let idents: Vec<&str> = clause.split(|c: char| !is_ident_char(c)).collect();
     if idents
@@ -200,7 +207,7 @@ fn bare_number_unit(clause: &str) -> Option<f64> {
         Some(1e6)
     } else if idents.iter().any(|i| i.starts_with("as_nanos")) {
         Some(1e9)
-    } else if idents.iter().any(|i| i.starts_with("as_secs_f")) {
+    } else if idents.iter().any(|i| i.starts_with("as_secs")) {
         Some(1.0)
     } else {
         None
@@ -436,6 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_one_second() {
+        let src = wrap("    assert!(took < Duration::from_secs(1), \"{took:?}\");");
+        assert_eq!(scan_source(&src), vec![2]);
+    }
+
+    #[test]
+    fn flags_just_under_two_seconds() {
+        let src = wrap(
+            "    assert!(took < Duration::from_millis(1_500));\n    assert!(took.as_millis() < 1999);\n    assert!(took.as_secs() < 1);",
+        );
+        assert_eq!(scan_source(&src), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn flags_deadline_plus_one_second() {
+        let src = wrap("    assert!(took < deadline + Duration::from_secs(1), \"{took:?}\");");
+        assert_eq!(scan_source(&src), vec![2]);
+    }
+
+    #[test]
     fn passes_lower_bound() {
         let src = wrap("    assert!(elapsed >= Duration::from_millis(200), \"{elapsed:?}\");");
         assert!(scan_source(&src).is_empty());
@@ -452,7 +479,7 @@ mod tests {
     #[test]
     fn passes_two_seconds() {
         let src = wrap(
-            "    assert!(took < Duration::from_secs(2), \"{took:?}\");\n    assert!(took < deadline + Duration::from_secs(2));",
+            "    assert!(took < Duration::from_secs(2), \"{took:?}\");\n    assert!(took < deadline + Duration::from_secs(2));\n    assert!(took.as_millis() < 2000);\n    assert!(took < Duration::from_secs_f64(2.5));",
         );
         assert!(scan_source(&src).is_empty());
     }
