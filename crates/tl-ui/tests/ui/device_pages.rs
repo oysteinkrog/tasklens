@@ -598,8 +598,12 @@ mod shared_range {
         assert!(n.is_some_and(|n| n >= 3), "history samples: {n:?}");
     }
 
-    /// The device history the engine answers with at 1 h: three points per series, for `ids`.
+    /// The device history the engine answers with at 1 h: three points per series, for `ids`
+    /// (sorted, as `DeviceHistory::get` searches them).
     fn publish_history(r: &mut Rig, ids: &[SeriesId]) {
+        let mut ids = ids.to_vec();
+        ids.sort();
+        ids.dedup();
         let now = i64::try_from(jiff::Timestamp::now().as_nanosecond()).expect("fits");
         let points: Arc<[HistPoint]> = (0..3)
             .map(|i| HistPoint {
