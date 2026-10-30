@@ -200,8 +200,7 @@ fn register_hover_events(
 }
 
 /// The chart's frame inside `bounds`, and the label rows outside it: an Overview chart (compact
-/// scale) keeps a title row above for a heading and a tick row below (UI-PRF-059); any other
-/// chart fills `bounds`.
+/// scale) keeps a title row above for a heading (UI-PRF-059); any other chart fills `bounds`.
 fn frame_of(
     view: &ChartView,
     bounds: Bounds<Pixels>,

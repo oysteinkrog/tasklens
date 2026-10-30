@@ -7544,10 +7544,11 @@ mod page {
         assert_eq!(r.saved(), None);
     }
 
-    /// UI-PRF-059: the CPU and Network charts draw their x ticks in an 18 px row under the plot,
-    /// so no tick label sits on data, and the CPU chart keeps a 16 px gutter to the core rows.
+    /// tasklens-o55.54: the CPU and Network charts draw their x ticks inside the plot along its
+    /// bottom edge, with no row of their own, and the CPU chart keeps a 16 px gutter to the core
+    /// rows.
     #[gpui_kit::test]
-    fn chart_ticks_in_own_row(cx: &mut TestAppContext) {
+    fn chart_ticks_inside_plot_bottom(cx: &mut TestAppContext) {
         use tl_ui::chart::labels::LabelKind;
         use tl_ui::pages::performance::overview::net_box::COMBINED_CHART_ID;
         let mut r = open(cx, true, 1920., 1200.);
@@ -7580,13 +7581,19 @@ mod page {
                         .painted(LabelKind::XTick(i))
                         .unwrap_or_else(|| panic!("{name}: tick {i} painted"));
                     let tick = tick.bounds();
-                    assert_eq!(tick.size.height, px(18.), "{name}: an 18 px row");
+                    assert_eq!(tick.size.height, px(18.), "{name}: an 18 px line");
                     assert!(
-                        !tick.intersects(&c.plot),
-                        "{name}: tick {i} {tick:?} on the plot {:?}",
+                        tick.left() >= c.plot.left()
+                            && tick.right() <= c.plot.right()
+                            && tick.bottom() <= c.plot.bottom(),
+                        "{name}: tick {i} {tick:?} inside the plot {:?}",
                         c.plot
                     );
-                    assert!(tick.top() > c.plot.bottom(), "{name}: under the plot");
+                    assert!(
+                        c.plot.bottom() - tick.bottom() <= px(4.),
+                        "{name}: tick {i} {tick:?} on the plot's bottom edge {:?}",
+                        c.plot
+                    );
                 }
             });
         }

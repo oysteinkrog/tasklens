@@ -27,8 +27,8 @@ use crate::theme::{TlTheme, UiMetrics};
 
 const NS_PER_S: u64 = 1_000_000_000;
 
-/// Label row height at 100% (`chart_label_row`). The x tick row under an Overview plot has this
-/// height (UI-PRF-059).
+/// Label row height at 100% (`chart_label_row`). The x ticks of an Overview plot take this
+/// height inside its bottom edge (tasklens-o55.54).
 pub const LABEL_ROW: f32 = 18.0;
 /// The title row above an Overview plot at 100% (UI-PRF-059).
 pub const TITLE_ROW: f32 = 20.0;
@@ -261,14 +261,14 @@ impl LabelCache {
 }
 
 /// The rows an Overview chart keeps outside its plot (UI-PRF-059): a title row above it for the
-/// heading and the value, and a tick row below it for the x ticks, so no label draws over data.
-/// The scale label draws inside the plot's top-right corner (tasklens-o55.54).
+/// heading and the value, so no label draws over data. The scale label draws inside the plot's
+/// top-right corner and the x ticks inside its bottom edge (tasklens-o55.54).
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct LabelRows {
     /// The title row's height; 0 when the chart has no heading.
     pub top: Pixels,
-    /// The tick row's height; 0 when the ticks are dropped.
-    pub bottom: Pixels,
+    /// Whether the x ticks show along the plot's bottom edge.
+    pub ticks: bool,
     /// Whether the scale label shows in the plot's top-right corner.
     pub scale: bool,
 }
@@ -276,31 +276,23 @@ pub struct LabelRows {
 impl LabelRows {
     /// The rows of a chart in `bounds` at `ui_scale` `s`; `heading` says whether it has a title,
     /// and only then does it get the title row. The x ticks need a box at least
-    /// `TICKS_MIN_BOX_W` wide, and a chart too short for them over a `MIN_PLOT_H` plot drops
-    /// them. A plot under `COMPACT_MIN_PLOT_H` drops the scale label.
+    /// `TICKS_MIN_BOX_W` wide and a plot at least `MIN_PLOT_H` tall. A plot under
+    /// `COMPACT_MIN_PLOT_H` drops the scale label.
     pub fn of(bounds: Bounds<Pixels>, heading: bool, s: f32) -> Self {
-        // The plot is the frame less its 1 px outline on each side.
-        let plot_h = |top: f32, bottom: f32| f32::from(bounds.size.height) - top - bottom - 2.0;
         let top = if heading { TITLE_ROW * s } else { 0.0 };
-        let mut bottom = if f32::from(bounds.size.width) >= TICKS_MIN_BOX_W * s {
-            LABEL_ROW * s
-        } else {
-            0.0
-        };
-        if plot_h(top, bottom) < MIN_PLOT_H * s {
-            bottom = 0.0;
-        }
-        let scale = plot_h(top, bottom) >= COMPACT_MIN_PLOT_H * s;
+        // The plot is the frame less its 1 px outline on each side.
+        let plot_h = f32::from(bounds.size.height) - top - 2.0;
+        let ticks = f32::from(bounds.size.width) >= TICKS_MIN_BOX_W * s && plot_h >= MIN_PLOT_H * s;
         Self {
             top: px(top),
-            bottom: px(bottom),
-            scale,
+            ticks,
+            scale: plot_h >= COMPACT_MIN_PLOT_H * s,
         }
     }
 
-    /// The chart's frame inside `bounds`: everything between the two rows.
+    /// The chart's frame inside `bounds`: everything under the title row.
     pub fn frame(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-        let h = (bounds.size.height - self.top - self.bottom).max(px(0.));
+        let h = (bounds.size.height - self.top).max(px(0.));
         Bounds::new(
             point(bounds.left(), bounds.top() + self.top),
             size(bounds.size.width, h),
@@ -324,7 +316,7 @@ pub struct LabelPaint<'a> {
     /// Draw the scale ceiling small in place of the axis max (`ChartView::set_compact_scale`):
     /// in the plot's top-right corner with `rows`, else in its top-left corner.
     pub compact_scale: bool,
-    /// The title and tick rows of an Overview chart, outside `plot` and inside `box_bounds`.
+    /// The title row of an Overview chart, outside `plot` and inside `box_bounds`.
     /// `None` draws every label inside the box, over the plot.
     pub rows: Option<LabelRows>,
     pub metrics: &'a UiMetrics,
@@ -596,12 +588,13 @@ pub fn paint(
         );
     }
     // Ticks: x at the quarter points of the range, y at 25% steps of a percent scale. The x
-    // ticks of an Overview chart sit in its tick row. Without rows, like every label, they need
-    // a plot at least MIN_PLOT_H tall, or they would collide with the rows above, and the range
-    // label owns the bottom row when it shows.
+    // ticks of an Overview chart sit inside its plot's bottom edge, as the scale label sits in
+    // its top corner. Without rows, like every label, they need a plot at least MIN_PLOT_H tall,
+    // or they would collide with the rows above, and the range label owns the bottom row when it
+    // shows.
     let ticks_wide = f32::from(b.size.width) >= TICKS_MIN_BOX_W * s;
     let x_row = match p.rows {
-        Some(r) => (r.bottom > px(0.)).then_some((b.bottom() - r.bottom, r.bottom)),
+        Some(r) => r.ticks.then_some((p.plot.bottom() - m.sp[1] - row, row)),
         None => (tall && ticks_wide).then(|| {
             let range_shown = wide && !p.labels.range_word.is_empty();
             let y = b.bottom() - pad - row - if range_shown { row } else { px(0.) };

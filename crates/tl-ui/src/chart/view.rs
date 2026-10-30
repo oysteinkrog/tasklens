@@ -456,8 +456,8 @@ impl ChartView {
 
     /// Shows the scale ceiling ("100%", "16.00 GiB", "8 MiB/s") as one small line in place of
     /// the axis max label (Overview boxes, TMOG), in the plot's top-right corner. The chart then
-    /// keeps a title row above its plot only for a heading, and a row below it for the x ticks
-    /// (`labels::LabelRows`, UI-PRF-059).
+    /// keeps a title row above its plot only for a heading, and draws the x ticks inside the
+    /// plot's bottom edge (`labels::LabelRows`, UI-PRF-059, tasklens-o55.54).
     pub fn set_compact_scale(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.compact_scale != on {
             self.compact_scale = on;

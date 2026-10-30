@@ -1256,7 +1256,8 @@ mod labels {
         state: ChartState,
         value: Option<(f32, Validity)>,
         axis_text: Option<&'static str>,
-        /// Paint as an Overview chart: compact scale, title row and tick row (UI-PRF-059).
+        /// Paint as an Overview chart: compact scale, title row and the ticks in the plot
+        /// (UI-PRF-059, tasklens-o55.54).
         overview: bool,
     }
 
@@ -1658,27 +1659,29 @@ mod labels {
         assert!(c.painted(LabelKind::AxisMax).is_some());
     }
 
-    /// An Overview chart without a heading has no title row: its plot starts at the top and the
-    /// scale label sits in the plot (tasklens-o55.54). A chart too short for the tick row over a
-    /// `MIN_PLOT_H` plot drops the ticks, and a plot under 32 px drops the scale label.
+    /// An Overview chart without a heading has no title row: its plot starts at the top, the
+    /// scale label sits in the plot's top corner and the x ticks along its bottom edge
+    /// (tasklens-o55.54). A plot under `MIN_PLOT_H` drops the ticks, and a plot under 32 px
+    /// drops the scale label.
     #[gpui_kit::test]
     fn chart_short_drops_ticks_then_scale(cx: &mut TestAppContext) {
         let at = |w: f32, h: f32| Bounds::new(point(px(0.), px(0.)), size(px(w), px(h)));
-        // 200 px: the tick row under a 180 px plot.
+        // 200 px: a 198 px plot with the ticks and the scale label in it.
         let r = LabelRows::of(at(600., 200.), false, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(18.), true));
-        // 110 px: the tick row would leave a 90 px plot, under 100. The ticks go.
-        let r = LabelRows::of(at(600., 110.), false, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(0.), true));
+        assert_eq!((r.top, r.ticks, r.scale), (px(0.), true, true));
+        assert_eq!(r.frame(at(600., 200.)), at(600., 200.), "no tick row");
+        // 100 px: a 98 px plot, under 100. The ticks go.
+        let r = LabelRows::of(at(600., 100.), false, 1.0);
+        assert_eq!((r.top, r.ticks, r.scale), (px(0.), false, true));
         // 30 px: a 28 px plot, under 32. The scale label goes.
         let r = LabelRows::of(at(600., 30.), false, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(0.), px(0.), false));
+        assert_eq!((r.top, r.ticks, r.scale), (px(0.), false, false));
         // A heading keeps its title row even when the plot under it is too short for the scale.
         let r = LabelRows::of(at(600., 50.), true, 1.0);
-        assert_eq!((r.top, r.bottom, r.scale), (px(20.), px(0.), false));
+        assert_eq!((r.top, r.ticks, r.scale), (px(20.), false, false));
         // Under 320 px wide there are no ticks at any height.
         let r = LabelRows::of(at(300., 400.), false, 1.0);
-        assert_eq!((r.top, r.bottom), (px(0.), px(0.)));
+        assert_eq!((r.top, r.ticks), (px(0.), false));
 
         // The paint follows the rows.
         let mut i = input(600., 200.);
@@ -1698,9 +1701,19 @@ mod labels {
             )
         };
         assert_eq!(drawn(&mut r), (true, true), "200 px: ticks and scale");
-        assert_eq!(r.cache.borrow().plot.top(), px(1.), "no title row");
-        r.set(|i| i.h = 110.);
-        assert_eq!(drawn(&mut r), (false, true), "110 px: the ticks go first");
+        {
+            let c = r.cache.borrow();
+            assert_eq!(c.plot.top(), px(1.), "no title row");
+            assert_eq!(c.plot.bottom(), px(199.), "no tick row");
+            let tick = c.painted(LabelKind::XTick(0)).expect("tick").bounds();
+            assert!(
+                tick.top() >= c.plot.top() && tick.bottom() <= c.plot.bottom(),
+                "{tick:?} inside the plot {:?}",
+                c.plot
+            );
+        }
+        r.set(|i| i.h = 100.);
+        assert_eq!(drawn(&mut r), (false, true), "100 px: the ticks go first");
         r.set(|i| i.h = 30.);
         assert_eq!(drawn(&mut r), (false, false), "30 px: then the scale label");
         assert_eq!(r.cache.borrow().plot.top(), px(1.), "no title row");
