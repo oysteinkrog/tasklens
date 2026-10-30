@@ -906,7 +906,7 @@ impl Reducer {
         let Some((kind, engine)) = request_of(&command) else {
             return;
         };
-        match self.forward(target, command) {
+        match self.queue_command(target, command) {
             Some(seq) => self.clients.queued(kind, engine, seq),
             None => self.clients.lost(kind, engine),
         }
@@ -914,10 +914,15 @@ impl Reducer {
 
     /// Appends a `QueuedCommand` with the next `seq` to the control watch and keeps the newest
     /// `QUEUE_MAX`. `send_modify` clones the current value, so the `progress` `Arc` stays the
-    /// same (R-276). Returns the `seq`, or `None` when the watch is closed. A scan, handle
-    /// search or eject pushed out before its worker started it is lost: no worker will report
-    /// it, so its request ends here (ADR-018).
-    fn forward(&mut self, target: SourceId, command: WorkerCommand) -> Option<u64> {
+    /// same (R-276).
+    fn forward(&mut self, target: SourceId, command: WorkerCommand) {
+        self.queue_command(target, command);
+    }
+
+    /// `forward`, returning the `seq`, or `None` when the watch is closed. A scan, handle search
+    /// or eject pushed out before its worker started it is lost: no worker will report it, so
+    /// its request ends here (ADR-018).
+    fn queue_command(&mut self, target: SourceId, command: WorkerCommand) -> Option<u64> {
         let kind = command.kind();
         let mut queued = None;
         let mut lost = Vec::new();
