@@ -2639,7 +2639,7 @@ impl DevicePage for GpuPage {
             .child(self.chart_box(&self.temperature, TEMPERATURE_ID, None, &m, window, cx));
         // The engine grid reads only the live series (crw.105).
         let note = (self.probe != ProbeState::Missing && self.shown_cells > 0)
-            .then(|| live_only_note(&m, current(cx), cx))
+            .then(|| live_only_note(&m, cx))
             .flatten();
         let mut page = v_flex()
             .w_full()

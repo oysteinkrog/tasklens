@@ -663,7 +663,8 @@ mod page_frame {
         });
         let long = "AMD Ryzen Threadripper PRO 7995WX 96-Cores with an extra long model name \
                     that cannot fit";
-        let (cx, _) = open(&mut cx, 500., long, 1);
+        // 800 px: the range switch also takes header width (crw.105).
+        let (cx, _) = open(&mut cx, 800., long, 1);
         let model = cx.debug_bounds("perf-page-model").expect("model text");
         let toggle = cx.debug_bounds("perf-page-toggle-0").expect("toggle");
         assert!(

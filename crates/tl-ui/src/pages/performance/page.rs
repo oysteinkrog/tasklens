@@ -51,7 +51,7 @@ use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
 use crate::pages::performance::overview::range::{
-    PAGE_SWITCH, current_range, history_request, page_range_switch, word,
+    PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, t_sm};
@@ -114,10 +114,12 @@ pub fn page_history_request(range_ns: u64) -> Option<DeviceHistoryRequest> {
 
 /// "Live only", right-aligned over a chart whose series the device metric history does not hold,
 /// while the shared range is 1 h, 24 h or 7 d. `None` at 1 min and 5 min.
-pub fn live_only_note(m: &UiMetrics, theme: &TlTheme, cx: &App) -> Option<AnyElement> {
+pub fn live_only_note(m: &UiMetrics, cx: &mut App) -> Option<AnyElement> {
     if !current_range(cx).from_history() {
         return None;
     }
+    let text = page_words(cx).live_only.clone();
+    let color = current(cx).text_secondary;
     let mut note = div();
     *note.text_style() = t_sm(m);
     Some(
@@ -126,8 +128,8 @@ pub fn live_only_note(m: &UiMetrics, theme: &TlTheme, cx: &App) -> Option<AnyEle
             .justify_end()
             .child(
                 note.debug_selector(|| LIVE_ONLY_ID.into())
-                    .text_color(theme.text_secondary)
-                    .child(word(cx, "perf-page-live-only")),
+                    .text_color(color)
+                    .child(text),
             )
             .into_any_element(),
     )
@@ -161,6 +163,10 @@ pub struct PageWords {
     pub unknown_gpu: SharedString,
     pub unknown_adapter: SharedString,
     pub details: SharedString,
+    /// The header's range switch.
+    pub range: SwitchWords,
+    /// "Live only" over a chart the device metric history does not serve.
+    pub live_only: SharedString,
 }
 
 impl Global for PageWords {}
@@ -232,6 +238,8 @@ impl PageWords {
             unknown_gpu: t("perf-unknown-gpu"),
             unknown_adapter: t("perf-unknown-adapter"),
             details: t("perf-details-heading"),
+            range: SwitchWords::build(&t),
+            live_only: t("perf-page-live-only"),
         }
     }
 }
@@ -458,6 +466,7 @@ impl DevicePageFrame<'_> {
         let key = page.key();
         let (word, model) = page.header();
         let details_heading = page_words(cx).details.clone();
+        let range_words = page_words(cx).range.clone();
 
         let header = h_flex()
             .debug_selector(|| "perf-page-header".into())
@@ -503,7 +512,7 @@ impl DevicePageFrame<'_> {
                 div()
                     .debug_selector(|| RANGE_ID.into())
                     .flex_none()
-                    .child(page_range_switch(PAGE_SWITCH, cx)),
+                    .child(page_range_switch(PAGE_SWITCH, &range_words, cx)),
             );
 
         let graph_area = div()

@@ -29,7 +29,7 @@ use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 use super::timeline::{self, Paused};
 use crate::chart::view::find_tiered;
 use crate::components::button::{TlButton, TlButtonKind};
-use crate::i18n::{Strings, tr, tr_en};
+use crate::i18n::tr;
 use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
 
@@ -117,30 +117,48 @@ pub fn history_kept(cx: &App) -> bool {
 /// at this resolution" (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are
 /// disabled with "Device history is off" (UI-PRF-060).
 pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
-    switch(prefix, timeline::paused(cx), cx)
+    let words = SwitchWords::build(|key| tr(cx, key));
+    switch(prefix, timeline::paused(cx), &words, cx)
 }
 
 /// The switch in a device page header: the same segments, but the Overview's pause does not
-/// apply, since the device pages always draw up to now.
-pub fn page_range_switch(prefix: &'static str, cx: &App) -> AnyElement {
-    switch(prefix, None, cx)
+/// apply, since the device pages always draw up to now. `words` come translated from the
+/// shared page words, so a frame does no lookups.
+pub fn page_range_switch(prefix: &'static str, words: &SwitchWords, cx: &App) -> AnyElement {
+    switch(prefix, None, words, cx)
 }
 
-/// `key` in the current strings; en-US without strings (the page frame tests).
-pub fn word(cx: &App, key: &str) -> SharedString {
-    if cx.has_global::<Strings>() {
-        tr(cx, key)
-    } else {
-        tr_en(key, &[])
+/// The switch words: the segment labels in [`OverviewRange::ALL`] order and the two tooltips of
+/// a disabled segment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwitchWords {
+    pub labels: [SharedString; 5],
+    pub history_off: SharedString,
+    pub not_kept: SharedString,
+}
+
+impl SwitchWords {
+    /// The words through `t`, which translates a Fluent key.
+    pub fn build(t: impl Fn(&str) -> SharedString) -> Self {
+        Self {
+            labels: SWITCH_KEYS.map(&t),
+            history_off: t("perf-overview-range-history-off"),
+            not_kept: t("perf-overview-range-not-kept"),
+        }
     }
 }
 
-fn switch(prefix: &'static str, paused: Option<Paused>, cx: &App) -> AnyElement {
+fn switch(
+    prefix: &'static str,
+    paused: Option<Paused>,
+    words: &SwitchWords,
+    cx: &App,
+) -> AnyElement {
     let current = current_range(cx);
     let now = timeline::now_realtime_ns();
     let kept = history_kept(cx);
     let mut row = div().flex().flex_row().flex_none();
-    for (range, key) in OverviewRange::ALL.into_iter().zip(SWITCH_KEYS) {
+    for (range, label) in OverviewRange::ALL.into_iter().zip(&words.labels) {
         let id = segment_id(prefix, range);
         let stored = kept || !matches!(range, OverviewRange::H24 | OverviewRange::D7);
         let servable = paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
@@ -150,13 +168,13 @@ fn switch(prefix: &'static str, paused: Option<Paused>, cx: &App) -> AnyElement 
                 on: range == current,
             },
         )
-        .label(word(cx, key))
+        .label(label.clone())
         .disabled(!stored || !servable)
         .on_click(move |_, _, cx| set_range(range, cx));
         if !stored {
-            button = button.tooltip(word(cx, "perf-overview-range-history-off"));
+            button = button.tooltip(words.history_off.clone());
         } else if !servable {
-            button = button.tooltip(word(cx, "perf-overview-range-not-kept"));
+            button = button.tooltip(words.not_kept.clone());
         }
         row = row.child(div().debug_selector(move || id.clone()).child(button));
     }

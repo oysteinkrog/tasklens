@@ -2117,7 +2117,7 @@ impl DevicePage for BatteryPage {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         // The battery series are not in the device metric history (crw.105).
-        let note = live_only_note(&m, &theme, cx);
+        let note = live_only_note(&m, cx);
         let mut out = v_flex().w_full().children(note).child(
             div()
                 .debug_selector(|| BATTERY_CHART_ID.into())

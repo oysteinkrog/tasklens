@@ -1609,7 +1609,7 @@ impl DevicePage for CpuPage {
         let m = *metrics(cx);
         // The per-core grid reads only the live series (crw.105).
         let note = (self.mode == CpuGraphMode::PerCore)
-            .then(|| live_only_note(&m, current(cx), cx))
+            .then(|| live_only_note(&m, cx))
             .flatten();
         let area = self.mode_area(&m, window, cx);
         let area = match note {
