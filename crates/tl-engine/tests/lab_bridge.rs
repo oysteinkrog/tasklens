@@ -387,11 +387,15 @@ fn end_to_end_engine_real_runtime() {
     );
 
     drop(wake);
-    // A clean report means teardown joined the runtime's worker and blocking threads. Other
-    // tests of this binary start threads at the same time, and the logind worker leaves the
-    // process-wide zbus and async-io threads running, so the thread count is not checked.
+    // Not a shutdown test, so it checks only that shutdown returned within the fixed ADR-004
+    // budgets, not `drained` or `torn_down`: a busy machine can miss either (tasklens-cr0.30).
+    // Other tests of this binary start threads at the same time, and the logind worker leaves
+    // the process-wide zbus and async-io threads running, so the thread count is not checked.
     let report = handle.shutdown();
-    assert!(report.clean(), "{report:?}");
+    assert!(
+        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET + Duration::from_secs(1),
+        "{report:?}"
+    );
 }
 
 // Shutdown (E09-A2) --------------------------------------------------------------------------
