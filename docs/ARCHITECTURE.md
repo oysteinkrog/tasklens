@@ -981,7 +981,7 @@ Reducer state is bounded: process metadata cache holds live processes plus at mo
 4. `rt.shutdown_timeout(Duration::from_millis(500))`.
 5. If step 2 returned `TimedOut` or step 4 returned `false`, log a warning and return; `tl-app` then calls `std::process::exit(0)` without running further destructors.
 
-Blocking jobs that walk many items or wait on a child process check their job's cancel flag between items, or at least every 20 ms while they wait, and return early with an incomplete result that is never published. The GPU probe's `Hello`, `Sample` and `--api-versions` waits do this (tasklens-cr0.30). A single system call that is still running is not interrupted. The warning in step 5 names the session tasks and blocking jobs still running.
+Blocking jobs that walk many items or wait on a child process check their job's cancel flag between items, or at least every 20 ms while they wait, and return early with an incomplete result that is never published. The GPU probe's `Hello`, `Sample` and `--api-versions` waits and the event detector's journal parse do this (tasklens-cr0.30). A single system call that is still running is not interrupted. The warning in step 5 names the session tasks and blocking jobs still running.
 
 ### Consequences
 

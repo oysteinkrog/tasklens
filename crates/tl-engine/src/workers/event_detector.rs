@@ -759,11 +759,16 @@ fn run(
         }
         Err(CollectError::Stopped) => return Vec::new(),
     };
-    let entries: Vec<Entry> = out
-        .stdout
-        .split(|&b| b == b'\n')
-        .filter_map(parse_entry)
-        .collect();
+    // A whole boot's kernel log can be tens of MB, and parsing it takes hundreds of ms. Check
+    // `stop` between entries; a stopped parse returns nothing and keeps the cursor, so the next
+    // fetch reads the same entries again (tasklens-cr0.30).
+    let mut entries = Vec::new();
+    for line in out.stdout.split(|&b| b == b'\n') {
+        if stop() {
+            return Vec::new();
+        }
+        entries.extend(parse_entry(line));
+    }
     if let Some(last) = entries.last() {
         src.cursor = Some(Arc::clone(&last.cursor));
     }
@@ -1636,6 +1641,49 @@ mod tests {
         let got = j.fetch(0, offset, || false);
         assert_eq!(got.events.len(), 1);
         assert_eq!(got.events[0].kind, EventKind::Crash);
+    }
+
+    /// A stop during the parse ends it within one entry: nothing is returned and the cursor
+    /// stays, so the next fetch reads the same entries again (tasklens-cr0.30).
+    #[test]
+    fn event_detector_journal_stop_during_parse() {
+        let (env, dir) = fake_env("stop", "wheel:x:998:me\n", (1000, vec![998]));
+        let mut kernel = String::new();
+        for i in 0..5000 {
+            kernel.push_str(&format!(
+                r#"{{"__CURSOR":"k{i}","__REALTIME_TIMESTAMP":"1700000010000000","MESSAGE":"line {i}"}}"#
+            ));
+            kernel.push('\n');
+        }
+        kernel.push_str(concat!(
+            r#"{"__CURSOR":"oom","__REALTIME_TIMESTAMP":"1700000020000000","MESSAGE":"Out of memory: Killed process 99 (hog) total-vm:1kB, UID:1000 pgtables:1kB oom_score_adj:0"}"#,
+            "\n",
+        ));
+        std::fs::write(dir.join("kernel.json"), kernel).unwrap();
+        let offset = 1_700_000_000 * S as i64;
+        let mut j = JournalEvents::new(env);
+
+        // Draining the pipes calls `stop` a few dozen times; call 1000 falls in the parse.
+        const STOP_AT: u32 = 1000;
+        let calls = std::cell::Cell::new(0u32);
+        let stop = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= STOP_AT
+        };
+        let got = j.fetch(0, offset, stop);
+        assert!(got.events.is_empty(), "{:?}", got.events);
+        // One call to the crash fetch, which stops before it reads anything.
+        assert!(calls.get() <= STOP_AT + 1, "{} stop calls", calls.get());
+
+        let again = j.fetch(60 * S, offset, || false);
+        assert_eq!(again.events.len(), 2, "{:?}", again.events);
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        let kernel_calls: Vec<&str> = calls.lines().filter(|l| l.starts_with("-k")).collect();
+        assert_eq!(
+            kernel_calls,
+            vec!["-k -b -o json --no-pager", "-k -b -o json --no-pager"],
+            "the stopped fetch kept its cursor"
+        );
     }
 
     #[test]
