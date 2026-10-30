@@ -37,7 +37,10 @@ use tl_model::validity::Validity;
 use super::actions::{PerfToggleGpuEngine, PerfToggleGpuOptionalGraph};
 use super::details::{Fallback, KeyValueModel};
 use super::menu::ClickedEngine;
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
+use super::page::{
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, live_only_note, live_range_ns,
+    page_history_request, page_range_ns, page_words,
+};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{
@@ -92,8 +95,6 @@ const KEY_GPU_CLOCK: &str = "perf-gpu-legend-gpu-clock";
 const KEY_MEM_CLOCK: &str = "perf-gpu-legend-mem-clock";
 const KEY_RESTARTING: &str = "perf-gpu-probe-restarting";
 const KEY_MISSING: &str = "perf-gpu-probe-missing";
-
-const NS_PER_S: u64 = 1_000_000_000;
 
 /// The trigger over a hovered engine heading that has a tooltip.
 pub const ENGINE_TIP_ID: &str = "perf-gpu-engine-tooltip";
@@ -527,7 +528,10 @@ impl Words {
 /// The settings the page draws from.
 #[derive(Clone, Debug, PartialEq)]
 struct PageSettings {
+    /// The shared range the charts draw.
     range_ns: u64,
+    /// The engine grid's range: it reads only the live series.
+    live_range_ns: u64,
     smooth: bool,
     rounded: bool,
     hidden: Vec<Arc<str>>,
@@ -539,7 +543,8 @@ impl PageSettings {
     fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
-            range_ns: u64::from(s.performance.graph_range_s) * NS_PER_S,
+            range_ns: page_range_ns(cx),
+            live_range_ns: live_range_ns(cx),
             smooth: s.motion.smooth_graphs,
             rounded: s.appearance.rounded_corners,
             hidden: s
@@ -799,6 +804,19 @@ fn placeholder_labels(words: &Words) -> ChartLabels {
     }
 }
 
+/// A page chart that reads the device metric history at 1 h, 24 h and 7 d.
+fn history_chart(
+    spec: ChartSpec,
+    labels: ChartLabels,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut Context<ChartView>,
+) -> ChartView {
+    let snap = Arc::clone(hub.read(cx).current());
+    ChartView::new(spec, labels, hub, cx)
+        .with_newest_marks()
+        .with_device_history(&snap)
+}
+
 /// Applies the range, smoothing and corner settings to a chart spec.
 fn with_settings(mut spec: ChartSpec, s: &PageSettings) -> ChartSpec {
     spec.range_ns = s.range_ns;
@@ -923,10 +941,18 @@ impl GpuPage {
             &settings,
         );
         let labels = memory_labels(memory_shape.shared, &words);
-        let memory = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+        let memory = cx.new(|cx| {
+            ChartView::new(spec, labels, &hub, cx)
+                .with_newest_marks()
+                .with_device_history(&snap)
+        });
         let spec = with_settings(temperature_spec(row.idx, &theme), &settings);
         let labels = temperature_labels(&words);
-        let temperature = cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks());
+        let temperature = cx.new(|cx| {
+            ChartView::new(spec, labels, &hub, cx)
+                .with_newest_marks()
+                .with_device_history(&snap)
+        });
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
@@ -1043,13 +1069,14 @@ impl GpuPage {
         self.words.probe_tooltip(self.probe)
     }
 
-    /// This page's demand part while it is active: the GPU component, and the inventory for the
-    /// adapter's vendor and static rows.
+    /// This page's demand part while it is active: the GPU component, the inventory for the
+    /// adapter's vendor and static rows, and the device metric history at 1 h, 24 h and 7 d.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             gpus: true,
             inventory: true,
+            device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
         }
     }
@@ -1180,8 +1207,7 @@ impl GpuPage {
             let spec = with_settings(placeholder_spec(self.row.idx, &theme), &self.settings);
             let labels = placeholder_labels(&self.words);
             let hub = self.hub.clone();
-            self.placeholder =
-                Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()));
+            self.placeholder = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
         }
         for view in [&self.memory, &self.temperature]
             .into_iter()
@@ -1316,9 +1342,7 @@ impl GpuPage {
                 Some(_) => {}
                 None => {
                     let (spec, labels) = (spec(), power_labels(&self.words));
-                    self.power = Some(
-                        cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()),
-                    );
+                    self.power = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
                     changed = true;
                 }
             }
@@ -1339,9 +1363,7 @@ impl GpuPage {
                 Some(_) => {}
                 None => {
                     let (spec, labels) = (spec(), clocks_labels(&self.words));
-                    self.clocks = Some(
-                        cx.new(|cx| ChartView::new(spec, labels, &hub, cx).with_newest_marks()),
-                    );
+                    self.clocks = Some(cx.new(|cx| history_chart(spec, labels, &hub, cx)));
                     changed = true;
                 }
             }
@@ -1516,8 +1538,12 @@ impl GpuPage {
         if new == self.settings {
             return;
         }
+        let range_moved = new.range_ns != self.settings.range_ns;
         self.settings = new;
         self.rebuild_all(cx);
+        if range_moved {
+            self.send_demand(cx);
+        }
         cx.notify();
     }
 
@@ -2580,7 +2606,7 @@ fn grid_spec(
             min: 0.0,
             max: 100.0,
         },
-        range_ns: s.range_ns,
+        range_ns: s.live_range_ns,
         smooth: s.smooth,
         cell_min_w: px(ENGINE_CELL_MIN_W * m.ui_scale),
         cell_h: px(ENGINE_CELL_H * m.ui_scale),
@@ -2611,8 +2637,13 @@ impl DevicePage for GpuPage {
             .gap(m.sp[4])
             .child(self.chart_box(&self.memory, MEMORY_ID, None, &m, window, cx))
             .child(self.chart_box(&self.temperature, TEMPERATURE_ID, None, &m, window, cx));
+        // The engine grid reads only the live series (crw.105).
+        let note = (self.probe != ProbeState::Missing && self.shown_cells > 0)
+            .then(|| live_only_note(&m, current(cx), cx))
+            .flatten();
         let mut page = v_flex()
             .w_full()
+            .children(note)
             .child(self.engines_element(window, cx))
             .child(row2);
         // Row 3: one chart takes the full width, two split it; none leaves no row.
