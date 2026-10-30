@@ -2,11 +2,11 @@
 //! restart", "Shutdown"; E13-009).
 //!
 //! Exactly one request is in flight: every call takes `&mut self`. A request is written as one
-//! frame, then the client waits with `poll` until the socket is readable or the deadline passes,
-//! then reads one frame. On any failure the client gives the child up before the error is
-//! returned: the child moves into a reaper that kills it and reaps it on a background thread, so
-//! the supervisor can start a new one, no zombie is left, and no caller ever waits for a killed
-//! child to exit (tasklens-cr0.30).
+//! frame, then the client reads one frame. Before every read of it the client waits with `poll`
+//! until the socket is readable, the deadline passes or the call is cancelled. On any failure
+//! the client gives the child up before the error is returned: the child moves into a reaper
+//! that kills it and reaps it on a background thread, so the supervisor can start a new one, no
+//! zombie is left, and no caller ever waits for a killed child to exit (tasklens-cr0.30).
 //!
 //! The probe is forked on its own long-lived thread, `tl-gpu-spawn`, never on the blocking pool
 //! (R-283). `PR_SET_PDEATHSIG` fires when the forking thread exits, and pool threads retire after
@@ -33,7 +33,6 @@ use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
-use rustix::net::sockopt::{Timeout, set_socket_timeout};
 use rustix::time::Timespec;
 use tl_model::gpu_proto::{
     ApiVersions, GPU_PROTO_VERSION, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure,
@@ -56,9 +55,6 @@ const EXIT_STATUS_GRACE: Duration = Duration::from_millis(100);
 
 /// The status text of a child that was still running when it was given up.
 const KILLED: &str = "killed";
-
-/// The smallest receive timeout set for the payload read. Zero would mean "no timeout".
-const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// The most `--api-versions` output kept: one frame of [`MAX_PROBE_FRAME`] and its prefix.
 const MAX_API_VERSIONS_OUTPUT: usize = MAX_PROBE_FRAME + 4;
@@ -254,52 +250,31 @@ impl ProbeClient {
             return Err(self.protocol(&e.to_string()));
         }
 
-        let revents = loop {
-            if cancel() {
-                self.child.give_up();
-                return Err(ProbeError::Cancelled);
-            }
-            let Some(left) = remaining(deadline, start.elapsed()) else {
-                self.child.give_up();
-                return Err(ProbeError::Deadline(deadline));
-            };
-            let mut fds = [PollFd::new(&self.child.sock, PollFlags::IN)];
-            match poll(&mut fds, Some(&timespec(left.min(CANCEL_POLL)))) {
-                // Timed out: the next turn checks for cancel and the deadline again.
-                Ok(0) => {}
-                Ok(_) => break fds[0].revents(),
-                Err(Errno::INTR) => {}
-                Err(e) => return Err(self.protocol(&format!("poll: {e}"))),
-            }
+        // Every read of the frame waits with `poll` first, so a child that stops mid-frame
+        // cannot hold this thread past a cancel or the deadline.
+        let mut reader = CancelRead {
+            file: &self.file,
+            start,
+            deadline,
+            cancel,
+            stopped: None,
         };
-        if !revents.contains(PollFlags::IN) {
-            // HUP or ERR with nothing to read: the child is exiting.
-            return Err(ProbeError::Exited(
-                self.exit_status_within(EXIT_STATUS_GRACE, cancel),
-            ));
-        }
-
-        // The prefix is there, but the payload may still be on its way. Bound that read by the
-        // rest of the deadline so a child that stops mid-frame cannot hold this thread.
-        let left = remaining(deadline, start.elapsed()).unwrap_or(MIN_READ_TIMEOUT);
-        if let Err(e) = set_socket_timeout(&self.file, Timeout::Recv, Some(left)) {
-            return Err(self.protocol(&format!("set read timeout: {e}")));
-        }
-        match read_frame::<_, ProbeResponse>(&mut self.file, MAX_PROBE_FRAME) {
-            Ok(resp) => Ok(resp),
-            Err(WireError::Eof | WireError::Truncated) => Err(ProbeError::Exited(
-                self.exit_status_within(EXIT_STATUS_GRACE, cancel),
-            )),
-            Err(WireError::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
+        let got = read_frame::<_, ProbeResponse>(&mut reader, MAX_PROBE_FRAME);
+        let stopped = reader.stopped;
+        match (got, stopped) {
+            (Ok(resp), _) => Ok(resp),
+            (Err(_), Some(Stop::Cancelled)) => {
+                self.child.give_up();
+                Err(ProbeError::Cancelled)
+            }
+            (Err(_), Some(Stop::Deadline)) => {
                 self.child.give_up();
                 Err(ProbeError::Deadline(deadline))
             }
-            Err(e) => Err(self.protocol(&e.to_string())),
+            (Err(WireError::Eof | WireError::Truncated), None) => Err(ProbeError::Exited(
+                self.exit_status_within(EXIT_STATUS_GRACE, cancel),
+            )),
+            (Err(e), None) => Err(self.protocol(&e.to_string())),
         }
     }
 
@@ -325,6 +300,57 @@ impl ProbeClient {
             }
             thread::sleep(SHUTDOWN_POLL);
         }
+    }
+}
+
+/// Why a [`CancelRead`] stopped before the frame was complete.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    Cancelled,
+    Deadline,
+}
+
+/// Reads the probe socket, waiting with `poll` in [`CANCEL_POLL`] slices before every read. A
+/// cancel or a missed deadline ends the read with an error and is recorded in `stopped`, so a
+/// frame that arrives in pieces, or stops halfway, never holds the caller (tasklens-cr0.30).
+struct CancelRead<'a> {
+    file: &'a File,
+    start: Instant,
+    deadline: Duration,
+    cancel: &'a dyn Fn() -> bool,
+    stopped: Option<Stop>,
+}
+
+impl CancelRead<'_> {
+    fn stop(&mut self, why: Stop) -> std::io::Error {
+        self.stopped = Some(why);
+        // Not `Interrupted`: `read_exact` would retry that.
+        std::io::Error::other(format!("{why:?}"))
+    }
+}
+
+impl Read for CancelRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if (self.cancel)() {
+                return Err(self.stop(Stop::Cancelled));
+            }
+            let Some(left) = remaining(self.deadline, self.start.elapsed()) else {
+                return Err(self.stop(Stop::Deadline));
+            };
+            let mut fds = [PollFd::new(self.file, PollFlags::IN)];
+            match poll(&mut fds, Some(&timespec(left.min(CANCEL_POLL)))) {
+                // Timed out: the next turn checks for cancel and the deadline again.
+                Ok(0) | Err(Errno::INTR) => {}
+                // HUP or ERR with nothing to read: the child is exiting. Read as EOF.
+                Ok(_) if !fds[0].revents().contains(PollFlags::IN) => return Ok(0),
+                Ok(_) => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Readable, so this read does not block.
+        let mut file = self.file;
+        file.read(buf)
     }
 }
 
@@ -824,6 +850,63 @@ mod tests {
         assert!(took < deadline + Duration::from_millis(100), "{took:?}");
         drop(client);
         assert!(not_reaped_yet(pid), "the caller waited for the child");
+        assert!(reaped_soon(pid), "the probe was not reaped");
+    }
+
+    /// A probe that sends part of a frame and stops: the 4-byte prefix for 16 payload bytes and
+    /// 2 of them. The pid is written after the bytes, so [`CancelAfter`] fires only once the
+    /// partial frame is on the socket.
+    fn partial_frame_probe(scripts: &Scripts) -> PathBuf {
+        let pid = scripts.0.join("pid");
+        scripts.script(
+            "partial",
+            &format!(
+                "printf '\\020\\000\\000\\000\\001\\002' >&3\necho $$ > '{}'\nexec sleep 30",
+                pid.display()
+            ),
+        )
+    }
+
+    #[test]
+    fn cancel_during_partial_frame_returns_at_once() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("partial-cancel");
+        let probe = partial_frame_probe(&scripts);
+        let cancel = CancelAfter::new(&scripts);
+        let start = Instant::now();
+        let got = ProbeClient::start_or_cancel(&probe, &[], &|| cancel.check());
+        let took = cancel.since_fired();
+        assert!(matches!(got, Err(ProbeError::Cancelled)), "{:?}", got.err());
+        assert!(took < Duration::from_millis(100), "{took:?}");
+        assert!(start.elapsed() < HELLO_DEADLINE, "{:?}", start.elapsed());
+        assert!(reaped_soon(scripts.pid()), "the probe was not reaped");
+    }
+
+    #[test]
+    fn deadline_during_partial_frame() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("partial-deadline");
+        let probe = partial_frame_probe(&scripts);
+        let mut client = ProbeClient::connect(&probe, &[]).expect("connect");
+        let pid = client.child.id();
+        // The partial frame is on the socket before the request starts.
+        let begin = Instant::now();
+        while !scripts.0.join("pid").exists() && begin.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let deadline = Duration::from_millis(200);
+        let req = ProbeRequest::Hello {
+            proto: GPU_PROTO_VERSION,
+        };
+        let start = Instant::now();
+        let got = client.request(&req, deadline, &never);
+        let took = start.elapsed();
+        assert!(
+            matches!(got, Err(ProbeError::Deadline(d)) if d == deadline),
+            "{got:?}"
+        );
+        assert!(took < deadline + Duration::from_millis(100), "{took:?}");
+        drop(client);
         assert!(reaped_soon(pid), "the probe was not reaped");
     }
 
