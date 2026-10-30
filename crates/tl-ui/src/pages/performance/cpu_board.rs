@@ -15,8 +15,9 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, FontWeight, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, Subscription, Window, div, px, size,
+    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, Styled as _, Subscription,
+    Window, div, px, size,
 };
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{CoreSmoothing, CoreSort};
@@ -200,18 +201,17 @@ impl CpuBoard {
             return;
         }
         let snap = Arc::clone(hub.read(cx).current());
-        let mut changed = false;
-        if devices {
-            changed |= self.sync_devices(&snap, cx);
-        }
-        if series && !changed {
+        let new_cpus = devices && self.sync_devices(&snap, cx);
+        let mut changed = new_cpus;
+        if series && !new_cpus {
             let runs = ChangedRuns::new(&ev.changed_series);
             if self.logical_ids.iter().any(|id| runs.contains(*id)) {
                 changed |= self.sync_values(&snap);
             }
         }
-        if system || changed {
-            changed |= self.sync_clocks(&snap, changed);
+        // New rows take the clocks again.
+        if system || new_cpus {
+            changed |= self.sync_clocks(&snap, new_cpus);
         }
         if changed {
             self.notify(cx);
