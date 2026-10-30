@@ -465,7 +465,7 @@ mod shared_range {
         })
     }
 
-    fn saved(r: &mut Rig) -> (OverviewRange, u32) {
+    fn saved(r: &mut Rig) -> (OverviewRange, u16) {
         r.vcx.update(|_, cx| {
             let p = &TlSettings::settings(cx).performance;
             (p.overview_range, p.graph_range_s)

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::TestAppContext;
+use gpui_kit::{AppContext as _, TestAppContext};
 use tl_model::settings::OverviewRange;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::cpu::CpuPage;
