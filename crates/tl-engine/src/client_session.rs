@@ -27,9 +27,12 @@
 //!   requests in engine id order and keep one per slot);
 //! - the new worker generation, for the requests the stopped one claimed (`RequestsLost`,
 //!   `EjectsLost`): `Lost`;
-//! - the engine supervisor, for the local session's requests when the reducer stops
-//!   (`ClientSessions::reducer_stopped`): `Lost`. The local session outlives the reducer; the
-//!   others end with it.
+//! - the engine supervisor, for every session's requests when the reducer stops
+//!   (`Reducer::stopped`): `Lost`. The local session outlives the reducer; the others end with
+//!   it.
+//!
+//! Actions end in the gate: its task sends the end, or the gate sends `Lost` for each action it
+//! aborts when it is dropped (`ActionGate`).
 //!
 //! The mapping of a request is removed exactly when its event is sent. A report about a request
 //! that has no mapping is not shown to any session and is counted in `ClientSessions::late`.
@@ -1004,23 +1007,26 @@ impl ClientSessions {
         }
     }
 
-    /// The reducer stops: it restarts or the engine shuts down. The local session outlives it,
-    /// so each of its active requests ends as `Lost`. A command still in the worker queue is
-    /// evicted first, under the lock a worker's claim takes, so the next reducer's workers never
-    /// run a request that already ended; the unclaimed commands of that worker queued before it
-    /// are skipped with it. A command a worker claimed died with that worker.
+    /// The reducer stops: it restarts or the engine shuts down. Each active scan, handle search
+    /// and eject of every session ends as `Lost`; the local session outlives the reducer, the
+    /// others end with it right after. A command still in the worker queue is evicted first,
+    /// under the lock a worker's claim takes, so the next reducer's workers never run a request
+    /// that already ended; the unclaimed commands of that worker queued before it are skipped
+    /// with it. A command a worker claimed died with that worker. The actions end in the gate
+    /// (`Reducer::stopped`).
     pub fn reducer_stopped(&mut self, progress: &CommandProgress) {
-        let local = &mut self.sessions[0];
-        for kind in MAPPED {
-            let ended: Vec<(u64, u64)> = local.requests[index(kind)]
-                .iter()
-                .map(|r| (r.engine, r.queued))
-                .collect();
-            for (engine, queued) in ended {
-                if let Some(source) = source(kind).filter(|_| queued != 0) {
-                    progress.evict(source, queued);
+        for session in &mut self.sessions {
+            for kind in MAPPED {
+                let ended: Vec<(u64, u64)> = session.requests[index(kind)]
+                    .iter()
+                    .map(|r| (r.engine, r.queued))
+                    .collect();
+                for (engine, queued) in ended {
+                    if let Some(source) = source(kind).filter(|_| queued != 0) {
+                        progress.evict(source, queued);
+                    }
+                    session.finish(kind, engine, RequestEnd::Lost, None);
                 }
-                local.finish(kind, engine, RequestEnd::Lost, None);
             }
         }
     }

@@ -40,6 +40,7 @@ use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
+use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
@@ -117,14 +118,20 @@ pub struct Components {
 
 /// Where one client session's action reports (ADR-018). `id` is the engine-wide id that the
 /// gate, `ActionFinished` and `ActionGate::finished` use. Events carry the request's own id, the
-/// session's, and go to `events`.
+/// session's, and go to `events`; the action's one `RequestEvent` goes to `requests`, which is
+/// `None` only where the session has no request channel (tests).
 #[derive(Clone, Debug)]
 pub struct ActionRoute {
     pub id: ActionId,
     pub events: async_channel::Sender<ActionEvent>,
+    pub requests: Option<async_channel::Sender<RequestEvent>>,
 }
 
 /// Action admission (E11). The reducer holds `None` until E11-A1 installs one.
+///
+/// Every routed request gets exactly one `RequestEvent` on `ActionRoute::requests`: from the
+/// gate when it refuses it, from the action task when it ends, or `Lost` when the gate is
+/// dropped while the action runs (`Reducer::stopped`).
 pub trait ActionGate: Send + 'static {
     fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>);
     /// `submit` for one client session: `req.id` is the session's own id and `route` says where
@@ -282,6 +289,16 @@ impl Reducer {
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
         }
+    }
+
+    /// The reducer stops: it restarts or the engine shuts down (ADR-004, ADR-018). Every active
+    /// request of every session ends as `Lost`: dropping the action gate aborts each action
+    /// still in flight and ends it, and `ClientSessions::reducer_stopped` ends the scans,
+    /// handle searches and ejects. `engine_session` calls it after every reducer run.
+    pub fn stopped(&mut self) {
+        drop(self.action_gate.take());
+        let progress = Arc::clone(&self.control.borrow().progress);
+        self.clients.reducer_stopped(&progress);
     }
 
     /// The loop: receive one message, drain until `DRAIN_MAX` messages in total, apply, publish

@@ -161,9 +161,8 @@ async fn engine_session(cx: &Cx, ep: &mut RootEndpoints, epoch: u32) -> Result<(
     let mut reducer = Reducer::new(epoch, ep.boot_id, control, ep.events_tx.clone());
     reducer.clients.set_local_requests(ep.requests_tx.clone());
     let result = run_session(cx, ep, &mut reducer, epoch).await;
-    // The local session outlives this reducer, so its requests end here.
-    let progress = Arc::clone(&reducer.control.borrow().progress);
-    reducer.clients.reducer_stopped(&progress);
+    // Every request still active ends here as `Lost`: the local session outlives this reducer.
+    reducer.stopped();
     ep.control = std::mem::replace(&mut reducer.control, placeholder_control());
     ep.next_sequence = reducer.sequence;
     result

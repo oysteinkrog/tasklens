@@ -43,7 +43,7 @@ use super::{
     ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
 };
 use crate::client_session::{
-    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, Report, RequestEnd,
+    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, Report, RequestEnd, RequestEvent,
 };
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
@@ -756,9 +756,11 @@ impl Reducer {
                     Some(tx) => tx.clone(),
                     None => self.events_tx.clone(),
                 };
+                let requests = self.clients.get(id).and_then(|s| s.requests_tx()).cloned();
                 let route = ActionRoute {
                     id: ActionId(self.clients.next_engine_id()),
                     events,
+                    requests,
                 };
                 if let Some(gate) = self.action_gate.as_mut() {
                     let exited = self.processes.exited_within_linger();
@@ -774,6 +776,16 @@ impl Reducer {
                         target: None,
                         state: ActionState::Rejected(RejectReason::Unsupported),
                     };
+                    let end = RequestEvent {
+                        kind: IdKind::Action,
+                        id: req.id.0,
+                        end: RequestEnd::Failed,
+                    };
+                    if let Some(tx) = &route.requests
+                        && tx.try_send(end).is_err()
+                    {
+                        tracing::debug!(target: "tasklens::engine", "request end dropped: channel closed");
+                    }
                     if route.events.try_send(event).is_err() {
                         tracing::debug!(target: "tasklens::engine", "action event dropped: queue full or closed");
                     }

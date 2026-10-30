@@ -20,7 +20,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -39,6 +39,7 @@ use tl_model::health::{HelperState, SourceId};
 use tl_model::helper_proto::{HelperReply, HelperRequest};
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
+use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::table::{Manager, StartupSource, UnitRef};
 use tl_model::time::BootId;
 use tl_ops::OpsError;
@@ -154,6 +155,8 @@ const USER_UNIT_FILE_DEADLINE: Duration = Duration::from_secs(10);
 pub const TIMED_OUT: &str = "timed out";
 /// The `Internal` text for a panic in an action task (ADR-015).
 const INTERNAL_ERROR: &str = "internal error";
+/// The `OutcomeUnknown` text of an action the gate aborted because the reducer stopped.
+pub const ENGINE_STOPPED: &str = "engine stopped";
 
 /// The ADR-006 deadline for one target of `kind`. `None` means no client-side timeout.
 ///
@@ -671,7 +674,7 @@ pub struct ActionCtx {
 
 /// The `ActionGate` the reducer calls (E11-A1). The only entry to `run_action`: every request
 /// passes `admit` first. It lives in the reducer, so a session restart drops it, and `Drop`
-/// aborts every action still in flight (ADR-004 task tree).
+/// aborts every action still in flight (ADR-004 task tree) and ends it as `Lost` (ADR-018).
 pub struct Gate {
     ctx: Arc<ActionCtx>,
     in_flight: FxHashMap<ActionId, InFlight>,
@@ -682,6 +685,11 @@ pub struct Gate {
 
 struct InFlight {
     handle: TaskHandle<()>,
+    /// The request's own id, which its events carry.
+    client: ActionId,
+    route: ActionRoute,
+    /// Set by whoever sends the action's `RequestEvent`: its task or `Drop`.
+    ended: Arc<AtomicBool>,
     kind: ActionKind,
     /// The admitted `Unit` targets, freed in `finished`.
     units: SmallVec<[UnitRef; 1]>,
@@ -714,6 +722,7 @@ impl ActionGate for Gate {
         let route = ActionRoute {
             id: req.id,
             events: self.ctx.events.clone(),
+            requests: None,
         };
         self.submit_routed(cx, req, view, route);
     }
@@ -727,7 +736,9 @@ impl ActionGate for Gate {
     ) {
         let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
             Admission::Reject(reason) => {
-                let ev = event(req.id, None, ActionState::Rejected(reason));
+                let state = ActionState::Rejected(reason);
+                send_end(&route, req.id, action_end(&state));
+                let ev = event(req.id, None, state);
                 if route.events.try_send(ev).is_err() {
                     tracing::debug!(target: "tasklens::action", id = req.id.0, "rejected event dropped: queue full or closed");
                 }
@@ -749,15 +760,32 @@ impl ActionGate for Gate {
             }
         }
         let id = route.id;
+        let client = req.id;
         let kind = req.kind.clone();
         let ctx = Arc::clone(&self.ctx);
+        let ended = Arc::new(AtomicBool::new(false));
+        let (task_route, task_ended) = (route.clone(), Arc::clone(&ended));
         let handle = cx
-            .spawn(move |cx| run_action_routed(cx, ctx, req, per_target, route))
+            .spawn(move |cx| async move {
+                run_with(
+                    &cx,
+                    &ctx,
+                    &task_route,
+                    &req,
+                    &per_target,
+                    dispatch_boxed,
+                    &task_ended,
+                )
+                .await;
+            })
             .expect("spawn");
         self.in_flight.insert(
             id,
             InFlight {
                 handle,
+                client,
+                route,
+                ended,
                 kind,
                 units,
                 manager,
@@ -775,12 +803,55 @@ impl ActionGate for Gate {
 }
 
 impl Drop for Gate {
-    /// `TaskHandle` does not cancel on drop. No event arrives for an aborted action; the UI's
-    /// `ActionTracker` times it out.
+    /// `TaskHandle` does not cancel on drop, so each action still in flight is aborted here. The
+    /// gate then ends it as `Lost`, unless its task already sent its end: the shared flag lets
+    /// exactly one of them send it. A best-effort `OutcomeUnknown` summary goes to the action
+    /// events too, for the UI's `ActionTracker`.
     fn drop(&mut self) {
         for flight in self.in_flight.values() {
             flight.handle.abort();
+            if flight.ended.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            send_end(&flight.route, flight.client, RequestEnd::Lost);
+            let summary = ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED));
+            if flight
+                .route
+                .events
+                .try_send(event(flight.client, None, summary))
+                .is_err()
+            {
+                tracing::debug!(target: "tasklens::action", id = flight.client.0, "summary of an aborted action dropped: queue full or closed");
+            }
         }
+    }
+}
+
+/// The `RequestEnd` an action with final summary `state` ends with.
+pub fn action_end(state: &ActionState) -> RequestEnd {
+    match state {
+        ActionState::Succeeded => RequestEnd::Done,
+        ActionState::Rejected(RejectReason::Busy) => RequestEnd::Busy,
+        ActionState::Rejected(_)
+        | ActionState::Failed(_)
+        | ActionState::OutcomeUnknown(_)
+        | ActionState::Started => RequestEnd::Failed,
+    }
+}
+
+/// Sends the action's one `RequestEvent` on its route. The channel is unbounded, so only a
+/// closed one refuses it: the session is gone.
+fn send_end(route: &ActionRoute, id: ActionId, end: RequestEnd) {
+    let Some(tx) = route.requests.as_ref() else {
+        return;
+    };
+    let ev = RequestEvent {
+        kind: IdKind::Action,
+        id: id.0,
+        end,
+    };
+    if tx.try_send(ev).is_err() {
+        tracing::debug!(target: "tasklens::action", id = id.0, ?end, "request end dropped: channel closed");
     }
 }
 
@@ -880,6 +951,7 @@ pub async fn run_action(
     let route = ActionRoute {
         id: req.id,
         events: actx.events.clone(),
+        requests: None,
     };
     run_action_routed(cx, actx, req, per_target, route).await;
 }
@@ -893,9 +965,22 @@ pub async fn run_action_routed(
     per_target: Vec<Option<RejectReason>>,
     route: ActionRoute,
 ) {
-    run_with(&cx, &actx, &route, &req, &per_target, dispatch_boxed).await;
+    let ended = AtomicBool::new(false);
+    run_with(
+        &cx,
+        &actx,
+        &route,
+        &req,
+        &per_target,
+        dispatch_boxed,
+        &ended,
+    )
+    .await;
 }
 
+/// The action task. `ended` is shared with the gate: the task sends the action's
+/// `RequestEvent` only when it sets the flag first, and with no await between, so an abort
+/// cannot come between the two. A cancelled task sends no end; the gate that aborted it does.
 async fn run_with(
     cx: &Cx,
     actx: &ActionCtx,
@@ -903,15 +988,24 @@ async fn run_with(
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
+    ended: &AtomicBool,
 ) {
     let events = &route.events;
     emit(events, cx, event(req.id, None, ActionState::Started)).await;
     let body = AssertUnwindSafe(run_body(cx, actx, events, req, per_target, dispatch))
         .catch_unwind()
         .await;
-    if body.is_err() {
-        emit(events, cx, event(req.id, None, internal_error())).await;
+    let summary = match body {
+        Ok(Some(summary)) => summary,
+        Ok(None) => return,
+        Err(_) => internal_error(),
+    };
+    if ended.swap(true, Ordering::AcqRel) {
+        tracing::debug!(target: "tasklens::action", id = req.id.0, "the gate ended the action first");
+        return;
     }
+    send_end(route, req.id, action_end(&summary));
+    emit(events, cx, event(req.id, None, summary)).await;
     if cx.is_cancel_requested() {
         tracing::debug!(target: "tasklens::action", id = req.id.0, "action cancelled, ActionFinished not sent");
         return;
@@ -928,7 +1022,8 @@ async fn run_with(
     }
 }
 
-/// Emits every final state and the summary.
+/// Emits every target's final state and returns the summary. `None` when the task was
+/// cancelled.
 async fn run_body(
     cx: &Cx,
     actx: &ActionCtx,
@@ -936,9 +1031,9 @@ async fn run_body(
     req: &ActionRequest,
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
-) {
+) -> Option<ActionState> {
     if cx.is_cancel_requested() {
-        return;
+        return None;
     }
     let summary = if req.kind.is_targetless() {
         // `privileged` only picks the deadline here: these kinds have no helper route.
@@ -947,10 +1042,7 @@ async fn run_body(
         // E29-014: through the helper. Without one the request is refused: it never falls back
         // to an unprivileged call.
         match actx.helper.as_deref() {
-            Some(h) => match helper::run_privileged(cx, actx, events, req, per_target, h).await {
-                Some(summary) => summary,
-                None => return,
-            },
+            Some(h) => helper::run_privileged(cx, actx, events, req, per_target, h).await?,
             None => ActionState::Rejected(RejectReason::Unsupported),
         }
     } else {
@@ -962,7 +1054,7 @@ async fn run_body(
         let mut states = Vec::with_capacity(req.targets.len());
         for (i, target) in req.targets.iter().enumerate() {
             if cx.is_cancel_requested() {
-                return;
+                return None;
             }
             let state = match (per_target.get(i).copied().flatten(), tree.as_mut()) {
                 (Some(reason), _) => ActionState::Rejected(reason),
@@ -980,7 +1072,7 @@ async fn run_body(
         }
         summarize(&states)
     };
-    emit(events, cx, event(req.id, None, summary)).await;
+    Some(summary)
 }
 
 /// Calls `process::kill_tree` once with the targets admission passed. A panic gives each of them
@@ -1549,6 +1641,100 @@ mod tests {
         (Gate::new(ctx), events, msgs)
     }
 
+    /// ADR-018, q4x76.17: a dropped gate (the reducer stopped) ends each action still in flight
+    /// as `Lost`, once. Action 1 already sent its own end and gets no second one; action 2 had
+    /// not run yet and gets `Lost`, a best-effort `OutcomeUnknown` summary and nothing else.
+    #[test]
+    fn dropped_gate_ends_each_action_in_flight_once() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (a_tx, a_rx) = async_channel::bounded(16);
+        let (b_tx, b_rx) = async_channel::bounded(16);
+        let (a_req_tx, a_req) = async_channel::unbounded();
+        let (b_req_tx, b_req) = async_channel::unbounded();
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let (mut gate, _own_events, mut msgs) = gate();
+                let f = Fixture::new();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &f.live,
+                    exited_within_linger: &f.exited,
+                };
+                let open = |id| {
+                    let mut req = request(
+                        ActionKind::OpenUri(Arc::from("https://example.org")),
+                        vec![],
+                    );
+                    req.id = ActionId(id);
+                    req
+                };
+                let route = ActionRoute {
+                    id: ActionId(10),
+                    events: a_tx,
+                    requests: Some(a_req_tx),
+                };
+                gate.submit_routed(&cx, open(1), &view, route);
+                assert!(matches!(
+                    msgs.recv(&cx).await,
+                    Ok(EngineMsg::ActionFinished { id: ActionId(10) })
+                ));
+                // `finished` is not called, so action 1 is still in flight.
+                let route = ActionRoute {
+                    id: ActionId(11),
+                    events: b_tx,
+                    requests: Some(b_req_tx),
+                };
+                gate.submit_routed(&cx, open(2), &view, route);
+                assert_eq!(gate.in_flight.len(), 2);
+                drop(gate);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(handle.is_finished());
+
+        let ends = |rx: &async_channel::Receiver<RequestEvent>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()
+        };
+        let end = |id, end| RequestEvent {
+            kind: IdKind::Action,
+            id,
+            end,
+        };
+        assert_eq!(ends(&a_req), [end(1, RequestEnd::Failed)]);
+        assert_eq!(ends(&b_req), [end(2, RequestEnd::Lost)]);
+        let states = |rx: &async_channel::Receiver<ActionEvent>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|e| (e.id, e.target, e.state))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            states(&a_rx),
+            [
+                (ActionId(1), None, ActionState::Started),
+                (
+                    ActionId(1),
+                    None,
+                    ActionState::Rejected(RejectReason::Unsupported)
+                ),
+            ]
+        );
+        assert_eq!(
+            states(&b_rx),
+            [(
+                ActionId(2),
+                None,
+                ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED))
+            )]
+        );
+    }
+
     /// ADR-018: two sessions send action id 1. Each run's events carry id 1 and go only to its
     /// own route; `ActionFinished` and `finished` use the engine ids.
     #[test]
@@ -1582,6 +1768,7 @@ mod tests {
                     let route = ActionRoute {
                         id: ActionId(engine),
                         events,
+                        requests: None,
                     };
                     gate.submit_routed(&cx, open.clone(), &view, route);
                 }
@@ -2122,8 +2309,10 @@ mod run_tests {
                     let route = ActionRoute {
                         id: req.id,
                         events: actx.events.clone(),
+                        requests: None,
                     };
-                    run_with(&cx, &actx, &route, &req, &per_target, dispatch).await;
+                    let ended = AtomicBool::new(false);
+                    run_with(&cx, &actx, &route, &req, &per_target, dispatch, &ended).await;
                 })
                 .expect("task is created");
             self.lab.scheduler.lock().schedule(task, 0);
