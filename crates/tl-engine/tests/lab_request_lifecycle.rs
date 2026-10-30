@@ -1,47 +1,60 @@
 //! Model-based test of the request lifecycle (q4x76.17, ADR-018): 5000 seeded runs of random
 //! interleavings of submit, cancel, queue copy, claim, progress, complete, fail, eviction by
-//! queue overflow, worker restart, session open and session end, over 2 to 4 sessions and
-//! every request kind: actions, scans, handle searches and ejects. The reducer is the real one;
-//! the two workers are fakes that behave as `process_detail` and `dbus_udisks` do: each copies
-//! the command list, claims each command through `CommandProgress::claim` later, and reports in
-//! slot order.
+//! queue overflow, worker restart, reducer restart, session open and session end, over 2 to 4
+//! sessions and every request kind: actions, scans, handle searches and ejects. The reducer is
+//! the real one; the two workers are fakes that behave as `process_detail` and `dbus_udisks` do:
+//! each copies the command list, claims each command through `CommandProgress::claim` later, and
+//! reports in slot order.
 //!
-//! Actions go through `ScriptGate`, which admits with the real `admit` (so the 17th action in
-//! flight gets `Rejected(Busy)`) and sends what `run_action_routed` sends: `Started`, target
-//! states, one summary, then `ActionFinished` with the engine id, which the model delivers to the
-//! reducer later. The real task's event order and its single `ActionFinished` are tested in
-//! `lab_actions.rs`; here the test checks the reducer's part: engine ids from the one counter,
-//! routing to the sending session's own channel, and `finished` freeing the gate's slot. When a
-//! session ends, the model drops its action receiver, as the server does.
+//! Actions run through the real `actions::Gate` and its action task. Each is an `OpenUri` whose
+//! opener waits until the model answers it, so the model picks when an action succeeds, fails,
+//! or is still running when the reducer stops. `ActionFinished` goes to a queue the model
+//! delivers to the reducer later.
 //!
-//! After every step: each event names a request its own session sent and is that request's
-//! first, or for an action comes before its summary; the end comes from the request's owner (`Busy` and an unclaimed `Lost` from the
-//! queue, `Done`, `Failed` and `Cancelled` as the worker reported, a claimed `Lost` only from a
-//! restart); no view shows another session's request or a running state after the end. At the
-//! end, after the workers and the gate finish everything: every request of an open session got
-//! exactly one end, no session has an active request left and the gate has no action in flight.
+//! A reducer restart takes the path `engine_session` takes between epochs: `Reducer::stopped`
+//! (which drops the gate), then a new reducer with the same worker control, sequence and local
+//! request channel, which continues the engine ids. The linked sessions end with the old
+//! reducer; the workers start a new generation.
+//!
+//! After every step: each event names a request its own session sent; nothing of a request
+//! comes after its end; an action's end comes after its summary and matches it; the end comes
+//! from the request's owner (`Busy` and an unclaimed `Lost` from the queue, `Done`, `Failed` and
+//! `Cancelled` as the worker or opener reported, a claimed or running `Lost` only from a worker
+//! or reducer restart); no view shows another session's request or a running state after the
+//! end; the gate holds exactly the actions the model expects. Right after a reducer restart,
+//! every request that was active has its end. At the end, after the workers and openers finish
+//! everything: every request of an open session got exactly one end, no session has an active
+//! request left and the gate has no action in flight.
 //!
 //! `TL_LIFECYCLE_SEED=<n>` runs one seed and prints its steps.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
-use rustc_hash::FxHashSet;
-use tl_engine::actions::{Admission, admit};
+use tl_engine::actions::startup::StartupPaths;
+use tl_engine::actions::{
+    ActionCtx, ActionOps, ENGINE_STOPPED, Gate, LaunchOutcome, MAX_IN_FLIGHT, Openers, action_end,
+};
 use tl_engine::client_session::{
     ClientMsg, ClientSessionId, IdKind, RequestEnd, RequestEvent, SessionLink,
 };
+use tl_engine::config::{EngineConfig, EngineMode};
+use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::reducer::apply::QUEUE_MAX;
 use tl_engine::reducer::{ActionGate, ActionRoute, AdmissionView, Publisher, Reducer};
 use tl_engine::source::{CommandProgress, QueuedCommand, WorkerCommand, WorkerControl};
 use tl_engine::update::{DetailsUpdate, DeviceDetailsUpdate, EngineMsg, SourceUpdate};
 use tl_model::actions::{
-    ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    RejectReason, Signal,
+    ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, LaunchSpec,
+    RejectReason,
 };
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::details::{
@@ -91,7 +104,127 @@ impl Rng {
 
 type RunOutput = Arc<Mutex<Option<(Reducer, Publisher)>>>;
 
-/// The reducer in a lab runtime, as in `lab_client_ids.rs`.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The model's URI for request `i`: the opener reads the request back from it.
+fn uri(i: usize) -> Arc<str> {
+    Arc::from(format!("req/{i}"))
+}
+
+/// The openers the real action task calls. Each `OpenUri` waits until the model answers it.
+#[derive(Default)]
+struct ModelOpeners {
+    /// By request index, the answer channel of each open call still waiting.
+    waiting: Mutex<HashMap<usize, async_channel::Sender<Result<(), ActionError>>>>,
+}
+
+impl ModelOpeners {
+    fn waiting(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = lock(&self.waiting).keys().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn is_waiting(&self, i: usize) -> bool {
+        lock(&self.waiting).contains_key(&i)
+    }
+
+    /// The opener of request `i` returns `result`. Its task runs at the next settle.
+    fn answer(&self, i: usize, result: Result<(), ActionError>) {
+        let tx = lock(&self.waiting).remove(&i).expect("a waiting call");
+        tx.try_send(result).expect("room for the answer");
+    }
+
+    /// Every waiting call fails: the tasks the stopped reducer's gate aborted wake up.
+    fn fail_all(&self) {
+        lock(&self.waiting).clear();
+    }
+}
+
+impl Openers for ModelOpeners {
+    fn open_uri(
+        &self,
+        _cx: &Cx,
+        target: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        let i = target
+            .strip_prefix("req/")
+            .and_then(|n| n.parse().ok())
+            .expect("a model URI");
+        let (tx, rx) = async_channel::bounded(1);
+        lock(&self.waiting).insert(i, tx);
+        Box::pin(async move {
+            rx.recv()
+                .await
+                .unwrap_or(Err(ActionError::PermissionDenied))
+        })
+    }
+
+    fn show_in_file_manager(
+        &self,
+        _cx: &Cx,
+        _path: &str,
+        _properties: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        panic!("the model only opens URIs")
+    }
+
+    fn launch(
+        &self,
+        _cx: &Cx,
+        _spec: &LaunchSpec,
+    ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>> {
+        panic!("the model only opens URIs")
+    }
+}
+
+struct NoOps;
+impl ActionOps for NoOps {}
+
+/// What the gate was given and holds. Shared between the gate in the reducer and the model.
+#[derive(Default)]
+struct GateLog {
+    /// Every route the reducer gave a gate: engine id, client id, events channel.
+    routes: Vec<(u64, ActionId, async_channel::Sender<ActionEvent>)>,
+    /// `Gate::in_flight` of the current gate after its last call.
+    in_flight: usize,
+}
+
+/// The real `Gate`, with a record of what the reducer gave it. Dropping it drops the gate.
+struct Recorded {
+    gate: Gate,
+    log: Arc<Mutex<GateLog>>,
+}
+
+impl ActionGate for Recorded {
+    fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
+        panic!("the reducer routes every action");
+    }
+
+    fn submit_routed(
+        &mut self,
+        cx: &Cx,
+        req: ActionRequest,
+        view: &AdmissionView<'_>,
+        route: ActionRoute,
+    ) {
+        lock(&self.log)
+            .routes
+            .push((route.id.0, req.id, route.events.clone()));
+        self.gate.submit_routed(cx, req, view, route);
+        lock(&self.log).in_flight = self.gate.in_flight();
+    }
+
+    fn finished(&mut self, id: ActionId) -> Option<SourceId> {
+        let source = self.gate.finished(id);
+        lock(&self.log).in_flight = self.gate.in_flight();
+        source
+    }
+}
+
+/// The reducer in a lab runtime, as in `lab_client_ids.rs`, with the real action gate.
 struct Rig {
     lab: LabRuntime,
     root: asupersync::types::RegionId,
@@ -99,13 +232,20 @@ struct Rig {
     publisher: Option<Publisher>,
     control: watch::Receiver<WorkerControl>,
     _wake_rx: async_channel::Receiver<()>,
+    epoch: u32,
+    local_requests: async_channel::Sender<RequestEvent>,
+    local_actions: async_channel::Sender<ActionEvent>,
+    openers: Arc<ModelOpeners>,
+    /// The `ActionFinished` messages the action tasks sent, which the model delivers.
+    finished: mpsc::Receiver<EngineMsg>,
+    finished_tx: mpsc::Sender<EngineMsg>,
+    gate_log: Arc<Mutex<GateLog>>,
 }
 
 impl Rig {
     fn new(
         local_requests: async_channel::Sender<RequestEvent>,
         local_actions: async_channel::Sender<ActionEvent>,
-        gate: Arc<Mutex<GateState>>,
     ) -> Self {
         let (control_tx, control) = watch::channel(WorkerControl::default());
         let (wake_tx, wake_rx) = async_channel::bounded(1);
@@ -116,26 +256,72 @@ impl Rig {
         };
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
         let root = lab.state.create_root_region(Budget::INFINITE);
-        let mut reducer = Reducer::new(1, BOOT, control_tx, local_actions);
-        reducer.clients.set_local_requests(local_requests);
-        reducer.action_gate = Some(Box::new(ScriptGate(gate)));
-        Rig {
+        let (finished_tx, finished) = mpsc::channel(256);
+        let mut rig = Rig {
             lab,
             root,
-            reducer: Some(reducer),
+            reducer: None,
             publisher: Some(publisher),
             control,
             _wake_rx: wake_rx,
-        }
+            epoch: 1,
+            local_requests,
+            local_actions,
+            openers: Arc::default(),
+            finished,
+            finished_tx,
+            gate_log: Arc::default(),
+        };
+        let mut reducer = Reducer::new(1, BOOT, control_tx, rig.local_actions.clone());
+        reducer
+            .clients
+            .set_local_requests(rig.local_requests.clone());
+        reducer.action_gate = Some(rig.gate());
+        rig.reducer = Some(reducer);
+        rig
+    }
+
+    /// A new real gate, as the engine's action gate hook makes one per reducer.
+    fn gate(&self) -> Box<dyn ActionGate> {
+        let openers: Arc<dyn Openers> = self.openers.clone();
+        let ctx = ActionCtx {
+            events: self.local_actions.clone(),
+            msgs: self.finished_tx.clone(),
+            ops: Arc::new(NoOps),
+            boot_id: BOOT,
+            uid: 1000,
+            config: Arc::new(EngineConfig::new(
+                EngineMode::Full,
+                PathBuf::from("/nonexistent"),
+            )),
+            systemd_system: ManagerConnSlot::new(),
+            systemd_user: ManagerConnSlot::new(),
+            openers: Some(openers),
+            helper: None,
+            destroy_support_sent: AtomicBool::new(false),
+            unit_bus_override: None,
+            startup_paths: StartupPaths::from_env(),
+        };
+        lock(&self.gate_log).in_flight = 0;
+        Box::new(Recorded {
+            gate: Gate::new(Arc::new(ctx)),
+            log: Arc::clone(&self.gate_log),
+        })
     }
 
     fn reducer(&self) -> &Reducer {
         self.reducer.as_ref().expect("the reducer is back")
     }
 
-    /// Applies `msgs` as one batch and publishes once.
+    /// Runs every task that is ready: the action tasks.
+    fn settle(&mut self) {
+        self.lab.run_until_idle();
+    }
+
+    /// Applies `msgs` as one batch and publishes once. The action tasks run too.
     fn run(&mut self, msgs: Vec<EngineMsg>) {
         if msgs.is_empty() {
+            self.settle();
             return;
         }
         let (tx, mut rx) = mpsc::channel::<EngineMsg>(msgs.len());
@@ -156,18 +342,37 @@ impl Rig {
                     .run(&cx, &mut rx, &mut publisher)
                     .await
                     .expect("no invariant violation");
-                *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((reducer, publisher));
+                *lock(&slot) = Some((reducer, publisher));
             })
             .expect("task is created");
         self.lab.scheduler.lock().schedule(task, 0);
         self.lab.run_until_idle();
-        let (reducer, publisher) = out
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .expect("run returned");
+        let (reducer, publisher) = lock(&out).take().expect("run returned");
         self.reducer = Some(reducer);
         self.publisher = Some(publisher);
+    }
+
+    /// The reducer stops and a new one starts, as `engine_session` does between epochs:
+    /// `Reducer::stopped` ends every active request and drops the gate; the worker control, the
+    /// sequence and the local request channel carry over, and the engine ids continue.
+    fn restart_reducer(&mut self) {
+        let mut old = self.reducer.take().expect("one run at a time");
+        old.stopped();
+        let control =
+            std::mem::replace(&mut old.control, watch::channel(WorkerControl::default()).0);
+        self.epoch += 1;
+        let mut next = Reducer::new(self.epoch, BOOT, control, self.local_actions.clone());
+        next.sequence = old.sequence;
+        next.clients.set_local_requests(self.local_requests.clone());
+        next.clients.resume_engine_ids(old.clients.last_engine_id());
+        drop(old);
+        next.action_gate = Some(self.gate());
+        self.reducer = Some(next);
+    }
+
+    /// The `ActionFinished` messages sent so far.
+    fn take_finished(&mut self) -> Vec<EngineMsg> {
+        std::iter::from_fn(|| self.finished.try_recv().ok()).collect()
     }
 
     fn progress(&self) -> Arc<CommandProgress> {
@@ -233,6 +438,8 @@ struct Req {
     /// batch that admitted it.
     engine: Option<u64>,
     end: Option<RequestEnd>,
+    /// An action's summary: its final state with no target.
+    summary: Option<ActionState>,
 }
 
 /// What the fake workers did, by engine id.
@@ -245,138 +452,6 @@ struct WorkerLog {
     replaced: HashSet<u64>,
     /// Claimed, not ended by a message, when their worker restarted.
     lost_in_restart: HashSet<u64>,
-}
-
-/// One admitted action, in flight until its `ActionFinished` reaches the reducer.
-struct Flight {
-    engine: u64,
-    client: ActionId,
-    events: async_channel::Sender<ActionEvent>,
-    started: bool,
-    /// Its summary was sent; only `ActionFinished` is left.
-    ended: bool,
-}
-
-/// What the scripted gate holds and did. Shared between the gate in the reducer and the model.
-#[derive(Default)]
-struct GateState {
-    flights: Vec<Flight>,
-    /// Every route the reducer gave the gate: engine id, client id, events channel.
-    routes: Vec<(u64, ActionId, async_channel::Sender<ActionEvent>)>,
-    /// The end the gate sent for each action, by engine id.
-    sent: HashMap<u64, RequestEnd>,
-    /// `ActionFinished` messages sent after a summary and not yet delivered, by engine id.
-    finished: Vec<u64>,
-}
-
-impl GateState {
-    /// Sends `event` as the action task does: a closed channel (an ended session) drops it.
-    fn emit(flight: &Flight, target: Option<u16>, state: ActionState) {
-        let _ = flight.events.try_send(ActionEvent {
-            id: flight.client,
-            target,
-            state,
-        });
-    }
-
-    /// The action at `at` sends its next event: `Started` first, then its target's state.
-    fn progress(&mut self, at: usize) {
-        let flight = &mut self.flights[at];
-        if flight.started {
-            Self::emit(flight, Some(0), ActionState::Succeeded);
-        } else {
-            flight.started = true;
-            Self::emit(flight, None, ActionState::Started);
-        }
-    }
-
-    /// The action at `at` sends its summary and then `ActionFinished`.
-    fn end(&mut self, at: usize, end: RequestEnd) {
-        let flight = &mut self.flights[at];
-        if !flight.started {
-            flight.started = true;
-            Self::emit(flight, None, ActionState::Started);
-        }
-        let state = match end {
-            RequestEnd::Done => ActionState::Succeeded,
-            RequestEnd::Failed => ActionState::Failed(ActionError::PermissionDenied),
-            _ => ActionState::OutcomeUnknown(Arc::from("timed out")),
-        };
-        Self::emit(flight, None, state);
-        flight.ended = true;
-        let engine = flight.engine;
-        self.sent.insert(engine, end);
-        self.finished.push(engine);
-    }
-
-    /// Indexes of the actions that have not sent their summary.
-    fn running(&self) -> Vec<usize> {
-        (0..self.flights.len())
-            .filter(|i| !self.flights[*i].ended)
-            .collect()
-    }
-}
-
-/// The action gate: the real `admit`, then the events `run_action_routed` sends, as the model
-/// says when.
-struct ScriptGate(Arc<Mutex<GateState>>);
-
-impl ActionGate for ScriptGate {
-    fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
-        panic!("the reducer routes every action");
-    }
-
-    fn submit_routed(
-        &mut self,
-        _cx: &Cx,
-        req: ActionRequest,
-        view: &AdmissionView<'_>,
-        route: ActionRoute,
-    ) {
-        let mut st = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        st.routes.push((route.id.0, req.id, route.events.clone()));
-        match admit(&req, view, st.flights.len(), &FxHashSet::default()) {
-            Admission::Reject(reason) => {
-                let end = if reason == RejectReason::Busy {
-                    RequestEnd::Busy
-                } else {
-                    RequestEnd::Failed
-                };
-                st.sent.insert(route.id.0, end);
-                let _ = route.events.try_send(ActionEvent {
-                    id: req.id,
-                    target: None,
-                    state: ActionState::Rejected(reason),
-                });
-            }
-            Admission::Run { .. } => st.flights.push(Flight {
-                engine: route.id.0,
-                client: req.id,
-                events: route.events,
-                started: false,
-                ended: false,
-            }),
-        }
-    }
-
-    fn finished(&mut self, id: ActionId) -> Option<SourceId> {
-        let mut st = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let at = st.flights.iter().position(|f| f.engine == id.0)?;
-        st.flights.remove(at);
-        Some(SourceId::Processes)
-    }
-}
-
-/// The end an action's final summary names, in the model's terms.
-fn action_end(state: &ActionState) -> RequestEnd {
-    match state {
-        ActionState::Rejected(RejectReason::Busy) => RequestEnd::Busy,
-        ActionState::Succeeded => RequestEnd::Done,
-        ActionState::OutcomeUnknown(_) => RequestEnd::Lost,
-        ActionState::Rejected(_) | ActionState::Failed(_) | ActionState::Started => {
-            RequestEnd::Failed
-        }
-    }
 }
 
 /// A fake worker's place in the command list.
@@ -670,9 +745,31 @@ struct Model {
     by_client: HashMap<(usize, usize, u64), usize>,
     workers: Workers,
     log: WorkerLog,
-    gate: Arc<Mutex<GateState>>,
+    /// Admitted actions whose `ActionFinished` has not reached the current gate.
+    in_gate: HashSet<usize>,
+    /// Actions in a gate when its reducer stopped: they may end `Lost`.
+    in_stopped_gate: HashSet<usize>,
+    /// Actions refused while the gate held `MAX_IN_FLIGHT`: they may end `Busy`.
+    gate_full: HashSet<usize>,
+    /// The end each answered opener call gives its action.
+    answered: HashMap<usize, RequestEnd>,
     steps: Vec<String>,
     trace: bool,
+}
+
+/// The model's kind index of `kind`: the `KINDS` index, or `ACTION`.
+fn kind_index(kind: IdKind) -> usize {
+    KINDS.iter().position(|k| *k == kind).unwrap_or(ACTION)
+}
+
+/// What the workers report when a reducer starts: the process targets and the disks, with
+/// results of no session (engine id 0).
+fn setup_msgs() -> Vec<EngineMsg> {
+    let mut setup: Vec<EngineMsg> = (0..3)
+        .map(|k| scan_msg(k, 0, ScanPhase::Finished))
+        .collect();
+    setup.push(disks_msg(&[None, None]));
+    setup
 }
 
 fn on(id: ClientSessionId, cmd: Command) -> EngineMsg {
@@ -690,8 +787,7 @@ impl Model {
     fn new(seed: u64, trace: bool) -> Self {
         let (local_tx, local_rx) = async_channel::unbounded();
         let (actions_tx, actions) = async_channel::unbounded();
-        let gate = Arc::new(Mutex::new(GateState::default()));
-        let rig = Rig::new(local_tx, actions_tx.clone(), Arc::clone(&gate));
+        let rig = Rig::new(local_tx, actions_tx.clone());
         let mut m = Model {
             seed,
             rng: Rng(seed),
@@ -711,15 +807,14 @@ impl Model {
             by_client: HashMap::new(),
             workers: Workers::default(),
             log: WorkerLog::default(),
-            gate,
+            in_gate: HashSet::new(),
+            in_stopped_gate: HashSet::new(),
+            gate_full: HashSet::new(),
+            answered: HashMap::new(),
             steps: Vec::new(),
             trace,
         };
-        // The process targets and the disks exist, with results of no session (engine id 0).
-        let mut setup: Vec<EngineMsg> = (0..3)
-            .map(|k| scan_msg(k, 0, ScanPhase::Finished))
-            .collect();
-        setup.push(disks_msg(&[None, None]));
+        let mut setup = setup_msgs();
         let extra = 1 + m.rng.below(3);
         for _ in 0..extra {
             setup.push(m.open_session());
@@ -774,16 +869,29 @@ impl Model {
         self.rig.run(msgs);
         self.read_events();
         self.check_views();
+        self.check_gate();
     }
 
+    /// Reads each session's action events, then its request ends. An action's events are all
+    /// sent before its end, so reading them first sees its summary before its end.
     fn read_events(&mut self) {
         for s in 0..self.sessions.len() {
+            let actions: Vec<ActionEvent> = match &self.sessions[s].actions {
+                Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+                None => Vec::new(),
+            };
+            for ev in actions {
+                self.action_event(s, &ev);
+            }
             while let Ok(ev) = self.sessions[s].requests.try_recv() {
                 if !self.sessions[s].open {
+                    // An action outlives its session; the server drops what it sends after.
+                    if ev.kind == IdKind::Action {
+                        continue;
+                    }
                     self.fail(&format!("event {ev:?} after session {s} ended"));
                 }
-                let kind = KINDS.iter().position(|k| *k == ev.kind).expect("kind");
-                let Some(&i) = self.by_client.get(&(s, kind, ev.id)) else {
+                let Some(&i) = self.by_client.get(&(s, kind_index(ev.kind), ev.id)) else {
                     self.fail(&format!(
                         "session {s} got {ev:?} for a request it never sent"
                     ));
@@ -793,21 +901,18 @@ impl Model {
                         "session {s} got {ev:?} after its end {first:?}: two terminal events"
                     ));
                 }
-                self.check_owner(i, ev.end);
+                if ev.kind == IdKind::Action {
+                    self.check_action_end(i, ev.end);
+                } else {
+                    self.check_owner(i, ev.end);
+                }
                 self.reqs[i].end = Some(ev.end);
-            }
-            let actions: Vec<ActionEvent> = match &self.sessions[s].actions {
-                Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
-                None => Vec::new(),
-            };
-            for ev in actions {
-                self.action_event(s, &ev);
             }
         }
     }
 
-    /// Action event `ev` reached session `s`: one of its own actions, before its summary. A
-    /// final state with no target is the summary, the action's end.
+    /// Action event `ev` reached session `s`: one of its own actions, before its end, with one
+    /// summary at most.
     fn action_event(&mut self, s: usize, ev: &ActionEvent) {
         let Some(&i) = self.by_client.get(&(s, ACTION, ev.id.0)) else {
             self.fail(&format!(
@@ -822,19 +927,54 @@ impl Model {
         if ev.target.is_some() || !ev.state.is_final() {
             return;
         }
-        let end = action_end(&ev.state);
-        let sent = self.reqs[i].engine.and_then(|e| {
-            let st = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
-            st.sent.get(&e).copied()
-        });
-        if sent != Some(end) {
-            let req = &self.reqs[i];
+        if let Some(first) = &self.reqs[i].summary {
             self.fail(&format!(
-                "action {} of session {s} (engine {:?}) ended {end:?}, but the gate sent {sent:?}",
-                req.client, req.engine
+                "session {s} got {ev:?} after the action's summary {first:?}"
             ));
         }
-        self.reqs[i].end = Some(end);
+        self.reqs[i].summary = Some(ev.state.clone());
+    }
+
+    /// Action `i` ended `end`: after its summary, which names the same end, from its one owner.
+    fn check_action_end(&self, i: usize, end: RequestEnd) {
+        let req = &self.reqs[i];
+        let Some(summary) = &req.summary else {
+            self.fail(&format!(
+                "action {} of session {} ended {end:?} before its summary",
+                req.client, req.session
+            ));
+        };
+        let ok = match end {
+            RequestEnd::Lost => {
+                self.in_stopped_gate.contains(&i)
+                    && *summary == ActionState::OutcomeUnknown(Arc::from(ENGINE_STOPPED))
+            }
+            RequestEnd::Busy => {
+                self.gate_full.contains(&i) && *summary == ActionState::Rejected(RejectReason::Busy)
+            }
+            RequestEnd::Done | RequestEnd::Failed => {
+                self.answered.get(&i) == Some(&end) && action_end(summary) == end
+            }
+            RequestEnd::Cancelled => false,
+        };
+        if !ok {
+            self.fail(&format!(
+                "action {} of session {} (engine {:?}) ended {end:?} with summary {summary:?}, \
+                 which is not its owner's end",
+                req.client, req.session, req.engine
+            ));
+        }
+    }
+
+    /// The gate holds exactly the admitted actions whose `ActionFinished` it has not had.
+    fn check_gate(&self) {
+        let held = lock(&self.rig.gate_log).in_flight;
+        if held != self.in_gate.len() {
+            self.fail(&format!(
+                "the gate holds {held} actions, the model {:?}",
+                self.in_gate
+            ));
+        }
     }
 
     /// No worker runs a request that already ended: the queue owner ended it, so it must not
@@ -984,6 +1124,7 @@ impl Model {
         let kind = slot.index();
         self.sessions[s].last_id[kind] += 1;
         let client = self.sessions[s].last_id[kind];
+        let i = self.reqs.len();
         let cmd = match slot {
             Slot::Scan(k) => Command::StringScan {
                 scan: ScanId(client),
@@ -1002,8 +1143,8 @@ impl Model {
             }),
             Slot::Action => Command::Action(ActionRequest {
                 id: ActionId(client),
-                kind: ActionKind::Signal(Signal::Term),
-                targets: std::iter::once(ActionTarget::Process(key(0))).collect(),
+                kind: ActionKind::OpenUri(uri(i)),
+                targets: Default::default(),
                 privileged: false,
             }),
         };
@@ -1013,8 +1154,8 @@ impl Model {
             client,
             engine: None,
             end: None,
+            summary: None,
         });
-        let i = self.reqs.len() - 1;
         self.by_client.insert((s, kind, client), i);
         (on(self.sessions[s].id, cmd), i)
     }
@@ -1046,15 +1187,24 @@ impl Model {
                 self.fail(&format!("engine id {e} given out twice"));
             }
             self.reqs[i].engine = engine;
+            if self.reqs[i].slot == Slot::Action {
+                // An admitted action's task ran and waits at its opener.
+                if self.rig.openers.is_waiting(i) {
+                    self.in_gate.insert(i);
+                } else if lock(&self.rig.gate_log).in_flight == MAX_IN_FLIGHT {
+                    self.gate_full.insert(i);
+                }
+            }
         }
         self.read_events();
         self.check_views();
+        self.check_gate();
     }
 
     /// The engine id the reducer gave session `s`'s action `client`. Fails unless the gate got
     /// it exactly once, routed to the session's own channel.
     fn action_route(&self, s: usize, client: u64) -> u64 {
-        let st = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let st = lock(&self.rig.gate_log);
         let own = &self.sessions[s].actions_tx;
         let mine: Vec<u64> = st
             .routes
@@ -1098,57 +1248,97 @@ impl Model {
         }
     }
 
-    /// The scripted gate moves one action: its next event, its summary, or the delivery of the
-    /// `ActionFinished` messages sent so far.
+    /// An opener call returns, or the `ActionFinished` messages sent so far reach the reducer.
     fn action_step(&mut self) {
-        let mut st = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
-        let running = st.running();
-        let (what, msgs) = match self.rng.below(3) {
-            0 if !running.is_empty() => {
-                let at = running[self.rng.below(running.len())];
-                st.progress(at);
-                (
-                    format!("action {} progresses", st.flights[at].engine),
-                    Vec::new(),
-                )
-            }
-            1 if !running.is_empty() => {
-                let at = running[self.rng.below(running.len())];
-                let end = match self.rng.below(4) {
-                    0 | 1 => RequestEnd::Done,
-                    2 => RequestEnd::Failed,
-                    _ => RequestEnd::Lost,
-                };
-                st.end(at, end);
-                (
-                    format!("action {} ends {end:?}", st.flights[at].engine),
-                    Vec::new(),
-                )
-            }
-            _ => {
-                let done = std::mem::take(&mut st.finished);
-                let what = format!("ActionFinished for {done:?} arrives");
-                let msgs = done
-                    .into_iter()
-                    .map(|e| EngineMsg::ActionFinished { id: ActionId(e) })
-                    .collect();
-                (what, msgs)
-            }
-        };
-        drop(st);
-        if msgs.is_empty() {
-            // Events only: the reducer has nothing to do.
-            self.steps.push(what);
-            self.read_events();
-        } else {
-            self.step(&what, msgs);
+        let waiting = self.rig.openers.waiting();
+        if waiting.is_empty() || self.rng.below(3) == 0 {
+            self.deliver_finished("");
+            return;
         }
+        let i = waiting[self.rng.below(waiting.len())];
+        let (end, result) = if self.rng.below(3) == 0 {
+            (RequestEnd::Failed, Err(ActionError::PermissionDenied))
+        } else {
+            (RequestEnd::Done, Ok(()))
+        };
+        self.rig.openers.answer(i, result);
+        self.answered.insert(i, end);
+        // Half the time its task runs now. Otherwise it runs with the next batch, and a reducer
+        // restart before that ends the action as `Lost`.
+        if self.rng.below(2) == 0 {
+            self.step(
+                &format!("the opener of action {i} returns {end:?}"),
+                Vec::new(),
+            );
+        } else {
+            self.steps.push(format!(
+                "the opener of action {i} returns {end:?}; its task waits"
+            ));
+        }
+    }
+
+    /// The `ActionFinished` messages sent so far reach the reducer, which frees their gate slots.
+    fn deliver_finished(&mut self, when: &str) {
+        let msgs = self.rig.take_finished();
+        let done: Vec<usize> = msgs
+            .iter()
+            .filter_map(|msg| match msg {
+                EngineMsg::ActionFinished { id } => self
+                    .reqs
+                    .iter()
+                    .position(|r| r.slot == Slot::Action && r.engine == Some(id.0)),
+                _ => None,
+            })
+            .collect();
+        for i in &done {
+            self.in_gate.remove(i);
+        }
+        self.step(&format!("{when}ActionFinished for {done:?} arrives"), msgs);
+    }
+
+    /// The reducer stops and a new one starts. Every request active then ends right away; the
+    /// linked sessions end with the old reducer, and the workers start a new generation.
+    fn reducer_restarts(&mut self) {
+        self.steps.push("the reducer restarts".to_owned());
+        if self.trace {
+            eprintln!("the reducer restarts");
+        }
+        let progress = self.rig.progress();
+        for target in [SourceId::ProcessDetail, SourceId::Udisks] {
+            // The new generation sends no `RequestsLost`: the reducer that knew them is gone.
+            let _ = self.workers.restart(target, &progress, &mut self.log);
+        }
+        self.workers.disk_last = [None, None];
+        self.in_stopped_gate.extend(self.in_gate.drain());
+        let active: Vec<usize> = (0..self.reqs.len())
+            .filter(|i| self.sessions[self.reqs[*i].session].open && self.reqs[*i].end.is_none())
+            .collect();
+        self.rig.restart_reducer();
+        // The aborted action tasks wake up; they must not end their actions again.
+        self.rig.openers.fail_all();
+        self.rig.settle();
+        self.read_events();
+        for i in active {
+            let req = &self.reqs[i];
+            if req.end.is_none() {
+                self.fail(&format!(
+                    "request {i} ({:?} {} of session {}, engine {:?}) got no end when the \
+                     reducer stopped",
+                    req.slot, req.client, req.session, req.engine
+                ));
+            }
+        }
+        for s in 1..self.sessions.len() {
+            self.sessions[s].open = false;
+            self.sessions[s].actions = None;
+        }
+        self.step("the new reducer starts", setup_msgs());
     }
 
     fn one_op(&mut self) {
         let open = self.open_sessions();
         let s = open[self.rng.below(open.len())];
-        match self.rng.below(112) {
+        match self.rng.below(114) {
             0..=29 => {
                 let n = 1 + self.rng.below(3);
                 let slots = (0..n).map(|_| self.random_slot()).collect();
@@ -1231,7 +1421,8 @@ impl Model {
                 let msg = self.open_session();
                 self.step("a session opens", vec![msg]);
             }
-            _ => self.action_step(),
+            100..=111 => self.action_step(),
+            _ => self.reducer_restarts(),
         }
     }
 
@@ -1254,25 +1445,14 @@ impl Model {
                         .report(slot, engine, Some(RequestEnd::Done), &mut self.log),
                 );
             }
-            {
-                let mut st = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
-                for at in st.running() {
-                    st.end(at, RequestEnd::Done);
-                }
-                out.extend(
-                    std::mem::take(&mut st.finished)
-                        .into_iter()
-                        .map(|e| EngineMsg::ActionFinished { id: ActionId(e) }),
-                );
+            for i in self.rig.openers.waiting() {
+                self.rig.openers.answer(i, Ok(()));
+                self.answered.insert(i, RequestEnd::Done);
             }
             self.step("drain", out);
+            self.deliver_finished("drain: ");
         }
-        let in_flight = self
-            .gate
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .flights
-            .len();
+        let in_flight = lock(&self.rig.gate_log).in_flight;
         if in_flight != 0 {
             self.fail(&format!(
                 "the gate has {in_flight} actions in flight after the drain"
@@ -1329,8 +1509,8 @@ fn every_request_ends_once_on_its_own_session() {
     for seed in 0..RUNS {
         run_seed(seed, false, &mut seen);
     }
-    // The runs reach every end of every kind. Actions have no cancel; their `Lost` is an
-    // `OutcomeUnknown` summary.
+    // The runs reach every end of every kind. Actions have no cancel; they are lost only when
+    // the reducer stops.
     for (kind, name) in KIND_NAMES.iter().enumerate() {
         for end in [
             RequestEnd::Done,
