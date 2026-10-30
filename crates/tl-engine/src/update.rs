@@ -154,6 +154,11 @@ pub enum DeviceDetailsUpdate {
     /// same disk ran, or a `seq` at or below the disk's last one. Udisks sends it so the reducer
     /// can end the request (ADR-018).
     EjectDropped(u64),
+    /// A new udisks generation started after one stopped. Ejects whose command was queued at or
+    /// before `through`, the last one the old generation took, ended with it (ADR-018).
+    EjectsLost {
+        through: u64,
+    },
 }
 
 /// Helper session state (R-150 item 1).
@@ -365,6 +370,12 @@ pub enum DetailsUpdate {
     /// scan limit pushed it out, or its process left the demand. The reducer ends the request
     /// (ADR-018).
     ScanDropped(ScanId),
+    /// A new process detail generation started after one stopped. Scans and handle searches
+    /// whose command was queued at or before `through`, the last one the old generation took,
+    /// ended with it (ADR-018).
+    RequestsLost {
+        through: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -446,7 +457,9 @@ pub fn source_of(update: &SourceUpdate) -> Option<SourceId> {
             DeviceDetailsUpdate::Batteries(_) | DeviceDetailsUpdate::OnBattery(_) => {
                 SourceId::UPower
             }
-            DeviceDetailsUpdate::EjectDropped(_) => SourceId::Udisks,
+            DeviceDetailsUpdate::EjectDropped(_) | DeviceDetailsUpdate::EjectsLost { .. } => {
+                SourceId::Udisks
+            }
         }),
         SourceUpdate::Helper(_) => None,
         SourceUpdate::Setup(_) => None,

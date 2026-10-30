@@ -68,7 +68,8 @@
 //! UI-PWN-017). A scan whose process leaves the demand stops without a payload: its window
 //! closed. Every scan that stops without a payload (that one, one replaced by a newer scan of
 //! its process, one pushed out at `DETAILS_MAX`) sends `DetailsUpdate::ScanDropped`, so the
-//! reducer can end its client's request (ADR-018).
+//! reducer can end its client's request (ADR-018). A new generation after a restart first sends
+//! `DetailsUpdate::RequestsLost`: the scans and handle searches the old one took died with it.
 //!
 //! Handle search (PROC-096, tasklens-dwy.3): `HandleSearch` queues one search over the open
 //! handles of every process, and the next sample starts it with `HandleSearch::new`, so the proc
@@ -128,6 +129,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use asupersync::channel::mpsc;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
 use asupersync::{Cx, Outcome, Time};
@@ -191,7 +193,7 @@ use crate::config::{EngineConfig, EngineMode};
 use crate::helper::{HelperCallError, HelperHandle, HelperReadError, HelperStream};
 use crate::source::{self, Source, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
-use crate::update::{DetailsUpdate, PssEntry, SourceUpdate, WorkerError};
+use crate::update::{DetailsUpdate, EngineMsg, PssEntry, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
 use crate::workers::handle_search::HandleSearch;
 use crate::workers::processes::{HELPER_READS_MAX, MAX_INTERVAL_MS, MIN_INTERVAL_MS, fd_list};
@@ -1383,6 +1385,21 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
 /// `source::run` for the detail reads, with `HelperDetailReads` and `HelperSearchReads` beside
 /// it when the session has a helper.
 pub async fn run(cx: Cx, io: WorkerIo, mut src: ProcessDetailSource) -> Outcome<(), WorkerError> {
+    // The scans and handle searches an earlier generation took ended with it: the reducer ends
+    // their requests (ADR-018). Later queued ones this generation runs.
+    let through = io
+        .control
+        .borrow_and_clone()
+        .progress
+        .started(SourceId::ProcessDetail);
+    if through > 0 {
+        let lost = SourceUpdate::Details(DetailsUpdate::RequestsLost { through });
+        match io.updates.send(&cx, EngineMsg::Source(lost)).await {
+            Ok(()) => {}
+            Err(mpsc::SendError::Cancelled(_)) => return Outcome::Ok(()),
+            Err(_) => return Outcome::Err(WorkerError::Closed),
+        }
+    }
     let Some(handle) = io.shared.helper.clone() else {
         return source::run(cx, io, src).await;
     };

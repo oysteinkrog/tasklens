@@ -18,13 +18,23 @@
 //! own scans, handle search and ejects, under its own ids. The local session is mapped the same
 //! way, so two windows never see each other's results.
 //!
-//! A scan, search or eject mapping is active from the request until its end: a terminal state in
-//! the worker's update, a newer request of the same slot in one (the workers handle each slot's
-//! requests in order and keep one per slot), or the worker's `ScanDropped` or `EjectDropped`. It
-//! is never dropped for being old. A session has at most `ACTIVE_MAX` active requests per kind;
-//! one more is refused as Busy. An ended mapping stays only while the shared details or device
-//! details still show its engine id, so the session keeps seeing a finished result under its own
-//! id. Actions keep no mapping: the gate routes each one by engine id until `ActionFinished`, and
+//! A scan, search or eject mapping lives as long as its request. The request ends on a terminal
+//! state in the worker's update, on a newer request in the same slot in one (the workers handle
+//! each slot's requests in order and keep one per slot), on the worker's `ScanDropped` or
+//! `EjectDropped`, when its command falls off the worker queue before the worker took it, or when
+//! the worker generation that took it stops (`RequestsLost`, `EjectsLost`). The mapping is removed
+//! at the publish after the end, once the session's views have been built from it one last time.
+//! Nothing is dropped for being old. A session has at most `ACTIVE_MAX` active requests per kind;
+//! one more is refused as Busy.
+//!
+//! The session's views keep showing a finished result under the session's own id: a view is
+//! only rebuilt from the shared value when that value changes, so a terminal state the worker
+//! reported stays as the session saw it. A request that ended without a terminal state of its
+//! own (refused as Busy, lost, or stopped by the worker) is shown in its slot as one: a failed or
+//! cancelled scan, a failed or stopped handle search, a failed eject. That stays until the session
+//! sends a new request in the slot, the slot leaves the shared data, or the session ends.
+//!
+//! Actions keep no mapping: the gate routes each one by engine id until `ActionFinished`, and
 //! runs at most `MAX_ACTIONS_IN_FLIGHT` (16) at once, below `ACTIVE_MAX`.
 //!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
@@ -38,15 +48,17 @@ use rustc_hash::FxHashMap;
 use tl_model::actions::ActionEvent;
 use tl_model::command::Command;
 use tl_model::details::{
-    DetailTab, DetailTarget, DetailsSnapshot, HandleSearchState, ScanId, SearchId, StringScanState,
-    TabPayload, TabSlot,
+    DetailTab, DetailTarget, DetailsSnapshot, HandlePhase, HandleSearchState, ScanId, ScanPhase,
+    SearchId, StringScanState, TabPayload, TabSlot,
 };
+use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
-    ServicesSnapshot, Snapshot, StartupSnapshot,
+    EjectState, ServicesSnapshot, Snapshot, StartupSnapshot,
 };
 use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery};
+use tl_model::validity::Validity;
 
 use crate::reducer::sys_table::{self, SysTableInput};
 use crate::reducer::{Components, bump, sys_table_index};
@@ -66,6 +78,14 @@ pub const SESSION_BITS: [ComponentMask; 4] = [
 /// as Busy until one of them ends.
 pub const ACTIVE_MAX: usize = 64;
 
+/// The failure text of a request refused as Busy.
+pub const BUSY_TEXT: &str = "Too many requests are running";
+/// The failure text of a request the engine lost: its command fell off the worker queue, or the
+/// worker restarted while it ran.
+pub const LOST_TEXT: &str = "The engine lost the request";
+/// The failure text of an eject the worker dropped or a newer eject of the disk replaced.
+pub const STOPPED_TEXT: &str = "Another eject of this disk ran instead";
+
 /// The client-chosen ids the reducer maps into the engine-wide namespace.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IdKind {
@@ -80,6 +100,14 @@ pub enum IdKind {
 impl IdKind {
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// The snapshot part that shows requests of this kind.
+    fn view_bit(self) -> ComponentMask {
+        match self {
+            IdKind::Scan | IdKind::Search => ComponentMask::DETAILS,
+            IdKind::Eject => ComponentMask::DEVICE_DETAILS,
+        }
     }
 }
 
@@ -110,15 +138,30 @@ impl IdSlot {
 pub enum MapError {
     #[error("session not open")]
     NoSession,
+    /// The session's views show the request as failed with `BUSY_TEXT`.
     #[error("{ACTIVE_MAX} requests of this kind are active")]
     Busy,
+}
+
+/// Why a request ended without a terminal state of its own in the shared data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EndReason {
+    /// Refused at admission: `ACTIVE_MAX` requests of its kind were active.
+    Busy,
+    /// Its command fell off the worker queue before the worker took it, or the worker
+    /// generation that took it stopped.
+    Lost,
+    /// The worker dropped it without a result, or a newer request in its slot replaced it.
+    Stopped,
 }
 
 struct IdEntry {
     client: u64,
     engine: u64,
     slot: IdSlot,
-    /// False once the request ended. The entry then stays only while its engine id is shown.
+    /// The worker queue `seq` of its command, 0 until it is forwarded.
+    queued: u64,
+    /// False once the request ended. The entry is removed at the next publish.
     active: bool,
 }
 
@@ -131,29 +174,22 @@ impl IdMap {
         self.0.iter().filter(|e| e.active).count()
     }
 
-    /// Ends the request with engine id `engine`. False when this map does not have it.
-    fn end(&mut self, engine: u64) -> bool {
-        match self.0.iter_mut().find(|e| e.engine == engine) {
-            Some(e) => {
-                e.active = false;
-                true
-            }
-            None => false,
-        }
+    /// The engine ids of the active requests in `slot` older than `engine`.
+    fn older(&self, slot: &IdSlot, engine: u64) -> Vec<u64> {
+        self.0
+            .iter()
+            .filter(|e| e.active && e.engine < engine && e.slot == *slot)
+            .map(|e| e.engine)
+            .collect()
     }
 
-    /// Ends the requests in `slot` older than `engine`.
-    fn end_older(&mut self, slot: &IdSlot, engine: u64) {
-        for e in &mut self.0 {
-            if e.engine < engine && e.slot == *slot {
-                e.active = false;
-            }
-        }
-    }
-
-    /// Drops the ended entries whose engine id is not in `shown`.
-    fn prune(&mut self, shown: &[u64]) {
-        self.0.retain(|e| e.active || shown.contains(&e.engine));
+    /// The engine ids of the active requests whose command was queued at or before `seq`.
+    fn queued_through(&self, seq: u64) -> Vec<u64> {
+        self.0
+            .iter()
+            .filter(|e| e.active && e.queued != 0 && e.queued <= seq)
+            .map(|e| e.engine)
+            .collect()
     }
 
     /// The engine id of the newest active request with `client`.
@@ -170,14 +206,90 @@ impl IdMap {
     }
 }
 
-/// The last shared `Arc`s this session rewrote and what they became, so an unchanged shared
-/// payload keeps its rewritten `Arc` (ADR-003 pointer equality). `None` means hidden.
+/// A request that ended without a terminal state of its own, as the session's views show it.
+struct Ended {
+    slot: IdSlot,
+    /// Orders it against the session's other requests in the slot.
+    engine: u64,
+    shown: EndedState,
+}
+
+enum EndedState {
+    Scan(Arc<TabPayload>),
+    Search(Arc<HandleSearchState>),
+    Eject((u64, EjectState)),
+}
+
+impl Ended {
+    fn new(slot: IdSlot, client: u64, engine: u64, reason: EndReason) -> Self {
+        let failed = |text: &str| Arc::<str>::from(text);
+        let shown = match &slot {
+            IdSlot::Scan(_) => {
+                let phase = match reason {
+                    EndReason::Busy => ScanPhase::Failed(failed(BUSY_TEXT)),
+                    EndReason::Lost => ScanPhase::Failed(failed(LOST_TEXT)),
+                    EndReason::Stopped => ScanPhase::Cancelled,
+                };
+                EndedState::Scan(Arc::new(TabPayload::Strings(Arc::new(StringScanState {
+                    scan: ScanId(client),
+                    progress_pct: 0,
+                    found: 0,
+                    chunks: Arc::from([]),
+                    phase,
+                }))))
+            }
+            IdSlot::Search => EndedState::Search(Arc::new(HandleSearchState {
+                search: SearchId(client),
+                phase: match reason {
+                    EndReason::Busy | EndReason::Lost => HandlePhase::Failed,
+                    EndReason::Stopped => HandlePhase::Stopped,
+                },
+                progress_pct: 0,
+                total_handles: 0,
+                chunks: Arc::from([]),
+                searched: 0,
+                total: 0,
+                skipped: 0,
+            })),
+            IdSlot::Eject(_) => {
+                let text = match reason {
+                    EndReason::Busy => BUSY_TEXT,
+                    EndReason::Lost => LOST_TEXT,
+                    EndReason::Stopped => STOPPED_TEXT,
+                };
+                EndedState::Eject((client, EjectState::Failed(failed(text))))
+            }
+        };
+        Ended {
+            slot,
+            engine,
+            shown,
+        }
+    }
+}
+
+/// The index of the disk with kernel name `disk` in the device catalog.
+fn disk_idx(c: &Components, disk: &str) -> Option<DeviceIdx> {
+    c.devices
+        .entries
+        .iter()
+        .find(|e| matches!(&e.identity, DeviceIdentity::Disk { name, .. } if **name == *disk))
+        .map(|e| e.idx)
+}
+
+/// The last shared values this session rewrote and what they became. An unchanged shared value
+/// keeps what it became: its rewritten `Arc` (ADR-003 pointer equality), and a finished result
+/// its session's id after the mapping is gone. `None` means hidden.
 #[derive(Default)]
 struct ViewCache {
     strings: FxHashMap<DetailTarget, (Arc<TabPayload>, Option<Arc<TabPayload>>)>,
     handle_search: Option<(Arc<HandleSearchState>, Option<Arc<HandleSearchState>>)>,
+    /// The whole disk list. Cleared when the session's ended ejects change.
     disks: Option<(DiskList, DiskList)>,
+    ejects: FxHashMap<DeviceIdx, (Eject, Option<Eject>)>,
 }
+
+type Eject = (u64, EjectState);
 
 type DiskList = Arc<[(DeviceIdx, DiskDetails)]>;
 
@@ -259,9 +371,11 @@ pub struct ClientSession {
     /// ejects, under its own ids. The header is the shared one.
     details: Arc<DetailsSnapshot>,
     device_details: Arc<DeviceDetailsSnapshot>,
-    /// Client ids to engine ids, in `IdKind` order: the active requests and the ended ones that
-    /// are still shown.
+    /// Client ids to engine ids, in `IdKind` order: the active requests, and until the next
+    /// publish the ones that just ended.
     ids: [IdMap; 3],
+    /// Requests that ended without a terminal state of their own, at most one per slot.
+    ended: Vec<Ended>,
     cache: ViewCache,
     /// Parts this session rebuilt since its last publish, plus `DETAILS` and `DEVICE_DETAILS`
     /// when its views of those must be built.
@@ -286,6 +400,7 @@ impl ClientSession {
             details: Arc::clone(&empty.details),
             device_details: Arc::clone(&empty.device_details),
             ids: Default::default(),
+            ended: Vec::new(),
             cache: ViewCache::default(),
             dirty: ComponentMask::DETAILS | ComponentMask::DEVICE_DETAILS,
             published: [0; SESSION_BITS.len()],
@@ -396,42 +511,98 @@ impl ClientSession {
         self.ids[kind.index()].active()
     }
 
-    /// The session's mappings of `kind`: the active ones and the ended ones still shown.
+    /// The session's mappings of `kind`: the active ones, and until the next publish the ones
+    /// that just ended.
     pub fn mapped(&self, kind: IdKind) -> usize {
         self.ids[kind.index()].0.len()
     }
 
-    /// Drops the ended mappings whose engine id `c` no longer shows: the scan in each target's
-    /// Strings tab, the handle search and each disk's eject.
-    fn prune_ids(&mut self, c: &Components) {
-        if self.ids.iter().all(|m| m.0.iter().all(|e| e.active)) {
-            return;
-        }
-        let scans: Vec<u64> = c
-            .details
-            .targets
-            .values()
-            .filter_map(
-                |detail| match detail.tab(DetailTab::Strings).payload.as_deref()? {
-                    TabPayload::Strings(state) => Some(state.scan.0),
-                    _ => None,
-                },
-            )
-            .collect();
-        let searches: Vec<u64> = c.details.handle_search.iter().map(|s| s.search.0).collect();
-        let ejects: Vec<u64> = c
-            .device_details
-            .disks
-            .iter()
-            .filter_map(|(_, disk)| disk.eject.as_ref().map(|(seq, _)| *seq))
-            .collect();
-        self.ids[IdKind::Scan.index()].prune(&scans);
-        self.ids[IdKind::Search.index()].prune(&searches);
-        self.ids[IdKind::Eject.index()].prune(&ejects);
+    /// Requests of `kind` this session's views show as ended without a terminal state of their
+    /// own (Busy, lost or stopped).
+    pub fn ended(&self, kind: IdKind) -> usize {
+        self.ended.iter().filter(|e| e.slot.kind() == kind).count()
     }
 
-    /// `shared` with this session's string scans and handle search under its own ids, and the
-    /// other sessions' hidden. Returns `shared` itself when nothing changes.
+    /// Ends request `engine` of `kind` when this session has it. `reason` is `None` when the
+    /// shared data shows its terminal state, else the views show the end in its slot. False
+    /// when the session does not have the request.
+    fn end(&mut self, kind: IdKind, engine: u64, reason: Option<EndReason>) -> bool {
+        let Some(entry) = self.ids[kind.index()]
+            .0
+            .iter_mut()
+            .find(|e| e.engine == engine)
+        else {
+            return false;
+        };
+        if !entry.active {
+            return true;
+        }
+        entry.active = false;
+        let (slot, client) = (entry.slot.clone(), entry.client);
+        self.dirty |= kind.view_bit();
+        if let Some(reason) = reason {
+            self.show_end(slot, client, engine, reason);
+        }
+        true
+    }
+
+    /// Shows request `engine` in `slot` as ended for `reason`, unless the session sent a newer
+    /// request in that slot.
+    fn show_end(&mut self, slot: IdSlot, client: u64, engine: u64, reason: EndReason) {
+        let kind = slot.kind();
+        let newer = self.ids[kind.index()]
+            .0
+            .iter()
+            .any(|e| e.slot == slot && e.engine > engine)
+            || self
+                .ended
+                .iter()
+                .any(|e| e.slot == slot && e.engine > engine);
+        if newer {
+            return;
+        }
+        self.forget_end(&slot);
+        self.ended.push(Ended::new(slot, client, engine, reason));
+        self.dirty |= kind.view_bit();
+        if kind == IdKind::Eject {
+            self.cache.disks = None;
+        }
+    }
+
+    /// Stops showing the end of a request in `slot`.
+    fn forget_end(&mut self, slot: &IdSlot) {
+        let before = self.ended.len();
+        self.ended.retain(|e| e.slot != *slot);
+        if self.ended.len() != before {
+            self.dirty |= slot.kind().view_bit();
+            if slot.kind() == IdKind::Eject {
+                self.cache.disks = None;
+            }
+        }
+    }
+
+    /// Stops showing the ends whose slot `c` no longer has: a process target that left the
+    /// details, a disk that left the device details. The handle search slot always stays.
+    fn prune_ended(&mut self, c: &Components) {
+        let gone: Vec<IdSlot> = self
+            .ended
+            .iter()
+            .filter(|e| match &e.slot {
+                IdSlot::Scan(key) => !c.details.targets.contains_key(&DetailTarget::Process(*key)),
+                IdSlot::Search => false,
+                IdSlot::Eject(disk) => disk_idx(c, disk)
+                    .is_none_or(|idx| !c.device_details.disks.iter().any(|(i, _)| *i == idx)),
+            })
+            .map(|e| e.slot.clone())
+            .collect();
+        for slot in gone {
+            self.forget_end(&slot);
+        }
+    }
+
+    /// `shared` with this session's string scans and handle search under its own ids, its
+    /// ended requests in their slots, and the other sessions' hidden. Returns `shared` itself
+    /// when nothing changes.
     fn view_details(&mut self, shared: &Arc<DetailsSnapshot>) -> Arc<DetailsSnapshot> {
         let scans = &self.ids[IdKind::Scan.index()];
         let mut old = std::mem::take(&mut self.cache.strings);
@@ -471,24 +642,50 @@ impl ClientSession {
                 .get_or_insert_with(|| shared.targets.clone())
                 .insert(*target, Arc::new(next));
         }
+        for ended in &self.ended {
+            let (IdSlot::Scan(key), EndedState::Scan(payload)) = (&ended.slot, &ended.shown) else {
+                continue;
+            };
+            let target = DetailTarget::Process(*key);
+            let targets = targets.get_or_insert_with(|| shared.targets.clone());
+            let Some(detail) = targets.get(&target) else {
+                continue;
+            };
+            let mut next = (**detail).clone();
+            let tab = &mut next.tabs[DetailTab::Strings.index()];
+            tab.payload = Some(Arc::clone(payload));
+            tab.validity = Validity::Valid;
+            targets.insert(target, Arc::new(next));
+        }
 
         let searches = &self.ids[IdKind::Search.index()];
-        let handle_search = shared.handle_search.as_ref().map(|src| {
-            let out = match self.cache.handle_search.take() {
-                Some((s, out)) if Arc::ptr_eq(&s, src) => out,
-                _ => searches.client(src.search.0).map(|client| {
-                    Arc::new(HandleSearchState {
-                        search: SearchId(client),
-                        ..HandleSearchState::clone(src)
-                    })
-                }),
-            };
-            self.cache.handle_search = Some((Arc::clone(src), out.clone()));
-            out
+        let ended_search = self.ended.iter().find_map(|e| match &e.shown {
+            EndedState::Search(state) => Some(state),
+            _ => None,
         });
-        if handle_search.is_none() {
-            self.cache.handle_search = None;
-        }
+        let handle_search = match (ended_search, shared.handle_search.as_ref()) {
+            (Some(state), _) => {
+                self.cache.handle_search = None;
+                Some(Some(Arc::clone(state)))
+            }
+            (None, Some(src)) => {
+                let out = match self.cache.handle_search.take() {
+                    Some((s, out)) if Arc::ptr_eq(&s, src) => out,
+                    _ => searches.client(src.search.0).map(|client| {
+                        Arc::new(HandleSearchState {
+                            search: SearchId(client),
+                            ..HandleSearchState::clone(src)
+                        })
+                    }),
+                };
+                self.cache.handle_search = Some((Arc::clone(src), out.clone()));
+                Some(out)
+            }
+            (None, None) => {
+                self.cache.handle_search = None;
+                None
+            }
+        };
 
         if targets.is_none() && handle_search.is_none() {
             return Arc::clone(shared);
@@ -503,27 +700,46 @@ impl ClientSession {
         Arc::new(next)
     }
 
-    /// `shared` with this session's ejects under its own `seq` and the other sessions' hidden.
-    /// Returns `shared` itself when no disk has an eject.
-    fn view_device_details(
-        &mut self,
-        shared: &Arc<DeviceDetailsSnapshot>,
-    ) -> Arc<DeviceDetailsSnapshot> {
+    /// `shared` with this session's ejects under its own `seq`, its ended ejects on their
+    /// disks, and the other sessions' hidden. Returns `shared` itself when no disk has an eject.
+    fn view_device_details(&mut self, c: &Components) -> Arc<DeviceDetailsSnapshot> {
+        let shared = &c.device_details;
         let src = &shared.disks;
-        if src.iter().all(|(_, d)| d.eject.is_none()) {
+        let ended: Vec<(DeviceIdx, &Eject)> = self
+            .ended
+            .iter()
+            .filter_map(|e| match (&e.slot, &e.shown) {
+                (IdSlot::Eject(disk), EndedState::Eject(eject)) => {
+                    Some((disk_idx(c, disk)?, eject))
+                }
+                _ => None,
+            })
+            .collect();
+        if ended.is_empty() && src.iter().all(|(_, d)| d.eject.is_none()) {
             self.cache.disks = None;
+            self.cache.ejects.clear();
             return Arc::clone(shared);
         }
         let disks = match self.cache.disks.take() {
             Some((s, out)) if Arc::ptr_eq(&s, src) => out,
             _ => {
                 let ejects = &self.ids[IdKind::Eject.index()];
+                let mut old = std::mem::take(&mut self.cache.ejects);
                 src.iter()
                     .map(|(idx, disk)| {
                         let mut disk = disk.clone();
-                        disk.eject = disk.eject.take().and_then(|(seq, state)| {
-                            ejects.client(seq).map(|client| (client, state))
-                        });
+                        if let Some((_, eject)) = ended.iter().find(|(i, _)| i == idx) {
+                            disk.eject = Some((*eject).clone());
+                        } else if let Some(eject) = disk.eject.take() {
+                            let out = match old.remove(idx) {
+                                Some((s, out)) if s == eject => out,
+                                _ => ejects
+                                    .client(eject.0)
+                                    .map(|client| (client, eject.1.clone())),
+                            };
+                            self.cache.ejects.insert(*idx, (eject, out.clone()));
+                            disk.eject = out;
+                        }
                         (*idx, disk)
                     })
                     .collect()
@@ -542,13 +758,18 @@ impl ClientSession {
     /// gets version one above its last published one. The views of details and device details
     /// are rebuilt from `c` when their bit is set; they keep the shared header.
     pub(crate) fn prepare(&mut self, shared: ComponentMask, c: &Components) {
-        self.prune_ids(c);
+        self.prune_ended(c);
         let dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE) | shared;
         if dirty.contains(ComponentMask::DETAILS) {
             self.details = self.view_details(&c.details);
         }
         if dirty.contains(ComponentMask::DEVICE_DETAILS) {
-            self.device_details = self.view_device_details(&c.device_details);
+            self.device_details = self.view_device_details(c);
+        }
+        // The views above were the last built from the requests that ended since the last
+        // publish (`end` marks their part dirty), so their mappings go now.
+        for map in &mut self.ids {
+            map.0.retain(|e| e.active);
         }
         for (i, bit) in SESSION_BITS.into_iter().enumerate() {
             if !dirty.contains(bit) {
@@ -644,7 +865,8 @@ impl ClientSessions {
 
     /// Gives session `id`'s request `client` in `slot` a new engine id and returns it. A client
     /// id sent again gets a new engine id; cancels use the newest active one. Busy when the
-    /// session has `ACTIVE_MAX` active requests of the slot's kind.
+    /// session has `ACTIVE_MAX` active requests of the slot's kind: its views then show the
+    /// request as failed with `BUSY_TEXT`.
     pub fn map_new(
         &mut self,
         id: ClientSessionId,
@@ -656,45 +878,74 @@ impl ClientSessions {
             .iter()
             .position(|s| s.id == id)
             .ok_or(MapError::NoSession)?;
-        let map = &self.sessions[index].ids[slot.kind().index()];
-        if map.active() >= ACTIVE_MAX {
+        // A refused request gets an engine id too, so its end is ordered against later ones.
+        let engine = self.next_engine_id();
+        let session = &mut self.sessions[index];
+        let kind = slot.kind();
+        if session.ids[kind.index()].active() >= ACTIVE_MAX {
+            session.show_end(slot, client, engine, EndReason::Busy);
             return Err(MapError::Busy);
         }
-        let engine = self.next_engine_id();
-        self.sessions[index].ids[slot.kind().index()]
-            .0
-            .push(IdEntry {
-                client,
-                engine,
-                slot,
-                active: true,
-            });
+        session.forget_end(&slot);
+        session.ids[kind.index()].0.push(IdEntry {
+            client,
+            engine,
+            slot,
+            queued: 0,
+            active: true,
+        });
         Ok(engine)
     }
 
-    /// Ends request `engine` of `kind`, whichever session owns it.
-    pub fn end(&mut self, kind: IdKind, engine: u64) {
+    /// Records that request `engine` of `kind` went to the worker queue as `seq`.
+    pub fn queued(&mut self, kind: IdKind, engine: u64, seq: u64) {
+        let entry = self.sessions.iter_mut().find_map(|s| {
+            s.ids[kind.index()]
+                .0
+                .iter_mut()
+                .find(|e| e.engine == engine)
+        });
+        if let Some(entry) = entry {
+            entry.queued = seq;
+        }
+    }
+
+    /// Ends request `engine` of `kind`, whichever session owns it. `reason` as in
+    /// `ClientSession::end`.
+    fn end_with(&mut self, kind: IdKind, engine: u64, reason: Option<EndReason>) {
         for s in &mut self.sessions {
-            if s.ids[kind.index()].end(engine) {
+            if s.end(kind, engine, reason) {
                 return;
             }
         }
     }
 
+    /// Request `engine` of `kind` reached its terminal state in the shared data.
+    pub fn end(&mut self, kind: IdKind, engine: u64) {
+        self.end_with(kind, engine, None);
+    }
+
+    /// Request `engine` of `kind` is lost: its command never reached the worker.
+    pub fn lost(&mut self, kind: IdKind, engine: u64) {
+        self.end_with(kind, engine, Some(EndReason::Lost));
+    }
+
     /// The worker reported request `engine` in `slot`: ends every older request in that slot,
-    /// in every session, and `engine` itself when `ended`.
+    /// in every session, as stopped, and `engine` itself when `ended`.
     pub fn seen(&mut self, slot: &IdSlot, engine: u64, ended: bool) {
         let kind = slot.kind();
         for s in &mut self.sessions {
-            s.ids[kind.index()].end_older(slot, engine);
+            for older in s.ids[kind.index()].older(slot, engine) {
+                s.end(kind, older, Some(EndReason::Stopped));
+            }
         }
         if ended {
             self.end(kind, engine);
         }
     }
 
-    /// Ends request `engine` of `kind` and the older ones in its slot. For a worker's
-    /// `ScanDropped` and `EjectDropped`, which carry no slot.
+    /// The worker dropped request `engine` of `kind` without a result: its `ScanDropped` or
+    /// `EjectDropped`, which carry no slot. Ends it and the older ones in its slot as stopped.
     pub fn dropped(&mut self, kind: IdKind, engine: u64) {
         let slot = self.sessions.iter().find_map(|s| {
             s.ids[kind.index()]
@@ -703,9 +954,22 @@ impl ClientSessions {
                 .find(|e| e.engine == engine)
                 .map(|e| e.slot.clone())
         });
-        match slot {
-            Some(slot) => self.seen(&slot, engine, true),
-            None => self.end(kind, engine),
+        if let Some(slot) = slot {
+            self.seen(&slot, engine, false);
+            self.end_with(kind, engine, Some(EndReason::Stopped));
+        }
+    }
+
+    /// A new worker generation started after an older one stopped. The requests of `kinds`
+    /// whose command was queued at or before `through`, the last one the older generation took,
+    /// died with it and are lost; later ones the new generation runs.
+    pub fn restarted(&mut self, kinds: &[IdKind], through: u64) {
+        for s in &mut self.sessions {
+            for &kind in kinds {
+                for engine in s.ids[kind.index()].queued_through(through) {
+                    s.end(kind, engine, Some(EndReason::Lost));
+                }
+            }
         }
     }
 

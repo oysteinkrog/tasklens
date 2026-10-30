@@ -419,6 +419,16 @@ fn gpu_update_owner<'a>(ids: impl IntoIterator<Item = &'a DeviceIdentity>) -> So
         .unwrap_or(SourceId::GpuDrm)
 }
 
+/// The id kind and engine id of a scan, handle search or eject command.
+fn request_of(command: &WorkerCommand) -> Option<(IdKind, u64)> {
+    match command {
+        WorkerCommand::StringScan { scan, .. } => Some((IdKind::Scan, scan.0)),
+        WorkerCommand::HandleSearch { search, .. } => Some((IdKind::Search, search.0)),
+        WorkerCommand::Device(DeviceCommand::Eject { seq, .. }) => Some((IdKind::Eject, *seq)),
+        _ => None,
+    }
+}
+
 impl Reducer {
     /// Applies one message. `Err` only on a broken invariant; the session then restarts.
     pub fn apply(
@@ -634,6 +644,10 @@ impl Reducer {
             SourceUpdate::Details(DetailsUpdate::ScanDropped(scan)) => {
                 self.clients.dropped(IdKind::Scan, scan.0);
             }
+            SourceUpdate::Details(DetailsUpdate::RequestsLost { through }) => {
+                self.clients
+                    .restarted(&[IdKind::Scan, IdKind::Search], through);
+            }
             SourceUpdate::Services(s) => self.apply_services(s, settings),
             SourceUpdate::Connections(c) => self.apply_connections(c, settings),
             SourceUpdate::ConnectionsDestroySupport(supported) => {
@@ -787,7 +801,7 @@ impl Reducer {
             }
             Command::StringScan { scan, key, opts } => {
                 if let Some(engine) = self.map_new(id, IdSlot::Scan(key), scan.0) {
-                    self.forward(
+                    self.forward_request(
                         SourceId::ProcessDetail,
                         WorkerCommand::StringScan {
                             scan: ScanId(engine),
@@ -812,7 +826,7 @@ impl Reducer {
                 privileged,
             } => {
                 if let Some(engine) = self.map_new(id, IdSlot::Search, search.0) {
-                    self.forward(
+                    self.forward_request(
                         SourceId::ProcessDetail,
                         WorkerCommand::HandleSearch {
                             search: SearchId(engine),
@@ -837,17 +851,16 @@ impl Reducer {
             Command::HistoryDelete { keys } => self.send_history(HistoryMsg::Delete { keys }),
             Command::SetupStatus => self.send_helper(HelperCommand::SetupStatus),
             Command::RunSetup { step } => self.send_helper(HelperCommand::RunSetup(step)),
+            Command::Device(DeviceCommand::Eject { seq, disk }) => {
+                let slot = IdSlot::Eject(Arc::clone(&disk));
+                if let Some(engine) = self.map_new(id, slot, seq) {
+                    self.forward_request(
+                        SourceId::Udisks,
+                        WorkerCommand::Device(DeviceCommand::Eject { seq: engine, disk }),
+                    );
+                }
+            }
             Command::Device(cmd) => {
-                let cmd = match cmd {
-                    DeviceCommand::Eject { seq, disk } => {
-                        let slot = IdSlot::Eject(Arc::clone(&disk));
-                        let Some(engine) = self.map_new(id, slot, seq) else {
-                            return;
-                        };
-                        DeviceCommand::Eject { seq: engine, disk }
-                    }
-                    other => other,
-                };
                 let target = match cmd {
                     DeviceCommand::SmartRead { .. }
                     | DeviceCommand::SmartReadAdmin { .. }
@@ -863,8 +876,8 @@ impl Reducer {
     }
 
     /// A new engine id for session `id`'s request `client` in `slot`. `None`, logged, when the
-    /// session already has `ACTIVE_MAX` active requests of that kind (Busy): the request is
-    /// dropped.
+    /// session already has `ACTIVE_MAX` active requests of that kind (Busy): the request is not
+    /// forwarded, and the session's views show it as failed.
     fn map_new(&mut self, id: ClientSessionId, slot: IdSlot, client: u64) -> Option<u64> {
         let kind = slot.kind();
         match self.clients.map_new(id, slot, client) {
@@ -887,26 +900,55 @@ impl Reducer {
         engine
     }
 
+    /// `forward` for a scan, handle search or eject that `map_new` mapped. Records the queue
+    /// `seq` of its command, or ends it as lost when the control watch is closed.
+    fn forward_request(&mut self, target: SourceId, command: WorkerCommand) {
+        let Some((kind, engine)) = request_of(&command) else {
+            return;
+        };
+        match self.forward(target, command) {
+            Some(seq) => self.clients.queued(kind, engine, seq),
+            None => self.clients.lost(kind, engine),
+        }
+    }
+
     /// Appends a `QueuedCommand` with the next `seq` to the control watch and keeps the newest
     /// `QUEUE_MAX`. `send_modify` clones the current value, so the `progress` `Arc` stays the
-    /// same (R-276).
-    fn forward(&mut self, target: SourceId, command: WorkerCommand) {
+    /// same (R-276). Returns the `seq`, or `None` when the watch is closed. A scan, handle
+    /// search or eject pushed out before its worker started it is lost: no worker will report
+    /// it, so its request ends here (ADR-018).
+    fn forward(&mut self, target: SourceId, command: WorkerCommand) -> Option<u64> {
         let kind = command.kind();
-        let sent = self.control.send_modify(move |c| {
+        let mut queued = None;
+        let mut lost = Vec::new();
+        let sent = self.control.send_modify(|c| {
             let seq = c.commands.last().map_or(0, |q| q.seq) + 1;
             let keep = c.commands.len().min(QUEUE_MAX - 1);
+            let (gone, kept) = c.commands.split_at(c.commands.len() - keep);
+            lost.extend(
+                gone.iter()
+                    .filter(|q| q.seq > c.progress.started(q.target))
+                    .filter_map(|q| request_of(&q.command)),
+            );
             let mut next = Vec::with_capacity(keep + 1);
-            next.extend_from_slice(&c.commands[c.commands.len() - keep..]);
+            next.extend_from_slice(kept);
             next.push(QueuedCommand {
                 seq,
                 target,
                 command,
             });
             c.commands = next.into();
+            queued = Some(seq);
         });
         if sent.is_err() {
             tracing::debug!(target: "tasklens::engine", ?target, kind, "control watch closed: command dropped");
+            return None;
         }
+        for (kind, engine) in lost {
+            tracing::debug!(target: "tasklens::engine", ?kind, engine, "request pushed off the worker queue: lost");
+            self.clients.lost(kind, engine);
+        }
+        queued
     }
 
     /// `try_send` into the history worker's channel (E30-A2). Without a sink the command is
@@ -1943,6 +1985,10 @@ impl Reducer {
             // Ends the request only; the snapshot does not change.
             DeviceDetailsUpdate::EjectDropped(seq) => {
                 self.clients.dropped(IdKind::Eject, seq);
+                return Ok(());
+            }
+            DeviceDetailsUpdate::EjectsLost { through } => {
+                self.clients.restarted(&[IdKind::Eject], through);
                 return Ok(());
             }
         }

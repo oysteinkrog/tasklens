@@ -164,6 +164,15 @@ async fn run_with<C: Connector>(
         fallback: admin_locate().is_ok(),
         queue: Queue::resume(&io),
     };
+    // An earlier generation took the ejects up to its last started command and ran them to an
+    // end, except one that was running when it stopped: the reducer ends that request.
+    let through = st.queue.last_seq;
+    if through > 0 {
+        let lost = SourceUpdate::DeviceDetails(DeviceDetailsUpdate::EjectsLost { through });
+        if let Some(stop) = send(&cx, &io, lost).await {
+            return stop;
+        }
+    }
     loop {
         if let Some(stop) = idle(&cx, &io).await {
             return stop;
