@@ -312,7 +312,7 @@ impl CpuBoard {
         let shown = |m: &Metric<u32>| matches!(m.validity, Validity::Valid | Validity::Stale);
         changed |= bars.set_freqs(
             (0..self.logical.len())
-                .map(|id| clocks.get(id).filter(|m| shown(m)).map(|m| m.value as f32)),
+                .map(|id| clocks.get(id).filter(|m| shown(*m)).map(|m| m.value as f32)),
         );
         changed
     }
