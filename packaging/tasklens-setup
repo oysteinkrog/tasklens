@@ -270,7 +270,7 @@ linger() {
 
 # ADR-018 Remote root actions: lets the user who asked run tasklens's root actions with no
 # password prompt, from any session, so a tasklens window on another PC can use them over ssh.
-# It covers the three tasklens polkit actions, systemd's manage-units only for a single unit
+# It covers the four tasklens polkit actions, systemd's manage-units only for a single unit
 # (the action has a "unit" detail) and manage-unit-files. `tasklens remote-admin on|off` runs
 # this through pkexec and saves remote_admin in engine.toml itself, through the engine socket;
 # this script never writes engine.toml. The command asks `remote-admin state` first and keeps
@@ -297,6 +297,7 @@ polkit.addRule(function(action, subject) {
     if (action.id == "io.github.oysteinkrog.tasklens.helper" ||
         action.id == "io.github.oysteinkrog.tasklens.setup" ||
         action.id == "io.github.oysteinkrog.tasklens.netmon" ||
+        action.id == "io.github.oysteinkrog.tasklens.smart" ||
         action.id == "org.freedesktop.systemd1.manage-unit-files" ||
         (action.id == "org.freedesktop.systemd1.manage-units" && action.lookup("unit"))) {
         return polkit.Result.YES;

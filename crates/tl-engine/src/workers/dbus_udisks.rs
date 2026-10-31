@@ -214,9 +214,10 @@ struct State {
     queue: Queue,
 }
 
-/// Blocking. The raw `smartctl --json=c -a` output for a kernel disk name.
+/// Blocking. The raw `smartctl --json=c -a` output for a kernel disk name, read through
+/// `tasklens-smart`.
 type AdminRead = fn(&str) -> Result<Vec<u8>, Arc<str>>;
-/// Finds `pkexec` and `smartctl`: `smartctl::locate`, a fake in tests.
+/// Finds `pkexec` and `tasklens-smart`: `smartctl::locate`, a fake in tests.
 type AdminLocate = fn() -> Result<(PathBuf, PathBuf), Arc<str>>;
 
 /// Where this generation is in the forwarded command list (R-276).

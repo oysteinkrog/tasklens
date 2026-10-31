@@ -1,0 +1,63 @@
+#!/bin/sh
+# tasklens-smart: reads one disk's SMART data as root for the disk pages (PERF-051, R-088).
+# The engine runs it as `pkexec /usr/lib/tasklens/tasklens-smart <disk>`, under the polkit
+# action io.github.oysteinkrog.tasklens.smart. It takes one kernel disk name and always runs
+# `smartctl --json=c -a /dev/<disk>`, so that action, and remote admin (ADR-018), grant SMART
+# reads only, never smartctl with other arguments.
+#
+# Exit codes: smartctl's own, or 1 for a wrong call and 2 when smartctl is missing. Never 126
+# or 127, which the engine reads as pkexec's.
+#
+# Test mode: when not root and TASKLENS_SMART_ROOT is set, smartctl is looked up under that
+# root. As root the variable is ignored.
+set -eu
+umask 022
+PATH=/usr/sbin:/usr/bin
+export PATH
+# Byte ranges and byte lengths in the disk name check, whatever the caller's locale.
+LC_ALL=C
+export LC_ALL
+
+USAGE='usage: tasklens-smart <disk>'
+
+if [ "$(id -u)" -eq 0 ]; then
+    ROOT=""
+elif [ -n "${TASKLENS_SMART_ROOT-}" ]; then
+    ROOT="$TASKLENS_SMART_ROOT"
+else
+    echo 'tasklens-smart: must run as root (use pkexec)' >&2
+    exit 1
+fi
+
+bad_name() {
+    echo 'tasklens-smart: the disk name must be 1 to 32 of a-z and 0-9, starting with a letter' >&2
+    exit 1
+}
+
+if [ "$#" -ne 1 ]; then
+    echo "$USAGE" >&2
+    exit 1
+fi
+disk=$1
+# A kernel disk name, as the engine checks it: 1 to 32 bytes of [a-z0-9], starting with a
+# letter. No "/", "." or "-", so it names a node directly under /dev and is never an option.
+case $disk in
+    [a-z]*) ;;
+    *) bad_name ;;
+esac
+case $disk in
+    *[!a-z0-9]*) bad_name ;;
+esac
+if [ "${#disk}" -gt 32 ]; then
+    bad_name
+fi
+
+# The same folders the engine checks, in the same order. Never the caller's PATH.
+for dir in /usr/sbin /usr/bin /sbin /bin; do
+    smartctl="$ROOT$dir/smartctl"
+    if [ -f "$smartctl" ] && [ -x "$smartctl" ]; then
+        exec "$smartctl" --json=c -a "/dev/$disk"
+    fi
+done
+echo 'tasklens-smart: smartctl is not installed (package smartmontools)' >&2
+exit 2

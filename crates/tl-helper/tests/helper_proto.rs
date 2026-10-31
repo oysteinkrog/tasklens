@@ -631,10 +631,11 @@ fn policy_path() -> std::path::PathBuf {
         .join("../../packaging/io.github.oysteinkrog.Tasklens.policy")
 }
 
-/// The polkit policy has exactly three actions, each tied to one fixed binary, none defaulting
-/// to `yes`, with the owner-confirmed texts (D-019).
+/// The polkit policy has exactly four actions, each tied to one fixed program, none defaulting
+/// to `yes`, with the owner-confirmed texts (D-019). The fourth is the SMART read
+/// (q4x76.33), so SMART does not use the generic `org.freedesktop.policykit.exec` action.
 #[test]
-fn policy_file_has_three_actions() {
+fn policy_file_has_four_actions() {
     let path = policy_path();
     let text = std::fs::read_to_string(&path).expect("read the policy file");
 
@@ -652,8 +653,12 @@ fn policy_file_has_three_actions() {
         Err(_) => eprintln!("xmllint not installed, well-formedness check skipped"),
     }
 
-    assert_eq!(text.matches("<action id=\"").count(), 3);
-    assert_eq!(text.matches(" id=\"").count(), 3, "no other id anywhere");
+    assert_eq!(text.matches("<action id=\"").count(), 4);
+    assert_eq!(text.matches(" id=\"").count(), 4, "no other id anywhere");
+    assert!(
+        !text.contains("smartctl"),
+        "no action names smartctl itself"
+    );
     assert!(!text.contains(">yes<"));
 
     let expected = [
@@ -674,6 +679,12 @@ fn policy_file_has_three_actions() {
             "tl-netmon",
             "Run the tasklens network monitor",
             "Authentication is required to run the tasklens network monitor.",
+        ),
+        (
+            "io.github.oysteinkrog.tasklens.smart",
+            "tasklens-smart",
+            "Read disk SMART data with tasklens",
+            "Authentication is required to let tasklens read SMART health data from a disk.",
         ),
     ];
     let pieces: Vec<&str> = text.split("<action id=\"").skip(1).collect();

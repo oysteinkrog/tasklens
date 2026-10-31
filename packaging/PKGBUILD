@@ -45,6 +45,7 @@ package() {
   install -Dm0755 target/release/tl-gpu-probe "$pkgdir/usr/lib/tasklens/tl-gpu-probe"
   install -Dm0755 target/release/tl-helper "$pkgdir/usr/lib/tasklens/tl-helper"
   install -Dm0755 packaging/tasklens-setup "$pkgdir/usr/lib/tasklens/tasklens-setup"
+  install -Dm0755 packaging/tasklens-smart "$pkgdir/usr/lib/tasklens/tasklens-smart"
   install -Dm0644 "packaging/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
   install -Dm0644 "packaging/$_appid.policy" "$pkgdir/usr/share/polkit-1/actions/$_appid.policy"
   install -Dm0644 assets/icons/tasklens.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_appid.svg"

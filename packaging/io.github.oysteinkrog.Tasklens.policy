@@ -22,4 +22,10 @@
     <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tl-netmon</annotate>
   </action>
+  <action id="io.github.oysteinkrog.tasklens.smart">
+    <description>Read disk SMART data with tasklens</description>
+    <message>Authentication is required to let tasklens read SMART health data from a disk.</message>
+    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/tasklens/tasklens-smart</annotate>
+  </action>
 </policyconfig>

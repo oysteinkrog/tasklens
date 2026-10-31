@@ -193,8 +193,8 @@ fn reach(host: &str, user: &str) -> String {
     format!(
         "Remote admin lets tasklens windows on other PCs run administrator actions on {host} \
          without a password prompt: acting on other users' processes, closing network \
-         connections, the network monitor, tasklens setup, and starting, stopping, enabling and \
-         disabling system services.\n\
+         connections, the network monitor, reading SMART data from disks, tasklens setup, and \
+         starting, stopping, enabling and disabling system services.\n\
          With it on, any program that runs as {user} on {host} can do these actions without a \
          prompt, whether it came through tasklens or not.\n\
          Turn on remote admin on {host}? [y/N] "
@@ -1062,6 +1062,7 @@ polkit.addRule(function(action, subject) {{
     if (action.id == \"io.github.oysteinkrog.tasklens.helper\" ||
         action.id == \"io.github.oysteinkrog.tasklens.setup\" ||
         action.id == \"io.github.oysteinkrog.tasklens.netmon\" ||
+        action.id == \"io.github.oysteinkrog.tasklens.smart\" ||
         action.id == \"org.freedesktop.systemd1.manage-unit-files\" ||
         (action.id == \"org.freedesktop.systemd1.manage-units\" && action.lookup(\"unit\"))) {{
         return polkit.Result.YES;

@@ -1,9 +1,14 @@
-//! SMART read with `pkexec smartctl` for a disk UDisks2 cannot read (E12-028, PERF-051, U-25).
+//! SMART read as root for a disk UDisks2 cannot read (E12-028, PERF-051, U-25).
 //!
-//! This is the one privileged action of the disk pages. polkit asks for the password; tasklens
-//! never sees or keeps it, and the privilege lasts one smartctl run. The disk name is checked to
-//! `[a-z0-9]` before it reaches a command line, both programs are absolute paths, the environment
-//! is cleared and no shell runs. The output holds the serial: it is shown, never logged.
+//! This is the one privileged action of the disk pages. It runs
+//! `pkexec /usr/lib/tasklens/tasklens-smart <disk>`, which is tasklens' own polkit action
+//! `io.github.oysteinkrog.tasklens.smart` (ADR-018 Privilege coverage), not the generic
+//! `org.freedesktop.policykit.exec`. That script takes only the disk name and always runs
+//! `smartctl --json=c -a /dev/<disk>`, so the action, and remote admin, grant SMART reads and
+//! nothing else smartctl can do. polkit asks for the password; tasklens never sees or keeps it.
+//! The disk name is checked to `[a-z0-9]` before it reaches a command line, both programs are
+//! absolute paths, the environment is cleared and no shell runs here. The output holds the
+//! serial: it is shown, never logged.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -24,8 +29,12 @@ pub const TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_OUTPUT: usize = 1 << 20;
 /// How often the run is checked for an exit.
 const POLL: Duration = Duration::from_millis(50);
+/// The root script that runs smartctl with fixed arguments. Its path is the polkit action's
+/// `exec.path`, so the path is fixed.
+pub const SMART_HELPER: &str = "/usr/lib/tasklens/tasklens-smart";
 /// The only folders searched for `smartctl`, in order. Never `PATH`: the program runs as root,
-/// and a user-writable `PATH` folder could hold a fake one.
+/// and a user-writable `PATH` folder could hold a fake one. `tasklens-smart` searches the same
+/// folders as root; the engine looks only to say "not installed" before any prompt.
 const SMARTCTL_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
 /// The only folders searched for `pkexec`, in order.
 const PKEXEC_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
@@ -39,6 +48,7 @@ const NVME_DATA_UNIT: u64 = 512_000;
 pub const INVALID_DISK: &str = "Invalid disk name";
 pub const NOT_INSTALLED: &str = "smartctl is not installed (package smartmontools)";
 pub const NO_PKEXEC: &str = "pkexec is not installed (package polkit)";
+pub const NO_HELPER: &str = "/usr/lib/tasklens/tasklens-smart was not found";
 pub const NOT_RUN: &str = "Could not run smartctl";
 pub const DENIED: &str = "Permission denied";
 pub const CANCELLED: &str = "Authentication cancelled";
@@ -56,33 +66,39 @@ pub fn valid_disk_name(disk: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// `pkexec` and `smartctl` as absolute paths, from fixed system folders only. `PATH` is never
-/// read.
+/// `pkexec` and `tasklens-smart` as absolute paths, after checking that `smartctl` is in one
+/// of the fixed system folders. `PATH` is never read.
 pub fn locate() -> Result<(PathBuf, PathBuf), Arc<str>> {
-    let dirs = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let smartctl =
-        find_on_path("smartctl", &dirs(&SMARTCTL_DIRS)).ok_or_else(|| Arc::from(NOT_INSTALLED))?;
-    let pkexec = find_on_path("pkexec", &dirs(&PKEXEC_DIRS)).ok_or_else(|| Arc::from(NO_PKEXEC))?;
-    Ok((pkexec, smartctl))
+    locate_in(Path::new(SMART_HELPER))
 }
 
-/// Blocking. Checks the name, finds both programs and runs smartctl once.
+fn locate_in(helper: &Path) -> Result<(PathBuf, PathBuf), Arc<str>> {
+    let dirs = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+    find_on_path("smartctl", &dirs(&SMARTCTL_DIRS)).ok_or_else(|| Arc::from(NOT_INSTALLED))?;
+    let pkexec = find_on_path("pkexec", &dirs(&PKEXEC_DIRS)).ok_or_else(|| Arc::from(NO_PKEXEC))?;
+    if !helper.is_file() {
+        return Err(Arc::from(NO_HELPER));
+    }
+    Ok((pkexec, helper.to_path_buf()))
+}
+
+/// Blocking. Checks the name, finds the programs and runs `tasklens-smart` once.
 pub fn read_raw(disk: &str) -> Result<Vec<u8>, Arc<str>> {
     if !valid_disk_name(disk) {
         return Err(Arc::from(INVALID_DISK));
     }
-    let (pkexec, smartctl) = locate()?;
-    run_smartctl(&pkexec, &smartctl, disk)
+    let (pkexec, helper) = locate()?;
+    run_helper(&pkexec, &helper, disk)
 }
 
-/// Blocking. Runs pkexec with an absolute smartctl path; returns stdout bytes.
-pub fn run_smartctl(pkexec: &Path, smartctl: &Path, disk: &str) -> Result<Vec<u8>, Arc<str>> {
-    run_for(pkexec, smartctl, disk, TIMEOUT)
+/// Blocking. Runs `pkexec <helper> <disk>`; returns stdout bytes, smartctl's JSON.
+pub fn run_helper(pkexec: &Path, helper: &Path, disk: &str) -> Result<Vec<u8>, Arc<str>> {
+    run_for(pkexec, helper, disk, TIMEOUT)
 }
 
 fn run_for(
     pkexec: &Path,
-    smartctl: &Path,
+    helper: &Path,
     disk: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, Arc<str>> {
@@ -90,10 +106,10 @@ fn run_for(
         return Err(Arc::from(INVALID_DISK));
     }
     let deadline = Instant::now() + timeout;
+    // The disk name is the only argument: the smartctl arguments are fixed in the script.
     let mut child = Command::new(pkexec)
-        .arg(smartctl)
-        .args(["--json=c", "-a"])
-        .arg(format!("/dev/{disk}"))
+        .arg(helper)
+        .arg(disk)
         .env_clear()
         .env("PATH", CHILD_PATH)
         .env("LANG", "C")
@@ -134,7 +150,8 @@ fn run_for(
         Some(126) => return Err(Arc::from(CANCELLED)),
         Some(127) => return Err(Arc::from(DENIED)),
         // smartctl's bit mask: bit 0 is a command line error, bit 1 a device open failure.
-        // The other bits report disk state and still come with JSON.
+        // The other bits report disk state and still come with JSON. tasklens-smart's own
+        // failures are 1 (a wrong call) and 2 (smartctl missing).
         Some(code) if code & 0b11 != 0 => return Err(Arc::from(CANNOT_OPEN)),
         _ => {}
     }
@@ -545,8 +562,8 @@ mod tests {
     }
 
     /// Runs `script` as the fake pkexec. `/bin/sh` stands in for pkexec and reads the script as
-    /// the "smartctl" argument, so the script gets smartctl's arguments and no freshly written
-    /// file is executed (which can fail with "Text file busy" while other tests fork).
+    /// the "tasklens-smart" argument, so the script gets the helper's arguments and no freshly
+    /// written file is executed (which can fail with "Text file busy" while other tests fork).
     fn run_fake(script: &str, timeout: Duration) -> Result<Vec<u8>, Arc<str>> {
         let dir = scratch();
         let path = dir.path().join("fake-pkexec.sh");
@@ -591,23 +608,46 @@ mod tests {
     fn locate_child() {
         let fake =
             PathBuf::from(std::env::var_os(FAKE_DIR_ENV).expect("run by locate_ignores_path"));
-        match locate() {
-            Ok((pkexec, smartctl)) => {
+        // A file that exists stands in for the installed helper, so the folder checks run on
+        // a machine without the package.
+        let exe = std::env::current_exe().expect("test binary");
+        match locate_in(&exe) {
+            Ok((pkexec, helper)) => {
                 assert!(!pkexec.starts_with(&fake), "{}", pkexec.display());
-                assert!(!smartctl.starts_with(&fake), "{}", smartctl.display());
+                assert_eq!(helper, exe);
                 let parent = |p: &Path| p.parent().and_then(Path::to_str).map(str::to_owned);
                 assert!(
                     PKEXEC_DIRS
                         .iter()
                         .any(|d| parent(&pkexec).as_deref() == Some(*d))
                 );
-                assert!(
-                    SMARTCTL_DIRS
-                        .iter()
-                        .any(|d| parent(&smartctl).as_deref() == Some(*d))
-                );
+                // The fake smartctl on PATH does not count as installed.
+                let dirs: Vec<PathBuf> = SMARTCTL_DIRS.iter().map(PathBuf::from).collect();
+                assert!(find_on_path("smartctl", &dirs).is_some());
             }
             Err(e) => assert!(&*e == NOT_INSTALLED || &*e == NO_PKEXEC, "{e}"),
+        }
+    }
+
+    /// SMART reads go through tasklens' own polkit action: the program pkexec runs is the
+    /// fixed helper path, never smartctl, and a missing helper is said before any prompt.
+    #[test]
+    fn locate_names_the_tasklens_helper() {
+        assert_eq!(SMART_HELPER, "/usr/lib/tasklens/tasklens-smart");
+        match locate() {
+            Ok((_, helper)) => assert_eq!(helper, Path::new(SMART_HELPER)),
+            Err(e) => assert!(
+                &*e == NOT_INSTALLED || &*e == NO_PKEXEC || &*e == NO_HELPER,
+                "{e}"
+            ),
+        }
+        let dir = scratch();
+        match locate_in(&dir.path().join("tasklens-smart")) {
+            Ok(found) => panic!("a missing helper was accepted: {found:?}"),
+            Err(e) => assert!(
+                &*e == NOT_INSTALLED || &*e == NO_PKEXEC || &*e == NO_HELPER,
+                "{e}"
+            ),
         }
     }
 
@@ -631,8 +671,9 @@ mod tests {
 
     #[test]
     fn exit_bits_and_output() {
-        // Arguments, environment and stdout reach the caller; bit 3 (disk failing) still parses.
-        let script = r#"[ "$1 $2 $3" = "--json=c -a /dev/sda" ] || exit 1
+        // The disk name is the helper's only argument; environment and stdout reach the
+        // caller; bit 3 (disk failing) still parses.
+        let script = r#"[ "$#" = 1 ] && [ "$1" = "sda" ] || exit 1
 [ "$PATH" = "/usr/sbin:/usr/bin" ] && [ "$LANG" = "C" ] && [ -z "$HOME" ] || exit 1
 printf '{"smart_status":{"passed":false}}'
 exit 8
@@ -648,5 +689,109 @@ exit 8
     fn output_too_large() {
         let script = format!("head -c {} /dev/zero\n", MAX_OUTPUT + 10);
         assert_eq!(run_fake(&script, TIMEOUT), Err(Arc::from(TOO_LARGE)));
+    }
+
+    /// Runs `packaging/tasklens-smart` with `args`, in its test mode under `root` when given.
+    /// Returns the exit code, stdout and stderr.
+    fn helper_script(root: Option<&Path>, args: &[&str]) -> (i32, String, String) {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tasklens-smart");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg(script)
+            .args(args)
+            .env_remove("TASKLENS_SMART_ROOT");
+        if let Some(root) = root {
+            command.env("TASKLENS_SMART_ROOT", root);
+        }
+        let out = command.output().expect("run tasklens-smart");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8(out.stdout).expect("utf-8"),
+            String::from_utf8(out.stderr).expect("utf-8"),
+        )
+    }
+
+    /// A root whose `usr/sbin/smartctl` is a link to `echo`, so a run prints the arguments
+    /// smartctl got. A link, not a new file, so nothing freshly written is executed.
+    fn echo_root() -> tempfile::TempDir {
+        let dir = scratch();
+        let sbin = dir.path().join("usr/sbin");
+        fs::create_dir_all(&sbin).expect("create usr/sbin");
+        let echo = ["/usr/bin/echo", "/bin/echo"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+            .expect("echo installed");
+        std::os::unix::fs::symlink(echo, sbin.join("smartctl")).expect("link smartctl");
+        dir
+    }
+
+    /// Security regression (ADR-018 Privilege coverage): the tasklens SMART action runs
+    /// smartctl with fixed arguments and one checked disk name, so neither a prompt nor remote
+    /// admin grants smartctl with other arguments.
+    #[test]
+    fn helper_script_runs_only_the_fixed_read() {
+        let root = echo_root();
+        let root = Some(root.path());
+        assert_eq!(
+            helper_script(root, &["nvme0n1"]),
+            (0, "--json=c -a /dev/nvme0n1\n".into(), String::new())
+        );
+        let longest = "a".repeat(32);
+        let (code, out, _) = helper_script(root, &[&longest]);
+        assert_eq!(code, 0);
+        assert_eq!(out, format!("--json=c -a /dev/{longest}\n"));
+
+        let bad_name = "tasklens-smart: the disk name must be 1 to 32 of a-z and 0-9, \
+                        starting with a letter\n";
+        let too_long = "a".repeat(33);
+        for disk in [
+            "",
+            "-a",
+            "--scan",
+            "../sda",
+            "sda/../sdb",
+            "sda1 -s on",
+            "sda;id",
+            "Sda",
+            "1sda",
+            "sda.",
+            "s\u{e9}a",
+            &too_long,
+        ] {
+            assert_eq!(
+                helper_script(root, &[disk]),
+                (1, String::new(), bad_name.into()),
+                "{disk:?}"
+            );
+        }
+        let usage = "usage: tasklens-smart <disk>\n";
+        assert_eq!(helper_script(root, &[]), (1, String::new(), usage.into()));
+        assert_eq!(
+            helper_script(root, &["sda", "-s"]),
+            (1, String::new(), usage.into())
+        );
+    }
+
+    /// The script refuses to run as a user outside test mode, and says so when smartctl is
+    /// missing; neither exit code is one of pkexec's (126, 127).
+    #[test]
+    fn helper_script_refusals() {
+        assert_eq!(
+            helper_script(None, &["sda"]),
+            (
+                1,
+                String::new(),
+                "tasklens-smart: must run as root (use pkexec)\n".into()
+            )
+        );
+        let empty = scratch();
+        assert_eq!(
+            helper_script(Some(empty.path()), &["sda"]),
+            (
+                2,
+                String::new(),
+                "tasklens-smart: smartctl is not installed (package smartmontools)\n".into()
+            )
+        );
     }
 }
