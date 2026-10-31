@@ -11,17 +11,27 @@
 //! `$XDG_RUNTIME_DIR/tasklens/remote-admin.lock` for the whole run. The path is the same for
 //! every `--app-id`, because there is one rules file per host. A second command waits up to
 //! `LOCK_WAIT`, then fails. Before it changes anything it asks `tasklens-setup remote-admin
-//! state` whether the rules file is present or absent and keeps the answer itself. Any failure
-//! after the script was started to change the file (the script exiting non-zero, even after it
-//! wrote the file, reading its output or waiting for it failing, or the save failing) puts that
-//! state back through the script (`on` for present, `off` for absent) before anything is printed
-//! (leader decision on tasklens-q4x76.31).
+//! state` whether the rules file is present or absent and keeps the answer itself. Then one rule
+//! decides what is undone (leader decisions on tasklens-q4x76.31):
+//!
+//! - The commit point is the successful socket save.
+//! - Any failure before the commit point, once the script was asked to change the file, runs the
+//!   restore: a failed spawn, any exit code from pkexec or the script, a failed wait, a failed
+//!   read of its output, or a failed save. Exit codes 126 and 127 count too: pkexec uses them
+//!   for a dismissed prompt and a refusal, but it also passes the script's own exit code through,
+//!   so they do not prove that the file is unchanged. The restore is idempotent: it sets the
+//!   rules file to the recorded state through the script (`on` for present, `off` for absent),
+//!   whatever the file is now. It runs before anything is printed, so a closed terminal cannot
+//!   skip it.
+//! - After the commit point nothing is undone. A failure to print the result only sets exit
+//!   code 1.
 //!
 //! - `on` reads the host settings, prints what remote admin reaches and asks for confirmation.
 //!   Then it writes the rule and saves `remote_admin = true`.
 //! - `off` checks that the engine answers, then saves `remote_admin = false` first, which closes
-//!   admission at once, then removes the rule. When the save fails nothing has changed. When
-//!   removing the rule fails, the setting stays off and the command says so.
+//!   admission at once, then removes the rule. When the save fails nothing has changed. The save
+//!   is the commit point, so when removing the rule fails after it nothing is undone: the setting
+//!   stays off and the command says so.
 //! - `status` prints the setting and whether polkit allows the tasklens helper for the engine
 //!   process without a password, the same check the engine makes. A user cannot read
 //!   `/etc/polkit-1/rules.d`, so this is how the rule is seen. It says whether the two agree.
@@ -238,17 +248,11 @@ fn turn_on(
         Err(e) => return not_checked(err, &e),
     };
     let failure = match env.setup.run(Step::On) {
-        Err(SetupError::NotStarted(e)) => {
-            writeln!(
-                err,
-                "tasklens remote-admin: the polkit rule was not written: {e}. Nothing changed."
-            )
-            .map_err(write_error)?;
-            return Ok(1);
-        }
-        Err(SetupError::Failed(e)) => format!("the polkit rule was not written: {e}"),
+        Err(e) => format!("the polkit rule was not written: {e}"),
         Ok(_) => match save(env, true) {
             Ok(_) => {
+                // The commit point: the rule and the setting agree. A failure to print this only
+                // sets exit code 1 (through `run`); nothing is undone.
                 writeln!(out, "Remote admin is on for {} on {host}.", env.user)
                     .map_err(write_error)?;
                 return Ok(0);
@@ -293,65 +297,40 @@ fn turn_off(env: &Env<'_>, out: &mut dyn Write, err: &mut dyn Write) -> Result<u
             return Ok(1);
         }
     };
-    let failure = match env.setup.run(Step::Off) {
+    // The save above is the commit point: a failure to remove the rule is reported, not undone.
+    match env.setup.run(Step::Off) {
         Ok(_) => {
             writeln!(out, "Remote admin is off on {host}.").map_err(write_error)?;
-            return Ok(0);
+            Ok(0)
         }
-        Err(SetupError::NotStarted(e)) => e,
-        Err(SetupError::Failed(e)) => {
-            // Put back first, then report.
-            let restored = env.setup.restore(rule_file);
+        Err(e) => {
             writeln!(
                 err,
                 "tasklens remote-admin: remote_admin is off, but removing the polkit rule failed: \
                  {e}."
             )
             .map_err(write_error)?;
-            match restored {
-                Ok(()) if rule_file == RuleFile::Absent => {
-                    writeln!(
-                        err,
-                        "There was no polkit rule before, and there is none now."
-                    )
-                    .map_err(write_error)?;
-                    return Ok(1);
-                }
-                Ok(()) => {
-                    writeln!(err, "{}", rule_file.restored_text()).map_err(write_error)?;
-                }
-                Err(e) => {
-                    writeln!(err, "The polkit rules file could not be put back: {e}.")
-                        .map_err(write_error)?;
-                }
+            if rule_file == RuleFile::Absent {
+                writeln!(err, "There was no polkit rule before.").map_err(write_error)?;
+            } else {
+                writeln!(
+                    err,
+                    "Remote windows get no administrator actions, but other programs that run as \
+                     {} may still. Run tasklens remote-admin off again to remove the rule.",
+                    env.user
+                )
+                .map_err(write_error)?;
             }
-            writeln!(
-                err,
-                "Remote windows get no administrator actions, but other programs that run as {} \
-                 may still. Run tasklens remote-admin off again to remove the rule.",
-                env.user
-            )
-            .map_err(write_error)?;
-            return Ok(1);
+            Ok(1)
         }
-    };
-    writeln!(
-        err,
-        "tasklens remote-admin: remote_admin is off, but the polkit rule was not removed: \
-         {failure}. Remote windows get no administrator actions, but other programs that run as \
-         {} still do. Run tasklens remote-admin off again to remove the rule.",
-        env.user
-    )
-    .map_err(write_error)?;
-    Ok(1)
+    }
 }
 
 /// The state query failed: nothing was changed.
-fn not_checked(err: &mut dyn Write, e: &SetupError) -> Result<u8, String> {
+fn not_checked(err: &mut dyn Write, e: &str) -> Result<u8, String> {
     writeln!(
         err,
-        "tasklens remote-admin: the polkit rules file could not be checked: {}. Nothing changed.",
-        e.text()
+        "tasklens remote-admin: the polkit rules file could not be checked: {e}. Nothing changed."
     )
     .map_err(write_error)?;
     Ok(1)
@@ -605,26 +584,8 @@ impl RuleFile {
 
     fn restored_text(self) -> &'static str {
         match self {
-            Self::Present => "The polkit rule is in place again, as it was before.",
-            Self::Absent => "The polkit rule was removed again, as there was none before.",
-        }
-    }
-}
-
-/// How a run of `tasklens-setup` failed.
-#[derive(Debug)]
-enum SetupError {
-    /// pkexec did not start the script: it could not run, the prompt was dismissed or polkit
-    /// said no. The rules file did not change.
-    NotStarted(String),
-    /// The script ran and failed. It may have changed the rules file first.
-    Failed(String),
-}
-
-impl SetupError {
-    fn text(&self) -> &str {
-        match self {
-            Self::NotStarted(text) | Self::Failed(text) => text,
+            Self::Present => "The polkit rule is in place, as it was before.",
+            Self::Absent => "There is no polkit rule, as before.",
         }
     }
 }
@@ -663,13 +624,13 @@ impl Setup {
         command
     }
 
-    /// Runs the script, waits for it and returns what it printed. Only a failed spawn means the
-    /// script never ran; after the spawn the script may have changed the file, so a failure to
-    /// read its output or to wait for it is `Failed`, and the caller restores.
-    fn run(&self, step: Step) -> Result<String, SetupError> {
-        let mut child = self.command(step).spawn().map_err(|e| {
-            SetupError::NotStarted(format!("{}: {e}", self.program.to_string_lossy()))
-        })?;
+    /// Runs the script, waits for it and returns what it printed. Every failure, from the spawn
+    /// to the exit code, is an error; the caller restores after any failed change.
+    fn run(&self, step: Step) -> Result<String, String> {
+        let mut child = self
+            .command(step)
+            .spawn()
+            .map_err(|e| format!("{}: {e}", self.program.to_string_lossy()))?;
         let mut stdout = Vec::new();
         // The pipe is closed before the wait, so a script still writing ends instead of
         // blocking.
@@ -682,59 +643,49 @@ impl Setup {
     }
 
     /// Asks whether the rules file is there.
-    fn state(&self) -> Result<RuleFile, SetupError> {
+    fn state(&self) -> Result<RuleFile, String> {
         let text = self.run(Step::State)?;
         match text.trim() {
             "present" => Ok(RuleFile::Present),
             "absent" => Ok(RuleFile::Absent),
-            other => Err(SetupError::Failed(format!(
-                "{SETUP_PATH} remote-admin state printed {other:?}"
-            ))),
+            other => Err(format!("{SETUP_PATH} remote-admin state printed {other:?}")),
         }
     }
 
-    /// Puts the rules file back to `rule_file`.
+    /// Sets the rules file to `rule_file`, whatever it is now.
     fn restore(&self, rule_file: RuleFile) -> Result<(), String> {
-        self.run(rule_file.step())
-            .map(drop)
-            .map_err(|e| e.text().to_owned())
+        self.run(rule_file.step()).map(drop)
     }
 }
 
-/// Classifies a run of the script that was spawned. pkexec's own exit codes 126 and 127 mean the
-/// script never ran. Everything else that is not exit 0 with its output read is `Failed`.
+/// Reads a run of the script that was spawned. Only exit 0 with its output read is a success.
+/// 126 and 127 get their own text, because pkexec uses them for a dismissed prompt and a
+/// refusal, but they are failures like any other exit code: pkexec also passes the script's own
+/// exit code through.
 fn outcome(
     step: Step,
     stdout: io::Result<Vec<u8>>,
     status: io::Result<ExitStatus>,
-) -> Result<String, SetupError> {
-    let status = status.map_err(|e| {
-        SetupError::Failed(format!(
-            "waiting for {SETUP_PATH} remote-admin {}: {e}",
-            step.word()
-        ))
-    })?;
+) -> Result<String, String> {
+    let word = step.word();
+    let status =
+        status.map_err(|e| format!("waiting for {SETUP_PATH} remote-admin {word}: {e}"))?;
     match status.code() {
-        Some(0) => match stdout {
-            Ok(stdout) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
-            Err(e) => Err(SetupError::Failed(format!(
-                "reading the output of {SETUP_PATH} remote-admin {}: {e}",
-                step.word()
-            ))),
-        },
-        Some(126) => Err(SetupError::NotStarted(
-            "the password prompt was dismissed (pkexec exit 126)".to_owned(),
+        Some(0) => stdout
+            .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
+            .map_err(|e| format!("reading the output of {SETUP_PATH} remote-admin {word}: {e}")),
+        Some(126) => Err(format!(
+            "pkexec {SETUP_PATH} remote-admin {word} exited with 126 (pkexec's code for a \
+             dismissed password prompt)"
         )),
-        Some(127) => Err(SetupError::NotStarted(
-            "polkit did not allow it (pkexec exit 127)".to_owned(),
+        Some(127) => Err(format!(
+            "pkexec {SETUP_PATH} remote-admin {word} exited with 127 (pkexec's code for a \
+             refusal by polkit)"
         )),
-        Some(code) => Err(SetupError::Failed(format!(
-            "{SETUP_PATH} remote-admin {} exited with {code}",
-            step.word()
-        ))),
-        None => Err(SetupError::Failed(
-            "tasklens-setup was ended by a signal".to_owned(),
+        Some(code) => Err(format!(
+            "{SETUP_PATH} remote-admin {word} exited with {code}"
         )),
+        None => Err("tasklens-setup was ended by a signal".to_owned()),
     }
 }
 
@@ -1183,7 +1134,8 @@ polkit.addRule(function(action, subject) {{
         }
     }
 
-    /// A dismissed password prompt saves nothing, at the state query or at the change.
+    /// A dismissed password prompt saves nothing. At the state query nothing has changed yet; at
+    /// the change the restore runs anyway, since exit 126 may also be the script's own code.
     #[test]
     fn on_with_dismissed_prompt_saves_nothing() {
         let rig = Rig::new();
@@ -1192,8 +1144,11 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(code, 1);
         assert_eq!(
             err,
-            "tasklens remote-admin: the polkit rules file could not be checked: the password \
-             prompt was dismissed (pkexec exit 126). Nothing changed.\n"
+            format!(
+                "tasklens remote-admin: the polkit rules file could not be checked: pkexec \
+                 {SETUP_PATH} remote-admin state exited with 126 (pkexec's code for a dismissed \
+                 password prompt). Nothing changed.\n"
+            )
         );
         assert!(!engine.remote_admin());
         assert_eq!(engine.rev(), 1);
@@ -1204,8 +1159,11 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(code, 1);
         assert_eq!(
             err,
-            "tasklens remote-admin: the polkit rule was not written: the password prompt was \
-             dismissed (pkexec exit 126). Nothing changed.\n"
+            format!(
+                "tasklens remote-admin: the polkit rule was not written: pkexec {SETUP_PATH} \
+                 remote-admin on exited with 126 (pkexec's code for a dismissed password \
+                 prompt).\nThere is no polkit rule, as before. Nothing changed.\n"
+            )
         );
         assert!(!rig.rule().exists());
         assert!(!engine.remote_admin());
@@ -1228,9 +1186,7 @@ polkit.addRule(function(action, subject) {{
             "{err}"
         );
         assert!(
-            err.ends_with(
-                "The polkit rule was removed again, as there was none before. Nothing changed.\n"
-            ),
+            err.ends_with("There is no polkit rule, as before. Nothing changed.\n"),
             "{err}"
         );
         assert!(!rig.rule().exists());
@@ -1249,8 +1205,8 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(
             err,
             "tasklens remote-admin: remote_admin was not saved: another window changed the host \
-             settings 3 times in a row.\nThe polkit rule was removed again, as there was none \
-             before. Nothing changed.\n"
+             settings 3 times in a row.\nThere is no polkit rule, as before. Nothing \
+             changed.\n"
         );
         assert!(!rig.rule().exists());
         assert!(!engine.remote_admin());
@@ -1288,41 +1244,49 @@ polkit.addRule(function(action, subject) {{
         }
     }
 
-    /// q4x76.31 leader decision: the script installs the rule and then fails (it exits 1, or
-    /// its stdout is closed so its last echo fails). The recorded state is put back, present
-    /// or absent, and nothing is saved.
+    /// q4x76.31 leader decisions: the script installs the rule and then fails. It exits 1, its
+    /// stdout is closed so its last echo fails, or it exits 126 or 127, which pkexec passes
+    /// through and which therefore do not prove that nothing changed. The recorded state is put
+    /// back, present or absent, and nothing is saved.
     #[test]
     fn on_script_fails_after_writing_the_rule_so_the_rules_file_is_as_it_was() {
         let own = rule_text(&own_user());
         // The first `on` runs the real script, notes that the rule was written, and fails.
-        let fail_after = |run: &str| {
+        let fail_after = |run: &str, code: u8| {
             format!(
                 "if [ \"$3\" = on ] && [ ! -e \"$r/failed-once\" ]; then\n\
                  : > \"$r/failed-once\"\n\
                  {run}\n\
                  [ -e \"$r/{RULE}\" ] && : > \"$r/rule-was-written\"\n\
-                 exit 1\n\
+                 exit {code}\n\
                  fi\n\
                  exec sh \"$@\""
             )
         };
-        for run in ["sh \"$@\"", "sh \"$@\" >&-"] {
+        let runs = [
+            ("sh \"$@\"", 1),
+            ("sh \"$@\" >&-", 1),
+            ("sh \"$@\"", 126),
+            ("sh \"$@\"", 127),
+        ];
+        for (run, exit) in runs {
             for prior in [None, Some(&own)] {
                 let rig = Rig::new();
                 if let Some(text) = prior {
                     fs::write(rig.rule(), text).expect("write rule");
                 }
                 let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 2);
-                let setup = rig.fake(&fail_after(run));
+                let setup = rig.fake(&fail_after(run, exit));
                 let (code, out, err) = rig.run(What::On, &setup, &unused_polkit, "y\n");
-                let case = format!("{run}, prior {prior:?}");
+                let case = format!("{run}, exit {exit}, prior {prior:?}");
                 assert_eq!(code, 1, "{case}: {out}{err}");
                 assert!(rig.root().join("rule-was-written").exists(), "{case}");
                 assert!(
-                    err.starts_with(&format!(
-                        "tasklens remote-admin: the polkit rule was not written: {SETUP_PATH} \
-                         remote-admin on exited with "
-                    )),
+                    err.starts_with("tasklens remote-admin: the polkit rule was not written: "),
+                    "{case}: {err}"
+                );
+                assert!(
+                    err.contains(&format!("remote-admin on exited with {exit}")),
                     "{case}: {err}"
                 );
                 assert!(err.ends_with("Nothing changed.\n"), "{case}: {err}");
@@ -1418,6 +1382,53 @@ polkit.addRule(function(action, subject) {{
         assert!(!engine.remote_admin());
     }
 
+    /// q4x76.31 leader decision: the save is the commit point. When the terminal closes after
+    /// it, so the success line cannot be printed, the rule and the setting stay on and the exit
+    /// code is 1.
+    #[test]
+    fn on_closed_stdout_after_the_save_keeps_the_change() {
+        /// Takes the question, then closes when it is flushed, as a terminal closed while the
+        /// command waits for pkexec.
+        #[derive(Default)]
+        struct ClosesAfterFlush {
+            text: Vec<u8>,
+            closed: bool,
+        }
+        impl Write for ClosesAfterFlush {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.closed {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                self.text.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.closed = true;
+                Ok(())
+            }
+        }
+        let rig = Rig::new();
+        let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 2);
+        let setup = rig.setup();
+        let env = rig.env(&setup, &unused_polkit);
+        let mut out = ClosesAfterFlush::default();
+        let mut err = Vec::new();
+        let code = run(What::On, &env, &mut "y\n".as_bytes(), &mut out, &mut err);
+        let err = String::from_utf8(err).expect("utf-8");
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(
+            String::from_utf8(out.text).expect("utf-8"),
+            reach(HOST, "alice")
+        );
+        assert!(
+            err.starts_with("tasklens remote-admin: writing to the terminal: "),
+            "{err}"
+        );
+        assert_eq!(rig.rule_file(), Some(rule_text(&own_user())));
+        assert!(engine.remote_admin());
+        assert_eq!(engine.rev(), 2);
+    }
+
     /// `on` over another rules file keeps that file until `off`, which removes both.
     #[test]
     fn on_over_an_existing_rules_file_then_off_leaves_none() {
@@ -1465,19 +1476,22 @@ polkit.addRule(function(action, subject) {{
         let (code, out, err) = rig.run(What::Off, &rig.dismissed_at("off"), &unused_polkit, "");
         assert_eq!(code, 1);
         assert_eq!(out, "");
-        assert!(
-            err.starts_with(
-                "tasklens remote-admin: remote_admin is off, but the polkit rule was not removed"
-            ),
-            "{err}"
+        assert_eq!(
+            err,
+            format!(
+                "tasklens remote-admin: remote_admin is off, but removing the polkit rule failed: \
+                 pkexec {SETUP_PATH} remote-admin off exited with 126 (pkexec's code for a \
+                 dismissed password prompt).\nThere was no polkit rule before.\n"
+            )
         );
         assert!(!engine.remote_admin());
     }
 
-    /// q4x76.31 leader decision: the script fails after it started to remove the rule. The
-    /// recorded state is put back and the setting stays off.
+    /// q4x76.31 leader decision: the save of `off` is the commit point. The script removes the
+    /// rule and then fails: nothing is undone, so the rule is not put back, no restore runs and
+    /// the setting stays off.
     #[test]
-    fn off_script_fails_so_the_recorded_state_is_put_back() {
+    fn off_script_fails_after_the_save_so_nothing_is_undone() {
         let own = rule_text(&own_user());
         for prior in [None, Some(&own)] {
             let rig = Rig::new();
@@ -1486,8 +1500,8 @@ polkit.addRule(function(action, subject) {{
             }
             let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 2);
             let setup = rig.fake(
-                "if [ \"$3\" = off ] && [ ! -e \"$r/failed-once\" ]; then\n\
-                 : > \"$r/failed-once\"\n\
+                "printf '%s\\n' \"$3\" >> \"$r/log\"\n\
+                 if [ \"$3\" = off ]; then\n\
                  sh \"$@\"\n\
                  exit 1\n\
                  fi\n\
@@ -1498,24 +1512,31 @@ polkit.addRule(function(action, subject) {{
             assert_eq!(code, 1, "{case}");
             assert_eq!(out, "", "{case}");
             assert!(
-                err.starts_with(
+                err.starts_with(&format!(
                     "tasklens remote-admin: remote_admin is off, but removing the polkit rule \
-                     failed: "
-                ),
+                     failed: {SETUP_PATH} remote-admin off exited with 1.\n"
+                )),
                 "{case}: {err}"
             );
             if prior.is_some() {
                 assert!(
-                    err.contains(RuleFile::Present.restored_text()),
+                    err.ends_with(
+                        "may still. Run tasklens remote-admin off again to remove the rule.\n"
+                    ),
                     "{case}: {err}"
                 );
             } else {
                 assert!(
-                    err.ends_with("There was no polkit rule before, and there is none now.\n"),
+                    err.ends_with("There was no polkit rule before.\n"),
                     "{case}: {err}"
                 );
             }
-            assert_eq!(rig.rule_file().as_ref(), prior, "{case}");
+            assert_eq!(
+                fs::read_to_string(rig.root().join("log")).expect("log"),
+                "state\noff\n",
+                "{case}"
+            );
+            assert_eq!(rig.rule_file(), None, "{case}");
             assert!(!engine.remote_admin(), "{case}");
         }
     }
@@ -1633,10 +1654,11 @@ polkit.addRule(function(action, subject) {{
         }
     }
 
-    /// Every `--app-id` takes the same lock, because they all change the one rules file. The
-    /// sockets stay apart.
+    /// q4x76.31 leader decision: every `--app-id` takes the same lock, because they all change
+    /// the one rules file; the sockets stay apart. Two `on` commands with different app ids run
+    /// one after the other: each one's state query and change finish before the other's start.
     #[test]
-    fn one_lock_for_every_app_id() {
+    fn commands_with_different_app_ids_run_one_after_the_other() {
         use std::os::unix::fs::PermissionsExt;
         let runtime = tempfile::tempdir().expect("tempdir");
         // The runtime directory must be 0700, as `$XDG_RUNTIME_DIR` is.
@@ -1650,49 +1672,76 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(socket, runtime.path().join("tasklens/engine.sock"));
         assert_eq!(socket_a, runtime.path().join("a/engine.sock"));
         assert_eq!(socket_b, runtime.path().join("b/engine.sock"));
-        let _held = engine_link::lock_engine(&lock_a)
-            .expect("lock a")
-            .expect("free");
-        assert!(
-            engine_link::lock_engine(&lock_b).expect("lock b").is_none(),
-            "a second app id must wait for the first"
+
+        let rig = Rig::new();
+        let engine_a = TestEngine::start(&socket_a, false, Saves::Work, 2);
+        let engine_b = TestEngine::start(&socket_b, false, Saves::Work, 2);
+        let setup = rig.fake(
+            "[ -e \"$r/busy\" ] && : > \"$r/overlap\"\n\
+             : > \"$r/busy\"\n\
+             printf '%s\\n' \"$3\" >> \"$r/log\"\n\
+             sleep 0.3\n\
+             sh \"$@\"\n\
+             s=$?\n\
+             rm -f \"$r/busy\"\n\
+             exit $s",
         );
+        let instances = [("a", socket_a, lock_a), ("b", socket_b, lock_b)];
+        let codes: Vec<u8> = thread::scope(|scope| {
+            let runs: Vec<_> = instances
+                .iter()
+                .map(|(app_id, socket, lock)| {
+                    let (rig, setup) = (&rig, &setup);
+                    scope.spawn(move || {
+                        let mut env = rig.env(setup, &unused_polkit);
+                        env.socket.clone_from(socket);
+                        env.lock.clone_from(lock);
+                        env.hello.app_id = Arc::from(*app_id);
+                        let mut out = Vec::new();
+                        let mut err = Vec::new();
+                        run(What::On, &env, &mut "y\n".as_bytes(), &mut out, &mut err)
+                    })
+                })
+                .collect();
+            runs.into_iter()
+                .map(|run| run.join().expect("run"))
+                .collect()
+        });
+        assert_eq!(codes, [0, 0]);
+        assert!(!rig.root().join("overlap").exists());
+        assert_eq!(
+            fs::read_to_string(rig.root().join("log")).expect("log"),
+            "state\non\nstate\non\n"
+        );
+        assert!(engine_a.remote_admin());
+        assert!(engine_b.remote_admin());
     }
 
-    /// Only pkexec's 126 and 127 mean the script never ran. A failure to read the output or to
-    /// wait, once the script was spawned, may follow a change to the file, so it is `Failed` and
-    /// the caller restores.
+    /// q4x76.31 leader decision: every failure of a run is an error, so the caller restores
+    /// after any failed change. There is no 'did not start' case: 126 and 127 may be the
+    /// script's own exit code.
     #[test]
-    fn a_failure_after_the_spawn_is_failed() {
+    fn every_failure_of_a_run_is_an_error() {
         use std::os::unix::process::ExitStatusExt;
         let exit = |code: i32| Ok(ExitStatus::from_raw(code << 8));
         fn closed<T>() -> io::Result<T> {
             Err(io::Error::from(io::ErrorKind::BrokenPipe))
         }
-        assert!(matches!(
-            outcome(Step::On, closed(), exit(0)),
-            Err(SetupError::Failed(_))
-        ));
-        assert!(matches!(
-            outcome(Step::On, Ok(Vec::new()), closed()),
-            Err(SetupError::Failed(_))
-        ));
-        assert!(matches!(
-            outcome(Step::Off, closed(), closed()),
-            Err(SetupError::Failed(_))
-        ));
-        assert!(matches!(
-            outcome(Step::On, Ok(Vec::new()), exit(1)),
-            Err(SetupError::Failed(_))
-        ));
-        assert!(matches!(
-            outcome(Step::On, closed(), exit(126)),
-            Err(SetupError::NotStarted(_))
-        ));
-        assert!(matches!(
-            outcome(Step::On, Ok(Vec::new()), exit(127)),
-            Err(SetupError::NotStarted(_))
-        ));
+        assert!(outcome(Step::On, closed(), exit(0)).is_err());
+        assert!(outcome(Step::On, Ok(Vec::new()), closed()).is_err());
+        assert!(outcome(Step::Off, closed(), closed()).is_err());
+        assert!(outcome(Step::On, Ok(Vec::new()), exit(1)).is_err());
+        assert!(
+            outcome(Step::On, closed(), exit(126))
+                .expect_err("126")
+                .contains("exited with 126")
+        );
+        assert!(
+            outcome(Step::On, Ok(Vec::new()), exit(127))
+                .expect_err("127")
+                .contains("exited with 127")
+        );
+        assert!(outcome(Step::On, Ok(Vec::new()), Ok(ExitStatus::from_raw(9))).is_err());
         assert_eq!(
             outcome(Step::State, Ok(b"absent\n".to_vec()), exit(0)).expect("ok"),
             "absent\n"
