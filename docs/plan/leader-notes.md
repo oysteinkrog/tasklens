@@ -1052,3 +1052,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.23 held: host settings writes carry their snapshot's generation; switching client refuses other-generation writes; controls disabled until the new backend's host_settings arrives. Requeued.
 - 2026-10-31 q4x76.23 held again: generation bumps when the old connection is lost or the switch starts; controls enabled only while host_settings has the current generation; ADR-018 rule 4 updated. Requeued.
 - 2026-10-31 q4x76.11 prep: HostContext refactor first (no visible change); windows bind to the host they came from, tray/mini/notices follow local; split into .11 + .25 hosts setting, .26 host manager, .27 tabs, .28 Settings > Hosts, .29 reconnect banner. Requeued.
+- 2026-10-31 q4x76.11: 4 stale tl-ui tests (o55.57 overview menu, crw.105 net_page focus) split to tasklens-spkk9; not this bead's.
