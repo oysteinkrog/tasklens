@@ -5,7 +5,8 @@
 //! with the request and their [`ToastTexts`]; the tracker sends the command, keeps one
 //! [`PendingAction`] per request and shows each step as a toast that replaces the previous one
 //! in place. Per request the engine sends `Started` or one `Rejected`, then one final state per
-//! target, then a summary with `target: None` (ADR-005).
+//! target, then a summary with `target: None` (ADR-005). A dump's target also sends `Progress`
+//! before its final state; the tracker passes it on as [`ActionTrackerEvent::Progress`].
 //!
 //! - 1 target: every toast uses the request key, `ToastKey(id.0)` unless the owner set
 //!   `toast_key`.
@@ -218,6 +219,13 @@ enum Mode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActionTrackerEvent {
     Started(ActionId),
+    /// A running target reported progress: `bytes` written so far (a dump, ADR-018). It is not a
+    /// result: `results` does not hold it.
+    Progress {
+        id: ActionId,
+        index: u16,
+        bytes: u64,
+    },
     /// One target's final state arrived; read it with `ActionTracker::results`. Only for
     /// requests with `owner_toasts`.
     TargetFinished {
@@ -435,7 +443,14 @@ impl ActionTracker {
         };
         match (ev.target, ev.state) {
             (None, ActionState::Started) => self.on_started(ev.id, cx),
-            (Some(_), ActionState::Started) => {}
+            (Some(_), ActionState::Started) | (None, ActionState::Progress { .. }) => {}
+            (Some(index), ActionState::Progress { bytes }) => {
+                cx.emit(ActionTrackerEvent::Progress {
+                    id: ev.id,
+                    index,
+                    bytes,
+                });
+            }
             (Some(index), state) => {
                 entry.results.push((index, state.clone()));
                 if entry.texts.owner_toasts {
@@ -496,10 +511,7 @@ impl ActionTracker {
         let helper = helper_state(cx);
         let states = entry.effective(&summary);
         let total = entry.total();
-        let ok = states
-            .iter()
-            .filter(|s| matches!(s, ActionState::Succeeded))
-            .count() as u16;
+        let ok = states.iter().filter(|s| s.is_success()).count() as u16;
         let failed = total - ok;
         let eperm: SmallVec<[u16; 4]> = (0..total)
             .filter(|&i| is_eperm(states[usize::from(i)]))
@@ -576,7 +588,7 @@ impl ActionTracker {
                 } else {
                     let failures: SmallVec<[(u16, &ActionState); 4]> = (0..total)
                         .map(|i| (i, states[usize::from(i)]))
-                        .filter(|(_, s)| !matches!(s, ActionState::Succeeded))
+                        .filter(|(_, s)| !s.is_success())
                         .collect();
                     let (kind, text) = (texts.partial)(ok, total, &failures);
                     let button = if retry {
@@ -643,11 +655,7 @@ impl ActionTracker {
         };
         debug!(target: "tasklens::ui", ?id, "action outcome unknown");
         let total = entry.total();
-        let ok = entry
-            .results
-            .iter()
-            .filter(|(_, s)| matches!(s, ActionState::Succeeded))
-            .count() as u16;
+        let ok = entry.results.iter().filter(|(_, s)| s.is_success()).count() as u16;
         if entry.texts.owner_toasts {
             self.keep_finished(id, entry.results);
             cx.emit(ActionTrackerEvent::Finished {
@@ -867,7 +875,9 @@ fn result_toast(
     words: &ActionWords,
 ) -> (ToastKind, SharedString, Option<ToastAction>) {
     match state {
-        ActionState::Succeeded => (ToastKind::Success, texts.success.clone(), None),
+        ActionState::Succeeded | ActionState::Saved(_) => {
+            (ToastKind::Success, texts.success.clone(), None)
+        }
         ActionState::Failed(ActionError::PermissionDenied) if retry => (
             ToastKind::Error,
             words.eperm.clone(),
@@ -886,7 +896,7 @@ fn result_toast(
             let (kind, text) = words.reject(*reason);
             (kind, text, None)
         }
-        ActionState::OutcomeUnknown(_) | ActionState::Started => {
+        ActionState::OutcomeUnknown(_) | ActionState::Started | ActionState::Progress { .. } => {
             (ToastKind::Warning, words.outcome_unknown.clone(), None)
         }
     }
@@ -901,7 +911,10 @@ fn failed_lines(
     let mut lines = Vec::new();
     for (target, state) in entry.request.targets.iter().zip(states) {
         let reason = match state {
-            ActionState::Succeeded | ActionState::Started => continue,
+            ActionState::Succeeded
+            | ActionState::Saved(_)
+            | ActionState::Started
+            | ActionState::Progress { .. } => continue,
             ActionState::Failed(err) => words.message(err),
             ActionState::Rejected(reason) => words.reject(*reason).1,
             ActionState::OutcomeUnknown(_) => words.outcome_unknown.clone(),
@@ -1088,11 +1101,14 @@ impl ActionWords {
     }
 
     /// The reason a target did not succeed, as the first sentence of its text in lower case
-    /// without the full stop, such as "permission denied" (R-196). `None` for `Succeeded` and
-    /// `Started`.
+    /// without the full stop, such as "permission denied" (R-196). `None` for `Succeeded`,
+    /// `Saved`, `Started` and `Progress`.
     pub fn short_reason(&self, state: &ActionState) -> Option<SharedString> {
         let text = match state {
-            ActionState::Succeeded | ActionState::Started => return None,
+            ActionState::Succeeded
+            | ActionState::Saved(_)
+            | ActionState::Started
+            | ActionState::Progress { .. } => return None,
             ActionState::Failed(err) => self.message(err),
             ActionState::Rejected(reason) => self.reject(*reason).1,
             ActionState::OutcomeUnknown(_) => self.outcome_unknown.clone(),
@@ -1346,7 +1362,7 @@ mod tests {
             deadline_for(
                 &ActionKind::Dump {
                     mode: DumpMode::Full,
-                    path: "/tmp/core".into(),
+                    name: "core.core".into(),
                 },
                 1
             ),

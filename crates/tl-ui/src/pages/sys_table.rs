@@ -684,7 +684,9 @@ impl SysActions {
     fn on_tracker(&mut self, ev: ActionTrackerEvent, cx: &mut Context<Self>) {
         match ev {
             // The pending toast stays as it is.
-            ActionTrackerEvent::Started(_) | ActionTrackerEvent::Retried { .. } => {}
+            ActionTrackerEvent::Started(_)
+            | ActionTrackerEvent::Progress { .. }
+            | ActionTrackerEvent::Retried { .. } => {}
             ActionTrackerEvent::TargetFinished { id, index } => {
                 if !self.requests.contains_key(&id) {
                     return;
@@ -778,10 +780,7 @@ impl SysActions {
                 )
             })
             .collect();
-        let ok = results
-            .iter()
-            .filter(|(_, s)| matches!(s, ActionState::Succeeded))
-            .count();
+        let ok = results.iter().filter(|(_, s)| s.is_success()).count();
         let failed = n - ok;
         let queue = tracked.queue.clone();
         let key = ToastKey(id.0);
@@ -793,7 +792,7 @@ impl SysActions {
         let words = action_words(cx);
         let lines: Rc<[SharedString]> = results
             .iter()
-            .filter(|(_, s)| !matches!(s, ActionState::Succeeded))
+            .filter(|(_, s)| !s.is_success())
             .map(|(i, s)| {
                 let label = words.target_label(&tracked.targets[*i]);
                 let reason = match s {
@@ -916,8 +915,10 @@ fn final_toast(
     cx: &mut App,
 ) -> Option<(ToastKind, SharedString, Option<ToastAction>)> {
     let toast = match state {
-        ActionState::Succeeded if texts.done_one.is_empty() => return None,
-        ActionState::Succeeded => (ToastKind::Success, texts.done_one.clone(), None),
+        ActionState::Succeeded | ActionState::Saved(_) if texts.done_one.is_empty() => return None,
+        ActionState::Succeeded | ActionState::Saved(_) => {
+            (ToastKind::Success, texts.done_one.clone(), None)
+        }
         // A dismissed helper prompt is a choice, not a failure (UI-SYS-064 step 3).
         ActionState::Failed(ActionError::AuthCancelled) => (
             ToastKind::Warning,
@@ -952,7 +953,7 @@ fn final_toast(
             let text = format!("{}: {reason}", texts.failed_prefix).into();
             (ToastKind::Error, text, None)
         }
-        ActionState::OutcomeUnknown(_) | ActionState::Started => {
+        ActionState::OutcomeUnknown(_) | ActionState::Started | ActionState::Progress { .. } => {
             (ToastKind::Warning, texts.unknown.clone(), None)
         }
     };

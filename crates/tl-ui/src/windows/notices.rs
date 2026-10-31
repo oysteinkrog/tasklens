@@ -13,15 +13,16 @@
 //! nothing and makes no network contact itself; the engine hashes and opens the browser.
 //!
 //! [`start_dump`] asks first when VmRSS is over 2 GiB, then sends `ActionKind::Dump` with a
-//! path the UI picks under `<state_dir>/dumps/`. While the action runs, the Info toast
-//! `DumpToast(action_id)` shows the file size, read with one `stat` every 500 ms off the UI
-//! thread. Closing it stops the reads; the result still shows. The result replaces that toast.
-//! A click on the path in the success toast copies the full path. A privilege failure offers the
-//! tracker's "Retry as administrator"; the retry shows its progress and result in the same toast.
-//! The UI never reads the core file: it holds process memory.
+//! file name only. The engine puts the file in its own dumps dir and reports the full path in
+//! `ActionState::Saved`, because a path on a host is chosen by that host's engine (ADR-018).
+//! While the action runs, the Info toast `DumpToast(action_id)` shows the file size from the
+//! engine's `Progress` events, and is pushed again every 500 ms so it stays up. Closing it stops
+//! the updates; the result still shows. The result replaces that toast. A click on the path in
+//! the success toast copies the full path. A privilege failure offers the tracker's "Retry as
+//! administrator"; the retry shows its progress and result in the same toast. The UI never reads
+//! the core file or its size: the file is on the engine's host and holds process memory.
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,7 +47,7 @@ use crate::action_tracker::{
     ActionTracker, ActionTrackerEvent, GlobalActionTracker, RetryActionAsAdmin, ToastTexts,
     action_words,
 };
-use crate::app::{AppEnv, EngineGlobal};
+use crate::app::EngineGlobal;
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::toast::{self, ToastAction, ToastClosed, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
@@ -307,8 +308,8 @@ pub fn vt_url(sha256: &[u8; 32]) -> String {
 /// Over this VmRSS the dump asks first (UI-PRC-014 "Create dump file, VmRSS > 2 GiB").
 pub const LARGE_DUMP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// How often the progress toast reads the size of the core file.
-pub const DUMP_POLL: Duration = Duration::from_millis(500);
+/// How often the progress toast is pushed again while the dump runs, so its timer never ends it.
+pub const DUMP_REFRESH: Duration = Duration::from_millis(500);
 
 /// The longest `{name}` part of a dump file name, in bytes (R-224).
 pub const DUMP_NAME_MAX: usize = 64;
@@ -387,7 +388,7 @@ fn name_and_rss(key: ProcessKey, cx: &App) -> (SharedString, u64) {
 
 /// The `{name}` part of a dump file name (R-224). Every char outside `[A-Za-z0-9._-]` becomes
 /// `_`, and a run of them one `_`, because the engine writes no other file name
-/// (`valid_dump_path`). Cut to 64 bytes; `process` when empty.
+/// (`valid_dump_name`). Cut to 64 bytes; `process` when empty.
 pub fn dump_file_stem(name: &str) -> String {
     let mut out = String::with_capacity(name.len().min(DUMP_NAME_MAX));
     let mut replaced = false;
@@ -409,14 +410,14 @@ pub fn dump_file_stem(name: &str) -> String {
     out
 }
 
-/// `<dir>/{name}_{pid}_{yyyymmdd_hhmmss}.core` (UI-PWN-034). `at` is local time.
-pub fn dump_path(dir: &Path, name: &str, pid: u32, at: jiff::civil::DateTime) -> String {
-    let file = format!(
+/// `{name}_{pid}_{yyyymmdd_hhmmss}.core` (UI-PWN-034), a file name only: the engine picks the
+/// directory. `at` is local time.
+pub fn dump_file_name(name: &str, pid: u32, at: jiff::civil::DateTime) -> String {
+    format!(
         "{}_{pid}_{}.core",
         dump_file_stem(name),
         at.strftime("%Y%m%d_%H%M%S")
-    );
-    dir.join(file).to_string_lossy().into_owned()
+    )
 }
 
 /// The path as the success toast shows it: `$HOME` as `~`.
@@ -475,7 +476,6 @@ struct RetryDump {
     /// The refused request.
     id: ActionId,
     toast: DumpToast,
-    path: Arc<str>,
     queue: WeakEntity<ToastQueue>,
     window: AnyWindowHandle,
 }
@@ -489,20 +489,13 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
         warn!(target: "tasklens::ui", "no action tracker; the dump was not started");
         return;
     };
-    let dir = cx
-        .try_global::<AppEnv>()
-        .map(|env| env.state_dir.join("dumps"))
-        .unwrap_or_default();
     let at = jiff::Zoned::now().datetime();
-    let path: Arc<str> = dump_path(&dir, name, key.pid, at).into();
+    let file: Arc<str> = dump_file_name(name, key.pid, at).into();
     let mode: DumpMode = TlSettings::settings(cx).processes.dump_type;
     let id = tracker.read(cx).next_id();
     let request = ActionRequest {
         id,
-        kind: ActionKind::Dump {
-            mode,
-            path: path.clone(),
-        },
+        kind: ActionKind::Dump { mode, name: file },
         targets: smallvec![ActionTarget::Process(key)],
         privileged: false,
     };
@@ -529,7 +522,7 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
     }
     let handle = window.window_handle();
     let queue = queue.downgrade();
-    let dump = cx.new(|cx| DumpRequest::new(id, toast, path, queue, handle, &tracker, cx));
+    let dump = cx.new(|cx| DumpRequest::new(id, toast, queue, handle, &tracker, cx));
     cx.global_mut::<DumpFlows>().live.push(dump);
 }
 
@@ -544,7 +537,7 @@ fn on_retried(from: ActionId, to: ActionId, tracker: &Entity<ActionTracker>, cx:
         return;
     };
     let r = flows.retry.swap_remove(ix);
-    let dump = cx.new(|cx| DumpRequest::new(to, r.toast, r.path, r.queue, r.window, tracker, cx));
+    let dump = cx.new(|cx| DumpRequest::new(to, r.toast, r.queue, r.window, tracker, cx));
     cx.global_mut::<DumpFlows>().live.push(dump);
 }
 
@@ -593,20 +586,20 @@ fn copy_dump_path(action: &CopyDumpPath, cx: &mut App) {
     }
 }
 
-/// One dump request, from the send to its result toast. Its `DumpProgress` task reads the file
-/// size every 500 ms and ends with the action.
+/// One dump request, from the send to its result toast. The size comes from the engine's
+/// `Progress` events; its refresh task pushes the progress toast again every 500 ms and ends
+/// with the action.
 pub struct DumpRequest {
     id: ActionId,
     toast: DumpToast,
-    path: Arc<str>,
     queue: WeakEntity<ToastQueue>,
     window: AnyWindowHandle,
-    /// The last size read; `None` before the first read.
+    /// The last size the engine reported; `None` before the first report.
     size: Option<u64>,
     /// The user closed the progress toast: it stays closed until the result.
     closed: bool,
     done: bool,
-    _progress: Option<Task<()>>,
+    _refresh: Option<Task<()>>,
     _tracker: Option<Subscription>,
     _closed: Option<Subscription>,
 }
@@ -615,7 +608,6 @@ impl DumpRequest {
     fn new(
         id: ActionId,
         toast: DumpToast,
-        path: Arc<str>,
         queue: WeakEntity<ToastQueue>,
         window: AnyWindowHandle,
         tracker: &Entity<ActionTracker>,
@@ -623,10 +615,11 @@ impl DumpRequest {
     ) -> Self {
         let subscription = cx.subscribe(
             tracker,
-            |this: &mut Self, tracker, ev: &ActionTrackerEvent, cx| {
-                if let ActionTrackerEvent::Finished { id, .. } = *ev
-                    && id == this.id
-                {
+            |this: &mut Self, tracker, ev: &ActionTrackerEvent, cx| match *ev {
+                ActionTrackerEvent::Progress { id, bytes, .. } if id == this.id => {
+                    this.on_size(bytes, cx);
+                }
+                ActionTrackerEvent::Finished { id, .. } if id == this.id => {
                     let state = tracker
                         .read(cx)
                         .results(id)
@@ -634,6 +627,7 @@ impl DumpRequest {
                         .map(|(_, state)| state.clone());
                     this.finish(state, cx);
                 }
+                _ => {}
             },
         );
         let key: ToastKey = toast.into();
@@ -644,16 +638,10 @@ impl DumpRequest {
                 }
             })
         });
-        let file = path.clone();
-        let progress = cx.spawn(async move |this, cx| {
+        let refresh = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(DUMP_POLL).await;
-                let file = file.clone();
-                let size = cx
-                    .background_executor()
-                    .spawn(async move { std::fs::metadata(&*file).map(|m| m.len()).ok() })
-                    .await;
-                if this.update(cx, |this, cx| this.on_size(size, cx)).is_err() {
+                cx.background_executor().timer(DUMP_REFRESH).await;
+                if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
                     return;
                 }
             }
@@ -661,13 +649,12 @@ impl DumpRequest {
         let this = Self {
             id,
             toast,
-            path,
             queue,
             window,
             size: None,
             closed: false,
             done: false,
-            _progress: Some(progress),
+            _refresh: Some(refresh),
             _tracker: Some(subscription),
             _closed: closed,
         };
@@ -675,27 +662,34 @@ impl DumpRequest {
         this
     }
 
-    /// The progress toast was closed: no more size reads and no new progress toast.
+    /// The progress toast was closed: no new progress toast until the result.
     fn on_closed(&mut self, _: &mut Context<Self>) {
         if self.done {
             return;
         }
         self.closed = true;
-        self._progress = None;
+        self._refresh = None;
     }
 
-    fn on_size(&mut self, size: Option<u64>, cx: &mut Context<Self>) {
+    /// The engine reported `bytes` written so far.
+    fn on_size(&mut self, bytes: u64, cx: &mut Context<Self>) {
         if self.done || self.closed {
             return;
         }
-        if size.is_some() {
-            self.size = size;
+        self.size = Some(bytes);
+        self.show_progress(cx);
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.done || self.closed {
+            return;
         }
         self.show_progress(cx);
     }
 
-    /// "Writing core…", then "Writing core… 1.20 GiB" once a size was read. Pushed on every
-    /// read: each push restarts the toast's timer, so the Info toast stays while the dump runs.
+    /// "Writing core…", then "Writing core… 1.20 GiB" once the engine reported a size. Pushed
+    /// on every report and every 500 ms: each push restarts the toast's timer, so the Info toast
+    /// stays while the dump runs.
     fn show_progress(&self, cx: &mut Context<Self>) {
         let text = match self.size {
             None => tr(cx, DUMP_WRITING),
@@ -721,18 +715,19 @@ impl DumpRequest {
         }
     }
 
-    /// Stops the size reads and replaces the progress toast with the result. `None` is a
-    /// request that ended with no target result (the engine stopped).
+    /// Stops the refresh and replaces the progress toast with the result. `None` is a request
+    /// that ended with no target result (the engine stopped). A dump's success is always
+    /// `Saved` with the path the engine chose.
     fn finish(&mut self, state: Option<ActionState>, cx: &mut Context<Self>) {
         if self.done {
             return;
         }
         self.done = true;
-        self._progress = None;
+        self._refresh = None;
         self._tracker = None;
         self._closed = None;
         match state {
-            Some(ActionState::Succeeded) => self.show_success(cx),
+            Some(ActionState::Saved(path)) => self.show_success(path, cx),
             Some(
                 ActionState::Failed(ActionError::PermissionDenied)
                 | ActionState::Rejected(RejectReason::NotOwner),
@@ -759,9 +754,9 @@ impl DumpRequest {
     }
 
     /// "Dump created: ~/…/name_1_20261003_101500.core" with "Open folder". A click on the text
-    /// copies the full path.
-    fn show_success(&self, cx: &mut Context<Self>) {
-        let shown = shown_dump_path(&self.path, &home_dir(cx));
+    /// copies the full path, which the engine reported.
+    fn show_success(&self, path: Arc<str>, cx: &mut Context<Self>) {
+        let shown = shown_dump_path(&path, &home_dir(cx));
         let shown = fit_path(self.window, &shown, cx);
         let text = tr_args(
             cx,
@@ -775,7 +770,7 @@ impl DumpRequest {
         DumpFlows::prune(cx);
         cx.default_global::<DumpFlows>().done.push(DoneDump {
             toast: self.toast,
-            path: self.path.clone(),
+            path,
             queue: self.queue.clone(),
         });
         self.push(ToastKind::Success, text, Some(button), cx);
@@ -809,7 +804,6 @@ impl DumpRequest {
             cx.default_global::<DumpFlows>().retry.push(RetryDump {
                 id: self.id,
                 toast: self.toast,
-                path: self.path.clone(),
                 queue: self.queue.clone(),
                 window: self.window,
             });
@@ -906,9 +900,12 @@ fn fit_path(window: AnyWindowHandle, shown: &str, cx: &mut App) -> SharedString 
 mod tests {
     use super::*;
 
-    /// The engine's file name check (`valid_dump_path` in tl-engine): `^[A-Za-z0-9._-]+\.core$`.
+    /// The engine's file name check (`valid_dump_name` in tl-engine): `^[A-Za-z0-9._-]+\.core$`,
+    /// no `/`, not `.` or `..`.
     fn engine_accepts(file: &str) -> bool {
-        file.len() > ".core".len()
+        !file.contains('/')
+            && file != ".."
+            && file.len() > ".core".len()
             && file.ends_with(".core")
             && file
                 .bytes()
@@ -920,15 +917,11 @@ mod tests {
     }
 
     #[test]
-    fn dump_path_format() {
-        let dir = Path::new("/home/u/.local/state/tasklens/dumps");
+    fn dump_file_name_format() {
+        assert_eq!(dump_file_name("x", 1, at()), "x_1_20261003_101500.core");
         assert_eq!(
-            dump_path(dir, "x", 1, at()),
-            "/home/u/.local/state/tasklens/dumps/x_1_20261003_101500.core"
-        );
-        assert_eq!(
-            dump_path(dir, "", 42, jiff::civil::date(2026, 1, 2).at(3, 4, 5, 0)),
-            "/home/u/.local/state/tasklens/dumps/process_42_20260102_030405.core"
+            dump_file_name("", 42, jiff::civil::date(2026, 1, 2).at(3, 4, 5, 0)),
+            "process_42_20260102_030405.core"
         );
     }
 
@@ -949,7 +942,6 @@ mod tests {
 
     #[test]
     fn dump_names_pass_the_engine_check() {
-        let dir = Path::new("/s/tasklens/dumps");
         for name in [
             "Isolated Web Co",
             "kworker/0:1H",
@@ -960,10 +952,8 @@ mod tests {
             "/",
             "\u{7}bell",
         ] {
-            let path = dump_path(dir, name, 4321, at());
-            let (parent, file) = path.rsplit_once('/').expect("a file name");
-            assert_eq!(parent, "/s/tasklens/dumps", "{name:?}");
-            assert!(engine_accepts(file), "{name:?} gave {file:?}");
+            let file = dump_file_name(name, 4321, at());
+            assert!(engine_accepts(&file), "{name:?} gave {file:?}");
         }
     }
 

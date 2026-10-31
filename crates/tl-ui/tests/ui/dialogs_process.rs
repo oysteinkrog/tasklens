@@ -2439,7 +2439,7 @@ mod dump {
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{
-        DUMP_POLL, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
+        DUMP_REFRESH, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
     };
 
     pub(super) const GIB: u64 = 1024 * 1024 * 1024;
@@ -2595,14 +2595,43 @@ mod dump {
             .collect()
     }
 
-    /// The one dump request: its mode and path.
+    /// The one dump request: its mode and file name.
     fn dump(r: &Rig) -> (ActionRequest, DumpMode, String) {
         let sent = actions(r);
         assert_eq!(sent.len(), 1, "{sent:?}");
         match &sent[0].kind {
-            ActionKind::Dump { mode, path } => (sent[0].clone(), *mode, path.to_string()),
+            ActionKind::Dump { mode, name } => (sent[0].clone(), *mode, name.to_string()),
             other => panic!("not Dump: {other:?}"),
         }
+    }
+
+    /// The file name a dump request carries.
+    fn dump_name(request: &ActionRequest) -> String {
+        match &request.kind {
+            ActionKind::Dump { name, .. } => name.to_string(),
+            other => panic!("not Dump: {other:?}"),
+        }
+    }
+
+    /// The path the engine reports for `request`: its file name in the engine host's dumps dir,
+    /// which is not the UI's state dir in these tests.
+    fn engine_path(request: &ActionRequest) -> String {
+        format!("/home/u/.local/state/tasklens/dumps/{}", dump_name(request))
+    }
+
+    /// The engine's success for `request`: `Saved` with [`engine_path`].
+    fn saved(request: &ActionRequest) -> ActionState {
+        ActionState::Saved(engine_path(request).into())
+    }
+
+    /// One `Progress` event for the dump's target.
+    fn progress(r: &mut Rig, request: &ActionRequest, bytes: u64) {
+        r.engine.emit(ActionEvent {
+            id: request.id,
+            target: Some(0),
+            state: ActionState::Progress { bytes },
+        });
+        r.pcx.run_until_parked();
     }
 
     fn toasts(r: &mut Rig) -> Vec<String> {
@@ -2710,19 +2739,19 @@ mod dump {
             ],
         );
 
-        // 1 GiB: no confirmation, the Dump goes out with the computed path.
+        // 1 GiB: no confirmation, the Dump goes out with a file name only: the engine picks
+        // the directory (ADR-018).
         start(&mut r, 100);
         assert!(confirmation(&r, cx).is_none(), "no confirmation at 1 GiB");
-        let (request, mode, path) = dump(&r);
+        let (request, mode, file) = dump(&r);
         assert_eq!(mode, DumpMode::Mini);
         assert_eq!(
             request.targets.as_slice(),
             &[ActionTarget::Process(key(100))]
         );
         assert!(!request.privileged);
-        let (dir, file) = path.rsplit_once('/').expect("a file name");
-        assert_eq!(dir, "/s/tasklens/dumps");
-        assert_file_name(file, "Isolated_Web_Co", 100);
+        assert!(!file.contains('/'), "{file}");
+        assert_file_name(&file, "Isolated_Web_Co", 100);
 
         // 3.4 GiB: the confirmation comes first; Cancel sends nothing.
         start(&mut r, 200);
@@ -2763,13 +2792,7 @@ mod dump {
         r.pcx.run_until_parked();
         let sent = actions(&r);
         assert_eq!(sent.len(), 2, "{sent:?}");
-        match &sent[1].kind {
-            ActionKind::Dump { path, .. } => {
-                let file = path.rsplit_once('/').expect("a file name").1;
-                assert_file_name(file, "big", 200);
-            }
-            other => panic!("not Dump: {other:?}"),
-        }
+        assert_file_name(&dump_name(&sent[1]), "big", 200);
     }
 
     #[gpui_kit::test]
@@ -2782,36 +2805,36 @@ mod dump {
             vec![record(7, "kworker/0:1H", 0)],
         );
         start(&mut r, 7);
-        let (_, mode, path) = dump(&r);
+        let (_, mode, file) = dump(&r);
         assert_eq!(mode, DumpMode::Full);
-        let file = path.rsplit_once('/').expect("a file name").1;
-        assert_file_name(file, "kworker_0_1H", 7);
+        assert_file_name(&file, "kworker_0_1H", 7);
     }
 
+    /// ADR-018: the size comes from the engine's `Progress` events, in order, not from the UI
+    /// reading a file. A file of another size at the engine's path changes nothing.
     #[gpui_kit::test]
     fn dump_progress_toast_updates_in_place(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().expect("temp dir");
         let mut r = rig(cx, tmp.path(), DumpMode::Mini, vec![record(5, "x", GIB)]);
         start(&mut r, 5);
-        let (request, _, path) = dump(&r);
+        let (request, _, name) = dump(&r);
         assert_eq!(toasts(&mut r), ["Writing core…"], "before the first size");
-        advance(&mut r, DUMP_POLL);
-        assert_eq!(toasts(&mut r), ["Writing core…"], "no file yet");
-
-        // The file grows to 1.2 GiB. A sparse file has that size and holds no data.
+        // A file the UI could stat: it is never read.
         std::fs::create_dir_all(tmp.path().join("dumps")).expect("dumps dir");
-        let file = std::fs::File::create(&path).expect("core file");
-        file.set_len(12 * GIB / 10).expect("sparse size");
-        advance(&mut r, DUMP_POLL);
+        let file = std::fs::File::create(tmp.path().join("dumps").join(&name)).expect("file");
+        file.set_len(7 * GIB).expect("sparse size");
+        advance(&mut r, DUMP_REFRESH);
+        assert_eq!(toasts(&mut r), ["Writing core…"], "no progress yet");
+
+        progress(&mut r, &request, 12 * GIB / 10);
         assert_eq!(toasts(&mut r), ["Writing core… 1.20 GiB"], "same toast");
 
-        file.set_len(2 * GIB).expect("sparse size");
-        advance(&mut r, DUMP_POLL);
+        progress(&mut r, &request, 2 * GIB);
         assert_eq!(toasts(&mut r), ["Writing core… 2.00 GiB"]);
 
         // The Info toast stays while the dump runs, past its 5 s.
         for _ in 0..16 {
-            advance(&mut r, DUMP_POLL);
+            advance(&mut r, DUMP_REFRESH);
         }
         assert_eq!(toasts(&mut r), ["Writing core… 2.00 GiB"], "after 8 s");
 
@@ -2822,10 +2845,10 @@ mod dump {
         r.pcx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(r.pcx.debug_bounds(selector).is_some(), "{selector}");
 
-        // After the result the size is no longer read.
-        finish(&mut r, &request, ActionState::Succeeded);
-        file.set_len(3 * GIB).expect("sparse size");
-        advance(&mut r, DUMP_POLL);
+        // After the result a late progress event changes nothing.
+        finish(&mut r, &request, saved(&request));
+        progress(&mut r, &request, 3 * GIB);
+        advance(&mut r, DUMP_REFRESH);
         let shown = toasts(&mut r);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
@@ -2836,33 +2859,32 @@ mod dump {
         let tmp = tempfile::tempdir().expect("temp dir");
         let mut r = rig(cx, tmp.path(), DumpMode::Mini, vec![record(5, "x", GIB)]);
         start(&mut r, 5);
-        let (request, _, path) = dump(&r);
-        std::fs::create_dir_all(tmp.path().join("dumps")).expect("dumps dir");
-        let file = std::fs::File::create(&path).expect("core file");
-        file.set_len(GIB).expect("sparse size");
-        advance(&mut r, DUMP_POLL);
+        let (request, _, _) = dump(&r);
+        progress(&mut r, &request, GIB);
         assert_eq!(toasts(&mut r), ["Writing core… 1.00 GiB"]);
 
-        // Closed while the dump runs: later size reads do not bring it back.
+        // Closed while the dump runs: later progress does not bring it back.
         let key = toast_key(&request);
         click(&mut r, format!("TlButton-TlToast-k{key}-close"));
         assert!(toasts(&mut r).is_empty());
-        file.set_len(2 * GIB).expect("sparse size");
+        progress(&mut r, &request, 2 * GIB);
         for _ in 0..4 {
-            advance(&mut r, DUMP_POLL);
+            advance(&mut r, DUMP_REFRESH);
         }
         assert!(toasts(&mut r).is_empty(), "still closed");
 
         // The result still shows.
-        finish(&mut r, &request, ActionState::Succeeded);
+        finish(&mut r, &request, saved(&request));
         let shown = toasts(&mut r);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
     }
 
+    /// The toast shows and copies the path the engine reported, not one under the UI's own
+    /// state dir.
     #[gpui_kit::test]
     fn dump_success_toast_text_and_button(cx: &mut TestAppContext) {
-        let state = PathBuf::from("/home/u/.local/state/tasklens");
+        let state = PathBuf::from("/s/tasklens");
         let mut r = rig(
             cx,
             &state,
@@ -2871,10 +2893,10 @@ mod dump {
         );
         r.pcx.update(|_, cx| set_test_home(cx, "/home/u"));
         start(&mut r, 1);
-        let (request, _, path) = dump(&r);
-        let file = path.rsplit_once('/').expect("a file name").1.to_owned();
+        let (request, _, file) = dump(&r);
         assert_file_name(&file, "x", 1);
-        finish(&mut r, &request, ActionState::Succeeded);
+        let path = engine_path(&request);
+        finish(&mut r, &request, saved(&request));
         assert_eq!(
             toasts(&mut r),
             [format!(
@@ -2896,7 +2918,7 @@ mod dump {
         // A second dump succeeds; "Open folder" on the first toast shows the first file.
         start(&mut r, 2);
         let second = actions(&r).pop().expect("second dump");
-        finish(&mut r, &second, ActionState::Succeeded);
+        finish(&mut r, &second, saved(&second));
         assert_eq!(toasts(&mut r).len(), 3);
         click(&mut r, format!("TlButton-TlToast-k{key}-action"));
         let sent = actions(&r);
@@ -2967,7 +2989,7 @@ mod dump {
         let mut r = rig(cx, &state, DumpMode::Mini, vec![record(3, "x", GIB)]);
         publish_helper(&mut r, HelperState::Locked);
         start(&mut r, 3);
-        let (request, _, path) = dump(&r);
+        let (request, _, name) = dump(&r);
         let tkey = toast_key(&request);
         finish(
             &mut r,
@@ -2991,7 +3013,7 @@ mod dump {
             retry.kind,
             ActionKind::Dump {
                 mode: DumpMode::Mini,
-                path: path.as_str().into(),
+                name: name.as_str().into(),
             }
         );
 
@@ -3000,7 +3022,7 @@ mod dump {
         r.pcx.update(|window, cx| window.draw(cx).clear(cx));
         let selector: &'static str = format!("TlToast-k{tkey}").leak();
         assert!(r.pcx.debug_bounds(selector).is_some(), "{selector}");
-        finish(&mut r, retry, ActionState::Succeeded);
+        finish(&mut r, retry, saved(retry));
         let shown = toasts(&mut r);
         assert_eq!(shown.len(), 1, "{shown:?}");
         assert!(shown[0].starts_with("Dump created: "), "{shown:?}");
@@ -3083,14 +3105,11 @@ mod dump {
         for pid in 1..=17 {
             start(&mut r, pid);
             let request = actions(&r).pop().expect("a dump");
-            finish(&mut r, &request, ActionState::Succeeded);
+            finish(&mut r, &request, saved(&request));
             first.get_or_insert(request);
         }
         let first = first.expect("17 dumps");
-        let ActionKind::Dump { path, .. } = &first.kind else {
-            panic!("not Dump: {:?}", first.kind);
-        };
-        let path = path.to_string();
+        let path = engine_path(&first);
         assert!(path.contains("/p1_1_"), "{path}");
         let key = toast_key(&first);
 

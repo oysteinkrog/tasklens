@@ -337,7 +337,7 @@ fn service_jobs_have_no_timeout(cx: &mut TestAppContext) {
         request(
             ActionKind::Dump {
                 mode: DumpMode::Mini,
-                path: "/var/tmp/core".into(),
+                name: "x_1.core".into(),
             },
             [process(1)],
         ),
