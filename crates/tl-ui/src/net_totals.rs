@@ -1,10 +1,11 @@
 //! The window's network total (ADR-018, tasklens-q4x76.22).
 //!
 //! The engine counts every adapter kind: `aggregate:net` is the total of all kinds, and
-//! `aggregate:net:<kind>` the total of each kind it has seen. The window shows the total minus
-//! the per-kind totals of the kinds its `performance.show_network_*` settings hide, so two
-//! windows on one engine each see their own total. History written before the per-kind totals
-//! has none of them, so there the total reads as it was stored.
+//! `aggregate:net:<kind>` the total of each kind. The window shows the total minus the per-kind
+//! totals of the kinds its `performance.show_network_*` settings hide, so two windows on one
+//! engine each see their own total (tested with two sessions on the real engine in
+//! `tl-app/tests/net_kinds_two_sessions.rs`). History written before the per-kind totals has none
+//! of them, so there the total reads as it was stored.
 
 use std::sync::Arc;
 
