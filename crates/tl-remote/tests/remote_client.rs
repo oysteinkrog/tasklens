@@ -2,6 +2,9 @@
 //! wake and `Ack` order, the bounded command queue, a connection lost during requests, a new
 //! engine instance, and journal close.
 
+// The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
+#![allow(clippy::unwrap_used)]
+
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU32, Ordering};
