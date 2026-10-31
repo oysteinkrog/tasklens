@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -1076,7 +1076,9 @@ fn overview_widget_grid_scale_1_5_and_2(cx: &mut TestAppContext) {
 /// widgets on that source; the container and the page never notify, no widget entity is made or
 /// dropped, and no widget is placed again. GPUI marks the ancestors of a notifying view dirty
 /// (crw.34, no GPUI fork), so the container and the page may render at most once in that frame,
-/// with fixed work only: no placement and no render of the widgets that did not change.
+/// with fixed work only: no placement. GPUI also re-renders every cached child of a view it
+/// re-renders (`window.refreshing`, gpui-pre 0.3.7 `view.rs`), so the other widgets may render
+/// once too, from text they already hold: they do not notify and their text stays the same.
 #[gpui_kit::test]
 fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -1106,6 +1108,8 @@ fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext
     let renders0: Vec<_> = widgets.iter().map(|w| r.counts(w).1).collect();
     let (render0, notify0, page0) = r.container_counts(&c);
     let relayouts0 = r.vcx.read_entity(&c, |c, _| c.relayout_count.get());
+    let vram_texts = r.read(&widgets[1], |w| w.texts().map(SharedString::clone));
+    let gpu_b_texts = r.read(&widgets[2], |w| w.texts().map(SharedString::clone));
 
     // A sample that changes nothing a widget shows: no notify, so nothing renders.
     r.system(|s| {
@@ -1148,9 +1152,25 @@ fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext
         "the container render places nothing"
     );
     let now: Vec<_> = widgets.iter().map(|w| r.counts(w).1).collect();
-    assert!(now[0] > renders0[0], "the widget on GPU A renders");
-    assert_eq!(now[1], renders0[1], "the VRAM widget does not render");
-    assert_eq!(now[2], renders0[2], "the GPU B widget does not render");
+    assert_eq!(now[0], renders0[0] + 1, "the widget on GPU A renders once");
+    assert!(
+        now[1] - renders0[1] <= 1,
+        "VRAM renders {}",
+        now[1] - renders0[1]
+    );
+    assert!(
+        now[2] - renders0[2] <= 1,
+        "GPU B renders {}",
+        now[2] - renders0[2]
+    );
+    assert_eq!(
+        r.read(&widgets[1], |w| w.texts().map(SharedString::clone)),
+        vram_texts
+    );
+    assert_eq!(
+        r.read(&widgets[2], |w| w.texts().map(SharedString::clone)),
+        gpu_b_texts
+    );
     assert_eq!(r.entity_ids(&c), ids, "no widget entity made or dropped");
     assert_eq!(r.read(&widgets[0], |w| w.texts()[1].to_string()), "70.0%");
 }
