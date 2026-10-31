@@ -1050,3 +1050,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.9 prep: per-kind network totals in the engine; host_settings snapshot part + set_host_settings; engine-lock holder owns engine.toml; split into .9 + .22 .23 .24 (.11 and .16 wait for .24). Requeued.
 - 2026-10-31 q4x76.10 held again: one poll loop on non-blocking ssh pipes that also watches ssh's exit (pidfd, else 200 ms try_wait). Requeued.
 - 2026-10-31 q4x76.23 held: host settings writes carry their snapshot's generation; switching client refuses other-generation writes; controls disabled until the new backend's host_settings arrives. Requeued.
+- 2026-10-31 q4x76.23 held again: generation bumps when the old connection is lost or the switch starts; controls enabled only while host_settings has the current generation; ADR-018 rule 4 updated. Requeued.
