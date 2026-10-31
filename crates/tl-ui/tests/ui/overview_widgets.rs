@@ -1071,9 +1071,12 @@ fn overview_widget_grid_scale_1_5_and_2(cx: &mut TestAppContext) {
     }
 }
 
-/// The render contract: on a sample the container never notifies, no widget entity is made or
-/// dropped, and only the widgets on the changed source notify. A sample that changes nothing
-/// shown renders neither the container nor the page.
+/// The render contract (ADR-019, UI-PRF-017): a sample that changes nothing shown renders
+/// neither the container nor the page. A sample that changes a shown value notifies only the
+/// widgets on that source; the container and the page never notify, no widget entity is made or
+/// dropped, and no widget is placed again. GPUI marks the ancestors of a notifying view dirty
+/// (crw.34, no GPUI fork), so the container and the page may render at most once in that frame,
+/// with fixed work only: no placement and no render of the widgets that did not change.
 #[gpui_kit::test]
 fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext) {
     let mut r = open(cx);
@@ -1100,7 +1103,9 @@ fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext
         (1..=3).filter_map(|id| c.widget(id).cloned()).collect()
     });
     let base: Vec<_> = widgets.iter().map(|w| r.counts(w).0).collect();
+    let renders0: Vec<_> = widgets.iter().map(|w| r.counts(w).1).collect();
     let (render0, notify0, page0) = r.container_counts(&c);
+    let relayouts0 = r.vcx.read_entity(&c, |c, _| c.relayout_count.get());
 
     // A sample that changes nothing a widget shows: no notify, so nothing renders.
     r.system(|s| {
@@ -1114,9 +1119,10 @@ fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext
     assert_eq!(r.container_counts(&c), (render0, notify0, page0));
     let now: Vec<_> = widgets.iter().map(|w| r.counts(w).0).collect();
     assert_eq!(now, base);
+    let now: Vec<_> = widgets.iter().map(|w| r.counts(w).1).collect();
+    assert_eq!(now, renders0, "no widget renders");
 
-    // GPU A's utilization changes: widget 1 notifies, the container does not. (GPUI marks the
-    // ancestors of a notifying view dirty, crw.34, so they may render once with fixed work.)
+    // GPU A's utilization changes: widget 1 notifies, the container does not.
     r.system(|s| {
         s.gpus = Arc::from([
             (DeviceIdx(GPU_A), gpu_totals(GPU_A, 70.)),
@@ -1127,8 +1133,24 @@ fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext
     assert_eq!(now[0], base[0] + 1, "the widget on GPU A's utilization");
     assert_eq!(now[1], base[1], "VRAM did not change");
     assert_eq!(now[2], base[2], "GPU B did not change");
-    let (_, notify, _) = r.container_counts(&c);
+    let (render, notify, page) = r.container_counts(&c);
     assert_eq!(notify, notify0, "the container never notifies on a sample");
+    // Only GPUI's ancestor marking renders the container and the page, at most once each.
+    assert!(
+        render - render0 <= 1,
+        "container renders {}",
+        render - render0
+    );
+    assert!(page - page0 <= 1, "page renders {}", page - page0);
+    assert_eq!(
+        r.vcx.read_entity(&c, |c, _| c.relayout_count.get()),
+        relayouts0,
+        "the container render places nothing"
+    );
+    let now: Vec<_> = widgets.iter().map(|w| r.counts(w).1).collect();
+    assert!(now[0] > renders0[0], "the widget on GPU A renders");
+    assert_eq!(now[1], renders0[1], "the VRAM widget does not render");
+    assert_eq!(now[2], renders0[2], "the GPU B widget does not render");
     assert_eq!(r.entity_ids(&c), ids, "no widget entity made or dropped");
     assert_eq!(r.read(&widgets[0], |w| w.texts()[1].to_string()), "70.0%");
 }

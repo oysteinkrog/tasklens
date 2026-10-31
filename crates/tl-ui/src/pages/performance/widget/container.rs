@@ -111,6 +111,9 @@ pub struct WidgetContainer {
     pub render_count: std::cell::Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: std::cell::Cell<u32>,
+    /// Placements run, so a test can tell a fixed-work render from one that placed widgets.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub relayout_count: std::cell::Cell<u32>,
 }
 
 impl WidgetContainer {
@@ -141,6 +144,8 @@ impl WidgetContainer {
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            relayout_count: std::cell::Cell::new(0),
         };
         this.sync_sources(cx);
         this.relayout(cx);
@@ -293,6 +298,8 @@ impl WidgetContainer {
     /// that left drop theirs, and kept ones take their settings and size in place. Returns
     /// whether anything the container draws changed.
     fn relayout(&mut self, cx: &mut Context<Self>) -> bool {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.relayout_count.set(self.relayout_count.get() + 1);
         let scale = metrics(cx).ui_scale;
         self.scale = scale;
         let placement = if self.layout.preset.is_none() {
