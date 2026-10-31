@@ -1,5 +1,6 @@
 //! `tasklens-engine` as a process (ADR-018): one engine per user, the runtime directory check,
-//! and a full start with `READY=1`, handshakes up to 8 sessions and a SIGTERM stop.
+//! a full start with `READY=1`, handshakes up to 8 sessions and a SIGTERM stop, and the bound
+//! on connections that never send their `Hello`.
 //!
 //! Every directory is a temporary one. The session bus address points nowhere, so the engine
 //! under test never reaches the desktop session (KWin bridge, notifications).
@@ -152,6 +153,11 @@ fn a_shared_runtime_dir_is_refused_by_name() {
 
 /// Connects and sends `Hello`; returns the stream and the server's answer.
 fn connect(socket: &Path) -> (UnixStream, ServerBootstrap) {
+    try_connect(socket).expect("an answer to the Hello")
+}
+
+/// `connect`, with `None` when the server closed the connection without an answer.
+fn try_connect(socket: &Path) -> Option<(UnixStream, ServerBootstrap)> {
     let mut stream = UnixStream::connect(socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -170,15 +176,14 @@ fn connect(socket: &Path) -> (UnixStream, ServerBootstrap) {
         &mut out,
     )
     .unwrap();
-    stream.write_all(&out).unwrap();
+    stream.write_all(&out).ok()?;
     let frames = FrameReader::new().unwrap();
-    let frame = frames.read_frame(&mut stream).unwrap();
-    (stream, decode_server_bootstrap(&frame).unwrap())
+    let frame = frames.read_frame(&mut stream).ok()?;
+    Some((stream, decode_server_bootstrap(&frame).unwrap()))
 }
 
-#[test]
-fn service_starts_serves_eight_sessions_and_stops_on_sigterm() {
-    let dirs = Dirs::new();
+/// Starts the service and waits for `READY=1`. Returns the child and the notify socket.
+fn start_ready(dirs: &Dirs) -> (Guard, UnixDatagram) {
     let notify_path = dirs.runtime.join("notify.sock");
     let notify = UnixDatagram::bind(&notify_path).unwrap();
     notify
@@ -186,11 +191,58 @@ fn service_starts_serves_eight_sessions_and_stops_on_sigterm() {
         .unwrap();
     let mut cmd = dirs.command();
     cmd.env("NOTIFY_SOCKET", &notify_path);
-    let mut child = Guard(Some(cmd.spawn().unwrap()));
-
+    let child = Guard(Some(cmd.spawn().unwrap()));
     let mut buf = [0u8; 256];
     let n = notify.recv(&mut buf).expect("READY=1 within 20 s");
     assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "READY=1\n");
+    (child, notify)
+}
+
+#[test]
+fn clients_that_withhold_hello_hold_at_most_four_connections() {
+    let dirs = Dirs::new();
+    let (_child, _notify) = start_ready(&dirs);
+    let socket = dirs.socket();
+
+    // Four connections that never send their Hello take every handshake place.
+    let mut silent: Vec<UnixStream> = (0..4)
+        .map(|_| UnixStream::connect(&socket).unwrap())
+        .collect();
+    // The accept thread takes connections in order, so the fifth finds no place and is closed
+    // at once, with no thread started for it.
+    let mut fifth = UnixStream::connect(&socket).unwrap();
+    fifth
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let begin = Instant::now();
+    let mut byte = [0u8; 1];
+    assert_eq!(fifth.read(&mut byte).unwrap_or(0), 0, "closed, no answer");
+    assert!(begin.elapsed() < Duration::from_secs(5));
+    assert!(try_connect(&socket).is_none(), "a Hello is not read either");
+
+    // A silent client that goes frees its place.
+    drop(silent.pop());
+    let begin = Instant::now();
+    loop {
+        match try_connect(&socket) {
+            Some((_, ServerBootstrap::Welcome(_))) => break,
+            Some((_, ServerBootstrap::Refused(r))) => panic!("refused: {}", r.text),
+            None => {
+                assert!(
+                    begin.elapsed() < Duration::from_secs(5),
+                    "the silent client's place did not free"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+#[test]
+fn service_starts_serves_eight_sessions_and_stops_on_sigterm() {
+    let dirs = Dirs::new();
+    let (mut child, notify) = start_ready(&dirs);
+    let mut buf = [0u8; 256];
     // The socket is bound before READY=1.
     let socket = dirs.socket();
     assert!(socket.exists());

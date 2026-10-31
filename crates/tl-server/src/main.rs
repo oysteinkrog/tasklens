@@ -7,7 +7,9 @@
 //! engine stops, which stops sampling and flushes history, and the service exits.
 //!
 //! Each connection whose peer runs as this user gets a handshake and, when welcomed, a
-//! `SessionPort`. The per-session wire side is q4x76.20; until then a connection only holds its
+//! `SessionPort`. At most `HANDSHAKES_MAX` connections are in their handshake at once, and the
+//! engine admits at most 8 sessions, so a client that never sends its `Hello` cannot make the
+//! service start threads or hold sockets without bound. The per-session wire side is q4x76.20; until then a connection only holds its
 //! port, and drops it when the client closes the connection or the engine ends the session.
 
 use std::ffi::OsString;
@@ -18,7 +20,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -43,6 +45,10 @@ const READY_WAIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(50);
 /// How often a connection checks whether the engine ended its session.
 const SESSION_POLL: Duration = Duration::from_secs(1);
+/// Connections in their handshake at once. Each waits at most `server::HELLO_TIMEOUT` for its
+/// `Hello`. A connection beyond this is closed at once, before a thread starts for it; with the
+/// 8 sessions that bounds the connection threads to 12.
+const HANDSHAKES_MAX: usize = 4;
 /// The privileged helper, as in `tasklens` (ADR-006).
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
 /// The log line when another engine holds the lock (ADR-018).
@@ -219,18 +225,25 @@ fn spawn_accept(
     identity: Arc<HostIdentity>,
 ) -> io::Result<()> {
     let next_id = Arc::new(AtomicU32::new(1));
+    let handshakes = Arc::new(AtomicUsize::new(0));
     thread::Builder::new()
         .name("tl-accept".into())
         .spawn(move || {
             loop {
                 match server::accept_peer(&listener, uid) {
                     Ok(stream) => {
+                        let Some(slot) = HandshakeSlot::take(&handshakes) else {
+                            warn!(target: "tasklens::engine", "connection closed: {HANDSHAKES_MAX} connections are in their handshake");
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                            continue;
+                        };
                         let engine = engine.clone();
                         let identity = Arc::clone(&identity);
                         let next_id = Arc::clone(&next_id);
+                        // A failed spawn drops the closure, and with it the slot and the stream.
                         let spawned = thread::Builder::new()
                             .name("tl-session".into())
-                            .spawn(move || serve(stream, &engine, &identity, &next_id));
+                            .spawn(move || serve(stream, slot, &engine, &identity, &next_id));
                         if let Err(e) = spawned {
                             warn!(target: "tasklens::engine", "session thread: {e}");
                         }
@@ -249,6 +262,28 @@ fn spawn_accept(
     Ok(())
 }
 
+/// One of the `HANDSHAKES_MAX` places for a connection in its handshake. Dropping it frees the
+/// place.
+struct HandshakeSlot(Arc<AtomicUsize>);
+
+impl HandshakeSlot {
+    /// `None` when all `HANDSHAKES_MAX` are taken.
+    fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < HANDSHAKES_MAX).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| HandshakeSlot(Arc::clone(count)))
+    }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A new session id, never 0 (the local session) and never one in use.
 fn session_id(next_id: &AtomicU32) -> ClientSessionId {
     loop {
@@ -259,9 +294,15 @@ fn session_id(next_id: &AtomicU32) -> ClientSessionId {
     }
 }
 
-/// One connection: the handshake, then the session's port until the client goes or the engine
-/// ends the session.
-fn serve(stream: UnixStream, engine: &EngineHandle, identity: &HostIdentity, next_id: &AtomicU32) {
+/// One connection: the handshake, which holds `slot`, then the session's port until the client
+/// goes or the engine ends the session.
+fn serve(
+    stream: UnixStream,
+    slot: HandshakeSlot,
+    engine: &EngineHandle,
+    identity: &HostIdentity,
+    next_id: &AtomicU32,
+) {
     let _ = stream.set_read_timeout(Some(server::HELLO_TIMEOUT));
     let (Ok(mut writer), Ok(frames)) = (stream.try_clone(), FrameReader::new()) else {
         return;
@@ -282,6 +323,7 @@ fn serve(stream: UnixStream, engine: &EngineHandle, identity: &HostIdentity, nex
             Err(e) => Err(server::refused(RefuseReason::Other(0), e.to_string())),
         }
     });
+    drop(slot);
     let (hello, port) = match welcomed {
         Ok(welcomed) => welcomed,
         Err(e) => {
@@ -384,6 +426,18 @@ mod tests {
         assert!(lock_engine(tmp.path()).unwrap().is_none());
         drop(held);
         assert!(lock_engine(tmp.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn handshake_slots_are_bounded_and_freed_on_drop() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let slots: Vec<_> = (0..HANDSHAKES_MAX)
+            .map(|_| HandshakeSlot::take(&count).expect("free"))
+            .collect();
+        assert!(HandshakeSlot::take(&count).is_none());
+        drop(slots);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert!(HandshakeSlot::take(&count).is_some());
     }
 
     #[test]
