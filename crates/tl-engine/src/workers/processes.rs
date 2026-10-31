@@ -1495,7 +1495,7 @@ mod tests {
         };
         let (src, before) = is_self(src);
         assert!(!before);
-        let window = desktop.add_window(4201);
+        let window = desktop.add_window(4201, Arc::from(crate::desktop::APP_ID));
         let (src, connected) = is_self(src);
         assert!(connected, "a connected window is self");
         drop(window);

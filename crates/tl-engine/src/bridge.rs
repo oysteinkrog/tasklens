@@ -32,7 +32,7 @@ use crate::client_session::{
 };
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
-use crate::desktop::{APP_ID, DesktopSession, WindowGuard};
+use crate::desktop::{DesktopSession, WindowGuard};
 use crate::helper::LinkEnv;
 use crate::reducer::{ActionGate, Publisher};
 use crate::session::{RootEndpoints, engine_root};
@@ -466,7 +466,7 @@ impl EngineHandle {
         let window = peer
             .as_ref()
             .filter(|p| !p.bridge)
-            .map(|p| self.inner.desktop.add_window(p.pid));
+            .map(|p| self.inner.desktop.add_window(p.pid, Arc::clone(&p.app_id)));
         Ok(SessionPort {
             id,
             latest,
@@ -632,8 +632,9 @@ pub struct SessionPeer {
 
 /// True when `peer`'s session may send `cmd` (leader decision on q4x76.12). Keep above and frame
 /// geometry name a tasklens window by its pid: only a window on this host may send them, for its
-/// own pid and app id. A bridge session's pid names a process on another host. Other KWin
-/// commands act on any window and pass.
+/// own pid. The KWin worker then acts only on a window of that pid whose `resourceClass` is the
+/// app id the session announced (`DesktopSession::own_app_ids`). A bridge session's pid names a
+/// process on another host. Other KWin commands act on any window and pass.
 pub fn own_window_allowed(peer: Option<&SessionPeer>, cmd: &KWinCommand) -> bool {
     let pid = match cmd {
         KWinCommand::KeepAbove { pid, .. } | KWinCommand::SetFrameGeometry { pid, .. } => *pid,
@@ -642,7 +643,7 @@ pub fn own_window_allowed(peer: Option<&SessionPeer>, cmd: &KWinCommand) -> bool
         | KWinCommand::Pick { .. }
         | KWinCommand::CancelPick { .. } => return true,
     };
-    peer.is_some_and(|p| !p.bridge && p.pid == pid && *p.app_id == *APP_ID)
+    peer.is_some_and(|p| !p.bridge && p.pid == pid)
 }
 
 impl std::fmt::Debug for SessionPort {
@@ -1004,6 +1005,7 @@ mod tests {
     use tl_model::table::{Manager, UnitRef};
 
     use crate::config::EngineMode;
+    use crate::desktop::APP_ID;
     use crate::reducer::AdmissionView;
 
     /// Command queue size from ADR-005.
@@ -1572,14 +1574,12 @@ mod tests {
             "a bridge session"
         );
         assert!(!own_window_allowed(None, &keep(4000)), "no Hello peer");
-        let other_app = SessionPeer {
-            app_id: Arc::from("org.example.Other"),
+        // The worker matches the window against the app id this session announced.
+        let devel = SessionPeer {
+            app_id: Arc::from("io.github.oysteinkrog.Tasklens.Devel"),
             ..local.clone()
         };
-        assert!(
-            !own_window_allowed(Some(&other_app), &keep(4000)),
-            "another app id"
-        );
+        assert!(own_window_allowed(Some(&devel), &keep(4000)));
         let activate = KWinCommand::Activate {
             internal_id: Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}"),
         };
@@ -1627,8 +1627,11 @@ mod tests {
             .send_open(ClientSessionId(3), None)
             .expect("open sent");
         assert_eq!(desktop.window_pids(), [4000]);
+        assert_eq!(desktop.own_app_ids(4000), [Arc::from(APP_ID)]);
+        assert!(desktop.own_app_ids(5000).is_empty(), "a bridge session");
         drop(local);
         assert!(desktop.window_pids().is_empty());
+        assert!(desktop.own_app_ids(4000).is_empty());
         drop((remote, unknown));
     }
 }

@@ -38,6 +38,7 @@ use asupersync::{Cx, Outcome};
 use futures_lite::stream::Boxed;
 use futures_lite::{Stream, StreamExt};
 use tl_collect::sanitize::sanitize_text;
+use tl_model::actions::ActionError;
 use tl_model::command::KWinCommand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::snapshot::{
@@ -48,7 +49,7 @@ use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect, error_name};
-use crate::desktop::{APP_ID, DesktopEnv, DesktopSession, DesktopSource};
+use crate::desktop::{ActivateCall, DesktopEnv, DesktopSession, DesktopSource};
 use crate::source::{CommandProgress, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
@@ -133,11 +134,12 @@ pub(crate) fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     let counter = Arc::new(AtomicU64::new(0));
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
+        let desktop = cfg.desktop.clone();
         let commands = Commands {
             mode: cfg.mode,
             counter: Arc::clone(&counter),
+            desktop: desktop.clone(),
         };
-        let desktop = cfg.desktop.clone();
         async move {
             match desktop.source() {
                 DesktopSource::Process => {
@@ -258,7 +260,22 @@ trait SessionBus {
 }
 
 /// One desktop session after another until `cx` is cancelled (`Ok`) or the bus fails (`Err`).
+/// However it ends, the session is cleared: the worker that would notice KWin leaving is gone,
+/// so the host has no desktop session until the next generation finds KWin again.
 async fn session_cycles(
+    cx: &Cx,
+    io: &WorkerIo,
+    desktop: &DesktopSession,
+    bus: &mut impl SessionBus,
+    commands: &Commands,
+    queue: &mut Queue,
+) -> Result<(), WorkerError> {
+    let result = cycles(cx, io, desktop, bus, commands, queue).await;
+    desktop.set(None);
+    result
+}
+
+async fn cycles(
     cx: &Cx,
     io: &WorkerIo,
     desktop: &DesktopSession,
@@ -490,6 +507,8 @@ enum Event {
     },
     /// An accepted `Picked` call: the window's pid, `None` for `"0"` or text that is not a `u32`.
     Picked { uuid: String, pid: Option<u32> },
+    /// Switch to window from the action gate (`DesktopSession::activate_window`).
+    Activate(ActivateCall),
 }
 
 /// What `serve` does when KWin leaves the bus.
@@ -556,10 +575,17 @@ async fn serve(
     {
         return closed(cx);
     }
+    // Switch to window calls are taken while this lives; dropping it fails those still queued.
+    let _serving = commands.desktop.bridge_serving();
 
     let owner_events = owner_signals.filter_map(|msg| owner_event(&msg));
     let control_events = control_changes(cx, io.control.clone());
-    let mut events: Boxed<Event> = rx.or(owner_events).or(control_events).boxed();
+    let activate_events = commands.desktop.activate_calls().map(Event::Activate);
+    let mut events: Boxed<Event> = rx
+        .or(owner_events)
+        .or(control_events)
+        .or(activate_events)
+        .boxed();
     let dir = path
         .parent()
         .ok_or_else(|| WorkerError::Other("script path has no directory".into()))?;
@@ -569,6 +595,8 @@ async fn serve(
     let mut current: Option<Arc<[WindowEntry]>> = None;
     // The last published list, so a pick result can go out with it.
     let mut shown: Option<(Arc<[WindowEntry]>, Validity)> = None;
+    // Switch to window calls waiting, like queued commands, for the first `Update`.
+    let mut activations: Vec<ActivateCall> = Vec::new();
     loop {
         let wait = picker
             .wait(cx.now())
@@ -610,6 +638,7 @@ async fn serve(
             Ok(Some(event @ (Event::PickReply { .. } | Event::Picked { .. }))) => {
                 picked = picker.handle(cx, &host, dir, files, event).await;
             }
+            Ok(Some(Event::Activate(call))) => activations.push(call),
             Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
             Err(e) => return Err(e.into()),
         }
@@ -627,6 +656,11 @@ async fn serve(
                 &mut picker,
             )
             .await;
+            for call in activations.drain(..) {
+                let result = activate(cx, &host, dir, commands, windows, files, &call).await;
+                // The caller may have timed out and gone.
+                let _ = call.reply.try_send(result);
+            }
         }
         // Without a published list the result waits for the next `Update`.
         if picked && let Some((windows, validity)) = &shown {
@@ -873,12 +907,14 @@ struct Commands {
     mode: EngineMode,
     /// The last `n` used in a plugin name. Shared by every generation of the worker.
     counter: Arc<AtomicU64>,
+    /// The app ids own-window commands match, and the Switch to window calls.
+    desktop: DesktopSession,
 }
 
 impl Commands {
     /// The plugin name and script text for `cmd`, or `None` when the command is dropped.
     fn prepare(&self, cmd: &KWinCommand, windows: &[WindowEntry]) -> Option<(String, String)> {
-        let target = match resolve(cmd, windows, self.mode) {
+        let target = match resolve(cmd, windows, self.mode, &self.desktop) {
             Ok(target) => target,
             Err(reason) => {
                 tracing::debug!(target: "tasklens::engine", reason, "kwin command dropped");
@@ -913,6 +949,7 @@ fn resolve(
     cmd: &KWinCommand,
     windows: &[WindowEntry],
     mode: EngineMode,
+    desktop: &DesktopSession,
 ) -> Result<Target, &'static str> {
     if mode == EngineMode::LowMemory && !matches!(cmd, KWinCommand::KeepAbove { .. }) {
         return Err("the low-memory engine runs only keep above");
@@ -921,7 +958,12 @@ fn resolve(
         KWinCommand::Activate { internal_id } => (by_id(windows, internal_id)?, CmdOp::Activate),
         KWinCommand::Close { internal_id } => (by_id(windows, internal_id)?, CmdOp::Close),
         KWinCommand::KeepAbove { pid, caption, on } => (
-            own_window(windows, *pid, caption.as_deref())?,
+            own_window(
+                windows,
+                *pid,
+                &desktop.own_app_ids(*pid),
+                caption.as_deref(),
+            )?,
             CmdOp::KeepAbove(*on),
         ),
         KWinCommand::SetFrameGeometry {
@@ -935,7 +977,7 @@ fn resolve(
                 ..*geometry
             };
             (
-                own_window(windows, *pid, Some(caption))?,
+                own_window(windows, *pid, &desktop.own_app_ids(*pid), Some(caption))?,
                 CmdOp::Geometry(g),
             )
         }
@@ -965,17 +1007,19 @@ fn by_id<'a>(windows: &'a [WindowEntry], id: &str) -> Result<&'a WindowEntry, &'
         .ok_or("window is not in the current list")
 }
 
-/// A tasklens window: `pid` and the tasklens app ID, plus the caption for a secondary window
-/// (APP-009, R-086). `None` is the main window: the one titled "tasklens", or the only tasklens
-/// window of `pid` (the low-memory rescue window).
+/// A tasklens window: `pid` and one of `app_ids`, the app ids that window announced
+/// (`DesktopSession::own_app_ids`), plus the caption for a secondary window (APP-009, R-086).
+/// `None` is the main window: the one titled "tasklens", or the only tasklens window of `pid`
+/// (the low-memory rescue window).
 fn own_window<'a>(
     windows: &'a [WindowEntry],
     pid: u32,
+    app_ids: &[Arc<str>],
     caption: Option<&str>,
 ) -> Result<&'a WindowEntry, &'static str> {
     let mut ours = windows
         .iter()
-        .filter(|w| w.pid == pid && &*w.resource_class == APP_ID);
+        .filter(|w| w.pid == pid && app_ids.contains(&w.resource_class));
     let found = match caption {
         Some(caption) => ours.find(|w| &*w.caption == caption),
         None => {
@@ -1428,7 +1472,7 @@ async fn run_commands(
             KWinCommand::CancelPick { seq: pick } => picked |= picker.cancel(pick),
             cmd => {
                 if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
-                    run_script(cx, host, dir, &plugin, script, files).await;
+                    let _ = run_script(cx, host, dir, &plugin, script, files).await;
                 }
             }
         }
@@ -1439,7 +1483,8 @@ async fn run_commands(
 
 /// Deletes the previous command's file, writes `<dir>/<plugin>.js` (mode 0600) and runs it. The
 /// new file is kept in `files`, also after a failure: `loadScript` may have taken it before
-/// `start` failed. A failure is logged at `warn` and the command is dropped (R-170).
+/// `start` failed. A failure is logged at `warn`; a queued command is then dropped (R-170), and
+/// Switch to window reports it.
 async fn run_script(
     cx: &Cx,
     host: &impl ScriptHost,
@@ -1447,7 +1492,7 @@ async fn run_script(
     plugin: &str,
     script: String,
     files: &mut CmdFiles,
-) {
+) -> Result<(), WorkerError> {
     files.clear(cx).await;
     let path = dir.join(format!("{plugin}.js"));
     let result = match write_script(cx, &path, script).await {
@@ -1455,11 +1500,35 @@ async fn run_script(
         Err(e) => Err(e),
     };
     files.last = Some(path);
-    if let Err(e) = result
+    if let Err(e) = &result
         && !cx.is_cancel_requested()
     {
         tracing::warn!(target: "tasklens::engine", plugin, error = %e, "kwin command failed");
     }
+    result
+}
+
+/// Switch to window (`ActionKind::ActivateWindow`): the activate script for the window in
+/// `windows`. `NoSuchProcess` when the window is not in the list, `Internal` when KWin did not
+/// take the script.
+async fn activate(
+    cx: &Cx,
+    host: &impl ScriptHost,
+    dir: &Path,
+    commands: &Commands,
+    windows: &[WindowEntry],
+    files: &mut CmdFiles,
+    call: &ActivateCall,
+) -> Result<(), ActionError> {
+    let cmd = KWinCommand::Activate {
+        internal_id: Arc::clone(&call.internal_id),
+    };
+    let Some((plugin, script)) = commands.prepare(&cmd, windows) else {
+        return Err(ActionError::NoSuchProcess);
+    };
+    run_script(cx, host, dir, &plugin, script, files)
+        .await
+        .map_err(|_| ActionError::Internal(Arc::from("KWin did not run the window switch")))
 }
 
 /// The object KWin's script calls. It checks and parses on the zbus executor and hands
@@ -1728,6 +1797,7 @@ async fn send(cx: &Cx, io: &WorkerIo, update: SourceUpdate) -> Option<Outcome<()
 mod tests {
     use super::*;
 
+    use crate::desktop::APP_ID;
     use asupersync::channel::watch;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
@@ -2004,6 +2074,7 @@ mod tests {
         Commands {
             mode,
             counter: Arc::new(AtomicU64::new(0)),
+            desktop: DesktopSession::new(DesktopSource::Process),
         }
     }
 
@@ -2209,6 +2280,32 @@ mod tests {
         assert_eq!(low.prepare(&pinned, &two), None);
     }
 
+    /// q4x76.12: under the engine service, keep above matches the app id the window announced
+    /// in its `Hello`, not the fixed one, and nothing while no window of that pid is connected.
+    #[test]
+    fn own_window_matches_the_announced_app_id() {
+        const DEVEL: &str = "io.github.oysteinkrog.Tasklens.Devel";
+        let windows = [
+            entry(ID_A, 7, "tasklens", APP_ID),
+            entry(ID_B, 7, "tasklens", DEVEL),
+        ];
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        let cmds = Commands {
+            mode: EngineMode::Full,
+            counter: Arc::new(AtomicU64::new(0)),
+            desktop: desktop.clone(),
+        };
+        let keep = KWinCommand::KeepAbove {
+            pid: 7,
+            caption: None,
+            on: true,
+        };
+        assert_eq!(cmds.prepare(&keep, &windows), None, "no window connected");
+        let _window = desktop.add_window(7, Arc::from(DEVEL));
+        let (_, script) = cmds.prepare(&keep, &windows).expect("the announced app id");
+        assert_eq!(args_of(&script)["id"], ID_B);
+    }
+
     /// Records each script as KWin would read it, and fails when told to. As the pick call layer
     /// it answers `queryWindowInfo` with `reply` from a child task, or never when that is `None`.
     struct FakeHost {
@@ -2311,6 +2408,39 @@ mod tests {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 
+    /// q4x76.12: Switch to window answers with a result: success once KWin took the script,
+    /// `NoSuchProcess` for a window not in the list, `Internal` when KWin refused the script.
+    #[test]
+    fn activate_reports_its_result() {
+        let dir = scratch("activate").join("tasklens");
+        let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
+        let cmds = commands(EngineMode::Full);
+        let host = FakeHost::new(false);
+        let failing = FakeHost::new(true);
+        let results = Arc::new(Mutex::new(Vec::new()));
+        {
+            let results = Arc::clone(&results);
+            in_lab(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut files = CmdFiles::default();
+                let call = |id: &str| ActivateCall {
+                    internal_id: Arc::from(id),
+                    reply: async_channel::bounded(1).0,
+                };
+                let mut got = Vec::new();
+                for (host, id) in [(&host, ID_A), (&host, ID_B), (&failing, ID_A)] {
+                    let r = activate(&cx, host, &dir, &cmds, &windows, &mut files, &call(id)).await;
+                    got.push(r);
+                }
+                *results.lock().expect("lock") = got;
+            });
+        }
+        let got = results.lock().expect("lock");
+        assert_eq!(got[0], Ok(()));
+        assert_eq!(got[1], Err(ActionError::NoSuchProcess));
+        assert!(matches!(got[2], Err(ActionError::Internal(_))), "{got:?}");
+    }
+
     #[test]
     fn cmd_file_kept_until_next_command() {
         let dir = scratch("cmd-file").join("tasklens");
@@ -2329,16 +2459,19 @@ mod tests {
                 let step = || steps.lock().expect("lock").push(names(&dir));
                 let mut files = CmdFiles::default();
                 let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
-                run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                let ran = run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                assert!(ran.is_ok());
                 step();
                 let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
-                run_script(&cx, &*failing, &dir, &plugin, script, &mut files).await;
+                let ran = run_script(&cx, &*failing, &dir, &plugin, script, &mut files).await;
+                assert!(ran.is_err());
                 step();
                 // The next `Update`.
                 files.clear(&cx).await;
                 step();
                 let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
-                run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                let ran = run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                assert!(ran.is_ok());
                 step();
                 // Worker exit.
                 drop(files);
@@ -2814,6 +2947,8 @@ mod tests {
     enum BusStep {
         KWinUp,
         KWinGone,
+        /// The bus fails while the bridge runs.
+        Fail,
     }
 
     /// `SessionBus` driven by the test: KWin comes and goes on `steps`, each bridge run is
@@ -2834,7 +2969,7 @@ mod tests {
             loop {
                 match self.steps.recv().await {
                     Ok(BusStep::KWinUp) => return Ok(()),
-                    Ok(BusStep::KWinGone) => {}
+                    Ok(BusStep::KWinGone | BusStep::Fail) => {}
                     Err(_) => return Err(WorkerError::Closed),
                 }
             }
@@ -2855,6 +2990,7 @@ mod tests {
             loop {
                 match self.steps.recv().await {
                     Ok(BusStep::KWinGone) => return Ok(()),
+                    Ok(BusStep::Fail) => return Err(WorkerError::Dbus("bus failed".into())),
                     Ok(BusStep::KWinUp) => {}
                     Err(_) => return Err(WorkerError::Closed),
                 }
@@ -2941,6 +3077,56 @@ mod tests {
         drop(steps_tx);
         handle.abort();
         lab.run_until_idle();
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    /// q4x76.12 review: a bridge that fails ends `session_cycles` with the error, and the
+    /// session is cleared with it, so no desktop command runs against the old session while
+    /// the supervisor restarts the worker.
+    #[test]
+    fn bridge_error_clears_the_desktop_session() {
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let (io, _rx) = worker_io();
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        let (steps_tx, steps) = async_channel::unbounded();
+        let mut bus = FakeBus {
+            steps,
+            env: vec!["WAYLAND_DISPLAY=wayland-1".to_owned()],
+            bridges: Arc::new(AtomicU64::new(0)),
+        };
+        let ended = Arc::new(Mutex::new(None));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task_desktop, task_ended) = (desktop.clone(), Arc::clone(&ended));
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut queue = Queue {
+                    last_seq: 0,
+                    progress: Arc::default(),
+                };
+                let commands = commands(EngineMode::Full);
+                let result =
+                    session_cycles(&cx, &io, &task_desktop, &mut bus, &commands, &mut queue).await;
+                *task_ended.lock().expect("lock") = Some(result.is_err());
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        steps_tx.try_send(BusStep::KWinUp).expect("send");
+        lab.run_until_idle();
+        assert!(desktop.is_present(), "the bridge runs");
+
+        steps_tx.try_send(BusStep::Fail).expect("send");
+        lab.run_until_idle();
+        assert_eq!(
+            *ended.lock().expect("lock"),
+            Some(true),
+            "the error ends it"
+        );
+        assert!(!desktop.is_present(), "the session is cleared");
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
     }

@@ -320,15 +320,26 @@ pub enum ActionKind {
     },
     /// Run dialog and Startup "Run now".
     Launch(LaunchSpec),
+    /// Switch to window: KWin activates the window `internal_id` (`WindowEntry::internal_id`)
+    /// on the host's screen. Unlike `KWinCommand::Activate` it ends with a result, so a window
+    /// can say it switched or why not (ADR-018, leader decision on q4x76.12):
+    /// `Failed(NoSuchProcess)` when the window is gone, `Failed(Unsupported)` when the host has
+    /// no KWin bridge.
+    ActivateWindow {
+        internal_id: Arc<str>,
+    },
 }
 
 impl ActionKind {
-    /// True for OpenUri, ShowInFileManager and Launch: targets is empty and admission skips the
-    /// target checks (R-134).
+    /// True for OpenUri, ShowInFileManager, Launch and ActivateWindow: targets is empty and
+    /// admission skips the target checks (R-134).
     pub fn is_targetless(&self) -> bool {
         matches!(
             self,
-            ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } | ActionKind::Launch(_)
+            ActionKind::OpenUri(_)
+                | ActionKind::ShowInFileManager { .. }
+                | ActionKind::Launch(_)
+                | ActionKind::ActivateWindow { .. }
         )
     }
 }
@@ -373,8 +384,9 @@ pub enum RejectReason {
     /// StartupRunNow or Launch of a program that is running. UI toast "Already running"
     /// (SYS-023, R-148 item 4).
     AlreadyRunning,
-    /// A command that acts on the host's screen (open, launch, run now) while nobody is logged
-    /// in to a desktop there. UI text "home has no desktop session" (ADR-018).
+    /// A command that acts on the host's screen (open, launch, run now, switch to window)
+    /// while nobody is logged in to a desktop there. UI text "home has no desktop session"
+    /// (ADR-018).
     NoDesktopSession,
 }
 
@@ -561,6 +573,12 @@ mod tests {
             .is_targetless()
         );
         assert!(ActionKind::Launch(launch).is_targetless());
+        assert!(
+            ActionKind::ActivateWindow {
+                internal_id: "{0a1b2c3d-0000-4000-8000-00000000000a}".into(),
+            }
+            .is_targetless()
+        );
         assert!(!ActionKind::Signal(Signal::Term).is_targetless());
         assert!(!ActionKind::UnitStart.is_targetless());
     }

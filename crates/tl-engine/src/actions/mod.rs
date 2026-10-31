@@ -68,7 +68,8 @@ pub enum Admission {
     },
 }
 
-/// True for `OpenUri`, `ShowInFileManager` and `Launch`: they carry no targets (R-134).
+/// True for `OpenUri`, `ShowInFileManager`, `Launch` and `ActivateWindow`: they carry no
+/// targets (R-134).
 pub fn targetless(kind: &ActionKind) -> bool {
     kind.is_targetless()
 }
@@ -82,6 +83,7 @@ pub fn needs_desktop(kind: &ActionKind) -> bool {
             | ActionKind::ShowInFileManager { .. }
             | ActionKind::Launch(_)
             | ActionKind::StartupRunNow
+            | ActionKind::ActivateWindow { .. }
     )
 }
 
@@ -228,7 +230,9 @@ pub fn deadline(
         // The UI reads the progress.
         ActionKind::Dump { .. } => None,
         ActionKind::SockDestroy => Some(QUICK_DEADLINE),
-        ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } => Some(QUICK_DEADLINE),
+        ActionKind::OpenUri(_)
+        | ActionKind::ShowInFileManager { .. }
+        | ActionKind::ActivateWindow { .. } => Some(QUICK_DEADLINE),
         ActionKind::Launch(spec) if spec.as_admin => Some(PROMPT_DEADLINE),
         ActionKind::Launch(_) => Some(QUICK_DEADLINE),
     }
@@ -317,6 +321,14 @@ pub trait Openers: Send + Sync + 'static {
         cx: &Cx,
         spec: &LaunchSpec,
     ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>>;
+    /// Switch to window through the KWin worker. The default has no bridge.
+    fn activate_window(
+        &self,
+        _cx: &Cx,
+        _internal_id: &Arc<str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        Box::pin(async { Err(ActionError::Unsupported) })
+    }
 }
 
 /// The production `Openers`: E14's opener and launcher on the user manager's session connection.
@@ -367,6 +379,15 @@ impl Openers for RealOpeners {
         Box::pin(
             async move { crate::launcher::launch(&cx, self.session.get(), &desktop, &spec).await },
         )
+    }
+
+    fn activate_window(
+        &self,
+        _cx: &Cx,
+        internal_id: &Arc<str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        let internal_id = Arc::clone(internal_id);
+        Box::pin(self.desktop.activate_window(internal_id))
     }
 }
 
@@ -942,9 +963,10 @@ fn refresh_source(kind: &ActionKind, manager: Option<Manager>) -> Option<SourceI
         | ActionKind::StartupRunNow
         | ActionKind::StartupDelete => Some(SourceId::Startup),
         ActionKind::SockDestroy => Some(SourceId::Connections),
-        ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } | ActionKind::Launch(_) => {
-            None
-        }
+        ActionKind::OpenUri(_)
+        | ActionKind::ShowInFileManager { .. }
+        | ActionKind::Launch(_)
+        | ActionKind::ActivateWindow { .. } => None,
     }
 }
 
@@ -1303,7 +1325,11 @@ async fn dispatch(
         )
         // Handled before the target loop (E11-004, E11-016).
         | (
-            K::KillTree | K::OpenUri(_) | K::ShowInFileManager { .. } | K::Launch(_),
+            K::KillTree
+            | K::OpenUri(_)
+            | K::ShowInFileManager { .. }
+            | K::Launch(_)
+            | K::ActivateWindow { .. },
             _,
         ) => ActionState::Rejected(RejectReason::Unsupported),
     }
@@ -1507,6 +1533,7 @@ fn kind_name(kind: &ActionKind) -> &'static str {
         ActionKind::OpenUri(_) => "OpenUri",
         ActionKind::ShowInFileManager { .. } => "ShowInFileManager",
         ActionKind::Launch(_) => "Launch",
+        ActionKind::ActivateWindow { .. } => "ActivateWindow",
     }
 }
 
@@ -2056,6 +2083,10 @@ mod tests {
                         cwd: None,
                         as_admin: false,
                     }),
+                    // Switch to window (q4x76.12 review).
+                    ActionKind::ActivateWindow {
+                        internal_id: Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}"),
+                    },
                 ];
                 for (i, kind) in desktop_kinds.into_iter().enumerate() {
                     gate.submit_routed(&cx, request(kind, vec![]), &view, route(10 + i as u64));
@@ -2085,6 +2116,7 @@ mod tests {
         assert_eq!(
             states,
             [
+                refused.clone(),
                 refused.clone(),
                 refused.clone(),
                 refused,
@@ -2316,6 +2348,9 @@ mod tests {
                 as_admin: false,
                 cwd: None,
             }),
+            ActionKind::ActivateWindow {
+                internal_id: Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}"),
+            },
         ]
     }
 
@@ -2326,7 +2361,7 @@ mod tests {
         assert_eq!(names.len(), kinds.len(), "a kind is listed twice");
         assert_eq!(
             kinds.len(),
-            31,
+            32,
             "a new ActionKind needs a row in every_kind"
         );
     }
@@ -2414,7 +2449,9 @@ mod tests {
             ActionKind::UnitWriteRecovery(_) | ActionKind::UnitRemoveRecovery => {
                 user_or_system(2, 120)
             }
-            ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } => s(2),
+            ActionKind::OpenUri(_)
+            | ActionKind::ShowInFileManager { .. }
+            | ActionKind::ActivateWindow { .. } => s(2),
             ActionKind::Launch(spec) if spec.as_admin => s(120),
             ActionKind::Launch(_) => s(2),
         }
@@ -2487,7 +2524,8 @@ mod tests {
                     ActionKind::SockDestroy => Some(SourceId::Connections),
                     ActionKind::OpenUri(_)
                     | ActionKind::ShowInFileManager { .. }
-                    | ActionKind::Launch(_) => None,
+                    | ActionKind::Launch(_)
+                    | ActionKind::ActivateWindow { .. } => None,
                 };
                 assert_eq!(refresh_source(&kind, manager), want, "{kind:?} {manager:?}");
             }

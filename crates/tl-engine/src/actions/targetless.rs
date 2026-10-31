@@ -1,5 +1,6 @@
-//! The targetless kinds `OpenUri`, `ShowInFileManager` and `Launch` (R-134, E11-016). Each runs
-//! one job through `ActionCtx::openers`; `run_action` emits `Started` and the one summary event.
+//! The targetless kinds `OpenUri`, `ShowInFileManager`, `Launch` and `ActivateWindow` (R-134,
+//! E11-016, q4x76.12). Each runs one job through `ActionCtx::openers`; `run_action` emits
+//! `Started` and the one summary event.
 //!
 //! Privacy: URIs, paths and command text are user data. Never log them above debug (ADR-015).
 
@@ -33,6 +34,10 @@ pub async fn run(cx: &Cx, actx: &ActionCtx, kind: &ActionKind, privileged: bool)
                     ActionState::Rejected(RejectReason::AlreadyRunning)
                 }
             }),
+            ActionKind::ActivateWindow { internal_id } => openers
+                .activate_window(cx, internal_id)
+                .await
+                .map(|()| ActionState::Succeeded),
             _ => Ok(ActionState::Rejected(RejectReason::Unsupported)),
         }
     };

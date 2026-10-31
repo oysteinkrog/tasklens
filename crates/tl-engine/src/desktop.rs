@@ -10,11 +10,18 @@
 //! environment, which Plasma fills at login, and stores the session's variables here. When KWin
 //! leaves, the session is gone and the commands are refused with `NoDesktopSession`.
 //!
-//! The same handle keeps the pids of the windows connected to the service from this host
-//! (`WindowGuard`). With the engine's own pid they are "self": the processes sweep marks them
-//! `IS_SELF`, so ending them is refused as before the service (leader decision on q4x76.12).
+//! The same handle keeps the pid and app id of each window connected to the service from this
+//! host (`WindowGuard`). With the engine's own pid they are "self": the processes sweep marks
+//! them `IS_SELF`, so ending them is refused as before the service (leader decision on
+//! q4x76.12). The KWin worker finds a window's own windows by that pid and app id.
+//!
+//! It also carries Switch to window (`ActionKind::ActivateWindow`) from the action gate to the
+//! KWin worker and the worker's answer back (`activate_window`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
+use tl_model::actions::ActionError;
 
 /// The variables taken from the desktop session. `XDG_ACTIVATION_TOKEN` is never taken
 /// (ADR-018).
@@ -35,6 +42,15 @@ const VALUE_MAX: usize = 4096;
 
 /// `env` runs the program with the session's variables added.
 pub const ENV_PATH: &str = "/usr/bin/env";
+
+/// `env` reads every argument with `=` before the program as a variable, and has no way to stop
+/// that. A program whose name holds `=` is started through this shell line, which runs its
+/// arguments as they are: `exec "$@"` never reads a word as a variable.
+pub const SH_PATH: &str = "/bin/sh";
+const EXEC_ARGS: &str = "exec \"$@\"";
+
+/// Switch to window calls waiting for the KWin worker. A full queue fails the call at once.
+const ACTIVATE_QUEUE: usize = 8;
 
 /// The session variables, in `SESSION_KEYS` order. A key with no usable value is left out.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -89,16 +105,23 @@ impl DesktopEnv {
     }
 
     /// `argv` run through `/usr/bin/env` with the session's variables, so the program starts on
-    /// the session's screen. `env` would read a first argument that contains `=` as a variable,
-    /// so such an `argv` is returned as it is, as is any `argv` when there are no variables.
+    /// the session's screen. `env` would read a program name that contains `=` as a variable,
+    /// so such a program runs through `/bin/sh -c 'exec "$@"' sh`. An empty `argv`, or any
+    /// `argv` when there are no variables, is returned as it is.
     pub fn wrap(&self, argv: Vec<String>) -> Vec<String> {
-        let first_ok = argv.first().is_some_and(|a| !a.contains('='));
-        if self.vars.is_empty() || !first_ok {
+        let Some(program) = argv.first() else {
+            return argv;
+        };
+        if self.vars.is_empty() {
             return argv;
         }
-        let mut out = Vec::with_capacity(1 + self.vars.len() + argv.len());
+        let through_sh = program.contains('=');
+        let mut out = Vec::with_capacity(4 + self.vars.len() + argv.len());
         out.push(ENV_PATH.to_owned());
         out.extend(self.vars.iter().map(|(k, v)| format!("{k}={v}")));
+        if through_sh {
+            out.extend([SH_PATH, "-c", EXEC_ARGS, "sh"].map(str::to_owned));
+        }
         out.extend(argv);
         out
     }
@@ -130,17 +153,34 @@ struct Shared {
     source: DesktopSource,
     /// `UserManager` only: the session's variables while there is a session.
     env: Mutex<Option<Arc<DesktopEnv>>>,
-    /// The pids of the windows connected from this host, one entry per connection.
-    windows: Mutex<Vec<u32>>,
+    /// The pid and app id of each window connected from this host, one entry per connection.
+    windows: Mutex<Vec<(u32, Arc<str>)>>,
+    /// True while the KWin worker serves its bridge and reads `activate_rx`.
+    bridge_up: AtomicBool,
+    activate_tx: async_channel::Sender<ActivateCall>,
+    activate_rx: async_channel::Receiver<ActivateCall>,
+}
+
+/// One Switch to window, from the action gate to the KWin worker. The worker answers on
+/// `reply`; dropping the call unanswered fails it.
+#[derive(Debug)]
+pub struct ActivateCall {
+    /// The KWin window id, as in `WindowEntry::internal_id`.
+    pub internal_id: Arc<str>,
+    pub reply: async_channel::Sender<Result<(), ActionError>>,
 }
 
 impl DesktopSession {
     pub fn new(source: DesktopSource) -> Self {
+        let (activate_tx, activate_rx) = async_channel::bounded(ACTIVATE_QUEUE);
         Self {
             shared: Arc::new(Shared {
                 source,
                 env: Mutex::new(None),
                 windows: Mutex::new(Vec::new()),
+                bridge_up: AtomicBool::new(false),
+                activate_tx,
+                activate_rx,
             }),
         }
     }
@@ -192,28 +232,81 @@ impl DesktopSession {
 
     /// The pids of the windows connected from this host, sorted, each once.
     pub fn window_pids(&self) -> Vec<u32> {
-        let mut pids = self
-            .shared
-            .windows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let mut pids: Vec<u32> = self.lock_windows().iter().map(|(pid, _)| *pid).collect();
         pids.sort_unstable();
         pids.dedup();
         pids
     }
 
-    /// Adds `pid` to the window pids until the guard is dropped.
-    pub fn add_window(&self, pid: u32) -> WindowGuard {
+    /// The app ids a window of `pid` may carry as its `resourceClass` for an own-window command
+    /// (keep above, frame geometry): the app id each connection from `pid` announced in its
+    /// `Hello`. The engine in the window (`Process`) also takes `APP_ID`, its own window's.
+    pub fn own_app_ids(&self, pid: u32) -> Vec<Arc<str>> {
+        let mut ids: Vec<Arc<str>> = self
+            .lock_windows()
+            .iter()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, app_id)| Arc::clone(app_id))
+            .collect();
+        if self.shared.source == DesktopSource::Process {
+            ids.push(Arc::from(APP_ID));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Adds the window `pid` with `app_id` until the guard is dropped.
+    pub fn add_window(&self, pid: u32, app_id: Arc<str>) -> WindowGuard {
+        self.lock_windows().push((pid, Arc::clone(&app_id)));
+        WindowGuard {
+            shared: Arc::clone(&self.shared),
+            pid,
+            app_id,
+        }
+    }
+
+    /// Switch to window: asks the KWin worker to activate the window `internal_id` and waits
+    /// for its answer. `Unsupported` when the worker does not serve its bridge (no KWin, or the
+    /// bridge has not started yet). Never blocks on a full queue.
+    pub async fn activate_window(&self, internal_id: Arc<str>) -> Result<(), ActionError> {
+        if !self.shared.bridge_up.load(Ordering::Acquire) {
+            return Err(ActionError::Unsupported);
+        }
+        let (reply, answer) = async_channel::bounded(1);
+        let call = ActivateCall { internal_id, reply };
+        if self.shared.activate_tx.try_send(call).is_err() {
+            return Err(ActionError::Internal(Arc::from(
+                "too many window switches waiting",
+            )));
+        }
+        match answer.recv().await {
+            Ok(result) => result,
+            Err(_) => Err(ActionError::Internal(Arc::from(
+                "the KWin bridge stopped before the switch",
+            ))),
+        }
+    }
+
+    /// The KWin worker's end of `activate_window`.
+    pub(crate) fn activate_calls(&self) -> async_channel::Receiver<ActivateCall> {
+        self.shared.activate_rx.clone()
+    }
+
+    /// The KWin worker serves its bridge until the guard is dropped. Dropping it fails every
+    /// call still waiting in the queue.
+    pub(crate) fn bridge_serving(&self) -> BridgeGuard {
+        self.shared.bridge_up.store(true, Ordering::Release);
+        BridgeGuard {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    fn lock_windows(&self) -> std::sync::MutexGuard<'_, Vec<(u32, Arc<str>)>> {
         self.shared
             .windows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(pid);
-        WindowGuard {
-            shared: Arc::clone(&self.shared),
-            pid,
-        }
     }
 
     fn lock_env(&self) -> std::sync::MutexGuard<'_, Option<Arc<DesktopEnv>>> {
@@ -224,23 +317,41 @@ impl DesktopSession {
     }
 }
 
-/// One connected window's pid in `DesktopSession::window_pids`. Dropping it removes the pid.
+/// One connected window in `DesktopSession::window_pids`. Dropping it removes the window.
 #[derive(Debug)]
 pub struct WindowGuard {
     shared: Arc<Shared>,
     pid: u32,
+    app_id: Arc<str>,
 }
 
 impl Drop for WindowGuard {
     fn drop(&mut self) {
-        let mut pids = self
+        let mut windows = self
             .shared
             .windows
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some(i) = pids.iter().position(|p| *p == self.pid) {
-            pids.swap_remove(i);
+        if let Some(i) = windows
+            .iter()
+            .position(|(p, a)| *p == self.pid && *a == self.app_id)
+        {
+            windows.swap_remove(i);
         }
+    }
+}
+
+/// The KWin worker serves its bridge while this lives (`DesktopSession::bridge_serving`).
+#[derive(Debug)]
+pub(crate) struct BridgeGuard {
+    shared: Arc<Shared>,
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        self.shared.bridge_up.store(false, Ordering::Release);
+        // A dropped call fails its waiter.
+        while self.shared.activate_rx.try_recv().is_ok() {}
     }
 }
 
@@ -292,10 +403,25 @@ mod tests {
                 "a=b x"
             ]
         );
-        // `env` would take a first argument with `=` as a variable.
-        let odd = vec!["a=b".to_owned()];
-        assert_eq!(env.wrap(odd.clone()), odd);
+        // `env` would take a program name with `=` as a variable, so it runs through `sh`,
+        // and it still gets the session's variables.
+        let odd = vec!["./a=b".to_owned(), "x=y".to_owned()];
+        assert_eq!(
+            env.wrap(odd),
+            [
+                ENV_PATH,
+                "WAYLAND_DISPLAY=wayland-1",
+                "DISPLAY=:0",
+                SH_PATH,
+                "-c",
+                "exec \"$@\"",
+                "sh",
+                "./a=b",
+                "x=y"
+            ]
+        );
         assert_eq!(DesktopEnv::default().wrap(argv.clone()), argv);
+        assert!(env.wrap(Vec::new()).is_empty());
     }
 
     #[test]
@@ -323,9 +449,9 @@ mod tests {
     #[test]
     fn window_pids_follow_their_guards() {
         let session = DesktopSession::new(DesktopSource::UserManager);
-        let a = session.add_window(40);
-        let b = session.add_window(30);
-        let c = session.add_window(40);
+        let a = session.add_window(40, Arc::from(APP_ID));
+        let b = session.add_window(30, Arc::from(APP_ID));
+        let c = session.add_window(40, Arc::from(APP_ID));
         assert_eq!(session.window_pids(), [30, 40]);
         drop(a);
         assert_eq!(
@@ -336,5 +462,67 @@ mod tests {
         drop(c);
         drop(b);
         assert!(session.window_pids().is_empty());
+    }
+
+    /// q4x76.12: own-window commands match the app id each window announced in its `Hello`,
+    /// not a fixed one. The engine in the window also takes its own `APP_ID`.
+    #[test]
+    fn own_app_ids_are_the_announced_ones() {
+        let service = DesktopSession::new(DesktopSource::UserManager);
+        assert!(service.own_app_ids(40).is_empty(), "no window connected");
+        let dev = service.add_window(40, Arc::from("io.github.oysteinkrog.Tasklens.Devel"));
+        let other = service.add_window(41, Arc::from(APP_ID));
+        assert_eq!(
+            service.own_app_ids(40),
+            [Arc::from("io.github.oysteinkrog.Tasklens.Devel")]
+        );
+        drop(dev);
+        assert!(service.own_app_ids(40).is_empty());
+        drop(other);
+
+        let window = DesktopSession::new(DesktopSource::Process);
+        assert_eq!(window.own_app_ids(7), [Arc::from(APP_ID)]);
+    }
+
+    /// q4x76.12: Switch to window waits for the KWin worker's answer. With no bridge it fails
+    /// at once; a call left in the queue when the bridge stops fails too.
+    #[test]
+    fn activate_window_waits_for_the_bridge() {
+        let session = DesktopSession::new(DesktopSource::UserManager);
+        let id: Arc<str> = Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}");
+        let no_bridge = futures_lite::future::block_on(session.activate_window(Arc::clone(&id)));
+        assert_eq!(no_bridge, Err(ActionError::Unsupported));
+
+        let calls = session.activate_calls();
+        let guard = session.bridge_serving();
+        let worker = std::thread::spawn(move || {
+            let call = calls.recv_blocking().expect("a call");
+            call.reply
+                .try_send(Err(ActionError::NoSuchProcess))
+                .expect("reply");
+            call.internal_id
+        });
+        let answer = futures_lite::future::block_on(session.activate_window(Arc::clone(&id)));
+        assert_eq!(answer, Err(ActionError::NoSuchProcess));
+        assert_eq!(worker.join().expect("worker"), id);
+
+        // Nobody reads the queue: the bridge stops and the waiting call fails.
+        let waiting = session.clone();
+        let wait_id = Arc::clone(&id);
+        let caller = std::thread::spawn(move || {
+            futures_lite::future::block_on(waiting.activate_window(wait_id))
+        });
+        while session.shared.activate_rx.is_empty() {
+            std::thread::yield_now();
+        }
+        drop(guard);
+        assert!(matches!(
+            caller.join().expect("caller"),
+            Err(ActionError::Internal(_))
+        ));
+        assert_eq!(
+            futures_lite::future::block_on(session.activate_window(id)),
+            Err(ActionError::Unsupported)
+        );
     }
 }

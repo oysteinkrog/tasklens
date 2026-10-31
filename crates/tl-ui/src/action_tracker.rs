@@ -998,6 +998,7 @@ pub fn deadline_for(kind: &ActionKind, targets: usize) -> Option<Duration> {
         ActionKind::Launch(spec) if spec.as_admin => Some(POLKIT),
         ActionKind::OpenUri(_)
         | ActionKind::ShowInFileManager { .. }
+        | ActionKind::ActivateWindow { .. }
         | ActionKind::Launch(_)
         | ActionKind::StartupRunNow => Some(PER_TARGET),
         ActionKind::SockDestroy
