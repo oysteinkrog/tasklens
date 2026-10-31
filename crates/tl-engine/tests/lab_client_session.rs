@@ -925,7 +925,7 @@ fn each_page_gets_the_parts_it_reads_from_the_demand_it_sends() {
             }
         }
         if reads.contains(&"services") {
-            assert_eq!(units(&got).len(), 3, "{page}: every unit");
+            assert_eq!(got.services.units.len(), 3, "{page}: every unit record");
         }
     }
 }
