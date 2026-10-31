@@ -7286,6 +7286,7 @@ mod page {
             // The default snapshot reads as RAPL readable: a separator and the power item.
             ("", false),
             ("Show power draw", false),
+            ("Show core clocks", false),
             ("", false),
             ("Arrange", false),
         ]
@@ -8588,7 +8589,20 @@ mod wired {
         // The Arrange submenu closes the list, after a separator.
         let arrange = || (MenuEntryKind::Submenu, "Arrange".to_owned(), None, false);
         let sep = || (MenuEntryKind::Separator, String::new(), None, false);
-        assert_eq!(tail(&mut r, Some(RaplState::NoZone)), [sep(), arrange()]);
+        // The CPU box also has the "Show core clocks" check item (tasklens-o55.57), right
+        // after the power items, or after the mode radios when there are none.
+        let clocks = || {
+            (
+                MenuEntryKind::Item,
+                "Show core clocks".to_owned(),
+                None,
+                false,
+            )
+        };
+        assert_eq!(
+            tail(&mut r, Some(RaplState::NoZone)),
+            [clocks(), sep(), arrange()]
+        );
         assert_eq!(
             tail(&mut r, Some(RaplState::Readable)),
             [
@@ -8599,6 +8613,7 @@ mod wired {
                     None,
                     false
                 ),
+                clocks(),
                 sep(),
                 arrange(),
             ]
@@ -8619,6 +8634,7 @@ mod wired {
                     None,
                     false
                 ),
+                clocks(),
                 sep(),
                 arrange(),
             ]
@@ -8670,6 +8686,7 @@ mod wired {
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),
+                ("Show core clocks".to_owned(), false),
                 (String::new(), false),
                 ("Arrange".to_owned(), false),
             ]
@@ -8753,6 +8770,7 @@ mod wired {
                 // The default snapshot reads as RAPL readable.
                 (String::new(), false),
                 ("Show power draw".to_owned(), false),
+                ("Show core clocks".to_owned(), false),
                 (String::new(), false),
                 ("Arrange".to_owned(), false),
             ]

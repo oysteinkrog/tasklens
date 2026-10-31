@@ -605,8 +605,9 @@ mod details {
         assert_eq!(shown.as_deref(), Some("MiB/s"));
     }
 
-    /// The Display unit link is the page's focus order and its first Tab stop (no header
-    /// toggles); Enter on it opens the unit menu.
+    /// The range switch sits in the page header, so it takes the first Tab stops (UI-PRF-055,
+    /// tasklens-crw.105); the Display unit link is the first block control after it. Enter on
+    /// the link opens the unit menu.
     #[gpui_kit::test]
     fn display_unit_in_focus_order(cx: &mut TestAppContext) {
         let mut sys = system(1000);
@@ -617,7 +618,20 @@ mod details {
         assert_eq!(order.len(), 2, "the Display unit link and the Fetch button");
         r.vcx.update(|window, cx| window.focus_next(cx));
         let first = r.vcx.update(|window, _| order[0].is_focused(window));
-        assert!(first, "the first Tab stop is the Display unit link");
+        assert!(!first, "the header range switch is the first Tab stop");
+        // Tab on through the range buttons: the Display unit link is the next page stop.
+        let mut reached = false;
+        for _ in 0..8 {
+            r.vcx.update(|window, cx| window.focus_next(cx));
+            if r.vcx.update(|window, _| order[0].is_focused(window)) {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "Tab reaches the Display unit link after the header"
+        );
 
         // GPUI turns Enter on the focused link into a keyboard click on key up.
         draw(r.vcx);
