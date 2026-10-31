@@ -14,6 +14,7 @@ mod bench_main;
 mod build_info;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
+mod engine_link;
 #[cfg(feature = "bench")]
 mod gallery_main;
 mod import_ts;
@@ -32,6 +33,7 @@ mod rendering_env;
 mod settings_store;
 #[allow(dead_code, reason = "tests call the rest")]
 mod single_instance;
+mod switch_client;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -41,12 +43,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
+use tl_model::remote_proto::{HelloTail, Want};
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
+use tl_ui::engine_link::{EngineLinkApi, EngineLinkState};
 use tl_ui::{AppEnv, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
+use crate::engine_link::{EngineLink, LinkEnv, LocalEngine};
 use crate::settings_store::{LoadNotice, Store};
 use crate::single_instance::{Forward, Outcome};
 
@@ -223,24 +228,19 @@ fn main() -> ExitCode {
 
     // E01: --bench and --gallery arms go here (before step 7)
 
-    // Step 7: start the engine. Do not wait for any collector.
-    let mut config = EngineConfig::new(
-        engine_mode(args.low_memory, args.force_full_memory_mode),
-        paths.state_dir.clone(),
-    )
-    .with_history_dir(paths.history_dir());
-    if Path::new(HELPER_PATH).exists() {
-        config = config.with_helper_path(HELPER_PATH.into());
-    }
-    let engine = match Engine::start(config, EngineHooks::default()) {
-        Ok(engine) => engine,
+    // Step 7: the engine. The main window uses the engine service, or its own engine when the
+    // service does not answer (ADR-018). The rescue window keeps its own engine, with no history
+    // and no lock. Do not wait for any collector.
+    let (engine, link_api) = match start_engine(&paths, &args) {
+        Ok(started) => started,
         Err(e) => {
             error!(target: "tasklens::engine", "engine start failed: {e}");
             eprintln!("tasklens could not start the engine: {e}");
             return ExitCode::from(1);
         }
     };
-    engine.set_settings(EngineSettings::from(&settings));
+    let client = engine.client();
+    client.set_settings(EngineSettings::from(&settings));
     info!(target: "tasklens::engine", "engine started");
     tl_ui::app::perf_step("engine_start");
 
@@ -264,6 +264,7 @@ fn main() -> ExitCode {
         read_ts_themes: Arc::new(import_ts::read_themes_file),
         list_adapters: Arc::new(adapters::list_adapters),
         run_history: None,
+        engine_link: link_api,
     };
     let persist = lowmem_unit::wrap_persist(
         store.persist_callback(),
@@ -280,7 +281,7 @@ fn main() -> ExitCode {
     // No tray in the low-memory rescue window (R-243).
     let tray = if args.low_memory { None } else { start_tray() };
     let exit = tl_ui::run(UiLaunch {
-        client: Arc::new(engine.clone()),
+        client,
         init: UiInit {
             settings,
             state,
@@ -359,11 +360,125 @@ impl<T> ExitOnce<T> {
     }
 }
 
+/// The window's engine.
+enum WindowEngine {
+    /// The rescue window's own engine (`--low-memory`): no history, no lock.
+    Rescue(EngineHandle),
+    /// The engine service, or the window's own engine when the service does not answer.
+    Link(Arc<EngineLink>),
+}
+
+impl WindowEngine {
+    /// The client the UI uses for the whole run.
+    fn client(&self) -> Arc<dyn EngineClient> {
+        match self {
+            WindowEngine::Rescue(engine) => Arc::new(engine.clone()),
+            WindowEngine::Link(link) => link.client(),
+        }
+    }
+
+    /// Stops the window's own engine within 1500 ms. The engine service keeps running.
+    fn shutdown(self) {
+        match self {
+            WindowEngine::Rescue(engine) => stop_engine(engine),
+            WindowEngine::Link(link) => link.shutdown(),
+        }
+    }
+}
+
+/// Stops an in-process engine (ADR-004 Shutdown), which flushes history.
+fn stop_engine(engine: EngineHandle) {
+    let report = engine.shutdown();
+    if !report.clean() {
+        warn!(target: "tasklens::engine", drained = report.drained, torn_down = report.torn_down,
+            "engine shutdown timed out");
+    }
+}
+
+/// The in-process engine's config. The rescue window (`--low-memory`) gets no history directory,
+/// also with `--force-full-memory-mode`, so it writes no history and needs no engine lock
+/// (ADR-018 Rescue mode).
+fn engine_config(paths: &paths::Paths, low_memory: bool, force_full: bool) -> EngineConfig {
+    let mut config =
+        EngineConfig::new(engine_mode(low_memory, force_full), paths.state_dir.clone());
+    if !low_memory {
+        config = config.with_history_dir(paths.history_dir());
+    }
+    if Path::new(HELPER_PATH).exists() {
+        config = config.with_helper_path(HELPER_PATH.into());
+    }
+    config
+}
+
+/// Starts the window's engine, and for the main window the API the status chip uses.
+fn start_engine(
+    paths: &paths::Paths,
+    args: &args::Args,
+) -> Result<(WindowEngine, Option<EngineLinkApi>), String> {
+    if args.low_memory {
+        let config = engine_config(paths, true, args.force_full_memory_mode);
+        let engine = Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
+        return Ok((WindowEngine::Rescue(engine), None));
+    }
+    if let Err(e) = paths::ensure_dir(&paths.state_dir) {
+        warn!(target: "tasklens::engine", "state directory: {e}");
+    }
+    let app_dir = args.app_id.as_deref().unwrap_or(paths::APP_DIR);
+    let (states_tx, states) = async_channel::unbounded();
+    let engine_paths = paths.clone();
+    let env = LinkEnv {
+        socket: engine_link::socket_path(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), app_dir),
+        lock_file: paths.state_dir.join(engine_link::LOCK_FILE),
+        // The unit serves the default paths only; an `--app-id` instance stays on its own
+        // (D-016).
+        start_unit: args.app_id.is_none().then(|| {
+            Box::new(engine_link::start_unit)
+                as Box<dyn Fn(std::time::Duration) -> bool + Send + Sync>
+        }),
+        start_engine: Box::new(move || {
+            let config = engine_config(&engine_paths, false, false);
+            let engine =
+                Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
+            Ok(LocalEngine {
+                client: Arc::new(engine.clone()),
+                stop: Box::new(move || stop_engine(engine)),
+            })
+        }),
+        hello: HelloTail {
+            pid: std::process::id(),
+            app_id: Arc::from(
+                args.app_id
+                    .as_deref()
+                    .unwrap_or(tl_ui::window::main::APP_ID),
+            ),
+            bridge: false,
+            want: Want { snapshots: true },
+        },
+        uid: tl_remote::server::own_uid(),
+        notify: Box::new(move |state: EngineLinkState| {
+            let _ = states_tx.try_send(state);
+        }),
+        deadline: engine_link::CONNECT_DEADLINE,
+    };
+    let link = EngineLink::open(env)?;
+    let weak = Arc::downgrade(&link);
+    let api = EngineLinkApi {
+        states,
+        switch: Arc::new(move || {
+            if let Some(link) = weak.upgrade() {
+                link.switch_to_service();
+            }
+        }),
+    };
+    Ok((WindowEngine::Link(link), Some(api)))
+}
+
 /// The exit steps after the UI stops (ADR-010 Close behaviour, ADR-004 Shutdown): settings,
-/// then the engine within 1500 ms, then `before_exit`, then the log file. Exits with `code`
-/// without running destructors, so a stuck engine thread cannot hold the process open.
+/// then the window's own engine within 1500 ms, then `before_exit`, then the log file. Exits
+/// with `code` without running destructors, so a stuck engine thread cannot hold the process
+/// open.
 fn finish(
-    engine: EngineHandle,
+    engine: WindowEngine,
     store: &Store,
     log: Option<logging::LogGuard>,
     code: i32,
@@ -371,11 +486,7 @@ fn finish(
 ) -> ! {
     // Pending changes are written before anything else on exit (ADR-011).
     store.flush();
-    let report = engine.shutdown();
-    if !report.clean() {
-        warn!(target: "tasklens::engine", drained = report.drained, torn_down = report.torn_down,
-            "engine shutdown timed out");
-    }
+    engine.shutdown();
     // Runs while the log writer is still alive, so its lines reach the log file.
     before_exit();
     // The non-blocking writer loses lines unless its guard is dropped before `exit`.
@@ -548,6 +659,25 @@ mod tests {
         let icon = main_tray_icon();
         assert_eq!(icon.argb_22.len(), 1_936);
         assert_eq!(icon.argb_44.len(), 7_744);
+    }
+
+    /// ADR-018 Rescue mode: the rescue window writes no history, also with
+    /// `--force-full-memory-mode`, so it needs no engine lock.
+    #[test]
+    fn rescue_engine_writes_no_history() {
+        let paths = paths::Paths::from_vars(|name| match name {
+            "HOME" => Some(OsString::from("/home/u")),
+            _ => None,
+        })
+        .expect("paths");
+        let rescue = engine_config(&paths, true, false);
+        assert_eq!(rescue.mode, EngineMode::LowMemory);
+        assert_eq!(rescue.history_dir, None);
+        let forced = engine_config(&paths, true, true);
+        assert_eq!(forced.mode, EngineMode::Full);
+        assert_eq!(forced.history_dir, None);
+        let main = engine_config(&paths, false, false);
+        assert_eq!(main.history_dir, Some(paths.history_dir()));
     }
 
     #[test]

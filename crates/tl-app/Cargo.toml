@@ -15,6 +15,7 @@ tl-engine = { workspace = true }
 tl-ui     = { workspace = true }
 tl-ops    = { workspace = true }   # write_atomic (R-130)
 tl-tray   = { workspace = true }   # tray thread (E31-008)
+tl-remote = { workspace = true }   # the engine service client (ADR-018)
 zbus      = { workspace = true }
 toml      = { workspace = true }
 serde     = { workspace = true }
