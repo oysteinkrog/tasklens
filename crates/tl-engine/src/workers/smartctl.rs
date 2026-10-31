@@ -469,7 +469,7 @@ mod tests {
         }
         // The check runs before any program.
         assert_eq!(
-            run_smartctl(
+            run_helper(
                 Path::new("/nonexistent"),
                 Path::new("/nonexistent"),
                 "../sda"
