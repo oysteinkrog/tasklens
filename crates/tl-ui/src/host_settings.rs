@@ -8,6 +8,12 @@
 //! revision it was made from; on a conflict nothing changes here and the next snapshot shows the
 //! current values. `TlSettings::set` and `TlSettings::toggle` send the host keys here, and
 //! `TlSettings` never writes them to `settings.toml`.
+//!
+//! A change also carries the hub's generation, the one its revision came with. After the window
+//! switched engines or reconnected, the client refuses a change made from the older snapshot,
+//! since two engines can have the same revision (ADR-018 Generations). Every control reads the
+//! hub's installed snapshot, so after a switch it is enabled only once that snapshot is the new
+//! engine's and carries a revision, as in a fresh window.
 
 use std::sync::Arc;
 
@@ -18,7 +24,6 @@ use tl_model::remote_proto::{
 };
 use tracing::{debug, info, warn};
 
-use crate::app::EngineGlobal;
 use crate::hub::GlobalHub;
 use crate::settings_global::{SettingKey, SettingValue};
 
@@ -42,6 +47,18 @@ pub fn current(cx: &App) -> Arc<HostSettings> {
     cx.try_global::<GlobalHub>()
         .map(|hub| Arc::clone(&hub.0.read(cx).current().host_settings))
         .unwrap_or_default()
+}
+
+/// The hub's client, its generation and the host settings in its snapshot, from one read.
+fn hub_state(cx: &App) -> Option<(Arc<dyn EngineClient>, u64, Arc<HostSettings>)> {
+    cx.try_global::<GlobalHub>().map(|hub| {
+        let hub = hub.0.read(cx);
+        (
+            Arc::clone(hub.client()),
+            hub.generation(),
+            Arc::clone(&hub.current().host_settings),
+        )
+    })
 }
 
 /// The values to show and use. The defaults until the engine gave them.
@@ -116,7 +133,10 @@ pub fn change_then(
     f: impl FnOnce(&mut HostSettingsValues),
     on_ack: impl FnOnce(&mut App) + 'static,
 ) {
-    let current = current(cx);
+    // Without a hub nothing was read, so there is nothing to change from.
+    let Some((client, generation, current)) = hub_state(cx) else {
+        return;
+    };
     if current.rev == 0 {
         debug!(target: "tasklens::settings", "host settings not read yet; change dropped");
         return;
@@ -133,10 +153,7 @@ pub fn change_then(
     if changes == HostSettingsChanges::default() {
         return;
     }
-    let Some(client) = client(cx) else {
-        return;
-    };
-    match client.set_host_settings(current.rev, changes) {
+    match client.set_host_settings(generation, current.rev, changes) {
         Ok(reply) => {
             // The snapshot carries the values either way; a conflict or a lost reply is only
             // logged.
@@ -156,13 +173,6 @@ pub fn change_then(
         }
         Err(e) => warn!(target: "tasklens::settings", "host settings not sent: {e:?}"),
     }
-}
-
-/// The client of the host the hub shows, else the app's engine client.
-fn client(cx: &App) -> Option<Arc<dyn EngineClient>> {
-    cx.try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(hub.0.read(cx).client()))
-        .or_else(|| cx.try_global::<EngineGlobal>().map(|e| Arc::clone(&e.0)))
 }
 
 /// Writes `value` to the field of `key` in `v`.

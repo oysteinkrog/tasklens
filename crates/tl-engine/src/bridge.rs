@@ -847,13 +847,19 @@ impl EngineClient for EngineHandle {
     /// Applies `changes` when `base_rev` is the current revision, else `Conflict`. Revision 0
     /// means no host settings were installed, so nothing can be changed yet. The engine keeps
     /// the result in memory only; the owner of `engine.toml` stores it (tasklens-q4x76.24).
+    /// The in-process engine's generation is always 0, so a write with any other `generation`
+    /// is not applied and gets a closed channel.
     fn set_host_settings(
         &self,
+        generation: u64,
         base_rev: u64,
         changes: HostSettingsChanges,
     ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
         if self.inner.stopped.load(Ordering::Acquire) || self.links().is_none() {
             return Err(CommandError::EngineStopped);
+        }
+        if generation != self.generation() {
+            return Ok(async_channel::bounded(1).1);
         }
         let reply = {
             let _write = self
@@ -1034,7 +1040,7 @@ mod tests {
         };
         // Nothing installed yet: revision 0, and no change applies, not even from base 0.
         assert_eq!(r.handle.host_settings().rev, 0);
-        let rx = r.handle.set_host_settings(0, changes.clone()).unwrap();
+        let rx = r.handle.set_host_settings(0, 0, changes.clone()).unwrap();
         assert!(matches!(
             reply(&rx),
             SetHostSettingsReply::Conflict { current } if current.rev == 0
@@ -1055,7 +1061,12 @@ mod tests {
             Ok(EngineMsg::Client(ClientMsg::Wake))
         ));
 
-        let rx = r.handle.set_host_settings(3, changes.clone()).unwrap();
+        // A write tagged with another generation is refused and changes nothing.
+        let rx = r.handle.set_host_settings(1, 3, changes.clone()).unwrap();
+        assert!(rx.is_closed() && rx.try_recv().is_err());
+        assert_eq!(r.handle.host_settings().rev, 3);
+
+        let rx = r.handle.set_host_settings(0, 3, changes.clone()).unwrap();
         assert_eq!(reply(&rx), SetHostSettingsReply::Ack { rev: 4 });
         let now = r.handle.host_settings();
         assert_eq!((now.rev, now.values.interval_ms), (4, 2000));
@@ -1069,6 +1080,7 @@ mod tests {
         let rx = r
             .handle
             .set_host_settings(
+                0,
                 3,
                 HostSettingsChanges {
                     interval_ms: Some(500),
@@ -1086,7 +1098,7 @@ mod tests {
 
         r.handle.inner.stopped.store(true, Ordering::Release);
         assert!(matches!(
-            r.handle.set_host_settings(4, changes),
+            r.handle.set_host_settings(0, 4, changes),
             Err(CommandError::EngineStopped)
         ));
     }

@@ -6,7 +6,10 @@
 //! `EngineHandle`. `switch_to` replaces the backend and sends it the window's session state again:
 //! the newest demand, engine settings, table query and system table queries. Host settings
 //! writes go to the current backend and are never sent again: each backend has its own revision
-//! (ADR-018 Settings).
+//! (ADR-018 Settings). Two backends can have the same revision, so a write carries the generation
+//! of the snapshot it was made from, and one from before a switch reaches no backend: its reply
+//! channel is closed, as for a write whose connection dropped (ADR-018 Generations). The window can write again once the hub
+//! has installed the new backend's snapshot.
 //!
 //! Each backend gets three forwarding threads, for its wake token, its action events and its
 //! request ends. They run until the backend's channel closes, so an action or request that was
@@ -213,12 +216,24 @@ impl EngineClient for SwitchClient {
         inner.settings = Some(settings);
     }
 
+    /// Forwards to the current backend only when `generation` is this proxy's current one, with
+    /// the backend's own generation, which the backend checks again. Else the write is not sent
+    /// and gets a closed channel.
     fn set_host_settings(
         &self,
+        generation: u64,
         base_rev: u64,
         changes: HostSettingsChanges,
     ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
-        self.current().0.set_host_settings(base_rev, changes)
+        // Under the lock, so a switch cannot come between the check and the forward.
+        let inner = lock(&self.inner);
+        let backend_generation = inner.backend.generation();
+        if generation != combined(inner.switches, backend_generation) {
+            return Ok(async_channel::bounded(1).1);
+        }
+        inner
+            .backend
+            .set_host_settings(backend_generation, base_rev, changes)
     }
 
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
@@ -250,8 +265,8 @@ pub(crate) mod tests {
     use gpui_kit::{AppContext as _, TestAppContext};
     use tl_model::actions::{ActionId, ActionState};
     use tl_model::remote_proto::{
-        BootPrefix, ClientMsg, HelloTail, HostIdentity, ServerMsg, Want, Welcome, decode_hello,
-        encode_welcome,
+        BootPrefix, ClientMsg, HelloTail, HostIdentity, HostSettings, ServerMsg, Want, Welcome,
+        decode_hello, encode_welcome,
     };
     use tl_model::request::{IdKind, RequestEnd};
     use tl_model::table::{SysColumnId, SysSortSpec, SysTable};
@@ -259,7 +274,9 @@ pub(crate) mod tests {
     use tl_remote::client::{ClientConfig, Connection, LinkStatus, RemoteClient};
     use tl_remote::delta::DeltaEncoder;
     use tl_remote::envelope::{FrameReader, FrameWriter};
-    use tl_ui::hub::SnapshotHub;
+    use tl_ui::host_settings;
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::settings_global::{SettingKey, SettingValue};
 
     /// A backend that records what it gets and publishes what a test gives it.
     pub(crate) struct TestBackend {
@@ -268,7 +285,8 @@ pub(crate) mod tests {
         pub(crate) demands: Mutex<Vec<Demand>>,
         pub(crate) settings: Mutex<Vec<EngineSettings>>,
         pub(crate) commands: Mutex<Vec<Command>>,
-        pub(crate) host_writes: Mutex<Vec<u64>>,
+        /// `(generation, base_rev)` of each host settings write.
+        pub(crate) host_writes: Mutex<Vec<(u64, u64)>>,
         wake_tx: async_channel::Sender<()>,
         wake_rx: async_channel::Receiver<()>,
         pub(crate) events_tx: async_channel::Sender<ActionEvent>,
@@ -301,8 +319,14 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn publish(&self, sequence: u64) {
+            self.publish_host(sequence, HostSettings::default());
+        }
+
+        /// Publishes a snapshot that carries `host` as its host settings.
+        pub(crate) fn publish_host(&self, sequence: u64, host: HostSettings) {
             let mut snap = Snapshot::empty(BootId(0), 0);
             snap.sequence = sequence;
+            snap.host_settings = Arc::new(host);
             *lock(&self.latest) = Arc::new(snap);
             let _ = self.wake_tx.try_send(());
         }
@@ -332,10 +356,11 @@ pub(crate) mod tests {
         }
         fn set_host_settings(
             &self,
+            generation: u64,
             base_rev: u64,
             _changes: HostSettingsChanges,
         ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
-            lock(&self.host_writes).push(base_rev);
+            lock(&self.host_writes).push((generation, base_rev));
             Ok(async_channel::bounded(1).1)
         }
         fn send(&self, cmd: Command) -> Result<(), CommandError> {
@@ -437,16 +462,39 @@ pub(crate) mod tests {
         let local = TestBackend::new(0, 1);
         let client = SwitchClient::new(local.clone());
         client
-            .set_host_settings(3, HostSettingsChanges::default())
+            .set_host_settings(client.generation(), 3, HostSettingsChanges::default())
             .unwrap();
-        let service = TestBackend::new(0, 0);
+        let service = TestBackend::new(5, 0);
         client.switch_to(service.clone());
         assert!(lock(&service.host_writes).is_empty(), "never sent again");
         client
-            .set_host_settings(1, HostSettingsChanges::default())
+            .set_host_settings(client.generation(), 1, HostSettingsChanges::default())
             .unwrap();
-        assert_eq!(*lock(&local.host_writes), [3]);
-        assert_eq!(*lock(&service.host_writes), [1]);
+        // Each backend gets its own generation, not the proxy's.
+        assert_eq!(*lock(&local.host_writes), [(0, 3)]);
+        assert_eq!(*lock(&service.host_writes), [(5, 1)]);
+    }
+
+    #[test]
+    fn a_host_settings_write_from_another_generation_is_refused() {
+        let local = TestBackend::new(0, 1);
+        let client = SwitchClient::new(local.clone());
+        let before = client.generation();
+        let service = TestBackend::new(1, 1);
+        client.switch_to(service.clone());
+        let refused = client
+            .set_host_settings(before, 3, HostSettingsChanges::default())
+            .unwrap();
+        assert!(refused.is_closed());
+        // The backend reconnects: a write from its last session is refused too.
+        let after = client.generation();
+        service.generation.store(2, Ordering::Release);
+        let refused = client
+            .set_host_settings(after, 3, HostSettingsChanges::default())
+            .unwrap();
+        assert!(refused.is_closed());
+        assert!(lock(&local.host_writes).is_empty());
+        assert!(lock(&service.host_writes).is_empty());
     }
 
     #[test]
@@ -589,6 +637,14 @@ pub(crate) mod tests {
         fn set_settings(&self, settings: EngineSettings) {
             self.switch.set_settings(settings);
         }
+        fn set_host_settings(
+            &self,
+            generation: u64,
+            base_rev: u64,
+            changes: HostSettingsChanges,
+        ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+            self.switch.set_host_settings(generation, base_rev, changes)
+        }
         fn send(&self, cmd: Command) -> Result<(), CommandError> {
             self.switch.send(cmd)
         }
@@ -650,5 +706,63 @@ pub(crate) mod tests {
             assert_eq!(hub.current().sequence, 1);
             assert_eq!(hub.current().system.boot_time_s, 200);
         });
+    }
+
+    /// Leader decision on tasklens-q4x76.23 (ADR-018 Generations): both engines have host
+    /// settings revision 3. A change the window makes after the switch, while the hub still
+    /// shows the old engine's snapshot, is refused and reaches neither engine. Once the hub
+    /// shows the new engine's snapshot, the same change goes to the new engine.
+    #[gpui_kit::test]
+    fn a_host_settings_change_waits_for_the_new_backends_snapshot(cx: &mut TestAppContext) {
+        let host = |interval_ms| {
+            let mut h = HostSettings {
+                rev: 3,
+                ..HostSettings::default()
+            };
+            h.values.interval_ms = interval_ms;
+            h
+        };
+        let interval = |cx: &mut TestAppContext, hub: &gpui_kit::Entity<SnapshotHub>| {
+            hub.read_with(cx, |hub, _| hub.current().host_settings.values.interval_ms)
+        };
+        let set_interval = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                host_settings::set(
+                    cx,
+                    SettingKey::ProcessesIntervalMs,
+                    &SettingValue::Int(2000),
+                );
+            });
+            cx.run_until_parked();
+        };
+
+        let local = TestBackend::new(0, 1);
+        local.publish_host(2, host(1000));
+        let switch = Arc::new(SwitchClient::new(local.clone()));
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let pumped = Arc::new(Pumped {
+            switch: Arc::clone(&switch),
+            wake_tx,
+            wake_rx,
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(pumped.clone(), cx));
+        cx.update(|cx| cx.set_global(GlobalHub(hub.clone())));
+        assert_eq!(interval(cx, &hub), 1000);
+
+        let service = TestBackend::new(1, 1);
+        service.publish_host(1, host(3000));
+        switch.switch_to(service.clone());
+        // The hub has not loaded the new engine's snapshot yet.
+        set_interval(cx);
+        assert!(lock(&local.host_writes).is_empty());
+        assert!(lock(&service.host_writes).is_empty());
+        assert_eq!(interval(cx, &hub), 1000, "no value changed");
+
+        pumped.pump();
+        cx.run_until_parked();
+        assert_eq!(interval(cx, &hub), 3000);
+        set_interval(cx);
+        assert_eq!(*lock(&service.host_writes), [(1, 3)]);
+        assert!(lock(&local.host_writes).is_empty());
     }
 }

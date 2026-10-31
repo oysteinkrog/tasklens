@@ -194,6 +194,11 @@ impl SnapshotHub {
         &self.client
     }
 
+    /// `EngineClient::generation` of the installed snapshot.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// One timer tick. Goes hidden when a change has waited more than 1000 ms for a render.
     fn check_hidden(&mut self, tick: u32, cx: &mut Context<Self>) {
         if self.hidden {

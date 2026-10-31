@@ -416,9 +416,14 @@ impl EngineClient for RemoteClient {
     }
 
     /// Queues `SetHostSettings` behind the commands already queued. The server checks
-    /// `base_rev`, so a change made from older values comes back as `Conflict`.
+    /// `base_rev`, so a change made from older values comes back as `Conflict`. A `generation`
+    /// that is not the current connection's session means the write was made from an earlier
+    /// connection's snapshot, perhaps of another engine instance with the same revision: it is
+    /// not sent, and its channel is closed. That holds from the moment a new connection opens,
+    /// before its first snapshot.
     fn set_host_settings(
         &self,
+        generation: u64,
         base_rev: u64,
         changes: HostSettingsChanges,
     ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
@@ -426,6 +431,9 @@ impl EngineClient for RemoteClient {
         let Some(link) = &st.link else {
             return Err(CommandError::EngineStopped);
         };
+        if generation != st.session {
+            return Ok(async_channel::bounded(1).1);
+        }
         match link
             .commands
             .try_send(ClientMsg::SetHostSettings { base_rev, changes })

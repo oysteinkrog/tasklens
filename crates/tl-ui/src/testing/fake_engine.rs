@@ -222,11 +222,17 @@ impl EngineClient for FakeEngine {
 
     /// Records the call, then answers as the engine does: `Conflict` unless `base_rev` is the
     /// current revision, else the next revision. Either way the current settings are published.
+    /// A `generation` that is not `generation()` gets a closed channel, as in every client, and
+    /// is not recorded.
     fn set_host_settings(
         &self,
+        generation: u64,
         base_rev: u64,
         changes: HostSettingsChanges,
     ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        if generation != self.generation() {
+            return Ok(async_channel::bounded(1).1);
+        }
         let (reply, current) = {
             let mut state = self.state();
             if state.busy {

@@ -450,7 +450,7 @@ fn host_settings_come_in_the_snapshot_and_each_write_gets_its_reply() {
         "nothing read before the first snapshot"
     );
     assert!(matches!(
-        client.set_host_settings(1, HostSettingsChanges::default()),
+        client.set_host_settings(0, 1, HostSettingsChanges::default()),
         Err(CommandError::EngineStopped)
     ));
     let mut server = Server::connect(&conns, "home", 1);
@@ -467,8 +467,19 @@ fn host_settings_come_in_the_snapshot_and_each_write_gets_its_reply() {
         interval_ms: Some(2000),
         ..HostSettingsChanges::default()
     };
-    let first = client.set_host_settings(3, changes.clone()).unwrap();
-    let second = client.set_host_settings(3, changes.clone()).unwrap();
+    // A write tagged with another session's generation is refused and never sent: its
+    // channel is closed, and the next message the server reads is the first write below.
+    let session = client.generation();
+    let refused = client
+        .set_host_settings(session + 1, 3, changes.clone())
+        .unwrap();
+    assert!(refused.is_closed());
+    let first = client
+        .set_host_settings(session, 3, changes.clone())
+        .unwrap();
+    let second = client
+        .set_host_settings(session, 3, changes.clone())
+        .unwrap();
     for _ in 0..2 {
         assert!(matches!(
             server.recv(),
@@ -498,7 +509,7 @@ fn host_settings_come_in_the_snapshot_and_each_write_gets_its_reply() {
     );
 
     // A write the connection drops before its reply ends with its channel closed.
-    let third = client.set_host_settings(4, changes).unwrap();
+    let third = client.set_host_settings(session, 4, changes).unwrap();
     assert!(matches!(server.recv(), ClientMsg::SetHostSettings { .. }));
     drop(server);
     wait_for("the third channel closed", || {
@@ -535,6 +546,12 @@ fn engine_instance_change_starts_a_new_generation() {
     assert_eq!(client.latest().system.boot_time_s, 100);
     assert_eq!(client.generation(), 1);
     assert_eq!(client.status(), LinkStatus::Connecting);
+    // A host settings write made from the old instance's snapshot is refused, even though that
+    // snapshot is still the one shown: the new instance may have the same revision.
+    let refused = client
+        .set_host_settings(1, 1, HostSettingsChanges::default())
+        .unwrap();
+    assert!(refused.is_closed());
 
     // The session state goes to the new session: demand, then the table query. They are read
     // before the first snapshot is sent, since its Ack may pass them on the control path.

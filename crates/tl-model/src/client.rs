@@ -47,17 +47,22 @@ pub trait EngineClient: Send + Sync + 'static {
     /// Changes the host settings (ADR-018 Settings). `base_rev` is the `rev` of the
     /// `Snapshot.host_settings` the change was made from, so a client never writes values it
     /// has not read: the engine applies `changes` only when `base_rev` is its current revision.
-    /// Never blocks. The reply comes on the returned channel: `Ack { rev }` with the new
-    /// revision, or `Conflict { current }`. The new values reach every session in its next
+    /// `generation` is the `generation` that snapshot came with. Two engines can have the same
+    /// revision, so a write whose `generation` is not the client's current one belongs to a
+    /// session that has ended: it is never sent, and its channel is closed with no reply, as
+    /// for a write whose connection dropped (ADR-018 Generations). Never blocks. The reply
+    /// comes on the returned channel: `Ack { rev }` with the new revision, or
+    /// `Conflict { current }`. The new values reach every session in its next
     /// snapshot either way. The channel closes with no reply when the connection drops first.
     /// `Err(Busy)` when the queue is full. The default is `Err(EngineStopped)`: a client with no
     /// engine behind it has no host settings.
     fn set_host_settings(
         &self,
+        generation: u64,
         base_rev: u64,
         changes: HostSettingsChanges,
     ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
-        let _ = (base_rev, changes);
+        let _ = (generation, base_rev, changes);
         Err(CommandError::EngineStopped)
     }
     /// Queue a command. Never blocks. Err(Busy) when the queue is full.
@@ -152,7 +157,7 @@ mod tests {
     fn default_set_host_settings_is_stopped() {
         let client = NullClient::new();
         assert!(matches!(
-            client.set_host_settings(1, HostSettingsChanges::default()),
+            client.set_host_settings(0, 1, HostSettingsChanges::default()),
             Err(CommandError::EngineStopped)
         ));
     }
