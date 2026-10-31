@@ -1,0 +1,14 @@
+[Unit]
+Description=Tasklens engine service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/tasklens-engine
+Restart=on-failure
+# The engine exits 0 after READY=1 when a window holds the engine lock. That is not a failure.
+RestartPreventExitStatus=0
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+# Arch does not apply presets by itself, so the package does it.
+post_install() {
+  systemctl --global preset tasklens-engine.service >/dev/null 2>&1 || true
+}
+
+post_upgrade() {
+  post_install
+}
+
+pre_remove() {
+  systemctl --global disable tasklens-engine.service >/dev/null 2>&1 || true
+}

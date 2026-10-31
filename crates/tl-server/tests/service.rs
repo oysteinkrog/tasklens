@@ -129,10 +129,24 @@ fn hold_lock(state: &Path) -> File {
 fn second_engine_exits_when_the_lock_is_held() {
     let dirs = Dirs::new();
     let _held = hold_lock(&dirs.state);
-    let mut child = Guard(Some(dirs.command().spawn().unwrap()));
+    let notify_path = dirs.runtime.join("notify.sock");
+    let notify = UnixDatagram::bind(&notify_path).unwrap();
+    notify
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut cmd = dirs.command();
+    cmd.env("NOTIFY_SOCKET", &notify_path);
+    let mut child = Guard(Some(cmd.spawn().unwrap()));
     let (status, err) = child.wait(Duration::from_secs(10));
     assert!(status.success(), "{status:?}: {err}");
     assert!(err.contains("engine already running in a window"), "{err}");
+    // READY=1 comes before the clean exit, so a Type=notify unit ends inactive and
+    // Restart=on-failure never restarts it.
+    let mut buf = [0u8; 256];
+    let n = notify.recv(&mut buf).expect("READY=1 before the exit");
+    assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "READY=1\n");
+    let n = notify.recv(&mut buf).expect("STOPPING=1 after it");
+    assert_eq!(std::str::from_utf8(&buf[..n]).unwrap(), "STOPPING=1\n");
     assert!(
         !dirs.runtime.join("tasklens").exists(),
         "it touched no socket"

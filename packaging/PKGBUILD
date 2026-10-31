@@ -16,6 +16,7 @@ makedepends=('base-devel' 'clang' 'pkgconf' 'rustup')
 # !lto: makepkg's -flto CFLAGS turn C dependencies (ring) into GCC bitcode
 # that rust-lld cannot link. Cargo's own lto = "fat" still applies.
 options=('!strip' '!lto')
+install=tasklens.install
 source=()
 
 _srcroot="$startdir/.."
@@ -38,6 +39,9 @@ package() {
   cd "$_srcroot"
   install -Dm0755 target/release/tasklens "$pkgdir/usr/bin/tasklens"
   install -Dm0755 target/release/tasklens-watch "$pkgdir/usr/bin/tasklens-watch"
+  install -Dm0755 target/release/tasklens-engine "$pkgdir/usr/bin/tasklens-engine"
+  install -Dm0644 packaging/tasklens-engine.service "$pkgdir/usr/lib/systemd/user/tasklens-engine.service"
+  install -Dm0644 packaging/80-tasklens.preset "$pkgdir/usr/lib/systemd/user-preset/80-tasklens.preset"
   install -Dm0755 target/release/tl-gpu-probe "$pkgdir/usr/lib/tasklens/tl-gpu-probe"
   install -Dm0755 target/release/tl-helper "$pkgdir/usr/lib/tasklens/tl-helper"
   install -Dm0755 packaging/tasklens-setup "$pkgdir/usr/lib/tasklens/tasklens-setup"

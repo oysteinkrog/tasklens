@@ -630,6 +630,25 @@ mod tests {
         )
     }
 
+    /// Like `script`, with `PKEXEC_UID` set to `uid` (or removed).
+    fn script_uid(root: &Path, uid: Option<&str>, args: &[&str]) -> (i32, String, String) {
+        let mut command = Command::new(SH);
+        command
+            .arg(packaging("tasklens-setup"))
+            .args(args)
+            .env("TASKLENS_SETUP_ROOT", root)
+            .env_remove("PKEXEC_UID");
+        if let Some(uid) = uid {
+            command.env("PKEXEC_UID", uid);
+        }
+        let out = command.output().expect("run tasklens-setup");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8(out.stdout).expect("utf-8"),
+            String::from_utf8(out.stderr).expect("utf-8"),
+        )
+    }
+
     /// A fake root with `etc/udev/rules.d/`, for test mode.
     fn rules_root() -> Fake {
         let fake = Fake::new();
@@ -721,7 +740,7 @@ mod tests {
     #[test]
     fn script_usage_exit_2() {
         let fake = rules_root();
-        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off\n";
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off\n";
         for args in [&["bogus"][..], &[]] {
             let (code, out, err) = script(Some(fake.dir.path()), args);
             assert_eq!(code, 2, "{args:?}");
@@ -777,7 +796,7 @@ polkit.addRule(function(action, subject) {
     #[test]
     fn script_polkit_rule_bad_arg() {
         let fake = polkit_root();
-        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off\n";
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off\n";
         for args in [&["polkit-rule", "maybe"][..], &["polkit-rule"]] {
             let (code, out, err) = script(Some(fake.dir.path()), args);
             assert_eq!(code, 2, "{args:?}");
@@ -785,6 +804,40 @@ polkit.addRule(function(action, subject) {
             assert_eq!(err, usage);
         }
         assert!(!fake.path(POLKIT_RULE).exists());
+    }
+
+    #[test]
+    fn script_linger_on_and_off_act_for_the_pkexec_user() {
+        let fake = Fake::new();
+        let (code, out, err) = script_uid(fake.dir.path(), Some("1000"), &["linger", "on"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert_eq!(out, "would run: loginctl enable-linger 1000\nEnabled\n");
+        let (code, out, err) = script_uid(fake.dir.path(), Some("1000"), &["linger", "off"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert_eq!(out, "would run: loginctl disable-linger 1000\nReverted\n");
+    }
+
+    /// Security regression: a missing or odd `PKEXEC_UID` never reaches loginctl.
+    #[test]
+    fn script_linger_refuses_a_bad_pkexec_uid() {
+        let fake = Fake::new();
+        for uid in [None, Some(""), Some("root"), Some("1000 0"), Some("-1")] {
+            let (code, out, err) = script_uid(fake.dir.path(), uid, &["linger", "on"]);
+            assert_eq!(code, 1, "{uid:?}");
+            assert_eq!(out, "", "{uid:?}");
+            assert_eq!(
+                err,
+                "tasklens-setup: PKEXEC_UID is missing or not a number\n"
+            );
+        }
+    }
+
+    #[test]
+    fn script_linger_bad_arg() {
+        let fake = Fake::new();
+        let (code, out, _) = script_uid(fake.dir.path(), Some("1000"), &["linger", "maybe"]);
+        assert_eq!(code, 2);
+        assert_eq!(out, "");
     }
 
     /// Security regression: the rule covers only tasklens's own actions, never a third-party one.

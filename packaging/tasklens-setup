@@ -17,7 +17,7 @@ LC_ALL=C
 export LC_ALL
 
 RULE='SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"'
-USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off'
+USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off'
 
 if [ "$(id -u)" -eq 0 ]; then
     ROOT=""
@@ -250,6 +250,19 @@ polkit_rule_off() {
     echo 'Reverted'
 }
 
+# Lets the user's engine service run with nobody logged in. pkexec sets PKEXEC_UID to the
+# user who asked.
+linger() {
+    case ${PKEXEC_UID-} in
+        '' | *[!0-9]*)
+            echo 'tasklens-setup: PKEXEC_UID is missing or not a number' >&2
+            exit 1
+            ;;
+    esac
+    run loginctl "$1-linger" "$PKEXEC_UID"
+    if [ "$1" = enable ]; then echo 'Enabled'; else echo 'Reverted'; fi
+}
+
 usage() {
     echo "$USAGE" >&2
     exit 2
@@ -264,6 +277,13 @@ case "${1-}" in
         case "${2-}" in
             on) polkit_rule_on ;;
             off) polkit_rule_off ;;
+            *) usage ;;
+        esac
+        ;;
+    linger)
+        case "${2-}" in
+            on) linger enable ;;
+            off) linger disable ;;
             *) usage ;;
         esac
         ;;
