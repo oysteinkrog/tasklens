@@ -4545,18 +4545,6 @@ mod main_window {
             vcx.update(|_, cx| TlSettings::settings(cx).processes.hide_system)
         }
 
-        /// `hide_system` of each table query sent, in order (tasklens-q4x76.22).
-        fn sent_hide_system(engine: &FakeEngine) -> Vec<bool> {
-            engine
-                .commands()
-                .into_iter()
-                .filter_map(|c| match c {
-                    tl_model::command::Command::SetTableQuery(q) => Some(q.settings.hide_system),
-                    _ => None,
-                })
-                .collect()
-        }
-
         #[gpui_kit::test]
         fn hide_system_toggle_toast(cx: &mut TestAppContext) {
             let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, false);
@@ -4564,13 +4552,14 @@ mod main_window {
 
             act(&mut vcx, ToggleHideSystem);
             assert!(hide_system(&mut vcx));
+            // A window setting: the process page sends it in its table query
+            // (tasklens-q4x76.22).
             assert!(engine.settings().is_empty());
-            assert_eq!(sent_hide_system(&engine).last(), Some(&true));
             assert_eq!(toasts(&mut vcx), ["Hiding system processes"]);
 
             act(&mut vcx, ToggleHideSystem);
             assert!(!hide_system(&mut vcx));
-            assert_eq!(sent_hide_system(&engine).last(), Some(&false));
+            assert!(engine.settings().is_empty());
             assert_eq!(
                 toasts(&mut vcx),
                 ["Hiding system processes", "Showing system processes"]

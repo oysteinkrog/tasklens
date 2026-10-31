@@ -8,8 +8,8 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::GroupKind;
-use tl_model::settings::{Settings, UiState};
-use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery};
+use tl_model::settings::{NetworkUnit, Settings, UiState};
+use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery, TableSettings};
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::pages::processes::cells::ProcColumnKind;
@@ -233,6 +233,37 @@ fn each_change_sends_one_query() {
     assert_eq!(sent.len(), 5);
     assert_eq!(sent[4].mode, TableMode::Flat);
     assert_eq!(sent[4].generation, 5);
+}
+
+/// The network unit, `subtree_totals` and `hide_system` are window settings: each query carries
+/// them, and a change sends a new query (ADR-018, tasklens-q4x76.22).
+#[test]
+fn query_carries_table_settings() {
+    let engine = FakeEngine::new();
+    let mut settings = Settings::default();
+    let mut q = ProcessQuery::new(&settings, &UiState::default());
+    q.bump_and_send(&*engine);
+    assert_eq!(sent(&engine)[0].settings, TableSettings::default());
+    assert!(!q.sync_settings(&settings, &*engine), "nothing changed");
+
+    settings.processes.hide_system = true;
+    assert!(q.sync_settings(&settings, &*engine));
+    settings.units.network = NetworkUnit::Bytes;
+    settings.processes.subtree_totals = true;
+    assert!(q.sync_settings(&settings, &*engine));
+    let sent = sent(&engine);
+    assert_eq!(sent.len(), 3);
+    assert!(sent[1].settings.hide_system);
+    assert_eq!(sent[1].settings.network, NetworkUnit::Bits);
+    assert_eq!(
+        sent[2].settings,
+        TableSettings {
+            network: NetworkUnit::Bytes,
+            network_auto_scale: false,
+            subtree_totals: true,
+            hide_system: true,
+        }
+    );
 }
 
 #[test]
@@ -3276,6 +3307,22 @@ mod filter {
         });
         r.draw();
         assert_eq!(r.toasts().len(), count);
+    }
+
+    /// A `units` change reaches the engine as a new table query (tasklens-q4x76.22).
+    #[gpui_kit::test]
+    fn units_change_sends_table_query(cx: &mut TestAppContext) {
+        use tl_model::settings::NetworkUnit;
+        let mut r = rig(cx);
+        let last = |r: &Rig| super::sent(&r.engine).pop().expect("a query was sent");
+        let before = last(&r).generation;
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.units.network = NetworkUnit::Bytes)
+        });
+        r.draw();
+        let q = last(&r);
+        assert!(q.generation > before);
+        assert_eq!(q.settings.network, NetworkUnit::Bytes);
     }
 
     #[gpui_kit::test]
