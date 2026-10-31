@@ -10,6 +10,7 @@
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
 #![allow(clippy::unwrap_used)]
 
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,7 +38,8 @@ use tl_model::table::{Manager, TableQuery, UnitRef};
 use tl_model::time::BootId;
 use tl_remote::envelope::{FrameReader, FrameWriter};
 use tl_remote::server::{
-    Item, Port, Receiver, SessionConfig, SessionEnd, SessionReport, Step, serve_session,
+    Item, Port, Receiver, SessionConfig, SessionEnd, SessionReport, Step, WRITE_TIMEOUT,
+    serve_session,
 };
 
 /// At least the 2 s floor for wall-clock limits in tests (tasklens-cr0.32).
@@ -582,7 +584,7 @@ fn a_full_engine_queue_ends_requests_busy_and_resends_the_table_query() {
     wait_for("the second demand", || {
         (rig.engine.demands.lock().unwrap().len() == 2).then_some(())
     });
-    // The retry runs before the message that carried it.
+    // By the next message at the latest.
     let sent = rig.engine.sent.lock().unwrap().clone();
     assert!(
         matches!(&sent[..], [Command::SetTableQuery(q)] if *q == table),
@@ -593,6 +595,100 @@ fn a_full_engine_queue_ends_requests_busy_and_resends_the_table_query() {
     let report = rig.server.take().unwrap().join().unwrap();
     assert_eq!(report.end, SessionEnd::ClientClosed);
     assert_eq!(report.commands_dropped, 1, "ResetBaselines");
+}
+
+#[test]
+fn a_quiet_clients_refused_table_query_gets_in_within_2_s_of_room() {
+    let mut rig = Rig::new(|_| {});
+    rig.engine.busy.store(true, Ordering::SeqCst);
+    let query = |generation| {
+        Command::SetTableQuery(TableQuery {
+            generation,
+            ..TableQuery::default()
+        })
+    };
+    rig.send(&ClientMsg::Command(query(1)));
+    rig.send(&ClientMsg::Command(query(2)));
+    // The reader takes messages in order, so both queries were refused once the demand is in.
+    rig.send(&ClientMsg::SetDemand(Demand::default()));
+    wait_for("the demand", || {
+        (!rig.engine.demands.lock().unwrap().is_empty()).then_some(())
+    });
+    assert!(rig.engine.sent.lock().unwrap().is_empty());
+
+    // The client sends nothing more.
+    rig.engine.busy.store(false, Ordering::SeqCst);
+    let room = Instant::now();
+    wait_for("the table query", || {
+        (!rig.engine.sent.lock().unwrap().is_empty()).then_some(())
+    });
+    assert!(
+        room.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        room.elapsed()
+    );
+    let sent = rig.engine.sent.lock().unwrap().clone();
+    assert!(
+        matches!(&sent[..], [Command::SetTableQuery(q)] if q.generation == 2),
+        "only the newest query: {sent:?}"
+    );
+
+    drop(rig.client);
+    let report = rig.server.take().unwrap().join().unwrap();
+    assert_eq!(report.end, SessionEnd::ClientClosed);
+}
+
+/// A client that reads `chunk` bytes every `every` while the writer is in a 4 MiB message. The
+/// session must close at the default write timeout, counted from the start of that write.
+fn slow_client_closed_at_the_write_timeout(chunk: usize, every: Duration) {
+    let mut rig = Rig::new(|_| {});
+    let slow = rig.client.try_clone().unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let reading = {
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut buf = vec![0; chunk];
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(every);
+                if matches!((&slow).read(&mut buf), Ok(0) | Err(_)) {
+                    return;
+                }
+            }
+        })
+    };
+    // Before the write starts, so the deadline cannot fall before `begin + WRITE_TIMEOUT`.
+    let begin = Instant::now();
+    block_writer(&rig);
+    let margin = Duration::from_secs(3);
+    let server = rig.server.take().unwrap();
+    while !server.is_finished() {
+        assert!(
+            begin.elapsed() < WRITE_TIMEOUT + margin,
+            "the session outlived the write timeout"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let elapsed = begin.elapsed();
+    let report = server.join().unwrap();
+    done.store(true, Ordering::SeqCst);
+    reading.join().unwrap();
+    assert_eq!(report.end, SessionEnd::WriteTimeout);
+    assert!(elapsed >= WRITE_TIMEOUT, "{elapsed:?}");
+    assert!(
+        rig.engine.dropped.load(Ordering::SeqCst),
+        "the slot is free"
+    );
+}
+
+#[test]
+fn a_client_that_takes_1_byte_per_second_is_closed_at_the_write_timeout() {
+    slow_client_closed_at_the_write_timeout(1, Duration::from_secs(1));
+}
+
+#[test]
+fn a_client_that_keeps_taking_a_little_is_closed_at_the_write_timeout() {
+    // About 80 KiB/s: each send gets some room, but the message needs far more than 10 s.
+    slow_client_closed_at_the_write_timeout(4096, Duration::from_millis(50));
 }
 
 #[test]
