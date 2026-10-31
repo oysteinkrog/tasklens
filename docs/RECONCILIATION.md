@@ -2093,6 +2093,7 @@ widgets = []                   # [] = empty box, which differs from no entry (th
 #   forms = subset of ["chart", "bar", "value", "stats", "label"] (not empty), col, row, cols, rows (grid layout only; GPU box: 6 columns),
 #   fill = true, dashed = false (written only when not the default), device_name = "<display only>" }
 # The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v1 once (ADR-019).
+# A reset to the default removes the entry and the GPU box's old mode, split, arrange and hidden keys, so they do not convert again (ADR-019).
 
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
