@@ -622,7 +622,11 @@ fn a_waiter_learns_the_refusal() {
         })
     };
     let (l, _w) = link();
-    assert!(clients.open_port(REMOTE, l, refused, &empty).is_err());
+    assert!(
+        clients
+            .open_port(ClientSessionId(99), l, refused, &empty)
+            .is_err()
+    );
     assert_eq!(
         waiter.join().expect("waiter"),
         Some(Err(OpenError::Full)),
