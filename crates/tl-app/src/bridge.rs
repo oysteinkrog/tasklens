@@ -13,14 +13,15 @@
 //! the window's ssh connector reads them.
 
 use std::fs::File;
-use std::io::{self, Write};
-use std::net::Shutdown;
+use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
-use std::thread;
 use std::time::{Duration, Instant};
+
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::{Errno, ioctl_fionbio};
 
 use tl_model::remote_proto::{Hello, decode_hello, encode_hello, read_frame};
 use tl_remote::server;
@@ -63,7 +64,7 @@ fn main_inner(app_id: Option<&str>) -> Result<(), String> {
 /// copies until either side ends. `start_unit` runs once when the first connect fails.
 pub fn run(
     mut input: File,
-    mut output: File,
+    output: File,
     socket: &Path,
     uid: u32,
     start_unit: Option<&dyn Fn(Duration) -> bool>,
@@ -78,6 +79,8 @@ pub fn run(
                 .map_err(|e| format!("cannot connect to {}: {e}", socket.display()))?
         }
     };
+    // Blocking, as nothing else runs yet. The window's ssh connector kills ssh when no answer
+    // comes within its deadline (20 s), which ends this stdin.
     let frame = read_frame(&mut input).map_err(|e| format!("reading the window's Hello: {e}"))?;
     let mut first = Vec::new();
     match decode_hello(&frame) {
@@ -100,24 +103,148 @@ pub fn run(
             first.extend_from_slice(&frame.payload);
         }
     }
-    (&stream)
-        .write_all(&first)
-        .map_err(|e| format!("sending Hello to the engine: {e}"))?;
+    pump(&input, &output, &stream, first).map_err(|e| format!("bridge: {e}"))
+}
 
-    let up = stream
-        .try_clone()
-        .map_err(|e| format!("engine socket: {e}"))?;
-    thread::Builder::new()
-        .name("tl-bridge-up".into())
-        .spawn(move || {
-            let _ = io::copy(&mut input, &mut &up);
-            // Ends the copy below too.
-            let _ = up.shutdown(Shutdown::Both);
-        })
-        .map_err(|e| format!("bridge thread: {e}"))?;
-    let _ = io::copy(&mut &stream, &mut output);
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(())
+/// The most bytes held for one direction.
+const BUF: usize = 64 * 1024;
+
+/// How long the bytes one side sent before it ended may take to reach the other side.
+const DRAIN: Duration = Duration::from_millis(500);
+
+/// Copies `input` to `engine` (starting with `up`, the window's `Hello`) and `engine` to
+/// `output` in one poll loop on non-blocking fds, with at most `BUF` held per direction. No
+/// step blocks while the other direction waits, and all three fds stay in the poll set, so a
+/// hang-up on any of them is seen even while its buffer is full.
+///
+/// Returns when either side ends. After EOF or a hang-up from the window, the engine gets up to
+/// `DRAIN` for what the window sent; after the same from the engine, the window gets the same.
+/// A failed write to the window ends the bridge at once. `Ok` covers every such end; `Err` is a
+/// failed poll or `fcntl`.
+fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io::Result<()> {
+    for fd in [input.as_fd(), output.as_fd(), engine.as_fd()] {
+        ioctl_fionbio(fd, true)?;
+    }
+    let gone = PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL;
+    let mut down = Vec::with_capacity(BUF);
+    let mut chunk = vec![0u8; BUF];
+    loop {
+        let mut input_flags = PollFlags::empty();
+        if up.len() < BUF {
+            input_flags |= PollFlags::IN;
+        }
+        let mut engine_flags = PollFlags::empty();
+        if down.len() < BUF {
+            engine_flags |= PollFlags::IN;
+        }
+        if !up.is_empty() {
+            engine_flags |= PollFlags::OUT;
+        }
+        let mut output_flags = PollFlags::empty();
+        if !down.is_empty() {
+            output_flags |= PollFlags::OUT;
+        }
+        // Empty flags still report HUP and ERR.
+        let mut fds = [
+            PollFd::new(input, input_flags),
+            PollFd::new(engine, engine_flags),
+            PollFd::new(output, output_flags),
+        ];
+        match poll(&mut fds, None) {
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+        let [input_ready, engine_ready, output_ready] = fds.map(|fd| fd.revents());
+
+        if !input_ready.is_empty() {
+            let ended = if up.len() < BUF {
+                !fill(input, &mut up, &mut chunk)
+            } else {
+                input_ready.intersects(gone)
+            };
+            if ended {
+                drain(engine, &mut up);
+                return Ok(());
+            }
+        }
+        if !engine_ready.is_empty() {
+            // Read first, so what the engine sent before it ended still reaches the window.
+            let mut ended = if down.len() < BUF {
+                !fill(engine, &mut down, &mut chunk)
+            } else {
+                engine_ready.intersects(gone)
+            };
+            if !ended && !up.is_empty() && engine_ready.intersects(PollFlags::OUT | gone) {
+                ended = !send(engine, &mut up);
+            }
+            if ended {
+                drain(output, &mut down);
+                return Ok(());
+            }
+        }
+        if !output_ready.is_empty() {
+            let ended = if down.is_empty() {
+                output_ready.intersects(gone)
+            } else {
+                !send(output, &mut down)
+            };
+            if ended {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Reads what `fd` has into `buf`, up to `BUF` in total. `false` when `fd` has ended or failed.
+fn fill(fd: impl AsFd, buf: &mut Vec<u8>, chunk: &mut [u8]) -> bool {
+    let room = BUF.saturating_sub(buf.len()).min(chunk.len());
+    match rustix::io::read(fd, &mut chunk[..room]) {
+        Ok(0) => false,
+        Ok(n) => {
+            buf.extend_from_slice(&chunk[..n]);
+            true
+        }
+        Err(Errno::AGAIN | Errno::INTR) => true,
+        Err(_) => false,
+    }
+}
+
+/// Writes what `fd` takes from the front of `buf`. `false` when the write failed.
+fn send(fd: impl AsFd, buf: &mut Vec<u8>) -> bool {
+    match rustix::io::write(fd, buf) {
+        Ok(n) => {
+            buf.drain(..n);
+            true
+        }
+        Err(Errno::AGAIN | Errno::INTR) => true,
+        Err(_) => false,
+    }
+}
+
+/// Writes `buf` to `fd` until it is empty, a write fails or `DRAIN` has passed.
+fn drain(fd: impl AsFd, buf: &mut Vec<u8>) {
+    let until = Instant::now() + DRAIN;
+    while !buf.is_empty() {
+        if !send(&fd, buf) {
+            return;
+        }
+        if buf.is_empty() {
+            return;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        let Ok(left) = Timespec::try_from(left) else {
+            return;
+        };
+        let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
+        match poll(&mut fds, Some(&left)) {
+            Ok(0) => return,
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(_) => return,
+        }
+    }
 }
 
 /// One connect to the socket within `CONNECT_DEADLINE`, with the peer's uid checked.
@@ -130,11 +257,13 @@ fn connect(socket: &Path, uid: u32) -> io::Result<UnixStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
 
     use tl_model::remote_proto::{
         BootPrefix, HelloTail, HostIdentity, ServerBootstrap, Want, Welcome,
@@ -288,6 +417,132 @@ mod tests {
         assert_eq!(runs.load(Ordering::Acquire), 1);
         let engine = engine_thread.lock().expect("lock").take().expect("engine");
         assert!(engine.join().expect("engine").bridge);
+    }
+
+    /// An engine that reads the `Hello`, then writes until its writes block: the window does
+    /// not read, so the bridge's output, its buffer and the socket are all full. It reports
+    /// that on `blocked`. With `close` it then hangs up; without, it writes on until the bridge
+    /// goes.
+    fn flooding_engine(
+        listener: UnixListener,
+        close: bool,
+    ) -> (thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        let (blocked_tx, blocked) = mpsc::channel();
+        let engine = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            read_frame(&mut stream).expect("hello");
+            stream
+                .set_write_timeout(Some(Duration::from_millis(100)))
+                .expect("write timeout");
+            let junk = vec![0x5a_u8; 16 * 1024];
+            let until = Instant::now() + Duration::from_secs(20);
+            let mut told = false;
+            while Instant::now() < until {
+                match stream.write(&junk) {
+                    Ok(_) => {}
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        if !told {
+                            told = true;
+                            let _ = blocked_tx.send(());
+                        }
+                        if close {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        (engine, blocked)
+    }
+
+    /// The window's two ends: it writes the bridge's input and never reads its output.
+    fn split_pipes() -> (UnixStream, UnixStream, File, File) {
+        let (window_in, bridge_in) = UnixStream::pair().expect("pair");
+        let (bridge_out, window_out) = UnixStream::pair().expect("pair");
+        (
+            window_in,
+            window_out,
+            File::from(OwnedFd::from(bridge_in)),
+            File::from(OwnedFd::from(bridge_out)),
+        )
+    }
+
+    fn send_hello(window: &mut UnixStream) {
+        let mut out = Vec::new();
+        encode_hello(
+            &Hello {
+                prefix: BootPrefix::ours(),
+                tail: Some(HelloTail {
+                    pid: 4242,
+                    app_id: Arc::from("tasklens"),
+                    bridge: false,
+                    want: Want { snapshots: true },
+                }),
+            },
+            &mut out,
+        )
+        .expect("hello");
+        window.write_all(&out).expect("send hello");
+    }
+
+    /// The review case: the window stops reading, the engine fills the output, then the
+    /// window's input ends. The bridge must not stay blocked on the full output.
+    #[test]
+    fn bridge_returns_when_window_ends_while_output_is_full() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("engine.sock");
+        let (engine, blocked) = flooding_engine(UnixListener::bind(&socket).expect("bind"), false);
+        let (mut window_in, window_out, input, output) = split_pipes();
+        let done = spawn_bridge(socket, input, output, None);
+        send_hello(&mut window_in);
+        blocked
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the output fills");
+        drop(window_in);
+        let result = done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the bridge returns within 1 s");
+        assert_eq!(result, Ok(()));
+        // The bridge closed the socket, so the engine's next write fails.
+        engine.join().expect("engine");
+        drop(window_out);
+    }
+
+    /// The other way round: the window stops reading, the engine fills the output and hangs
+    /// up. The bridge gives the window `DRAIN` to take the rest, then returns.
+    #[test]
+    fn bridge_returns_when_engine_ends_while_output_is_full() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("engine.sock");
+        let (engine, blocked) = flooding_engine(UnixListener::bind(&socket).expect("bind"), true);
+        let (mut window_in, mut window_out, input, output) = split_pipes();
+        let done = spawn_bridge(socket, input, output, None);
+        send_hello(&mut window_in);
+        blocked
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the output fills");
+        engine.join().expect("engine");
+        let result = done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the bridge returns within 1 s");
+        assert_eq!(result, Ok(()));
+        // The window still gets what the bridge passed on before it ended.
+        window_out
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        let mut first = [0u8; 4];
+        window_out.read_exact(&mut first).expect("bytes");
+        assert_eq!(first, [0x5a; 4]);
+        drop(window_in);
     }
 
     #[test]
