@@ -903,7 +903,7 @@ mod tests {
     use super::*;
 
     /// The engine's file name check (`valid_dump_name` in tl-engine): `^[A-Za-z0-9._-]+\.core$`,
-    /// no `/`, not `.` or `..`.
+    /// no `/`, no `..` anywhere.
     fn engine_accepts(file: &str) -> bool {
         !file.contains('/')
             && !file.contains("..")
