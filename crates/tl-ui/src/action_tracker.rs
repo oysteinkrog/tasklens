@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Action, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global,
+    Action, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global,
     IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Task,
     WeakEntity, Window, div,
 };
