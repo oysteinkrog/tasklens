@@ -25,6 +25,10 @@ pub const LANGUAGES: [&str; 12] = [
 
 /// The Refresh menu choices for `processes.interval_ms`.
 pub const PROCESS_INTERVAL_MENU_MS: [u32; 6] = [250, 500, 1000, 2000, 5000, 10000];
+/// `processes.interval_ms`: min, max and step.
+pub const PROCESS_INTERVAL_MS_RANGE: (u32, u32, u32) = (250, 10_000, 1);
+/// `history.retention_h`: min, max and step.
+pub const HISTORY_RETENTION_H_RANGE: (u8, u8, u8) = (1, 12, 1);
 
 /// `general.start_tab` (R-024). `LastUsed` opens `state.toml` `last_tab`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
@@ -1348,7 +1352,7 @@ impl Default for GraphsSettings {
 }
 
 /// `[history]` (P3, D-003).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistorySettings {
     pub enabled: bool,
@@ -1996,7 +2000,7 @@ impl Default for EngineSettings {
 
 /// Clamps `value` into `min..=max`, then rounds it to the nearest multiple of `step` (ties
 /// round up). Pushes `key` to `changed` when the value changes.
-fn clamp_key<T>(
+pub(crate) fn clamp_key<T>(
     value: &mut T,
     (min, max, step): (T, T, T),
     key: &'static str,
@@ -2061,7 +2065,7 @@ impl Settings {
         );
         clamp_key(
             &mut self.processes.interval_ms,
-            (250, 10_000, 1),
+            PROCESS_INTERVAL_MS_RANGE,
             "processes.interval_ms",
             c,
         );
@@ -2071,7 +2075,7 @@ impl Settings {
         }
         clamp_key(
             &mut self.history.retention_h,
-            (1, 12, 1),
+            HISTORY_RETENTION_H_RANGE,
             "history.retention_h",
             c,
         );

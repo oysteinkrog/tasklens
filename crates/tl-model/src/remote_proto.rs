@@ -33,6 +33,10 @@ use crate::process::{
 };
 use crate::request::RequestEvent;
 use crate::series::{Sample, SeriesView};
+use crate::settings::{
+    HISTORY_RETENTION_H_RANGE, HistorySettings, PROCESS_INTERVAL_MS_RANGE, ProcessesSettings,
+    clamp_key,
+};
 use crate::snapshot::{
     ComponentHeader, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory, DeviceTimeline,
     HistPoint, InventorySnapshot, ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot,
@@ -817,18 +821,81 @@ pub struct DeviceHistoryDelta {
     pub timeline: Option<Option<Arc<DeviceTimeline>>>,
 }
 
-/// Values of the host settings in `engine.toml`. tasklens-q4x76.9 adds the fields.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct HostSettingsValues {}
+/// The host settings in `engine.toml` (ADR-018 Settings). The engine that holds the engine lock
+/// owns them; a window reads them and never writes values it has not read.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HostSettingsValues {
+    /// `processes.interval_ms`, 250..=10000.
+    pub interval_ms: u32,
+    /// The `[history]` table.
+    pub history: HistorySettings,
+    /// Set by `tasklens-setup remote-admin on|off` (ADR-018 Remote root actions).
+    pub remote_admin: bool,
+}
 
-/// Changes to host settings, sent with `SetHostSettings`. tasklens-q4x76.9 adds the fields.
+impl Default for HostSettingsValues {
+    fn default() -> Self {
+        Self {
+            interval_ms: ProcessesSettings::default().interval_ms,
+            history: HistorySettings::default(),
+            remote_admin: false,
+        }
+    }
+}
+
+impl HostSettingsValues {
+    /// Clamps out-of-range values as `Settings::clamp` does and returns the dotted keys that
+    /// changed.
+    pub fn clamp(&mut self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        clamp_key(
+            &mut self.interval_ms,
+            PROCESS_INTERVAL_MS_RANGE,
+            "processes.interval_ms",
+            &mut changed,
+        );
+        clamp_key(
+            &mut self.history.retention_h,
+            HISTORY_RETENTION_H_RANGE,
+            "history.retention_h",
+            &mut changed,
+        );
+        changed
+    }
+
+    /// These values with `changes` applied, then clamped.
+    pub fn with_changes(&self, changes: &HostSettingsChanges) -> Self {
+        let mut next = self.clone();
+        if let Some(v) = changes.interval_ms {
+            next.interval_ms = v;
+        }
+        if let Some(v) = &changes.history {
+            next.history = v.clone();
+        }
+        if let Some(v) = changes.remote_admin {
+            next.remote_admin = v;
+        }
+        next.clamp();
+        next
+    }
+}
+
+/// Changes to host settings, sent with `SetHostSettings`. `None` keeps the current value.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct HostSettingsChanges {}
+pub struct HostSettingsChanges {
+    pub interval_ms: Option<u32>,
+    pub history: Option<HistorySettings>,
+    pub remote_admin: Option<bool>,
+}
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct HostSettings {
+    /// Goes up by one with every change and survives restarts (stored in `engine.toml`).
     pub rev: u64,
     pub values: HostSettingsValues,
+    /// `engine.toml` was written by a newer tasklens (ADR-011 load step 3). Changes still apply
+    /// to the running engine but are never saved.
+    pub read_only: bool,
 }
 
 /// The reply to `SetHostSettings`. On `Conflict` the client reloads.
@@ -1201,7 +1268,11 @@ mod tests {
             ClientMsg::GetHostSettings,
             ClientMsg::SetHostSettings {
                 base_rev: 7,
-                changes: HostSettingsChanges::default(),
+                changes: HostSettingsChanges {
+                    interval_ms: Some(500),
+                    history: Some(HistorySettings::default()),
+                    remote_admin: None,
+                },
             },
         ]);
         let mut names: Vec<_> = msgs.iter().map(client_name).collect();
@@ -1219,6 +1290,31 @@ mod tests {
             .is_control()
         );
         assert!(!ClientMsg::GetHostSettings.is_control());
+    }
+
+    #[test]
+    fn host_settings_changes_keep_what_they_leave_out_and_are_clamped() {
+        let base = HostSettingsValues {
+            interval_ms: 2000,
+            history: HistorySettings {
+                enabled: true,
+                ..HistorySettings::default()
+            },
+            remote_admin: true,
+        };
+        assert_eq!(base.with_changes(&HostSettingsChanges::default()), base);
+        let next = base.with_changes(&HostSettingsChanges {
+            interval_ms: Some(50),
+            history: Some(HistorySettings {
+                retention_h: 99,
+                ..HistorySettings::default()
+            }),
+            remote_admin: None,
+        });
+        assert_eq!(next.interval_ms, 250);
+        assert_eq!(next.history.retention_h, 12);
+        assert!(!next.history.enabled);
+        assert!(next.remote_admin);
     }
 
     #[test]
@@ -1271,7 +1367,16 @@ mod tests {
             },
             ServerMsg::HostSettings(HostSettings {
                 rev: 5,
-                values: HostSettingsValues::default(),
+                values: HostSettingsValues {
+                    interval_ms: 2000,
+                    history: HistorySettings {
+                        enabled: true,
+                        retention_h: 3,
+                        ..HistorySettings::default()
+                    },
+                    remote_admin: true,
+                },
+                read_only: true,
             }),
             ServerMsg::SetHostSettings(SetHostSettingsReply::Ack { rev: 6 }),
             ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict {

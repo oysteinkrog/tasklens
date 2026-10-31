@@ -177,6 +177,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "tracing",
             "tracing-subscriber",
             "libc",
+            "tl-ops",
+            "toml",
         ],
     ),
     ("tl-tray", &["tl-model", "ksni", "async-channel"]),

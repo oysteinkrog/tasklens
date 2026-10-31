@@ -2,8 +2,9 @@
 //! reached by windows and by `tasklens bridge` over `$XDG_RUNTIME_DIR/tasklens/engine.sock`.
 //!
 //! Start order: logging; SIGTERM and SIGINT blocked, so only `sigwait` sees them; the engine lock
-//! (exit 0 when another engine holds it); the runtime and socket directories; the socket; the
-//! engine; the accept thread; `READY=1` once history is open or after 5 s. On SIGTERM the
+//! (exit 0 when another engine holds it); the host settings in `engine.toml`, which the lock
+//! holder owns; the runtime and socket directories; the socket; the engine, given the host
+//! settings; the accept thread; `READY=1` once history is open or after 5 s. On SIGTERM the
 //! engine stops, which stops sampling and flushes history, and the service exits.
 //!
 //! Each connection whose peer runs as this user gets a handshake and, when welcomed, a
@@ -22,8 +23,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use host_settings::{HostSettingsFile, Origin, SharedHostSettings};
 use sd_notify::NotifyState;
 use tl_engine::client_session::{ClientSessionId, OpenError, SESSIONS_MAX};
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode, SessionPort};
@@ -33,13 +35,19 @@ use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::journal::{JournalHandle, JournalQuery};
-use tl_model::remote_proto::{HostIdentity, RefuseReason};
+use tl_model::remote_proto::{
+    HostIdentity, HostSettings, HostSettingsChanges, HostSettingsValues, RefuseReason,
+    SetHostSettingsReply,
+};
 use tl_model::request::RequestEvent;
+use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_remote::envelope::FrameReader;
 use tl_remote::server::{self, EndpointError, Port, Receiver, SessionConfig};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+mod host_settings;
 
 /// The directory under each XDG root.
 const APP_DIR: &str = "tasklens";
@@ -102,6 +110,21 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     };
 
+    let config_dir = config_dir(|name| std::env::var_os(name))?;
+    let (file, origin) = HostSettingsFile::open(&config_dir, now_unix());
+    match &origin {
+        Origin::Loaded => {}
+        Origin::Imported => {
+            info!(target: "tasklens::engine", "host settings imported from settings.toml");
+        }
+        Origin::Created => info!(target: "tasklens::engine", "host settings created"),
+        Origin::Corrupt { kept_as } => warn!(
+            target: "tasklens::engine",
+            "engine.toml was unreadable and has been reset; the old file was kept as {kept_as}"
+        ),
+    }
+    let start_values = file.current().values.clone();
+
     let uid = server::own_uid();
     let runtime = server::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), uid)
         .map_err(|e| e.to_string())?;
@@ -109,7 +132,6 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     let socket = socket_dir.join(server::SOCKET_NAME);
     let listener = server::bind(&socket, uid).map_err(|e| e.to_string())?;
 
-    // Host settings come from engine.toml in q4x76.9; until then the engine runs on defaults.
     let mut config = EngineConfig::new(EngineMode::Full, state_dir.clone())
         .with_history_dir(state_dir.join("history"));
     if Path::new(HELPER_PATH).exists() {
@@ -117,10 +139,19 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     }
     let engine = Engine::start(config, EngineHooks::default())
         .map_err(|e| format!("engine start failed: {e}"))?;
+    // As the window does: the settings follow the start at once.
+    engine.set_settings(engine_settings(&start_values));
     info!(target: "tasklens::engine", socket = %socket.display(), "engine started");
 
+    let applier = engine.clone();
+    let host = Arc::new(SharedHostSettings::new(
+        file,
+        Box::new(move |values: &HostSettingsValues| {
+            applier.set_settings(engine_settings(values));
+        }),
+    ));
     let identity = Arc::new(host_identity(&engine));
-    spawn_accept(listener, uid, engine.clone(), identity)
+    spawn_accept(listener, uid, engine.clone(), identity, host)
         .map_err(|e| format!("accept thread: {e}"))?;
 
     if !wait_ready(&engine) {
@@ -143,14 +174,46 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The engine's settings: the host settings, and defaults for the keys each window sets for
+/// itself (tasklens-q4x76.22 moves those into the session's table query and demand).
+fn engine_settings(values: &HostSettingsValues) -> EngineSettings {
+    EngineSettings {
+        interval_ms: values.interval_ms,
+        history: values.history.clone(),
+        ..EngineSettings::default()
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// `$XDG_STATE_HOME/tasklens`, or `$HOME/.local/state/tasklens`, created with mode 0700.
 fn state_dir(get: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    app_dir(get, "XDG_STATE_HOME", ".local/state")
+}
+
+/// `$XDG_CONFIG_HOME/tasklens`, or `$HOME/.config/tasklens`, created with mode 0700. It holds
+/// `engine.toml` and the window's `settings.toml`.
+fn config_dir(get: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    app_dir(get, "XDG_CONFIG_HOME", ".config")
+}
+
+/// `$<var>/tasklens`, or `$HOME/<fallback>/tasklens` when `var` is unset or not absolute,
+/// created with mode 0700.
+fn app_dir(
+    get: impl Fn(&str) -> Option<OsString>,
+    var: &str,
+    fallback: &str,
+) -> Result<PathBuf, String> {
     let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
-    let root = match absolute(get("XDG_STATE_HOME")) {
+    let root = match absolute(get(var)) {
         Some(root) => root,
         None => absolute(get("HOME"))
             .ok_or("HOME is not set to an absolute path")?
-            .join(".local/state"),
+            .join(fallback),
     };
     let dir = root.join(APP_DIR);
     DirBuilder::new()
@@ -233,6 +296,7 @@ fn spawn_accept(
     uid: u32,
     engine: EngineHandle,
     identity: Arc<HostIdentity>,
+    host: Arc<SharedHostSettings>,
 ) -> io::Result<()> {
     let next_id = Arc::new(AtomicU32::new(1));
     let handshakes = Arc::new(AtomicUsize::new(0));
@@ -251,11 +315,12 @@ fn spawn_accept(
                         let engine = engine.clone();
                         let identity = Arc::clone(&identity);
                         let next_id = Arc::clone(&next_id);
+                        let host = Arc::clone(&host);
                         // A failed spawn drops the closure, and with it the slot and the stream.
                         let spawned = thread::Builder::new()
                             .name("tl-session".into())
                             .spawn(move || {
-                                serve(stream, slot, deadline, &engine, &identity, &next_id)
+                                serve(stream, slot, deadline, &engine, &identity, &next_id, host)
                             });
                         if let Err(e) = spawned {
                             warn!(target: "tasklens::engine", "session thread: {e}");
@@ -316,6 +381,7 @@ fn serve(
     engine: &EngineHandle,
     identity: &HostIdentity,
     next_id: &AtomicU32,
+    host: Arc<SharedHostSettings>,
 ) {
     let Ok(frames) = FrameReader::new() else {
         return;
@@ -363,6 +429,7 @@ fn serve(
     let port = EnginePort {
         port,
         engine: engine.clone(),
+        host,
     };
     let report = server::serve_session(stream, port, config);
     info!(
@@ -377,10 +444,12 @@ fn serve(
 }
 
 /// The engine's side of one session for `serve_session`: the session's port, plus the engine
-/// for journal streams, which are not tied to a session.
+/// for journal streams, which are not tied to a session, and the host settings every session
+/// shares.
 struct EnginePort {
     port: SessionPort,
     engine: EngineHandle,
+    host: Arc<SharedHostSettings>,
 }
 
 impl Port for EnginePort {
@@ -414,6 +483,18 @@ impl Port for EnginePort {
 
     fn is_ended(&self) -> bool {
         self.port.is_ended()
+    }
+
+    fn host_settings(&self) -> HostSettings {
+        self.host.get()
+    }
+
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> SetHostSettingsReply {
+        self.host.set(base_rev, &changes)
     }
 }
 
@@ -474,6 +555,24 @@ mod tests {
         .unwrap();
         assert_eq!(dir, home.join(".local/state").join(APP_DIR));
         assert!(state_dir(|_| None).is_err());
+    }
+
+    #[test]
+    fn config_dir_prefers_xdg_config_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config").into_os_string();
+        let home = tmp.path().join("home");
+        let home_s = home.clone().into_os_string();
+        let dir = config_dir(|name| match name {
+            "XDG_CONFIG_HOME" => Some(config.clone()),
+            "HOME" => Some(home_s.clone()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(dir, tmp.path().join("config").join(APP_DIR));
+        let dir = config_dir(|name| (name == "HOME").then(|| home_s.clone())).unwrap();
+        assert_eq!(dir, home.join(".config").join(APP_DIR));
+        assert!(dir.is_dir());
     }
 
     #[test]

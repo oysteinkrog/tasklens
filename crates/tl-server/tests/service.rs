@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tl_model::remote_proto::{
-    BootPrefix, Hello, HelloTail, RefuseReason, ServerBootstrap, Want, decode_server_bootstrap,
-    encode_hello,
+    BootPrefix, ClientMsg, Hello, HelloTail, HostSettingsChanges, RefuseReason, ServerBootstrap,
+    ServerMsg, SetHostSettingsReply, Want, decode_server_bootstrap, encode_hello,
 };
-use tl_remote::envelope::FrameReader;
+use tl_remote::envelope::{FrameReader, FrameWriter};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tasklens-engine");
 
@@ -380,4 +380,93 @@ fn service_starts_serves_eight_sessions_and_stops_on_sigterm() {
         .unwrap();
     let mut rest = Vec::new();
     sessions[0].read_to_end(&mut rest).expect("the stream ends");
+}
+
+/// The next message that is not a snapshot frame.
+fn next_reply(stream: &mut UnixStream, frames: &mut FrameReader) -> ServerMsg {
+    loop {
+        let frame = frames.read_frame(stream).unwrap();
+        match frames.decode_server(&frame).unwrap() {
+            ServerMsg::Snapshot(_) => {}
+            other => return other,
+        }
+    }
+}
+
+fn send(stream: &mut UnixStream, msg: &ClientMsg) {
+    let mut out = Vec::new();
+    FrameWriter::new()
+        .unwrap()
+        .encode_client(msg, &mut out)
+        .unwrap();
+    stream.write_all(&out).unwrap();
+}
+
+#[test]
+fn service_imports_host_settings_once_and_saves_changes() {
+    let dirs = Dirs::new();
+    let config = dirs.home.join(".config/tasklens");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("settings.toml"),
+        "[processes]\ninterval_ms = 2000\n[history]\nretention_h = 3\n",
+    )
+    .unwrap();
+    let (mut child, notify) = start_ready(&dirs);
+
+    let (mut stream, answer) = connect(&dirs.socket());
+    assert!(matches!(answer, ServerBootstrap::Welcome(_)));
+    let mut frames = FrameReader::new().unwrap();
+    send(&mut stream, &ClientMsg::GetHostSettings);
+    let ServerMsg::HostSettings(read) = next_reply(&mut stream, &mut frames) else {
+        panic!("not a HostSettings reply");
+    };
+    assert_eq!(read.rev, 1);
+    assert_eq!(read.values.interval_ms, 2000);
+    assert_eq!(read.values.history.retention_h, 3);
+
+    let changes = HostSettingsChanges {
+        interval_ms: Some(500),
+        ..HostSettingsChanges::default()
+    };
+    send(
+        &mut stream,
+        &ClientMsg::SetHostSettings {
+            base_rev: read.rev,
+            changes: changes.clone(),
+        },
+    );
+    assert!(matches!(
+        next_reply(&mut stream, &mut frames),
+        ServerMsg::SetHostSettings(SetHostSettingsReply::Ack { rev: 2 })
+    ));
+    send(
+        &mut stream,
+        &ClientMsg::SetHostSettings {
+            base_rev: read.rev,
+            changes,
+        },
+    );
+    assert!(matches!(
+        next_reply(&mut stream, &mut frames),
+        ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict { current }) if current.rev == 2
+    ));
+
+    let pid = child.child().id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut buf = [0u8; 256];
+    notify.recv(&mut buf).expect("STOPPING=1");
+    let (status, err) = child.wait(Duration::from_secs(5));
+    assert!(status.success(), "{status:?}: {err}");
+    let saved = std::fs::read_to_string(config.join("engine.toml")).unwrap();
+    let saved: toml::Table = saved.parse().unwrap();
+    assert_eq!(saved["rev"].as_integer(), Some(2));
+    assert_eq!(saved["processes"]["interval_ms"].as_integer(), Some(500));
+    assert_eq!(saved["history"]["retention_h"].as_integer(), Some(3));
 }

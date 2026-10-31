@@ -16,6 +16,8 @@ sd-notify = { workspace = true }
 tracing   = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc      = { workspace = true }   # SIGTERM wait: sigprocmask and sigwait (ADR-018)
+tl-ops    = { workspace = true }   # write_atomic for engine.toml (ADR-011, ADR-018 Settings)
+toml      = { workspace = true }   # engine.toml and the one-time import from settings.toml
 
 [dev-dependencies]
 tempfile = { workspace = true }

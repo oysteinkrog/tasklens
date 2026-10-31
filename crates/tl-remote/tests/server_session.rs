@@ -30,7 +30,8 @@ use tl_model::journal::{
     JournalQuery,
 };
 use tl_model::remote_proto::{
-    ClientMsg, HostSettings, ServerMsg, SetHostSettingsReply, SnapshotFrame, StreamId,
+    ClientMsg, HostSettings, HostSettingsChanges, ServerMsg, SetHostSettingsReply, SnapshotFrame,
+    StreamId,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
@@ -77,6 +78,8 @@ struct Engine {
         )>,
     >,
     dropped: AtomicBool,
+    /// The host settings store: a change applies only on the current revision.
+    host: Mutex<HostSettings>,
 }
 
 impl Engine {
@@ -97,6 +100,10 @@ impl Engine {
             demands: Mutex::new(Vec::new()),
             journals: Mutex::new(Vec::new()),
             dropped: AtomicBool::new(false),
+            host: Mutex::new(HostSettings {
+                rev: 1,
+                ..HostSettings::default()
+            }),
         })
     }
 
@@ -189,6 +196,26 @@ impl Port for FakePort {
 
     fn is_ended(&self) -> bool {
         false
+    }
+
+    fn host_settings(&self) -> HostSettings {
+        self.0.host.lock().unwrap().clone()
+    }
+
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> SetHostSettingsReply {
+        let mut host = self.0.host.lock().unwrap();
+        if base_rev != host.rev {
+            return SetHostSettingsReply::Conflict {
+                current: host.clone(),
+            };
+        }
+        host.values = host.values.with_changes(&changes);
+        host.rev += 1;
+        SetHostSettingsReply::Ack { rev: host.rev }
     }
 }
 
@@ -383,7 +410,7 @@ fn nothing_is_sent_before_the_first_publish_or_to_a_client_that_wants_no_snapsho
     rig.engine.publish(1);
     // A reply sent after the publish arrives first and alone.
     rig.send(&ClientMsg::GetHostSettings);
-    assert!(matches!(rig.recv(), ServerMsg::HostSettings(h) if h == HostSettings::default()));
+    assert!(matches!(rig.recv(), ServerMsg::HostSettings(h) if h.rev == 1));
 
     let mut rig = Rig::new(|_| {});
     rig.send(&ClientMsg::GetHostSettings);
@@ -397,8 +424,41 @@ fn nothing_is_sent_before_the_first_publish_or_to_a_client_that_wants_no_snapsho
     });
     assert!(matches!(
         rig.recv(),
-        ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict { current }) if current == HostSettings::default()
+        ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict { current }) if current.rev == 1
     ));
+}
+
+#[test]
+fn host_settings_are_read_and_changed_through_the_port() {
+    let mut rig = Rig::new(|c| c.snapshots = false);
+    rig.send(&ClientMsg::GetHostSettings);
+    let ServerMsg::HostSettings(read) = rig.recv() else {
+        panic!("not a HostSettings reply");
+    };
+    assert_eq!(read, *rig.engine.host.lock().unwrap());
+
+    let changes = HostSettingsChanges {
+        interval_ms: Some(2000),
+        ..HostSettingsChanges::default()
+    };
+    rig.send(&ClientMsg::SetHostSettings {
+        base_rev: read.rev,
+        changes: changes.clone(),
+    });
+    assert!(matches!(
+        rig.recv(),
+        ServerMsg::SetHostSettings(SetHostSettingsReply::Ack { rev: 2 })
+    ));
+
+    // A second client's write from the same base is a conflict and gets the current values.
+    rig.send(&ClientMsg::SetHostSettings {
+        base_rev: read.rev,
+        changes,
+    });
+    let ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict { current }) = rig.recv() else {
+        panic!("not a Conflict reply");
+    };
+    assert_eq!((current.rev, current.values.interval_ms), (2, 2000));
 }
 
 #[test]

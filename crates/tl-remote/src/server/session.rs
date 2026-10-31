@@ -73,7 +73,8 @@ use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalError, JournalEvent, JournalHandle, JournalQuery};
 use tl_model::remote_proto::{
-    ClientMsg, HostSettings, ProtoError, ServerMsg, SetHostSettingsReply, StreamId,
+    ClientMsg, HostSettings, HostSettingsChanges, ProtoError, ServerMsg, SetHostSettingsReply,
+    StreamId,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
@@ -122,6 +123,15 @@ pub trait Port: Send + Sync + 'static {
     fn journal(&self, query: JournalQuery) -> JournalHandle;
     /// The engine ended the session or stopped.
     fn is_ended(&self) -> bool;
+    /// The host settings and their revision (ADR-018 Settings).
+    fn host_settings(&self) -> HostSettings;
+    /// Applies `changes` when `base_rev` is the current revision, else `Conflict` with the
+    /// current settings. Blocks only for the `engine.toml` write.
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> SetHostSettingsReply;
 }
 
 /// How one session runs. `Default` has the ADR-018 values.
@@ -673,17 +683,14 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
                 journal_close(sh, stream);
                 true
             }
-            // Host settings arrive with tasklens-q4x76.9; until then they are the defaults and
-            // a change is a conflict.
             ClientMsg::GetHostSettings => {
-                sh.queue_reply(&mut out, &ServerMsg::HostSettings(HostSettings::default()))
+                let current = sh.port.host_settings();
+                sh.queue_reply(&mut out, &ServerMsg::HostSettings(current))
             }
-            ClientMsg::SetHostSettings { .. } => sh.queue_reply(
-                &mut out,
-                &ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict {
-                    current: HostSettings::default(),
-                }),
-            ),
+            ClientMsg::SetHostSettings { base_rev, changes } => {
+                let reply = sh.port.set_host_settings(base_rev, changes);
+                sh.queue_reply(&mut out, &ServerMsg::SetHostSettings(reply))
+            }
         };
         if !going {
             // The reason is set already.
@@ -1303,6 +1310,18 @@ mod tests {
 
         fn is_ended(&self) -> bool {
             false
+        }
+
+        fn host_settings(&self) -> HostSettings {
+            unreachable!("no host settings in this test")
+        }
+
+        fn set_host_settings(
+            &self,
+            _base_rev: u64,
+            _changes: HostSettingsChanges,
+        ) -> SetHostSettingsReply {
+            unreachable!("no host settings in this test")
         }
     }
 
