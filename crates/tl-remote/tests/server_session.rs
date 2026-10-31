@@ -413,12 +413,20 @@ fn an_ack_for_a_frame_not_in_flight_closes_the_session() {
 fn each_request_end_follows_its_action_events() {
     let mut rig = Rig::new(|_| {});
     let engine = Arc::clone(&rig.engine);
-    // The engine sends each action's events and then its end, as the action gate does.
+    // The engine sends each action's events and then its end, as the action gate does, with
+    // at most 16 actions in flight per session (the gate's admission limit). Round `n` starts
+    // once the client has read the ends of round `n - 1`.
+    let (read_tx, read_rx) = std::sync::mpsc::channel::<()>();
     let feeder = std::thread::spawn(move || {
-        for id in 1..=300 {
-            engine.event(id, ActionState::Started);
-            engine.event(id, ActionState::Succeeded);
-            engine.end(IdKind::Action, id, RequestEnd::Done);
+        for round in 0..300 / 16 + 1 {
+            if round > 0 && read_rx.recv().is_err() {
+                return;
+            }
+            for id in (round * 16 + 1..=round * 16 + 16).filter(|id| *id <= 300) {
+                engine.event(id, ActionState::Started);
+                engine.event(id, ActionState::Succeeded);
+                engine.end(IdKind::Action, id, RequestEnd::Done);
+            }
         }
     });
     let mut summary_seen = vec![false; 301];
@@ -442,6 +450,9 @@ fn each_request_end_follows_its_action_events() {
                     end.id
                 );
                 ended += 1;
+                if ended % 16 == 0 {
+                    let _ = read_tx.send(());
+                }
             }
             other => panic!("unexpected {other:?}"),
         }
