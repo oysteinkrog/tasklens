@@ -332,11 +332,14 @@ fn full_queue_is_busy_and_ack_goes_first() {
     assert_eq!(client.send(action(1)), Err(CommandError::Busy));
 
     // An Ack travels on the control path, ahead of the 64 queued commands. The gate opens only
-    // once it waits there.
+    // once it waits there. `AckQueued` is reported just before the push, with the client's state
+    // lock held until the push is done; `status` takes that lock, so the Ack is queued once it
+    // returns.
     let (frame, _) = server.publish(&snapshot(2, 101));
     wait_step("the Ack queued", &steps, |s| {
         (*s == Observed::AckQueued(frame)).then_some(())
     });
+    assert_eq!(client.status(), LinkStatus::Connected);
     gate.set(false);
     assert!(is_command(&server.recv(), |c| matches!(
         c,

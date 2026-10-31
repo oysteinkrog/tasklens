@@ -75,20 +75,28 @@ pub const BACKOFF: [Duration; 6] = [
     Duration::from_secs(30),
 ];
 
-/// One step of the client, reported in the order it happened by `RemoteClient::observe`
-/// (`test-hooks`). A test waits for the exact step it then asserts on.
+/// One step of the client, reported by `RemoteClient::observe` (`test-hooks`). A test waits for
+/// the exact step it then asserts on.
+///
+/// Each step is reported before the store, queue push, channel send or write that lets another
+/// thread act on it. So a step another thread takes because of it is always reported later.
+/// `SessionEnded` is the one step reported after its effects, because a test waits for it and
+/// then checks them.
 #[cfg(feature = "test-hooks")]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Observed {
-    /// A frame was applied and stored; the wake token follows.
+    /// A frame was applied and is about to be stored; the wake token and the `Ack` follow.
     SnapshotInstalled { generation: u64, frame: u64 },
-    /// The first snapshot of session `generation` was stored, so `generation()` returns it.
+    /// The first snapshot of session `generation` is about to be stored. `generation()` returns
+    /// it once `AckQueued` for that frame is reported and the state lock is free.
     Generation(u64),
-    /// `Ack { frame }` waits on the control path.
+    /// `Ack { frame }` is about to be pushed on the control path. The reader holds the client's
+    /// state lock from this report until the Ack is pushed and the writer is rung, so any client
+    /// call that takes the lock and returns after this report finds the Ack queued.
     AckQueued(u64),
-    /// `Ack { frame }` was written to the stream.
+    /// `Ack { frame }` is about to be written to the stream.
     AckWritten(u64),
-    /// A request end was passed to `request_events`.
+    /// A request end is about to be passed to `request_events`.
     RequestEnded(RequestEvent),
     /// The session lost its link, and the ends of its open requests were passed on.
     SessionEnded(u64),
@@ -571,12 +579,8 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                 else {
                     break;
                 };
-                // One store for both, so the hub never sees this session's number with the last
-                // session's data (ADR-018 Delta flow).
-                shared.latest.store(Arc::new(Installed {
-                    generation: session,
-                    snap: Arc::new(snap),
-                }));
+                let first_of_session = std::mem::replace(&mut first, false);
+                // Reported before the store that lets the UI read the snapshot.
                 observe!(
                     shared.observer,
                     Observed::SnapshotInstalled {
@@ -584,18 +588,26 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                         frame: frame.frame,
                     }
                 );
+                if first_of_session {
+                    observe!(shared.observer, Observed::Generation(session));
+                }
+                // One store for both, so the hub never sees this session's number with the last
+                // session's data (ADR-018 Delta flow).
+                shared.latest.store(Arc::new(Installed {
+                    generation: session,
+                    snap: Arc::new(snap),
+                }));
                 let _ = shared.wake_tx.try_send(());
                 installed_frame = frame.frame;
                 let mut st = lock(&shared.state);
-                if first {
+                if first_of_session {
                     st.status = Some(LinkStatus::Connected);
-                    first = false;
-                    observe!(shared.observer, Observed::Generation(session));
                 }
                 if let Some(link) = &st.link {
-                    // Reported before the writer is woken, so `AckWritten` cannot come first.
-                    link.queue_control(ClientMsg::Ack { frame: frame.frame });
+                    // Reported before the push: a writer already in its loop can take the Ack
+                    // without waiting for `ring`, so `AckWritten` must not be able to come first.
                     observe!(shared.observer, Observed::AckQueued(frame.frame));
+                    link.queue_control(ClientMsg::Ack { frame: frame.frame });
                     link.ring();
                 }
             }
@@ -603,8 +615,9 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
             ServerMsg::Request(ev) => {
                 let mut st = lock(&shared.state);
                 if take_pending(&mut st.pending, (ev.kind, ev.id)) {
-                    let _ = shared.requests_tx.try_send(ev);
+                    // Reported before the send that lets the UI read the end.
                     observe!(shared.observer, Observed::RequestEnded(ev));
+                    let _ = shared.requests_tx.try_send(ev);
                 }
             }
             ServerMsg::Journal { stream, event } => {
@@ -619,6 +632,8 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
     }
     shutdown();
     end_session(shared, &host_name);
+    // After its effects: a test waits for this step and then checks that the link is gone and
+    // the ends were sent. The next session's steps come from this thread, so they follow it.
     observe!(shared.observer, Observed::SessionEnded(session));
     Ok(())
 }
@@ -743,8 +758,9 @@ fn end_session(shared: &Shared, host_name: &str) {
                 id,
                 end: RequestEnd::Lost,
             };
-            let _ = shared.requests_tx.try_send(end);
+            // Reported before the send that lets the UI read the end.
             observe!(shared.observer, Observed::RequestEnded(end));
+            let _ = shared.requests_tx.try_send(end);
         }
     }
 }
@@ -815,11 +831,12 @@ fn write_loop(mut writer: Box<dyn Write + Send>, inputs: &WriterInputs) -> io::R
             frames
                 .encode_client(&msg, &mut out)
                 .map_err(io::Error::other)?;
-            writer.write_all(&out)?;
+            // Reported before the write that lets the server answer the Ack.
             #[cfg(feature = "test-hooks")]
             if let ClientMsg::Ack { frame } = msg {
                 let _ = inputs.observer.tx.try_send(Observed::AckWritten(frame));
             }
+            writer.write_all(&out)?;
         }
         writer.flush()?;
     }
