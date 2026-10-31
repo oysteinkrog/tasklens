@@ -20,7 +20,7 @@ use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
-use tl_ui::action_tracker::ToastTexts;
+use tl_ui::action_tracker::{ToastTexts, reconnecting_refusal};
 use tl_ui::actions::{CancelWindowPick, StartWindowPick};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::window_frame::TlSecondaryWindow;
@@ -855,4 +855,65 @@ fn host_tab_fast_reconnect_ends_lost_actions(cx: &mut TestAppContext) {
     assert!(rig.end_task(&home, 4321).is_some());
     assert_eq!(Rig::actions(&rig.remotes["home"]), 2);
     assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+}
+
+/// ADR-018 rule 4: a refused send is a sighting too. Home drops, and before any snapshot, link
+/// event or 500 ms check, an End task is refused. The tracker has seen the newer generation, so
+/// the request sent in the old session ends as outcome unknown at once. The same holds for a
+/// direct send refused by `reconnecting_refusal`.
+#[gpui_kit::test]
+fn host_tab_refused_send_ends_lost_actions(cx: &mut TestAppContext) {
+    let mut rig = boot(cx, &["home"]);
+    rig.select_host(1);
+    let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
+    let tracker = home.tracker().expect("tracker").clone();
+    let outcome_unknown = |rig: &mut Rig| {
+        rig.vcx.read_entity(&tracker, |t, _| {
+            t.pushed()
+                .iter()
+                .filter(|p| p.text.as_ref() == "Outcome unknown")
+                .count()
+        })
+    };
+
+    // Tracked send, refused while reconnecting.
+    assert!(rig.end_task(&home, 4321).is_some());
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+    rig.remotes["home"].bump_generation();
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+    assert!(
+        rig.end_task(&home, 4321).is_none(),
+        "refused while reconnecting"
+    );
+    assert_eq!(
+        Rig::actions(&rig.remotes["home"]),
+        1,
+        "nothing more was sent"
+    );
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 0);
+    assert_eq!(
+        outcome_unknown(&mut rig),
+        1,
+        "the lost action ended at once"
+    );
+
+    // The next session sends again.
+    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    fresh.sequence = 1;
+    rig.remotes["home"].restart(fresh);
+    rig.draw();
+    assert!(rig.end_task(&home, 4321).is_some());
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+
+    // Direct send, refused while reconnecting.
+    rig.remotes["home"].bump_generation();
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+    let refusal = rig.vcx.update(|_, cx| reconnecting_refusal(&home, cx));
+    assert!(refusal.is_some(), "the direct send is refused");
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 0);
+    assert_eq!(
+        outcome_unknown(&mut rig),
+        2,
+        "the second lost action ended at once"
+    );
 }

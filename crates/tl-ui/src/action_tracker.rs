@@ -31,7 +31,8 @@
 //! soon as the tracker sees a newer generation for its host, from any source, every request
 //! from an older session becomes "Outcome unknown" with "connection to <host> lost", unless the
 //! client ended it first. The sources are the hub's link events (either way), every installed
-//! snapshot, a reply to a request from a newer session and a new send. No source depends on the
+//! snapshot, a reply to a request from a newer session and every send, sent or refused (also a
+//! direct send refused by [`reconnecting_refusal`]). No source depends on the
 //! hub's 500 ms stale check, so a drop and reconnect faster than that still ends the lost
 //! requests when the next session's first snapshot arrives. While the link is stale, until the
 //! first complete frame of the next session, nothing is sent:
@@ -79,6 +80,12 @@ use crate::window::main::push_main_toast;
 pub fn reconnecting_refusal(host: &HostContext, cx: &mut App) -> Option<SharedString> {
     if host.hub().is_none_or(|hub| hub.read(cx).session_current()) {
         return None;
+    }
+    // A refused send has seen the client's newer generation: the lost session's requests end.
+    if let Some(tracker) = host.tracker() {
+        tracker.update(cx, |t, cx| {
+            t.see_client_generation(cx);
+        });
     }
     let name = host
         .remote_name()
@@ -473,12 +480,12 @@ impl ActionTracker {
             request.id = self.next_id();
         }
         let id = request.id;
+        // Seen before the stale check, so a refused send also ends the lost session's requests.
+        let session = self.see_client_generation(cx);
         if !self.host_live(cx) {
             debug!(target: "tasklens::ui", ?id, "action not sent: the host is reconnecting");
             return Err(CommandError::EngineStopped);
         }
-        let session = self.client.generation();
-        self.see_generation(session, cx);
         self.client.send(Command::Action(request.clone()))?;
         let deadline = request_deadline(&request);
         debug!(target: "tasklens::ui", ?id, ?deadline, "action tracked");
@@ -508,6 +515,7 @@ impl ActionTracker {
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
+        self.see_client_generation(cx);
         if !self.host_live(cx) {
             let host = self.host_name(cx);
             let text = tr_args(
@@ -769,6 +777,14 @@ impl ActionTracker {
         let keep = !self.pending.is_empty();
         self.sweeping = keep;
         keep
+    }
+
+    /// [`Self::see_generation`] with the client's generation now, which it returns. Every send,
+    /// sent or refused, shows the tracker the client's generation.
+    fn see_client_generation(&mut self, cx: &mut Context<Self>) -> u64 {
+        let generation = self.client.generation();
+        self.see_generation(generation, cx);
+        generation
     }
 
     /// Notes that the host's client has reached `generation` (ADR-018 rule 4). The first time a
