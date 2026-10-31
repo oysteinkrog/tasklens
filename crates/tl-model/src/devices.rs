@@ -64,9 +64,10 @@ pub enum DeviceIdentity {
 /// (PERF-005, R-154).
 ///
 /// `Nets` counts the interfaces of every [`NetKind`]. `NetsOf(kind)` counts only the interfaces
-/// of `kind`, under the key `aggregate:net:<kind>` ([`NetKind::key`]); the reducer creates it
-/// with the first sample that has an interface of that kind (ADR-018, tasklens-q4x76.22). A
-/// window that hides some kinds shows `Nets` minus the `NetsOf` series of the hidden kinds.
+/// of `kind`, under the key `aggregate:net:<kind>` ([`NetKind::key`]). The reducer creates one
+/// for every kind at session start and gives each a sample whenever `Nets` gets one, 0 for a
+/// kind with no interface (ADR-018, tasklens-q4x76.22). A window that hides some kinds shows
+/// `Nets` minus the `NetsOf` series of the hidden kinds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum AggregateKind {
     Disks,

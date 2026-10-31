@@ -1277,8 +1277,9 @@ fn net_desc(id: DeviceIdentity, kind: NetKind) -> DeviceDesc {
 }
 
 /// The engine counts every adapter kind whatever a window shows: `aggregate:net` is the total of
-/// all kinds and `aggregate:net:<kind>` the total of each kind present. With no window open the
-/// history sink gets every one of them, under its persistent key (tasklens-q4x76.22).
+/// all kinds and `aggregate:net:<kind>` the total of each kind, 0 for a kind with no adapter.
+/// With no window open the history sink gets every one of them, under its persistent key
+/// (tasklens-q4x76.22).
 #[test]
 fn aggregate_net_counts_every_kind_with_no_window() {
     let mut rig = Rig::new();
@@ -1318,25 +1319,28 @@ fn aggregate_net_counts_every_kind_with_no_window() {
     assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Wired)), 5000.0);
     assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Wireless)), 300.0);
     assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Virtual)), 700.0);
-    // A kind with no adapter has no total.
-    let latest = rig.latest();
+    // A kind with no adapter has a valid total of 0.
     for kind in [NetKind::VpnTunnel, NetKind::Other] {
-        let id = DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind));
-        assert!(latest.devices.find(&id).is_none(), "{kind:?}");
+        let device = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind)));
+        let last = rig.last_sample(SeriesId {
+            device,
+            metric: MetricId::NET_RX,
+        });
+        assert_eq!(last.value, 0.0, "{kind:?}");
+        assert!(last.flags.contains(SampleFlags::VALID), "{kind:?}");
     }
 
-    // The sink drops samples it gets before the catalog, as for any new device, so the
-    // history sees the second sample.
-    let (eno1, wlan0, docker0) = (net_id("eno1", 2), net_id("wlan0", 3), net_id("docker0", 4));
+    // docker0 goes away. Its kind still gets a sample, 0, so a history bucket that holds both
+    // samples has as many virtual samples as total samples: the total's mean (6000 + 5300) / 2
+    // minus the virtual mean (700 + 0) / 2 is the mean of the other kinds, 5300.
+    let (eno1, wlan0) = (net_id("eno1", 2), net_id("wlan0", 3));
     rig.run(vec![src(SourceUpdate::Nets(NetSample {
         t_ns: 2 * SEC,
-        nets: vec![
-            (eno1, net_totals(5000.0)),
-            (wlan0, net_totals(300.0)),
-            (docker0, net_totals(700.0)),
-        ],
+        nets: vec![(eno1, net_totals(5000.0)), (wlan0, net_totals(300.0))],
     }))])
     .expect("no invariant violation");
+    assert_eq!(rx_of(&rig, AggregateKind::Nets), 5300.0);
+    assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Virtual)), 0.0);
 
     // What the history worker would store: the catalog keys and the samples.
     let mut keys = Vec::new();
@@ -1360,23 +1364,35 @@ fn aggregate_net_counts_every_kind_with_no_window() {
         "aggregate:net",
         "aggregate:net:wired",
         "aggregate:net:wireless",
+        "aggregate:net:vpn",
         "aggregate:net:virtual",
+        "aggregate:net:other",
     ] {
         assert!(keys.iter().any(|k| k == key), "{key} not in {keys:?}");
     }
-    let virt = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(
-        NetKind::Virtual,
-    )));
-    assert!(
-        stored.contains(&(
-            SeriesId {
-                device: virt,
-                metric: MetricId::NET_RX,
-            },
-            700.0
-        )),
-        "{stored:?}"
-    );
+    let rx = |kind: AggregateKind| {
+        let device = rig.idx(&DeviceIdentity::Aggregate(kind));
+        stored
+            .iter()
+            .filter(|(id, _)| {
+                *id == SeriesId {
+                    device,
+                    metric: MetricId::NET_RX,
+                }
+            })
+            .map(|(_, v)| *v)
+            .collect::<Vec<_>>()
+    };
+    // The sink drops what it gets before it has a catalog, so it may miss the first sample;
+    // either way each kind has as many samples as the total.
+    let total = rx(AggregateKind::Nets);
+    assert_eq!(total.last(), Some(&5300.0), "{total:?}");
+    let virt = rx(AggregateKind::NetsOf(NetKind::Virtual));
+    assert_eq!(virt.len(), total.len(), "{virt:?}");
+    assert_eq!(virt.last(), Some(&0.0));
+    let vpn = rx(AggregateKind::NetsOf(NetKind::VpnTunnel));
+    assert_eq!(vpn.len(), total.len(), "{vpn:?}");
+    assert!(vpn.iter().all(|&v| v == 0.0), "{vpn:?}");
 }
 
 #[test]

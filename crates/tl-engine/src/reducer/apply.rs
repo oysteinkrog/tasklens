@@ -1796,15 +1796,20 @@ impl Reducer {
     }
 
     /// Per-interface series, then the totals: `aggregate:net` over every interface and
-    /// `aggregate:net:<kind>` over the interfaces of each kind present in `s`. An interface
-    /// with no kind counts as `Other`. The engine counts every kind whatever a window shows, so
-    /// two windows and the history all read the same totals (ADR-018, tasklens-q4x76.22).
+    /// `aggregate:net:<kind>` over the interfaces of each kind. An interface with no kind counts
+    /// as `Other`. The engine counts every kind whatever a window shows, so two windows and the
+    /// history all read the same totals (ADR-018, tasklens-q4x76.22).
+    ///
+    /// Every kind gets a sample whenever `aggregate:net` does, 0 for a kind with no interface,
+    /// and it is valid exactly when the total is. So each per-kind series has the same samples
+    /// as the total, and a history bucket's total mean minus a kind's mean is the mean of the
+    /// other kinds, also when an adapter comes or goes inside the bucket.
     fn apply_nets(&mut self, s: NetSample) -> Result<(), InvariantViolation> {
         let t = s.t_ns;
         let period = self.apply_state.period(SourceId::Net, t, SLOW_NS);
         let mut rows = Vec::with_capacity(s.nets.len());
         let mut all = NetTotal::default();
-        let mut by_kind = [None::<NetTotal>; NetKind::ALL.len()];
+        let mut by_kind = [NetTotal::default(); NetKind::ALL.len()];
         for (identity, mut n) in s.nets {
             let (idx, present) = self.sample_device(&identity)?;
             n.device = idx;
@@ -1837,19 +1842,15 @@ impl Reducer {
                 .and_then(|e| e.net_kind)
                 .unwrap_or(NetKind::Other);
             all.add(&n);
-            by_kind[kind_slot(kind)]
-                .get_or_insert_with(NetTotal::default)
-                .add(&n);
+            by_kind[kind_slot(kind)].add(&n);
             rows.push((idx, n));
         }
         let agg = self.fixed_device(&DeviceIdentity::Aggregate(AggregateKind::Nets))?;
         self.push_net_total(agg, t, all, period);
-        for (kind, total) in NetKind::ALL.into_iter().zip(by_kind) {
-            let Some(total) = total else {
-                continue;
-            };
-            let (idx, _) =
-                self.sample_device(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind)))?;
+        for (kind, mut total) in NetKind::ALL.into_iter().zip(by_kind) {
+            total.rx_ok = all.rx_ok;
+            total.tx_ok = all.tx_ok;
+            let idx = self.fixed_device(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind)))?;
             self.push_net_total(idx, t, total, period);
         }
         rows.sort_unstable_by_key(|(idx, _)| *idx);

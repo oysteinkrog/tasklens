@@ -40,7 +40,10 @@ impl Default for Catalog {
 }
 
 impl Catalog {
-    /// Entry 0 is the CPU package, then the disk, network and GPU aggregates, all present.
+    /// Entry 0 is the CPU package, then the disk, network and GPU aggregates, then the network
+    /// total of each [`NetKind`], all present. The per-kind totals exist from the start, so each
+    /// gets a sample whenever `aggregate:net` does and a bucket mean covers the same samples
+    /// (tasklens-q4x76.22).
     pub fn new() -> Self {
         let mut catalog = Catalog {
             entries: Vec::new(),
@@ -67,8 +70,18 @@ impl Catalog {
             ),
         ];
         for (identity, name, key) in fixed {
-            // Four entries never overflow a u16 index.
+            // Nine entries in all never overflow a u16 index.
             let _ = catalog.push(identity, Arc::from(name), None, Arc::from(key), None, None);
+        }
+        for kind in NetKind::ALL {
+            let _ = catalog.push(
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind)),
+                Arc::from(format!("Network ({})", kind.key())),
+                None,
+                Arc::from(format!("aggregate:net:{}", kind.key())),
+                None,
+                None,
+            );
         }
         catalog
     }
@@ -446,8 +459,8 @@ mod tests {
         c.apply_list(&l).unwrap();
         assert!(c.publish().is_none());
         // Earlier snapshots stay valid and unchanged.
-        assert_eq!(first.entries.len(), 4);
-        assert_eq!(second.entries.len(), 5);
+        assert_eq!(first.entries.len(), 9);
+        assert_eq!(second.entries.len(), 10);
     }
 
     #[test]
@@ -526,6 +539,26 @@ mod tests {
             (
                 DeviceIdentity::Aggregate(AggregateKind::Gpus),
                 "aggregate:gpu",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Wired)),
+                "aggregate:net:wired",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Wireless)),
+                "aggregate:net:wireless",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::VpnTunnel)),
+                "aggregate:net:vpn",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Virtual)),
+                "aggregate:net:virtual",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Other)),
+                "aggregate:net:other",
             ),
         ];
         assert_eq!(published.entries.len(), expected.len());
