@@ -39,6 +39,7 @@ use tl_ops::launch::{
 use zbus::message::Type;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
+use crate::desktop::{DesktopSession, DesktopSource, SESSION_KEYS};
 use crate::opener;
 
 /// The deadline for each D-Bus call (ADR-006).
@@ -67,13 +68,17 @@ pub enum LaunchOutcome {
 }
 
 /// Runs `spec`. `session` is the user manager connection on the session bus
-/// (`SharedHandles.systemd_user`).
+/// (`SharedHandles.systemd_user`). Programs start with `desktop`'s variables (ADR-018).
 pub(crate) async fn launch(
     cx: &Cx,
     session: Option<Arc<zbus::Connection>>,
+    desktop: &DesktopSession,
     spec: &LaunchSpec,
 ) -> Result<LaunchOutcome, ActionError> {
-    launch_with(cx, session, spec, &RealHost).await
+    let host = RealHost {
+        desktop: desktop.clone(),
+    };
+    launch_with(cx, session, spec, &host).await
 }
 
 /// One check of a watched child.
@@ -91,6 +96,11 @@ trait Host: Sync {
     type Child: Send + Sync + 'static;
 
     fn var(&self, key: &str) -> Option<String>;
+    /// `argv` as it must be spawned to start on the desktop session's screen. Not used for the
+    /// administrator path, which passes the session's variables through `pkexec env` itself.
+    fn session_argv(&self, argv: Vec<String>) -> Vec<String> {
+        argv
+    }
     fn startup_env(&self) -> StartupEnv;
     /// Starts `argv` detached in `cwd`. The caller passes the child to `detach` or reaps it
     /// through `poll`.
@@ -125,13 +135,27 @@ trait Host: Sync {
     ) -> impl Future<Output = Result<(), ActionError>> + Send;
 }
 
-struct RealHost;
+struct RealHost {
+    desktop: DesktopSession,
+}
 
 impl Host for RealHost {
     type Child = Arc<Spawned>;
 
+    /// The desktop session's value for a session variable, this process's for any other.
     fn var(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
+        if SESSION_KEYS.contains(&key) {
+            self.desktop.var(key)
+        } else {
+            std::env::var(key).ok()
+        }
+    }
+
+    fn session_argv(&self, argv: Vec<String>) -> Vec<String> {
+        match self.desktop.overrides() {
+            Some(env) => env.wrap(argv),
+            None => argv,
+        }
     }
 
     fn startup_env(&self) -> StartupEnv {
@@ -186,7 +210,7 @@ impl Host for RealHost {
         session: Option<Arc<zbus::Connection>>,
         target: &str,
     ) -> Result<(), ActionError> {
-        opener::open_uri(cx, session, target).await
+        opener::open_uri(cx, session, self.desktop.overrides(), target).await
     }
 
     async fn activate_action(
@@ -401,7 +425,7 @@ async fn spawn_in_scope<H: Host>(
     scope: &str,
     description: &str,
 ) -> Result<LaunchOutcome, ActionError> {
-    let child = host.spawn(cx, argv, cwd).await?;
+    let child = host.spawn(cx, host.session_argv(argv), cwd).await?;
     let pid = host.pid(&child);
     host.detach(cx, child);
     match session {
@@ -1637,17 +1661,56 @@ mod tests {
         assert_ne!(a, rand_suffix(), "two suffixes differ");
     }
 
+    fn real_host() -> RealHost {
+        RealHost {
+            desktop: DesktopSession::new(DesktopSource::Process),
+        }
+    }
+
+    /// ADR-018: under the engine service a program starts with the desktop session's
+    /// variables, and the session's values win for those keys only.
+    #[test]
+    fn real_host_takes_the_session_under_the_service() {
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        let host = RealHost {
+            desktop: desktop.clone(),
+        };
+        let argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), "kate".to_owned()];
+        assert_eq!(host.session_argv(argv.clone()), argv, "no session yet");
+        assert_eq!(host.var("WAYLAND_DISPLAY"), None);
+        desktop.set(Some(crate::desktop::DesktopEnv::from_lines(&[
+            "WAYLAND_DISPLAY=wayland-1",
+            "HOME=/elsewhere",
+        ])));
+        assert_eq!(
+            host.session_argv(argv),
+            [
+                crate::desktop::ENV_PATH,
+                "WAYLAND_DISPLAY=wayland-1",
+                "/bin/sh",
+                "-c",
+                "kate"
+            ]
+        );
+        assert_eq!(host.var("WAYLAND_DISPLAY").as_deref(), Some("wayland-1"));
+        assert_eq!(host.var("HOME"), std::env::var("HOME").ok());
+        // The window's engine: children inherit the process environment as before.
+        let local = real_host();
+        let argv = vec!["kate".to_owned()];
+        assert_eq!(local.session_argv(argv.clone()), argv);
+    }
+
     /// Spawns `/bin/true` for real and waits for it through `RealHost::poll`.
     #[test]
     fn real_host_poll_reaps_true() {
         let probe = run(async move {
             let cx = Cx::current().expect("task has a Cx");
-            let child = RealHost
+            let child = real_host()
                 .spawn(&cx, vec!["/bin/true".to_owned()], None)
                 .await
                 .expect("spawned");
             loop {
-                let probe = RealHost.poll(&cx, &child).await.expect("probe");
+                let probe = real_host().poll(&cx, &child).await.expect("probe");
                 if probe.exit.is_some() {
                     break probe;
                 }

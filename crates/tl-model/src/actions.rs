@@ -373,6 +373,9 @@ pub enum RejectReason {
     /// StartupRunNow or Launch of a program that is running. UI toast "Already running"
     /// (SYS-023, R-148 item 4).
     AlreadyRunning,
+    /// A command that acts on the host's screen (open, launch, run now) while nobody is logged
+    /// in to a desktop there. UI text "home has no desktop session" (ADR-018).
+    NoDesktopSession,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

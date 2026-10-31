@@ -1733,6 +1733,7 @@ fnd-action-reject-protected = This process is protected. Confirm the warning to 
 fnd-action-reject-not-owner = This process belongs to another user. Administrator access is needed.
 fnd-action-reject-unsupported = This action is not available for this process.
 fnd-action-reject-already-running = Already running
+fnd-action-reject-no-desktop-session = This PC has no desktop session. Nobody is logged in to its screen.
 # Target labels in the Details dialog lines.
 fnd-action-target-pid = PID { $pid }
 fnd-action-target-tid = Thread { $tid }

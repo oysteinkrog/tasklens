@@ -11,6 +11,7 @@ pub mod client_session;
 pub mod config;
 pub mod controller;
 pub mod dbus;
+pub mod desktop;
 pub mod gpu;
 #[doc(hidden)]
 pub mod helper;
@@ -26,9 +27,9 @@ pub mod update;
 pub mod workers;
 // Chain-edit lines added by later beads: dbus (E08-A2); session, reducer, bridge (E09);
 // actions (E11); gpu (E13); launcher, opener (E14); helper (E29); history_query (E30);
-// client_session (q4x76.4).
+// client_session (q4x76.4); desktop (q4x76.12).
 
-pub use bridge::{Engine, EngineHandle, EngineHooks, SessionPort, ShutdownReport};
+pub use bridge::{Engine, EngineHandle, EngineHooks, SessionPeer, SessionPort, ShutdownReport};
 pub use config::{EngineConfig, EngineMode};
 
 /// The hooks `EngineHooks::default()` returns. Later beads replace one field each: E11-A1 the

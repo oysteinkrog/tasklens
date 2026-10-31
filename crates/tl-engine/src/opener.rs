@@ -33,6 +33,7 @@ use tl_model::actions::{ActionError, ActionState};
 use zbus::message::Type;
 use zbus::zvariant::{Fd, OwnedValue, Value};
 
+use crate::desktop::DesktopEnv;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
 /// The deadline for each D-Bus call (ADR-006).
@@ -60,11 +61,19 @@ pub(crate) trait Spawn: Sync {
 }
 
 /// The tl-ops launch helper (`posix_spawn`, `setsid`, stdio on `/dev/null`). The child is reaped
-/// by a background task, so the action does not wait for it to exit.
-pub(crate) struct Detached;
+/// by a background task, so the action does not wait for it to exit. With `env`, the program
+/// gets the desktop session's variables (the engine service, ADR-018).
+#[derive(Default)]
+pub(crate) struct Detached {
+    pub env: Option<Arc<DesktopEnv>>,
+}
 
 impl Spawn for Detached {
     async fn spawn(&self, cx: &Cx, argv: Vec<String>) -> Result<(), ActionError> {
+        let argv = match &self.env {
+            Some(env) => env.wrap(argv),
+            None => argv,
+        };
         let mut job = cx
             .spawn_blocking(move |_| tl_ops::launch::spawn_detached(&argv, None))
             .map_err(|_| internal("spawn job not admitted"))?;
@@ -94,19 +103,22 @@ impl Spawn for Detached {
 pub(crate) async fn open_uri(
     cx: &Cx,
     session: Option<Arc<zbus::Connection>>,
+    env: Option<Arc<DesktopEnv>>,
     target: &str,
 ) -> Result<(), ActionError> {
-    open_uri_with(cx, session.as_deref(), target, &Detached).await
+    open_uri_with(cx, session.as_deref(), target, &Detached { env }).await
 }
 
 /// Shows `path` in the file manager, or its properties dialog when `properties` is true.
 pub(crate) async fn show_in_file_manager(
     cx: &Cx,
     session: Option<Arc<zbus::Connection>>,
+    env: Option<Arc<DesktopEnv>>,
     path: &str,
     properties: bool,
 ) -> Result<(), ActionError> {
-    show_in_file_manager_with(cx, session.as_deref(), path, properties, &Detached).await
+    let spawner = Detached { env };
+    show_in_file_manager_with(cx, session.as_deref(), path, properties, &spawner).await
 }
 
 /// `org.freedesktop.Application.ActivateAction(action, [parameter], {})` on `bus_name` at
@@ -1023,8 +1035,10 @@ mod tests {
     fn detached_spawn_reaps_child() {
         let result = run(async move {
             let cx = cx();
-            let spawned = Detached.spawn(&cx, vec!["/bin/true".to_owned()]).await;
-            let missing = Detached
+            let spawned = Detached::default()
+                .spawn(&cx, vec!["/bin/true".to_owned()])
+                .await;
+            let missing = Detached::default()
                 .spawn(&cx, vec!["/nonexistent/tasklens-y6k24".to_owned()])
                 .await;
             (spawned, missing)

@@ -48,6 +48,7 @@ use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect, error_name};
+use crate::desktop::{APP_ID, DesktopEnv, DesktopSession, DesktopSource};
 use crate::source::{CommandProgress, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
@@ -89,8 +90,6 @@ const INVALID_WINDOW: &str = "org.kde.KWin.Error.InvalidWindow";
 /// KWin `WindowType` values of shell windows (KWin 6.7.5 `effect/globals.h`): desktop 1, dock 2,
 /// notification 13, on-screen display 16, critical notification 17.
 const SHELL_TYPES: [i32; 5] = [1, 2, 13, 16, 17];
-/// Every tasklens window carries this app ID as its `resourceClass` (R-086, APP-009).
-const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 /// The main window's title (R-176).
 const MAIN_CAPTION: &str = "tasklens";
 
@@ -107,6 +106,17 @@ const UPDATE_QUEUE: usize = 8;
 
 /// The health text when KDE or KWin is missing (R-155 item 4).
 const NOT_AVAILABLE: &str = "KWin bridge not available";
+/// The health text while the engine service's host has no desktop session (ADR-018).
+const NO_SESSION: &str = "No desktop session";
+
+const SYSTEMD_NAME: &str = "org.freedesktop.systemd1";
+const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
+const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
+const PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
+/// How long the engine service waits for the user manager's environment to name a display
+/// after KWin appeared, and how often it reads it meanwhile.
+const ENV_WAIT: Duration = Duration::from_secs(5);
+const ENV_RETRY: Duration = Duration::from_millis(500);
 
 /// Both engines. The low-memory engine runs only `KWinCommand::KeepAbove` (R-152).
 pub fn spec() -> WorkerSpec {
@@ -127,9 +137,15 @@ pub(crate) fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
             mode: cfg.mode,
             counter: Arc::clone(&counter),
         };
+        let desktop = cfg.desktop.clone();
         async move {
-            let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
-            run(cx, io, commands, desktop.as_deref()).await
+            match desktop.source() {
+                DesktopSource::Process => {
+                    let current = std::env::var("XDG_CURRENT_DESKTOP").ok();
+                    run(cx, io, commands, current.as_deref()).await
+                }
+                DesktopSource::UserManager => run_service(cx, io, commands, desktop).await,
+            }
         }
     })
 }
@@ -169,7 +185,17 @@ async fn run(
         remove_stale(&cx, dir).await;
     }
     let mut files = CmdFiles::default();
-    let result = serve(&cx, &io, &conn, &path, &commands, &mut queue, &mut files).await;
+    let result = serve(
+        &cx,
+        &io,
+        &conn,
+        &path,
+        &commands,
+        &mut queue,
+        &mut files,
+        KWinGone::Wait,
+    )
+    .await;
     unload_on_exit(&cx, &conn).await;
     // One unlink each on the runtime tmpfs. They run inline because the blocking pool refuses
     // new jobs once the region is cancelled.
@@ -179,6 +205,223 @@ async fn run(
         Ok(()) => Outcome::Ok(()),
         Err(_) if cx.is_cancel_requested() => Outcome::Ok(()),
         Err(e) => failed(&cx, &io, e).await,
+    }
+}
+
+/// The engine service's bridge (ADR-018 "Commands that act on the host's desktop"). The
+/// service starts with the user manager, often before anyone logs in, so its own environment
+/// says nothing about the desktop. It watches KWin's name on the user bus instead: when KWin
+/// appears it reads the user manager's environment, which Plasma fills at login, records the
+/// session in `desktop` and runs the bridge; when KWin leaves it records that there is no
+/// session and waits for the next one.
+async fn run_service(
+    cx: Cx,
+    io: WorkerIo,
+    commands: Commands,
+    desktop: DesktopSession,
+) -> Outcome<(), WorkerError> {
+    let mut queue = match resume(&cx, &io).await {
+        Ok(queue) => queue,
+        Err(stop) => return stop,
+    };
+    let mut bus = UserBus { conn: None };
+    match session_cycles(&cx, &io, &desktop, &mut bus, &commands, &mut queue).await {
+        Ok(()) => Outcome::Ok(()),
+        Err(_) if cx.is_cancel_requested() => Outcome::Ok(()),
+        Err(e) => failed(&cx, &io, e).await,
+    }
+}
+
+/// The user bus side of the service's desktop session. The worker uses D-Bus; tests use a
+/// fake.
+trait SessionBus {
+    /// Returns once KWin owns its name. Commands queued meanwhile are dropped: they act on a
+    /// screen nobody is logged in to.
+    async fn wait_kwin(
+        &mut self,
+        cx: &Cx,
+        io: &WorkerIo,
+        queue: &mut Queue,
+    ) -> Result<(), WorkerError>;
+
+    /// The user manager's `Environment`, as `KEY=VALUE` lines.
+    async fn manager_env(&mut self, cx: &Cx) -> Result<Vec<String>, WorkerError>;
+
+    /// Runs the bridge until KWin leaves the bus.
+    async fn bridge(
+        &mut self,
+        cx: &Cx,
+        io: &WorkerIo,
+        commands: &Commands,
+        queue: &mut Queue,
+    ) -> Result<(), WorkerError>;
+}
+
+/// One desktop session after another until `cx` is cancelled (`Ok`) or the bus fails (`Err`).
+async fn session_cycles(
+    cx: &Cx,
+    io: &WorkerIo,
+    desktop: &DesktopSession,
+    bus: &mut impl SessionBus,
+    commands: &Commands,
+    queue: &mut Queue,
+) -> Result<(), WorkerError> {
+    loop {
+        desktop.set(None);
+        let empty = SourceUpdate::Windows(Box::new(snapshot(Vec::new(), Validity::Unsupported)));
+        if send(cx, io, empty).await.is_some() {
+            return closed(cx);
+        }
+        let state = health(SourceState::Unsupported, Some(NO_SESSION.into()));
+        if send(cx, io, state).await.is_some() {
+            return closed(cx);
+        }
+        bus.wait_kwin(cx, io, queue).await?;
+        if cx.is_cancel_requested() {
+            return Ok(());
+        }
+        let env = session_env(cx, bus).await?;
+        if cx.is_cancel_requested() {
+            return Ok(());
+        }
+        desktop.set(Some(env));
+        bus.bridge(cx, io, commands, queue).await?;
+        if cx.is_cancel_requested() {
+            return Ok(());
+        }
+    }
+}
+
+/// The session's variables from the user manager. Plasma may import `WAYLAND_DISPLAY` a
+/// moment after KWin takes its name, so a read that names no display is read again every
+/// `ENV_RETRY`, for at most `ENV_WAIT`; then the session starts with what it has.
+async fn session_env(cx: &Cx, bus: &mut impl SessionBus) -> Result<DesktopEnv, WorkerError> {
+    let start = cx.now();
+    loop {
+        let env = DesktopEnv::from_lines(&bus.manager_env(cx).await?);
+        let waited = Duration::from_nanos(cx.now().duration_since(start));
+        if env.has_display() || waited >= ENV_WAIT {
+            if !env.has_display() {
+                tracing::info!(target: "tasklens::engine", "desktop session has no display variable");
+            }
+            return Ok(env);
+        }
+        time::sleep(cx.now(), ENV_RETRY).await;
+        if cx.checkpoint().is_err() {
+            return Ok(env);
+        }
+    }
+}
+
+/// `SessionBus` on the user bus, which the user manager gives the service as its session bus.
+/// Each bridge run gets its own connection, so a new run never finds the last run's
+/// `WindowBridge` object still registered.
+struct UserBus {
+    conn: Option<DbusConn>,
+}
+
+impl UserBus {
+    async fn conn(&mut self, cx: &Cx) -> Result<&DbusConn, WorkerError> {
+        if self.conn.is_none() {
+            self.conn = Some(connect(cx, Bus::Session).await?);
+        }
+        Ok(self.conn.as_ref().expect("connected above"))
+    }
+}
+
+impl SessionBus for UserBus {
+    async fn wait_kwin(
+        &mut self,
+        cx: &Cx,
+        io: &WorkerIo,
+        queue: &mut Queue,
+    ) -> Result<(), WorkerError> {
+        let conn = self.conn(cx).await?;
+        // Subscribe before asking so no change is missed in between.
+        let bus = conn
+            .read(
+                cx,
+                zbus::Proxy::new(conn.raw(), DBUS_NAME, DBUS_PATH, DBUS_INTERFACE),
+            )
+            .await?;
+        let owner_signals = conn
+            .read(
+                cx,
+                bus.receive_signal_with_args("NameOwnerChanged", &[(0, KWIN_NAME)]),
+            )
+            .await?;
+        let present: bool = conn
+            .read(cx, bus.call("NameHasOwner", &(KWIN_NAME,)))
+            .await?;
+        drop(bus);
+        if present {
+            return Ok(());
+        }
+        let owner_events = owner_signals.filter_map(|msg| owner_event(&msg));
+        let control_events = control_changes(cx, io.control.clone());
+        let mut events: Boxed<Event> = owner_events.or(control_events).boxed();
+        loop {
+            queue.drop_all(&io.control.borrow_and_clone());
+            match conn.next_signal(cx, &mut events, READ_TIMEOUT).await {
+                Ok(Some(Event::Owner(Some(_)))) => return Ok(()),
+                Ok(_) => {}
+                Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    async fn manager_env(&mut self, cx: &Cx) -> Result<Vec<String>, WorkerError> {
+        let conn = self.conn(cx).await?;
+        let call = conn.raw().call_method(
+            Some(SYSTEMD_NAME),
+            SYSTEMD_PATH,
+            Some(PROPERTIES_INTERFACE),
+            "Get",
+            &(SYSTEMD_MANAGER, "Environment"),
+        );
+        let reply = conn.read(cx, call).await?;
+        let value: zbus::zvariant::OwnedValue = reply
+            .body()
+            .deserialize()
+            .map_err(|e| WorkerError::Dbus(format!("Environment: {e}").into()))?;
+        Vec::<String>::try_from(value)
+            .map_err(|e| WorkerError::Dbus(format!("Environment: {e}").into()))
+    }
+
+    async fn bridge(
+        &mut self,
+        cx: &Cx,
+        io: &WorkerIo,
+        commands: &Commands,
+        queue: &mut Queue,
+    ) -> Result<(), WorkerError> {
+        let conn = match self.conn.take() {
+            Some(conn) => conn,
+            None => connect(cx, Bus::Session).await?,
+        };
+        let Some(path) = script_path() else {
+            return Err(WorkerError::Other("XDG_RUNTIME_DIR is not set".into()));
+        };
+        if let Some(dir) = path.parent() {
+            remove_stale(cx, dir).await;
+        }
+        let mut files = CmdFiles::default();
+        let result = serve(
+            cx,
+            io,
+            &conn,
+            &path,
+            commands,
+            queue,
+            &mut files,
+            KWinGone::Return,
+        )
+        .await;
+        unload_on_exit(cx, &conn).await;
+        let _ = std::fs::remove_file(&path);
+        drop(files);
+        result
     }
 }
 
@@ -249,7 +492,18 @@ enum Event {
     Picked { uuid: String, pid: Option<u32> },
 }
 
-/// Serves the bridge until `cx` is cancelled (`Ok`) or the bus fails (`Err`).
+/// What `serve` does when KWin leaves the bus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KWinGone {
+    /// Publish an empty list and wait for KWin to come back (the window's engine).
+    Wait,
+    /// Return `Ok`: the desktop session ended (the engine service).
+    Return,
+}
+
+/// Serves the bridge until `cx` is cancelled (`Ok`), KWin leaves under `KWinGone::Return`
+/// (`Ok`) or the bus fails (`Err`).
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     cx: &Cx,
     io: &WorkerIo,
@@ -258,6 +512,7 @@ async fn serve(
     commands: &Commands,
     queue: &mut Queue,
     files: &mut CmdFiles,
+    gone: KWinGone,
 ) -> Result<(), WorkerError> {
     let raw = conn.raw();
     let unique = raw
@@ -341,6 +596,8 @@ async fn serve(
                     // KWin restarted: the new instance has no script loaded.
                     current = None;
                     load_script(cx, conn, path).await?;
+                } else if gone == KWinGone::Return {
+                    return Ok(());
                 } else {
                     current = Some(Arc::from([]));
                     shown = Some((Arc::from([]), Validity::Unsupported));
@@ -2550,5 +2807,141 @@ mod tests {
             assert!(picker.pending.is_none());
             assert!(host.queries.lock().expect("lock").is_empty());
         });
+    }
+
+    /// What the fake user bus does next.
+    #[derive(Debug)]
+    enum BusStep {
+        KWinUp,
+        KWinGone,
+    }
+
+    /// `SessionBus` driven by the test: KWin comes and goes on `steps`, each bridge run is
+    /// counted.
+    struct FakeBus {
+        steps: async_channel::Receiver<BusStep>,
+        env: Vec<String>,
+        bridges: Arc<AtomicU64>,
+    }
+
+    impl SessionBus for FakeBus {
+        async fn wait_kwin(
+            &mut self,
+            _cx: &Cx,
+            _io: &WorkerIo,
+            _queue: &mut Queue,
+        ) -> Result<(), WorkerError> {
+            loop {
+                match self.steps.recv().await {
+                    Ok(BusStep::KWinUp) => return Ok(()),
+                    Ok(BusStep::KWinGone) => {}
+                    Err(_) => return Err(WorkerError::Closed),
+                }
+            }
+        }
+
+        async fn manager_env(&mut self, _cx: &Cx) -> Result<Vec<String>, WorkerError> {
+            Ok(self.env.clone())
+        }
+
+        async fn bridge(
+            &mut self,
+            _cx: &Cx,
+            _io: &WorkerIo,
+            _commands: &Commands,
+            _queue: &mut Queue,
+        ) -> Result<(), WorkerError> {
+            self.bridges.fetch_add(1, Ordering::Relaxed);
+            loop {
+                match self.steps.recv().await {
+                    Ok(BusStep::KWinGone) => return Ok(()),
+                    Ok(BusStep::KWinUp) => {}
+                    Err(_) => return Err(WorkerError::Closed),
+                }
+            }
+        }
+    }
+
+    /// The health states in `rx`, in order.
+    fn health_states(rx: &mut mpsc::Receiver<EngineMsg>) -> Vec<(SourceState, Option<String>)> {
+        let mut got = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let EngineMsg::Source(SourceUpdate::Health {
+                state, last_error, ..
+            }) = msg
+            {
+                got.push((state, last_error.as_deref().map(str::to_owned)));
+            }
+        }
+        got
+    }
+
+    /// q4x76.12, ADR-018: the engine service has no desktop session until KWin appears; then
+    /// it reads the user manager's environment and starts the bridge. When KWin leaves the
+    /// session ends, and the next KWin starts the bridge again.
+    #[test]
+    fn service_bridge_follows_the_desktop_session() {
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let (io, mut rx) = worker_io();
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        let (steps_tx, steps) = async_channel::unbounded();
+        let bridges = Arc::new(AtomicU64::new(0));
+        let mut bus = FakeBus {
+            steps,
+            env: vec![
+                "WAYLAND_DISPLAY=wayland-1".to_owned(),
+                "XDG_CURRENT_DESKTOP=KDE".to_owned(),
+            ],
+            bridges: Arc::clone(&bridges),
+        };
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let task_desktop = desktop.clone();
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut queue = Queue {
+                    last_seq: 0,
+                    progress: Arc::default(),
+                };
+                let commands = commands(EngineMode::Full);
+                let _ =
+                    session_cycles(&cx, &io, &task_desktop, &mut bus, &commands, &mut queue).await;
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        let no_session = (SourceState::Unsupported, Some(NO_SESSION.to_owned()));
+        assert!(!desktop.is_present(), "nobody logged in yet");
+        assert_eq!(bridges.load(Ordering::Relaxed), 0);
+        assert_eq!(health_states(&mut rx), [no_session.clone()]);
+
+        steps_tx.try_send(BusStep::KWinUp).expect("send");
+        lab.run_until_idle();
+        assert!(desktop.is_present(), "KWin appeared");
+        assert_eq!(desktop.var("WAYLAND_DISPLAY").as_deref(), Some("wayland-1"));
+        assert_eq!(bridges.load(Ordering::Relaxed), 1, "the bridge started");
+
+        steps_tx.try_send(BusStep::KWinGone).expect("send");
+        lab.run_until_idle();
+        assert!(!desktop.is_present(), "the session ended with KWin");
+        assert_eq!(health_states(&mut rx), [no_session]);
+
+        steps_tx.try_send(BusStep::KWinUp).expect("send");
+        lab.run_until_idle();
+        assert!(desktop.is_present());
+        assert_eq!(
+            bridges.load(Ordering::Relaxed),
+            2,
+            "the bridge started again"
+        );
+
+        // A closed channel ends the fake bridge, so the task ends.
+        drop(steps_tx);
+        handle.abort();
+        lab.run_until_idle();
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }

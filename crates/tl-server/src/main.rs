@@ -28,7 +28,10 @@ use std::time::{Duration, Instant, SystemTime};
 use host_settings::{HostSettingsFile, Origin, SharedHostSettings};
 use sd_notify::NotifyState;
 use tl_engine::client_session::{ClientSessionId, OpenError, SESSIONS_MAX};
-use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode, SessionPort};
+use tl_engine::desktop::DesktopSource;
+use tl_engine::{
+    Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode, SessionPeer, SessionPort,
+};
 use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
@@ -130,8 +133,11 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     let socket = socket_dir.join(server::SOCKET_NAME);
     let listener = server::bind(&socket, uid).map_err(|e| e.to_string())?;
 
+    // The service starts before anyone logs in: the desktop session comes and goes with KWin,
+    // and its variables come from the user manager (ADR-018).
     let mut config = EngineConfig::new(EngineMode::Full, state_dir.clone())
-        .with_history_dir(state_dir.join("history"));
+        .with_history_dir(state_dir.join("history"))
+        .with_desktop(DesktopSource::UserManager);
     if Path::new(HELPER_PATH).exists() {
         config = config.with_helper_path(HELPER_PATH.into());
     }
@@ -378,8 +384,15 @@ fn serve(
     // frees by then.
     let mut reader = server::DeadlineStream::new(&stream, deadline);
     let mut writer = server::DeadlineStream::new(&stream, deadline);
-    let welcomed = server::handshake(&mut reader, &mut writer, &frames, |_| {
-        match engine.open_session_until(session_id(next_id), deadline) {
+    let welcomed = server::handshake(&mut reader, &mut writer, &frames, |hello| {
+        // The window's pid and app id tell its windows apart from others; a bridge session's
+        // window runs on another host (ADR-018).
+        let peer = SessionPeer {
+            pid: hello.pid,
+            app_id: Arc::clone(&hello.app_id),
+            bridge: hello.bridge,
+        };
+        match engine.open_session_from(session_id(next_id), Some(peer), deadline) {
             Ok(port) => Ok((identity.clone(), port)),
             Err(OpenError::Full) => Err(server::refused(
                 RefuseReason::TooManySessions,
@@ -407,6 +420,7 @@ fn serve(
         target: "tasklens::engine",
         session,
         pid = hello.pid,
+        app_id = %hello.app_id,
         bridge = hello.bridge,
         "client connected",
     );

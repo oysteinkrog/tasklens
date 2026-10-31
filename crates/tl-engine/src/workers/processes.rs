@@ -57,6 +57,7 @@ use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::{ProcessField, Validity};
 
 use crate::config::{EngineConfig, EngineMode};
+use crate::desktop::DesktopSource;
 use crate::helper::{HelperCallError, HelperHandle, HelperReadError};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
@@ -147,6 +148,8 @@ pub struct ProcessesSource {
     out: SweepOutput,
     ctx: SweepCtx,
     protect: ProtectInputs,
+    /// The `WAYLAND_DISPLAY` `protect.compositor_pid` was read for, under the engine service.
+    compositor_display: Option<String>,
     cfg: Arc<EngineConfig>,
     /// Set by `period`: the optional reads run only while something shows them.
     wants: Cell<SweepWants>,
@@ -214,7 +217,11 @@ impl ProcessesSource {
                     .get()
                     .unsigned_abs()
             ],
-            compositor_pid: host_compositor_pid(),
+            // The engine service has no session until KWin appears (`refresh_protect`).
+            compositor_pid: match cfg.desktop.source() {
+                DesktopSource::Process => host_compositor_pid(),
+                DesktopSource::UserManager => None,
+            },
             session_bus_pid: None,
         };
         Ok(Self {
@@ -222,6 +229,7 @@ impl ProcessesSource {
             out: SweepOutput::default(),
             ctx,
             protect,
+            compositor_display: None,
             cfg,
             wants: Cell::new(SweepWants::default()),
             history_only: Cell::new(false),
@@ -305,6 +313,7 @@ impl Source for ProcessesSource {
     }
 
     fn sample(mut self) -> (Self, SourceUpdate) {
+        self.refresh_protect();
         self.ctx.online_cpus = self.read_online_cpus();
         let wants = self.wants.get();
         self.ctx.want_fd_count = wants.fd_count;
@@ -571,6 +580,27 @@ fn real_clock() -> (TimeNs, u64) {
 fn absolute(value: Option<OsString>) -> Option<PathBuf> {
     let path = PathBuf::from(value?);
     path.is_absolute().then_some(path)
+}
+
+impl ProcessesSource {
+    /// "Self" is the engine's pid plus the pid of every window connected from this host
+    /// (leader decision on q4x76.12), so the sweep marks the windows `IS_SELF` and ending them
+    /// is refused. Under the engine service the compositor follows the desktop session.
+    fn refresh_protect(&mut self) {
+        let desktop = &self.cfg.desktop;
+        self.protect.self_pids.truncate(1);
+        self.protect.self_pids.extend(desktop.window_pids());
+        if desktop.source() == DesktopSource::UserManager {
+            let display = desktop.var("WAYLAND_DISPLAY");
+            if display != self.compositor_display {
+                self.protect.compositor_pid = display.as_deref().and_then(|display| {
+                    let runtime = absolute(std::env::var_os("XDG_RUNTIME_DIR"))?;
+                    wayland_compositor_pid(&runtime, std::ffi::OsStr::new(display))
+                });
+                self.compositor_display = display;
+            }
+        }
+    }
 }
 
 /// The Wayland compositor of this session, for the protected set.
@@ -1409,6 +1439,68 @@ mod tests {
                 std::fs::copy(entry.path(), &to).expect("copy file");
             }
         }
+    }
+
+    /// q4x76.12: under the engine service a window connected from this host is "self" while
+    /// its connection lasts, so ending it is refused (`IS_SELF`, PROC-059).
+    #[test]
+    fn connected_windows_are_self() {
+        use tl_model::process::ProcFlags;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/process-edge");
+        copy_tree(&fixture, base);
+        std::fs::create_dir_all(base.join("proc/sys/kernel/random")).expect("create random dir");
+        std::fs::write(
+            base.join("proc/sys/kernel/random/boot_id"),
+            "8a8a3a3e-7d55-4b6e-9a43-1f0b0c3a2d11\n",
+        )
+        .expect("write boot_id");
+        let cfg = Arc::new(
+            EngineConfig::new(EngineMode::Full, base.join("state"))
+                .with_sys_root(SysRoot::at(base))
+                .with_desktop(DesktopSource::UserManager),
+        );
+        let desktop = cfg.desktop.clone();
+        let paths = AppPaths {
+            home: base.join("home"),
+            xdg_data_home: None,
+            xdg_data_dirs: None,
+            xdg_config_home: None,
+            icon_cache: base.join("cache/icons.toml"),
+        };
+        let users = PasswdUserNames::load(&base.join("etc/passwd"));
+        let src = ProcessesSource::with_parts(cfg, &paths, Box::new(users))
+            .expect("fixture source opens");
+        let demand = Demand {
+            process_table: true,
+            ..Demand::default()
+        };
+        let is_self = |src: ProcessesSource| {
+            assert!(src.period(&demand, &settings(1000)).is_some());
+            match src.sample() {
+                (src, SourceUpdate::Processes(sweep)) => {
+                    let flags = sweep
+                        .records
+                        .iter()
+                        .find(|r| r.key.pid == 4201)
+                        .expect("4201 swept")
+                        .flags;
+                    (src, flags.contains(ProcFlags::IS_SELF))
+                }
+                _ => panic!("sample gives a sweep"),
+            }
+        };
+        let (src, before) = is_self(src);
+        assert!(!before);
+        let window = desktop.add_window(4201);
+        let (src, connected) = is_self(src);
+        assert!(connected, "a connected window is self");
+        drop(window);
+        let (_src, after) = is_self(src);
+        assert!(!after, "not after its connection ended");
     }
 
     /// `sample` reads the shared index for the demand's detail keys: the first sweep queues the

@@ -73,6 +73,18 @@ pub fn targetless(kind: &ActionKind) -> bool {
     kind.is_targetless()
 }
 
+/// True for the kinds that act on the host's screen: they need its desktop session (ADR-018).
+/// The gate refuses them with `NoDesktopSession` while there is none.
+pub fn needs_desktop(kind: &ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::OpenUri(_)
+            | ActionKind::ShowInFileManager { .. }
+            | ActionKind::Launch(_)
+            | ActionKind::StartupRunNow
+    )
+}
+
 /// Admission rules in ADR-006 order. A request whose every target is rejected still runs, so the
 /// UI gets `Started`, the per-target `Rejected` events and a `Rejected` summary.
 pub fn admit(
@@ -310,6 +322,9 @@ pub trait Openers: Send + Sync + 'static {
 /// The production `Openers`: E14's opener and launcher on the user manager's session connection.
 pub struct RealOpeners {
     pub session: ManagerConnSlot,
+    /// The host's desktop session. Under the engine service, spawned programs get its
+    /// variables (ADR-018).
+    pub desktop: crate::desktop::DesktopSession,
 }
 
 impl Openers for RealOpeners {
@@ -320,7 +335,10 @@ impl Openers for RealOpeners {
     ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
         let cx = cx.clone();
         let target = target.to_owned();
-        Box::pin(async move { crate::opener::open_uri(&cx, self.session.get(), &target).await })
+        let env = self.desktop.overrides();
+        Box::pin(
+            async move { crate::opener::open_uri(&cx, self.session.get(), env, &target).await },
+        )
     }
 
     fn show_in_file_manager(
@@ -331,8 +349,10 @@ impl Openers for RealOpeners {
     ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
         let cx = cx.clone();
         let path = path.to_owned();
+        let env = self.desktop.overrides();
         Box::pin(async move {
-            crate::opener::show_in_file_manager(&cx, self.session.get(), &path, properties).await
+            crate::opener::show_in_file_manager(&cx, self.session.get(), env, &path, properties)
+                .await
         })
     }
 
@@ -343,7 +363,10 @@ impl Openers for RealOpeners {
     ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>> {
         let cx = cx.clone();
         let spec = spec.clone();
-        Box::pin(async move { crate::launcher::launch(&cx, self.session.get(), &spec).await })
+        let desktop = self.desktop.clone();
+        Box::pin(
+            async move { crate::launcher::launch(&cx, self.session.get(), &desktop, &spec).await },
+        )
     }
 }
 
@@ -747,7 +770,15 @@ impl ActionGate for Gate {
         view: &AdmissionView<'_>,
         route: ActionRoute,
     ) {
-        let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
+        let admission = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
+            Admission::Run { .. }
+                if needs_desktop(&req.kind) && !self.ctx.config.desktop.is_present() =>
+            {
+                Admission::Reject(RejectReason::NoDesktopSession)
+            }
+            admission => admission,
+        };
+        let per_target = match admission {
             Admission::Reject(reason) => {
                 let state = ActionState::Rejected(reason);
                 let end = action_end(&state);
@@ -926,6 +957,7 @@ pub fn gate_factory(hook: HookCtx) -> Box<dyn ActionGate> {
 pub fn gate_with_ops(hook: HookCtx, ops: Arc<dyn ActionOps>) -> Box<dyn ActionGate> {
     let openers: Arc<dyn Openers> = Arc::new(RealOpeners {
         session: hook.shared.systemd_user.clone(),
+        desktop: hook.config.desktop.clone(),
     });
     Box::new(Gate::new(Arc::new(ActionCtx {
         events: hook.events_tx,
@@ -1746,6 +1778,22 @@ mod tests {
         async_channel::Receiver<ActionEvent>,
         mpsc::Receiver<EngineMsg>,
     ) {
+        let config = EngineConfig::new(
+            crate::config::EngineMode::Full,
+            std::path::PathBuf::from("/nonexistent"),
+        );
+        ctx_with_config(ops, config)
+    }
+
+    /// `ctx_with_ops` with `config`.
+    fn ctx_with_config(
+        ops: Arc<dyn ActionOps>,
+        config: EngineConfig,
+    ) -> (
+        Arc<ActionCtx>,
+        async_channel::Receiver<ActionEvent>,
+        mpsc::Receiver<EngineMsg>,
+    ) {
         let (events_tx, events) = async_channel::bounded(256);
         let (msgs_tx, msgs) = mpsc::channel(256);
         let ctx = Arc::new(ActionCtx {
@@ -1754,10 +1802,7 @@ mod tests {
             ops,
             boot_id: BOOT,
             uid: 1000,
-            config: Arc::new(EngineConfig::new(
-                crate::config::EngineMode::Full,
-                std::path::PathBuf::from("/nonexistent"),
-            )),
+            config: Arc::new(config),
             systemd_system: ManagerConnSlot::new(),
             systemd_user: ManagerConnSlot::new(),
             openers: None,
@@ -1964,6 +2009,92 @@ mod tests {
 
     /// ADR-018: two sessions send action id 1. Each run's events carry id 1 and go only to its
     /// own route; `ActionFinished` and `finished` use the engine ids.
+    /// q4x76.12, ADR-018: while the host has no desktop session, the kinds that act on its
+    /// screen are refused with `NoDesktopSession` and nothing runs. Once the session is there
+    /// they run.
+    #[test]
+    fn desktop_commands_need_a_desktop_session() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+
+        use crate::desktop::{DesktopEnv, DesktopSource};
+
+        let config = EngineConfig::new(
+            crate::config::EngineMode::Full,
+            std::path::PathBuf::from("/nonexistent"),
+        )
+        .with_desktop(DesktopSource::UserManager);
+        let desktop = config.desktop.clone();
+        let (ctx, _own, mut msgs) = ctx_with_config(Arc::new(NoOps), config);
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (tx, rx) = async_channel::bounded(16);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut gate = Gate::new(ctx);
+                let f = Fixture::new();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &f.live,
+                    exited_within_linger: &f.exited,
+                };
+                let route = |id| ActionRoute {
+                    id: ActionId(id),
+                    events: tx.clone(),
+                    requests: None,
+                };
+                let desktop_kinds = [
+                    ActionKind::OpenUri(Arc::from("https://example.org")),
+                    ActionKind::ShowInFileManager {
+                        path: Arc::from("/home/u/a.txt"),
+                        properties: false,
+                    },
+                    ActionKind::Launch(LaunchSpec {
+                        what: tl_model::actions::LaunchWhat::Command(Arc::from("kate")),
+                        cwd: None,
+                        as_admin: false,
+                    }),
+                ];
+                for (i, kind) in desktop_kinds.into_iter().enumerate() {
+                    gate.submit_routed(&cx, request(kind, vec![]), &view, route(10 + i as u64));
+                }
+                assert_eq!(gate.in_flight.len(), 0, "nothing runs without a session");
+                desktop.set(Some(DesktopEnv::from_lines(&["WAYLAND_DISPLAY=wayland-1"])));
+                let open = request(
+                    ActionKind::OpenUri(Arc::from("https://example.org")),
+                    vec![],
+                );
+                gate.submit_routed(&cx, open, &view, route(20));
+                assert_eq!(gate.in_flight.len(), 1, "admitted with a session");
+                match msgs.recv(&cx).await {
+                    Ok(EngineMsg::ActionFinished { id }) => assert_eq!(id, ActionId(20)),
+                    _ => panic!("expected ActionFinished"),
+                }
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        drop(handle);
+
+        let states: Vec<ActionState> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| e.state)
+            .collect();
+        let refused = ActionState::Rejected(RejectReason::NoDesktopSession);
+        assert_eq!(
+            states,
+            [
+                refused.clone(),
+                refused.clone(),
+                refused,
+                ActionState::Started,
+                // No openers in this ctx.
+                ActionState::Rejected(RejectReason::Unsupported),
+            ]
+        );
+    }
+
     #[test]
     fn routed_actions_report_to_their_own_route() {
         use asupersync::types::Budget;

@@ -15,7 +15,7 @@ use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeHandle};
 use tl_collect::sysroot::{SysRoot, read_trimmed};
 use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, CommandError};
+use tl_model::command::{Command, CommandError, KWinCommand};
 use tl_model::demand::Demand;
 use tl_model::history::RecordSink;
 use tl_model::journal::{JournalError, JournalEvent, JournalHandle, JournalQuery};
@@ -32,6 +32,7 @@ use crate::client_session::{
 };
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
+use crate::desktop::{APP_ID, DesktopSession, WindowGuard};
 use crate::helper::LinkEnv;
 use crate::reducer::{ActionGate, Publisher};
 use crate::session::{RootEndpoints, engine_root};
@@ -289,6 +290,8 @@ struct Inner {
     host: Arc<ArcSwap<HostSettings>>,
     /// Held while a change is checked against the current revision and stored.
     host_write: Mutex<()>,
+    /// The host's desktop session; ports of local windows add their pid to it.
+    desktop: DesktopSession,
 }
 
 /// The UI-side channel ends that `shutdown` drops first.
@@ -315,6 +318,7 @@ impl EngineHandle {
         journal: Option<JournalSpawner>,
         trace: Arc<ShutdownTrace>,
         host: Arc<ArcSwap<HostSettings>>,
+        desktop: DesktopSession,
     ) -> Self {
         let last_demand = Mutex::new(demand_tx.borrow().clone());
         Self {
@@ -337,6 +341,7 @@ impl EngineHandle {
                 ports: Mutex::new(Vec::new()),
                 host,
                 host_write: Mutex::new(()),
+                desktop,
             }),
         }
     }
@@ -370,10 +375,22 @@ impl EngineHandle {
         id: ClientSessionId,
         deadline: Instant,
     ) -> Result<SessionPort, OpenError> {
+        self.open_session_from(id, None, deadline)
+    }
+
+    /// `open_session_until` for a session whose `Hello` named `peer` (ADR-018). A window on
+    /// this host (not a bridge) counts as "self" while its port lives, and may send the KWin
+    /// commands for its own windows. A session with no peer may not send those.
+    pub fn open_session_from(
+        &self,
+        id: ClientSessionId,
+        peer: Option<SessionPeer>,
+        deadline: Instant,
+    ) -> Result<SessionPort, OpenError> {
         if Instant::now() >= deadline {
             return Err(OpenError::Busy);
         }
-        let port = self.send_open(id)?;
+        let port = self.send_open(id, peer)?;
         let deadline = deadline.min(Instant::now() + OPEN_WAIT);
         let stopped = || self.inner.stopped.load(Ordering::Acquire);
         match port.state.wait_admission(deadline, OPEN_POLL, stopped) {
@@ -388,7 +405,11 @@ impl EngineHandle {
 
     /// The checks of `open_session` and its `OpenPort` message. The port it returns is not
     /// admitted yet.
-    fn send_open(&self, id: ClientSessionId) -> Result<SessionPort, OpenError> {
+    fn send_open(
+        &self,
+        id: ClientSessionId,
+        peer: Option<SessionPeer>,
+    ) -> Result<SessionPort, OpenError> {
         if id == ClientSessionId::LOCAL {
             return Err(OpenError::Duplicate);
         }
@@ -442,6 +463,10 @@ impl EngineHandle {
                 }
             })?;
         ports.push((id, Arc::clone(&state)));
+        let window = peer
+            .as_ref()
+            .filter(|p| !p.bridge)
+            .map(|p| self.inner.desktop.add_window(p.pid));
         Ok(SessionPort {
             id,
             latest,
@@ -450,6 +475,8 @@ impl EngineHandle {
             requests_rx,
             state,
             handle: self.clone(),
+            peer,
+            _window: window,
         })
     }
 
@@ -586,6 +613,36 @@ pub struct SessionPort {
     requests_rx: async_channel::Receiver<RequestEvent>,
     state: Arc<PortState>,
     handle: EngineHandle,
+    /// Who opened the session, from its `Hello`.
+    peer: Option<SessionPeer>,
+    /// A window on this host is "self" while its port lives.
+    _window: Option<WindowGuard>,
+}
+
+/// Who opened a session, from its `Hello` (ADR-018).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionPeer {
+    /// The window's process id, on the host the window runs on.
+    pub pid: u32,
+    /// The window's app id, which its windows carry as their `resourceClass`.
+    pub app_id: Arc<str>,
+    /// The session comes through `tasklens bridge`, so the window runs on another host.
+    pub bridge: bool,
+}
+
+/// True when `peer`'s session may send `cmd` (leader decision on q4x76.12). Keep above and frame
+/// geometry name a tasklens window by its pid: only a window on this host may send them, for its
+/// own pid and app id. A bridge session's pid names a process on another host. Other KWin
+/// commands act on any window and pass.
+pub fn own_window_allowed(peer: Option<&SessionPeer>, cmd: &KWinCommand) -> bool {
+    let pid = match cmd {
+        KWinCommand::KeepAbove { pid, .. } | KWinCommand::SetFrameGeometry { pid, .. } => *pid,
+        KWinCommand::Activate { .. }
+        | KWinCommand::Close { .. }
+        | KWinCommand::Pick { .. }
+        | KWinCommand::CancelPick { .. } => return true,
+    };
+    peer.is_some_and(|p| !p.bridge && p.pid == pid && *p.app_id == *APP_ID)
 }
 
 impl std::fmt::Debug for SessionPort {
@@ -631,9 +688,17 @@ impl SessionPort {
 
     /// A command from this session (`ClientMsg::Command`). Never blocks: a full queue is
     /// `Err(Busy)`, a stopped engine or an ended session `Err(EngineStopped)`.
+    /// A KWin command `own_window_allowed` refuses is dropped, as the KWin worker drops a
+    /// command for a window it cannot find (R-170).
     pub fn send(&self, cmd: Command) -> Result<(), CommandError> {
         if self.is_ended() {
             return Err(CommandError::EngineStopped);
+        }
+        if let Command::KWin(kwin) = &cmd
+            && !own_window_allowed(self.peer.as_ref(), kwin)
+        {
+            tracing::debug!(target: "tasklens::engine", id = self.id.0, "kwin command dropped: not this session's window");
+            return Ok(());
         }
         let links = self.handle.links();
         let Some(links) = &*links else {
@@ -692,6 +757,7 @@ impl Engine {
         let rt = crate::runtime::build_traced_runtime(Arc::clone(&trace))
             .map_err(|e| EngineError::Runtime(e.to_string().into()))?;
         let boot_id = read_boot_id(&config.sys_root);
+        let desktop = config.desktop.clone();
 
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
@@ -742,6 +808,7 @@ impl Engine {
             journal,
             trace,
             host_settings,
+            desktop,
         );
         *handle
             .inner
@@ -968,6 +1035,7 @@ mod tests {
             journal,
             Arc::default(),
             Arc::default(),
+            DesktopSession::new(crate::desktop::DesktopSource::Process),
         );
         Rig {
             handle,
@@ -1466,5 +1534,101 @@ mod tests {
             read_boot_id(&SysRoot::at(Path::new("/nonexistent"))),
             BootId(0)
         );
+    }
+
+    fn peer(pid: u32, bridge: bool) -> SessionPeer {
+        SessionPeer {
+            pid,
+            app_id: Arc::from(APP_ID),
+            bridge,
+        }
+    }
+
+    /// q4x76.12: keep above and frame geometry only from a window on this host, for its own
+    /// pid and app id. Other KWin commands pass from any session.
+    #[test]
+    fn own_window_commands_only_from_the_window_itself() {
+        use tl_model::snapshot::FrameGeometry;
+
+        let keep = |pid| KWinCommand::KeepAbove {
+            pid,
+            caption: None,
+            on: true,
+        };
+        let place = |pid| KWinCommand::SetFrameGeometry {
+            pid,
+            caption: Arc::from("tasklens Graph 1"),
+            geometry: FrameGeometry::default(),
+        };
+        let local = peer(4000, false);
+        assert!(own_window_allowed(Some(&local), &keep(4000)));
+        assert!(own_window_allowed(Some(&local), &place(4000)));
+        assert!(
+            !own_window_allowed(Some(&local), &keep(4001)),
+            "another pid"
+        );
+        assert!(
+            !own_window_allowed(Some(&peer(4000, true)), &keep(4000)),
+            "a bridge session"
+        );
+        assert!(!own_window_allowed(None, &keep(4000)), "no Hello peer");
+        let other_app = SessionPeer {
+            app_id: Arc::from("org.example.Other"),
+            ..local.clone()
+        };
+        assert!(
+            !own_window_allowed(Some(&other_app), &keep(4000)),
+            "another app id"
+        );
+        let activate = KWinCommand::Activate {
+            internal_id: Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}"),
+        };
+        assert!(own_window_allowed(Some(&peer(4000, true)), &activate));
+        assert!(own_window_allowed(None, &KWinCommand::Pick { seq: 1 }));
+    }
+
+    /// q4x76.12: a refused own-window command is dropped and never reaches the reducer.
+    #[test]
+    fn refused_own_window_command_is_not_queued() {
+        let mut rig = rig(None);
+        let port = rig
+            .handle
+            .send_open(ClientSessionId(1), Some(peer(4000, true)))
+            .expect("open sent");
+        assert!(matches!(
+            rig.msgs_rx.try_recv(),
+            Ok(EngineMsg::Client(ClientMsg::OpenPort { .. }))
+        ));
+        let keep = Command::KWin(KWinCommand::KeepAbove {
+            pid: 4000,
+            caption: None,
+            on: true,
+        });
+        assert_eq!(port.send(keep), Ok(()));
+        assert!(rig.msgs_rx.try_recv().is_err(), "nothing queued");
+    }
+
+    /// q4x76.12: a window on this host is "self" while its port lives; a bridge session's pid
+    /// names a process on another host and is never added.
+    #[test]
+    fn local_window_pids_follow_their_ports() {
+        let rig = rig(None);
+        let desktop = rig.handle.inner.desktop.clone();
+        let local = rig
+            .handle
+            .send_open(ClientSessionId(1), Some(peer(4000, false)))
+            .expect("open sent");
+        let remote = rig
+            .handle
+            .send_open(ClientSessionId(2), Some(peer(5000, true)))
+            .expect("open sent");
+        let unknown = rig
+            .handle
+            .send_open(ClientSessionId(3), None)
+            .expect("open sent");
+        assert_eq!(desktop.window_pids(), [4000]);
+        drop(local);
+        assert!(desktop.window_pids().is_empty());
+        drop((remote, unknown));
     }
 }

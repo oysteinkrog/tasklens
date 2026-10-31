@@ -1041,6 +1041,7 @@ pub struct ActionWords {
     reject_not_owner: SharedString,
     reject_unsupported: SharedString,
     reject_running: SharedString,
+    reject_no_desktop: SharedString,
     target_pid: Template,
     target_tid: Template,
     target_socket: Template,
@@ -1072,6 +1073,7 @@ impl ActionWords {
             reject_not_owner: t("fnd-action-reject-not-owner"),
             reject_unsupported: t("fnd-action-reject-unsupported"),
             reject_running: t("fnd-action-reject-already-running"),
+            reject_no_desktop: t("fnd-action-reject-no-desktop-session"),
             target_pid: tmpl("fnd-action-target-pid", &["pid"]),
             target_tid: tmpl("fnd-action-target-tid", &["tid"]),
             target_socket: tmpl("fnd-action-target-socket", &["local", "remote"]),
@@ -1109,6 +1111,7 @@ impl ActionWords {
             RejectReason::Protected => self.reject_protected.clone(),
             RejectReason::NotOwner => self.reject_not_owner.clone(),
             RejectReason::Unsupported => self.reject_unsupported.clone(),
+            RejectReason::NoDesktopSession => self.reject_no_desktop.clone(),
             RejectReason::AlreadyRunning => {
                 return (ToastKind::Info, self.reject_running.clone());
             }

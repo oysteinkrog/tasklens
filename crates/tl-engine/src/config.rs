@@ -10,6 +10,8 @@ use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_collect::pkg::{PackageIndex, Pacman, PkgBackend};
 
+use crate::desktop::{DesktopSession, DesktopSource};
+
 /// Which worker set the engine runs. Fixed at start (ADR-004).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EngineMode {
@@ -75,6 +77,9 @@ pub struct EngineConfig {
     /// The backend of the package index the `Processes` and `ProcessDetail` workers share.
     /// Production uses pacman; tests inject a fake.
     pub pkg_backend: PkgSource,
+    /// The host's desktop session (ADR-018). `DesktopSource::Process` from `new`; the engine
+    /// service sets `UserManager`.
+    pub desktop: DesktopSession,
 }
 
 impl EngineConfig {
@@ -88,6 +93,7 @@ impl EngineConfig {
             helper_path: None,
             app_paths: None,
             pkg_backend: PkgSource::Pacman,
+            desktop: DesktopSession::new(DesktopSource::Process),
         }
     }
 
@@ -113,6 +119,12 @@ impl EngineConfig {
 
     pub fn with_pkg_backend(mut self, backend: PkgSource) -> Self {
         self.pkg_backend = backend;
+        self
+    }
+
+    /// The desktop session comes from `source` (ADR-018).
+    pub fn with_desktop(mut self, source: DesktopSource) -> Self {
+        self.desktop = DesktopSession::new(source);
         self
     }
 }
