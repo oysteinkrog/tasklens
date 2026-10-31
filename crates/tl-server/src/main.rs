@@ -45,9 +45,10 @@ const READY_WAIT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(50);
 /// How often a connection checks whether the engine ended its session.
 const SESSION_POLL: Duration = Duration::from_secs(1);
-/// Connections in their handshake at once. Each waits at most `server::HELLO_TIMEOUT` for its
-/// `Hello`. A connection beyond this is closed at once, before a thread starts for it; with the
-/// 8 sessions that bounds the connection threads to 12.
+/// Connections in their handshake at once. Each has `server::HELLO_TIMEOUT` from accept for its
+/// whole handshake, then it is closed and its place frees. A connection beyond this is closed at
+/// once, before a thread starts for it; with the 8 sessions that bounds the connection threads
+/// to 12.
 const HANDSHAKES_MAX: usize = 4;
 /// The privileged helper, as in `tasklens` (ADR-006).
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
@@ -232,6 +233,7 @@ fn spawn_accept(
             loop {
                 match server::accept_peer(&listener, uid) {
                     Ok(stream) => {
+                        let deadline = Instant::now() + server::HELLO_TIMEOUT;
                         let Some(slot) = HandshakeSlot::take(&handshakes) else {
                             warn!(target: "tasklens::engine", "connection closed: {HANDSHAKES_MAX} connections are in their handshake");
                             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -243,7 +245,9 @@ fn spawn_accept(
                         // A failed spawn drops the closure, and with it the slot and the stream.
                         let spawned = thread::Builder::new()
                             .name("tl-session".into())
-                            .spawn(move || serve(stream, slot, &engine, &identity, &next_id));
+                            .spawn(move || {
+                                serve(stream, slot, deadline, &engine, &identity, &next_id)
+                            });
                         if let Err(e) = spawned {
                             warn!(target: "tasklens::engine", "session thread: {e}");
                         }
@@ -294,21 +298,21 @@ fn session_id(next_id: &AtomicU32) -> ClientSessionId {
     }
 }
 
-/// One connection: the handshake, which holds `slot`, then the session's port until the client
-/// goes or the engine ends the session.
+/// One connection: the handshake, which holds `slot` and must end by `deadline`, then the
+/// session's port until the client goes or the engine ends the session.
 fn serve(
     stream: UnixStream,
     slot: HandshakeSlot,
+    deadline: Instant,
     engine: &EngineHandle,
     identity: &HostIdentity,
     next_id: &AtomicU32,
 ) {
-    let _ = stream.set_read_timeout(Some(server::HELLO_TIMEOUT));
     let (Ok(mut writer), Ok(frames)) = (stream.try_clone(), FrameReader::new()) else {
         return;
     };
-    let mut reader = &stream;
-    let welcomed = server::handshake(&mut reader, &mut writer, &frames, |_| {
+    let mut timed = server::DeadlineReader::new(&stream, deadline);
+    let welcomed = server::handshake(&mut timed, &mut writer, &frames, |_| {
         match engine.open_session(session_id(next_id)) {
             Ok(port) => Ok((identity.clone(), port)),
             Err(OpenError::Full) => Err(server::refused(
@@ -340,6 +344,7 @@ fn serve(
         "client connected",
     );
     let _ = stream.set_read_timeout(Some(SESSION_POLL));
+    let mut reader = &stream;
     let mut buf = [0u8; 4096];
     while !port.is_ended() {
         match reader.read(&mut buf) {

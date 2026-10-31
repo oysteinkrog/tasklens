@@ -1,6 +1,7 @@
 //! `tasklens-engine` as a process (ADR-018): one engine per user, the runtime directory check,
-//! a full start with `READY=1`, handshakes up to 8 sessions and a SIGTERM stop, and the bound
-//! on connections that never send their `Hello`.
+//! a full start with `READY=1`, handshakes up to 8 sessions and a SIGTERM stop, the bound on
+//! connections that never send their `Hello`, and the handshake deadline for those that send it
+//! a byte at a time.
 //!
 //! Every directory is a temporary one. The session bus address points nowhere, so the engine
 //! under test never reaches the desktop session (KWin bridge, notifications).
@@ -151,17 +152,8 @@ fn a_shared_runtime_dir_is_refused_by_name() {
     hold_lock(&dirs.state);
 }
 
-/// Connects and sends `Hello`; returns the stream and the server's answer.
-fn connect(socket: &Path) -> (UnixStream, ServerBootstrap) {
-    try_connect(socket).expect("an answer to the Hello")
-}
-
-/// `connect`, with `None` when the server closed the connection without an answer.
-fn try_connect(socket: &Path) -> Option<(UnixStream, ServerBootstrap)> {
-    let mut stream = UnixStream::connect(socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+/// The `Hello` this test client sends.
+fn hello_bytes() -> Vec<u8> {
     let mut out = Vec::new();
     encode_hello(
         &Hello {
@@ -176,7 +168,21 @@ fn try_connect(socket: &Path) -> Option<(UnixStream, ServerBootstrap)> {
         &mut out,
     )
     .unwrap();
-    stream.write_all(&out).ok()?;
+    out
+}
+
+/// Connects and sends `Hello`; returns the stream and the server's answer.
+fn connect(socket: &Path) -> (UnixStream, ServerBootstrap) {
+    try_connect(socket).expect("an answer to the Hello")
+}
+
+/// `connect`, with `None` when the server closed the connection without an answer.
+fn try_connect(socket: &Path) -> Option<(UnixStream, ServerBootstrap)> {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(&hello_bytes()).ok()?;
     let frames = FrameReader::new().unwrap();
     let frame = frames.read_frame(&mut stream).ok()?;
     Some((stream, decode_server_bootstrap(&frame).unwrap()))
@@ -235,6 +241,66 @@ fn clients_that_withhold_hello_hold_at_most_four_connections() {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+#[test]
+fn clients_that_trickle_hello_are_closed_at_the_handshake_deadline() {
+    let dirs = Dirs::new();
+    let (_child, _notify) = start_ready(&dirs);
+    let socket = dirs.socket();
+
+    // Four clients send their Hello one byte per 500 ms, so every read gets a byte in time,
+    // but no Hello is whole before the 5 s deadline.
+    let hello = hello_bytes();
+    assert!(
+        hello.len() > 12,
+        "the Hello takes longer than 5 s to trickle"
+    );
+    let begin = Instant::now();
+    let tricklers: Vec<_> = (0..4)
+        .map(|_| {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            let watch = stream.try_clone().unwrap();
+            let hello = hello.clone();
+            let writer = std::thread::spawn(move || {
+                for byte in hello {
+                    if stream.write_all(&[byte]).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+            (watch, writer)
+        })
+        .collect();
+
+    // The server closes each one at 5 s from accept, with no answer.
+    let limit = Duration::from_secs(5) + Duration::from_secs(2);
+    for (mut watch, writer) in tricklers {
+        let left = limit.saturating_sub(begin.elapsed());
+        watch
+            .set_read_timeout(Some(left.max(Duration::from_millis(1))))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        match watch.read(&mut byte) {
+            Ok(0) => {}
+            Ok(_) => panic!("the server answered a partial Hello"),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            Err(e) => panic!("not closed within {limit:?}: {e}"),
+        }
+        let elapsed = begin.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "closed after {elapsed:?}, before the deadline"
+        );
+        writer.join().unwrap();
+    }
+
+    // Their places are free: a fifth client that sends its Hello at once is welcomed.
+    match connect(&socket) {
+        (_, ServerBootstrap::Welcome(_)) => {}
+        (_, ServerBootstrap::Refused(r)) => panic!("refused: {}", r.text),
     }
 }
 
