@@ -7,16 +7,20 @@
 //!
 //! Process start plus handshake have `SSH_DEADLINE` (20 s). Until the first frame from the
 //! server (`Welcome` or `Refused`) has been read whole, each read waits for bytes with `poll`
-//! for the time left. When the deadline passes, or the stream ends or fails before that frame,
+//! for the time left, and the window's end of ssh's stdin is non-blocking, so a write that finds
+//! the pipe full also waits with `poll` for the time left. When the deadline passes, or the stream ends or fails before that frame,
 //! the child is reaped (killed first when it is still running at the deadline) and the read or
 //! write returns an error whose text names the failure (`classify`). After that frame, bytes
 //! pass through unchanged and an error ends the session as on any other transport.
 //!
-//! `Connection::shutdown` and the drop of the connection's last half kill and reap the child.
+//! `Connection::shutdown` and the drop of the connection's last half kill and reap the child and
+//! end the stderr thread. That thread waits on stderr and on a stop pipe, so it ends even when a
+//! process that ssh started keeps stderr open.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -24,7 +28,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::io::Errno;
+use rustix::io::{Errno, ioctl_fionbio};
+use rustix::pipe::{PipeFlags, pipe_with};
 use tl_model::remote_proto::{FrameHeader, HEADER_LEN};
 
 use crate::client::{Connection, Connector};
@@ -39,8 +44,12 @@ pub const STDERR_LINES: usize = 64;
 pub const STDERR_BYTES: usize = 16 * 1024;
 /// How often a failed attempt checks whether the child has exited.
 const POLL: Duration = Duration::from_millis(10);
-/// How long a failed attempt waits for the end of stderr after the child has exited. A
-/// grandchild that keeps the pipe open does not hold the attempt longer.
+/// How often a handshake write that waits for room in the pipe checks whether the first frame
+/// has been read meanwhile.
+const WRITE_SLICE: Duration = Duration::from_millis(100);
+/// How long a failed attempt waits for the end of stderr after the child has exited. Then the
+/// stderr thread is stopped, so a grandchild that keeps the pipe open does not hold the attempt
+/// or the thread longer.
 const STDERR_GRACE: Duration = Duration::from_secs(1);
 
 /// Why a target was rejected.
@@ -322,11 +331,24 @@ impl Connector for SshConnector {
             reap(&mut child);
             return Err(io::Error::other("ssh started without its pipes"));
         };
+        // Until the first frame, a write must not block past the deadline (`SshWriter`).
+        if let Err(e) = ioctl_fionbio(&stdin, true) {
+            reap(&mut child);
+            return Err(io::Error::other(format!("ssh stdin: {e}")));
+        }
+        // Closing `stop_tx` tells the stderr thread to end.
+        let (stop_rx, stop_tx) = match pipe_with(PipeFlags::CLOEXEC) {
+            Ok(pair) => pair,
+            Err(e) => {
+                reap(&mut child);
+                return Err(io::Error::other(format!("ssh stderr stop pipe: {e}")));
+            }
+        };
         let ring = Arc::new(Mutex::new(StderrRing::new()));
         let drain_ring = Arc::clone(&ring);
         let drain = thread::Builder::new()
             .name("tl-ssh-stderr".into())
-            .spawn(move || drain_stderr(stderr, &drain_ring));
+            .spawn(move || drain_stderr(&stderr, &stop_rx, &drain_ring));
         let drain = match drain {
             Ok(handle) => handle,
             Err(e) => {
@@ -341,6 +363,7 @@ impl Connector for SshConnector {
             child: Mutex::new(Some(child)),
             stderr: ring,
             drain: Mutex::new(Some(drain)),
+            stop: Mutex::new(Some(stop_tx)),
             lifted: AtomicBool::new(false),
             failure: Mutex::new(None),
         });
@@ -353,7 +376,11 @@ impl Connector for SshConnector {
                 filled: 0,
                 rest: None,
             }),
-            writer: Box::new(SshWriter { input: stdin, proc }),
+            writer: Box::new(SshWriter {
+                input: stdin,
+                proc,
+                blocking: false,
+            }),
             shutdown: Arc::new(move || control.terminate()),
         })
     }
@@ -368,14 +395,31 @@ fn reap(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Reads the child's stderr into `ring` until the pipe ends.
-fn drain_stderr(mut stderr: impl Read, ring: &Mutex<StderrRing>) {
+/// Reads the child's stderr into `ring` until the pipe ends or `stop` becomes readable (its
+/// write end was closed).
+fn drain_stderr(stderr: &impl AsFd, stop: &impl AsFd, ring: &Mutex<StderrRing>) {
     let mut buf = [0u8; 4096];
     loop {
-        match stderr.read(&mut buf) {
+        let mut fds = [
+            PollFd::new(stderr, PollFlags::IN),
+            PollFd::new(stop, PollFlags::IN),
+        ];
+        match poll(&mut fds, None) {
+            Ok(_) => {}
+            Err(Errno::INTR) => continue,
+            Err(_) => break,
+        }
+        if !fds[1].revents().is_empty() {
+            break;
+        }
+        if fds[0].revents().is_empty() {
+            continue;
+        }
+        // `poll` saw bytes or the end, so this read does not block.
+        match rustix::io::read(stderr, &mut buf[..]) {
             Ok(0) => break,
             Ok(n) => lock(ring).feed(&buf[..n]),
-            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(Errno::INTR | Errno::AGAIN) => {}
             Err(_) => break,
         }
     }
@@ -392,6 +436,8 @@ struct Proc {
     child: Mutex<Option<Child>>,
     stderr: Arc<Mutex<StderrRing>>,
     drain: Mutex<Option<JoinHandle<()>>>,
+    /// The write end of the stderr thread's stop pipe. Dropping it ends the thread.
+    stop: Mutex<Option<OwnedFd>>,
     /// The first frame from the server has been read whole.
     lifted: AtomicBool,
     /// The named failure, once known. Reader and writer report the same one.
@@ -407,7 +453,7 @@ impl Proc {
             return io::Error::other(text.to_string());
         }
         let (exit, timed_out) = self.end_child(timed_out);
-        self.join_drain();
+        self.stop_drain(STDERR_GRACE);
         let text = classify(
             exit,
             &lock(&self.stderr),
@@ -449,25 +495,27 @@ impl Proc {
         }
     }
 
-    /// Waits up to `STDERR_GRACE` for the stderr thread, so the ring holds all of stderr.
-    fn join_drain(&self) {
+    /// Ends the stderr thread and returns once it has ended. The thread first gets up to
+    /// `grace` to read stderr to its end, so the ring holds all of it. Then it is told to stop,
+    /// so a process that keeps the pipe open cannot leave it blocked.
+    fn stop_drain(&self, grace: Duration) {
         let Some(handle) = lock(&self.drain).take() else {
             return;
         };
-        let until = Instant::now() + STDERR_GRACE;
+        let until = Instant::now() + grace;
         while !handle.is_finished() && Instant::now() < until {
             thread::sleep(POLL);
         }
-        if handle.is_finished() {
-            let _ = handle.join();
-        }
+        drop(lock(&self.stop).take());
+        let _ = handle.join();
     }
 
-    /// Kills and reaps the child if it still runs.
+    /// Kills and reaps the child if it still runs, and ends the stderr thread.
     fn terminate(&self) {
         if let Some(mut child) = lock(&self.child).take() {
             reap(&mut child);
         }
+        self.stop_drain(Duration::ZERO);
     }
 }
 
@@ -542,29 +590,61 @@ impl Read for SshReader {
     }
 }
 
-/// ssh's stdin. A write that fails before the first frame from the server returns the named
-/// failure, since ssh has then exited.
+/// ssh's stdin. Until the first frame from the server is read whole, the pipe is non-blocking
+/// and a write that finds it full waits only until the deadline; a write that fails then
+/// returns the named failure, since ssh has then exited or not read in time. After that frame,
+/// writes block as on any other transport.
 struct SshWriter {
     input: ChildStdin,
     proc: Arc<Proc>,
+    /// The pipe has been set back to blocking.
+    blocking: bool,
 }
 
 impl SshWriter {
-    fn named(&self, e: io::Error) -> io::Error {
-        if self.proc.lifted.load(Ordering::Acquire) || e.kind() == ErrorKind::Interrupted {
-            e
-        } else {
-            self.proc.failed(false)
+    /// Waits until the pipe has room or the first frame has been read. `Err` with the named
+    /// failure at the deadline or when the pipe fails.
+    fn wait_writable(&self) -> io::Result<()> {
+        loop {
+            if self.proc.lifted.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let left = self.proc.deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(self.proc.failed(true));
+            }
+            let slice = Timespec::try_from(left.min(WRITE_SLICE)).map_err(io::Error::other)?;
+            let mut fds = [PollFd::new(&self.input, PollFlags::OUT)];
+            match poll(&mut fds, Some(&slice)) {
+                Ok(0) | Err(Errno::INTR) => {}
+                Ok(_) => return Ok(()),
+                Err(_) => return Err(self.proc.failed(false)),
+            }
         }
     }
 }
 
 impl Write for SshWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.input.write(buf).map_err(|e| self.named(e))
+        loop {
+            if self.proc.lifted.load(Ordering::Acquire) {
+                if !self.blocking {
+                    ioctl_fionbio(&self.input, false)?;
+                    self.blocking = true;
+                }
+                return self.input.write(buf);
+            }
+            match self.input.write(buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => self.wait_writable()?,
+                Err(e) if e.kind() == ErrorKind::Interrupted => return Err(e),
+                Err(_) => return Err(self.proc.failed(false)),
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.input.flush().map_err(|e| self.named(e))
+        // A pipe has no buffer of its own to flush.
+        Ok(())
     }
 }

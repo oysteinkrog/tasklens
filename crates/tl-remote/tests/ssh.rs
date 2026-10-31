@@ -10,6 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -315,4 +316,70 @@ fn bad_target_never_runs_ssh() {
         "/nonexistent/tasklens-test/ssh".into(),
     ));
     assert_eq!(reason, "home: the ssh target starts with -");
+}
+
+/// Threads in this process that drain an ssh stderr.
+fn stderr_threads() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .filter(|comm| comm.trim() == "tl-ssh-stderr")
+        .count()
+}
+
+/// Waits until no stderr thread is left. Call with `SERIAL` held, so no other test starts one.
+fn assert_stderr_threads_end() {
+    let deadline = Instant::now() + TIMEOUT;
+    while stderr_threads() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "a stderr thread is still running"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn handshake_write_ends_at_deadline() {
+    // ssh never reads its stdin, so the pipe fills and a write would block for good.
+    let _serial = serial();
+    let fake = Fake::new("exec sleep 30");
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .with_deadline(Duration::from_millis(300))
+        .connect()
+        .unwrap();
+    let mut writer = conn.writer;
+    let begin = Instant::now();
+    let err = writer.write_all(&vec![0u8; 1 << 20]).unwrap_err();
+    assert_eq!(err.to_string(), "home did not answer within 300 ms");
+    assert!(begin.elapsed() < TIMEOUT);
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    drop(writer);
+    drop(conn.reader);
+    assert_stderr_threads_end();
+}
+
+#[test]
+fn stderr_held_open_by_descendant() {
+    // ssh exits, but a process it started keeps stderr open for 30 s. The attempt still ends
+    // with the named failure, and its stderr thread ends too.
+    let _serial = serial();
+    let fake = Fake::new(
+        "sleep 30 >/dev/null </dev/null &\necho $! > \"$(dirname \"$0\")/bg\"\necho boom >&2\nexit 3",
+    );
+    let begin = Instant::now();
+    let reason = first_failure(SshConnector::new("home", "me@home", fake.program()));
+    assert_eq!(reason, "ssh to home failed (exit 3): boom");
+    assert!(begin.elapsed() < TIMEOUT);
+    assert_stderr_threads_end();
+    let bg: i32 = std::fs::read_to_string(fake.path("bg"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_raw(bg).unwrap(),
+        rustix::process::Signal::KILL,
+    );
 }
