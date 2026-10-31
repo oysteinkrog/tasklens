@@ -2423,6 +2423,117 @@ mod tests {
         assert_eq!(means(&h, sid(4, MetricId::BATTERY_POWER)), [-10.0; 30]);
     }
 
+    /// ADR-018, level-triggered range list: 2000 random steps in which sessions open, change
+    /// their range, clear it and close, through a queue of 2 that the worker drains at random,
+    /// so range lists are dropped. After each settled step every open session finds the answer
+    /// for its own range, and the worker keeps no read for a range no open session shows.
+    #[test]
+    fn range_list_model() {
+        let mut rng: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut below = |n: u64| {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng % n
+        };
+        let choices = [
+            None,
+            live(DeviceRange::H1),
+            live(DeviceRange::H24),
+            live(DeviceRange::D7),
+        ];
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let (tx, mut rx) = mpsc::channel::<MetricMsg>(2);
+        slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
+        let mut sink = MetricSink::new(Arc::clone(&slot));
+        // The local session first, as in `ClientSessions`.
+        let mut ranges: Vec<Option<DeviceHistoryRequest>> = vec![None];
+        let mut shown: DeviceHistories = Arc::from([]);
+        let (mut refused, mut settled) = (0, 0);
+        let mut now = t0;
+
+        // `ClientSessions::linked_ranges`: the distinct ranges of the other sessions.
+        let linked = |ranges: &[Option<DeviceHistoryRequest>]| {
+            let mut out = Vec::new();
+            for r in &ranges[1..] {
+                if !out.contains(r) {
+                    out.push(*r);
+                }
+            }
+            out
+        };
+        // One worker turn: up to `n` messages, then the answers.
+        let turn = |st: &mut State,
+                        rx: &mut mpsc::Receiver<MetricMsg>,
+                        shown: &mut DeviceHistories,
+                        local: Option<DeviceHistoryRequest>,
+                        now: TimeNs,
+                        n: usize| {
+            for msg in std::iter::from_fn(|| rx.try_recv().ok()).take(n) {
+                st.apply(msg);
+            }
+            let wanted = st.wanted(local);
+            if let Some(answer) = st.answer_all(&wanted, false, now).expect("read") {
+                *shown = answer;
+            }
+        };
+
+        for _ in 0..2000 {
+            now += SEC;
+            let pick = choices[below(choices.len() as u64) as usize];
+            match below(8) {
+                0..=1 => ranges.push(pick),
+                2..=4 => {
+                    let i = below(ranges.len() as u64) as usize;
+                    ranges[i] = pick;
+                }
+                5 => {
+                    let i = below(ranges.len() as u64) as usize;
+                    ranges[i] = None;
+                }
+                6..=7 if ranges.len() > 1 => {
+                    let i = 1 + below(ranges.len() as u64 - 1) as usize;
+                    ranges.remove(i);
+                }
+                _ => {}
+            }
+            // The end of the reducer turn.
+            sink.set_ranges(&linked(&ranges));
+            if sink.ranges_sent_to != Some(1) {
+                refused += 1;
+            }
+            let n = below(3) as usize;
+            turn(&mut st, &mut rx, &mut shown, ranges[0], now, n);
+
+            if below(4) == 0 {
+                // Settle: the worker catches up and the next turn sends the list again.
+                turn(&mut st, &mut rx, &mut shown, ranges[0], now, usize::MAX);
+                sink.set_ranges(&linked(&ranges));
+                turn(&mut st, &mut rx, &mut shown, ranges[0], now, usize::MAX);
+                settled += 1;
+                for key in &ranges {
+                    let found = shown.iter().find(|(k, _)| k == key);
+                    let Some((_, answer)) = found else {
+                        panic!("no answer for {key:?} in {:?}", shown.len());
+                    };
+                    assert_eq!(answer.request, *key);
+                }
+                for p in &st.published {
+                    assert!(
+                        ranges.contains(&Some(p.request)),
+                        "the worker keeps a read of {:?}",
+                        p.request
+                    );
+                }
+            }
+        }
+        assert!(refused > 50, "the queue refused {refused} range lists");
+        assert!(settled > 400, "{settled} settled steps");
+    }
+
     #[test]
     fn sink_sends_the_catalog_to_each_new_store_first() {
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
