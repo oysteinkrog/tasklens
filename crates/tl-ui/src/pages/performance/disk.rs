@@ -31,7 +31,6 @@ use tl_model::snapshot::{
     DiskDetails, InvField, PartitionRow, PartitionTable, SmartKind, Snapshot,
 };
 use tl_model::system::{DiskTotals, Metric};
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -1435,7 +1434,7 @@ impl DiskPage {
             ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
         ) {
             let inputs = DiskDetailInputs {
-                now_boot_ns: now_boot_ns(),
+                now_boot_ns: self.hub.read(cx).now_ns(),
                 observed_end_ns: snap.system.header.observed_end,
                 totals: disk_totals(snap, self.row.idx),
                 error: snap.health.get(SourceId::Disk).last_error.as_deref(),

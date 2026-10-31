@@ -47,7 +47,6 @@ use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::WineGroupInfo;
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tracing::warn;
 
@@ -61,7 +60,7 @@ use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale,
 };
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::settings_global::{Section, TlSettings};
@@ -516,6 +515,8 @@ pub struct MemoryAppsChart {
     views: Vec<(DeviceIdx, Arc<SeriesView>)>,
     /// The history clock while `views` come from the device metric history.
     clock: Option<HistoryClock>,
+    /// The hub's host clock: hover times are on the host's boot clock (tasklens-q4x76.35).
+    host_clock: HostClock,
     /// What `views` were resolved from: the source, the device history version and the device
     /// catalog version. History views are built again only when one changes.
     views_from: (Source, u64, u64),
@@ -598,6 +599,7 @@ impl MemoryAppsChart {
         let mut this = Self {
             place,
             chart,
+            host_clock: hub.read(cx).clock().clone(),
             hub,
             views: Vec::new(),
             clock: None,
@@ -1158,14 +1160,10 @@ impl MemoryAppsChart {
         }
         let reference = self.shared.and_then(|d| self.view(d))?;
         let newest = reference.samples.last()?.t_ns;
+        let now = self.host_clock.now_ns();
         let right = match self.clock {
-            Some(clock) => clock.right_edge_ns(now_boot_ns()),
-            None => right_edge_ns(
-                now_boot_ns(),
-                newest,
-                reference.period_ns,
-                self.settings.smooth,
-            ),
+            Some(clock) => clock.right_edge_ns(now),
+            None => right_edge_ns(now, newest, reference.period_ns, self.settings.smooth),
         };
         let x = (f32::from(pos.x) - 1.).clamp(0., w);
         let ns = f64::from(w - x) * self.settings.range_ns as f64 / f64::from(w);

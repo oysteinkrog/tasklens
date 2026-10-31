@@ -30,7 +30,6 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::GpuOptionalGraph;
 use tl_model::snapshot::{DisplayMode, GraphicsAdapter, Snapshot};
 use tl_model::system::{ClockEventReasons, GpuEngine, GpuTotals, Metric};
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -1154,7 +1153,7 @@ impl GpuPage {
                     _ => (None, None),
                 };
             let inputs = GpuDetailInputs {
-                now_boot_ns: now_boot_ns(),
+                now_boot_ns: self.hub.read(cx).now_ns(),
                 observed_end_ns: snap.system.header.observed_end,
                 totals: gpu_totals(snap, self.row.idx),
                 adapter: adapter(snap, self.row.idx),

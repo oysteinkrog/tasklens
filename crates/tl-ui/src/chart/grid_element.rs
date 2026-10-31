@@ -47,7 +47,6 @@ use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::{SampleFlags, SeriesView};
 use tl_model::snapshot::{ComponentMask, Snapshot};
-use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::element::translated;
@@ -62,7 +61,7 @@ use super::{
 };
 use crate::anim::AnimationDriver;
 use crate::components::icons::AppIcon;
-use crate::hub::{SnapshotChanged, SnapshotHub};
+use crate::hub::{HostClock, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::theme::{TlTheme, UiMetrics};
 
@@ -218,6 +217,9 @@ pub struct ChartGridView {
     /// Unsupported win over the data; the rest is derived per cell.
     pub state: ChartState,
     hub: Entity<SnapshotHub>,
+    /// The hub's host clock: the grid's "now" is on the clock of the host its samples come
+    /// from (tasklens-q4x76.35).
+    clock: HostClock,
     _hub_sub: Subscription,
     /// All cells in one cache: `fills[0]`, `strokes[0]` (total), `strokes[1]` (overlay).
     cache: Rc<RefCell<ChartCache>>,
@@ -305,6 +307,7 @@ impl ChartGridView {
             spec,
             state: ChartState::Live,
             hub: hub.clone(),
+            clock: hub.read(cx).clock().clone(),
             _hub_sub,
             cache: Rc::default(),
             scratch: geometry::Scratch::default(),
@@ -734,7 +737,7 @@ impl Element for ChartGridElement {
     ) {
         let env = PaintEnv {
             scale_factor: window.scale_factor(),
-            now: now_boot_ns(),
+            now: self.view.read(cx).clock.now_ns(),
             metrics: *cx.global::<UiMetrics>(),
             theme: crate::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),

@@ -36,7 +36,7 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{InvField, NetDetails, PublicIpState, Snapshot, WifiInfo};
 use tl_model::system::{LinkState, Metric, NetTotals};
-use tl_model::time::now_boot_ns;
+use tl_model::time::TimeNs;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
@@ -1280,7 +1280,7 @@ impl NetPage {
         }
         if mask.intersects(
             ComponentMask::SYSTEM | ComponentMask::DEVICE_DETAILS | ComponentMask::DEVICES,
-        ) && self.sync_details(snap)
+        ) && self.sync_details(snap, self.hub.read(cx).now_ns())
         {
             cx.notify();
         }
@@ -1402,10 +1402,10 @@ impl NetPage {
         open_context_menu_at(at, window, cx, menu);
     }
 
-    /// Brings the Details rows up to date. True when one changed.
-    fn sync_details(&mut self, snap: &Snapshot) -> bool {
+    /// Brings the Details rows up to date at the host time `now`. True when one changed.
+    fn sync_details(&mut self, snap: &Snapshot, now: TimeNs) -> bool {
         let inputs = NetDetailInputs {
-            now_boot_ns: now_boot_ns(),
+            now_boot_ns: now,
             observed_end_ns: snap.system.header.observed_end,
             totals: net_totals(snap, self.row.idx),
             unit: self.settings.unit,
@@ -1489,7 +1489,8 @@ impl NetPage {
             // The header switch shows the new range.
             self.send_demand(cx);
         }
-        if self.sync_details(&snap) || range_moved {
+        let now = self.hub.read(cx).now_ns();
+        if self.sync_details(&snap, now) || range_moved {
             cx.notify();
         }
     }
@@ -1516,7 +1517,8 @@ impl NetPage {
         self.apply_snapshot(&snap, ComponentMask::DEVICES, cx);
         // The Display unit text and tooltip come from the new strings.
         self.details.refresh_strings(cx);
-        self.sync_details(&snap);
+        let now = self.hub.read(cx).now_ns();
+        self.sync_details(&snap, now);
         self.sync_public_ip(&snap, true);
         cx.notify();
     }

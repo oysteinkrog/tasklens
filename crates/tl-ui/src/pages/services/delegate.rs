@@ -31,7 +31,7 @@ use tl_model::table::{
     Manager, ServiceColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, TableRow, Total, UnitRef,
     UnitType,
 };
-use tl_model::time::{BootId, now_boot_ns};
+use tl_model::time::BootId;
 use tl_model::units;
 use tl_model::units::LocalDateTime;
 use tl_model::validity::Validity;
@@ -39,6 +39,7 @@ use tl_model::validity::Validity;
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::host::HostContext;
+use crate::hub::HostClock;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::cells::{
@@ -733,6 +734,8 @@ pub struct ServicesDelegate {
     page: Option<WeakEntity<super::ServicesPage>>,
     /// The host this table shows. Set when it opens; never changes.
     host: HostContext,
+    /// The host's boot clock: Stale ages compare snapshot times with it (`set_clock`).
+    clock: HostClock,
 }
 
 impl ServicesDelegate {
@@ -779,7 +782,14 @@ impl ServicesDelegate {
             proc_tip_words: RowTipWords::from_fn(|key| tr_en(key, &[])),
             page: None,
             host: host.clone(),
+            clock: HostClock::local(),
         }
+    }
+
+    /// Sets the boot clock of the host this table shows ([`HostContext::clock`]). The local
+    /// clock until set.
+    pub fn set_clock(&mut self, clock: HostClock) {
+        self.clock = clock;
     }
 
     pub(super) fn set_page(&mut self, page: WeakEntity<super::ServicesPage>) {
@@ -998,7 +1008,7 @@ impl ServicesDelegate {
             out,
         );
         if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
-            out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
+            out.tooltip = live_tip(out.validity, &self.snapshot, self.clock.now_ns());
         }
         if exited {
             // UI-PRC-011: all text of an exited row is secondary.

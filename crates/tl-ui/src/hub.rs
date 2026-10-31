@@ -3,6 +3,7 @@
 //! main window and reports it as hidden (ADR-010 "Hidden state", ADR-008 "Hidden detection").
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AsyncApp, Context, Entity, EventEmitter, Global, WeakEntity};
@@ -12,6 +13,7 @@ use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, SeriesId};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::SensorKind;
+use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
 pub use tl_model::snapshot::ComponentMask;
@@ -24,6 +26,99 @@ pub const REFRESH_WHILE_HIDDEN: bool = false;
 const HIDDEN_CHECK_PERIOD: Duration = Duration::from_millis(500);
 /// A change pending longer than this without a render means the window is hidden.
 const HIDDEN_AFTER: Duration = Duration::from_millis(1000);
+
+/// How fast a remote host's clock offset may move down per snapshot, ns. Offsets move up at
+/// once, since a sample is never ahead of the true offset; this lets the estimate follow a host
+/// clock that runs slower than this PC's while a single late snapshot moves it only 1 ms.
+const OFFSET_DECAY_NS: i64 = 1_000_000;
+
+/// The offset slot before a remote host's first published snapshot: read as 0.
+const OFFSET_UNKNOWN: i64 = i64::MIN;
+
+/// One host's CLOCK_BOOTTIME as this window reads it (tasklens-q4x76.35). Every sample and
+/// snapshot time is on the clock of the host that made it (ADR-003), so every UI read of "now"
+/// that is compared with snapshot times goes through the host's clock, never through
+/// `now_boot_ns()` directly.
+///
+/// For the local host it is this PC's CLOCK_BOOTTIME. For a remote host it is this PC's clock
+/// plus an offset learned from the snapshots: `published_ns` minus this PC's clock at install.
+/// The transport delay makes each sample a little low, so the estimate keeps the highest sample
+/// and moves down by at most [`OFFSET_DECAY_NS`] per snapshot. A new connection or a new boot of
+/// the host starts the estimate over. Cheap to clone: clones share the offset.
+#[derive(Clone, Debug, Default)]
+pub struct HostClock {
+    /// The offset in ns, host minus this PC; `None` for the local host.
+    remote: Option<Arc<AtomicI64>>,
+}
+
+impl HostClock {
+    /// The local host: this PC's CLOCK_BOOTTIME.
+    pub fn local() -> Self {
+        Self { remote: None }
+    }
+
+    /// A remote host whose offset is learned from its snapshots. Reads this PC's clock until
+    /// the first published snapshot.
+    pub fn remote() -> Self {
+        Self {
+            remote: Some(Arc::new(AtomicI64::new(OFFSET_UNKNOWN))),
+        }
+    }
+
+    /// True for a remote host's clock.
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// The host's CLOCK_BOOTTIME now.
+    pub fn now_ns(&self) -> TimeNs {
+        self.now_at(now_boot_ns())
+    }
+
+    /// The host's CLOCK_BOOTTIME when this PC's reads `local_ns`.
+    pub fn now_at(&self, local_ns: TimeNs) -> TimeNs {
+        local_ns.saturating_add_signed(self.offset_ns())
+    }
+
+    /// The offset in ns, host minus this PC: 0 for the local host and before the first sample.
+    pub fn offset_ns(&self) -> i64 {
+        match &self.remote {
+            Some(slot) => match slot.load(Ordering::Relaxed) {
+                OFFSET_UNKNOWN => 0,
+                offset => offset,
+            },
+            None => 0,
+        }
+    }
+
+    /// Learns from `snap` installed now. `reset` starts the estimate over.
+    fn observe(&self, snap: &Snapshot, reset: bool) {
+        self.observe_at(snap.published_ns, now_boot_ns(), reset);
+    }
+
+    /// Learns from a snapshot published at the host time `published_ns` and installed when
+    /// this PC's clock read `local_ns`. `reset` (a new connection or a new host boot) drops the
+    /// old estimate. Does nothing for the local host or for a snapshot never published
+    /// (`published_ns` 0).
+    pub fn observe_at(&self, published_ns: TimeNs, local_ns: TimeNs, reset: bool) {
+        let Some(slot) = &self.remote else {
+            return;
+        };
+        if published_ns == 0 {
+            return;
+        }
+        let sample = (i128::from(published_ns) - i128::from(local_ns))
+            .clamp(i128::from(OFFSET_UNKNOWN + 1), i128::from(i64::MAX))
+            as i64;
+        let old = slot.load(Ordering::Relaxed);
+        let next = if reset || old == OFFSET_UNKNOWN || sample >= old {
+            sample
+        } else {
+            old - (old - sample).min(OFFSET_DECAY_NS)
+        };
+        slot.store(next, Ordering::Relaxed);
+    }
+}
 
 /// Emitted after a newer snapshot is installed and at least one component changed.
 #[derive(Clone, Debug)]
@@ -82,6 +177,8 @@ pub struct SnapshotHub {
     live_sensors: FxHashSet<DeviceIdx>,
     /// The link state last reported with `LinkChanged`.
     live: bool,
+    /// The host's boot clock, learned from `published_ns` for a remote host.
+    clock: HostClock,
 }
 
 impl EventEmitter<SnapshotChanged> for SnapshotHub {}
@@ -142,7 +239,28 @@ impl SnapshotHub {
             hidden: false,
             refresh_while_hidden: REFRESH_WHILE_HIDDEN,
             live_sensors,
+            clock: HostClock::local(),
         }
+    }
+
+    /// A hub for a remote host: like [`SnapshotHub::new`], but its clock is the host's, learned
+    /// from the snapshots' `published_ns` ([`HostClock`]).
+    pub fn new_remote(client: Arc<dyn EngineClient>, cx: &mut Context<Self>) -> Self {
+        let mut hub = Self::new(client, cx);
+        hub.clock = HostClock::remote();
+        hub.clock.observe(&hub.current, true);
+        hub
+    }
+
+    /// The host's boot clock. Every read of "now" that is compared with this hub's snapshot
+    /// times uses it.
+    pub fn clock(&self) -> &HostClock {
+        &self.clock
+    }
+
+    /// The host's CLOCK_BOOTTIME now.
+    pub fn now_ns(&self) -> TimeNs {
+        self.clock.now_ns()
     }
 
     /// The installed snapshot. Callers must not keep it beyond one render (ADR-005 retention).
@@ -168,6 +286,10 @@ impl SnapshotHub {
         {
             return;
         }
+        self.clock.observe(
+            &snap,
+            new_generation || snap.boot_id != self.current.boot_id,
+        );
         note_live_sensors(&mut self.live_sensors, &snap);
         let mut changed_series = SmallVec::new();
         let mask = if new_generation {

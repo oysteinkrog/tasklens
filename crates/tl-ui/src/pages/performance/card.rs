@@ -28,7 +28,6 @@ use tl_model::series::SeriesView;
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{DiskDetails, DiskDrive, Snapshot};
 use tl_model::system::{LinkState, Metric, SensorKind, SensorReading};
-use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
@@ -1399,11 +1398,13 @@ impl StaleTimer {
         self.at
     }
 
-    /// Arms the timer for the deadline `at`, or drops it for `None`. A running timer for the
+    /// Arms the timer for the deadline `at`, or drops it for `None`. `at` and `now` are on the
+    /// boot clock of the host the card shows ([`ChartView::now_ns`]). A running timer for the
     /// same deadline is kept. `field` finds this timer in the owner when it fires.
     pub fn arm<V: 'static>(
         &mut self,
         at: Option<u64>,
+        now: u64,
         field: fn(&mut V) -> &mut StaleTimer,
         cx: &mut Context<V>,
     ) {
@@ -1412,7 +1413,7 @@ impl StaleTimer {
         }
         self.at = at;
         self.task = at.map(|at| {
-            let wait = Duration::from_nanos(at.saturating_sub(now_boot_ns()));
+            let wait = Duration::from_nanos(at.saturating_sub(now));
             cx.spawn(async move |this: WeakEntity<V>, cx: &mut AsyncApp| {
                 cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |this, cx| {
@@ -1596,6 +1597,7 @@ impl Render for CardView {
         let prepared = card.prepare_top(self.top, lead.as_deref(), window, cx);
         let height = prepared.height;
         let stale_at = prepared.stale_at(self.chart.read(cx));
+        let now = self.chart.read(cx).now_ns();
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.prepared = Some(prepared.clone());
@@ -1605,7 +1607,7 @@ impl Render for CardView {
             App::notify(cx, self.sidebar);
         }
         self.stale
-            .arm(stale_at, |this: &mut Self| &mut this.stale, cx);
+            .arm(stale_at, now, |this: &mut Self| &mut this.stale, cx);
 
         #[cfg(any(test, feature = "test-hooks"))]
         {

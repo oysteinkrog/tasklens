@@ -156,6 +156,7 @@ impl ServicesPage {
             None => (UiState::default(), ServiceFilterState::default()),
         };
         let mut delegate = ServicesDelegate::new(host, &state);
+        delegate.set_clock(host.clock(cx));
         delegate.set_page(cx.weak_entity());
         delegate.set_window(Some(window.window_handle()));
         let sort = delegate.sort();

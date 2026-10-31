@@ -23,7 +23,6 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::series::{SampleFlags, SeriesView};
-use tl_model::time::now_boot_ns;
 
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
@@ -122,7 +121,7 @@ impl Element for ChartElement {
     ) {
         let env = PaintEnv {
             scale_factor: window.scale_factor(),
-            now: now_boot_ns(),
+            now: self.view.read(cx).now_ns(),
             metrics: *cx.global::<UiMetrics>(),
             theme: crate::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),

@@ -33,7 +33,6 @@ use tl_model::snapshot::{
     InvField, InventorySnapshot, MemoryDetails, MemoryModule, Snapshot, SwapDevice, SwapKindModel,
 };
 use tl_model::system::{MemoryTotals, ZramTotals};
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -1855,7 +1854,7 @@ impl MemoryPage {
     fn sync_details(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
         let inputs = MemoryDetailInputs {
             mem: &snap.system.memory,
-            now_boot_ns: now_boot_ns(),
+            now_boot_ns: self.hub.read(cx).now_ns(),
             observed_end_ns: snap.system.header.observed_end,
             error: snap.health.get(SourceId::Memory).last_error.as_deref(),
         };

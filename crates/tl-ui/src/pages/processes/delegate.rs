@@ -42,7 +42,7 @@ use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
 use tl_model::settings::{NetworkUnit, Settings, UiState};
 use tl_model::snapshot::{Snapshot, WindowEntry};
 use tl_model::table::{SortSpec, TableRow, UnitRef};
-use tl_model::time::{TimeNs, now_boot_ns};
+use tl_model::time::TimeNs;
 use tl_model::validity::{FieldValidity, Validity};
 
 use super::actions::CapturedTargets;
@@ -66,6 +66,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
 use crate::components::validity::{GlyphCtx, tooltip_text};
 use crate::host::HostContext;
+use crate::hub::HostClock;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::table::cells::CellOut;
@@ -269,6 +270,8 @@ struct NameEntry {
 pub struct ProcessDelegate {
     /// The host this table shows. Set when it opens; never changes.
     host: HostContext,
+    /// The host's boot clock: row tints and Stale ages compare snapshot times with it.
+    clock: HostClock,
     query: ProcessQuery,
     /// The snapshot the rows came from (or the paused one, E22-024).
     snapshot: Arc<Snapshot>,
@@ -355,8 +358,11 @@ impl ProcessDelegate {
         // `GroupHeader::node` is always a `NodeId::Group`.
         let headers = GroupHeader::ALL
             .map(|h| ProcRowId::fixed(&h.node()).unwrap_or(ProcRowId::KernelThreads));
+        let clock = host.clock(cx);
         let mut this = Self {
             host: host.clone(),
+            tint_now: clock.now_ns(),
+            clock,
             query: ProcessQuery::new(settings, state),
             snapshot: Arc::clone(&snapshot),
             built_for: None,
@@ -386,7 +392,6 @@ impl ProcessDelegate {
             window: None,
             active: false,
             visible_keys: Arc::from([]),
-            tint_now: now_boot_ns(),
             tint_animations: settings.motion.animations && !cx.reduce_motion(),
             tint_wake: None,
             tip_words: RowTipWords::new(cx),
@@ -965,10 +970,10 @@ impl ProcessDelegate {
         if let Some(now) = self.fixed_now {
             return now;
         }
-        now_boot_ns()
+        self.clock.now_ns()
     }
 
-    /// Fixes the clock the row tints read; `None` goes back to `CLOCK_BOOTTIME`.
+    /// Fixes the clock the row tints read; `None` goes back to the host's `CLOCK_BOOTTIME`.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_fixed_now(&mut self, now: Option<TimeNs>) {
         self.fixed_now = now;
@@ -1281,7 +1286,7 @@ impl TreeTableDelegate for ProcessDelegate {
             out,
         );
         if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
-            out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
+            out.tooltip = live_tip(out.validity, &self.snapshot, self.clock.now_ns());
         }
         // The column's own text replaces the validity tooltip of a value or an `n/a`.
         if out.want_tooltip

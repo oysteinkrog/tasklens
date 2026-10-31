@@ -31,7 +31,6 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::{BatteryDetails, InvField, Snapshot};
 use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
-use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
 
@@ -787,7 +786,7 @@ impl FanPage {
                     _ => None,
                 });
             let inputs = DetailInputs {
-                now_boot_ns: now_boot_ns(),
+                now_boot_ns: self.hub.read(cx).now_ns(),
                 observed_end_ns: snap.system.header.observed_end,
                 fan,
                 temperature,
@@ -1954,7 +1953,11 @@ impl BatteryPage {
             changed |= self.sync_history(history, cx);
             let kind = record.map_or("", |b| &*b.kind);
             let word = page_words(cx).battery_kind(kind).clone();
-            let age_ns = now_boot_ns().saturating_sub(snap.device_details.header.observed_end);
+            let age_ns = self
+                .hub
+                .read(cx)
+                .now_ns()
+                .saturating_sub(snap.device_details.header.observed_end);
             changed |= update_battery_details(&mut self.details, record, &word, age_ns);
         }
         if details || devices {

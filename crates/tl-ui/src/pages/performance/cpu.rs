@@ -32,7 +32,6 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
 use tl_model::snapshot::{CpuStaticInfo, RaplState, Snapshot};
 use tl_model::system::{CpuTopology, Metric};
-use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
@@ -1323,7 +1322,7 @@ impl CpuPage {
         }
         if system {
             let inputs = CpuLiveInputs {
-                now_boot_ns: now_boot_ns(),
+                now_boot_ns: self.hub.read(cx).now_ns(),
                 cpu_error: snap.health.get(SourceId::Cpu).last_error.as_deref(),
                 temp_sensors: &self.temp_sensors,
             };

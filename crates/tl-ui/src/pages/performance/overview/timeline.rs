@@ -46,7 +46,7 @@ use tl_model::settings::{OverviewRange, PerformanceSettings, TimelineClick};
 use tl_model::snapshot::{
     DeviceTimeline, HistPoint, TimelineBand, TimelineEvent, TimelineEventKind,
 };
-use tl_model::time::{TimeNs, now_boot_ns};
+use tl_model::time::TimeNs;
 
 use super::fit::whole_rows;
 use super::layout::BoxMode;
@@ -54,7 +54,7 @@ use super::parts::{box_frame, edit_chrome};
 use super::range::{self, RangeText};
 use crate::components::toast::ToastKind;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::net_totals;
 use crate::pages::performance::details::Template;
@@ -189,13 +189,13 @@ pub fn now_realtime_ns() -> i64 {
     i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or(i64::MAX)
 }
 
-/// CLOCK_BOOTTIME now.
-pub fn now_boot() -> TimeNs {
+/// CLOCK_BOOTTIME now on the host `clock` belongs to (tasklens-q4x76.35).
+pub fn now_boot(clock: &HostClock) -> TimeNs {
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some((_, boot)) = TEST_CLOCK.get() {
         return boot;
     }
-    now_boot_ns()
+    clock.now_ns()
 }
 
 /// The end of `range` held at `at`: the picked time centred in the range, never after `now`.
@@ -849,7 +849,7 @@ impl TimelineBox {
     /// mode there or shows the toast ([`Self::on_history_answer`]); no answer within
     /// [`HISTORY_ASK_TIMEOUT`] shows the toast.
     fn open_history(&mut self, t: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let offset = now_realtime_ns() - now_boot() as i64;
+        let offset = now_realtime_ns() - now_boot(self.hub.read(cx).clock()) as i64;
         let Ok(boot_t) = TimeNs::try_from(t - offset) else {
             self.no_history(cx);
             return;

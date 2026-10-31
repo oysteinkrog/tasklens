@@ -2210,8 +2210,13 @@ impl Render for DeviceSidebar {
                 .children(normal_cards)
                 .into_any_element()
         };
-        self.edit_stale
-            .arm(edit_stale_at, |this: &mut Self| &mut this.edit_stale, cx);
+        let now = self.hub.read(cx).now_ns();
+        self.edit_stale.arm(
+            edit_stale_at,
+            now,
+            |this: &mut Self| &mut this.edit_stale,
+            cx,
+        );
         self.watch_edit_charts(unseen_charts, cx);
         #[cfg(any(test, feature = "test-hooks"))]
         {

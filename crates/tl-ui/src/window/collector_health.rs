@@ -15,7 +15,7 @@ use gpui_kit::{
     px, size,
 };
 use tl_model::health::{HealthSnapshot, SourceHealth, SourceId, SourceState};
-use tl_model::time::{TimeNs, now_boot_ns};
+use tl_model::time::TimeNs;
 use tl_model::units::{count, short_age};
 
 use super::registry::{GlobalRegistry, WindowKey};
@@ -301,8 +301,8 @@ pub struct CollectorHealthWindow {
     strings_version: u64,
     /// `HealthSnapshot::version` the rows show.
     health_version: Option<u64>,
-    /// CLOCK_BOOTTIME and executor time at open; now is the boot time plus the executor time
-    /// passed, so the test clock moves the ages.
+    /// The host's CLOCK_BOOTTIME and the executor time at open; now is the boot time plus the
+    /// executor time passed, so the test clock moves the ages.
     boot_anchor: TimeNs,
     clock_anchor: Instant,
     buf: String,
@@ -357,7 +357,7 @@ impl CollectorHealthWindow {
             words: HealthWords::new(cx),
             strings_version: strings_version(cx),
             health_version: None,
-            boot_anchor: now_boot_ns(),
+            boot_anchor: host.clock(cx).now_ns(),
             clock_anchor: cx.background_executor().now(),
             buf: String::new(),
             _strings: strings,
@@ -371,7 +371,7 @@ impl CollectorHealthWindow {
         this
     }
 
-    /// CLOCK_BOOTTIME at the executor time `clock`.
+    /// The host's CLOCK_BOOTTIME at the executor time `clock`.
     fn now(&self, clock: Instant) -> TimeNs {
         let passed = clock.saturating_duration_since(self.clock_anchor);
         self.boot_anchor + passed.as_nanos() as TimeNs

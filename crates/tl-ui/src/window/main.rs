@@ -53,7 +53,6 @@ use smallvec::SmallVec;
 use tl_model::command::{AppRequest, Command, CommandError, DeviceCommand, KWinCommand, Tab};
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tl_model::table::{Manager, TableMode, UnitRef};
-use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
@@ -2667,9 +2666,11 @@ impl MainWindow {
             return;
         };
         let health = hub.read(cx).current().health.clone();
+        // Health times are on the host's clock.
+        let now = hub.read(cx).now_ns();
         let tab = self.active;
         let stale = self.status.update(cx, |chip, cx| {
-            chip.set_health(&health, tab, now_boot_ns(), cx);
+            chip.set_health(&health, tab, now, cx);
             chip.has_stale()
         });
         if stale && !self.health_ticking {

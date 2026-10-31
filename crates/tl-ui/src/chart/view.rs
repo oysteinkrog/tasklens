@@ -15,14 +15,13 @@ use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::{
     ComponentMask, DeviceHistory, HistPoint, ProcessSeriesSet, SeriesSet, Snapshot,
 };
-use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::element::ChartElement;
 use super::{
     ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, lines, scale,
 };
-use crate::hub::{SnapshotChanged, SnapshotHub};
+use crate::hub::{HostClock, SnapshotChanged, SnapshotHub};
 
 pub struct ChartView {
     pub spec: ChartSpec,
@@ -31,6 +30,9 @@ pub struct ChartView {
     /// Unsupported and derives the rest from the data.
     pub state: ChartState,
     hub: Entity<SnapshotHub>,
+    /// The hub's host clock: the chart's "now" is on the clock of the host its samples come
+    /// from (tasklens-q4x76.35).
+    clock: HostClock,
     _hub_sub: Subscription,
     pub(crate) cache: Rc<RefCell<ChartCache>>,
     /// Buffers reused by every geometry rebuild.
@@ -131,6 +133,7 @@ impl ChartView {
             labels,
             state: ChartState::WarmingUp,
             hub: hub.clone(),
+            clock: hub.read(cx).clock().clone(),
             _hub_sub,
             cache: Rc::default(),
             scratch: geometry::Scratch::default(),
@@ -409,11 +412,17 @@ impl ChartView {
         }
     }
 
+    /// The CLOCK_BOOTTIME of the host the chart's samples come from, now. Compare sample times
+    /// only with this, never with this PC's clock (tasklens-q4x76.35).
+    pub fn now_ns(&self) -> u64 {
+        self.clock.now_ns()
+    }
+
     /// The value label's input (E19-009; owners such as the sidebar card read it too): the newest
-    /// valid value of series 0 and its validity at the current boot time. `None` when the spec
-    /// has no series.
+    /// valid value of series 0 and its validity at the host's current boot time. `None` when the
+    /// spec has no series.
     pub fn value_now(&self) -> Option<(f32, Validity)> {
-        self.value_at(now_boot_ns())
+        self.value_at(self.now_ns())
     }
 
     /// `value_now` at `now_boot_ns`. Owner-set Failed, Restricted and Unsupported map to the

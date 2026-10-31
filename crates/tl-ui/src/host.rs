@@ -31,7 +31,7 @@ use crate::action_tracker::{ActionTracker, GlobalActionTracker};
 use crate::app::{AppEnv, EngineGlobal};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hosts_api::HostLinkStatus;
-use crate::hub::{GlobalHub, SnapshotHub};
+use crate::hub::{GlobalHub, HostClock, SnapshotHub};
 use crate::i18n::tr_args;
 use crate::settings_global::TlSettings;
 use crate::window::main::{GlobalShellEvents, ShellEvents, ShellState};
@@ -71,7 +71,7 @@ impl HostContext {
         first_action_id: u64,
         cx: &mut App,
     ) -> Self {
-        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let hub = cx.new(|cx| SnapshotHub::new_remote(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
         let tracker = cx.new(|cx| {
             let mut tracker = ActionTracker::new(Arc::clone(&client), Some(hub.clone()), cx);
@@ -180,6 +180,14 @@ impl HostContext {
     /// The host's snapshot hub.
     pub fn hub(&self) -> Option<&Entity<SnapshotHub>> {
         self.hub.as_ref()
+    }
+
+    /// The host's boot clock (tasklens-q4x76.35): its hub's clock, or this PC's clock when the
+    /// context has no hub. Compare snapshot times only with this clock's now.
+    pub fn clock(&self, cx: &App) -> HostClock {
+        self.hub
+            .as_ref()
+            .map_or_else(HostClock::local, |hub| hub.read(cx).clock().clone())
     }
 
     /// The host's demand aggregator.

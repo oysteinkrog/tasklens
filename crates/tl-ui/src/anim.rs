@@ -69,7 +69,7 @@ pub struct PaintRecord {
     pub view: EntityId,
     /// Newest sample painted.
     pub newest_ns: u64,
-    /// `now_boot_ns()` at paint.
+    /// The chart host's CLOCK_BOOTTIME at paint ([`crate::hub::HostClock`]).
     pub painted_at_ns: u64,
 }
 
