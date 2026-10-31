@@ -1031,6 +1031,81 @@ mod sys_actions {
 
     const FAIL: ActionState = ActionState::Failed(ActionError::PermissionDenied);
 
+    fn remote_rig(cx: &mut TestAppContext) -> Rig {
+        let mut r = rig(cx);
+        let tracker = r.tracker.clone();
+        r.vcx
+            .update(|_, cx| tracker.update(cx, |t, _| t.set_remote_name(Arc::from("home"))));
+        r
+    }
+
+    fn choose(r: &mut Rig, selector: &'static str) {
+        use gpui_kit::{AnyWindowHandle, Modifiers};
+        use tl_ui::components::dialog::TlDialogView;
+        use tl_ui::components::window_frame::TlSecondaryWindow;
+        let found: Option<AnyWindowHandle> = r.vcx.update(|_, cx| {
+            cx.windows().into_iter().find(|w| {
+                w.downcast::<Root>()
+                    .and_then(|h| TlSecondaryWindow::<TlDialogView>::find(h, cx))
+                    .is_some()
+            })
+        });
+        let any = found.expect("a confirmation");
+        let mut vcx = VisualTestContext::from_window(any, &r.vcx.cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let at = vcx.debug_bounds(selector).expect("dialog button").center();
+        vcx.simulate_click(at, Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn remote_root_action_asks_before_it_is_sent(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx);
+        let id = r.submit(
+            ActionKindTag::Start,
+            ActionKind::UnitStart,
+            [unit("cups.service")],
+            start_texts(),
+        );
+        assert!(id.is_none(), "nothing sent before the answer");
+        assert!(r.actions_sent().is_empty());
+        assert!(r.visible().is_empty());
+        choose(&mut r, "TlDialogCancel");
+        assert!(r.actions_sent().is_empty(), "cancel sends nothing");
+        r.submit(
+            ActionKindTag::Start,
+            ActionKind::UnitStart,
+            [unit("cups.service")],
+            start_texts(),
+        );
+        choose(&mut r, "TlDialogAction");
+        let sent = r.actions_sent();
+        assert_eq!(sent.len(), 1, "sent after the confirmation");
+        assert!(r.pending(&unit("cups.service"), ActionKindTag::Start));
+    }
+
+    #[gpui_kit::test]
+    fn remote_admin_refusal_names_the_host(cx: &mut TestAppContext) {
+        use tl_model::actions::RejectReason;
+        let mut r = remote_rig(cx);
+        r.submit(
+            ActionKindTag::Start,
+            ActionKind::UnitStart,
+            [unit("cups.service")],
+            start_texts(),
+        );
+        choose(&mut r, "TlDialogAction");
+        let id = r.actions_sent()[0].id;
+        r.finish(id, &[ActionState::Rejected(RejectReason::RemoteAdminOff)]);
+        assert_eq!(
+            r.visible(),
+            ["Remote admin is off on home. Run tasklens remote-admin on there."]
+        );
+        assert_eq!(r.pushed().last().map(|t| t.kind), Some(ToastKind::Warning));
+    }
+
     #[gpui_kit::test]
     fn action_toast_replaced_in_place(cx: &mut TestAppContext) {
         let mut r = rig(cx);

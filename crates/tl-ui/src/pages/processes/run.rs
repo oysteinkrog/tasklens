@@ -39,7 +39,9 @@ use super::actions::{
 use super::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use super::jump::JumpTexts;
 use super::menu::{GraphKind, graph_source};
-use super::toasts::{ActionToastTexts, activate_window, refusal_reason, submit_to, toast_words};
+use super::toasts::{
+    ActionToastTexts, activate_window, refusal_reason, submit_to, submit_to_then, toast_words,
+};
 use super::{
     ConfirmWords, End, EndPlan, GroupOp, GroupPlan, ProcessesPage, dialog_targets, exe_deleted,
     group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
@@ -837,11 +839,8 @@ fn submit(
     on_sent: Option<OnSent>,
     cx: &mut App,
 ) {
-    if let Some(id) = submit_to(host, req, texts, queue, cx)
-        && let Some(on_sent) = on_sent
-    {
-        cx.defer(move |cx| on_sent(id, cx));
-    }
+    // The tracker calls `on_sent` itself: on a remote host the send follows the confirmation.
+    submit_to_then(host, req, texts, queue, on_sent, cx);
 }
 
 /// The Plasma Shell restart in flight (PROC-072). The tracker subscription clears it when that

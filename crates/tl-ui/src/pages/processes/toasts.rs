@@ -162,6 +162,19 @@ pub fn submit_to(
     queue: Option<WeakEntity<ToastQueue>>,
     cx: &mut App,
 ) -> Option<ActionId> {
+    submit_to_then(host, req, texts, queue, None, cx)
+}
+
+/// As [`submit_to`]. `on_sent` gets the id once the request is sent, which on a remote host is
+/// after the root confirmation, so the result here is `None` at once.
+pub fn submit_to_then(
+    host: &HostContext,
+    req: ActionRequest,
+    texts: ActionToastTexts,
+    queue: Option<WeakEntity<ToastQueue>>,
+    on_sent: Option<crate::action_tracker::OnSentId>,
+    cx: &mut App,
+) -> Option<ActionId> {
     let Some(tracker) = host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the action was not sent");
         return None;
@@ -173,7 +186,9 @@ pub fn submit_to(
     let mut texts = texts.into_toast_texts(action_words(cx));
     // PROC-058, ADR-006: a permission-denied result offers "Retry as administrator".
     texts.retry_as_admin = true;
-    tracker.update(cx, |t, cx| t.track_or_toast(req, queue, texts, cx))
+    tracker.update(cx, |t, cx| {
+        t.track_or_toast_then(req, queue, texts, on_sent, cx)
+    })
 }
 
 /// Switches to the window `internal_id` on the host: an `ActivateWindow` request whose result

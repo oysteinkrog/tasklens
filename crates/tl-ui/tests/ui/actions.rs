@@ -1182,19 +1182,76 @@ mod remote_root {
         );
     }
 
-    #[gpui_kit::test]
-    fn retry_as_administrator_on_a_remote_host_follows_that_hosts_helper(cx: &mut TestAppContext) {
-        let eperm = ActionState::Failed(ActionError::PermissionDenied);
-        let texts = || ToastTexts {
-            retry_as_admin: true,
-            ..ToastTexts::new("", "Could not end task.")
-        };
-        let mut r = rig(cx, Some(HelperState::Missing));
+    /// Fails `end_task(1)` with EPERM on remote host "home" whose helper is `helper` and whose
+    /// remote admin is `remote_admin`. Returns the last toast's button.
+    fn eperm_button_on_home(
+        cx: &mut TestAppContext,
+        helper: HelperState,
+        remote_admin: bool,
+    ) -> Option<SharedString> {
+        let mut r = rig(cx, Some(helper));
+        r.engine
+            .publish_host_settings(|v| v.remote_admin = remote_admin);
+        r.vcx.run_until_parked();
         let tracker = r.tracker.clone();
         r.vcx
             .update(|_, cx| tracker.update(cx, |t, _| t.set_remote_name(Arc::from("home"))));
-        let id = r.track(end_task(1), texts());
-        r.finish(id, &[eperm]);
-        assert_eq!(r.last().button, None, "no helper on home: no retry button");
+        let texts = ToastTexts {
+            retry_as_admin: true,
+            ..ToastTexts::new("", "Could not end task.")
+        };
+        let id = r.track(end_task(1), texts);
+        r.finish(id, &[ActionState::Failed(ActionError::PermissionDenied)]);
+        r.last().button
+    }
+
+    #[gpui_kit::test]
+    fn retry_as_administrator_on_a_remote_host_follows_that_hosts_helper(cx: &mut TestAppContext) {
+        let button = eperm_button_on_home(cx, HelperState::Missing, true);
+        assert_eq!(button, None, "no helper on home: no retry button");
+    }
+
+    #[gpui_kit::test]
+    fn retry_as_administrator_on_a_remote_host_needs_remote_admin_on(cx: &mut TestAppContext) {
+        let button = eperm_button_on_home(cx, HelperState::Unlocked, false);
+        assert_eq!(
+            button, None,
+            "remote admin off on home: the retry would be refused"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn retry_as_administrator_shows_on_a_remote_host_with_helper_and_remote_admin(
+        cx: &mut TestAppContext,
+    ) {
+        let button = eperm_button_on_home(cx, HelperState::Unlocked, true);
+        assert!(button.is_some(), "helper and remote admin on: retry shows");
+    }
+
+    #[gpui_kit::test]
+    fn on_sent_gets_the_id_after_the_confirmation(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        let got: Rc<RefCell<Vec<ActionId>>> = Rc::default();
+        let sink = got.clone();
+        let (queue, tracker) = (r.queue.downgrade(), r.tracker.clone());
+        let on_sent: tl_ui::action_tracker::OnSentId =
+            Rc::new(move |id, _| sink.borrow_mut().push(id));
+        let now = r.vcx.update(|_, cx| {
+            tracker.update(cx, |t, cx| {
+                t.track_or_toast_then(
+                    privileged_end_task(),
+                    queue,
+                    ToastTexts::new("", "Could not end task."),
+                    Some(on_sent),
+                    cx,
+                )
+            })
+        });
+        r.vcx.run_until_parked();
+        assert!(now.is_none());
+        assert!(got.borrow().is_empty(), "not before the answer");
+        choose(&mut r, "TlDialogAction");
+        assert_eq!(got.borrow().len(), 1, "once, after the confirmation");
+        assert_eq!(r.actions_sent().len(), 1);
     }
 }

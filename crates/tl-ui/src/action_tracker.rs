@@ -336,6 +336,9 @@ pub struct PushedToast {
     pub button: Option<SharedString>,
 }
 
+/// Gets the id of a request once it is sent.
+pub type OnSentId = Rc<dyn Fn(ActionId, &mut App)>;
+
 pub struct ActionTracker {
     client: Arc<dyn EngineClient>,
     /// The same host's hub, for its tl-helper state.
@@ -547,11 +550,29 @@ impl ActionTracker {
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
+        self.track_or_toast_then(request, queue, texts, None, cx)
+    }
+
+    /// [`Self::track_or_toast`] for an owner that needs the id of the send. `on_sent` gets the
+    /// id once the request is sent: at once on this PC, after the confirmation on a remote host.
+    /// Cancel sends nothing and never calls it.
+    pub fn track_or_toast_then(
+        &mut self,
+        request: ActionRequest,
+        queue: WeakEntity<ToastQueue>,
+        texts: ToastTexts,
+        on_sent: Option<OnSentId>,
+        cx: &mut Context<Self>,
+    ) -> Option<ActionId> {
         if let Some(host) = self.remote_root_host(&request) {
-            self.confirm_then_send(request, queue, texts, host, cx);
+            self.confirm_then_send(request, queue, texts, host, on_sent, cx);
             return None;
         }
-        self.send_or_toast(request, queue, texts, cx)
+        let id = self.send_or_toast(request, queue, texts, cx)?;
+        if let Some(on_sent) = on_sent {
+            cx.defer(move |cx| on_sent(id, cx));
+        }
+        Some(id)
     }
 
     /// The name of the remote host `request` would run as root on, `None` for the local host
@@ -572,6 +593,7 @@ impl ActionTracker {
         queue: WeakEntity<ToastQueue>,
         texts: ToastTexts,
         host: Arc<str>,
+        on_sent: Option<OnSentId>,
         cx: &mut Context<Self>,
     ) {
         let Some(window) = cx.active_window() else {
@@ -586,9 +608,10 @@ impl ActionTracker {
                 if !matches!(result, DialogResult::Confirmed { .. }) {
                     return;
                 }
-                let _ = this.update(cx, |t, cx| {
-                    t.send_or_toast(request, queue, texts, cx);
-                });
+                let sent = this.update(cx, |t, cx| t.send_or_toast(request, queue, texts, cx));
+                if let (Ok(Some(id)), Some(on_sent)) = (sent, on_sent) {
+                    cx.defer(move |cx| on_sent(id, cx));
+                }
             };
             let opened = window.update(cx, |_, window, cx| dialog.open(window, cx, on_result));
             if !matches!(opened, Ok(Ok(()))) {
@@ -685,7 +708,8 @@ impl ActionTracker {
                     cx.emit(ActionTrackerEvent::TargetFinished { id: ev.id, index });
                 } else if entry.mode() == Mode::PerTarget {
                     let helper = helper_state(self.hub.as_ref(), cx);
-                    self.push_target(ev.id, index, &state, helper, cx);
+                    let admin = remote_admin_on(self.hub.as_ref(), cx);
+                    self.push_target(ev.id, index, &state, helper, admin, cx);
                 }
             }
             (None, state) => self.on_summary(ev.id, state, cx),
@@ -718,13 +742,14 @@ impl ActionTracker {
         index: u16,
         state: &ActionState,
         helper: HelperState,
+        remote_admin: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.pending.get(&id) else {
             return;
         };
         let words = action_words(cx);
-        let retry = retry_allowed(entry, helper);
+        let retry = retry_allowed(entry, helper, remote_admin);
         let (kind, text, button) = result_toast(id, state, entry, retry, &words);
         let queue = entry.queue.clone();
         let key = ToastKey(id.0 << 8 | u64::from(index));
@@ -737,6 +762,7 @@ impl ActionTracker {
         };
         let words = action_words(cx);
         let helper = helper_state(self.hub.as_ref(), cx);
+        let admin = remote_admin_on(self.hub.as_ref(), cx);
         let states = entry.effective(&summary);
         let total = entry.total();
         let ok = states.iter().filter(|s| s.is_success()).count() as u16;
@@ -744,7 +770,7 @@ impl ActionTracker {
         let eperm: SmallVec<[u16; 4]> = (0..total)
             .filter(|&i| is_eperm(states[usize::from(i)]))
             .collect();
-        let retry = !eperm.is_empty() && retry_allowed(&entry, helper);
+        let retry = !eperm.is_empty() && retry_allowed(&entry, helper, admin);
         if entry.texts.owner_toasts {
             let finals = states.iter().enumerate();
             let finals = finals.map(|(i, s)| (i as u16, (*s).clone())).collect();
@@ -1099,10 +1125,21 @@ fn is_eperm(state: &ActionState) -> bool {
     matches!(state, ActionState::Failed(ActionError::PermissionDenied))
 }
 
+/// Whether remote admin is on at the tracker's host. Off without a hub.
+fn remote_admin_on(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> bool {
+    crate::host_settings::current_of(hub, cx)
+        .values
+        .remote_admin
+}
+
 /// "Retry as administrator" shows from P3 on, while tl-helper is installed, and never for a
-/// request that already ran privileged.
-fn retry_allowed(entry: &PendingAction, helper: HelperState) -> bool {
-    entry.texts.retry_as_admin && helper != HelperState::Missing && !entry.request.privileged
+/// request that already ran privileged. On a remote host it also needs remote admin on there,
+/// or the engine would refuse the retry.
+fn retry_allowed(entry: &PendingAction, helper: HelperState, remote_admin: bool) -> bool {
+    entry.texts.retry_as_admin
+        && helper != HelperState::Missing
+        && !entry.request.privileged
+        && (entry.host.is_none() || remote_admin)
 }
 
 /// The retry of `entry`: its `eperm` targets, privileged, with a new id.
