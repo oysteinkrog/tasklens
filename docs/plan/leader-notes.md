@@ -1062,3 +1062,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.31 held: remote-admin on/off is one transaction: flock for the whole command, CLI records the prior rules-file state (no shared backup), restore on any failure after the script starts. Requeued.
 - 2026-10-31 q4x76.31 held again: idempotent restore on any failure before the commit point (socket save); nothing undone after it; one fixed lock file. Requeued.
 - 2026-10-31 idle CPU (q4x76.15) on a loaded desktop: ratios 1.244, 0.817, 1.197; ratio of summed CPU 1.06 (within 10%). Too noisy to decide alone; filed tasklens-gkaiq to measure both at once. Accepted for 1.1.0 on the summed ratio.
+- 2026-10-31: 1.1.0 visual check blocked: remote host graphs empty (q4x76.35, P1, opus); Chrome shown as 'cat' on home (q4x76.36). Release waits for .35. Rule for .35: graph time for a host comes from that host's clock.
