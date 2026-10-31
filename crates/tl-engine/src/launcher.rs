@@ -804,12 +804,13 @@ fn ops_error(e: &OpsError) -> ActionError {
 /// A failed spawn names the program, so "not found" and "not executable" say which one. The
 /// error travels in the action's result only; launcher logs never carry it (ADR-015).
 fn spawn_error(program: &str, e: &OpsError) -> ActionError {
-    match e {
-        OpsError::Os(code) => ActionError::Internal(
-            format!("{program}: {}", std::io::Error::from_raw_os_error(*code)).into(),
-        ),
-        _ => ops_error(e),
-    }
+    let reason = match e {
+        OpsError::Os(code) => std::io::Error::from_raw_os_error(*code).to_string(),
+        OpsError::PermissionDenied => "permission denied".to_owned(),
+        OpsError::NoSuchProcess => "no such process".to_owned(),
+        _ => return ops_error(e),
+    };
+    ActionError::Internal(format!("{program}: {reason}").into())
 }
 
 fn internal(reason: &str) -> ActionError {
