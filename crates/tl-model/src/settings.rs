@@ -18,6 +18,9 @@ use crate::table::{ServiceStateFilter, TableMode, TableSettings, UnitType};
 /// First line of `settings.toml` and `state.toml`.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// The key `Settings::clamp` reports when it drops an invalid `[[hosts]]` entry.
+pub const HOSTS_KEY: &str = "hosts";
+
 /// `general.language` values in table (a) order. `"system"` follows the desktop locale.
 pub const LANGUAGES: [&str; 12] = [
     "system", "en-US", "de-DE", "es-ES", "fr-FR", "ja-JP", "ko-KR", "pt-BR", "ru-RU", "uk-UA",
@@ -1472,6 +1475,107 @@ pub struct DebugSettings {
     pub show_fps: bool,
 }
 
+/// One `[[hosts]]` entry: a remote PC the window reaches over ssh (UI-SHL-008). Its place in
+/// the list is its tab order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostEntry {
+    /// The tab name. Unique in the list, compared without regard to case.
+    pub name: String,
+    /// The ssh destination: `user@host`, a host name or an ssh config alias.
+    pub target: String,
+    /// A disabled host keeps its entry but gets no tab and no connection.
+    pub enabled: bool,
+}
+
+impl Default for HostEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// Why a [`HostEntry`] is not valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostError {
+    /// The name is empty or only spaces.
+    EmptyName,
+    /// The ssh destination is empty or only spaces.
+    EmptyTarget,
+    /// The name or the destination has a control character.
+    ControlChar,
+    /// The destination starts with `-`, so ssh would read it as an option.
+    TargetIsOption,
+    /// The destination has a space, so it is not one ssh argument.
+    TargetHasSpace,
+    /// An earlier entry, or the local host, has the same name.
+    DuplicateName,
+}
+
+impl HostError {
+    /// The reason in one short line, for the log and the Settings page.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::EmptyName => "the name is empty",
+            Self::EmptyTarget => "the ssh destination is empty",
+            Self::ControlChar => "the name or destination has a control character",
+            Self::TargetIsOption => "the ssh destination starts with a dash",
+            Self::TargetHasSpace => "the ssh destination has a space",
+            Self::DuplicateName => "another host has the same name",
+        }
+    }
+}
+
+impl HostEntry {
+    /// Checks this entry alone. `DuplicateName` comes from [`check_hosts`].
+    pub fn validate(&self) -> Result<(), HostError> {
+        let (name, target) = (self.name.trim(), self.target.trim());
+        if name.is_empty() {
+            return Err(HostError::EmptyName);
+        }
+        if target.is_empty() {
+            return Err(HostError::EmptyTarget);
+        }
+        if name.chars().chain(target.chars()).any(char::is_control) {
+            return Err(HostError::ControlChar);
+        }
+        if target.starts_with('-') {
+            return Err(HostError::TargetIsOption);
+        }
+        if target.contains(char::is_whitespace) {
+            return Err(HostError::TargetHasSpace);
+        }
+        Ok(())
+    }
+}
+
+/// Checks a host list. Returns the index and reason of each entry that is not valid: an entry
+/// that fails [`HostEntry::validate`], or whose name an earlier valid entry or `local_name`
+/// already uses (case-insensitive, spaces at the ends ignored). `local_name` is the implicit
+/// local host's name; pass `None` when it is not known.
+pub fn check_hosts(hosts: &[HostEntry], local_name: Option<&str>) -> Vec<(usize, HostError)> {
+    let mut seen: Vec<String> = local_name
+        .map(|n| vec![n.trim().to_lowercase()])
+        .unwrap_or_default();
+    let mut bad = Vec::new();
+    for (i, h) in hosts.iter().enumerate() {
+        if let Err(e) = h.validate() {
+            bad.push((i, e));
+            continue;
+        }
+        let key = h.name.trim().to_lowercase();
+        if seen.contains(&key) {
+            bad.push((i, HostError::DuplicateName));
+        } else {
+            seen.push(key);
+        }
+    }
+    bad
+}
+
 /// The whole of `settings.toml`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1499,6 +1603,9 @@ pub struct Settings {
     pub services: ServicesSettings,
     pub lowmem: LowmemSettings,
     pub debug: DebugSettings,
+    /// `[[hosts]]`: the remote PCs, in tab order (ADR-018, UI-SHL-008). The local host is
+    /// implicit and always first, so it is never listed here.
+    pub hosts: Vec<HostEntry>,
 }
 
 impl Default for Settings {
@@ -1526,6 +1633,7 @@ impl Default for Settings {
             services: ServicesSettings::default(),
             lowmem: LowmemSettings::default(),
             debug: DebugSettings::default(),
+            hosts: Vec::new(),
         }
     }
 }
@@ -2104,6 +2212,18 @@ impl Settings {
             c.push("performance.memory_by_app.colors");
         }
         self.performance.migrate_overview(c);
+        // `[[hosts]]`: an invalid entry is dropped, the others keep their order. The local
+        // host's name is not known here, so a clash with it is the host manager's check.
+        let bad = check_hosts(&self.hosts, None);
+        if !bad.is_empty() {
+            let mut i = 0;
+            self.hosts.retain(|_| {
+                let keep = !bad.iter().any(|(b, _)| *b == i);
+                i += 1;
+                keep
+            });
+            c.push(HOSTS_KEY);
+        }
         // UI-PRF-057: a saved `history` timeline click is kept while recording is off. Recording
         // is a host setting (ADR-018), which this file does not hold, so the window reads
         // `history` as `pause` while the host's recording is off.
@@ -2694,6 +2814,92 @@ mod tests {
         let old = text.replace("cpu_board_sort = \"load\"\n", "");
         let back = toml::from_str::<Settings>(&old).expect("parses");
         assert_eq!(back.performance.cpu_board_sort, CoreSort::Number);
+    }
+
+    fn host(name: &str, target: &str) -> HostEntry {
+        HostEntry {
+            name: name.into(),
+            target: target.into(),
+            enabled: true,
+        }
+    }
+
+    /// q4x76.25: `[[hosts]]` round trips in order, with `enabled`.
+    #[test]
+    fn hosts_round_trip_in_order() {
+        let mut s = Settings::default();
+        assert!(s.hosts.is_empty());
+        assert!(!toml::to_string(&s).unwrap().contains("hosts"));
+        s.hosts = vec![host("home", "me@home.lan"), host("office", "office")];
+        s.hosts[1].enabled = false;
+        let text = toml::to_string(&s).expect("serializes");
+        assert!(text.contains("[[hosts]]"), "{text}");
+        let (back, changed) = load_toml(&text);
+        assert_eq!(back, s);
+        assert!(changed.is_empty());
+        // `enabled` defaults to true when the key is missing.
+        let (s, _) = load_toml("[[hosts]]\nname = \"a\"\ntarget = \"b\"\n");
+        assert_eq!(s.hosts, vec![host("a", "b")]);
+    }
+
+    /// q4x76.25: each invalid entry is rejected with its own reason.
+    #[test]
+    fn hosts_invalid_entries_have_reasons() {
+        let cases = [
+            (host("", "x"), HostError::EmptyName),
+            (host("  ", "x"), HostError::EmptyName),
+            (host("a", ""), HostError::EmptyTarget),
+            (host("a", "   "), HostError::EmptyTarget),
+            (host("a\nb", "x"), HostError::ControlChar),
+            (host("a", "-oProxyCommand=x"), HostError::TargetIsOption),
+            (host("a", "me@x y"), HostError::TargetHasSpace),
+        ];
+        for (h, e) in cases {
+            assert_eq!(h.validate(), Err(e.clone()), "{h:?}");
+            assert!(!e.reason().is_empty());
+        }
+        assert_eq!(host("home", "me@home").validate(), Ok(()));
+    }
+
+    /// q4x76.25: names are unique, ignoring case, and never clash with the local host.
+    #[test]
+    fn hosts_names_must_be_unique() {
+        let list = [host("Home", "a"), host("home ", "b"), host("office", "c")];
+        assert_eq!(
+            check_hosts(&list, None),
+            vec![(1, HostError::DuplicateName)]
+        );
+        assert_eq!(
+            check_hosts(&list, Some("OFFICE")),
+            vec![(1, HostError::DuplicateName), (2, HostError::DuplicateName)]
+        );
+        // A bad entry does not claim its name.
+        let list = [host("a", ""), host("a", "x")];
+        assert_eq!(check_hosts(&list, None), vec![(0, HostError::EmptyTarget)]);
+    }
+
+    /// q4x76.25: loading drops the invalid entries, keeps the rest in order and reports the key.
+    #[test]
+    fn hosts_load_drops_invalid_entries() {
+        let text = "[[hosts]]\nname = \"home\"\ntarget = \"h\"\n\
+                    [[hosts]]\nname = \"\"\ntarget = \"x\"\n\
+                    [[hosts]]\nname = \"HOME\"\ntarget = \"y\"\n\
+                    [[hosts]]\nname = \"lab\"\ntarget = \"l\"\n";
+        let (s, changed) = load_toml(text);
+        assert_eq!(s.hosts, vec![host("home", "h"), host("lab", "l")]);
+        assert_eq!(changed, vec![HOSTS_KEY]);
+    }
+
+    /// q4x76.25 + ADR-011: a key the model does not know is ignored, in a host entry and in the
+    /// file, and is absent after the next save. The entry itself still loads.
+    #[test]
+    fn hosts_unknown_keys_are_ignored() {
+        let text = "future = 1\n[[hosts]]\nname = \"home\"\ntarget = \"h\"\nport = 22\n";
+        let (s, changed) = load_toml(text);
+        assert!(changed.is_empty());
+        assert_eq!(s.hosts, vec![host("home", "h")]);
+        let out = toml::to_string(&s).unwrap();
+        assert!(!out.contains("port") && !out.contains("future"), "{out}");
     }
 
     #[test]
