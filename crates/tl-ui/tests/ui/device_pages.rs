@@ -398,8 +398,8 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
 }
 
 /// One shared range on every device page (crw.105): `performance.overview_range`, set from the
-/// range switch in any page header. `graph_range_s` keeps only the sidebar tiles and the Battery
-/// chart, which reads only the live series.
+/// range switch in any page header. `graph_range_s` keeps only the sidebar tiles. The Battery
+/// chart follows the shared range too, since its series are in the device history (crw.107).
 mod shared_range {
     use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
     use tl_model::ids::{MetricId, SeriesId};
@@ -437,9 +437,8 @@ mod shared_range {
     }
 
     /// The chart ranges in s: CPU Overall, Memory Physical, Disk Active, Network Throughput,
-    /// GPU Memory, Fan Speed, the CPU per-core grid and the GPU engine grid (the shared range),
-    /// then the Battery chart (live only).
-    fn ranges(r: &mut Rig) -> ([u64; 8], u64) {
+    /// GPU Memory, Fan Speed, the CPU per-core grid, the GPU engine grid and the Battery chart.
+    fn ranges(r: &mut Rig) -> [u64; 9] {
         let cpu = page::<CpuPage>(r, "cpu");
         let memory = page::<MemoryPage>(r, "memory");
         let disk = page::<DiskPage>(r, DISKS[0]);
@@ -449,19 +448,17 @@ mod shared_range {
         let bat = page::<BatteryPage>(r, MOUSE);
         r.vcx.update(|_, cx| {
             let ns = |c: &Entity<tl_ui::chart::ChartView>| c.read(cx).spec.range_ns / S;
-            (
-                [
-                    ns(cpu.read(cx).overall()),
-                    ns(memory.read(cx).physical()),
-                    ns(disk.read(cx).active_chart()),
-                    ns(net.read(cx).throughput()),
-                    ns(gpu.read(cx).memory()),
-                    ns(fan.read(cx).speed()),
-                    cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
-                    gpu.read(cx).engines().read(cx).spec.range_ns / S,
-                ],
+            [
+                ns(cpu.read(cx).overall()),
+                ns(memory.read(cx).physical()),
+                ns(disk.read(cx).active_chart()),
+                ns(net.read(cx).throughput()),
+                ns(gpu.read(cx).memory()),
+                ns(fan.read(cx).speed()),
+                cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
+                gpu.read(cx).engines().read(cx).spec.range_ns / S,
                 ns(bat.read(cx).chart()),
-            )
+            ]
         })
     }
 
@@ -486,7 +483,7 @@ mod shared_range {
                 assert!(r.vcx.debug_bounds(id).is_some(), "{id} on {k}");
             }
         }
-        assert_eq!(ranges(&mut r), ([60; 8], 60), "1 min by default");
+        assert_eq!(ranges(&mut r), [60; 9], "1 min by default");
 
         select(&mut r, "memory");
         click_range(&mut r, OverviewRange::M5);
@@ -495,14 +492,13 @@ mod shared_range {
             (OverviewRange::M5, 60),
             "graph_range_s stays"
         );
-        assert_eq!(ranges(&mut r), ([300; 8], 300));
+        assert_eq!(ranges(&mut r), [300; 9]);
         assert_eq!(last_demand(&r).device_history_range, None, "5 min is live");
 
         select(&mut r, GPU);
         click_range(&mut r, OverviewRange::H24);
         assert_eq!(saved(&mut r).0, OverviewRange::H24);
-        // The live-only Battery chart keeps `graph_range_s`.
-        assert_eq!(ranges(&mut r), ([86_400; 8], 60));
+        assert_eq!(ranges(&mut r), [86_400; 9]);
         assert_eq!(
             last_demand(&r).device_history_range,
             Some(DeviceHistoryRequest {
@@ -511,7 +507,7 @@ mod shared_range {
             })
         );
 
-        // `graph_range_s` moves the live-only chart only.
+        // `graph_range_s` moves no page chart.
         let performance = r.page.clone();
         r.vcx.update(|window, cx| {
             performance.read(cx).focus_handle(cx).focus(window, cx);
@@ -519,7 +515,7 @@ mod shared_range {
         r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
         draw(r.vcx);
         assert_eq!(saved(&mut r), (OverviewRange::H24, 30));
-        assert_eq!(ranges(&mut r), ([86_400; 8], 30));
+        assert_eq!(ranges(&mut r), [86_400; 9]);
 
         // Another page asks for the same history while it is shown.
         select(&mut r, DISKS[0]);
@@ -529,24 +525,40 @@ mod shared_range {
         );
     }
 
-    /// The Battery chart reads only the live series: at 1 h, 24 h and 7 d it shows "Live only".
-    /// Charts and grids the history serves show no note, the CPU per-core grid and the GPU engine
-    /// grid included.
+    /// The Battery chart reads the device history like every other page chart (crw.107): at
+    /// 24 h the Battery page asks for it, draws the points the engine answers with and shows no
+    /// "Live only" note. No other page shows the note either.
     #[gpui_kit::test]
-    fn live_only_note(cx: &mut TestAppContext) {
+    fn battery_reads_device_history(cx: &mut TestAppContext) {
         let mut r = open(cx);
         publish_p2(&mut r);
         select(&mut r, MOUSE);
-        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "1 min is live");
-        click_range(&mut r, OverviewRange::H1);
-        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_some(), "battery");
+        click_range(&mut r, OverviewRange::H24);
+        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "battery");
+        assert_eq!(
+            last_demand(&r).device_history_range,
+            Some(DeviceHistoryRequest {
+                range: DeviceRange::H24,
+                end_realtime_ns: None,
+            })
+        );
+        let id = SeriesId {
+            device: DeviceIdx(16),
+            metric: MetricId::BATTERY_PCT,
+        };
+        publish_history(&mut r, DeviceRange::H24, &[id]);
+        let bat = page::<BatteryPage>(&mut r, MOUSE);
+        let n = r.vcx.update(|_, cx| {
+            bat.read(cx).chart().read(cx).resolved()[0]
+                .as_ref()
+                .map(|v| v.samples.len())
+        });
+        // No live samples exist, so the samples come from the three history points.
+        assert!(n.is_some_and(|n| n >= 3), "history samples: {n:?}");
         for k in ["cpu", "memory", DISKS[0], "net:enp38s0", GPU, FAN] {
             select(&mut r, k);
             assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "{k}");
         }
-        select(&mut r, MOUSE);
-        click_range(&mut r, OverviewRange::M5);
-        assert!(r.vcx.debug_bounds(LIVE_ONLY_ID).is_none(), "5 min is live");
     }
 
     /// At 1 h a page chart draws the device history the engine answers with.
@@ -598,9 +610,9 @@ mod shared_range {
         assert!(n.is_some_and(|n| n >= 3), "history samples: {n:?}");
     }
 
-    /// The device history the engine answers with at 1 h: three points per series, for `ids`
-    /// (sorted, as `DeviceHistory::get` searches them).
-    fn publish_history(r: &mut Rig, ids: &[SeriesId]) {
+    /// The device history the engine answers with at `range`: three points per series, for
+    /// `ids` (sorted, as `DeviceHistory::get` searches them).
+    fn publish_history(r: &mut Rig, range: DeviceRange, ids: &[SeriesId]) {
         let mut ids = ids.to_vec();
         ids.sort();
         ids.dedup();
@@ -622,7 +634,7 @@ mod shared_range {
                     ..ComponentHeader::default()
                 },
                 request: Some(DeviceHistoryRequest {
-                    range: DeviceRange::H1,
+                    range,
                     end_realtime_ns: None,
                 }),
                 realtime_offset_ns: now - now_boot_ns() as i64,
@@ -683,7 +695,7 @@ mod shared_range {
                 .flat_map(|g| g.read(cx).spec.cells.iter().map(|c| c.fill_series))
                 .collect::<Vec<_>>()
         });
-        publish_history(&mut r, &ids);
+        publish_history(&mut r, DeviceRange::H1, &ids);
         r.vcx.update(|_, cx| {
             for (name, g) in [("cpu grid", &cpu_grid), ("engine grid", &engines)] {
                 let g = g.read(cx);
