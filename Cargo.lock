@@ -6975,6 +6975,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sd-notify"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e4ef7359e694bfaf1dd27a30f9d760b54c00dfae9f19bd0c05a39bc9128fe76"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8123,8 +8132,24 @@ dependencies = [
  "arc-swap",
  "async-channel",
  "proptest",
+ "rustix",
+ "tempfile",
  "tl-model",
  "zstd",
+]
+
+[[package]]
+name = "tl-server"
+version = "1.0.3"
+dependencies = [
+ "libc",
+ "sd-notify",
+ "tempfile",
+ "tl-engine",
+ "tl-model",
+ "tl-remote",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
