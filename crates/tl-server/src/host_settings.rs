@@ -14,6 +14,10 @@
 //! Writes are atomic with mode 0600 (`tl_ops::write_atomic`).
 //!
 //! Logs name files and keys, never their values.
+//!
+//! tl-app compiles this file too (`crates/tl-app/src/host_file.rs`), so the window's own engine
+//! owns `engine.toml` with this same code while it holds the lock, and the rescue window reads it
+//! with `read_without_lock` (tasklens-q4x76.24).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -114,6 +118,28 @@ impl HostSettingsFile {
         if let Err(e) = tl_ops::write_atomic(&self.path, text.as_bytes(), tl_ops::PRIVATE_FILE_MODE)
         {
             warn!(target: LOG, "{}: could not be written: {e}", self.path.display());
+        }
+    }
+}
+
+/// The settings in `dir/engine.toml` for a process that does not hold the engine lock: the
+/// rescue window (ADR-018 Rescue mode). Nothing is created, renamed or written. A missing
+/// `engine.toml` gives the host keys of `settings.toml` (or the defaults) at the first revision;
+/// an unreadable one gives the defaults. A change the caller makes stays in its memory.
+#[allow(
+    dead_code,
+    reason = "tasklens-engine holds the lock, so only the rescue window in tl-app reads this way"
+)]
+pub fn read_without_lock(dir: &Path) -> HostSettings {
+    match read(&dir.join(ENGINE_FILE)) {
+        Read::Table(table) => from_table(&table),
+        Read::Unreadable => fresh(HostSettingsValues::default()),
+        Read::Missing => {
+            let path = dir.join(SETTINGS_FILE);
+            match read(&path) {
+                Read::Table(table) => fresh(host_keys(&table, &path)),
+                Read::Missing | Read::Unreadable => fresh(HostSettingsValues::default()),
+            }
         }
     }
 }
@@ -526,6 +552,58 @@ device_metrics_max_mb = 32
         assert_eq!(file.current().rev, 1);
         assert_eq!(file.current().values.interval_ms, 10_000);
         assert_eq!(file.current().values.history.retention_h, 1);
+    }
+
+    /// Every file in `dir` with its contents, sorted by name.
+    fn files(dir: &Path) -> Vec<(String, String)> {
+        let mut all: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                let text = std::fs::read_to_string(e.path()).unwrap();
+                (e.file_name().to_string_lossy().into_owned(), text)
+            })
+            .collect();
+        all.sort();
+        all
+    }
+
+    /// ADR-018 Rescue mode (tasklens-q4x76.24): a reader without the engine lock never writes,
+    /// creates or renames a file, whatever state `engine.toml` is in.
+    #[test]
+    fn reading_without_the_lock_never_writes() {
+        // No engine.toml yet: the host keys of settings.toml, and no engine.toml afterwards.
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), SETTINGS_FILE, SETTINGS);
+        let before = files(tmp.path());
+        let read = read_without_lock(tmp.path());
+        assert_eq!((read.rev, &read.values), (1, &imported()));
+        assert_eq!(files(tmp.path()), before);
+
+        // A stored file is read as it is.
+        let (mut file, _) = HostSettingsFile::open(tmp.path(), NOW);
+        assert!(matches!(
+            file.set(1, &interval(500)),
+            SetHostSettingsReply::Ack { rev: 2 }
+        ));
+        let before = files(tmp.path());
+        assert_eq!(read_without_lock(tmp.path()), *file.current());
+        assert_eq!(files(tmp.path()), before);
+
+        // A newer schema stays read-only.
+        write(tmp.path(), ENGINE_FILE, "schema_version = 99\nrev = 7\n");
+        let before = files(tmp.path());
+        let read = read_without_lock(tmp.path());
+        assert!(read.read_only);
+        assert_eq!(read.rev, 7);
+        assert_eq!(files(tmp.path()), before);
+
+        // A corrupt file gives the defaults and is not renamed.
+        write(tmp.path(), ENGINE_FILE, "rev = [[[");
+        let before = files(tmp.path());
+        let read = read_without_lock(tmp.path());
+        assert_eq!(read.values, HostSettingsValues::default());
+        assert_eq!(files(tmp.path()), before);
     }
 
     #[test]

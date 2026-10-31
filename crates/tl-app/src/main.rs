@@ -18,6 +18,7 @@ mod crash;
 mod engine_link;
 #[cfg(feature = "bench")]
 mod gallery_main;
+mod host_file;
 mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
@@ -44,15 +45,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
-use tl_model::remote_proto::{HelloTail, HostSettings, HostSettingsValues, Want};
-use tl_model::settings::{Settings, StartTab};
+use tl_model::remote_proto::{HelloTail, Want};
+use tl_model::settings::StartTab;
 use tl_ui::app::ToastKindTag;
 use tl_ui::engine_link::{EngineLinkApi, EngineLinkState};
 use tl_ui::{AppEnv, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
-use crate::engine_link::{EngineLink, LinkEnv, LocalEngine};
+use crate::engine_link::{EngineLink, LinkEnv};
 use crate::settings_store::{LoadNotice, Store};
 use crate::single_instance::{Forward, Outcome};
 
@@ -237,7 +238,7 @@ fn main() -> ExitCode {
     // Step 7: the engine. The main window uses the engine service, or its own engine when the
     // service does not answer (ADR-018). The rescue window keeps its own engine, with no history
     // and no lock. Do not wait for any collector.
-    let (engine, link_api) = match start_engine(&paths, &args, &settings) {
+    let (engine, link_api) = match start_engine(&paths, &args) {
         Ok(started) => started,
         Err(e) => {
             error!(target: "tasklens::engine", "engine start failed: {e}");
@@ -419,10 +420,10 @@ fn engine_config(paths: &paths::Paths, low_memory: bool, force_full: bool) -> En
 fn start_engine(
     paths: &paths::Paths,
     args: &args::Args,
-    settings: &Settings,
 ) -> Result<(WindowEngine, Option<EngineLinkApi>), String> {
-    let host = window_host_settings(settings);
     if args.low_memory {
+        // The rescue window holds no lock, so it only reads engine.toml (ADR-018 Rescue mode).
+        let host = host_file::read_only(&paths.config_dir);
         let config = engine_config(paths, true, args.force_full_memory_mode);
         let engine = Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
         engine.install_host_settings(host);
@@ -443,15 +444,20 @@ fn start_engine(
             Box::new(engine_link::start_unit)
                 as Box<dyn Fn(std::time::Duration) -> bool + Send + Sync>
         }),
+        // Runs only while the window holds the engine lock, so it owns engine.toml, as the
+        // service does (ADR-018 Settings, tasklens-q4x76.24).
         start_engine: Box::new(move || {
+            let file = host_file::open(&engine_paths.config_dir);
             let config = engine_config(&engine_paths, false, false);
             let engine =
                 Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
-            engine.install_host_settings(host.clone());
-            Ok(LocalEngine {
-                client: Arc::new(engine.clone()),
-                stop: Box::new(move || stop_engine(engine)),
-            })
+            let applier = engine.clone();
+            Ok(host_file::local_engine(
+                file,
+                Arc::new(engine.clone()),
+                Box::new(move |current| applier.install_host_settings(current.clone())),
+                Box::new(move || stop_engine(engine)),
+            ))
         }),
         hello: HelloTail {
             pid: std::process::id(),
@@ -481,18 +487,6 @@ fn start_engine(
         }),
     };
     Ok((WindowEngine::Link(link), Some(api)))
-}
-
-/// The host settings the window's own engine starts with: the host keys of `settings.toml`, at
-/// revision 1 so the window can change them. The window no longer writes those keys, so this is
-/// the value from before the engine service, or the defaults. tasklens-q4x76.24 moves this
-/// engine to `engine.toml`.
-fn window_host_settings(settings: &Settings) -> HostSettings {
-    HostSettings {
-        rev: 1,
-        values: HostSettingsValues::from_settings(settings),
-        read_only: false,
-    }
 }
 
 /// The exit steps after the UI stops (ADR-010 Close behaviour, ADR-004 Shutdown): settings,
