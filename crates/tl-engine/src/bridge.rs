@@ -830,9 +830,14 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    use asupersync::Cx;
+    use smallvec::SmallVec;
+    use tl_model::actions::{ActionId, ActionKind, ActionRequest, Signal};
+    use tl_model::health::SourceId;
     use tl_model::table::{Manager, UnitRef};
 
     use crate::config::EngineMode;
+    use crate::reducer::AdmissionView;
 
     /// Command queue size from ADR-005.
     const QUEUE: usize = 256;
@@ -1008,62 +1013,161 @@ mod tests {
         assert!(handle.latest().sequence >= 1);
     }
 
-    /// The `OpenPort` messages on the queue, with their ports' state. Other messages are
-    /// dropped.
-    fn opened(rx: &mut mpsc::Receiver<EngineMsg>) -> Vec<(ClientSessionId, Arc<PortState>)> {
-        let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let EngineMsg::Client(ClientMsg::OpenPort { id, port, .. }) = msg {
-                out.push((id, port));
+    /// Parks the reducer inside `submit` until the test releases it, so a test can hold a running
+    /// reducer at a chosen point.
+    struct ParkGate {
+        parked: std::sync::mpsc::Sender<()>,
+        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl ActionGate for ParkGate {
+        fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
+            let _ = self.parked.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv_timeout(Duration::from_secs(10));
+        }
+
+        fn finished(&mut self, _id: ActionId) -> Option<SourceId> {
+            None
+        }
+    }
+
+    /// An engine on the fixture with a running reducer that `park` holds and `release` lets go.
+    /// Low-memory mode has no workers, so only the test and the tick fill the queue.
+    struct Live {
+        handle: EngineHandle,
+        parked_rx: std::sync::mpsc::Receiver<()>,
+        release_tx: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Live {
+        fn start() -> Self {
+            let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release = Arc::new(Mutex::new(release_rx));
+            let hooks = EngineHooks {
+                action_gate: Some(Arc::new(move |_ctx: HookCtx| {
+                    Box::new(ParkGate {
+                        parked: parked_tx.clone(),
+                        release: Arc::clone(&release),
+                    }) as Box<dyn ActionGate>
+                })),
+                ..EngineHooks::default()
+            };
+            let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tl-collect/tests/fixtures/minimal-vm");
+            let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
+                .with_sys_root(SysRoot::at(&base));
+            let handle = Engine::start(config, hooks).expect("engine starts");
+            Self {
+                handle,
+                parked_rx,
+                release_tx,
             }
         }
-        out
+
+        /// Sends an action and waits until the reducer is parked in its `submit`.
+        fn park(&self) {
+            let park = Command::Action(ActionRequest {
+                id: ActionId(1),
+                kind: ActionKind::Signal(Signal::Term),
+                targets: SmallVec::new(),
+                privileged: false,
+            });
+            assert_eq!(self.handle.send(park), Ok(()));
+            self.parked_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reducer parks");
+        }
+
+        fn release(&self) {
+            let _ = self.release_tx.send(());
+        }
+
+        /// Fills the command queue until it refuses a command.
+        fn fill_queue(&self) {
+            let mut sent = 0;
+            while self.handle.send(Command::ResetBaselines).is_ok() {
+                sent += 1;
+                assert!(sent <= QUEUE, "the queue never filled");
+            }
+        }
+
+        fn shutdown(self) {
+            self.release();
+            let report = self.handle.shutdown();
+            assert!(report.clean(), "{report:?}");
+        }
+    }
+
+    /// Waits up to 5 s for `done`.
+    fn within_5s(done: impl Fn() -> bool) -> bool {
+        let begin = Instant::now();
+        while !done() {
+            if begin.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
     }
 
     #[test]
     fn open_session_serves_eight_ports_beside_the_local_session() {
-        let mut r = rig(None);
-        let ports: Vec<SessionPort> = (1..SESSIONS_MAX as u32)
-            .map(|i| r.handle.open_session(ClientSessionId(i)).expect("room"))
+        let live = Live::start();
+        let mut ports: Vec<SessionPort> = (1..SESSIONS_MAX as u32)
+            .map(|i| live.handle.open_session(ClientSessionId(i)).expect("room"))
             .collect();
         assert_eq!(ports.len(), 8);
         assert_eq!(
-            r.handle.open_session(ClientSessionId(99)).err(),
+            live.handle.open_session(ClientSessionId(99)).err(),
             Some(OpenError::Full)
         );
         assert_eq!(
-            r.handle.open_session(ClientSessionId(1)).err(),
+            live.handle.open_session(ClientSessionId(1)).err(),
             Some(OpenError::Duplicate)
         );
         assert_eq!(
-            r.handle.open_session(ClientSessionId::LOCAL).err(),
+            live.handle.open_session(ClientSessionId::LOCAL).err(),
             Some(OpenError::Duplicate)
         );
-        let sent = opened(&mut r.msgs_rx);
-        assert_eq!(sent.len(), 8);
 
         // A dropped port keeps its slot until the reducer has ended its session.
-        drop(ports.into_iter().next());
-        assert!(sent[0].1.is_closed());
+        live.park();
+        let first = Arc::clone(&ports[0].state);
+        drop(ports.remove(0));
+        assert!(first.is_closed());
+        assert!(!first.is_ended());
         assert_eq!(
-            r.handle.open_session(ClientSessionId(99)).err(),
+            live.handle.open_session(ClientSessionId(99)).err(),
             Some(OpenError::Full)
         );
-        sent[0].1.end();
-        r.handle
+        live.release();
+        assert!(
+            within_5s(|| first.is_ended()),
+            "the reducer ends the session"
+        );
+        let reopened = live
+            .handle
             .open_session(ClientSessionId(99))
             .expect("the ended session's slot is free");
+        drop(reopened);
+        drop(ports);
+        live.shutdown();
     }
 
     #[test]
     fn a_port_dropped_on_a_full_queue_still_closes() {
-        let mut r = rig(None);
-        let port = r.handle.open_session(ClientSessionId(1)).expect("room");
-        for _ in 1..QUEUE {
-            assert_eq!(r.handle.send(Command::ResetBaselines), Ok(()));
-        }
+        let live = Live::start();
+        let port = live.handle.open_session(ClientSessionId(1)).expect("room");
+        let state = Arc::clone(&port.state);
+        live.park();
+        live.fill_queue();
         assert_eq!(
-            r.handle.open_session(ClientSessionId(2)).err(),
+            live.handle.open_session(ClientSessionId(2)).err(),
             Some(OpenError::Busy),
             "a full queue refuses an open and keeps no slot"
         );
@@ -1073,10 +1177,20 @@ mod tests {
             memory: true,
             ..Demand::default()
         });
+        // The drop's wake does not fit in the queue; the close is in the shared state.
         drop(port);
-        let sent = opened(&mut r.msgs_rx);
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].1.is_closed(), "the close is in the shared state");
+        assert!(state.is_closed(), "the close is in the shared state");
+        live.release();
+        assert!(
+            within_5s(|| state.is_ended()),
+            "the reducer reads the close with no message for it"
+        );
+        let again = live
+            .handle
+            .open_session(ClientSessionId(2))
+            .expect("the refused open kept no slot");
+        drop(again);
+        live.shutdown();
     }
 
     #[test]
