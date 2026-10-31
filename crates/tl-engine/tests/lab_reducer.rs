@@ -1325,6 +1325,19 @@ fn aggregate_net_counts_every_kind_with_no_window() {
         assert!(latest.devices.find(&id).is_none(), "{kind:?}");
     }
 
+    // The sink drops samples it gets before the catalog, as for any new device, so the
+    // history sees the second sample.
+    let (eno1, wlan0, docker0) = (net_id("eno1", 2), net_id("wlan0", 3), net_id("docker0", 4));
+    rig.run(vec![src(SourceUpdate::Nets(NetSample {
+        t_ns: 2 * SEC,
+        nets: vec![
+            (eno1, net_totals(5000.0)),
+            (wlan0, net_totals(300.0)),
+            (docker0, net_totals(700.0)),
+        ],
+    }))])
+    .expect("no invariant violation");
+
     // What the history worker would store: the catalog keys and the samples.
     let mut keys = Vec::new();
     let mut stored: Vec<(SeriesId, f32)> = Vec::new();
