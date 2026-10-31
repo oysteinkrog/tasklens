@@ -236,9 +236,14 @@ impl Link {
         let _ = self.doorbell.try_send(());
     }
 
-    fn control(&self, msg: ClientMsg) {
+    /// Queues `msg` on the control path without waking the writer; `ring` does that.
+    fn queue_control(&self, msg: ClientMsg) {
         // Unbounded: only a closed channel refuses, and then the writer is gone.
         let _ = self.control.try_send(msg);
+    }
+
+    fn control(&self, msg: ClientMsg) {
+        self.queue_control(msg);
         self.ring();
     }
 }
@@ -588,16 +593,18 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                     observe!(shared.observer, Observed::Generation(session));
                 }
                 if let Some(link) = &st.link {
-                    link.control(ClientMsg::Ack { frame: frame.frame });
+                    // Reported before the writer is woken, so `AckWritten` cannot come first.
+                    link.queue_control(ClientMsg::Ack { frame: frame.frame });
                     observe!(shared.observer, Observed::AckQueued(frame.frame));
+                    link.ring();
                 }
             }
             ServerMsg::Action(ev) => send_event(shared, ev),
             ServerMsg::Request(ev) => {
                 let mut st = lock(&shared.state);
                 if take_pending(&mut st.pending, (ev.kind, ev.id)) {
-                    observe!(shared.observer, Observed::RequestEnded(ev));
                     let _ = shared.requests_tx.try_send(ev);
+                    observe!(shared.observer, Observed::RequestEnded(ev));
                 }
             }
             ServerMsg::Journal { stream, event } => {
@@ -736,8 +743,8 @@ fn end_session(shared: &Shared, host_name: &str) {
                 id,
                 end: RequestEnd::Lost,
             };
-            observe!(shared.observer, Observed::RequestEnded(end));
             let _ = shared.requests_tx.try_send(end);
+            observe!(shared.observer, Observed::RequestEnded(end));
         }
     }
 }
