@@ -95,6 +95,10 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
         .map_err(|e| format!("{}: {e}", state_dir.join(LOCK_FILE).display()))?
     else {
         info!(target: "tasklens::engine", "{ALREADY_RUNNING}");
+        // Under Type=notify, a clean exit before READY=1 counts as a failure and
+        // Restart=on-failure would start the unit again every 2 s. Report ready, then stop.
+        let _ = sd_notify::notify(&[NotifyState::Ready]);
+        let _ = sd_notify::notify(&[NotifyState::Stopping]);
         return Ok(ExitCode::SUCCESS);
     };
 
