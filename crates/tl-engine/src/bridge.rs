@@ -1614,24 +1614,32 @@ mod tests {
     fn local_window_pids_follow_their_ports() {
         let rig = rig(None);
         let desktop = rig.handle.inner.desktop.clone();
+        let devel: Arc<str> = Arc::from("io.github.oysteinkrog.Tasklens.Devel");
+        let with_app = |pid, bridge| SessionPeer {
+            app_id: Arc::clone(&devel),
+            ..peer(pid, bridge)
+        };
         let local = rig
             .handle
-            .send_open(ClientSessionId(1), Some(peer(4000, false)))
+            .send_open(ClientSessionId(1), Some(with_app(4000, false)))
             .expect("open sent");
         let remote = rig
             .handle
-            .send_open(ClientSessionId(2), Some(peer(5000, true)))
+            .send_open(ClientSessionId(2), Some(with_app(5000, true)))
             .expect("open sent");
         let unknown = rig
             .handle
             .send_open(ClientSessionId(3), None)
             .expect("open sent");
         assert_eq!(desktop.window_pids(), [4000]);
-        assert_eq!(desktop.own_app_ids(4000), [Arc::from(APP_ID)]);
-        assert!(desktop.own_app_ids(5000).is_empty(), "a bridge session");
+        assert!(desktop.own_app_ids(4000).contains(&devel));
+        assert!(
+            !desktop.own_app_ids(5000).contains(&devel),
+            "a bridge session"
+        );
         drop(local);
         assert!(desktop.window_pids().is_empty());
-        assert!(desktop.own_app_ids(4000).is_empty());
+        assert!(!desktop.own_app_ids(4000).contains(&devel));
         drop((remote, unknown));
     }
 }

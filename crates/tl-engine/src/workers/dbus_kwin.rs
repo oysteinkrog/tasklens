@@ -2429,7 +2429,9 @@ mod tests {
                 };
                 let mut got = Vec::new();
                 for (host, id) in [(&host, ID_A), (&host, ID_B), (&failing, ID_A)] {
-                    let r = activate(&cx, host, &dir, &cmds, &windows, &mut files, &call(id)).await;
+                    let r =
+                        super::activate(&cx, host, &dir, &cmds, &windows, &mut files, &call(id))
+                            .await;
                     got.push(r);
                 }
                 *results.lock().expect("lock") = got;
