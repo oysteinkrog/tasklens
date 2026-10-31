@@ -985,3 +985,56 @@ fn one_journal_event_over_the_byte_limit_ends_the_stream() {
         }
     ));
 }
+
+#[test]
+fn a_journal_stream_id_opened_again_gets_only_its_own_events() {
+    let mut rig = Rig::new(|_| {});
+    let id = StreamId(1);
+    rig.send(&ClientMsg::JournalOpen {
+        stream: id,
+        query: query(),
+    });
+    let (old, old_controls) = rig.engine.journal(0);
+    old.try_send(JournalEvent::Access(JournalAccess::All))
+        .unwrap();
+    assert!(matches!(
+        rig.recv(),
+        ServerMsg::Journal {
+            stream: StreamId(1),
+            event: JournalEvent::Access(JournalAccess::All)
+        }
+    ));
+    rig.send(&ClientMsg::JournalClose { stream: id });
+    assert!(
+        old_controls.recv_blocking().is_err(),
+        "the old journalctl stops"
+    );
+    // The old journalctl still sends before it ends. The pump may hold its receiver yet.
+    let _ = old.try_send(JournalEvent::Access(JournalAccess::All));
+    rig.send(&ClientMsg::JournalOpen {
+        stream: id,
+        query: query(),
+    });
+    let (new, _new_controls) = rig.engine.journal(1);
+    // The old journalctl ends: its last sender goes.
+    rig.engine.journals.lock().unwrap()[0] = {
+        let (tx, _) = async_channel::unbounded();
+        let (_, rx) = async_channel::unbounded();
+        (tx, rx)
+    };
+    drop(old);
+    for _ in 0..2 {
+        new.try_send(JournalEvent::Access(JournalAccess::OwnOnly))
+            .unwrap();
+        assert!(
+            matches!(
+                rig.recv(),
+                ServerMsg::Journal {
+                    stream: StreamId(1),
+                    event: JournalEvent::Access(JournalAccess::OwnOnly)
+                }
+            ),
+            "only the new stream's events, and the old end did not end it"
+        );
+    }
+}

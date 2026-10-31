@@ -23,7 +23,10 @@
 //! - Replies: `REPLIES_MAX` messages or `REPLY_BYTES_MAX` bytes; more closes the session.
 //! - Journal: at most `JOURNAL_STREAMS_MAX` streams, each with `JOURNAL_BATCHES_MAX` events or
 //!   `JOURNAL_BYTES_MAX` bytes queued. A stream over its limit, even with one event, ends with
-//!   `JournalError::Overflow` and its `journalctl` stops; the session goes on.
+//!   `JournalError::Overflow` and its `journalctl` stops; the session goes on. Each opening of a
+//!   stream gets a new generation, and the pump keys what it holds by stream id and generation.
+//!   An event or end from an earlier opening of a reused id is dropped, so it cannot reach or end
+//!   the stream opened after it.
 //! - `Ack`: one waits for the writer at most, since one frame is in flight at most. A second
 //!   `Ack` before the writer applied the first closes the session.
 //! - A message not written within `WRITE_TIMEOUT` of the start of its write, or a frame with no
@@ -247,7 +250,16 @@ struct Entry {
     what: Item,
 }
 
+/// One opening of a journal stream: its id and the generation it got when it opened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct StreamKey {
+    id: StreamId,
+    generation: u64,
+}
+
 struct Stream {
+    /// Which opening of its id this is. What the pump got from an earlier one is dropped.
+    generation: u64,
     /// Dropping it stops the stream's `journalctl`. `None` once the stream ended here.
     handle: Option<JournalHandle>,
     /// What the pump waits on. `None` once the stream ended, here or in the engine.
@@ -266,6 +278,17 @@ struct Queues {
     streams: BTreeMap<StreamId, Stream>,
     /// The stream the writer served last, so each stream gets its turn.
     journal_turn: Option<StreamId>,
+    /// The generation the next opened stream gets.
+    next_generation: u64,
+}
+
+impl Queues {
+    /// The stream `key` names, if it is still that opening of its id.
+    fn stream_mut(&mut self, key: StreamKey) -> Option<&mut Stream> {
+        self.streams
+            .get_mut(&key.id)
+            .filter(|s| s.generation == key.generation)
+    }
 }
 
 struct Shared<P> {
@@ -287,6 +310,31 @@ struct Shared<P> {
 }
 
 impl<P: Port> Shared<P> {
+    /// The session's shared state, with the receivers of the writer's and the pump's bells.
+    fn new(
+        stream: UnixStream,
+        port: P,
+        config: SessionConfig,
+    ) -> (Arc<Self>, mpsc::Receiver<()>, async_channel::Receiver<()>) {
+        let (writer_bell, writer_rx) = mpsc::sync_channel(1);
+        let (pump_bell, pump_rx) = async_channel::bounded(1);
+        let shared = Arc::new(Self {
+            port,
+            stream,
+            config,
+            queues: Mutex::new(Queues::default()),
+            refused: Mutex::new(Vec::new()),
+            writer_bell,
+            pump_bell,
+            stopping: AtomicBool::new(false),
+            end: Mutex::new(None),
+            progress_dropped: AtomicU64::new(0),
+            commands_dropped: AtomicU64::new(0),
+            frames_trimmed: AtomicU64::new(0),
+        });
+        (shared, writer_rx, pump_rx)
+    }
+
     /// Ends the session: the first reason wins. Shuts the socket down, so a blocked read or
     /// write returns, and wakes the pump and the writer.
     fn finish(&self, end: SessionEnd) {
@@ -355,13 +403,15 @@ impl<P: Port> Shared<P> {
     }
 
     /// Queues a journal event on its stream. A stream over its limit gets an error event and
-    /// ends. An event for a stream that is closed or ended is dropped.
-    fn queue_journal(&self, frames: &mut FrameWriter, id: StreamId, event: JournalEvent) {
+    /// ends. An event for a stream that is closed or ended, or for an earlier opening of its id,
+    /// is dropped.
+    fn queue_journal(&self, frames: &mut FrameWriter, key: StreamKey, event: JournalEvent) {
+        let id = key.id;
         let Some(bytes) = self.encode(frames, &ServerMsg::Journal { stream: id, event }) else {
             return;
         };
         let mut q = lock(&self.queues);
-        let Some(s) = q.streams.get_mut(&id) else {
+        let Some(s) = q.stream_mut(key) else {
             return;
         };
         if s.handle.is_none() {
@@ -392,6 +442,29 @@ impl<P: Port> Shared<P> {
         // Stops the stream's journalctl, outside the lock.
         drop(handle);
         self.ring_writer();
+    }
+
+    /// The engine closed the events of stream `key`. An end from an earlier opening of its id
+    /// is dropped, so it cannot end the stream opened after it.
+    fn journal_done(&self, key: StreamKey) {
+        if let Some(s) = lock(&self.queues).stream_mut(key) {
+            s.events = None;
+        }
+    }
+
+    /// The event receivers of the open streams, keyed by opening, for the pump to wait on.
+    fn journal_receivers(&self) -> Vec<(StreamKey, async_channel::Receiver<JournalEvent>)> {
+        lock(&self.queues)
+            .streams
+            .iter()
+            .filter_map(|(id, s)| {
+                let key = StreamKey {
+                    id: *id,
+                    generation: s.generation,
+                };
+                s.events.clone().map(|rx| (key, rx))
+            })
+            .collect()
     }
 
     fn encode(&self, frames: &mut FrameWriter, msg: &ServerMsg) -> Option<Vec<u8>> {
@@ -492,22 +565,7 @@ pub fn serve_session<P: Port>(stream: UnixStream, port: P, config: SessionConfig
     let _ = stream.set_read_timeout(None);
     // The writer keeps its own deadline (`Shared::write`).
     let _ = stream.set_write_timeout(None);
-    let (writer_bell, writer_rx) = mpsc::sync_channel(1);
-    let (pump_bell, pump_rx) = async_channel::bounded(1);
-    let shared = Arc::new(Shared {
-        port,
-        stream,
-        config,
-        queues: Mutex::new(Queues::default()),
-        refused: Mutex::new(Vec::new()),
-        writer_bell,
-        pump_bell,
-        stopping: AtomicBool::new(false),
-        end: Mutex::new(None),
-        progress_dropped: AtomicU64::new(0),
-        commands_dropped: AtomicU64::new(0),
-        frames_trimmed: AtomicU64::new(0),
-    });
+    let (shared, writer_rx, pump_rx) = Shared::new(stream, port, config);
     let mut threads = Vec::new();
     let writer = {
         let sh = Arc::clone(&shared);
@@ -601,10 +659,7 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
                 true
             }
             ClientMsg::JournalClose { stream } => {
-                let closed = lock(&sh.queues).streams.remove(&stream);
-                // Stops its journalctl, outside the lock.
-                drop(closed);
-                let _ = sh.pump_bell.try_send(());
+                journal_close(sh, stream);
                 true
             }
             // Host settings arrive with tasklens-q4x76.9; until then they are the defaults and
@@ -766,17 +821,30 @@ fn journal_open<P: Port>(
     }
     let handle = sh.port.journal(query);
     let events = handle.events();
-    lock(&sh.queues).streams.insert(
+    let mut q = lock(&sh.queues);
+    let generation = q.next_generation;
+    q.next_generation += 1;
+    q.streams.insert(
         stream,
         Stream {
+            generation,
             handle: Some(handle),
             events: Some(events),
             queue: VecDeque::new(),
             bytes: 0,
         },
     );
+    drop(q);
     let _ = sh.pump_bell.try_send(());
     true
+}
+
+/// Closes a journal stream and drops what it had queued. The id may be opened again at once.
+fn journal_close<P: Port>(sh: &Shared<P>, stream: StreamId) {
+    let closed = lock(&sh.queues).streams.remove(&stream);
+    // Stops its journalctl, outside the lock.
+    drop(closed);
+    let _ = sh.pump_bell.try_send(());
 }
 
 // ---- Pump ----
@@ -792,9 +860,9 @@ enum Got {
     Wake,
     Event(ActionEvent),
     End(RequestEvent),
-    Journal(StreamId, JournalEvent),
+    Journal(StreamKey, JournalEvent),
     /// The engine closed the stream's events.
-    JournalDone(StreamId),
+    JournalDone(StreamKey),
     /// One of the port's channels closed: the engine ended the session.
     PortEnded,
 }
@@ -853,11 +921,9 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
         if !retry_refused(sh) {
             return;
         }
-        let journals: Vec<(StreamId, async_channel::Receiver<JournalEvent>)> = lock(&sh.queues)
-            .streams
-            .iter()
-            .filter_map(|(id, s)| s.events.clone().map(|rx| (*id, rx)))
-            .collect();
+        // Keyed by opening: the client may close a stream and open its id again before this
+        // pass ends, and what is taken here then belongs to the stream it closed.
+        let journals = sh.journal_receivers();
         let got = {
             let mut futures: Vec<Pin<Box<dyn Future<Output = Got> + '_>>> =
                 Vec::with_capacity(4 + journals.len());
@@ -873,12 +939,12 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
             futures.push(Box::pin(async {
                 events.recv().await.map_or(Got::PortEnded, Got::Event)
             }));
-            for (id, rx) in &journals {
-                let id = *id;
+            for (key, rx) in &journals {
+                let key = *key;
                 futures.push(Box::pin(async move {
                     rx.recv()
                         .await
-                        .map_or(Got::JournalDone(id), |ev| Got::Journal(id, ev))
+                        .map_or(Got::JournalDone(key), |ev| Got::Journal(key, ev))
                 }));
             }
             first_ready(&mut futures, &mut cx, TICK).unwrap_or(Got::Tick)
@@ -892,19 +958,15 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
             Got::Wake => sh.ring_writer(),
             Got::Event(ev) => first_event = Some(ev),
             Got::End(end) => ends.push(end),
-            Got::Journal(id, ev) => {
-                sh.queue_journal(&mut frames, id, ev);
-                if let Some((_, rx)) = journals.iter().find(|(j, _)| *j == id) {
+            Got::Journal(key, ev) => {
+                sh.queue_journal(&mut frames, key, ev);
+                if let Some((_, rx)) = journals.iter().find(|(k, _)| *k == key) {
                     while let Ok(ev) = rx.try_recv() {
-                        sh.queue_journal(&mut frames, id, ev);
+                        sh.queue_journal(&mut frames, key, ev);
                     }
                 }
             }
-            Got::JournalDone(id) => {
-                if let Some(s) = lock(&sh.queues).streams.get_mut(&id) {
-                    s.events = None;
-                }
-            }
+            Got::JournalDone(key) => sh.journal_done(key),
             Got::PortEnded => port_ended = true,
         }
         // Ends first, then events: every end taken here was sent after its request's events,
@@ -1120,6 +1182,7 @@ mod tests {
 
     fn stream(queued: &[u8]) -> Stream {
         Stream {
+            generation: 0,
             handle: None,
             events: None,
             queue: queued.iter().map(|b| vec![*b]).collect(),
@@ -1165,5 +1228,124 @@ mod tests {
         assert_eq!(q.actions.len(), 1, "the action waits for the next pick");
         // Without a snapshot due, the floor changes nothing.
         assert_eq!(order(&mut q, false, true), vec![1]);
+    }
+
+    /// A port with journal streams only. Keeps each stream's event sender, in the order opened.
+    #[derive(Default)]
+    struct Journals(Mutex<Vec<Option<async_channel::Sender<JournalEvent>>>>);
+
+    impl Port for Arc<Journals> {
+        fn latest(&self) -> Arc<Snapshot> {
+            unreachable!("no snapshots in this test")
+        }
+
+        fn wake(&self) -> Receiver<()> {
+            async_channel::bounded(1).1
+        }
+
+        fn action_events(&self) -> Receiver<ActionEvent> {
+            async_channel::bounded(1).1
+        }
+
+        fn request_events(&self) -> Receiver<RequestEvent> {
+            async_channel::bounded(1).1
+        }
+
+        fn set_demand(&self, _demand: Demand) {}
+
+        fn send(&self, _cmd: Command) -> Result<(), CommandError> {
+            Ok(())
+        }
+
+        fn journal(&self, _query: JournalQuery) -> JournalHandle {
+            let (events_tx, events_rx) = async_channel::unbounded();
+            lock(&self.0).push(Some(events_tx));
+            JournalHandle::new(events_rx, async_channel::unbounded().0)
+        }
+
+        fn is_ended(&self) -> bool {
+            false
+        }
+    }
+
+    fn query() -> JournalQuery {
+        JournalQuery {
+            unit: tl_model::table::UnitRef {
+                manager: tl_model::table::Manager::User,
+                name: Arc::from("a.service"),
+            },
+            follow: true,
+        }
+    }
+
+    fn old_event() -> JournalEvent {
+        JournalEvent::Access(tl_model::journal::JournalAccess::All)
+    }
+
+    fn new_event() -> JournalEvent {
+        JournalEvent::Access(tl_model::journal::JournalAccess::OwnOnly)
+    }
+
+    #[test]
+    fn a_reopened_journal_stream_takes_nothing_from_the_one_before() {
+        let engine = Arc::new(Journals::default());
+        let (socket, _client) = UnixStream::pair().unwrap();
+        let (sh, _writer_bell, _pump_bell) =
+            Shared::new(socket, Arc::clone(&engine), SessionConfig::default());
+        let mut frames = FrameWriter::new().unwrap();
+        let id = StreamId(1);
+
+        assert!(journal_open(&sh, &mut frames, id, query()));
+        // The pump takes the first opening's receiver on a pass, and the old journalctl has
+        // events on the way.
+        let pass = sh.journal_receivers();
+        let [(old, old_rx)] = pass.as_slice() else {
+            panic!("one stream is open");
+        };
+        let old_tx = lock(&engine.0)[0].clone().unwrap();
+        old_tx.try_send(old_event()).unwrap();
+        old_tx.try_send(old_event()).unwrap();
+
+        // Before that pass ends, the client closes the stream and opens its id again.
+        journal_close(&sh, id);
+        assert!(journal_open(&sh, &mut frames, id, query()));
+        let reopened = sh.journal_receivers();
+        let [(new, _)] = reopened.as_slice() else {
+            panic!("one stream is open");
+        };
+        assert_eq!(new.id, old.id);
+        assert_ne!(
+            new.generation, old.generation,
+            "the new opening has its own generation"
+        );
+
+        // The pump goes on with what it took: the old events, then the old stream's end.
+        while let Ok(ev) = old_rx.try_recv() {
+            sh.queue_journal(&mut frames, *old, ev);
+        }
+        lock(&engine.0)[0] = None;
+        drop(old_tx);
+        assert!(old_rx.try_recv().is_err(), "the old journalctl is done");
+        sh.journal_done(*old);
+
+        {
+            let q = lock(&sh.queues);
+            let s = &q.streams[&id];
+            assert!(s.queue.is_empty(), "no old event reached the new stream");
+            assert_eq!(s.bytes, 0);
+            assert!(s.events.is_some(), "the old end did not end the new stream");
+            assert!(s.handle.is_some());
+        }
+
+        // The new opening's own events still get in.
+        let new_tx = lock(&engine.0)[1].clone().unwrap();
+        new_tx.try_send(new_event()).unwrap();
+        let pass = sh.journal_receivers();
+        let [(key, rx)] = pass.as_slice() else {
+            panic!("the new stream still waits for events");
+        };
+        assert_eq!(key, new);
+        sh.queue_journal(&mut frames, *key, rx.try_recv().unwrap());
+        assert_eq!(lock(&sh.queues).streams[&id].queue.len(), 1);
     }
 }
