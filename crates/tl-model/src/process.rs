@@ -90,6 +90,9 @@ bitflags::bitflags! {
         const IS_SELF = 16;
         /// See ADR-006.
         const PROTECTED = 32;
+        /// `meta.name` is the desktop entry Name of the app: the collector named this process as
+        /// the app's primary process (PROC-008). An app row takes its name from such a member.
+        const APP_NAME = 64;
     }
 }
 

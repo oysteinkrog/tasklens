@@ -1020,7 +1020,7 @@ impl ProcessSampler {
         let now = out.observed_start;
         for (r, x) in out.records.iter_mut().zip(&mut out.extras) {
             let kernel_thread = r.flags.contains(ProcFlags::KERNEL_THREAD);
-            r.flags = flags_for(
+            let flags = flags_for(
                 r.key.pid,
                 kernel_thread,
                 r.uid,
@@ -1028,10 +1028,13 @@ impl ProcessSampler {
                 &set,
                 inp.protect,
             );
-            let since = self.flag_since.entry(r.key).or_insert((r.flags, now));
-            if since.0 != r.flags {
-                *since = (r.flags, now);
+            // APP_NAME is a naming mark, not a state the row tints for, so it does not move
+            // `flag_since_ns`.
+            let since = self.flag_since.entry(r.key).or_insert((flags, now));
+            if since.0 != flags {
+                *since = (flags, now);
             }
+            r.flags = flags | (r.flags & ProcFlags::APP_NAME);
             x.flag_since_ns = since.1;
         }
     }
@@ -1368,9 +1371,14 @@ impl Build<'_, '_> {
 
         let status = &p.status;
         let threads = p.stat.num_threads;
-        // Only KERNEL_THREAD is known here; `set_flags` computes the full set.
+        // Only KERNEL_THREAD and APP_NAME are known here; `set_flags` computes the rest.
         let mut flags = ProcFlags::empty();
         flags.set(ProcFlags::KERNEL_THREAD, kernel_thread);
+        // The same test `display_name` uses to give this process the app name.
+        flags.set(
+            ProcFlags::APP_NAME,
+            primary && !kernel_thread && app.app_name.is_some(),
+        );
         self.out.records.push(ProcessRecord {
             key,
             ppid: p.stat.ppid,

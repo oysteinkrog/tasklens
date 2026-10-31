@@ -40,7 +40,8 @@ pub const MAX_EXITED: usize = 256;
 const SWEEP_FLAGS: ProcFlags = ProcFlags::KERNEL_THREAD
     .union(ProcFlags::OTHER_USER)
     .union(ProcFlags::IS_SELF)
-    .union(ProcFlags::PROTECTED);
+    .union(ProcFlags::PROTECTED)
+    .union(ProcFlags::APP_NAME);
 
 /// Linger time in nanoseconds: `clamp(2 × interval_ms, 1000, 3000) × 1e6` (R-041).
 pub fn linger_ns(interval_ms: u32) -> u64 {

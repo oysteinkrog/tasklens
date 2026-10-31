@@ -2341,6 +2341,11 @@ fn sweep_app_member_grouped() {
     assert_eq!(out.side[i].class, ProcClass::App);
     assert!(out.side[i].is_app_primary);
     assert_eq!(&*out.records[i].meta.name, "Firefox");
+    // The engine names the app row from the member that carries APP_NAME (q4x76.36).
+    assert!(out.records[i].flags.contains(ProcFlags::APP_NAME));
+    let child = index_of(&out, 4202);
+    assert_eq!(out.records[child].ppid, 4201);
+    assert!(!out.records[child].flags.contains(ProcFlags::APP_NAME));
     assert_eq!(out.records[i].meta.app_id.as_deref(), Some("firefox"));
     let desktop = out.records[i].meta.desktop_path.as_deref();
     assert!(

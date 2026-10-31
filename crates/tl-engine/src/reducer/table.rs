@@ -1123,9 +1123,8 @@ pub fn aggregate(
         let Some(r) = records.get(i as usize) else {
             continue;
         };
-        // 0: no app id, 1: app id, 2: app id and primary, 3: primary whose desktop entry
-        // resolved (its name is the .desktop Name). The first of the best rank wins, so a child
-        // that sorts before its parent (a `cat` helper) never names the group.
+        // See `name_rank`. The first of the best rank wins, so a child that sorts before its
+        // parent (a `cat` helper) never names the group.
         let rank = name_rank(r, app_pids.contains(&r.ppid));
         if first.is_none() || rank > first_rank {
             first = Some(r);
@@ -1714,19 +1713,22 @@ pub fn build_grouped(
     (rows, groups)
 }
 
-/// `build_grouped` plus the number of processes shown.
-/// How well a record names its app row (PROC-008). 0: no app id. 1: app id, parent in the app.
-/// 2: app id, parent outside the app (the primary process). 3: a primary whose desktop entry
-/// resolved, so its name is the .desktop Name; this wins over a helper such as `cat`.
+/// How well a record names its app row (PROC-008). 3: its name is the app's .desktop Name
+/// (`APP_NAME`, set by the collector). 2: app id, parent outside the app (the primary process).
+/// 1: app id, parent in the app. 0: no app id. A member with the desktop Name wins over a helper
+/// such as `cat` even when the app's main process sits in another group.
 fn name_rank(r: &ProcessRecord, parent_in_app: bool) -> u8 {
+    if r.flags.contains(ProcFlags::APP_NAME) {
+        return 3;
+    }
     match &r.meta.app_id {
         None => 0,
         Some(_) if parent_in_app => 1,
-        Some(_) if r.meta.desktop_path.is_some() => 3,
         Some(_) => 2,
     }
 }
 
+/// `build_grouped` plus the number of processes shown.
 fn grouped_rows(
     input: &TableInput<'_>,
     query: &TableQuery,
@@ -1749,9 +1751,9 @@ fn grouped_rows(
     let unit_of = |i: usize| input.extras.get(i).and_then(|x| x.unit.as_ref());
 
     // Lowercase app names for the filter, by the same rule as the row name (`name_rank`): a
-    // primary with a resolved desktop entry, else a primary (an app id, parent outside the
-    // app's own pids), else the first record. The pid
-    // set is per group, so an app started from another app still has a primary.
+    // member named with the desktop Name, else a primary (an app id, parent outside the app's
+    // own pids), else the first record. The pid set is per group, so an app started from
+    // another app still has a primary.
     let app_pids: FxHashSet<(GroupKey, u32)> = records
         .iter()
         .filter(|r| r.meta.app_id.is_some())
@@ -2926,37 +2928,52 @@ mod tests {
         assert_eq!(view.groups[0].members, 3);
     }
 
-    /// A fixture shaped like the home machine: the main process is outside the group, so every
-    /// member's parent is outside it and all rank as primary. The helpers have no desktop entry;
-    /// the renderer resolved one and carries the desktop Name.
+    /// A fixture shaped like the home machine, built the way the collector builds it. Chrome's
+    /// main process (pid 900) sits in its own scope, so it is not in this group, and the group
+    /// holds only its children: two `cat` helpers, a renderer and crashpad (parent: the user's
+    /// systemd). Every member has the app id and the desktop path, since both come from the
+    /// same desktop entry. Only crashpad's parent is outside every app unit, so only crashpad is
+    /// the collector's primary: its name is the desktop Name and it carries `APP_NAME`.
+    /// `desktop: false` is the same tree with no desktop entry: no app id, path or Name.
     fn home_fixture(desktop: bool) -> Fixture {
-        let mut cat = in_app(rec(50, 900, "cat", 0.0), "chrome", true);
-        Arc::make_mut(&mut cat.meta).app_id = Some("chrome".into());
-        let mut crash = in_app(rec(60, 1, "chrome_crashpad", 0.0), "chrome", true);
-        Arc::make_mut(&mut crash.meta).app_id = Some("chrome".into());
-        let mut render = in_app(rec(101, 900, "Google Chrome", 1.0), "chrome", true);
-        if desktop {
-            Arc::make_mut(&mut render.meta).desktop_path =
-                Some("/usr/share/applications/chrome.desktop".into());
+        let member = |pid, ppid, name| {
+            let mut r = in_app(rec(pid, ppid, name, 0.0), "chrome-personal", desktop);
+            if desktop {
+                Arc::make_mut(&mut r.meta).desktop_path =
+                    Some("/home/user/.local/share/applications/chrome-personal.desktop".into());
+            }
+            r
+        };
+        let crash_name = if desktop {
+            "Google Chrome"
         } else {
-            Arc::make_mut(&mut render.meta).name = "chrome-renderer".into();
-        }
-        Fixture::new(vec![(cat, None), (crash, None), (render, None)])
+            "chrome_crashpad"
+        };
+        let mut crash = member(70, 1102, crash_name);
+        crash.flags.set(ProcFlags::APP_NAME, desktop);
+        Fixture::new(vec![
+            (member(50, 900, "cat"), None),
+            (member(51, 900, "cat"), None),
+            (member(60, 900, "chrome"), None),
+            (crash, None),
+        ])
     }
 
     #[test]
     fn app_row_uses_desktop_name_when_main_process_is_outside_group() {
         let view = home_fixture(true).build("", &headers(), CPU_DESC);
+        assert_eq!(view.groups.len(), 1);
         assert_eq!(&*view.groups[0].name, "Google Chrome");
+        // The filter matches the desktop Name for every member, not only crashpad: the cat
+        // helpers' own search text is just "cat".
         let view = home_fixture(true).build("google", &headers(), CPU_DESC);
         assert_eq!(view.groups.len(), 1);
-        let view = home_fixture(true).build("cat", &headers(), CPU_DESC);
-        assert!(view.groups.iter().all(|g| &*g.name != "Google Chrome"));
+        assert_eq!(view.groups[0].members, 4);
     }
 
     #[test]
     fn app_row_without_desktop_entry_uses_primary_rule() {
-        // No desktop entry: all rank 2, the first member (`cat`) names the row.
+        // No desktop entry: no member has an app id, so the first member (`cat`) names the row.
         let view = home_fixture(false).build("", &headers(), CPU_DESC);
         assert_eq!(&*view.groups[0].name, "cat");
         // With a parent inside the group the real primary still wins.
