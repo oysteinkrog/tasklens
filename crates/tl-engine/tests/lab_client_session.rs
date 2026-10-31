@@ -28,7 +28,9 @@ use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GraphTarget, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
-use tl_model::snapshot::{ServiceBackend, ServiceStatus, Snapshot, StartupType, UnitRecord};
+use tl_model::snapshot::{
+    InventorySnapshot, ServiceBackend, ServiceStatus, Snapshot, StartupType, UnitRecord,
+};
 use tl_model::system::CpuSet;
 use tl_model::table::{
     Manager, SortSpec, SysColumnId, SysNodeId, SysSortSpec, SysTable, SysTableQuery, TableMode,
@@ -928,6 +930,57 @@ fn each_page_gets_the_parts_it_reads_from_the_demand_it_sends() {
             assert_eq!(got.services.units.len(), 3, "{page}: every unit record");
         }
     }
+}
+
+/// Leader decision, round 6 of tasklens-q4x76.15: Processes Start time is not 1970 in service
+/// mode. A linked session that shows only the Processes tab computes Start time as the UI does
+/// (`tl-ui` `processes::cells::boot_time_s` plus `start_boot_ns`). The engine leaves
+/// `SystemSnapshot.boot_time_s` at 0, so without the inventory the date is 1970.
+#[test]
+fn processes_start_time_is_not_1970_in_service_mode() {
+    const BOOT_UNIX_S: i64 = 1_793_400_000; // 2026-10-31
+    const STARTED_AFTER_BOOT_S: u64 = 3_600;
+    let mut rig = Rig::new();
+    let (remote, _remote_wake) = link();
+    let mut started = sweep(1_000_000_000, &[10, 11, 20]);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut started {
+        s.extras[0].start_boot_ns = STARTED_AFTER_BOOT_S * 1_000_000_000;
+    }
+    let mut inventory = InventorySnapshot::default();
+    inventory.system.boot_time_s = Total {
+        value: BOOT_UNIX_S,
+        validity: Validity::Valid,
+    };
+    rig.run(vec![
+        open(REMOTE, &remote),
+        started,
+        EngineMsg::Source(SourceUpdate::Inventory(Box::new(inventory))),
+    ]);
+    let (_, processes_tab, _) = page_demands().swap_remove(0);
+    rig.run(vec![demand(REMOTE, processes_tab)]);
+    let got = remote.latest.load_full();
+
+    // `cells::boot_time_s`: the inventory value when valid and above 0, else the system one.
+    let inv = &got.inventory.system.boot_time_s;
+    let boot = if inv.validity.is_valid() && inv.value > 0 {
+        inv.value
+    } else {
+        got.system.boot_time_s
+    };
+    let row = got
+        .processes
+        .records
+        .iter()
+        .position(|r| r.key.pid == 10)
+        .expect("PID 10 is in the session's processes");
+    let start_s = boot
+        + i64::try_from(got.processes.extras[row].start_boot_ns / 1_000_000_000)
+            .expect("fits in i64");
+    assert!(
+        inv.validity.is_valid(),
+        "the boot time comes from the inventory"
+    );
+    assert_eq!(start_s, BOOT_UNIX_S + 3_600, "Start time is boot plus 1 h");
 }
 
 #[test]
