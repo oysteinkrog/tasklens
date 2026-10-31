@@ -220,13 +220,21 @@ fn gone(pid: u32) -> bool {
 /// Runs the fake ssh `body` as host "home" and returns the reason the client shows. The child
 /// must be reaped by then.
 fn fake_failure(body: &str, deadline: Duration) -> String {
+    fake_failure_timed(body, deadline).0
+}
+
+/// `fake_failure`, plus how long the attempt took. The time starts once `SERIAL` is held, so
+/// waiting for other tests does not count.
+fn fake_failure_timed(body: &str, deadline: Duration) -> (String, Duration) {
     let _serial = serial();
+    let begin = Instant::now();
     let fake = Fake::new(body);
     let reason =
         first_failure(SshConnector::new("home", "me@home", fake.program()).with_deadline(deadline));
+    let took = begin.elapsed();
     let pid = fake.pid();
     assert!(gone(pid), "ssh child {pid} still exists");
-    reason
+    (reason, took)
 }
 
 #[test]
@@ -270,10 +278,9 @@ fn fake_ssh_other_exit() {
 
 #[test]
 fn fake_ssh_timeout() {
-    let begin = Instant::now();
-    let reason = fake_failure("exec sleep 30", Duration::from_millis(300));
+    let (reason, took) = fake_failure_timed("exec sleep 30", Duration::from_millis(300));
     assert_eq!(reason, "home did not answer within 300 ms");
-    assert!(begin.elapsed() < Duration::from_secs(5));
+    assert!(took < Duration::from_secs(5));
 }
 
 #[test]
