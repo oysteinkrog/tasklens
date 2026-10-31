@@ -1009,7 +1009,11 @@ mod desktop_on_host {
         );
         r.finish(id, &[ActionState::Failed(ActionError::Unsupported)]);
         let text = r.last().text.to_string();
-        assert!(!text.contains(" on "), "{text}");
+        assert!(!text.contains(" on home"), "{text}");
+        assert_eq!(
+            text,
+            "Could not open file location. Not supported on this system."
+        );
     }
 
     #[gpui_kit::test]
@@ -1022,7 +1026,7 @@ mod desktop_on_host {
 
     #[gpui_kit::test]
     fn menu_label_gets_the_suffix_only_on_a_remote_host(cx: &mut TestAppContext) {
-        let r = remote_rig(cx, None);
+        let mut r = remote_rig(cx, None);
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let (local, remote) = r.vcx.update(|_, cx| {

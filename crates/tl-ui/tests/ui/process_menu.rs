@@ -1091,6 +1091,7 @@ mod end {
     };
     use gpui_kit::{Keystroke, point, px};
     use tl_model::actions::ActionError;
+    use tl_model::actions::ActionId;
     use tl_model::actions::CgroupRef;
     use tl_model::actions::IoPriority;
     use tl_model::actions::SchedPolicy;
@@ -2743,12 +2744,16 @@ mod end {
         // The built menu holds the captured targets the handler acts on.
         menu_labels(&mut rig, 1);
         assert!(rig.dispatch(ShowWindow).is_none());
-        let sent = kwin_sent(&rig);
+        let sent = activations_sent(&rig);
         assert_eq!(sent.len(), 1);
-        assert!(matches!(
-            &sent[0],
-            KWinCommand::Activate { internal_id } if &**internal_id == "{top}"
-        ));
+        assert_eq!(sent[0].1, "{top}");
+        emit(
+            &rig.engine,
+            &mut rig.vcx,
+            sent[0].0,
+            None,
+            ActionState::Succeeded,
+        );
         assert_eq!(visible(&mut rig.vcx), ["Process window shown."]);
     }
 
@@ -4460,6 +4465,17 @@ mod end {
         })
     }
 
+    /// The window ids of the `ActivateWindow` requests sent so far, with their ids.
+    fn activations_sent(rig: &Rig) -> Vec<(ActionId, String)> {
+        actions_sent(&rig.engine)
+            .into_iter()
+            .filter_map(|r| match r.kind {
+                ActionKind::ActivateWindow { internal_id } => Some((r.id, internal_id.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn kwin_sent(rig: &Rig) -> Vec<KWinCommand> {
         rig.engine
             .commands()
@@ -4515,8 +4531,8 @@ mod end {
         assert_eq!(ids, [Some("{a}".to_owned()), Some("{b}".to_owned())]);
     }
 
-    /// PROC-053, PROC-054: Enter on a popup item sends one `KWin(Activate)` for its window and
-    /// shows "Process window shown." A window gone from the snapshot sends nothing and shows
+    /// PROC-053, PROC-054: Enter on a popup item sends one `ActivateWindow` for its window and
+    /// shows "Process window shown." when the engine reports success. A window gone from the snapshot sends nothing and shows
     /// "No window found". Esc closes the popup and gives the focus back to the table.
     #[gpui_kit::test]
     fn activate_window_sends_kwin_command(cx: &mut TestAppContext) {
@@ -4534,12 +4550,14 @@ mod end {
         rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
         rig.vcx.simulate_keystrokes("enter");
         rig.vcx.run_until_parked();
-        assert_eq!(
-            kwin_sent(&rig),
-            [KWinCommand::Activate {
-                internal_id: Arc::from("{a}"),
-            }]
-        );
+        let sent = activations_sent(&rig);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].1, "{a}");
+        assert!(kwin_sent(&rig).is_empty(), "the old KWin send is gone");
+        // The toast follows the engine's result, not the send.
+        assert!(visible(&mut rig.vcx).is_empty());
+        let id = sent[0].0;
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Succeeded);
         assert_eq!(
             visible(&mut rig.vcx).last().map(String::as_str),
             Some("Process window shown.")
@@ -4554,7 +4572,7 @@ mod end {
             .is_none()
         );
         assert_eq!(
-            kwin_sent(&rig).len(),
+            activations_sent(&rig).len(),
             1,
             "nothing sent for a vanished window"
         );
@@ -4581,6 +4599,6 @@ mod end {
         });
         assert!(!open, "Esc closes the popup");
         assert!(focused, "focus is back on the table");
-        assert_eq!(kwin_sent(&rig).len(), 1);
+        assert_eq!(activations_sent(&rig).len(), 1);
     }
 }

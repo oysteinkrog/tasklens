@@ -1403,7 +1403,7 @@ mod menu_tests {
             let menu = self.vcx.update(|window, cx| {
                 let focus = cx.focus_handle();
                 TlMenu::build(window, cx, focus, move |menu, window, cx| {
-                    service_menu(menu, &t, backend, window, cx)
+                    service_menu(menu, &t, backend, &HostContext::local(cx), window, cx)
                 })
             });
             self.popup_entries(&menu)
