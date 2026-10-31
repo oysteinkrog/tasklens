@@ -307,8 +307,8 @@ impl Reducer {
         self.clients.reducer_stopped(&progress);
     }
 
-    /// The loop: receive one message, drain until `DRAIN_MAX` messages in total, apply, publish
-    /// once. Returns `Ok(())` when the channel closes, the task is cancelled or the wake
+    /// The loop: receive one message (or wake on a change of the local demand), drain until
+    /// `DRAIN_MAX` messages in total, apply, publish once. Returns `Ok(())` when the channel closes, the task is cancelled or the wake
     /// receiver is gone. Returns `Err` on an invariant violation (the session restarts).
     pub async fn run(
         &mut self,
@@ -317,15 +317,18 @@ impl Reducer {
         publisher: &mut Publisher,
     ) -> Result<(), InvariantViolation> {
         while !publisher.stop_publishing {
-            let Ok(first) = rx.recv(cx).await else {
+            let Ok(first) = self.next_msg(cx, rx).await else {
                 return Ok(());
             };
             let settings = self
                 .settings_rx
                 .as_ref()
                 .map_or_else(EngineSettings::default, watch::Receiver::borrow_and_clone);
-            self.apply(cx, first, &settings)?;
-            let mut applied = 1;
+            let mut applied = 0;
+            if let Some(first) = first {
+                self.apply(cx, first, &settings)?;
+                applied = 1;
+            }
             while applied < DRAIN_MAX {
                 let Ok(msg) = rx.try_recv() else {
                     break;
@@ -335,8 +338,8 @@ impl Reducer {
             }
             if let Some(local) = self
                 .demand_rx
-                .as_ref()
-                .map(watch::Receiver::borrow_and_clone)
+                .as_mut()
+                .map(watch::Receiver::borrow_and_update_clone)
             {
                 let demand = self.clients.combined(&local, &background_demand(&settings));
                 self.clients.set_local_demand(local);
@@ -361,6 +364,27 @@ impl Reducer {
             publisher.publish(next);
         }
         Ok(())
+    }
+
+    /// The next message, or `None` when the local window's demand changed first: the workers
+    /// then get the new combined demand at once, not at the next message (ADR-018). Both waits
+    /// are cancel-safe. Once the demand watch is closed, only messages wake the loop.
+    async fn next_msg(
+        &mut self,
+        cx: &Cx,
+        rx: &mut mpsc::Receiver<EngineMsg>,
+    ) -> Result<Option<EngineMsg>, mpsc::RecvError> {
+        let Some(local) = self.demand_rx.as_mut() else {
+            return rx.recv(cx).await.map(Some);
+        };
+        let msg = async { rx.recv(cx).await.map(Some) };
+        let changed = async {
+            match local.changed(cx).await {
+                Ok(()) => Ok(None),
+                Err(_) => std::future::pending().await,
+            }
+        };
+        futures_lite::future::or(msg, changed).await
     }
 
     /// The combined demand now (ADR-018): the local window's current demand, every other client
