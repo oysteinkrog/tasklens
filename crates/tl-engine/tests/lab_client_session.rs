@@ -20,7 +20,7 @@ use tl_engine::source::WorkerControl;
 use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate};
 use tl_model::actions::SchedPolicy;
 use tl_model::command::Command;
-use tl_model::demand::Demand;
+use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
@@ -130,6 +130,31 @@ fn open(id: ClientSessionId, link: &SessionLink) -> EngineMsg {
         id,
         link: link.clone(),
     })
+}
+
+fn demand(id: ClientSessionId, demand: Demand) -> EngineMsg {
+    EngineMsg::Client(ClientMsg::Demand {
+        id,
+        demand: Box::new(demand),
+    })
+}
+
+/// A window on the Processes tab. A session gets only the parts its demand asks for, so the
+/// tests that read a session's table, processes or services send this first.
+fn processes_tab() -> Demand {
+    Demand {
+        any_surface_visible: true,
+        process_table: true,
+        ..Demand::default()
+    }
+}
+
+/// A host tab that is not shown: the title bar value only (ADR-018 Sessions).
+fn hidden_host() -> Demand {
+    Demand {
+        cpu: CpuDemand::Total,
+        ..Demand::default()
+    }
 }
 
 fn on(id: ClientSessionId, cmd: Command) -> EngineMsg {
@@ -353,7 +378,7 @@ fn data() -> Vec<EngineMsg> {
 fn two_sessions_get_their_own_table_and_services_views() {
     let mut rig = Rig::new();
     let (remote, _remote_wake) = link();
-    let mut msgs = vec![open(REMOTE, &remote)];
+    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
     msgs.extend(data());
     msgs.extend([
         on(ClientSessionId::LOCAL, table_query(3, "1")),
@@ -414,7 +439,7 @@ fn a_new_session_starts_with_default_queries_over_current_data() {
     ]);
     rig.run(msgs);
     let (remote, _remote_wake) = link();
-    let local = rig.run(vec![open(REMOTE, &remote)]);
+    let local = rig.run(vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())]);
     let other = remote.latest.load_full();
     assert_eq!(pids(&local), [10, 11]);
     assert_eq!(other.table.query_generation, 0);
@@ -480,6 +505,72 @@ fn local_session_is_unchanged_by_another_session() {
         assert_eq!(a.services.counts, s.services.counts);
         assert_eq!(a.services.manager_counts, s.services.manager_counts);
     }
+}
+
+/// Leader decision on tasklens-q4x76.15: a session's snapshot carries only what its demand
+/// asks for. Hidden, it keeps the system part and nothing else changes from one publish to the
+/// next; shown again, its next snapshot has the whole current table.
+#[test]
+fn a_session_gets_only_the_parts_its_demand_asks_for() {
+    let mut rig = Rig::new();
+    let (remote, _remote_wake) = link();
+    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
+    msgs.extend(data());
+    let local = rig.run(msgs);
+    let shown = remote.latest.load_full();
+    assert_eq!(pids(&shown), [10, 11, 20]);
+    assert_eq!(units(&shown).len(), 3);
+    assert!(Arc::ptr_eq(&shown.processes, &local.processes));
+    assert!(Arc::ptr_eq(&shown.system, &local.system));
+
+    // Hidden: the system part is the shared one, every other part is empty.
+    let local = rig.run(vec![
+        demand(REMOTE, hidden_host()),
+        sweep(2_000_000_000, &[10, 11, 20, 21]),
+    ]);
+    let hidden = remote.latest.load_full();
+    assert_eq!(hidden.sequence, local.sequence);
+    assert!(Arc::ptr_eq(&hidden.system, &local.system));
+    assert_eq!(local.processes.records.len(), 4);
+    assert!(hidden.processes.records.is_empty());
+    assert!(hidden.table.rows.is_empty());
+    assert_eq!(hidden.table.header.version, 0);
+    assert!(hidden.services.rows.is_empty() && hidden.services.units.is_empty());
+    assert!(hidden.health.version == 0 && hidden.devices.version == 0);
+
+    // A later publish changes nothing but the system part, so a frame carries nothing else.
+    let local = rig.run(vec![
+        sweep(3_000_000_000, &[10, 11, 20, 21, 22]),
+        services(&["alpha.service", "gamma.service"]),
+    ]);
+    let later = remote.latest.load_full();
+    assert_eq!(later.sequence, local.sequence);
+    assert!(later.sequence > hidden.sequence);
+    let empty = Snapshot {
+        sequence: later.sequence,
+        published_ns: later.published_ns,
+        system: Arc::clone(&later.system),
+        ..(*hidden).clone()
+    };
+    assert_eq!(
+        *later, empty,
+        "only the system part and the header fields differ"
+    );
+    assert!(Arc::ptr_eq(&later.table, &hidden.table));
+    assert!(Arc::ptr_eq(&later.processes, &hidden.processes));
+    assert!(Arc::ptr_eq(&later.services, &hidden.services));
+    assert!(Arc::ptr_eq(&later.series, &hidden.series));
+
+    // Shown again: the whole current table, over the current processes.
+    let local = rig.run(vec![
+        demand(REMOTE, processes_tab()),
+        sweep(4_000_000_000, &[10, 11, 20, 21, 22]),
+    ]);
+    let again = remote.latest.load_full();
+    assert_eq!(pids(&again), [10, 11, 20, 21, 22]);
+    assert!(Arc::ptr_eq(&again.processes, &local.processes));
+    assert!(again.table.header.version > shown.table.header.version);
+    assert_eq!(units(&again), ["alpha.service", "gamma.service"]);
 }
 
 #[test]

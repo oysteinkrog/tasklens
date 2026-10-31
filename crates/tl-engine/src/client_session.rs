@@ -569,6 +569,9 @@ pub struct ClientSession {
     /// The state shared with the session's `SessionPort`, for a session opened with
     /// `ClientMsg::OpenPort`. Dropping the session ends it.
     port: Option<Arc<PortState>>,
+    /// The parts the session started with. `snapshot` sends these, the same `Arc` each time, in
+    /// place of a part the session's demand does not ask for.
+    empty: Snapshot,
 }
 
 impl Drop for ClientSession {
@@ -610,6 +613,7 @@ impl ClientSession {
             published: [0; SESSION_BITS.len()],
             link,
             port: None,
+            empty: empty.clone(),
         }
     }
 
@@ -1136,20 +1140,84 @@ impl ClientSession {
         }
     }
 
-    /// `base` with this session's six parts and its views of details and device details.
+    /// `base` with this session's six parts and its views of details and device details, each
+    /// part only while the session's demand asks for it (ADR-018 Sessions, leader decision on
+    /// tasklens-q4x76.15). In place of a part it does not ask for the session gets its empty
+    /// one, the same `Arc` on every publish, so its frames do not carry that part. When the
+    /// demand comes back, the part is the session's current one again and its next frame
+    /// carries it whole.
+    ///
+    /// Each part and what gates it. "A window" is `window_visible`; "tray graphs" is any of the
+    /// tray's cpu, memory, disks, nets and gpus flags; "graph targets" is a non-empty
+    /// `graph_targets` (tray and minigraph process graphs):
+    /// - `sequence`, `epoch`, `boot_id`, `published_ns`, `system`: always. `system` holds the
+    ///   title bar value, all a host that is not shown asks for.
+    /// - `series`, `devices`, `health`: a window or tray graphs.
+    /// - `processes`: a window or graph targets (the tray names a process graph from it).
+    /// - `process_series`: graph targets.
+    /// - `table`: `process_table`, `services` (the Services page's cells read the table) or an
+    ///   open Properties window (`details`).
+    /// - `inventory`, `windows`, `connections`, `services`, `startup`: a window.
+    /// - `details`, `device_details`: a window, or a scan, handle search or eject of the
+    ///   session's own that it still shows.
+    /// - `device_history`: a window or `device_history_range`.
+    /// - `history`: always. It holds only the answers to the session's own history queries
+    ///   and changes only when one arrives, so no demand flag gates it.
     pub fn snapshot(&self, base: Snapshot) -> Snapshot {
+        let d = &self.demand;
+        let e = &self.empty;
+        let window = window_visible(d);
+        let tray = d.tray.cpu || d.tray.memory || d.tray.disks || d.tray.nets || d.tray.gpus;
+        let targets = !d.graph_targets.is_empty();
+        let own = !self.shown.is_empty();
+        let table = d.process_table || d.services || !d.details.is_empty();
         Snapshot {
-            table: Arc::clone(&self.table),
-            services: Arc::clone(&self.services),
-            startup: Arc::clone(&self.startup),
-            connections: Arc::clone(&self.connections),
-            details: Arc::clone(&self.details),
-            device_details: Arc::clone(&self.device_details),
+            series: gate(window || tray, base.series, &e.series),
+            devices: gate(window || tray, base.devices, &e.devices),
+            health: gate(window || tray, base.health, &e.health),
+            processes: gate(window || targets, base.processes, &e.processes),
+            process_series: gate(targets, base.process_series, &e.process_series),
+            table: gate(table, Arc::clone(&self.table), &e.table),
+            inventory: gate(window, base.inventory, &e.inventory),
+            windows: gate(window, base.windows, &e.windows),
+            services: gate(window, Arc::clone(&self.services), &e.services),
+            startup: gate(window, Arc::clone(&self.startup), &e.startup),
+            connections: gate(window, Arc::clone(&self.connections), &e.connections),
+            details: gate(window || own, Arc::clone(&self.details), &e.details),
+            device_details: gate(
+                window || own,
+                Arc::clone(&self.device_details),
+                &e.device_details,
+            ),
+            device_history: gate(
+                window || d.device_history_range.is_some(),
+                Arc::clone(&self.device_history),
+                &e.device_history,
+            ),
             history: Arc::clone(&self.history),
-            device_history: Arc::clone(&self.device_history),
             ..base
         }
     }
+}
+
+/// `part` when `on`, else `empty`.
+fn gate<T>(on: bool, part: Arc<T>, empty: &Arc<T>) -> Arc<T> {
+    if on { part } else { Arc::clone(empty) }
+}
+
+/// A window surface is visible. The UI's merge counts shown tray icons as a visible surface
+/// too (tl-ui `DemandAggregator`), so a demand whose only visible surface is the tray, one that
+/// asks for nothing but the tray, graph targets, recording and device history, is not a window.
+fn window_visible(d: &Demand) -> bool {
+    let tray_only = Demand {
+        any_surface_visible: true,
+        tray: d.tray,
+        graph_targets: Arc::clone(&d.graph_targets),
+        recording: d.recording,
+        device_history: d.device_history,
+        ..Demand::default()
+    };
+    d.any_surface_visible && !(d.tray.icons_shown && *d == tray_only)
 }
 
 fn unversioned(header: ComponentHeader) -> ComponentHeader {
