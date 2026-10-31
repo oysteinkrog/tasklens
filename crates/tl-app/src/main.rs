@@ -44,8 +44,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
-use tl_model::remote_proto::{HelloTail, Want};
-use tl_model::settings::{EngineSettings, StartTab};
+use tl_model::remote_proto::{HelloTail, HostSettings, HostSettingsValues, Want};
+use tl_model::settings::{Settings, StartTab};
 use tl_ui::app::ToastKindTag;
 use tl_ui::engine_link::{EngineLinkApi, EngineLinkState};
 use tl_ui::{AppEnv, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
@@ -237,7 +237,7 @@ fn main() -> ExitCode {
     // Step 7: the engine. The main window uses the engine service, or its own engine when the
     // service does not answer (ADR-018). The rescue window keeps its own engine, with no history
     // and no lock. Do not wait for any collector.
-    let (engine, link_api) = match start_engine(&paths, &args) {
+    let (engine, link_api) = match start_engine(&paths, &args, &settings) {
         Ok(started) => started,
         Err(e) => {
             error!(target: "tasklens::engine", "engine start failed: {e}");
@@ -246,7 +246,6 @@ fn main() -> ExitCode {
         }
     };
     let client = engine.client();
-    client.set_settings(EngineSettings::from(&settings));
     info!(target: "tasklens::engine", "engine started");
     tl_ui::app::perf_step("engine_start");
 
@@ -420,10 +419,13 @@ fn engine_config(paths: &paths::Paths, low_memory: bool, force_full: bool) -> En
 fn start_engine(
     paths: &paths::Paths,
     args: &args::Args,
+    settings: &Settings,
 ) -> Result<(WindowEngine, Option<EngineLinkApi>), String> {
+    let host = window_host_settings(settings);
     if args.low_memory {
         let config = engine_config(paths, true, args.force_full_memory_mode);
         let engine = Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
+        engine.install_host_settings(host);
         return Ok((WindowEngine::Rescue(engine), None));
     }
     if let Err(e) = paths::ensure_dir(&paths.state_dir) {
@@ -445,6 +447,7 @@ fn start_engine(
             let config = engine_config(&engine_paths, false, false);
             let engine =
                 Engine::start(config, EngineHooks::default()).map_err(|e| e.to_string())?;
+            engine.install_host_settings(host.clone());
             Ok(LocalEngine {
                 client: Arc::new(engine.clone()),
                 stop: Box::new(move || stop_engine(engine)),
@@ -478,6 +481,18 @@ fn start_engine(
         }),
     };
     Ok((WindowEngine::Link(link), Some(api)))
+}
+
+/// The host settings the window's own engine starts with: the host keys of `settings.toml`, at
+/// revision 1 so the window can change them. The window no longer writes those keys, so this is
+/// the value from before the engine service, or the defaults. tasklens-q4x76.24 moves this
+/// engine to `engine.toml`.
+fn window_host_settings(settings: &Settings) -> HostSettings {
+    HostSettings {
+        rev: 1,
+        values: HostSettingsValues::from_settings(settings),
+        read_only: false,
+    }
 }
 
 /// The exit steps after the UI stops (ADR-010 Close behaviour, ADR-004 Shutdown): settings,

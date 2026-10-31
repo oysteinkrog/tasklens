@@ -4,7 +4,9 @@
 //! tl-ui takes one client at start and keeps it, so the window always talks to this proxy. The
 //! proxy holds the current backend: the engine service's `RemoteClient` or the in-process
 //! `EngineHandle`. `switch_to` replaces the backend and sends it the window's session state again:
-//! the newest demand, engine settings, table query and system table queries.
+//! the newest demand, engine settings, table query and system table queries. Host settings
+//! writes go to the current backend and are never sent again: each backend has its own revision
+//! (ADR-018 Settings).
 //!
 //! Each backend gets three forwarding threads, for its wake token, its action events and its
 //! request ends. They run until the backend's channel closes, so an action or request that was
@@ -22,6 +24,7 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalHandle, JournalQuery};
+use tl_model::remote_proto::{HostSettingsChanges, SetHostSettingsReply};
 use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
@@ -210,6 +213,14 @@ impl EngineClient for SwitchClient {
         inner.settings = Some(settings);
     }
 
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        self.current().0.set_host_settings(base_rev, changes)
+    }
+
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
         let mut inner = lock(&self.inner);
         match &cmd {
@@ -257,6 +268,7 @@ pub(crate) mod tests {
         pub(crate) demands: Mutex<Vec<Demand>>,
         pub(crate) settings: Mutex<Vec<EngineSettings>>,
         pub(crate) commands: Mutex<Vec<Command>>,
+        pub(crate) host_writes: Mutex<Vec<u64>>,
         wake_tx: async_channel::Sender<()>,
         wake_rx: async_channel::Receiver<()>,
         pub(crate) events_tx: async_channel::Sender<ActionEvent>,
@@ -278,6 +290,7 @@ pub(crate) mod tests {
                 demands: Mutex::default(),
                 settings: Mutex::default(),
                 commands: Mutex::default(),
+                host_writes: Mutex::default(),
                 wake_tx,
                 wake_rx,
                 events_tx,
@@ -316,6 +329,14 @@ pub(crate) mod tests {
         }
         fn set_settings(&self, settings: EngineSettings) {
             lock(&self.settings).push(settings);
+        }
+        fn set_host_settings(
+            &self,
+            base_rev: u64,
+            _changes: HostSettingsChanges,
+        ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+            lock(&self.host_writes).push(base_rev);
+            Ok(async_channel::bounded(1).1)
         }
         fn send(&self, cmd: Command) -> Result<(), CommandError> {
             lock(&self.commands).push(cmd);
@@ -409,6 +430,23 @@ pub(crate) mod tests {
         client.send(Command::ResetBaselines).unwrap();
         assert_eq!(lock(&service.commands).len(), 3);
         assert_eq!(lock(&local.commands).len(), 4);
+    }
+
+    #[test]
+    fn host_settings_writes_go_to_the_current_backend_only() {
+        let local = TestBackend::new(0, 1);
+        let client = SwitchClient::new(local.clone());
+        client
+            .set_host_settings(3, HostSettingsChanges::default())
+            .unwrap();
+        let service = TestBackend::new(0, 0);
+        client.switch_to(service.clone());
+        assert!(lock(&service.host_writes).is_empty(), "never sent again");
+        client
+            .set_host_settings(1, HostSettingsChanges::default())
+            .unwrap();
+        assert_eq!(*lock(&local.host_writes), [3]);
+        assert_eq!(*lock(&service.host_writes), [1]);
     }
 
     #[test]
