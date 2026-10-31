@@ -1293,20 +1293,15 @@ mod remote_root {
     #[gpui_kit::test]
     fn the_confirmation_opens_on_the_window_that_asked(cx: &mut TestAppContext) {
         let mut r = rig_on(cx, Some("home"));
-        let owner: AnyWindowHandle = r.vcx.window.into();
+        let owner: AnyWindowHandle = r.vcx.update(|window, _| window.window_handle());
         // Another window becomes the active one.
-        let other = r.vcx.update(|_, cx| {
-            cx.open_window(Default::default(), |window, cx| {
-                let host = cx.new(|_| Host);
-                Root::new(host, window, cx)
-            })
-            .unwrap()
+        let other = r.vcx.cx.add_window(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
         });
-        r.vcx.update(|_, cx| {
-            other
-                .update(cx, |_, window, _| window.activate_window())
-                .unwrap()
-        });
+        let other: AnyWindowHandle = other.into();
+        let mut other_cx = VisualTestContext::from_window(other, &r.vcx.cx);
+        other_cx.update(|window, _| window.activate_window());
         r.vcx.run_until_parked();
         let (queue, tracker) = (r.queue.downgrade(), r.tracker.clone());
         r.vcx.update(|_, cx| {
@@ -1326,6 +1321,6 @@ mod remote_root {
         assert_eq!(open.len(), 1);
         let parent = open[0].1.read_with(&r.vcx, |v, _| v.parent());
         assert_eq!(parent, owner, "modal to the asking window");
-        assert_ne!(parent, other.into(), "not the active window");
+        assert_ne!(parent, other, "not the active window");
     }
 }
