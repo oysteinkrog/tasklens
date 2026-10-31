@@ -505,14 +505,22 @@ fn lost_history_queries_end_and_free_their_slot() {
     assert_eq!(session.active(IdKind::History), 0);
 }
 
-/// Closing a session tells the history worker to forget its queries.
+/// After a session that queried history closes, the history worker gets the list of open
+/// sessions without it, so it drops that session's queries.
 #[test]
 fn closing_a_session_forgets_its_history() {
     let mut rig = Rig::new();
     let remote = Remote::new();
-    rig.run(vec![remote.open()]);
+    rig.run(vec![remote.open(), on(REMOTE, query(1))]);
+    let lists = |rig: &mut Rig| -> Vec<Vec<ClientSessionId>> {
+        std::iter::from_fn(|| rig.history_rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                HistoryMsg::Sessions { ids, .. } => Some(ids.to_vec()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(lists(&mut rig), [vec![ClientSessionId::LOCAL, REMOTE]]);
     rig.run(vec![EngineMsg::Client(ClientMsg::Close(REMOTE))]);
-    let forgot = std::iter::from_fn(|| rig.history_rx.try_recv().ok())
-        .any(|msg| matches!(msg, HistoryMsg::Forget(id) if id == REMOTE));
-    assert!(forgot);
+    assert_eq!(lists(&mut rig), [vec![ClientSessionId::LOCAL]]);
 }

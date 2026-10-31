@@ -13,7 +13,12 @@
 //!
 //! Queries are per client session (ADR-018). The worker keeps each session's last Frame and
 //! TopAt queries and last view apart, answers a session only with its own, and after a delete
-//! sends each session its view again. `HistoryMsg::Forget` drops a closed session's.
+//! sends each session its view again.
+//!
+//! The sink tells the worker which sessions are open with `HistoryMsg::Sessions`, the full list
+//! and its number. The worker drops the queries and view of every session not in the list. The
+//! sink sends the list again until the current generation has it, so a send that a full queue
+//! refused only delays the drop.
 //!
 //! The worker switches between three modes each turn (ADR-012, D-010, PROC-086): recording to
 //! the store when `history.enabled` is true, the 10-minute `RollingWindow` when recording is off
@@ -95,8 +100,12 @@ pub enum HistoryMsg {
         range: HistoryRange,
         what: HistoryWhat,
     },
-    /// Client session `owner` closed: drop its queries and view.
-    Forget(ClientSessionId),
+    /// The open client sessions, numbered from 1 by the sink. The worker drops the queries and
+    /// view of every other session and ignores a list older than one it applied.
+    Sessions {
+        seq: u64,
+        ids: Arc<[ClientSessionId]>,
+    },
     Delete {
         keys: Arc<[ProcessKey]>,
     },
@@ -130,6 +139,13 @@ pub struct HistorySink {
     dropped: u64,
     /// The last `dropped` value the worker received.
     reported: u64,
+    /// The open client sessions and their list number.
+    sessions: Arc<[ClientSessionId]>,
+    sessions_seq: u64,
+    /// The generation that has `sessions`.
+    sessions_sent_to: Option<u64>,
+    /// The last generation that took a query. A generation that took none holds no session.
+    queried_by: Option<u64>,
 }
 
 impl HistorySink {
@@ -138,13 +154,52 @@ impl HistorySink {
             slot,
             dropped: 0,
             reported: 0,
+            sessions: Arc::from([]),
+            sessions_seq: 0,
+            sessions_sent_to: None,
+            queried_by: None,
         }
     }
 
     /// For `Command::HistoryQuery` and `Command::HistoryDelete` routed by the reducer (E30-A2).
     /// The generation that took `msg`, or `None` when it was dropped.
     pub fn command(&mut self, msg: HistoryMsg) -> Option<u64> {
-        self.send(msg)
+        let query = matches!(msg, HistoryMsg::Query { .. });
+        let took = self.send(msg);
+        if query && took.is_some() {
+            self.queried_by = took;
+        }
+        took
+    }
+
+    /// The open client sessions, called after each reducer turn. The list goes to the current
+    /// generation when it changed or that generation does not have it yet; a send the full queue
+    /// refused is tried again at the next call. A generation that took no query is skipped.
+    pub fn set_sessions<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = ClientSessionId>,
+        I::IntoIter: Clone,
+    {
+        let ids = ids.into_iter();
+        if !self.sessions.iter().copied().eq(ids.clone()) {
+            self.sessions = ids.collect();
+            self.sessions_seq += 1;
+            self.sessions_sent_to = None;
+        }
+        let guard = self.slot.load();
+        let Some(HistoryTx { generation, tx }) = guard.as_deref() else {
+            return;
+        };
+        if self.sessions_sent_to == Some(*generation) || self.queried_by != Some(*generation) {
+            return;
+        }
+        let msg = HistoryMsg::Sessions {
+            seq: self.sessions_seq,
+            ids: Arc::clone(&self.sessions),
+        };
+        if tx.try_send(msg).is_ok() {
+            self.sessions_sent_to = Some(*generation);
+        }
     }
 
     /// Messages dropped so far: no sender, queue full or channel closed.
@@ -370,7 +425,7 @@ impl RecordingState {
             // `State::apply` handles queries and deletes (E30-015).
             HistoryMsg::Delete { .. }
             | HistoryMsg::Query { .. }
-            | HistoryMsg::Forget(_)
+            | HistoryMsg::Sessions { .. }
             | HistoryMsg::Dropped { .. }
             | HistoryMsg::Inspect(_) => {}
         }
@@ -634,6 +689,8 @@ struct State {
     dropped: u64,
     /// The client sessions that sent a query, in the order of their first one.
     owners: Vec<Owner>,
+    /// The number of the last `HistoryMsg::Sessions` applied.
+    sessions_seq: u64,
 }
 
 impl State {
@@ -702,7 +759,12 @@ impl State {
                         view: Arc::new(view),
                     }));
                 }
-                HistoryMsg::Forget(owner) => self.owners.retain(|o| o.id != owner),
+                HistoryMsg::Sessions { seq, ids } => {
+                    if seq >= self.sessions_seq {
+                        self.sessions_seq = seq;
+                        self.owners.retain(|o| ids.contains(&o.id));
+                    }
+                }
                 HistoryMsg::Delete { keys } => {
                     for (owner, view) in self.delete(&keys) {
                         out.push(SourceUpdate::History(HistoryUpdate::View {
@@ -857,7 +919,7 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         // `State::apply` handles queries and deletes (E30-015).
         HistoryMsg::Delete { .. }
         | HistoryMsg::Query { .. }
-        | HistoryMsg::Forget(_)
+        | HistoryMsg::Sessions { .. }
         | HistoryMsg::Dropped { .. } => {}
         HistoryMsg::Inspect(_) => {}
     }
@@ -933,6 +995,7 @@ pub async fn run_history(
         version: 0,
         dropped: 0,
         owners: Vec::new(),
+        sessions_seq: 0,
     }));
     let mut msgs: Vec<HistoryMsg> = Vec::with_capacity(BATCH_MAX);
     // Runtime time in ns of the next MemTotal and clock offset read.
@@ -1270,6 +1333,151 @@ mod tests {
             _ => panic!("expected one Query message"),
         }
         assert_eq!(sink.dropped(), 0);
+    }
+
+    /// A small xorshift generator, so the model test runs the same steps each time.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
+    fn worker_state() -> State {
+        State {
+            mode: Mode::Off,
+            boot: BootId(1),
+            realtime_offset_ns: 0,
+            version: 0,
+            dropped: 0,
+            owners: Vec::new(),
+            sessions_seq: 0,
+        }
+    }
+
+    /// ADR-018, level-triggered session list: 2000 random steps in which sessions open, query,
+    /// close and the worker restarts, through a queue of 2 that the worker drains at random, so
+    /// sends are dropped. After each settled step the worker holds no closed session, and each
+    /// open session's last view answers the last query the current generation took from it.
+    #[test]
+    fn session_list_model() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let slot: HistorySlot = Arc::new(ArcSwapOption::empty());
+        let mut generation = 1;
+        let (tx, mut rx) = mpsc::channel(2);
+        slot.store(Some(Arc::new(HistoryTx { generation, tx })));
+        let mut sink = HistorySink::new(Arc::clone(&slot));
+        let mut st = worker_state();
+        // Open sessions and the (generation, query id) each one sent last.
+        let mut open: Vec<(ClientSessionId, Option<(u64, u64)>)> =
+            vec![(ClientSessionId::LOCAL, None)];
+        let mut next_session = 1;
+        let mut next_query = 1;
+        let mut views: Vec<(ClientSessionId, u64)> = Vec::new();
+        let (mut lists_refused, mut settled) = (0, 0);
+        let h = HistorySettings::default();
+        let what = HistoryWhat::Frame {
+            metric: HistoryMetric::Cpu,
+            view: (0, u64::MAX),
+            keys: Arc::from([]),
+            overview: false,
+        };
+
+        let drain = |st: &mut State,
+                     rx: &mut mpsc::Receiver<HistoryMsg>,
+                     views: &mut Vec<(ClientSessionId, u64)>,
+                     n: u64| {
+            let mut msgs: Vec<HistoryMsg> = std::iter::from_fn(|| rx.try_recv().ok())
+                .take(n as usize)
+                .collect();
+            let mut out = Vec::new();
+            st.apply(&mut msgs, &mut out, &h, 0);
+            for update in out {
+                if let SourceUpdate::History(HistoryUpdate::View { owner, view, .. }) = update {
+                    views.retain(|(o, _)| *o != owner);
+                    views.push((owner, view.query_id));
+                }
+            }
+        };
+
+        for _ in 0..2000 {
+            match rng.below(10) {
+                0..=1 => {
+                    open.push((ClientSessionId(next_session), None));
+                    next_session += 1;
+                }
+                2..=5 => {
+                    let i = rng.below(open.len() as u64) as usize;
+                    let msg = HistoryMsg::Query {
+                        owner: open[i].0,
+                        id: next_query,
+                        range: HistoryRange::Live,
+                        what: what.clone(),
+                    };
+                    if let Some(g) = sink.command(msg) {
+                        open[i].1 = Some((g, next_query));
+                    }
+                    next_query += 1;
+                }
+                6..=8 if open.len() > 1 => {
+                    let i = 1 + rng.below(open.len() as u64 - 1) as usize;
+                    open.remove(i);
+                }
+                9 => {
+                    // The worker restarts: a new generation with an empty state.
+                    generation += 1;
+                    let (tx, new_rx) = mpsc::channel(2);
+                    rx = new_rx;
+                    slot.store(Some(Arc::new(HistoryTx { generation, tx })));
+                    st = worker_state();
+                    views.clear();
+                }
+                _ => {}
+            }
+            // The end of the reducer turn.
+            sink.set_sessions(open.iter().map(|(id, _)| *id));
+            if sink.queried_by == Some(generation) && sink.sessions_sent_to != Some(generation) {
+                lists_refused += 1;
+            }
+            drain(&mut st, &mut rx, &mut views, rng.below(3));
+
+            if rng.below(4) == 0 {
+                // Settle: the worker catches up and the next turn sends the list again.
+                drain(&mut st, &mut rx, &mut views, u64::MAX);
+                sink.set_sessions(open.iter().map(|(id, _)| *id));
+                drain(&mut st, &mut rx, &mut views, u64::MAX);
+                settled += 1;
+                for owner in &st.owners {
+                    assert!(
+                        open.iter().any(|(id, _)| *id == owner.id),
+                        "the worker holds closed session {:?}",
+                        owner.id
+                    );
+                }
+                for (id, last) in &open {
+                    if let Some((g, q)) = last
+                        && *g == generation
+                    {
+                        let shown = views.iter().find(|(o, _)| o == id).map(|(_, q)| *q);
+                        assert_eq!(shown, Some(*q), "session {id:?}");
+                    }
+                }
+            }
+        }
+        assert!(
+            lists_refused > 50,
+            "the queue refused {lists_refused} lists"
+        );
+        assert!(
+            sink.dropped() > 50,
+            "the queue dropped {} queries",
+            sink.dropped()
+        );
+        assert!(settled > 400, "{settled} settled steps");
     }
 
     /// Keeps the fields of every warn event as text.

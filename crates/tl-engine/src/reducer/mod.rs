@@ -51,7 +51,7 @@ use tl_model::table::{ProcessTableView, SysTable, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
-use crate::client_session::{ClientSessions, background_demand};
+use crate::client_session::{ClientSession, ClientSessions, background_demand};
 use crate::source::WorkerControl;
 use crate::update::{DeviceHistories, EngineMsg};
 use crate::workers::history::HistorySink;
@@ -361,6 +361,10 @@ impl Reducer {
                 sink.on_snapshot(&next);
             }
             self.clients.publish(&next);
+            // After the publish, which closes the sessions whose link is gone (ADR-018).
+            if let Some(sink) = self.history_cmd.as_mut() {
+                sink.set_sessions(self.clients.iter().map(ClientSession::id));
+            }
             publisher.publish(next);
         }
         Ok(())

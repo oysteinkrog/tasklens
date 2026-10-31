@@ -722,10 +722,9 @@ impl Reducer {
                     self.rebuild_sys_for(table, settings, Some(id));
                 }
             }
+            // The history worker learns of the close from the session list sent after the turn.
             ClientMsg::Close(id) => {
-                if self.clients.close(id) {
-                    self.send_history(HistoryMsg::Forget(id));
-                } else {
+                if !self.clients.close(id) {
                     tracing::debug!(target: "tasklens::engine", id = id.0, "close: no such client session");
                 }
             }
