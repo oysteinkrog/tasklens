@@ -360,7 +360,10 @@ fn service_starts_serves_eight_sessions_and_stops_on_sigterm() {
     let (status, err) = child.wait(Duration::from_secs(5));
     assert!(status.success(), "{status:?}: {err}");
     assert!(!socket.exists(), "the socket is removed on the way out");
-    // Connections still open see the end of the stream.
-    let mut byte = [0u8; 1];
-    assert_eq!(sessions[0].read(&mut byte).unwrap_or(0), 0);
+    // Connections still open see the end of the stream, after any snapshot frame sent to them.
+    sessions[0]
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut rest = Vec::new();
+    sessions[0].read_to_end(&mut rest).expect("the stream ends");
 }

@@ -9,8 +9,8 @@
 //! Each connection whose peer runs as this user gets a handshake and, when welcomed, a
 //! `SessionPort`. At most `HANDSHAKES_MAX` connections are in their handshake at once, and the
 //! engine admits at most 8 sessions, so a client that never sends its `Hello` cannot make the
-//! service start threads or hold sockets without bound. The per-session wire side is q4x76.20; until then a connection only holds its
-//! port, and drops it when the client closes the connection or the engine ends the session.
+//! service start threads or hold sockets without bound. A welcomed connection then runs
+//! `tl_remote::server::serve_session` over its port, which drops the port when the session ends.
 
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File, OpenOptions};
@@ -26,12 +26,18 @@ use std::time::{Duration, Instant};
 
 use sd_notify::NotifyState;
 use tl_engine::client_session::{ClientSessionId, OpenError, SESSIONS_MAX};
-use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
+use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode, SessionPort};
+use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
+use tl_model::command::{Command, CommandError};
+use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
+use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::remote_proto::{HostIdentity, RefuseReason};
+use tl_model::request::RequestEvent;
+use tl_model::snapshot::Snapshot;
 use tl_remote::envelope::FrameReader;
-use tl_remote::server::{self, EndpointError};
+use tl_remote::server::{self, EndpointError, Port, Receiver, SessionConfig};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -43,8 +49,6 @@ const LOCK_FILE: &str = "engine.lock";
 const READY_WAIT: Duration = Duration::from_secs(5);
 /// How often `wait_ready` looks at the published health.
 const READY_POLL: Duration = Duration::from_millis(50);
-/// How often a connection checks whether the engine ended its session.
-const SESSION_POLL: Duration = Duration::from_secs(1);
 /// Connections in their handshake at once. Each has `server::HELLO_TIMEOUT` from accept for its
 /// whole handshake (reads, the engine's admission and the answer), then it is closed and its
 /// place frees. A connection beyond this is closed at
@@ -340,33 +344,73 @@ fn serve(
             return;
         }
     };
+    let session = port.id().0;
     info!(
         target: "tasklens::engine",
-        session = port.id().0,
+        session,
         pid = hello.pid,
         bridge = hello.bridge,
         "client connected",
     );
-    let _ = stream.set_read_timeout(Some(SESSION_POLL));
-    let _ = stream.set_write_timeout(None);
-    let mut reader = &stream;
-    let mut buf = [0u8; 4096];
-    while !port.is_ended() {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) => {}
-            Err(_) => break,
-        }
+    let config = SessionConfig {
+        snapshots: hello.want.snapshots,
+        ..SessionConfig::default()
+    };
+    let port = EnginePort {
+        port,
+        engine: engine.clone(),
+    };
+    let report = server::serve_session(stream, port, config);
+    info!(
+        target: "tasklens::engine",
+        session,
+        progress_dropped = report.progress_dropped,
+        commands_dropped = report.commands_dropped,
+        frames_trimmed = report.frames_trimmed,
+        "client disconnected: {}",
+        report.end,
+    );
+}
+
+/// The engine's side of one session for `serve_session`: the session's port, plus the engine
+/// for journal streams, which are not tied to a session.
+struct EnginePort {
+    port: SessionPort,
+    engine: EngineHandle,
+}
+
+impl Port for EnginePort {
+    fn latest(&self) -> Arc<Snapshot> {
+        self.port.latest()
     }
-    let _ = stream.shutdown(std::net::Shutdown::Both);
-    info!(target: "tasklens::engine", session = port.id().0, "client disconnected");
+
+    fn wake(&self) -> Receiver<()> {
+        self.port.wake()
+    }
+
+    fn action_events(&self) -> Receiver<ActionEvent> {
+        self.port.action_events()
+    }
+
+    fn request_events(&self) -> Receiver<RequestEvent> {
+        self.port.request_events()
+    }
+
+    fn set_demand(&self, demand: Demand) {
+        self.port.set_demand(demand);
+    }
+
+    fn send(&self, cmd: Command) -> Result<(), CommandError> {
+        self.port.send(cmd)
+    }
+
+    fn journal(&self, query: JournalQuery) -> JournalHandle {
+        self.engine.journal(query)
+    }
+
+    fn is_ended(&self) -> bool {
+        self.port.is_ended()
+    }
 }
 
 /// Blocks SIGTERM and SIGINT in this thread and returns the set for `wait_signal`.
