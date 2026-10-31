@@ -15,6 +15,8 @@
 //!   fixture in `tl-remote/tests/budgets.rs`; it prints and asserts nothing.
 
 #![allow(clippy::unwrap_used)]
+// The numbers are the result: the lane and the leader read them with `--nocapture`.
+#![allow(clippy::print_stdout)]
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -101,9 +103,18 @@ fn cpu_seconds(pid: &str) -> f64 {
         .split_whitespace()
         .collect();
     let ticks: u64 = rest[11].parse::<u64>().unwrap() + rest[12].parse::<u64>().unwrap();
-    // SAFETY: sysconf has no preconditions.
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let hz = clock_ticks();
     ticks as f64 / hz as f64
+}
+
+/// Clock ticks per second, `getconf CLK_TCK`.
+fn clock_ticks() -> u64 {
+    let out = Command::new("getconf").arg("CLK_TCK").output().unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 fn loadavg() -> String {
@@ -197,8 +208,8 @@ fn idle_service_cpu_is_within_10_percent_of_the_hidden_window_engine() {
     }
     std::thread::sleep(WARM_UP);
     let (service, s_before, s_after) = measure(&pid);
-    // SAFETY: kill has no memory preconditions; the pid is our own child, not yet reaped.
-    unsafe { libc::kill(guard.0.id() as libc::pid_t, libc::SIGTERM) };
+    let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+    assert!(killed.success());
     let begin = Instant::now();
     while guard.0.try_wait().unwrap().is_none() {
         assert!(
