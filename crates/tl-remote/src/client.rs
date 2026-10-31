@@ -15,6 +15,10 @@
 //! queue is `Err(Busy)`, no connection is `Err(EngineStopped)`. A `JournalClose` that overtakes
 //! its stream's `JournalOpen` is held back by the writer, which then sends neither.
 //!
+//! A host settings change goes on the command queue too. Its reply is passed to the channel
+//! `set_host_settings` returned; the server answers them in order, so the oldest one waiting
+//! takes it. When the connection drops, those channels close with no reply.
+//!
 //! Every action, scan, handle search, eject and history query sent is tracked by `IdKind` and id
 //! until its `RequestEvent` arrives. When the connection drops, each one still open ends here
 //! instead: an action gets an `OutcomeUnknown("connection to <host> lost")` summary and then
@@ -27,7 +31,7 @@
 //! snapshot is stored together with its session number as `generation`, and the hub compares
 //! nothing across two of them. Until that first snapshot `latest` keeps the last data.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,8 +47,9 @@ use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalEvent, JournalHandle, JournalQuery};
 use tl_model::remote_proto::{
-    BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, PROTO, ProtoError, ServerBootstrap,
-    ServerMsg, StreamId, Welcome, decode_server_bootstrap, encode_hello,
+    BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, HostSettingsChanges, PROTO, ProtoError,
+    ServerBootstrap, ServerMsg, SetHostSettingsReply, StreamId, Welcome, decode_server_bootstrap,
+    encode_hello,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::settings::EngineSettings;
@@ -217,6 +222,8 @@ struct State {
     session: u64,
     /// Requests sent and not yet ended, by kind and id, with how many are open.
     pending: HashMap<(IdKind, u64), u32>,
+    /// One sender per host settings change sent and not yet answered, oldest first.
+    host_replies: VecDeque<async_channel::Sender<SetHostSettingsReply>>,
     demand: Option<Demand>,
     table_query: Option<TableQuery>,
     /// The newest query per system table.
@@ -375,9 +382,8 @@ impl EngineClient for RemoteClient {
         st.demand = Some(demand);
     }
 
-    /// The engine settings that stay with the window move into the session's table query and
-    /// demand, and host settings get their own messages (ADR-018 Settings, tasklens-q4x76.9).
-    /// Until then nothing is sent.
+    /// The engine settings are host settings, which `set_host_settings` changes (ADR-018
+    /// Settings), so nothing is sent.
     fn set_settings(&self, _settings: EngineSettings) {}
 
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
@@ -403,6 +409,33 @@ impl EngineClient for RemoteClient {
                     *st.pending.entry(key).or_insert(0) += 1;
                 }
                 Ok(())
+            }
+            Err(async_channel::TrySendError::Full(_)) => Err(CommandError::Busy),
+            Err(async_channel::TrySendError::Closed(_)) => Err(CommandError::EngineStopped),
+        }
+    }
+
+    /// Queues `SetHostSettings` behind the commands already queued. The server checks
+    /// `base_rev`, so a change made from older values comes back as `Conflict`.
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        let mut st = lock(&self.shared.state);
+        let Some(link) = &st.link else {
+            return Err(CommandError::EngineStopped);
+        };
+        match link
+            .commands
+            .try_send(ClientMsg::SetHostSettings { base_rev, changes })
+        {
+            Ok(()) => {
+                link.ring();
+                let (tx, rx) = async_channel::bounded(1);
+                // Under the lock, so the reader cannot take the reply before the sender waits.
+                st.host_replies.push_back(tx);
+                Ok(rx)
             }
             Err(async_channel::TrySendError::Full(_)) => Err(CommandError::Busy),
             Err(async_channel::TrySendError::Closed(_)) => Err(CommandError::EngineStopped),
@@ -626,8 +659,15 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                     let _ = tx.try_send(event);
                 }
             }
-            // Host settings replies have no reader yet (tasklens-q4x76.9).
-            ServerMsg::HostSettings(_) | ServerMsg::SetHostSettings(_) => {}
+            ServerMsg::SetHostSettings(reply) => {
+                let waiting = lock(&shared.state).host_replies.pop_front();
+                if let Some(tx) = waiting {
+                    let _ = tx.try_send(reply);
+                }
+            }
+            // The client reads host settings from the snapshot and never sends
+            // `GetHostSettings`.
+            ServerMsg::HostSettings(_) => {}
         }
     }
     shutdown();
@@ -739,8 +779,9 @@ fn end_session(shared: &Shared, host_name: &str) {
         let mut st = lock(&shared.state);
         st.link = None;
         st.shutdown = None;
-        // Dropping the senders closes each handle's events.
+        // Dropping the senders closes each handle's events, and each host settings reply.
         st.journals.clear();
+        st.host_replies.clear();
         std::mem::take(&mut st.pending)
     };
     let lost: Arc<str> = Arc::from(format!("connection to {host_name} lost"));

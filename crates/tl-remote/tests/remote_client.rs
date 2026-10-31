@@ -1,7 +1,7 @@
 //! `RemoteClient` against an in-memory server on a Unix socket pair (ADR-018): snapshot install,
 //! wake and `Ack` order, the bounded command queue, a connection lost during requests, a new
 //! engine instance, generation and snapshot read together, action summaries with a full event
-//! queue, and journal close.
+//! queue, journal close, and host settings from the snapshot with their write replies.
 //!
 //! A test waits for the exact step it then asserts on, through the client's `observe` steps or
 //! the channel it reads, never for an earlier step that only usually comes first.
@@ -24,8 +24,8 @@ use tl_model::details::{ScanId, StringScanOpts};
 use tl_model::ids::ProcessKey;
 use tl_model::journal::{JournalAccess, JournalEvent, JournalQuery};
 use tl_model::remote_proto::{
-    BootPrefix, ClientMsg, HelloTail, HostIdentity, ServerMsg, StreamId, Want, Welcome,
-    decode_hello, encode_welcome,
+    BootPrefix, ClientMsg, HelloTail, HostIdentity, HostSettings, HostSettingsChanges, ServerMsg,
+    SetHostSettingsReply, StreamId, Want, Welcome, decode_hello, encode_welcome,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
@@ -439,6 +439,72 @@ fn drop_during_action_and_scan_ends_each_once() {
     assert!(before.is_empty(), "nothing replayed: {before:?}");
     assert!(ends.try_recv().is_err());
     assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn host_settings_come_in_the_snapshot_and_each_write_gets_its_reply() {
+    let (client, conns) = client();
+    assert_eq!(
+        client.latest().host_settings.rev,
+        0,
+        "nothing read before the first snapshot"
+    );
+    assert!(matches!(
+        client.set_host_settings(1, HostSettingsChanges::default()),
+        Err(CommandError::EngineStopped)
+    ));
+    let mut server = Server::connect(&conns, "home", 1);
+    let mut snap = snapshot(1, 100);
+    snap.host_settings = Arc::new(HostSettings {
+        rev: 3,
+        ..HostSettings::default()
+    });
+    server.publish(&snap);
+    server.ack();
+    assert_eq!(client.latest().host_settings.rev, 3);
+
+    let changes = HostSettingsChanges {
+        interval_ms: Some(2000),
+        ..HostSettingsChanges::default()
+    };
+    let first = client.set_host_settings(3, changes.clone()).unwrap();
+    let second = client.set_host_settings(3, changes.clone()).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            server.recv(),
+            ClientMsg::SetHostSettings { base_rev: 3, changes: ref c } if *c == changes
+        ));
+    }
+    // The server answers in order, so each reply reaches the write it belongs to.
+    let current = HostSettings {
+        rev: 4,
+        ..HostSettings::default()
+    };
+    server.send(&ServerMsg::SetHostSettings(SetHostSettingsReply::Ack {
+        rev: 4,
+    }));
+    server.send(&ServerMsg::SetHostSettings(
+        SetHostSettingsReply::Conflict {
+            current: current.clone(),
+        },
+    ));
+    assert_eq!(
+        recv("the first reply", &first),
+        SetHostSettingsReply::Ack { rev: 4 }
+    );
+    assert_eq!(
+        recv("the second reply", &second),
+        SetHostSettingsReply::Conflict { current }
+    );
+
+    // A write the connection drops before its reply ends with its channel closed.
+    let third = client.set_host_settings(4, changes).unwrap();
+    assert!(matches!(server.recv(), ClientMsg::SetHostSettings { .. }));
+    drop(server);
+    wait_for("the third channel closed", || {
+        third.is_closed().then_some(())
+    });
+    assert!(third.try_recv().is_err());
 }
 
 #[test]

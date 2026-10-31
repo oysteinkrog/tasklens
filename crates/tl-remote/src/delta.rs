@@ -266,6 +266,7 @@ pub fn encode(base: Option<(u64, &Snapshot)>, new: &Snapshot, frame: u64) -> Sna
         &new.device_history,
         device_history_delta,
     );
+    f.host_settings = whole(b.map(|b| &b.host_settings), &new.host_settings);
     f
 }
 
@@ -647,6 +648,7 @@ pub fn apply(
             &frame.device_history,
             apply_device_history,
         )?,
+        host_settings: pick(&base.host_settings, &frame.host_settings),
     })
 }
 
@@ -1377,7 +1379,8 @@ mod tests {
             history,
             process_series,
             device_details,
-            device_history
+            device_history,
+            host_settings
         );
         assert_eq!(
             (got.epoch, got.boot_id, got.published_ns),
@@ -1710,6 +1713,33 @@ mod tests {
         assert!(t.rows.is_empty());
         assert_eq!(t.order.as_ref().map(|o| o.len()), Some(21));
         assert!(t.groups.is_none() && t.subtree.is_none());
+    }
+
+    #[test]
+    fn host_settings_go_whole_when_they_change() {
+        use tl_model::remote_proto::HostSettings;
+
+        let mut base = fixture(3);
+        base.host_settings = Arc::new(HostSettings {
+            rev: 4,
+            ..HostSettings::default()
+        });
+        // A complete frame carries them, so a fresh client starts from the engine's revision.
+        let complete = wire(&encode(None, &base, 1));
+        assert_eq!(complete.host_settings.as_ref().map(|h| h.rev), Some(4));
+        let got = apply(&Snapshot::empty(BootId(0), 0), 0, &complete, 1).unwrap();
+        assert_eq!(got.host_settings.rev, 4);
+
+        let (frame, _) = round_trip(&base, &base.clone());
+        assert!(frame.host_settings.is_none(), "unchanged: not sent");
+
+        let mut new = base.clone();
+        let next = Arc::make_mut(&mut new.host_settings);
+        next.rev = 5;
+        next.values.interval_ms = 2000;
+        let (frame, got) = round_trip(&base, &new);
+        assert_eq!(frame.host_settings.as_ref().map(|h| h.rev), Some(5));
+        assert_eq!(got.host_settings.values.interval_ms, 2000);
     }
 
     #[test]
