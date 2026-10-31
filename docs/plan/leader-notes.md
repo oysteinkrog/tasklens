@@ -1054,3 +1054,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.11 prep: HostContext refactor first (no visible change); windows bind to the host they came from, tray/mini/notices follow local; split into .11 + .25 hosts setting, .26 host manager, .27 tabs, .28 Settings > Hosts, .29 reconnect banner. Requeued.
 - 2026-10-31 q4x76.11: 4 stale tl-ui tests (o55.57 overview menu, crw.105 net_page focus) split to tasklens-spkk9; not this bead's.
 - 2026-10-31 q4x76.12 prep: self = engine pid + local Hello window pids; own-window commands checked per session, refused from bridge sessions; remote-only success toasts; KWin name watch; UI split to tasklens-q4x76.30 before q4x76.13. Requeued.
+- 2026-10-31 q4x76.12 held: own-window checks keyed by session Hello (pid, app id); desktop calls carry the bridge generation; env read on KWin name appear with bounded 10 s backoff, no steady polling. Requeued.
