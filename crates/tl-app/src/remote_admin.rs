@@ -444,11 +444,12 @@ impl Session {
                 .frames
                 .read_frame(&mut DeadlineStream::new(&self.stream, deadline))
                 .map_err(|e| fail(&e))?;
-            match self.frames.decode_server(&frame).map_err(|e| fail(&e))? {
-                reply @ (ServerMsg::HostSettings(_) | ServerMsg::SetHostSettings(_)) => {
-                    return Ok(reply);
-                }
-                _ => {}
+            let msg = self.frames.decode_server(&frame).map_err(|e| fail(&e))?;
+            if matches!(
+                msg,
+                ServerMsg::HostSettings(_) | ServerMsg::SetHostSettings(_)
+            ) {
+                return Ok(msg);
             }
         }
     }
