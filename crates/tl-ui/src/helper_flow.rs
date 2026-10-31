@@ -14,9 +14,6 @@
 //! window when that window is closed or no start is recorded, and then clears the record. A
 //! cancel shows "Authentication cancelled", any other failure "Could not start the privileged
 //! helper".
-//!
-//! The helper belongs to a host. The flow sends to and watches the host the main window shows
-//! when a start is dispatched; with one host that is always the local host.
 
 use std::sync::Arc;
 
@@ -39,8 +36,6 @@ const START_FAILED_TEXT: &str = "fnd-shield-start-failed";
 
 /// The shield's command sender and start outcome toaster.
 pub struct HelperFlow {
-    /// The hub of the host the flow sends to and watches: the host shown at the last start.
-    hub: Entity<SnapshotHub>,
     client: Arc<dyn EngineClient>,
     /// The window [`note_start`] named for the start being dispatched now.
     noted: Option<AnyWindowHandle>,
@@ -58,9 +53,9 @@ impl Global for GlobalHelperFlow {}
 
 /// Creates the flow and registers the two Action handlers. Does nothing without the hub.
 pub fn install(cx: &mut App) {
-    // App-level: the flow starts on the host the main window shows.
-    let host = HostContext::shown(cx);
-    let Some(hub) = host.hub().cloned() else {
+    // The flow is installed at startup, before any host tab exists: the local host. Host tabs
+    // (tasklens-q4x76.27) decide how the shield follows a remote host.
+    let Some(hub) = HostContext::local_hub(cx).cloned() else {
         debug!(target: "tasklens::ui", "no hub, helper flow not installed");
         return;
     };
@@ -70,12 +65,7 @@ pub fn install(cx: &mut App) {
     let weak = flow.downgrade();
     App::on_action(cx, move |_: &StartHelperSession, cx| {
         let active = cx.active_window();
-        // App-level: a start goes to the host the main window shows now.
-        let host = HostContext::shown(cx);
-        let _ = weak.update(cx, |flow, cx| {
-            flow.bind(&host, cx);
-            flow.start(active);
-        });
+        let _ = weak.update(cx, |flow, _| flow.start(active));
     });
     let weak = flow.downgrade();
     App::on_action(cx, move |_: &EndHelperSession, cx| {
@@ -94,22 +84,6 @@ pub fn note_start(window: AnyWindowHandle, cx: &mut App) {
 
 impl HelperFlow {
     fn new(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
-        let (client, seen_seq, _health) = Self::watch(hub, cx);
-        Self {
-            hub: hub.clone(),
-            client,
-            noted: None,
-            requester: None,
-            seen_seq,
-            _health,
-        }
-    }
-
-    /// The client of `hub`, its last `helper_start` seq and a subscription to its health.
-    fn watch(
-        hub: &Entity<SnapshotHub>,
-        cx: &mut Context<Self>,
-    ) -> (Arc<dyn EngineClient>, u64, Subscription) {
         let hub_ref = hub.read(cx);
         let client = hub_ref.client().clone();
         let seen_seq = hub_ref
@@ -118,29 +92,18 @@ impl HelperFlow {
             .helper_start
             .as_ref()
             .map_or(0, |(seq, _)| *seq);
-        let health = cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
+        let _health = cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
             if ev.mask.contains(ComponentMask::HEALTH) {
                 this.take_health(&hub, cx);
             }
         });
-        (client, seen_seq, health)
-    }
-
-    /// Moves the flow to `host` when it shows another hub. A start still waiting on the old
-    /// host is forgotten. Keeps the current host when `host` has no hub.
-    fn bind(&mut self, host: &HostContext, cx: &mut Context<Self>) {
-        let Some(hub) = host.hub() else {
-            return;
-        };
-        if *hub == self.hub {
-            return;
+        Self {
+            client,
+            noted: None,
+            requester: None,
+            seen_seq,
+            _health,
         }
-        let (client, seen_seq, health) = Self::watch(hub, cx);
-        self.hub = hub.clone();
-        self.client = client;
-        self.seen_seq = seen_seq;
-        self.requester = None;
-        self._health = health;
     }
 
     /// Sends `StartHelperSession` and records its requester: the noted window, else `active`.
