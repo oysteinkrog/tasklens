@@ -672,7 +672,7 @@ expression: rows
         "user1",
         App,
         ProcFlags(
-            0x0,
+            APP_NAME,
         ),
         Sleeping,
         27,
