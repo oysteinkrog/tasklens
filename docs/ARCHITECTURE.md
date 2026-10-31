@@ -2770,7 +2770,7 @@ widgets = [
 
 A flow layout has `preset = { id = "chart_engines", arrange = "auto", split = 0.5 }` and widgets with `slot = 0` or `slot = 1` instead of `device`, and no cells.
 
-**Load rules** (`Settings::clamp`, one `warn!` line for all layout drops, key `performance.layouts`):
+**Load rules** (`Settings::clamp`, one `warn!` line for all layout drops, reported with `LAYOUTS_KEY = "performance.layouts"` as `OVERVIEW_KEY` is):
 
 - An entry without a string `container` is dropped. A second entry for the same container is dropped.
 - An entry for a container not in `LAYOUT_CONTAINERS`, or with `version` above `LAYOUT_VERSION`, becomes `LayoutEntry::Kept` and is written back unchanged. A missing `version` reads as 1.
