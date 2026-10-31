@@ -2518,6 +2518,7 @@ mod tests {
                 let mut files = CmdFiles::default();
                 let call = |id: &str| ActivateCall {
                     internal_id: Arc::from(id),
+                    generation: 1,
                     reply: async_channel::bounded(1).0,
                 };
                 let mut got = Vec::new();
