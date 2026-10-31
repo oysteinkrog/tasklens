@@ -2874,7 +2874,7 @@ mod tests {
             assert_eq!(rig.queue.progress.done(SourceId::KWin), 3);
             // A later bridge's command is dropped too; this bridge's own runs.
             assert!(
-                !rig.command_for(&cx, &[activate.clone()], RIG_BRIDGE + 1)
+                !rig.command_for(&cx, std::slice::from_ref(&activate), RIG_BRIDGE + 1)
                     .await
             );
             assert!(rig.host.seen.lock().expect("lock").is_empty());
