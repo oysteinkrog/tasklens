@@ -149,9 +149,11 @@ pub struct MetricSink {
     reading_sec: Option<u64>,
     /// The `HELD` series the sink repeats.
     held: Vec<Held>,
-    /// The other client sessions' ranges, and the sender generation that received them.
+    /// The other client sessions' ranges, the sender generation that has them, and the last
+    /// generation that received a non-empty list. A new generation starts with none.
     ranges: Arc<[DeviceHistoryRequest]>,
     ranges_sent_to: Option<u64>,
+    ranges_held_by: Option<u64>,
 }
 
 impl MetricSink {
@@ -164,6 +166,7 @@ impl MetricSink {
             held: Vec::new(),
             ranges: Arc::from([]),
             ranges_sent_to: None,
+            ranges_held_by: None,
         }
     }
 
@@ -185,12 +188,17 @@ impl MetricSink {
         if self.ranges_sent_to == Some(tx.generation) {
             return;
         }
+        if self.ranges.is_empty() && self.ranges_held_by != Some(tx.generation) {
+            self.ranges_sent_to = Some(tx.generation);
+            return;
+        }
         if tx
             .tx
             .try_send(MetricMsg::Ranges(Arc::clone(&self.ranges)))
             .is_ok()
         {
             self.ranges_sent_to = Some(tx.generation);
+            self.ranges_held_by = (!self.ranges.is_empty()).then_some(tx.generation);
         }
     }
 
@@ -2397,6 +2405,7 @@ mod tests {
                 MetricMsg::Catalog(_) => "catalog",
                 MetricMsg::System(_) => "system",
                 MetricMsg::Reading(_) | MetricMsg::Sleep { .. } => "event",
+                MetricMsg::Ranges(_) => "ranges",
             })
             .collect();
         assert_eq!(kinds, ["catalog", "system", "system"]);

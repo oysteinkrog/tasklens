@@ -335,15 +335,14 @@ fn history_factory(
         let mut started = false;
         poll_fn(move |task| {
             let poll = run.as_mut().poll(task);
-            if !started {
+            // The generation stores its sender after it told the reducer it started.
+            if !started && let Some(tx) = slot.load().as_deref() {
                 started = true;
                 let start = HistoryMsg::SessionStart {
                     epoch,
                     t_ns: now_boot_ns(),
                 };
-                if let Some(tx) = slot.load().as_deref()
-                    && tx.try_send(start).is_ok()
-                {
+                if tx.tx.try_send(start).is_ok() {
                     task.waker().wake_by_ref();
                 }
             }

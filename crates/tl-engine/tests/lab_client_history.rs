@@ -134,7 +134,8 @@ impl Rig {
     /// The local window shows `range`.
     fn local_range(&mut self, range: Option<DeviceHistoryRequest>) {
         self.demand_tx
-            .send_modify(|d| d.device_history_range = range);
+            .send_modify(|d| d.device_history_range = range)
+            .expect("the reducer holds the receiver");
     }
 
     /// The queries the history worker received, as `(owner, engine id)`.
