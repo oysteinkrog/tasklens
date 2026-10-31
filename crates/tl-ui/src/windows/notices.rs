@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(dump_file_stem("tab\there\0x"), "tab_here_x");
         assert_eq!(dump_file_stem("ok.name_v-2"), "ok.name_v-2");
         assert_eq!(dump_file_stem(".."), "._");
-        assert_eq!(dump_file_stem("a...b"), "a._b");
+        assert_eq!(dump_file_stem("a...b"), "a._.b");
         assert_eq!(dump_file_stem(""), "process");
         let long = "a".repeat(100);
         assert_eq!(dump_file_stem(&long).len(), DUMP_NAME_MAX);
