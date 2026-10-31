@@ -9,18 +9,22 @@
 //! sender is dropped, so `run` drains the queue and then returns.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use tl_engine::actions::{Admission, admit};
 use tl_engine::client_session::{
     ACTIVE_MAX, ClientMsg, ClientSessionId, IdKind, PortState, RequestEnd, RequestEvent,
     SessionLink,
 };
 use tl_engine::reducer::apply::QUEUE_MAX;
 use tl_engine::reducer::{ActionGate, ActionRoute, AdmissionView, Publisher, Reducer};
+use tl_engine::remote_admin::{PolkitAnswer, PolkitCheck, RemoteAdmin};
 use tl_engine::source::{WorkerCommand, WorkerControl};
 use tl_engine::update::{DetailsUpdate, DeviceDetailsUpdate, EngineMsg, SourceUpdate};
 use tl_model::actions::{
@@ -1174,15 +1178,9 @@ fn kwin_command_carries_its_sessions_app_id() {
         Arc::from("io.github.oysteinkrog.Tasklens.Devel"),
     );
     let ports = [
-        (
-            REMOTE,
-            Arc::new(PortState::for_window(Some(Arc::clone(&main)))),
-        ),
-        (
-            OTHER,
-            Arc::new(PortState::for_window(Some(Arc::clone(&devel)))),
-        ),
-        (BRIDGED, Arc::new(PortState::for_window(None))),
+        (REMOTE, Arc::new(PortState::for_window(Arc::clone(&main)))),
+        (OTHER, Arc::new(PortState::for_window(Arc::clone(&devel)))),
+        (BRIDGED, Arc::new(PortState::for_bridge())),
     ];
     let remotes: Vec<Remote> = ports.iter().map(|_| Remote::new()).collect();
     let keep = || {
@@ -1247,8 +1245,13 @@ fn kwin_command_carries_the_bridge_generation() {
     assert_eq!(bridges, [expected]);
 }
 
-/// Records what admission sees for each request: the session is remote, remote admin is on.
-struct ViewGate(Arc<Mutex<Vec<(bool, bool)>>>);
+/// What admission saw for one request: the session is remote, remote admin is on, and what
+/// `admit` decided with that view.
+type Seen = (bool, bool, Admission);
+
+/// Runs the engine's own `admit` on each request with the view the reducer gives it, and keeps
+/// what it saw and decided.
+struct ViewGate(Arc<Mutex<Vec<Seen>>>);
 
 impl ActionGate for ViewGate {
     fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
@@ -1258,14 +1261,16 @@ impl ActionGate for ViewGate {
     fn submit_routed(
         &mut self,
         _cx: &Cx,
-        _req: ActionRequest,
+        req: ActionRequest,
         view: &AdmissionView<'_>,
         _route: ActionRoute,
     ) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((view.remote, view.remote_admin));
+        let admission = admit(&req, view, 0, &FxHashSet::default());
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).push((
+            view.remote,
+            view.remote_admin,
+            admission,
+        ));
     }
 
     fn finished(&mut self, _id: ActionId) -> Option<SourceId> {
@@ -1273,9 +1278,39 @@ impl ActionGate for ViewGate {
     }
 }
 
-/// q4x76.13, ADR-018: admission sees a bridge session as remote, and a window on this host, a
-/// session with no `Hello` and the local session as not remote. It reads the host setting
-/// `remote_admin` for each request, so turning it on needs no restart.
+/// polkit with a fixed answer.
+struct FixedPolkit(PolkitAnswer);
+
+impl PolkitCheck for FixedPolkit {
+    fn helper_allowed(&self) -> PolkitAnswer {
+        self.0.clone()
+    }
+}
+
+/// A root action: a signal sent as administrator.
+fn root_action(id: u64) -> Command {
+    Command::Action(ActionRequest {
+        id: ActionId(id),
+        kind: ActionKind::Signal(Signal::Term),
+        targets: SmallVec::new(),
+        privileged: true,
+    })
+}
+
+/// Remote admin with the setting on and polkit's answer `answer`, after the check.
+fn remote_admin(answer: PolkitAnswer) -> RemoteAdmin {
+    let admin = RemoteAdmin::new(Arc::new(FixedPolkit(answer)));
+    admin.apply(true);
+    admin.wait_checked(Duration::from_secs(10));
+    admin
+}
+
+/// q4x76.13, ADR-018: admission sees only a window on this host and the local session as not
+/// remote. A bridge session and a session with no `Hello` are remote (fails closed), so their
+/// root actions are refused with `RemoteAdminOff` while remote admin is off. The host setting
+/// alone does not turn remote admin on: with the setting on and polkit saying no, the refusal
+/// stays. Once polkit allows the helper, the same request from a remote session is admitted,
+/// with no restart.
 #[test]
 fn admission_sees_the_sessions_remote_flag_and_remote_admin() {
     const LOCAL_WINDOW: ClientSessionId = ClientSessionId(8);
@@ -1287,9 +1322,9 @@ fn admission_sees_the_sessions_remote_flag_and_remote_admin() {
         (REMOTE, Arc::new(PortState::for_bridge())),
         (
             LOCAL_WINDOW,
-            Arc::new(PortState::for_window(Some(Arc::from(
+            Arc::new(PortState::for_window(Arc::from(
                 "io.github.oysteinkrog.Tasklens",
-            )))),
+            ))),
         ),
         (NO_HELLO, Arc::new(PortState::default())),
     ];
@@ -1306,12 +1341,14 @@ fn admission_sees_the_sessions_remote_flag_and_remote_admin() {
         })
         .collect();
     msgs.extend([
-        on(REMOTE, action(1)),
-        on(LOCAL_WINDOW, action(1)),
-        on(NO_HELLO, action(1)),
-        on(ClientSessionId::LOCAL, action(1)),
+        on(REMOTE, root_action(1)),
+        on(LOCAL_WINDOW, root_action(1)),
+        on(NO_HELLO, root_action(1)),
+        on(ClientSessionId::LOCAL, root_action(1)),
     ]);
     rig.run(msgs);
+
+    // The setting is on, but polkit does not allow the helper: remote admin stays off.
     let on_settings = HostSettings {
         rev: 2,
         values: HostSettingsValues {
@@ -1321,18 +1358,35 @@ fn admission_sees_the_sessions_remote_flag_and_remote_admin() {
         read_only: false,
     };
     rig.reducer_mut().host_settings.store(Arc::new(on_settings));
-    rig.run(vec![on(REMOTE, action(2))]);
+    rig.reducer_mut().remote_admin = remote_admin(PolkitAnswer::NotAllowed);
+    rig.run(vec![on(NO_HELLO, root_action(2))]);
+    // polkit allows it: remote admin is on.
+    rig.reducer_mut().remote_admin = remote_admin(PolkitAnswer::Allowed);
+    rig.run(vec![
+        on(REMOTE, root_action(2)),
+        on(NO_HELLO, root_action(3)),
+    ]);
 
+    let refused = Admission::Reject(RejectReason::RemoteAdminOff);
     let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let views: Vec<(bool, bool)> = seen.iter().map(|(r, a, _)| (*r, *a)).collect();
     assert_eq!(
-        seen,
+        views,
         [
             (true, false),
             (false, false),
+            (true, false),
             (false, false),
-            (false, false),
+            (true, false),
+            (true, true),
             (true, true),
         ]
+    );
+    let refusals: Vec<bool> = seen.iter().map(|(_, _, a)| *a == refused).collect();
+    assert_eq!(
+        refusals,
+        [true, false, true, false, true, false, false],
+        "{seen:?}"
     );
     drop((ports, remotes));
 }

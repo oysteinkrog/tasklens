@@ -234,6 +234,7 @@ async fn run_session(
         ..SharedHandles::default()
     };
     reducer.desktop = ep.config.desktop.clone();
+    reducer.remote_admin = ep.config.remote_admin.clone();
     reducer.action_gate = ep.hooks.action_gate.as_ref().map(|make| {
         make(HookCtx {
             events_tx: ep.events_tx.clone(),

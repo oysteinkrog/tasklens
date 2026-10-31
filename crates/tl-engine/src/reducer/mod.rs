@@ -54,6 +54,7 @@ use tl_model::validity::Validity;
 
 use crate::client_session::{ClientSession, ClientSessions, background_demand};
 use crate::desktop::{DesktopSession, DesktopSource};
+use crate::remote_admin::RemoteAdmin;
 use crate::source::WorkerControl;
 use crate::update::{DeviceHistories, EngineMsg};
 use crate::workers::history::HistorySink;
@@ -167,8 +168,9 @@ pub struct AdmissionView<'a> {
     pub exited_within_linger: &'a FxHashSet<ProcessKey>,
     /// The request comes from a remote session (`ClientSession::is_remote`).
     pub remote: bool,
-    /// The host setting `remote_admin` (ADR-018 Remote root actions). With it off, a remote
-    /// session's root actions are refused with `RemoteAdminOff`.
+    /// Remote admin is on: the host setting `remote_admin` is on and polkit allows the helper
+    /// (`RemoteAdmin::is_on`, ADR-018 Remote root actions). With it off, a remote session's
+    /// root actions are refused with `RemoteAdminOff`.
     pub remote_admin: bool,
 }
 
@@ -209,6 +211,9 @@ pub struct Reducer {
     /// The host settings with their revision, which every snapshot carries (ADR-018 Settings).
     /// `EngineHandle` stores them; the reducer only reads them at each publish.
     pub host_settings: Arc<ArcSwap<HostSettings>>,
+    /// Whether remote admin is on. `EngineHandle` applies the setting and polkit's answer to
+    /// it; the reducer reads it at admission (ADR-018). Off with no polkit call by default.
+    pub remote_admin: RemoteAdmin,
     /// The local window's demand watch. `None` leaves PSS, details and the other demand-driven
     /// state as the updates set it, and sends no combined demand.
     pub demand_rx: Option<watch::Receiver<Demand>>,
@@ -300,6 +305,7 @@ impl Reducer {
             helper_tx: None,
             settings_rx: None,
             host_settings: Arc::default(),
+            remote_admin: RemoteAdmin::default(),
             demand_rx: None,
             demand_out: None,
             apply_state: apply::ApplyState::default(),

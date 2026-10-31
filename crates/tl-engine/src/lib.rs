@@ -19,6 +19,7 @@ mod history_query;
 mod launcher;
 mod opener;
 pub mod reducer;
+pub mod remote_admin;
 pub mod runtime;
 pub mod session;
 pub mod source;

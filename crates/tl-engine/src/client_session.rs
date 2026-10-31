@@ -388,36 +388,36 @@ pub struct PortState {
     /// act only on its pid's windows with this app id (ADR-018, q4x76.12). `None` for a bridge
     /// session and a session with no `Hello`.
     own_app_id: Option<Arc<str>>,
-    /// The session's `Hello` said it comes through `tasklens bridge`, so its window runs on
-    /// another host. Root actions from it need remote admin (ADR-018 Remote root actions).
-    remote: bool,
+    /// The session's `Hello` said it is a window on this host. Every other session counts as
+    /// remote, so it fails closed: a bridge session and a session with no `Hello` need remote
+    /// admin for root actions (ADR-018 Remote root actions).
+    local: bool,
 }
 
 impl PortState {
-    /// The state of a session whose own-window commands act on windows with `own_app_id`.
-    pub fn for_window(own_app_id: Option<Arc<str>>) -> Self {
+    /// The state of a window on this host whose own-window commands act on its windows with
+    /// `own_app_id`. The only state that is not remote.
+    pub fn for_window(own_app_id: Arc<str>) -> Self {
         Self {
-            own_app_id,
+            own_app_id: Some(own_app_id),
+            local: true,
             ..Self::default()
         }
     }
 
-    /// The state of a session that comes through `tasklens bridge`. It has no own windows on
-    /// this host.
+    /// The state of a session that comes through `tasklens bridge`: remote, with no own windows
+    /// on this host. The same as `default`, which a session with no `Hello` gets.
     pub fn for_bridge() -> Self {
-        Self {
-            remote: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     pub fn own_app_id(&self) -> Option<&Arc<str>> {
         self.own_app_id.as_ref()
     }
 
-    /// True for a session from `for_bridge`.
+    /// True for every session but a window on this host (`for_window`).
     pub fn is_remote(&self) -> bool {
-        self.remote
+        !self.local
     }
 
     pub fn close(&self) {
@@ -663,10 +663,14 @@ impl ClientSession {
         self.port.as_ref().and_then(|p| p.own_app_id())
     }
 
-    /// True when the session's window runs on another host (`PortState::is_remote`). The local
-    /// session and a session with no `Hello` are not remote.
+    /// True unless the session is known to be on this host: the in-process local session, or a
+    /// port whose `Hello` named a window here (`PortState::is_remote`). A bridge session, a
+    /// session with no `Hello` and any other session without a port are remote (fails closed).
     pub fn is_remote(&self) -> bool {
-        self.port.as_ref().is_some_and(|p| p.is_remote())
+        match &self.port {
+            Some(port) => port.is_remote(),
+            None => self.id != ClientSessionId::LOCAL,
+        }
     }
 
     /// The stored query of `table`, or the default one: generation 0, default sort, no filter,

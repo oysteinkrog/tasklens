@@ -11,6 +11,7 @@ use tl_collect::apps::AppPaths;
 use tl_collect::pkg::{PackageIndex, Pacman, PkgBackend};
 
 use crate::desktop::{DesktopSession, DesktopSource};
+use crate::remote_admin::{PolkitCheck, RemoteAdmin};
 
 /// Which worker set the engine runs. Fixed at start (ADR-004).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,6 +81,9 @@ pub struct EngineConfig {
     /// The host's desktop session (ADR-018). `DesktopSource::Process` from `new`; the engine
     /// service sets `UserManager`.
     pub desktop: DesktopSession,
+    /// Whether remote admin is on (ADR-018 Remote root actions). Clones share it. `new` asks
+    /// the system's polkit; tests pass a fake with `with_polkit`.
+    pub remote_admin: RemoteAdmin,
 }
 
 impl EngineConfig {
@@ -94,6 +98,7 @@ impl EngineConfig {
             app_paths: None,
             pkg_backend: PkgSource::Pacman,
             desktop: DesktopSession::new(DesktopSource::Process),
+            remote_admin: RemoteAdmin::default(),
         }
     }
 
@@ -125,6 +130,12 @@ impl EngineConfig {
     /// The desktop session comes from `source` (ADR-018).
     pub fn with_desktop(mut self, source: DesktopSource) -> Self {
         self.desktop = DesktopSession::new(source);
+        self
+    }
+
+    /// Remote admin asks `polkit` instead of the system's polkit when its setting turns on.
+    pub fn with_polkit(mut self, polkit: Arc<dyn PolkitCheck>) -> Self {
+        self.remote_admin = RemoteAdmin::new(polkit);
         self
     }
 }

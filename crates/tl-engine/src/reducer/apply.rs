@@ -43,8 +43,8 @@ use super::{
     ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
 };
 use crate::client_session::{
-    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, OpenError, PortState, Report, RequestEnd,
-    RequestEvent, SessionLink,
+    ClientMsg, ClientSession, ClientSessionId, IdKind, IdSlot, MapError, OpenError, PortState,
+    Report, RequestEnd, RequestEvent, SessionLink,
 };
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
@@ -843,8 +843,13 @@ impl Reducer {
                         boot_id: self.boot_id,
                         live: self.processes.live_keys(),
                         exited_within_linger: &exited,
-                        remote: self.clients.get(id).is_some_and(|s| s.is_remote()),
-                        remote_admin: self.host_settings.load().values.remote_admin,
+                        // Fails closed: a session the registry does not know is remote,
+                        // unless it is the local one.
+                        remote: self
+                            .clients
+                            .get(id)
+                            .map_or(id != ClientSessionId::LOCAL, ClientSession::is_remote),
+                        remote_admin: self.remote_admin.is_on(),
                     };
                     gate.submit_routed(cx, req, &view, route);
                 } else {

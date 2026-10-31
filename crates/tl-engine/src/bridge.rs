@@ -35,6 +35,7 @@ use crate::dbus::SharedHandles;
 use crate::desktop::{DesktopSession, WindowGuard};
 use crate::helper::LinkEnv;
 use crate::reducer::{ActionGate, Publisher};
+use crate::remote_admin::{RemoteAdmin, RemoteAdminState};
 use crate::session::{RootEndpoints, engine_root};
 use crate::source::WorkerControl;
 use crate::update::EngineMsg;
@@ -292,6 +293,9 @@ struct Inner {
     host_write: Mutex<()>,
     /// The host's desktop session; ports of local windows add their pid to it.
     desktop: DesktopSession,
+    /// Whether remote admin is on. Each install of the host settings passes it their
+    /// `remote_admin`; the reducers read it at admission (ADR-018 Remote root actions).
+    remote_admin: RemoteAdmin,
 }
 
 /// The UI-side channel ends that `shutdown` drops first.
@@ -319,6 +323,7 @@ impl EngineHandle {
         trace: Arc<ShutdownTrace>,
         host: Arc<ArcSwap<HostSettings>>,
         desktop: DesktopSession,
+        remote_admin: RemoteAdmin,
     ) -> Self {
         let last_demand = Mutex::new(demand_tx.borrow().clone());
         Self {
@@ -342,6 +347,7 @@ impl EngineHandle {
                 host,
                 host_write: Mutex::new(()),
                 desktop,
+                remote_admin,
             }),
         }
     }
@@ -442,11 +448,12 @@ impl EngineHandle {
         // Unbounded: an end is never dropped, and admission bounds how many are outstanding.
         let (requests_tx, requests_rx) = async_channel::unbounded::<RequestEvent>();
         // A window on this host acts only on its own windows: its pid and the app id it announced.
-        // A bridge session is remote: its root actions need remote admin (ADR-018).
+        // Every other session is remote, so its root actions need remote admin (ADR-018). That
+        // includes a session with no `Hello`: it fails closed.
         let state = Arc::new(match &peer {
-            Some(p) if p.bridge => PortState::for_bridge(),
-            Some(p) => PortState::for_window(Some(Arc::clone(&p.app_id))),
-            None => PortState::for_window(None),
+            Some(p) if !p.bridge => PortState::for_window(Arc::clone(&p.app_id)),
+            Some(_) => PortState::for_bridge(),
+            None => PortState::default(),
         });
         let link = SessionLink {
             latest: Arc::clone(&latest),
@@ -505,8 +512,15 @@ impl EngineHandle {
         self.inner.host.load_full()
     }
 
+    /// Where remote admin stands: the setting `remote_admin` and polkit's answer to it.
+    pub fn remote_admin(&self) -> RemoteAdminState {
+        self.inner.remote_admin.state()
+    }
+
     /// Stores `current` and passes its values to the workers. The caller holds `host_write`.
+    /// A change of `remote_admin` goes to `RemoteAdmin`, which asks polkit when it turns on.
     fn store_host_settings(&self, current: HostSettings) {
+        self.inner.remote_admin.apply(current.values.remote_admin);
         let settings = current.values.engine_settings();
         self.inner.host.store(Arc::new(current));
         if let Some(links) = &*self.links() {
@@ -766,6 +780,7 @@ impl Engine {
             .map_err(|e| EngineError::Runtime(e.to_string().into()))?;
         let boot_id = read_boot_id(&config.sys_root);
         let desktop = config.desktop.clone();
+        let remote_admin = config.remote_admin.clone();
 
         let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
@@ -817,6 +832,7 @@ impl Engine {
             trace,
             host_settings,
             desktop,
+            remote_admin,
         );
         *handle
             .inner
@@ -1045,6 +1061,7 @@ mod tests {
             Arc::default(),
             Arc::default(),
             DesktopSession::new(crate::desktop::DesktopSource::Process),
+            RemoteAdmin::new(Arc::new(DenyPolkit)),
         );
         Rig {
             handle,
@@ -1178,6 +1195,50 @@ mod tests {
             r.handle.set_host_settings(0, 4, changes),
             Err(CommandError::EngineStopped)
         ));
+    }
+
+    /// polkit as the rig sees it: it never allows the helper without a password.
+    struct DenyPolkit;
+
+    impl crate::remote_admin::PolkitCheck for DenyPolkit {
+        fn helper_allowed(&self) -> crate::remote_admin::PolkitAnswer {
+            crate::remote_admin::PolkitAnswer::NotAllowed
+        }
+    }
+
+    /// q4x76.13, ADR-018: installing the host settings at start with `remote_admin` on asks
+    /// polkit. polkit says no, so remote admin is off while the setting stays on; turning the
+    /// setting off through the socket turns remote admin off with no new check.
+    #[test]
+    fn remote_admin_follows_the_setting_and_polkit() {
+        let r = rig(None);
+        assert_eq!(r.handle.remote_admin(), RemoteAdminState::Off);
+        let mut installed = HostSettings {
+            rev: 1,
+            ..HostSettings::default()
+        };
+        installed.values.remote_admin = true;
+        r.handle.install_host_settings(installed);
+        let refused = RemoteAdminState::Refused(crate::remote_admin::PolkitAnswer::NotAllowed);
+        assert_eq!(
+            r.handle
+                .inner
+                .remote_admin
+                .wait_checked(Duration::from_secs(10)),
+            refused
+        );
+        assert!(
+            r.handle.host_settings().values.remote_admin,
+            "the setting is never rewritten by the check"
+        );
+
+        let off = HostSettingsChanges {
+            remote_admin: Some(false),
+            ..HostSettingsChanges::default()
+        };
+        let rx = r.handle.set_host_settings(0, 1, off).unwrap();
+        assert_eq!(reply(&rx), SetHostSettingsReply::Ack { rev: 2 });
+        assert_eq!(r.handle.remote_admin(), RemoteAdminState::Off);
     }
 
     #[test]
@@ -1646,10 +1707,11 @@ mod tests {
         assert_eq!(local.state.own_app_id(), Some(&devel));
         assert_eq!(remote.state.own_app_id(), None, "a bridge session");
         assert_eq!(unknown.state.own_app_id(), None, "no Hello peer");
-        // q4x76.13: only a bridge session is remote, so only its root actions need remote admin.
+        // q4x76.13: only a window on this host is local. A bridge session and a session with
+        // no `Hello` are remote, so their root actions need remote admin (fails closed).
         assert!(!local.state.is_remote());
         assert!(remote.state.is_remote(), "a bridge session");
-        assert!(!unknown.state.is_remote(), "no Hello peer");
+        assert!(unknown.state.is_remote(), "no Hello peer");
         drop(local);
         assert!(desktop.window_pids().is_empty());
         assert!(!desktop.has_window(4000, &devel));
