@@ -14,7 +14,9 @@
 //! The window's ends of ssh's stdin and stdout are non-blocking. A read or write that has to
 //! wait polls the pipe together with a stop pipe and a pidfd for ssh, so it wakes when
 //! `Connection::shutdown` runs or ssh exits, even while a process that ssh started keeps the
-//! pipe open. Before the first frame it also wakes at the deadline.
+//! pipe open. When the kernel gives no pidfd, the wait polls in slices of `EXIT_CHECK` (200 ms)
+//! and checks with `try_wait` after each one whether ssh has exited. Before the first frame it
+//! also wakes at the deadline.
 //!
 //! `Connection::shutdown` and the drop of the connection's last half kill and reap the child,
 //! close the stop pipe and so end the stderr thread and every waiting read and write.
@@ -54,6 +56,9 @@ const WRITE_SLICE: Duration = Duration::from_millis(100);
 /// stderr thread is stopped, so a grandchild that keeps the pipe open does not hold the attempt
 /// or the thread longer.
 const STDERR_GRACE: Duration = Duration::from_secs(1);
+/// Without a pidfd, the longest a wait on ssh's pipes polls before it checks whether ssh has
+/// exited.
+const EXIT_CHECK: Duration = Duration::from_millis(200);
 
 /// Why a target was rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -296,6 +301,9 @@ pub struct SshConnector {
     target: String,
     program: OsString,
     deadline: Duration,
+    /// Watch ssh's exit through a pidfd when the kernel gives one. Tests turn it off to run
+    /// the `try_wait` path.
+    pidfd: bool,
 }
 
 impl SshConnector {
@@ -306,7 +314,17 @@ impl SshConnector {
             target: target.into(),
             program,
             deadline: SSH_DEADLINE,
+            pidfd: true,
         }
+    }
+
+    /// Watches ssh's exit with `try_wait` every `EXIT_CHECK` instead of a pidfd, as on a kernel
+    /// without pidfds.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn without_pidfd(mut self) -> Self {
+        self.pidfd = false;
+        self
     }
 
     /// The deadline for process start plus handshake, `SSH_DEADLINE` by default.
@@ -351,8 +369,11 @@ impl Connector for SshConnector {
         };
         let stop_rx = Arc::new(stop_rx);
         // Readable once ssh has exited. A kernel without pidfds (before 5.3) leaves it out, and
-        // only `shutdown` then wakes a read or write that a process ssh started holds open.
-        let exited = pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).ok();
+        // `Proc::wait` then checks with `try_wait` every `EXIT_CHECK`.
+        let exited = self
+            .pidfd
+            .then(|| pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).ok())
+            .flatten();
         let ring = Arc::new(Mutex::new(StderrRing::new()));
         let drain_ring = Arc::clone(&ring);
         let drain_stop = Arc::clone(&stop_rx);
@@ -449,7 +470,8 @@ struct Proc {
     stop: Mutex<Option<OwnedFd>>,
     /// The read end of the stop pipe.
     stop_rx: Arc<OwnedFd>,
-    /// A pidfd for ssh, readable once it has exited. `None` when the kernel has no pidfds.
+    /// A pidfd for ssh, readable once it has exited. `None` when the kernel has no pidfds; then
+    /// `Proc::wait` checks with `try_wait`.
     exited: Option<OwnedFd>,
     /// The first frame from the server has been read whole.
     lifted: AtomicBool,
@@ -532,20 +554,38 @@ impl Proc {
         }
     }
 
+    /// Whether ssh has exited, by `try_wait`. The child keeps its exit status, so `end_child`
+    /// still reads the code later. A child already reaped, or one `try_wait` cannot ask
+    /// about, counts as exited, so no wait can hang on it.
+    fn child_exited(&self) -> bool {
+        match lock(&self.child).as_mut() {
+            None => true,
+            Some(child) => !matches!(child.try_wait(), Ok(None)),
+        }
+    }
+
     /// Waits until `fd` is ready for `flags` (or has ended or failed), the stop pipe closes, ssh
-    /// exits or `until` passes. `None` waits with no limit.
+    /// exits or `until` passes. `None` waits with no limit. Without a pidfd, each poll lasts at
+    /// most `EXIT_CHECK` and is followed by a `try_wait`.
     fn wait(&self, fd: &impl AsFd, flags: PollFlags, until: Option<Instant>) -> io::Result<Woke> {
         loop {
-            let left = match until {
+            let mut left = match until {
                 None => None,
                 Some(until) => {
                     let left = until.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         return Ok(Woke::TimedOut);
                     }
-                    Some(Timespec::try_from(left).map_err(io::Error::other)?)
+                    Some(left)
                 }
             };
+            if self.exited.is_none() {
+                left = Some(left.map_or(EXIT_CHECK, |left| left.min(EXIT_CHECK)));
+            }
+            let left = left
+                .map(Timespec::try_from)
+                .transpose()
+                .map_err(io::Error::other)?;
             // Without a pidfd the stop pipe takes its place, so the set keeps its size.
             let exited: &OwnedFd = self.exited.as_ref().unwrap_or(&*self.stop_rx);
             let mut fds = [
@@ -565,7 +605,11 @@ impl Proc {
             if !ready.is_empty() {
                 return Ok(Woke::Ready);
             }
-            if !exited.is_empty() {
+            if self.exited.is_some() {
+                if !exited.is_empty() {
+                    return Ok(Woke::Exited);
+                }
+            } else if self.child_exited() {
                 return Ok(Woke::Exited);
             }
         }

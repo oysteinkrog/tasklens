@@ -498,3 +498,33 @@ fn session_read_and_write_end_when_ssh_exits_while_descendant_holds_pipes() {
     assert_stderr_threads_end();
     kill_bg(&fake);
 }
+
+#[test]
+fn session_ends_within_1_s_of_ssh_exit_without_pidfd() {
+    // The kernel gives no pidfd (forced here), so the wait finds ssh's exit with `try_wait`.
+    // ssh exits 0.5 s after it starts while the holder keeps both pipes open. The blocked read
+    // and write must still return within 1 s of that exit, with no shutdown.
+    let _serial = serial();
+    let (fake, _frames) = welcome_then_holder("sleep 0.5\nexit 0");
+    let begin = Instant::now();
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .without_pidfd()
+        .connect()
+        .unwrap();
+    let shutdown = std::sync::Arc::clone(&conn.shutdown);
+    let (wrote, read) = block_both(conn);
+    let by = begin + Duration::from_millis(1500);
+    let wrote = wrote
+        .recv_timeout(by.saturating_duration_since(Instant::now()))
+        .expect("the write returns within 1 s of ssh's exit");
+    assert!(wrote.is_err(), "the write fails");
+    let read = read
+        .recv_timeout(by.saturating_duration_since(Instant::now()))
+        .expect("the read returns within 1 s of ssh's exit");
+    assert!(matches!(read, Ok(0)), "the read sees the end: {read:?}");
+    shutdown();
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    assert_stderr_threads_end();
+    kill_bg(&fake);
+}
