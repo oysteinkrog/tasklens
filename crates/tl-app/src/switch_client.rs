@@ -8,8 +8,8 @@
 //! writes go to the current backend and are never sent again: each backend has its own revision
 //! (ADR-018 Settings). Two backends can have the same revision, so a write carries the generation
 //! of the snapshot it was made from, and one from before a switch reaches no backend: its reply
-//! channel is closed, as for a write whose connection dropped (ADR-018 Generations). The window can write again once the hub
-//! has installed the new backend's snapshot.
+//! channel is closed, as for a write whose connection dropped (ADR-018 Generations). The window
+//! can write again once the hub has installed the new backend's snapshot.
 //!
 //! Each backend gets three forwarding threads, for its wake token, its action events and its
 //! request ends. They run until the backend's channel closes, so an action or request that was
@@ -18,6 +18,12 @@
 //! `generation` is `(switches << 32) | backend generation`. Every switch raises it above every
 //! value the old backend gave, so the hub, which orders snapshots by `(generation, sequence)`,
 //! shows the new backend's snapshots from sequence 1 and drops a late snapshot of the old one.
+//!
+//! A switch raises the proxy's generation twice: when it starts (`begin_switch`, before the old
+//! engine stops) and when the new backend is in place (`switch_to`). Snapshots carry the count
+//! from when their backend was set, so from the start of a switch until the hub installs the new
+//! backend's snapshot, `generation()` is newer than the snapshot shown and the window keeps its
+//! host controls disabled (ADR-018 Generations).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -58,8 +64,10 @@ struct Channels {
 
 struct Inner {
     backend: Arc<dyn EngineClient>,
-    /// How many times the backend was replaced.
+    /// Raised when a switch starts and again when its backend is set. `generation()` uses it.
     switches: u64,
+    /// `switches` when the current backend was set. Its snapshots' generation uses it.
+    backend_switches: u64,
     demand: Option<Demand>,
     settings: Option<EngineSettings>,
     table_query: Option<TableQuery>,
@@ -91,6 +99,7 @@ impl SwitchClient {
             inner: Mutex::new(Inner {
                 backend,
                 switches: 0,
+                backend_switches: 0,
                 demand: None,
                 settings: None,
                 table_query: None,
@@ -98,6 +107,13 @@ impl SwitchClient {
             }),
             channels,
         }
+    }
+
+    /// Raises the generation as a switch starts, before the current backend stops, so the window
+    /// stops writing host settings from that backend's snapshot at once. `switch_to` follows.
+    /// If it never does, the generation stays raised: the old backend has stopped.
+    pub fn begin_switch(&self) {
+        lock(&self.inner).switches += 1;
     }
 
     /// Makes `backend` the current engine, sends it the window's session state and wakes the
@@ -122,16 +138,21 @@ impl SwitchClient {
                 let _ = backend.send(Command::SetSysTableQuery(q.clone()));
             }
             inner.switches += 1;
+            inner.backend_switches = inner.switches;
             std::mem::replace(&mut inner.backend, backend)
         };
         let _ = self.channels.wake_tx.try_send(());
         old
     }
 
-    /// The backend and the switch count, from one lock.
-    fn current(&self) -> (Arc<dyn EngineClient>, u64) {
+    /// The backend, the switch count and the count when the backend was set, from one lock.
+    fn current(&self) -> (Arc<dyn EngineClient>, u64, u64) {
         let inner = lock(&self.inner);
-        (Arc::clone(&inner.backend), inner.switches)
+        (
+            Arc::clone(&inner.backend),
+            inner.switches,
+            inner.backend_switches,
+        )
     }
 }
 
@@ -192,16 +213,17 @@ impl EngineClient for SwitchClient {
     }
 
     fn generation(&self) -> u64 {
-        let (backend, switches) = self.current();
+        let (backend, switches, _) = self.current();
         combined(switches, backend.generation())
     }
 
     /// A switch between the lock and the load gives the old backend's snapshot with the old
-    /// generation, which the hub then drops as older.
+    /// generation, which the hub then drops as older. During a switch the snapshot keeps the
+    /// count from when its backend was set, which is lower than `generation()`'s.
     fn latest_with_generation(&self) -> (u64, Arc<Snapshot>) {
-        let (backend, switches) = self.current();
+        let (backend, _, backend_switches) = self.current();
         let (generation, snap) = backend.latest_with_generation();
-        (combined(switches, generation), snap)
+        (combined(backend_switches, generation), snap)
     }
 
     fn set_demand(&self, demand: Demand) {
@@ -581,10 +603,20 @@ pub(crate) mod tests {
 
     /// A `RemoteClient` whose only connection is `stream`.
     fn remote_on(stream: UnixStream) -> Arc<RemoteClient> {
-        let conn = Mutex::new(Some(Connection::unix(stream).expect("connection")));
+        remote_over(vec![stream], Duration::from_secs(60))
+    }
+
+    /// A `RemoteClient` that gets `streams` as its connections, in order, waiting `backoff`
+    /// after each one ends.
+    fn remote_over(streams: Vec<UnixStream>, backoff: Duration) -> Arc<RemoteClient> {
+        let conns: std::collections::VecDeque<Connection> = streams
+            .into_iter()
+            .map(|s| Connection::unix(s).expect("connection"))
+            .collect();
+        let conns = Mutex::new(conns);
         let connector = move || {
-            lock(&conn)
-                .take()
+            lock(&conns)
+                .pop_front()
                 .ok_or_else(|| std::io::Error::other("no more connections"))
         };
         let config = ClientConfig {
@@ -594,9 +626,18 @@ pub(crate) mod tests {
                 bridge: false,
                 want: Want { snapshots: true },
             },
-            backoff: vec![Duration::from_secs(60)],
+            backoff: vec![backoff],
         };
         Arc::new(RemoteClient::start(connector, config).expect("client"))
+    }
+
+    /// Waits up to 5 s for `f` to hold.
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let begin = std::time::Instant::now();
+        while !f() {
+            assert!(begin.elapsed() < Duration::from_secs(5), "{what}");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The switch client with a wake channel that only the test thread feeds: GPUI's test
@@ -753,9 +794,21 @@ pub(crate) mod tests {
         let service = TestBackend::new(1, 1);
         service.publish_host(1, host(3000));
         assert!(cx.update(|cx| host_settings::known(cx)));
+        // From the start of the switch, before the new backend is in place, the host controls
+        // are disabled and a change reaches no engine.
+        switch.begin_switch();
+        assert!(!cx.update(|cx| host_settings::known(cx)));
+        set_interval(cx);
+        assert!(lock(&local.host_writes).is_empty());
+        // A newer snapshot of the old engine in between leaves them disabled: it keeps the
+        // generation from before the switch.
+        local.publish_host(3, host(1000));
+        pumped.pump();
+        cx.run_until_parked();
+        assert!(!cx.update(|cx| host_settings::known(cx)));
         switch.switch_to(service.clone());
         // The hub has not loaded the new engine's snapshot yet, so the host controls are
-        // disabled again, as in a fresh window, and the old values stay shown.
+        // disabled, as in a fresh window, and the old values stay shown.
         assert!(!cx.update(|cx| host_settings::known(cx)));
         assert_eq!(cx.update(|cx| host_settings::current(cx)).rev, 0);
         assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
@@ -771,5 +824,67 @@ pub(crate) mod tests {
         set_interval(cx);
         assert_eq!(*lock(&service.host_writes), [(1, 3)]);
         assert!(lock(&local.host_writes).is_empty());
+    }
+
+    /// Leader decision on tasklens-q4x76.23 (ADR-018 Generations): the service connection drops
+    /// and comes back. The host controls are disabled from the moment the drop is seen, through
+    /// the reconnect, until the hub installs the new connection's first snapshot. Then they are
+    /// enabled again with the new values.
+    #[gpui_kit::test]
+    fn host_controls_are_disabled_from_a_drop_until_the_next_snapshot(cx: &mut TestAppContext) {
+        let snap = |interval_ms| {
+            let mut s = Snapshot::empty(BootId(7), 1);
+            Arc::make_mut(&mut s.system).header.version = 1;
+            let mut host = HostSettings {
+                rev: 3,
+                ..HostSettings::default()
+            };
+            host.values.interval_ms = interval_ms;
+            s.host_settings = Arc::new(host);
+            s
+        };
+        let (first_ours, first_theirs) = UnixStream::pair().expect("socket pair");
+        let (second_ours, second_theirs) = UnixStream::pair().expect("socket pair");
+        let cut = first_ours.try_clone().expect("clone");
+        let first = snap(1000);
+        thread::spawn(move || serve(first_ours, Duration::ZERO, vec![first]));
+        let remote = remote_over(vec![first_theirs, second_theirs], Duration::from_millis(10));
+        wait_until("the first snapshot", || {
+            remote.status() == LinkStatus::Connected
+        });
+
+        let switch = Arc::new(SwitchClient::new(remote.clone()));
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let pumped = Arc::new(Pumped {
+            switch: Arc::clone(&switch),
+            wake_tx,
+            wake_rx,
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(pumped.clone(), cx));
+        cx.update(|cx| cx.set_global(GlobalHub(hub.clone())));
+        assert!(cx.update(|cx| host_settings::known(cx)));
+        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
+
+        // The service goes away. The second connection's server does not answer yet, so the
+        // client stays between the two sessions.
+        cut.shutdown(std::net::Shutdown::Both).expect("shutdown");
+        wait_until("the drop seen", || remote.generation() == 2);
+        assert!(!cx.update(|cx| host_settings::known(cx)));
+        assert_eq!(cx.update(|cx| host_settings::current(cx)).rev, 0);
+        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
+
+        // The new connection is up and its first snapshot is stored, but the hub has not
+        // installed it: still disabled.
+        let second = snap(3000);
+        thread::spawn(move || serve(second_ours, Duration::ZERO, vec![second]));
+        wait_until("the second snapshot", || {
+            remote.latest_with_generation().0 == 3
+        });
+        assert!(!cx.update(|cx| host_settings::known(cx)));
+
+        pumped.pump();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| host_settings::known(cx)));
+        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 3000);
     }
 }

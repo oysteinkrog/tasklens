@@ -286,6 +286,8 @@ impl EngineLink {
         };
         self.local_runs.fetch_add(1, Ordering::AcqRel);
         info!(target: "tasklens::engine", "switching to the engine service");
+        // Before the engine stops: the window must not write host settings to it any more.
+        self.client.begin_switch();
         (engine.stop)();
         drop(file);
         let next = match establish(&self.env) {
@@ -1023,6 +1025,41 @@ mod tests {
         assert_eq!(link.client().latest().sequence, 0);
         // No engine of the window's own ran again.
         assert_eq!(rig.engines_started.load(Ordering::Acquire), 1);
+    }
+
+    /// ADR-018 Generations (leader decision on tasklens-q4x76.23): the switch raises the
+    /// client's generation when it starts, so the window's engine is already behind it when it
+    /// stops.
+    #[test]
+    fn switch_raises_the_generation_before_the_engine_stops() {
+        let rig = Rig::new();
+        let mut env = rig.env(Some(Box::new(|_| false)));
+        let client: Arc<Mutex<Option<Arc<SwitchClient>>>> = Arc::default();
+        let at_stop: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let start = std::mem::replace(&mut env.start_engine, Box::new(|| Err(String::new())));
+        let (slot, seen) = (Arc::clone(&client), Arc::clone(&at_stop));
+        env.start_engine = Box::new(move || {
+            let mut engine = start()?;
+            let stop = engine.stop;
+            let (slot, seen) = (Arc::clone(&slot), Arc::clone(&seen));
+            engine.stop = Box::new(move || {
+                if let Some(client) = &*lock(&slot) {
+                    lock(&seen).push(client.generation());
+                }
+                stop();
+            });
+            Ok(engine)
+        });
+        let link = EngineLink::open(env).unwrap();
+        *lock(&client) = Some(link.client());
+        let before = link.client().generation();
+
+        link.run_switch();
+        assert_eq!(rig.engines_stopped.load(Ordering::Acquire), 1);
+        let at_stop = lock(&at_stop).clone();
+        assert_eq!(at_stop.len(), 1);
+        assert!(at_stop[0] > before, "{at_stop:?} after {before}");
+        link.shutdown();
     }
 
     #[test]

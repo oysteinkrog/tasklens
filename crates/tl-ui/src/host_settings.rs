@@ -13,9 +13,9 @@
 //! switched engines or reconnected, the client refuses a change made from the older snapshot,
 //! since two engines can have the same revision (ADR-018 Generations). Every control reads the
 //! hub's installed snapshot through `current`. While that snapshot is from an older generation
-//! than the hub's client (after a switch or a reconnect, before the new engine's first snapshot
-//! is installed) `current` gives revision 0, so the controls are disabled until the new engine's
-//! host settings arrive, as in a fresh window.
+//! than the hub's client (from the start of a switch or the loss of a connection until the new
+//! engine's first snapshot is installed) `current` gives revision 0, so the controls are
+//! disabled until the new engine's host settings arrive, as in a fresh window.
 
 use std::sync::Arc;
 
