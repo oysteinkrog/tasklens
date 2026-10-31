@@ -509,10 +509,14 @@ fn local_session_is_unchanged_by_another_session() {
 
 /// Leader decision on tasklens-q4x76.15: a session's snapshot carries only what its demand
 /// asks for. Hidden, it keeps the system part and nothing else changes from one publish to the
-/// next; shown again, its next snapshot has the whole current table.
+/// next; shown again, its first snapshot has the whole table of the processes it carries.
 #[test]
 fn a_session_gets_only_the_parts_its_demand_asks_for() {
     let mut rig = Rig::new();
+    // The local window is hidden too, so a sweep while the remote session is hidden only
+    // feeds device history and builds no table (`processes::history_only`), as in the service.
+    let (_local_tx, local_rx) = watch::channel(Demand::default());
+    rig.reducer.as_mut().expect("the reducer is back").demand_rx = Some(local_rx);
     let (remote, _remote_wake) = link();
     let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
     msgs.extend(data());
@@ -543,8 +547,9 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     assert!(hidden.health.version == 0 && hidden.devices.version == 0);
 
     // A later publish changes nothing but the system part, so a frame carries nothing else.
+    // PID 11 exits, so the rows of the table built before now name other records.
     let local = rig.run(vec![
-        sweep(3_000_000_000, &[10, 11, 20, 21, 22]),
+        sweep(3_000_000_000, &[10, 20, 21, 22]),
         services(&["alpha.service", "gamma.service"]),
     ]);
     let later = remote.latest.load_full();
@@ -565,18 +570,20 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     assert!(Arc::ptr_eq(&later.services, &hidden.services));
     assert!(Arc::ptr_eq(&later.series, &hidden.series));
 
-    // Shown again: the session's own table and the shared parts come back at once, and the
-    // next sweep brings the whole current table, over the current processes.
+    // Shown again with no sweep in between: the first snapshot has a table built from the
+    // processes it carries, not the one from before the session was hidden.
     let local = rig.run(vec![demand(REMOTE, processes_tab())]);
     let back = remote.latest.load_full();
     assert!(Arc::ptr_eq(&back.processes, &local.processes));
-    assert!(!back.table.rows.is_empty());
+    assert_eq!(pids(&back), [10, 20, 21, 22]);
+    assert_eq!(back.table.total, 4);
+    assert!(back.table.header.version > shown.table.header.version);
     assert_eq!(units(&back), ["alpha.service", "gamma.service"]);
-    let local = rig.run(vec![sweep(4_000_000_000, &[10, 11, 20, 21, 22])]);
-    let again = remote.latest.load_full();
-    assert_eq!(pids(&again), [10, 11, 20, 21, 22]);
-    assert!(Arc::ptr_eq(&again.processes, &local.processes));
-    assert!(again.table.header.version > shown.table.header.version);
+
+    // A publish with no new processes keeps that table.
+    rig.run(vec![services(&["alpha.service"])]);
+    let kept = remote.latest.load_full();
+    assert!(Arc::ptr_eq(&kept.table, &back.table));
 }
 
 #[test]

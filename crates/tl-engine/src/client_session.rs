@@ -77,7 +77,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -98,7 +98,7 @@ use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
-    DiskDetails, EjectState, ServicesSnapshot, Snapshot, StartupSnapshot,
+    DiskDetails, EjectState, ProcessSnapshot, ServicesSnapshot, Snapshot, StartupSnapshot,
 };
 use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery};
 use tl_model::validity::Validity;
@@ -526,6 +526,9 @@ pub struct ClientSession {
     /// The last `SetSysTableQuery` per system table: Services, Startup, Connections.
     pub sys_queries: [Option<SysTableQuery>; 3],
     table: Arc<ProcessTableView>,
+    /// The processes `table` was built from. A table built from other processes than the ones
+    /// published with it names the wrong rows (`ClientSessions::stale_tables`).
+    table_of: Weak<ProcessSnapshot>,
     /// The session's rows, query generation and counts. The other fields are refreshed from
     /// the shared component at publish.
     services: Arc<ServicesSnapshot>,
@@ -593,6 +596,7 @@ impl ClientSession {
             query: TableQuery::default(),
             sys_queries: [None, None, None],
             table: Arc::clone(&empty.table),
+            table_of: Weak::new(),
             services: Arc::clone(&empty.services),
             startup: Arc::clone(&empty.startup),
             connections: Arc::clone(&empty.connections),
@@ -636,9 +640,11 @@ impl ClientSession {
             })
     }
 
-    /// Replaces the process table. Its header version should be 0; publish sets it.
-    pub(crate) fn set_table(&mut self, view: ProcessTableView) {
+    /// Replaces the process table, built from `processes`. Its header version should be 0;
+    /// publish sets it.
+    pub(crate) fn set_table(&mut self, view: ProcessTableView, processes: &Arc<ProcessSnapshot>) {
         self.table = Arc::new(view);
+        self.table_of = Arc::downgrade(processes);
         self.dirty |= ComponentMask::TABLE;
     }
 
@@ -1154,10 +1160,13 @@ impl ClientSession {
     ///   title bar value, all a host that is not shown asks for.
     /// - `series`, `health`: a window or tray graphs.
     /// - `devices`: a window, tray graphs, or what gates `device_details`, whose disks it names.
-    /// - `processes`: a window or graph targets (the tray names a process graph from it).
+    /// - `processes`: a window, graph targets (the tray names a process graph from it), or
+    ///   what gates `table`, whose rows name records in it by index.
     /// - `process_series`: graph targets.
     /// - `table`: `process_table`, `services` (the Services page's cells read the table) or an
-    ///   open Properties window (`details`).
+    ///   open Properties window (`details`). The reducer rebuilds a table built from older
+    ///   processes before the publish (`ClientSessions::stale_tables`), so the first snapshot
+    ///   that carries the table again holds the current one.
     /// - `inventory`, `windows`, `connections`, `services`, `startup`: a window.
     /// - `details`, `device_details`: a window, or a scan, handle search or eject of the
     ///   session's own that it still shows.
@@ -1171,12 +1180,12 @@ impl ClientSession {
         let tray = d.tray.cpu || d.tray.memory || d.tray.disks || d.tray.nets || d.tray.gpus;
         let targets = !d.graph_targets.is_empty();
         let own = !self.shown.is_empty();
-        let table = d.process_table || d.services || !d.details.is_empty();
+        let table = table_demanded(d);
         Snapshot {
             series: gate(window || tray, base.series, &e.series),
             devices: gate(window || tray || own, base.devices, &e.devices),
             health: gate(window || tray, base.health, &e.health),
-            processes: gate(window || targets, base.processes, &e.processes),
+            processes: gate(window || targets || table, base.processes, &e.processes),
             process_series: gate(targets, base.process_series, &e.process_series),
             table: gate(table, Arc::clone(&self.table), &e.table),
             inventory: gate(window, base.inventory, &e.inventory),
@@ -1199,6 +1208,12 @@ impl ClientSession {
             ..base
         }
     }
+}
+
+/// The session's demand asks for its process table: the Processes tab, the Services page,
+/// whose cells read the table, or an open Properties window.
+fn table_demanded(d: &Demand) -> bool {
+    d.process_table || d.services || !d.details.is_empty()
 }
 
 /// `part` when `on`, else `empty`.
@@ -1711,6 +1726,24 @@ impl ClientSessions {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut ClientSession> {
         self.sessions.iter_mut()
+    }
+
+    /// The linked sessions whose snapshot carries their table (`table_demanded`) but whose
+    /// table was not built from `processes`, the processes published with it. A sweep while no
+    /// session asks for the table updates only the processes (`processes::history_only`), so a
+    /// session shown again would get its old table, whose rows name records by index, over the
+    /// new processes. The reducer rebuilds these tables before it publishes.
+    pub(crate) fn stale_tables(&self, processes: &Arc<ProcessSnapshot>) -> Vec<ClientSessionId> {
+        let current = Arc::downgrade(processes);
+        self.sessions
+            .iter()
+            .filter(|s| {
+                s.link.is_some()
+                    && table_demanded(&s.demand)
+                    && !Weak::ptr_eq(&s.table_of, &current)
+            })
+            .map(|s| s.id)
+            .collect()
     }
 
     /// Publishes `base` with each linked session's parts. A session whose wake receiver is

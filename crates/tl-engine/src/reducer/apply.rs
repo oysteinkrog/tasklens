@@ -2336,9 +2336,19 @@ impl Reducer {
             let mut view = table::build(&input, &session.query);
             view.totals = totals.clone();
             view.header = header;
-            session.set_table(view);
+            session.set_table(view, &processes);
         }
         self.refresh_app_details(settings);
+    }
+
+    /// Rebuilds the table of each linked session that shows it but has a table built from
+    /// older processes (`ClientSessions::stale_tables`), as one that asks for it again after
+    /// hidden sweeps has. Called before the publish, so the first snapshot that carries the
+    /// table again holds the current one.
+    pub(super) fn rebuild_stale_tables(&mut self, settings: &EngineSettings) {
+        for id in self.clients.stale_tables(&self.components.processes) {
+            self.rebuild_tables(settings, Some(id));
+        }
     }
 
     /// Merges one manager's update into `services`: the other manager's units and details stay,
