@@ -7,13 +7,19 @@
 //! as the user. It runs `tasklens-setup` through pkexec only to write or remove the rule, and it
 //! saves the setting through the engine socket, as a control-only client (no snapshots).
 //!
+//! `on` and `off` are one transaction each. The command holds an exclusive `flock` on
+//! `$XDG_RUNTIME_DIR/<app>/remote-admin.lock` for the whole run; a second command waits up to
+//! `LOCK_WAIT`, then fails. Before it changes anything it asks `tasklens-setup remote-admin
+//! state` whether the rules file is present or absent and keeps the answer itself. Any failure
+//! after the script was started to change the file (the script exiting non-zero, even after it
+//! wrote the file, or the save failing) puts that state back through the script (`on` for
+//! present, `off` for absent) before anything is printed (leader decision on tasklens-q4x76.31).
+//!
 //! - `on` reads the host settings, prints what remote admin reaches and asks for confirmation.
-//!   Then it writes the rule and saves `remote_admin = true`. When the save fails it puts the
-//!   rules file back as it was before (`tasklens-setup remote-admin undo`), so the rule and the
-//!   setting do not disagree.
-//! - `off` saves `remote_admin = false` first, which closes admission at once, then removes the
-//!   rule. When the save fails nothing has changed. When removing the rule fails, the setting
-//!   stays off and the command says so.
+//!   Then it writes the rule and saves `remote_admin = true`.
+//! - `off` checks that the engine answers, then saves `remote_admin = false` first, which closes
+//!   admission at once, then removes the rule. When the save fails nothing has changed. When
+//!   removing the rule fails, the setting stays off and the command says so.
 //! - `status` prints the setting and whether polkit allows the tasklens helper for the engine
 //!   process without a password, the same check the engine makes. A user cannot read
 //!   `/etc/polkit-1/rules.d`, so this is how the rule is seen. It says whether the two agree.
@@ -23,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -47,6 +54,10 @@ use crate::paths;
 pub const SETUP_PATH: &str = "/usr/lib/tasklens/tasklens-setup";
 /// How long each step with the engine may take: connect and handshake, or one request.
 pub const STEP_DEADLINE: Duration = Duration::from_secs(5);
+/// How long a second `on` or `off` waits for the first to finish.
+pub const LOCK_WAIT: Duration = Duration::from_secs(10);
+/// The lock file, next to the engine socket.
+const LOCK_NAME: &str = "remote-admin.lock";
 /// How many times a save is tried when another client changed the settings in between.
 const SAVE_TRIES: usize = 3;
 /// How long the polkit call may take.
@@ -68,6 +79,8 @@ pub fn main(app_id: Option<&str>, what: What) -> ExitCode {
     let setup = Setup::pkexec();
     let polkit = |pid: u32| polkit_answer(pid, uid);
     let env = Env {
+        lock: socket.with_file_name(LOCK_NAME),
+        lock_wait: LOCK_WAIT,
         socket,
         uid,
         hello: HelloTail {
@@ -107,6 +120,10 @@ fn user_name(uid: u32) -> String {
 pub struct Env<'a> {
     /// `$XDG_RUNTIME_DIR/<app>/engine.sock`.
     pub socket: PathBuf,
+    /// `$XDG_RUNTIME_DIR/<app>/remote-admin.lock`, held for the whole of `on` and `off`.
+    pub lock: PathBuf,
+    /// `LOCK_WAIT` in the app.
+    pub lock_wait: Duration,
     /// The user the engine must run as.
     pub uid: u32,
     /// The `Hello` tail: a control-only client that is not a bridge.
@@ -134,8 +151,8 @@ pub fn run(
     err: &mut dyn Write,
 ) -> u8 {
     let result = match what {
-        What::On => turn_on(env, input, out, err),
-        What::Off => turn_off(env, out, err),
+        What::On => take_lock(env).and_then(|_lock| turn_on(env, input, out, err)),
+        What::Off => take_lock(env).and_then(|_lock| turn_off(env, out, err)),
         What::Status => status(env, out),
     };
     match result {
@@ -160,6 +177,26 @@ fn reach(host: &str, user: &str) -> String {
     )
 }
 
+/// Takes the exclusive lock, waiting up to `env.lock_wait` for another `on` or `off` to finish.
+/// The lock lasts as long as the file stays open.
+fn take_lock(env: &Env<'_>) -> Result<File, String> {
+    let until = Instant::now() + env.lock_wait;
+    loop {
+        match engine_link::lock_engine(&env.lock) {
+            Ok(Some(file)) => return Ok(file),
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                return Err(
+                    "another tasklens remote-admin on or off is still running. Try again when it \
+                     is done"
+                        .to_owned(),
+                );
+            }
+            Err(e) => return Err(format!("{}: {e}", env.lock.display())),
+        }
+    }
+}
+
 fn turn_on(
     env: &Env<'_>,
     input: &mut dyn BufRead,
@@ -182,46 +219,54 @@ fn turn_on(
         writeln!(out, "Nothing changed.").map_err(write_error)?;
         return Ok(1);
     }
-    if let Err(e) = env.setup.run(Step::On) {
-        writeln!(
-            err,
-            "tasklens remote-admin: the polkit rule was not written: {e}. Nothing changed."
-        )
-        .map_err(write_error)?;
-        return Ok(1);
-    }
-    match save(env, true) {
-        Ok(_) => {
-            writeln!(out, "Remote admin is on for {} on {host}.", env.user).map_err(write_error)?;
-            Ok(0)
-        }
-        Err(e) => {
-            // The rules file goes back first, so a failed write to the terminal cannot leave
-            // it changed.
-            let undone = env.setup.run(Step::Undo);
+    let rule_file = match env.setup.state() {
+        Ok(rule_file) => rule_file,
+        Err(e) => return not_checked(err, &e),
+    };
+    let failure = match env.setup.run(Step::On) {
+        Err(SetupError::NotStarted(e)) => {
             writeln!(
                 err,
-                "tasklens remote-admin: remote_admin was not saved: {e}."
+                "tasklens remote-admin: the polkit rule was not written: {e}. Nothing changed."
             )
             .map_err(write_error)?;
-            match undone {
-                Ok(()) => writeln!(
-                    err,
-                    "The polkit rules file was put back as it was. Nothing changed."
-                ),
-                Err(e) => writeln!(
-                    err,
-                    "The polkit rules file could not be put back: {e}. Run tasklens \
-                     remote-admin status to see whether the rule and the setting agree."
-                ),
-            }
-            .map_err(write_error)?;
-            Ok(1)
+            return Ok(1);
         }
+        Err(SetupError::Failed(e)) => format!("the polkit rule was not written: {e}"),
+        Ok(_) => match save(env, true) {
+            Ok(_) => {
+                writeln!(out, "Remote admin is on for {} on {host}.", env.user)
+                    .map_err(write_error)?;
+                return Ok(0);
+            }
+            Err(e) => format!("remote_admin was not saved: {e}"),
+        },
+    };
+    // The rules file goes back before anything is printed, so a failed write to the terminal
+    // cannot leave it changed.
+    let restored = env.setup.restore(rule_file);
+    writeln!(err, "tasklens remote-admin: {failure}.").map_err(write_error)?;
+    match restored {
+        Ok(()) => writeln!(err, "{} Nothing changed.", rule_file.restored_text()),
+        Err(e) => writeln!(
+            err,
+            "The polkit rules file could not be put back: {e}. Run tasklens remote-admin status \
+             to see whether the rule and the setting agree."
+        ),
     }
+    .map_err(write_error)?;
+    Ok(1)
 }
 
 fn turn_off(env: &Env<'_>, out: &mut dyn Write, err: &mut dyn Write) -> Result<u8, String> {
+    // The engine must answer before the password prompt.
+    if Session::open(env)?.get()?.read_only {
+        return Err(read_only_text());
+    }
+    let rule_file = match env.setup.state() {
+        Ok(rule_file) => rule_file,
+        Err(e) => return not_checked(err, &e),
+    };
     let host = match save(env, false) {
         Ok(host) => host,
         Err(e) => {
@@ -234,19 +279,68 @@ fn turn_off(env: &Env<'_>, out: &mut dyn Write, err: &mut dyn Write) -> Result<u
             return Ok(1);
         }
     };
-    if let Err(e) = env.setup.run(Step::Off) {
-        writeln!(
-            err,
-            "tasklens remote-admin: remote_admin is off, but the polkit rule was not removed: \
-             {e}. Remote windows get no administrator actions, but other programs that run as \
-             {} still do. Run tasklens remote-admin off again to remove the rule.",
-            env.user
-        )
-        .map_err(write_error)?;
-        return Ok(1);
-    }
-    writeln!(out, "Remote admin is off on {host}.").map_err(write_error)?;
-    Ok(0)
+    let failure = match env.setup.run(Step::Off) {
+        Ok(_) => {
+            writeln!(out, "Remote admin is off on {host}.").map_err(write_error)?;
+            return Ok(0);
+        }
+        Err(SetupError::NotStarted(e)) => e,
+        Err(SetupError::Failed(e)) => {
+            // Put back first, then report.
+            let restored = env.setup.restore(rule_file);
+            writeln!(
+                err,
+                "tasklens remote-admin: remote_admin is off, but removing the polkit rule failed: \
+                 {e}."
+            )
+            .map_err(write_error)?;
+            match restored {
+                Ok(()) if rule_file == RuleFile::Absent => {
+                    writeln!(
+                        err,
+                        "There was no polkit rule before, and there is none now."
+                    )
+                    .map_err(write_error)?;
+                    return Ok(1);
+                }
+                Ok(()) => {
+                    writeln!(err, "{}", rule_file.restored_text()).map_err(write_error)?;
+                }
+                Err(e) => {
+                    writeln!(err, "The polkit rules file could not be put back: {e}.")
+                        .map_err(write_error)?;
+                }
+            }
+            writeln!(
+                err,
+                "Remote windows get no administrator actions, but other programs that run as {} \
+                 may still. Run tasklens remote-admin off again to remove the rule.",
+                env.user
+            )
+            .map_err(write_error)?;
+            return Ok(1);
+        }
+    };
+    writeln!(
+        err,
+        "tasklens remote-admin: remote_admin is off, but the polkit rule was not removed: \
+         {failure}. Remote windows get no administrator actions, but other programs that run as \
+         {} still do. Run tasklens remote-admin off again to remove the rule.",
+        env.user
+    )
+    .map_err(write_error)?;
+    Ok(1)
+}
+
+/// The state query failed: nothing was changed.
+fn not_checked(err: &mut dyn Write, e: &SetupError) -> Result<u8, String> {
+    writeln!(
+        err,
+        "tasklens remote-admin: the polkit rules file could not be checked: {}. Nothing changed.",
+        e.text()
+    )
+    .map_err(write_error)?;
+    Ok(1)
 }
 
 fn status(env: &Env<'_>, out: &mut dyn Write) -> Result<u8, String> {
@@ -461,12 +555,12 @@ impl Session {
 /// What `tasklens-setup remote-admin` is asked to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
-    /// Write the rule, keeping the rules file as it was for `Undo`.
+    /// Write the rule.
     On,
     /// Remove the rule.
     Off,
-    /// Put the rules file back as it was before the last `On`.
-    Undo,
+    /// Print whether the rules file is present or absent.
+    State,
 }
 
 impl Step {
@@ -474,22 +568,61 @@ impl Step {
         match self {
             Self::On => "on",
             Self::Off => "off",
-            Self::Undo => "undo",
+            Self::State => "state",
         }
     }
 }
 
-/// Runs the root setup script for `remote-admin on|off|undo`:
+/// The rules file before the command changed it, from `tasklens-setup remote-admin state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleFile {
+    Present,
+    Absent,
+}
+
+impl RuleFile {
+    /// The step that puts this state back.
+    fn step(self) -> Step {
+        match self {
+            Self::Present => Step::On,
+            Self::Absent => Step::Off,
+        }
+    }
+
+    fn restored_text(self) -> &'static str {
+        match self {
+            Self::Present => "The polkit rule is in place again, as it was before.",
+            Self::Absent => "The polkit rule was removed again, as there was none before.",
+        }
+    }
+}
+
+/// How a run of `tasklens-setup` failed.
+#[derive(Debug)]
+enum SetupError {
+    /// pkexec did not start the script: it could not run, the prompt was dismissed or polkit
+    /// said no. The rules file did not change.
+    NotStarted(String),
+    /// The script ran and failed. It may have changed the rules file first.
+    Failed(String),
+}
+
+impl SetupError {
+    fn text(&self) -> &str {
+        match self {
+            Self::NotStarted(text) | Self::Failed(text) => text,
+        }
+    }
+}
+
+/// Runs the root setup script for `remote-admin on|off|state`:
 /// `pkexec /usr/lib/tasklens/tasklens-setup` in the app, a fake in tests.
 pub struct Setup {
     program: OsString,
-    /// Before `remote-admin on|off|undo`.
+    /// Before `remote-admin on|off|state`.
     args: Vec<OsString>,
     /// Added to the inherited environment.
     envs: Vec<(OsString, OsString)>,
-    /// The script's own "Enabled" or "Reverted" goes nowhere. pkexec asks for the password on
-    /// the terminal, so the app keeps the terminal's output.
-    quiet: bool,
 }
 
 impl Setup {
@@ -498,38 +631,69 @@ impl Setup {
             program: "pkexec".into(),
             args: vec![SETUP_PATH.into()],
             envs: Vec::new(),
-            quiet: false,
         }
     }
 
+    /// The script's output is read here, never written to the terminal, so a closed terminal
+    /// cannot fail the script. pkexec asks for the password on the controlling terminal
+    /// (`/dev/tty`) or through the desktop's polkit agent, and errors stay on stderr.
     fn command(&self, step: Step) -> Command {
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
             .args(["remote-admin", step.word()])
-            .envs(self.envs.iter().map(|(k, v)| (k, v)));
-        if self.quiet {
-            command.stdout(Stdio::null());
-        }
+            .envs(self.envs.iter().map(|(k, v)| (k, v)))
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
         command
     }
 
-    /// Runs the script and waits for it. pkexec's own exit codes are named.
-    fn run(&self, step: Step) -> Result<(), String> {
-        let status = self
+    /// Runs the script, waits for it and returns what it printed. pkexec's own exit codes are
+    /// named.
+    fn run(&self, step: Step) -> Result<String, SetupError> {
+        let output = self
             .command(step)
-            .status()
-            .map_err(|e| format!("{}: {e}", self.program.to_string_lossy()))?;
-        match status.code() {
-            Some(0) => Ok(()),
-            Some(126) => Err("the password prompt was dismissed (pkexec exit 126)".to_owned()),
-            Some(127) => Err("polkit did not allow it (pkexec exit 127)".to_owned()),
-            Some(code) => Err(format!(
+            .spawn()
+            .and_then(std::process::Child::wait_with_output)
+            .map_err(|e| {
+                SetupError::NotStarted(format!("{}: {e}", self.program.to_string_lossy()))
+            })?;
+        match output.status.code() {
+            Some(0) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+            Some(126) => Err(SetupError::NotStarted(
+                "the password prompt was dismissed (pkexec exit 126)".to_owned(),
+            )),
+            Some(127) => Err(SetupError::NotStarted(
+                "polkit did not allow it (pkexec exit 127)".to_owned(),
+            )),
+            Some(code) => Err(SetupError::Failed(format!(
                 "{SETUP_PATH} remote-admin {} exited with {code}",
                 step.word()
+            ))),
+            None => Err(SetupError::Failed(
+                "tasklens-setup was ended by a signal".to_owned(),
             )),
-            None => Err("tasklens-setup was ended by a signal".to_owned()),
         }
+    }
+
+    /// Asks whether the rules file is there.
+    fn state(&self) -> Result<RuleFile, SetupError> {
+        let text = self.run(Step::State)?;
+        match text.trim() {
+            "present" => Ok(RuleFile::Present),
+            "absent" => Ok(RuleFile::Absent),
+            other => Err(SetupError::Failed(format!(
+                "{SETUP_PATH} remote-admin state printed {other:?}"
+            ))),
+        }
+    }
+
+    /// Puts the rules file back to `rule_file`.
+    fn restore(&self, rule_file: RuleFile) -> Result<(), String> {
+        self.run(rule_file.step())
+            .map(drop)
+            .map_err(|e| e.text().to_owned())
     }
 }
 
@@ -592,8 +756,6 @@ mod tests {
     use super::*;
 
     const RULE: &str = "etc/polkit-1/rules.d/49-tasklens-remote-admin.rules";
-    /// Where `tasklens-setup remote-admin on` keeps the rules file as it was.
-    const BEFORE: &str = "var/lib/tasklens/remote-admin.rules.before";
     const HOST: &str = "home";
 
     /// What the test engine does with a save.
@@ -777,8 +939,12 @@ mod tests {
             self.root().join(RULE)
         }
 
-        fn before(&self) -> PathBuf {
-            self.root().join(BEFORE)
+        fn lock(&self) -> PathBuf {
+            self.dir.path().join(LOCK_NAME)
+        }
+
+        fn script() -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tasklens-setup")
         }
 
         /// The rules file's text, or `None` when there is none.
@@ -791,22 +957,43 @@ mod tests {
         fn setup(&self) -> Setup {
             Setup {
                 program: "sh".into(),
-                args: vec![
-                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../packaging/tasklens-setup")
-                        .into(),
-                ],
-                envs: vec![
-                    ("TASKLENS_SETUP_ROOT".into(), self.root().into()),
-                    ("PKEXEC_UID".into(), server::own_uid().to_string().into()),
-                ],
-                quiet: true,
+                args: vec![Self::script().into()],
+                envs: self.setup_envs(),
             }
+        }
+
+        fn setup_envs(&self) -> Vec<(OsString, OsString)> {
+            vec![
+                ("TASKLENS_SETUP_ROOT".into(), self.root().into()),
+                ("PKEXEC_UID".into(), server::own_uid().to_string().into()),
+            ]
+        }
+
+        /// A fake pkexec that runs `body` with `$1` the script, `$2` `remote-admin` and `$3`
+        /// the step; `sh "$@"` runs the script as `setup()` does. `$r` is the rig's root.
+        fn fake(&self, body: &str) -> Setup {
+            Setup {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!("r=\"$TASKLENS_SETUP_ROOT\"\n{body}").into(),
+                    "pkexec".into(),
+                    Self::script().into(),
+                ],
+                envs: self.setup_envs(),
+            }
+        }
+
+        /// A fake pkexec whose password prompt is dismissed for `step` only.
+        fn dismissed_at(&self, step: &str) -> Setup {
+            self.fake(&format!("[ \"$3\" = {step} ] && exit 126\nexec sh \"$@\""))
         }
 
         fn env<'a>(&self, setup: &'a Setup, polkit: &'a dyn Fn(u32) -> PolkitAnswer) -> Env<'a> {
             Env {
                 socket: self.socket(),
+                lock: self.lock(),
+                lock_wait: LOCK_WAIT,
                 uid: server::own_uid(),
                 hello: HelloTail {
                     pid: std::process::id(),
@@ -848,7 +1035,6 @@ mod tests {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 99".into(), "pkexec".into()],
             envs: Vec::new(),
-            quiet: true,
         }
     }
 
@@ -858,7 +1044,6 @@ mod tests {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 126".into(), "pkexec".into()],
             envs: Vec::new(),
-            quiet: true,
         }
     }
 
@@ -924,13 +1109,16 @@ polkit.addRule(function(action, subject) {{
         );
         let mode = fs::metadata(rig.rule()).expect("stat").permissions().mode() & 0o7777;
         assert_eq!(mode, 0o644);
-        assert!(!rig.before().exists(), "there was no rules file to keep");
+        assert!(
+            !rig.root().join("var").exists(),
+            "the script keeps no backup"
+        );
         assert!(engine.remote_admin());
         assert_eq!(engine.rev(), 2);
 
         // A second engine for `off`: the first served its two sessions.
         fs::remove_file(rig.socket()).expect("rm socket");
-        let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 1);
+        let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 2);
         let (code, out, err) = rig.run(What::Off, &setup, &unused_polkit, "");
         assert_eq!(code, 0, "{out}{err}");
         assert_eq!(out, "Remote admin is off on home.\n");
@@ -954,7 +1142,7 @@ polkit.addRule(function(action, subject) {{
         }
     }
 
-    /// A dismissed password prompt saves nothing.
+    /// A dismissed password prompt saves nothing, at the state query or at the change.
     #[test]
     fn on_with_dismissed_prompt_saves_nothing() {
         let rig = Rig::new();
@@ -963,9 +1151,22 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(code, 1);
         assert_eq!(
             err,
+            "tasklens remote-admin: the polkit rules file could not be checked: the password \
+             prompt was dismissed (pkexec exit 126). Nothing changed.\n"
+        );
+        assert!(!engine.remote_admin());
+        assert_eq!(engine.rev(), 1);
+
+        let rig = Rig::new();
+        let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 2);
+        let (code, _, err) = rig.run(What::On, &rig.dismissed_at("on"), &unused_polkit, "y\n");
+        assert_eq!(code, 1);
+        assert_eq!(
+            err,
             "tasklens remote-admin: the polkit rule was not written: the password prompt was \
              dismissed (pkexec exit 126). Nothing changed.\n"
         );
+        assert!(!rig.rule().exists());
         assert!(!engine.remote_admin());
         assert_eq!(engine.rev(), 1);
     }
@@ -986,7 +1187,9 @@ polkit.addRule(function(action, subject) {{
             "{err}"
         );
         assert!(
-            err.ends_with("The polkit rules file was put back as it was. Nothing changed.\n"),
+            err.ends_with(
+                "The polkit rule was removed again, as there was none before. Nothing changed.\n"
+            ),
             "{err}"
         );
         assert!(!rig.rule().exists());
@@ -1005,23 +1208,20 @@ polkit.addRule(function(action, subject) {{
         assert_eq!(
             err,
             "tasklens remote-admin: remote_admin was not saved: another window changed the host \
-             settings 3 times in a row.\nThe polkit rules file was put back as it was. Nothing \
-             changed.\n"
+             settings 3 times in a row.\nThe polkit rule was removed again, as there was none \
+             before. Nothing changed.\n"
         );
         assert!(!rig.rule().exists());
         assert!(!engine.remote_admin());
     }
 
-    /// q4x76.31: a failed save puts back the rules file that was there before, whatever the
-    /// setting was: no file stays no file, and an existing file (this user's rule, another
-    /// user's rule, or a hand-edited one) comes back byte for byte.
+    /// q4x76.31 leader decision: a failed save puts back the state the script reported before
+    /// the change, present or absent, whatever the setting was. The script keeps no backup.
     #[test]
     fn on_save_fails_so_the_rules_file_is_as_it_was() {
         let own = rule_text(&own_user());
-        let other = rule_text("bob");
-        let edited = "// edited by hand\n".to_owned();
         for setting in [false, true] {
-            for prior in [None, Some(&own), Some(&other), Some(&edited)] {
+            for prior in [None, Some(&own)] {
                 let rig = Rig::new();
                 if let Some(text) = prior {
                     fs::write(rig.rule(), text).expect("write rule");
@@ -1030,17 +1230,126 @@ polkit.addRule(function(action, subject) {{
                 let (code, _, err) = rig.run(What::On, &rig.setup(), &unused_polkit, "y\n");
                 let case = format!("setting {setting}, prior {prior:?}");
                 assert_eq!(code, 1, "{case}");
+                let restored = if prior.is_some() {
+                    RuleFile::Present
+                } else {
+                    RuleFile::Absent
+                };
                 assert!(
-                    err.ends_with(
-                        "The polkit rules file was put back as it was. Nothing changed.\n"
-                    ),
+                    err.ends_with(&format!("{} Nothing changed.\n", restored.restored_text())),
                     "{case}: {err}"
                 );
                 assert_eq!(rig.rule_file().as_ref(), prior, "{case}");
-                assert!(!rig.before().exists(), "{case}");
+                assert!(!rig.root().join("var").exists(), "{case}");
                 assert!(!rig.rule().with_extension("rules.tmp").exists(), "{case}");
                 assert_eq!(engine.remote_admin(), setting, "{case}");
             }
+        }
+    }
+
+    /// q4x76.31 leader decision: the script installs the rule and then fails (it exits 1, or
+    /// its stdout is closed so its last echo fails). The recorded state is put back, present
+    /// or absent, and nothing is saved.
+    #[test]
+    fn on_script_fails_after_writing_the_rule_so_the_rules_file_is_as_it_was() {
+        let own = rule_text(&own_user());
+        // The first `on` runs the real script, notes that the rule was written, and fails.
+        let fail_after = |run: &str| {
+            format!(
+                "if [ \"$3\" = on ] && [ ! -e \"$r/failed-once\" ]; then\n\
+                 : > \"$r/failed-once\"\n\
+                 {run}\n\
+                 [ -e \"$r/{RULE}\" ] && : > \"$r/rule-was-written\"\n\
+                 exit 1\n\
+                 fi\n\
+                 exec sh \"$@\""
+            )
+        };
+        for run in ["sh \"$@\"", "sh \"$@\" >&-"] {
+            for prior in [None, Some(&own)] {
+                let rig = Rig::new();
+                if let Some(text) = prior {
+                    fs::write(rig.rule(), text).expect("write rule");
+                }
+                let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 2);
+                let setup = rig.fake(&fail_after(run));
+                let (code, out, err) = rig.run(What::On, &setup, &unused_polkit, "y\n");
+                let case = format!("{run}, prior {prior:?}");
+                assert_eq!(code, 1, "{case}: {out}{err}");
+                assert!(rig.root().join("rule-was-written").exists(), "{case}");
+                assert!(
+                    err.starts_with(&format!(
+                        "tasklens remote-admin: the polkit rule was not written: {SETUP_PATH} \
+                         remote-admin on exited with "
+                    )),
+                    "{case}: {err}"
+                );
+                assert!(err.ends_with("Nothing changed.\n"), "{case}: {err}");
+                assert_eq!(rig.rule_file().as_ref(), prior, "{case}");
+                assert!(!engine.remote_admin(), "{case}");
+                assert_eq!(engine.rev(), 1, "{case}");
+            }
+        }
+    }
+
+    /// q4x76.31 leader decision: two commands at once run one after the other. Each one's state
+    /// query and change finish before the other's start.
+    #[test]
+    fn concurrent_commands_run_one_after_the_other() {
+        let rig = Rig::new();
+        let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 4);
+        let setup = rig.fake(
+            "[ -e \"$r/busy\" ] && : > \"$r/overlap\"\n\
+             : > \"$r/busy\"\n\
+             printf '%s\\n' \"$3\" >> \"$r/log\"\n\
+             sleep 0.3\n\
+             sh \"$@\"\n\
+             s=$?\n\
+             rm -f \"$r/busy\"\n\
+             exit $s",
+        );
+        let codes: Vec<u8> = thread::scope(|scope| {
+            let runs: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| rig.run(What::On, &setup, &unused_polkit, "y\n").0))
+                .collect();
+            runs.into_iter()
+                .map(|run| run.join().expect("run"))
+                .collect()
+        });
+        assert_eq!(codes, [0, 0]);
+        assert!(!rig.root().join("overlap").exists());
+        assert_eq!(
+            fs::read_to_string(rig.root().join("log")).expect("log"),
+            "state\non\nstate\non\n"
+        );
+        assert!(engine.remote_admin());
+    }
+
+    /// A second command waits for the lock, then fails with a plain message before it asks the
+    /// engine or runs pkexec.
+    #[test]
+    fn a_held_lock_fails_after_the_wait() {
+        let rig = Rig::new();
+        let _held = engine_link::lock_engine(&rig.lock())
+            .expect("lock")
+            .expect("free");
+        let setup = no_pkexec();
+        for what in [What::On, What::Off] {
+            let mut env = rig.env(&setup, &unused_polkit);
+            env.lock_wait = Duration::from_millis(200);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let started = Instant::now();
+            let code = run(what, &env, &mut "y\n".as_bytes(), &mut out, &mut err);
+            assert!(started.elapsed() >= Duration::from_millis(200), "{what:?}");
+            assert_eq!(code, 1, "{what:?}");
+            assert!(out.is_empty(), "{what:?}");
+            assert_eq!(
+                String::from_utf8(err).expect("utf-8"),
+                "tasklens remote-admin: another tasklens remote-admin on or off is still running. \
+                 Try again when it is done\n",
+                "{what:?}"
+            );
         }
     }
 
@@ -1073,20 +1382,15 @@ polkit.addRule(function(action, subject) {{
     fn on_over_an_existing_rules_file_then_off_leaves_none() {
         let rig = Rig::new();
         fs::write(rig.rule(), rule_text("bob")).expect("write rule");
-        let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 3);
+        let engine = TestEngine::start(&rig.socket(), false, Saves::Work, 4);
         let setup = rig.setup();
         let (code, out, err) = rig.run(What::On, &setup, &unused_polkit, "y\n");
         assert_eq!(code, 0, "{out}{err}");
         assert_eq!(rig.rule_file(), Some(rule_text(&own_user())));
-        assert_eq!(
-            fs::read_to_string(rig.before()).expect("kept file"),
-            rule_text("bob")
-        );
         assert!(engine.remote_admin());
         let (code, out, err) = rig.run(What::Off, &setup, &unused_polkit, "");
         assert_eq!(code, 0, "{out}{err}");
         assert!(!rig.rule().exists());
-        assert!(!rig.before().exists());
         assert!(!engine.remote_admin());
     }
 
@@ -1095,7 +1399,7 @@ polkit.addRule(function(action, subject) {{
     fn off_save_fails_so_the_rule_stays() {
         let rig = Rig::new();
         fs::write(rig.rule(), rule_text("alice")).expect("write rule");
-        let engine = TestEngine::start(&rig.socket(), true, Saves::Conflict, 1);
+        let engine = TestEngine::start(&rig.socket(), true, Saves::Conflict, 2);
         let (code, out, err) = rig.run(What::Off, &rig.setup(), &unused_polkit, "");
         assert_eq!(code, 1);
         assert_eq!(out, "");
@@ -1116,8 +1420,8 @@ polkit.addRule(function(action, subject) {{
     #[test]
     fn off_with_dismissed_prompt_keeps_the_setting_off() {
         let rig = Rig::new();
-        let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 1);
-        let (code, out, err) = rig.run(What::Off, &dismissed_pkexec(), &unused_polkit, "");
+        let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 2);
+        let (code, out, err) = rig.run(What::Off, &rig.dismissed_at("off"), &unused_polkit, "");
         assert_eq!(code, 1);
         assert_eq!(out, "");
         assert!(
@@ -1127,6 +1431,52 @@ polkit.addRule(function(action, subject) {{
             "{err}"
         );
         assert!(!engine.remote_admin());
+    }
+
+    /// q4x76.31 leader decision: the script fails after it started to remove the rule. The
+    /// recorded state is put back and the setting stays off.
+    #[test]
+    fn off_script_fails_so_the_recorded_state_is_put_back() {
+        let own = rule_text(&own_user());
+        for prior in [None, Some(&own)] {
+            let rig = Rig::new();
+            if let Some(text) = prior {
+                fs::write(rig.rule(), text).expect("write rule");
+            }
+            let engine = TestEngine::start(&rig.socket(), true, Saves::Work, 2);
+            let setup = rig.fake(
+                "if [ \"$3\" = off ] && [ ! -e \"$r/failed-once\" ]; then\n\
+                 : > \"$r/failed-once\"\n\
+                 sh \"$@\"\n\
+                 exit 1\n\
+                 fi\n\
+                 exec sh \"$@\"",
+            );
+            let (code, out, err) = rig.run(What::Off, &setup, &unused_polkit, "");
+            let case = format!("prior {prior:?}");
+            assert_eq!(code, 1, "{case}");
+            assert_eq!(out, "", "{case}");
+            assert!(
+                err.starts_with(
+                    "tasklens remote-admin: remote_admin is off, but removing the polkit rule \
+                     failed: "
+                ),
+                "{case}: {err}"
+            );
+            if prior.is_some() {
+                assert!(
+                    err.contains(RuleFile::Present.restored_text()),
+                    "{case}: {err}"
+                );
+            } else {
+                assert!(
+                    err.ends_with("There was no polkit rule before, and there is none now.\n"),
+                    "{case}: {err}"
+                );
+            }
+            assert_eq!(rig.rule_file().as_ref(), prior, "{case}");
+            assert!(!engine.remote_admin(), "{case}");
+        }
     }
 
     /// Status prints both states, says whether they agree and asks polkit about the engine's
@@ -1213,10 +1563,10 @@ polkit.addRule(function(action, subject) {{
         }
     }
 
-    /// The app runs `pkexec /usr/lib/tasklens/tasklens-setup remote-admin on|off|undo`.
+    /// The app runs `pkexec /usr/lib/tasklens/tasklens-setup remote-admin on|off|state`.
     #[test]
     fn pkexec_command_line() {
-        for (step, word) in [(Step::On, "on"), (Step::Off, "off"), (Step::Undo, "undo")] {
+        for (step, word) in [(Step::On, "on"), (Step::Off, "off"), (Step::State, "state")] {
             let command = Setup::pkexec().command(step);
             assert_eq!(command.get_program(), "pkexec");
             let args: Vec<_> = command.get_args().collect();

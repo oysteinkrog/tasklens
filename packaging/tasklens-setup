@@ -17,7 +17,7 @@ LC_ALL=C
 export LC_ALL
 
 RULE='SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"'
-USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off|remote-admin on|off|undo'
+USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off|remote-admin on|off|state'
 
 if [ "$(id -u)" -eq 0 ]; then
     ROOT=""
@@ -40,9 +40,6 @@ SAVED_CONF="$STATE_DIR/lm_sensors.before"
 SAVED_ENABLED="$STATE_DIR/lm_sensors-service.enabled"
 POLKIT_RULE="$ROOT/etc/polkit-1/rules.d/49-tasklens.rules"
 REMOTE_ADMIN_RULE="$ROOT/etc/polkit-1/rules.d/49-tasklens-remote-admin.rules"
-# The remote admin rules file as it was before the last `remote-admin on`, for `remote-admin
-# undo`. Missing when there was no rules file.
-REMOTE_ADMIN_BEFORE="$STATE_DIR/remote-admin.rules.before"
 
 # Runs an external system command, or prints it in test mode.
 run() {
@@ -276,7 +273,8 @@ linger() {
 # It covers the three tasklens polkit actions, systemd's manage-units only for a single unit
 # (the action has a "unit" detail) and manage-unit-files. `tasklens remote-admin on|off` runs
 # this through pkexec and saves remote_admin in engine.toml itself, through the engine socket;
-# this script never writes engine.toml.
+# this script never writes engine.toml. The command asks `remote-admin state` first and keeps
+# the answer itself; to undo a failed change it runs `on` (present) or `off` (absent).
 remote_admin_on() {
     check_pkexec_uid
     user=$(id -nu -- "$PKEXEC_UID" 2>/dev/null) || {
@@ -290,11 +288,6 @@ remote_admin_on() {
             exit 1
             ;;
     esac
-    mkdir -p "$STATE_DIR"
-    rm -f "$REMOTE_ADMIN_BEFORE"
-    if [ -e "$REMOTE_ADMIN_RULE" ]; then
-        cp -p "$REMOTE_ADMIN_RULE" "$REMOTE_ADMIN_BEFORE"
-    fi
     tmp="$REMOTE_ADMIN_RULE.tmp"
     cat > "$tmp" <<EOF
 polkit.addRule(function(action, subject) {
@@ -317,23 +310,14 @@ EOF
 }
 
 remote_admin_off() {
-    rm -f "$REMOTE_ADMIN_RULE" "$REMOTE_ADMIN_BEFORE"
+    rm -f "$REMOTE_ADMIN_RULE"
     echo 'Reverted'
 }
 
-# Puts the rules file back as it was before the last `remote-admin on`: the saved file, or no
-# file when there was none. `tasklens remote-admin on` runs this when it could not save
-# remote_admin, so the rule and the setting do not disagree.
-remote_admin_undo() {
-    if [ -e "$REMOTE_ADMIN_BEFORE" ]; then
-        tmp="$REMOTE_ADMIN_RULE.tmp"
-        cp -p "$REMOTE_ADMIN_BEFORE" "$tmp"
-        mv -f "$tmp" "$REMOTE_ADMIN_RULE"
-        rm -f "$REMOTE_ADMIN_BEFORE"
-    else
-        rm -f "$REMOTE_ADMIN_RULE"
-    fi
-    echo 'Reverted'
+# Prints "present" when the rules file exists, else "absent". A user cannot read
+# /etc/polkit-1/rules.d (root:polkitd 0750), so the command asks this.
+remote_admin_state() {
+    if [ -e "$REMOTE_ADMIN_RULE" ]; then echo 'present'; else echo 'absent'; fi
 }
 
 usage() {
@@ -364,7 +348,7 @@ case "${1-}" in
         case "${2-}" in
             on) remote_admin_on ;;
             off) remote_admin_off ;;
-            undo) remote_admin_undo ;;
+            state) remote_admin_state ;;
             *) usage ;;
         esac
         ;;
