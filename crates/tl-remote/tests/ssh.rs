@@ -10,13 +10,17 @@
 #![allow(clippy::unwrap_used)]
 
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use tl_model::remote_proto::{BootPrefix, HelloTail, RefuseReason, Refused, Want, encode_refused};
+use tl_model::remote_proto::{
+    BootPrefix, HelloTail, HostIdentity, RefuseReason, Refused, Want, Welcome, encode_refused,
+    encode_welcome, read_frame,
+};
+use tl_model::time::BootId;
 use tl_remote::client::{ClientConfig, Connector, LinkStatus, RemoteClient};
 use tl_remote::ssh::{
     STDERR_BYTES, STDERR_LINES, SshConnector, StderrRing, TargetError, classify, ssh_command,
@@ -373,6 +377,11 @@ fn stderr_held_open_by_descendant() {
     assert_eq!(reason, "ssh to home failed (exit 3): boom");
     assert!(begin.elapsed() < TIMEOUT);
     assert_stderr_threads_end();
+    kill_bg(&fake);
+}
+
+/// Kills the process the fake started in the background and wrote to `bg`.
+fn kill_bg(fake: &Fake) {
     let bg: i32 = std::fs::read_to_string(fake.path("bg"))
         .unwrap()
         .trim()
@@ -382,4 +391,110 @@ fn stderr_held_open_by_descendant() {
         rustix::process::Pid::from_raw(bg).unwrap(),
         rustix::process::Signal::KILL,
     );
+}
+
+/// A fake ssh that answers with `Welcome`, then starts a process that keeps its stdin and
+/// stdout open for 30 s and writes that process's pid to `bg`. `end` is the rest of the script.
+fn welcome_then_holder(end: &str) -> (Fake, tempfile::TempDir) {
+    let mut frame = Vec::new();
+    encode_welcome(
+        &Welcome {
+            prefix: BootPrefix::ours(),
+            tail: Some(HostIdentity {
+                host_name: Arc::from("home"),
+                machine_id: Arc::from("m1"),
+                boot_id: BootId(7),
+                engine_instance: 1,
+            }),
+        },
+        &mut frame,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let welcome = dir.path().join("welcome.bin");
+    std::fs::write(&welcome, &frame).unwrap();
+    // A background job's stdin is /dev/null in a shell without job control, so the holder gets
+    // ssh's stdin as fd 3. It keeps stdout as fd 1.
+    let fake = Fake::new(&format!(
+        "cat '{}'\nexec 3<&0\nsleep 30 &\necho $! > \"$(dirname \"$0\")/bg\"\n{end}",
+        welcome.display()
+    ));
+    (fake, dir)
+}
+
+/// The window's two halves after the handshake: a writer that fills ssh's stdin (nobody reads
+/// it) and a reader that waits for bytes (nobody writes). Each result arrives on its receiver.
+fn block_both(
+    conn: tl_remote::client::Connection,
+) -> (
+    std::sync::mpsc::Receiver<std::io::Result<()>>,
+    std::sync::mpsc::Receiver<std::io::Result<usize>>,
+) {
+    let mut reader = conn.reader;
+    let mut writer = conn.writer;
+    read_frame(&mut reader).unwrap();
+    let (wrote_tx, wrote) = std::sync::mpsc::channel();
+    let (read_tx, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = wrote_tx.send(writer.write_all(&vec![0u8; 1 << 20]));
+    });
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let _ = read_tx.send(reader.read(&mut buf));
+    });
+    (wrote, read)
+}
+
+#[test]
+fn session_read_and_write_end_on_shutdown_while_descendant_holds_pipes() {
+    // After the handshake, a write waits on a full stdin and a read on an empty stdout. Killing
+    // ssh does not end either pipe, since the holder keeps them open; shutdown must still wake
+    // both within 1 s.
+    let _serial = serial();
+    let (fake, _frames) = welcome_then_holder("exec sleep 30");
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .connect()
+        .unwrap();
+    let shutdown = std::sync::Arc::clone(&conn.shutdown);
+    let (wrote, read) = block_both(conn);
+    // Both are blocked: the pipe is full and nothing comes.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(wrote.try_recv().is_err(), "the write is blocked");
+    assert!(read.try_recv().is_err(), "the read is blocked");
+    let begin = Instant::now();
+    shutdown();
+    let one = Duration::from_secs(1);
+    let wrote = wrote
+        .recv_timeout(one)
+        .expect("the write returns within 1 s");
+    assert!(wrote.is_err(), "the write fails");
+    let read = read.recv_timeout(one).expect("the read returns within 1 s");
+    assert!(!matches!(read, Ok(n) if n > 0), "the read ends: {read:?}");
+    assert!(begin.elapsed() < one);
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    assert_stderr_threads_end();
+    kill_bg(&fake);
+}
+
+#[test]
+fn session_read_and_write_end_when_ssh_exits_while_descendant_holds_pipes() {
+    // ssh exits on its own after the handshake while the holder keeps both pipes open. The read
+    // sees the end and the write fails, with no shutdown.
+    let _serial = serial();
+    let (fake, _frames) = welcome_then_holder("sleep 0.5\nexit 0");
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .connect()
+        .unwrap();
+    let shutdown = std::sync::Arc::clone(&conn.shutdown);
+    let (wrote, read) = block_both(conn);
+    let wrote = wrote.recv_timeout(TIMEOUT).expect("the write returns");
+    assert!(wrote.is_err(), "the write fails");
+    let read = read.recv_timeout(TIMEOUT).expect("the read returns");
+    assert!(matches!(read, Ok(0)), "the read sees the end: {read:?}");
+    shutdown();
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    assert_stderr_threads_end();
+    kill_bg(&fake);
 }

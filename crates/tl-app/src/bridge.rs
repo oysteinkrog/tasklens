@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::{Errno, ioctl_fionbio};
 
-use tl_model::remote_proto::{Hello, decode_hello, encode_hello, read_frame};
+use tl_model::remote_proto::{
+    FrameHeader, HEADER_LEN, Hello, RawFrame, decode_hello, encode_hello,
+};
 use tl_remote::server;
 
 use crate::engine_link::{self, CONNECT_DEADLINE};
@@ -63,7 +65,7 @@ fn main_inner(app_id: Option<&str>) -> Result<(), String> {
 /// Connects `input` and `output` to the engine at `socket`, whose peer must run as `uid`, and
 /// copies until either side ends. `start_unit` runs once when the first connect fails.
 pub fn run(
-    mut input: File,
+    input: File,
     output: File,
     socket: &Path,
     uid: u32,
@@ -79,31 +81,7 @@ pub fn run(
                 .map_err(|e| format!("cannot connect to {}: {e}", socket.display()))?
         }
     };
-    // Blocking, as nothing else runs yet. The window's ssh connector kills ssh when no answer
-    // comes within its deadline (20 s), which ends this stdin.
-    let frame = read_frame(&mut input).map_err(|e| format!("reading the window's Hello: {e}"))?;
-    let mut first = Vec::new();
-    match decode_hello(&frame) {
-        Ok(Hello {
-            prefix,
-            tail: Some(mut tail),
-        }) => {
-            tail.bridge = true;
-            encode_hello(
-                &Hello {
-                    prefix,
-                    tail: Some(tail),
-                },
-                &mut first,
-            )
-            .map_err(|e| format!("encoding Hello: {e}"))?;
-        }
-        _ => {
-            first.extend_from_slice(&frame.header.to_bytes());
-            first.extend_from_slice(&frame.payload);
-        }
-    }
-    pump(&input, &output, &stream, first).map_err(|e| format!("bridge: {e}"))
+    pump(&input, &output, &stream).map_err(|e| format!("bridge: {e}"))
 }
 
 /// The most bytes held for one direction.
@@ -112,20 +90,28 @@ const BUF: usize = 64 * 1024;
 /// How long the bytes one side sent before it ended may take to reach the other side.
 const DRAIN: Duration = Duration::from_millis(500);
 
-/// Copies `input` to `engine` (starting with `up`, the window's `Hello`) and `engine` to
-/// `output` in one poll loop on non-blocking fds, with at most `BUF` held per direction. No
-/// step blocks while the other direction waits, and all three fds stay in the poll set, so a
-/// hang-up on any of them is seen even while its buffer is full.
+/// Copies `input` to `engine` and `engine` to `output` in one poll loop on non-blocking fds,
+/// with at most `BUF` held per direction. No step blocks while the other direction waits, and
+/// all three fds stay in the poll set, so a hang-up on any of them is seen even while its
+/// buffer is full.
+///
+/// The window's first frame is held back until it is whole and goes on as `hello` rewrites it.
+/// Waiting for it is part of the loop, so the engine's end (its `Hello` deadline is 5 s) or the
+/// window's ends that wait too.
 ///
 /// Returns when either side ends. After EOF or a hang-up from the window, the engine gets up to
 /// `DRAIN` for what the window sent; after the same from the engine, the window gets the same.
 /// A failed write to the window ends the bridge at once. `Ok` covers every such end; `Err` is a
-/// failed poll or `fcntl`.
-fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io::Result<()> {
+/// window that ends before its first frame is whole, a first frame over `BUF`, or a failed poll
+/// or `fcntl`.
+fn pump(input: &File, output: &File, engine: &UnixStream) -> io::Result<()> {
     for fd in [input.as_fd(), output.as_fd(), engine.as_fd()] {
         ioctl_fionbio(fd, true)?;
     }
     let gone = PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL;
+    let mut up = Vec::with_capacity(BUF);
+    // The window's first frame has gone into `up` as it goes to the engine.
+    let mut greeted = false;
     let mut down = Vec::with_capacity(BUF);
     let mut chunk = vec![0u8; BUF];
     loop {
@@ -137,7 +123,7 @@ fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io
         if down.len() < BUF {
             engine_flags |= PollFlags::IN;
         }
-        if !up.is_empty() {
+        if greeted && !up.is_empty() {
             engine_flags |= PollFlags::OUT;
         }
         let mut output_flags = PollFlags::empty();
@@ -162,7 +148,13 @@ fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io
             } else {
                 input_ready.intersects(gone)
             };
+            if !ended && !greeted {
+                greeted = hello(&mut up)?;
+            }
             if ended {
+                if !greeted {
+                    return Err(io::Error::other("the window ended before its Hello"));
+                }
                 drain(engine, &mut up);
                 return Ok(());
             }
@@ -174,7 +166,8 @@ fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io
             } else {
                 engine_ready.intersects(gone)
             };
-            if !ended && !up.is_empty() && engine_ready.intersects(PollFlags::OUT | gone) {
+            if !ended && greeted && !up.is_empty() && engine_ready.intersects(PollFlags::OUT | gone)
+            {
                 ended = !send(engine, &mut up);
             }
             if ended {
@@ -193,6 +186,51 @@ fn pump(input: &File, output: &File, engine: &UnixStream, mut up: Vec<u8>) -> io
             }
         }
     }
+}
+
+/// Rewrites the window's first frame at the front of `buf` once it is whole: a `Hello` on our
+/// protocol gets its bridge flag set, so the engine knows the session is remote. Anything else
+/// (another protocol version, a header that does not parse) stays as it is, so the engine
+/// refuses it and the window shows why. `true` once the frame is ready to go on; `Err` for a
+/// frame that cannot fit in `BUF`, as no `Hello` is that large.
+fn hello(buf: &mut Vec<u8>) -> io::Result<bool> {
+    let Some(head) = buf.first_chunk::<HEADER_LEN>() else {
+        return Ok(false);
+    };
+    let Ok(header) = FrameHeader::parse(head) else {
+        return Ok(true);
+    };
+    let len = HEADER_LEN + header.encoded_len as usize;
+    if len > BUF {
+        return Err(io::Error::other(format!(
+            "the window's Hello has {len} bytes, more than {BUF}"
+        )));
+    }
+    if buf.len() < len {
+        return Ok(false);
+    }
+    let frame = RawFrame {
+        header,
+        payload: buf[HEADER_LEN..len].to_vec(),
+    };
+    if let Ok(Hello {
+        prefix,
+        tail: Some(mut tail),
+    }) = decode_hello(&frame)
+    {
+        tail.bridge = true;
+        let mut out = Vec::new();
+        encode_hello(
+            &Hello {
+                prefix,
+                tail: Some(tail),
+            },
+            &mut out,
+        )
+        .map_err(|e| io::Error::other(format!("encoding Hello: {e}")))?;
+        buf.splice(..len, out);
+    }
+    Ok(true)
 }
 
 /// Reads what `fd` has into `buf`, up to `BUF` in total. `false` when `fd` has ended or failed.
@@ -267,7 +305,7 @@ mod tests {
 
     use tl_model::remote_proto::{
         BootPrefix, HelloTail, HostIdentity, ServerBootstrap, Want, Welcome,
-        decode_server_bootstrap, encode_welcome,
+        decode_server_bootstrap, encode_welcome, read_frame,
     };
     use tl_model::time::BootId;
 
@@ -542,6 +580,66 @@ mod tests {
         let mut first = [0u8; 4];
         window_out.read_exact(&mut first).expect("bytes");
         assert_eq!(first, [0x5a; 4]);
+        drop(window_in);
+    }
+
+    /// The window has not sent its `Hello` when the engine hangs up (as at its 5 s `Hello`
+    /// deadline). The bridge must not wait on stdin for a frame nobody will take.
+    #[test]
+    fn bridge_returns_when_engine_ends_before_hello() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (accepted_tx, accepted) = mpsc::channel();
+        let engine = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let _ = accepted_tx.send(());
+            // Holds the connection a moment, then hangs up without a Hello.
+            thread::sleep(Duration::from_millis(100));
+            drop(stream);
+        });
+        let (window_in, window_out, input, output) = split_pipes();
+        let done = spawn_bridge(socket, input, output, None);
+        accepted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the bridge connects");
+        engine.join().expect("engine");
+        let result = done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the bridge returns within 1 s");
+        assert_eq!(result, Ok(()));
+        drop((window_in, window_out));
+    }
+
+    /// The window stops reading the bridge's stdout before it sends its `Hello`. The bridge
+    /// must see that while it waits for the `Hello`.
+    #[test]
+    fn bridge_returns_when_output_closes_before_hello() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (accepted_tx, accepted) = mpsc::channel();
+        let engine = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = accepted_tx.send(());
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            // Ends when the bridge closes the socket.
+            let mut buf = [0u8; 64];
+            while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
+        });
+        let (window_in, window_out, input, output) = split_pipes();
+        let done = spawn_bridge(socket, input, output, None);
+        accepted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the bridge connects");
+        drop(window_out);
+        let result = done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the bridge returns within 1 s");
+        assert_eq!(result, Ok(()));
+        engine.join().expect("engine");
         drop(window_in);
     }
 

@@ -5,17 +5,19 @@
 //! become an ssh option. Host-key checking is left to the user's ssh config. stdout carries only
 //! protocol bytes; a thread drains stderr into a ring of 64 lines and 16 KiB.
 //!
-//! Process start plus handshake have `SSH_DEADLINE` (20 s). Until the first frame from the
-//! server (`Welcome` or `Refused`) has been read whole, each read waits for bytes with `poll`
-//! for the time left, and the window's end of ssh's stdin is non-blocking, so a write that finds
-//! the pipe full also waits with `poll` for the time left. When the deadline passes, or the stream ends or fails before that frame,
-//! the child is reaped (killed first when it is still running at the deadline) and the read or
-//! write returns an error whose text names the failure (`classify`). After that frame, bytes
-//! pass through unchanged and an error ends the session as on any other transport.
+//! Process start plus handshake have `SSH_DEADLINE` (20 s). When the deadline passes, or the
+//! stream ends or fails before the first frame from the server (`Welcome` or `Refused`) has been
+//! read whole, the child is reaped (killed first when it is still running at the deadline) and
+//! the read or write returns an error whose text names the failure (`classify`). After that
+//! frame, bytes pass through unchanged and an error ends the session as on any other transport.
 //!
-//! `Connection::shutdown` and the drop of the connection's last half kill and reap the child and
-//! end the stderr thread. That thread waits on stderr and on a stop pipe, so it ends even when a
-//! process that ssh started keeps stderr open.
+//! The window's ends of ssh's stdin and stdout are non-blocking. A read or write that has to
+//! wait polls the pipe together with a stop pipe and a pidfd for ssh, so it wakes when
+//! `Connection::shutdown` runs or ssh exits, even while a process that ssh started keeps the
+//! pipe open. Before the first frame it also wakes at the deadline.
+//!
+//! `Connection::shutdown` and the drop of the connection's last half kill and reap the child,
+//! close the stop pipe and so end the stderr thread and every waiting read and write.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -30,6 +32,7 @@ use std::time::{Duration, Instant};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::{Errno, ioctl_fionbio};
 use rustix::pipe::{PipeFlags, pipe_with};
+use rustix::process::{Pid, PidfdFlags, pidfd_open};
 use tl_model::remote_proto::{FrameHeader, HEADER_LEN};
 
 use crate::client::{Connection, Connector};
@@ -44,8 +47,8 @@ pub const STDERR_LINES: usize = 64;
 pub const STDERR_BYTES: usize = 16 * 1024;
 /// How often a failed attempt checks whether the child has exited.
 const POLL: Duration = Duration::from_millis(10);
-/// How often a handshake write that waits for room in the pipe checks whether the first frame
-/// has been read meanwhile.
+/// How often a write that waits for room in the pipe before the first frame checks whether that
+/// frame has been read meanwhile, so the write then waits without the deadline.
 const WRITE_SLICE: Duration = Duration::from_millis(100);
 /// How long a failed attempt waits for the end of stderr after the child has exited. Then the
 /// stderr thread is stopped, so a grandchild that keeps the pipe open does not hold the attempt
@@ -331,24 +334,31 @@ impl Connector for SshConnector {
             reap(&mut child);
             return Err(io::Error::other("ssh started without its pipes"));
         };
-        // Until the first frame, a write must not block past the deadline (`SshWriter`).
-        if let Err(e) = ioctl_fionbio(&stdin, true) {
-            reap(&mut child);
-            return Err(io::Error::other(format!("ssh stdin: {e}")));
+        // No read or write may block where the stop pipe cannot wake it (`Proc::wait`).
+        for fd in [stdin.as_fd(), stdout.as_fd()] {
+            if let Err(e) = ioctl_fionbio(fd, true) {
+                reap(&mut child);
+                return Err(io::Error::other(format!("ssh pipes: {e}")));
+            }
         }
-        // Closing `stop_tx` tells the stderr thread to end.
+        // Closing `stop_tx` wakes the stderr thread and every waiting read and write.
         let (stop_rx, stop_tx) = match pipe_with(PipeFlags::CLOEXEC) {
             Ok(pair) => pair,
             Err(e) => {
                 reap(&mut child);
-                return Err(io::Error::other(format!("ssh stderr stop pipe: {e}")));
+                return Err(io::Error::other(format!("ssh stop pipe: {e}")));
             }
         };
+        let stop_rx = Arc::new(stop_rx);
+        // Readable once ssh has exited. A kernel without pidfds (before 5.3) leaves it out, and
+        // only `shutdown` then wakes a read or write that a process ssh started holds open.
+        let exited = pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).ok();
         let ring = Arc::new(Mutex::new(StderrRing::new()));
         let drain_ring = Arc::clone(&ring);
+        let drain_stop = Arc::clone(&stop_rx);
         let drain = thread::Builder::new()
             .name("tl-ssh-stderr".into())
-            .spawn(move || drain_stderr(&stderr, &stop_rx, &drain_ring));
+            .spawn(move || drain_stderr(&stderr, &*drain_stop, &drain_ring));
         let drain = match drain {
             Ok(handle) => handle,
             Err(e) => {
@@ -364,6 +374,8 @@ impl Connector for SshConnector {
             stderr: ring,
             drain: Mutex::new(Some(drain)),
             stop: Mutex::new(Some(stop_tx)),
+            stop_rx,
+            exited,
             lifted: AtomicBool::new(false),
             failure: Mutex::new(None),
         });
@@ -376,11 +388,7 @@ impl Connector for SshConnector {
                 filled: 0,
                 rest: None,
             }),
-            writer: Box::new(SshWriter {
-                input: stdin,
-                proc,
-                blocking: false,
-            }),
+            writer: Box::new(SshWriter { input: stdin, proc }),
             shutdown: Arc::new(move || control.terminate()),
         })
     }
@@ -436,8 +444,13 @@ struct Proc {
     child: Mutex<Option<Child>>,
     stderr: Arc<Mutex<StderrRing>>,
     drain: Mutex<Option<JoinHandle<()>>>,
-    /// The write end of the stderr thread's stop pipe. Dropping it ends the thread.
+    /// The write end of the stop pipe. Dropping it ends the stderr thread and wakes every
+    /// waiting read and write.
     stop: Mutex<Option<OwnedFd>>,
+    /// The read end of the stop pipe.
+    stop_rx: Arc<OwnedFd>,
+    /// A pidfd for ssh, readable once it has exited. `None` when the kernel has no pidfds.
+    exited: Option<OwnedFd>,
     /// The first frame from the server has been read whole.
     lifted: AtomicBool,
     /// The named failure, once known. Reader and writer report the same one.
@@ -510,6 +523,54 @@ impl Proc {
         let _ = handle.join();
     }
 
+    /// The error for a read or write that the stop pipe woke: the named failure when the
+    /// attempt failed, else a closed connection.
+    fn closed(&self) -> io::Error {
+        match &*lock(&self.failure) {
+            Some(text) => io::Error::other(text.to_string()),
+            None => io::Error::new(ErrorKind::BrokenPipe, "the ssh connection was closed"),
+        }
+    }
+
+    /// Waits until `fd` is ready for `flags` (or has ended or failed), the stop pipe closes, ssh
+    /// exits or `until` passes. `None` waits with no limit.
+    fn wait(&self, fd: &impl AsFd, flags: PollFlags, until: Option<Instant>) -> io::Result<Woke> {
+        loop {
+            let left = match until {
+                None => None,
+                Some(until) => {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(Woke::TimedOut);
+                    }
+                    Some(Timespec::try_from(left).map_err(io::Error::other)?)
+                }
+            };
+            // Without a pidfd the stop pipe takes its place, so the set keeps its size.
+            let exited: &OwnedFd = self.exited.as_ref().unwrap_or(&*self.stop_rx);
+            let mut fds = [
+                PollFd::new(fd, flags),
+                PollFd::new(&*self.stop_rx, PollFlags::IN),
+                PollFd::new(exited, PollFlags::IN),
+            ];
+            match poll(&mut fds, left.as_ref()) {
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(e.into()),
+            }
+            let [ready, stopped, exited] = fds.map(|fd| fd.revents());
+            if !stopped.is_empty() {
+                return Ok(Woke::Stopped);
+            }
+            if !ready.is_empty() {
+                return Ok(Woke::Ready);
+            }
+            if !exited.is_empty() {
+                return Ok(Woke::Exited);
+            }
+        }
+    }
+
     /// Kills and reaps the child if it still runs, and ends the stderr thread.
     fn terminate(&self) {
         if let Some(mut child) = lock(&self.child).take() {
@@ -525,6 +586,28 @@ impl Drop for Proc {
     }
 }
 
+/// What ended a wait on one of ssh's pipes (`Proc::wait`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Woke {
+    /// The pipe is ready, or has ended or failed.
+    Ready,
+    /// ssh has exited. A process it started may still hold the pipe open.
+    Exited,
+    /// The stop pipe closed: the connection was shut down or the attempt failed.
+    Stopped,
+    /// The wait's limit passed.
+    TimedOut,
+}
+
+/// What one read from ssh's stdout gave.
+enum Got {
+    Bytes(usize),
+    /// The pipe ended, or ssh exited and left nothing more in it.
+    End,
+    Stopped,
+    TimedOut,
+}
+
 /// ssh's stdout. Until the first frame is read whole, a read waits only until the deadline and
 /// reads no further than the end of that frame.
 struct SshReader {
@@ -537,19 +620,25 @@ struct SshReader {
 }
 
 impl SshReader {
-    /// Waits until stdout has bytes or has ended. `Err` with the named failure at the deadline.
-    fn wait_readable(&self) -> io::Result<()> {
+    /// One read of what stdout has, waiting for bytes until `until` (`None`: no limit).
+    fn read_some(&self, buf: &mut [u8], until: Option<Instant>) -> io::Result<Got> {
+        let mut exited = false;
         loop {
-            let left = self.proc.deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(self.proc.failed(true));
+            match rustix::io::read(&self.out, &mut *buf) {
+                Ok(0) => return Ok(Got::End),
+                Ok(n) => return Ok(Got::Bytes(n)),
+                Err(Errno::INTR) => continue,
+                // All that ssh wrote before it exited has been read. Only a process it started
+                // could still write, and that is not ssh's stream.
+                Err(Errno::AGAIN) if exited => return Ok(Got::End),
+                Err(Errno::AGAIN) => {}
+                Err(e) => return Err(e.into()),
             }
-            let left = Timespec::try_from(left).map_err(io::Error::other)?;
-            let mut fds = [PollFd::new(&self.out, PollFlags::IN)];
-            match poll(&mut fds, Some(&left)) {
-                Ok(0) | Err(Errno::INTR) => {}
-                Ok(_) => return Ok(()),
-                Err(_) => return Err(self.proc.failed(false)),
+            match self.proc.wait(&self.out, PollFlags::IN, until)? {
+                Woke::Ready => {}
+                Woke::Exited => exited = true,
+                Woke::Stopped => return Ok(Got::Stopped),
+                Woke::TimedOut => return Ok(Got::TimedOut),
             }
         }
     }
@@ -557,17 +646,23 @@ impl SshReader {
 
 impl Read for SshReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.proc.lifted.load(Ordering::Acquire) || buf.is_empty() {
-            return self.out.read(buf);
+        if buf.is_empty() {
+            return Ok(0);
         }
-        self.wait_readable()?;
+        if self.proc.lifted.load(Ordering::Acquire) {
+            return match self.read_some(buf, None)? {
+                Got::Bytes(n) => Ok(n),
+                Got::End => Ok(0),
+                Got::Stopped | Got::TimedOut => Err(self.proc.closed()),
+            };
+        }
         let want = self.rest.unwrap_or(HEADER_LEN - self.filled);
         let len = buf.len().min(want);
-        let n = match self.out.read(&mut buf[..len]) {
-            Ok(0) => return Err(self.proc.failed(false)),
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::Interrupted => return Err(e),
-            Err(_) => return Err(self.proc.failed(false)),
+        let n = match self.read_some(&mut buf[..len], Some(self.proc.deadline)) {
+            Ok(Got::Bytes(n)) => n,
+            Ok(Got::TimedOut) => return Err(self.proc.failed(true)),
+            Ok(Got::Stopped) => return Err(self.proc.closed()),
+            Ok(Got::End) | Err(_) => return Err(self.proc.failed(false)),
         };
         match &mut self.rest {
             None => {
@@ -590,55 +685,46 @@ impl Read for SshReader {
     }
 }
 
-/// ssh's stdin. Until the first frame from the server is read whole, the pipe is non-blocking
-/// and a write that finds it full waits only until the deadline; a write that fails then
-/// returns the named failure, since ssh has then exited or not read in time. After that frame,
-/// writes block as on any other transport.
+/// ssh's stdin. Until the first frame from the server is read whole, a write that finds the
+/// pipe full waits only until the deadline, and a write that fails returns the named failure,
+/// since ssh has then exited or not read in time. After that frame, a write waits until there
+/// is room, `shutdown` runs or ssh exits.
 struct SshWriter {
     input: ChildStdin,
     proc: Arc<Proc>,
-    /// The pipe has been set back to blocking.
-    blocking: bool,
-}
-
-impl SshWriter {
-    /// Waits until the pipe has room or the first frame has been read. `Err` with the named
-    /// failure at the deadline or when the pipe fails.
-    fn wait_writable(&self) -> io::Result<()> {
-        loop {
-            if self.proc.lifted.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            let left = self.proc.deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(self.proc.failed(true));
-            }
-            let slice = Timespec::try_from(left.min(WRITE_SLICE)).map_err(io::Error::other)?;
-            let mut fds = [PollFd::new(&self.input, PollFlags::OUT)];
-            match poll(&mut fds, Some(&slice)) {
-                Ok(0) | Err(Errno::INTR) => {}
-                Ok(_) => return Ok(()),
-                Err(_) => return Err(self.proc.failed(false)),
-            }
-        }
-    }
 }
 
 impl Write for SshWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         loop {
-            if self.proc.lifted.load(Ordering::Acquire) {
-                if !self.blocking {
-                    ioctl_fionbio(&self.input, false)?;
-                    self.blocking = true;
-                }
-                return self.input.write(buf);
-            }
-            match self.input.write(buf) {
+            let lifted = self.proc.lifted.load(Ordering::Acquire);
+            match rustix::io::write(&self.input, buf) {
                 Ok(n) => return Ok(n),
-                Err(e) if e.kind() == ErrorKind::WouldBlock => self.wait_writable()?,
-                Err(e) if e.kind() == ErrorKind::Interrupted => return Err(e),
+                Err(Errno::INTR) => continue,
+                Err(Errno::AGAIN) => {}
+                Err(e) if lifted => return Err(e.into()),
                 Err(_) => return Err(self.proc.failed(false)),
+            }
+            let until = if lifted {
+                None
+            } else {
+                let now = Instant::now();
+                if now >= self.proc.deadline {
+                    return Err(self.proc.failed(true));
+                }
+                Some(self.proc.deadline.min(now + WRITE_SLICE))
+            };
+            match self.proc.wait(&self.input, PollFlags::OUT, until) {
+                Ok(Woke::Ready | Woke::TimedOut) => {}
+                Ok(Woke::Stopped) => return Err(self.proc.closed()),
+                Ok(Woke::Exited) if lifted => {
+                    return Err(io::Error::new(ErrorKind::BrokenPipe, "ssh has exited"));
+                }
+                Err(e) if lifted => return Err(e),
+                Ok(Woke::Exited) | Err(_) => return Err(self.proc.failed(false)),
             }
         }
     }
