@@ -1919,6 +1919,35 @@ fn record_history_toast_and_engine_settings(cx: &mut TestAppContext) {
     assert_eq!(toast_texts(&mut r), ["History recording on"]);
 }
 
+/// The "History recording on" toast waits for the engine's Ack: a full queue or a conflict leave
+/// recording as it was and show no toast.
+#[gpui_kit::test]
+fn record_history_no_toast_when_the_write_fails(cx: &mut TestAppContext) {
+    let mut r = rig_with_toasts(cx);
+    tall_window(r.cx);
+    let record = |r: &mut Rig<'_>| {
+        keys(r.cx, "alt-s");
+        click_label(r.cx, "Record history");
+        draw(r.cx);
+        r.cx.run_until_parked();
+    };
+
+    r.engine.set_busy(true);
+    record(&mut r);
+    assert!(!host(&r).history.enabled);
+    assert!(toast_texts(&mut r).is_empty(), "queue full");
+    r.engine.set_busy(false);
+
+    r.engine
+        .change_host_settings_elsewhere(|v| v.history.retention_h = 12);
+    record(&mut r);
+    let writes = r.engine.host_writes();
+    assert_eq!(writes.len(), 1, "the conflicting write was sent");
+    assert!(!host(&r).history.enabled, "recording unchanged");
+    assert_eq!(host(&r).history.retention_h, 12, "the current values show");
+    assert!(toast_texts(&mut r).is_empty(), "conflict");
+}
+
 #[gpui_kit::test]
 fn history_storage_radio(cx: &mut TestAppContext) {
     let r = rig(cx);

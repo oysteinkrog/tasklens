@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::App;
+use gpui_kit::{App, AsyncApp};
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::{
     HostSettings, HostSettingsChanges, HostSettingsValues, SetHostSettingsReply,
@@ -70,12 +70,26 @@ pub fn read_key(values: &HostSettingsValues, key: SettingKey) -> Option<SettingV
 /// Writes `value` to the host key `key`. A kind mismatch, an integer that does not fit or a key
 /// that is not a host key logs a warning and sends nothing.
 pub fn set(cx: &mut App, key: SettingKey, value: &SettingValue) {
+    set_then(cx, key, value, |_| {});
+}
+
+/// As `set`, and calls `on_ack` once the engine applied the change (see `change_then`).
+pub fn set_then(
+    cx: &mut App,
+    key: SettingKey,
+    value: &SettingValue,
+    on_ack: impl FnOnce(&mut App) + 'static,
+) {
     let mut rejected = None;
-    change(cx, |v| {
-        if let Err(why) = assign(v, key, value) {
-            rejected = Some(why);
-        }
-    });
+    change_then(
+        cx,
+        |v| {
+            if let Err(why) = assign(v, key, value) {
+                rejected = Some(why);
+            }
+        },
+        on_ack,
+    );
     if let Some(why) = rejected {
         warn!(target: "tasklens::settings", key = key.as_str(), why, "set rejected");
     }
@@ -91,6 +105,17 @@ pub fn toggle(cx: &mut App, key: SettingKey) {
 /// Applies `f` to the current values and sends what changed to the host's engine, with the
 /// revision they came from. Sends nothing before the engine gave them, or when nothing changed.
 pub fn change(cx: &mut App, f: impl FnOnce(&mut HostSettingsValues)) {
+    change_then(cx, f, |_| {});
+}
+
+/// As `change`, and calls `on_ack` once the engine replied that it applied the change. It is
+/// not called when nothing was sent (not read yet, no change, a full queue, no engine), on a
+/// conflict, or when the connection dropped before the reply.
+pub fn change_then(
+    cx: &mut App,
+    f: impl FnOnce(&mut HostSettingsValues),
+    on_ack: impl FnOnce(&mut App) + 'static,
+) {
     let current = current(cx);
     if current.rev == 0 {
         debug!(target: "tasklens::settings", "host settings not read yet; change dropped");
@@ -113,14 +138,21 @@ pub fn change(cx: &mut App, f: impl FnOnce(&mut HostSettingsValues)) {
     };
     match client.set_host_settings(current.rev, changes) {
         Ok(reply) => {
-            cx.background_executor()
-                .spawn(async move {
-                    // The snapshot carries the result either way; a conflict is only logged.
-                    if let Ok(SetHostSettingsReply::Conflict { current }) = reply.recv().await {
-                        info!(target: "tasklens::settings", rev = current.rev, "host settings changed elsewhere; change not applied");
-                    }
-                })
-                .detach();
+            // The snapshot carries the values either way; a conflict or a lost reply is only
+            // logged.
+            cx.spawn(async move |cx: &mut AsyncApp| match reply.recv().await {
+                Ok(SetHostSettingsReply::Ack { rev }) => {
+                    debug!(target: "tasklens::settings", rev, "host settings changed");
+                    cx.update(on_ack);
+                }
+                Ok(SetHostSettingsReply::Conflict { current }) => {
+                    info!(target: "tasklens::settings", rev = current.rev, "host settings changed elsewhere; change not applied");
+                }
+                Err(_) => {
+                    info!(target: "tasklens::settings", "no reply to the host settings change");
+                }
+            })
+            .detach();
         }
         Err(e) => warn!(target: "tasklens::settings", "host settings not sent: {e:?}"),
     }

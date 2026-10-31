@@ -105,7 +105,8 @@ gpui_kit::actions!(
         ToggleStartAtLogin,
         /// Flips `startup.start_minimized`; rewrites the entry while Start at login is on.
         ToggleStartMinimized,
-        /// Flips `history.enabled` and shows the Info toast "History recording on" or "off".
+        /// Flips `history.enabled` and, once the engine applied it, shows the Info toast "History
+        /// recording on" or "off".
         ToggleRecordHistory,
         /// Asks, then installs the polkit rule; or removes it. `privilege.passwordless` follows
         /// the setup result.
@@ -147,13 +148,24 @@ pub fn init(cx: &mut App) {
             return;
         }
         let on = !host.values.history.enabled;
-        TlSettings::set(cx, SettingKey::HistoryEnabled, SettingValue::Bool(on));
         let key = if on {
             "shell-toast-history-on"
         } else {
             "shell-toast-history-off"
         };
-        info_toast(cx, key);
+        // The toast waits for the engine's Ack: a full queue, a conflict or a lost connection
+        // leave recording as it was, so they show no toast.
+        let window = cx.active_window();
+        host_settings::set_then(
+            cx,
+            SettingKey::HistoryEnabled,
+            &SettingValue::Bool(on),
+            move |cx| {
+                if let Some(window) = window {
+                    info_toast_in(window, cx, key);
+                }
+            },
+        );
     });
     cx.on_action(|a: &SetRenderingGpu, cx| {
         if settings_now(cx).rendering.gpu == a.0.as_ref() {
@@ -367,10 +379,14 @@ pub fn build(
 /// Pushes the Info toast `key` in the active window. Deferred: the window is busy dispatching
 /// the menu action.
 fn info_toast(cx: &mut App, key: &str) {
+    if let Some(handle) = cx.active_window() {
+        info_toast_in(handle, cx, key);
+    }
+}
+
+/// Pushes the Info toast `key` in `handle`'s window. Deferred, as `info_toast`.
+fn info_toast_in(handle: AnyWindowHandle, cx: &mut App, key: &str) {
     let text = tr(cx, key);
-    let Some(handle) = cx.active_window() else {
-        return;
-    };
     cx.defer(move |cx| {
         let _ = handle.update(cx, |_, window, cx| {
             if let Some(queue) = ToastQueue::of_window(window, cx) {
