@@ -282,9 +282,9 @@ fn remote_host_hours_behind_draws_points(cx: &mut TestAppContext) {
     let clock = HostClock::remote_with_local_shift((10 * HOUR) as i64);
     let pc_now = clock.local_now_ns();
     let (host_now, got) = draw_remote_chart(cx, clock, -((3 * HOUR) as i64));
-    assert_eq!(
-        pc_now - host_now,
-        3 * HOUR,
+    // `pc_now` was read a moment before the publish.
+    assert!(
+        (host_now + 3 * HOUR).abs_diff(pc_now) < 5 * S,
         "the host is 3 h behind this PC"
     );
     assert_points(host_now, got);
@@ -333,7 +333,9 @@ fn collector_health_ages_use_the_offset_learned_after_open(cx: &mut TestAppConte
         .expect("health frame");
     let mut vcx = VisualTestContext::from_window(handle.into(), cx);
 
-    // The host is 3 h ahead of this PC; its CPU source last had data 3 s ago on its clock.
+    // The host is 3 h ahead of this PC; its CPU source last had data 3.5 s ago on its clock.
+    // The window's ages move with the test executor's clock, which stands still, so the real
+    // time between open and publish makes the age a little short: 3.5 s reads "3s ago".
     let host_now = now_boot_ns() + 3 * HOUR;
     remote.publish_with(|s| {
         s.published_ns = host_now;
@@ -344,7 +346,7 @@ fn collector_health_ages_use_the_offset_learned_after_open(cx: &mut TestAppConte
         }
         health.sources[SourceId::Cpu.index()] = SourceHealth {
             state: SourceState::Running,
-            last_ok_ns: Some(host_now - 3 * S),
+            last_ok_ns: Some(host_now - 3_500 * MS),
             last_error: None,
             restarts: 0,
         };
