@@ -1040,3 +1040,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.15 held again: gate each snapshot part by the narrowest Demand field naming it; window visibility only for parts no field names; one table-driven test over every Demand field. Requeued.
 - 2026-10-31 q4x76.20 held again: cached streams keyed by (id, generation); events or Done from an older generation are dropped; sweep every cached receiver in session.rs. Requeued.
 - 2026-10-31 q4x76.15 round 6: delivery gate = any Demand field whose page reads the part (inventory: inventory or window; services: services, unit fields or process_table); collectors unchanged; sweep tl-ui readers. Requeued.
+- 2026-10-31 q4x76.15: option B confirmed; budget fixture must fill every delivered part. Runner: review prompt keeps Leader decisions whole (bead_brief). Requeued.
