@@ -487,7 +487,8 @@ impl Read for WelcomeReader {
         self.stream
             .set_read_timeout(Some(time_left(self.bound.deadline)?))?;
         let want = self.rest.unwrap_or(HEADER_LEN - self.filled);
-        let n = self.stream.read(&mut buf[..buf.len().min(want)])?;
+        let len = buf.len().min(want);
+        let n = self.stream.read(&mut buf[..len])?;
         match &mut self.rest {
             None => {
                 self.header[self.filled..self.filled + n].copy_from_slice(&buf[..n]);
