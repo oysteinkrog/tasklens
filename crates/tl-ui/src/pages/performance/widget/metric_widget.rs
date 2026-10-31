@@ -400,11 +400,20 @@ impl MetricWidget {
         if self.chart_key == Some(key) && self.chart.is_some() {
             return false;
         }
+        let old_format = self.chart_key.map(|k| k.format);
         self.chart_key = Some(key);
         let spec = chart_spec(key, self.chart_cell, &self.settings, current(cx));
         match &self.chart {
             Some(chart) => {
-                chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                // A new source can bring a new value format (percent to bytes): the labels
+                // follow it, not only the spec.
+                let labels = (old_format != Some(key.format)).then(|| spark_labels(key.format));
+                chart.update(cx, |v, cx| {
+                    v.set_spec(spec, cx);
+                    if let Some(labels) = labels {
+                        v.set_labels(labels, cx);
+                    }
+                });
                 false
             }
             None => {

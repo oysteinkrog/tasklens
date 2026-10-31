@@ -761,3 +761,40 @@ fn overview_widget_chart_follows_source_scale(cx: &mut TestAppContext) {
         "the widget itself shows nothing new"
     );
 }
+
+/// A source switch on a kept chart (percent to bytes) brings the new source's value format
+/// to the chart's labels, not only to its spec.
+#[gpui_kit::test]
+fn overview_widget_source_switch_updates_chart_labels(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let first = widget(
+        1,
+        selector(DeviceSelector::Key(key(1)), &engine_gpu()),
+        FormSet::CHART,
+    );
+    let w = r.add(first.clone(), 240., 120.);
+    let fmt = |r: &mut Rig| {
+        let view = r.read(&w, |w| w.chart().cloned()).expect("chart");
+        r.vcx.read_entity(&view, |v, _| v.labels.value_fmt)
+    };
+    let before = fmt(&mut r);
+    let view = r.read(&w, |w| w.chart().cloned()).expect("chart");
+
+    let vram = WidgetSetting {
+        source: selector(DeviceSelector::Key(key(1)), "vram"),
+        ..first
+    };
+    let store = &mut r.store;
+    r.vcx.update(|_, cx| {
+        let source = store.source(&vram.source, cx);
+        w.update(cx, |w, cx| w.set_setting(vram, source, cx));
+    });
+    draw(r.vcx);
+    let after = fmt(&mut r);
+    assert_ne!(before, after, "VRAM bytes, not the engine's percent");
+    assert_eq!(
+        r.read(&w, |w| w.chart().cloned()).map(|c| c.entity_id()),
+        Some(view.entity_id()),
+        "the chart entity is kept"
+    );
+}
