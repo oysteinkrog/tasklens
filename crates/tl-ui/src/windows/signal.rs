@@ -557,6 +557,7 @@ fn track_signal(
     targets: SmallVec<[ActionTarget; 1]>,
     names: TargetNames,
     queue: WeakEntity<ToastQueue>,
+    window: AnyWindowHandle,
     cx: &mut App,
 ) {
     let Some(signal) = signal(signo) else {
@@ -570,7 +571,7 @@ fn track_signal(
     let words = Rc::new(SignalWords::new(cx));
     let action_words = action_words(cx);
     tracker.update(cx, |tracker, cx| {
-        tracker.track_or_toast(
+        tracker.track_or_toast_in(
             ActionRequest {
                 id: tracker.next_id(),
                 kind: ActionKind::Signal(signal),
@@ -579,6 +580,8 @@ fn track_signal(
             },
             queue,
             toast_texts(words, action_words, signo, names),
+            Some(window),
+            None,
             cx,
         );
     });
@@ -647,7 +650,15 @@ pub fn send_signal(
         None
     };
     let Some(ask) = ask else {
-        track_signal(host, signo, targets, names, queue, cx);
+        track_signal(
+            host,
+            signo,
+            targets,
+            names,
+            queue,
+            window.window_handle(),
+            cx,
+        );
         return;
     };
     let parent = window.window_handle();
@@ -655,7 +666,7 @@ pub fn send_signal(
     cx.defer(move |cx| {
         confirm(ask, parent, cx, move |result, cx| {
             if result == ConfirmResult::Confirmed {
-                track_signal(&host, signo, targets, names, queue, cx);
+                track_signal(&host, signo, targets, names, queue, parent, cx);
             }
         });
     });

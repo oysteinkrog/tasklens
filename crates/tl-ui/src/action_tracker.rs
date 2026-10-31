@@ -564,8 +564,22 @@ impl ActionTracker {
         on_sent: Option<OnSentId>,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
+        self.track_or_toast_in(request, queue, texts, None, on_sent, cx)
+    }
+
+    /// [`Self::track_or_toast_then`] for an owner that knows its window: the root confirmation
+    /// opens on `window`. With `None` it opens on the active window.
+    pub fn track_or_toast_in(
+        &mut self,
+        request: ActionRequest,
+        queue: WeakEntity<ToastQueue>,
+        texts: ToastTexts,
+        window: Option<AnyWindowHandle>,
+        on_sent: Option<OnSentId>,
+        cx: &mut Context<Self>,
+    ) -> Option<ActionId> {
         if let Some(host) = self.remote_root_host(&request) {
-            self.confirm_then_send(request, queue, texts, host, on_sent, cx);
+            self.confirm_then_send(request, queue, texts, host, window, on_sent, cx);
             return None;
         }
         let id = self.send_or_toast(request, queue, texts, cx)?;
@@ -585,18 +599,20 @@ impl ActionTracker {
         }
     }
 
-    /// Opens the root confirmation in the active window and sends `request` when it is
-    /// confirmed. Cancel, Esc or no window to ask in sends nothing.
+    /// Opens the root confirmation in `window` (the active window when `None`) and sends
+    /// `request` when it is confirmed. Cancel, Esc or no window to ask in sends nothing.
+    #[allow(clippy::too_many_arguments)]
     fn confirm_then_send(
         &mut self,
         request: ActionRequest,
         queue: WeakEntity<ToastQueue>,
         texts: ToastTexts,
         host: Arc<str>,
+        window: Option<AnyWindowHandle>,
         on_sent: Option<OnSentId>,
         cx: &mut Context<Self>,
     ) {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = window.or_else(|| cx.active_window()) else {
             warn!(target: "tasklens::ui", "no window for the root confirmation; nothing sent");
             return;
         };
@@ -997,9 +1013,21 @@ impl ActionTracker {
         let Some((_, record)) = self.retries.remove(ix) else {
             return;
         };
-        if let Some(to) = self.track_or_toast(record.request, record.queue, record.texts, cx) {
-            cx.emit(ActionTrackerEvent::Retried { from: id, to });
-        }
+        // On a remote host the send waits for the confirmation, so `Retried` goes out when the
+        // send happens, with the id it got.
+        let this = cx.weak_entity();
+        let on_sent: OnSentId = Rc::new(move |to, cx| {
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(ActionTrackerEvent::Retried { from: id, to })
+            });
+        });
+        self.track_or_toast_then(
+            record.request,
+            record.queue,
+            record.texts,
+            Some(on_sent),
+            cx,
+        );
     }
 
     /// Whether finished request `id` has a "Retry as administrator" waiting. An owner that

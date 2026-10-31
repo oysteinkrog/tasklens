@@ -669,6 +669,11 @@ pub struct TlDialogView {
 }
 
 impl TlDialogView {
+    /// The window this confirmation is modal to.
+    pub fn parent(&self) -> AnyWindowHandle {
+        self.parent
+    }
+
     fn new(
         dialog: TlDialog,
         focus: DialogFocus,

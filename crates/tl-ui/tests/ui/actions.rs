@@ -1254,4 +1254,78 @@ mod remote_root {
         assert_eq!(got.borrow().len(), 1, "once, after the confirmation");
         assert_eq!(r.actions_sent().len(), 1);
     }
+
+    #[gpui_kit::test]
+    fn confirmed_remote_retry_still_emits_retried(cx: &mut TestAppContext) {
+        let mut r = rig(cx, Some(HelperState::Unlocked));
+        r.engine.publish_host_settings(|v| v.remote_admin = true);
+        r.vcx.run_until_parked();
+        let tracker = r.tracker.clone();
+        r.vcx
+            .update(|_, cx| tracker.update(cx, |t, _| t.set_remote_name(Arc::from("home"))));
+        let seen = events(&mut r);
+        let texts = ToastTexts {
+            retry_as_admin: true,
+            ..ToastTexts::new("", "Could not end task.")
+        };
+        let id = r.track(end_task(1), texts);
+        r.finish(id, &[ActionState::Failed(ActionError::PermissionDenied)]);
+        r.dispatch(RetryActionAsAdmin(id.0));
+        r.vcx.run_until_parked();
+        assert!(
+            !seen
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ActionTrackerEvent::Retried { .. })),
+            "not before the answer"
+        );
+        choose(&mut r, "TlDialogAction");
+        let sent = r.actions_sent();
+        assert_eq!(sent.len(), 2);
+        let to = sent[1].id;
+        assert!(
+            seen.borrow()
+                .contains(&ActionTrackerEvent::Retried { from: id, to }),
+            "Retried names the retry's own id"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_confirmation_opens_on_the_window_that_asked(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        let owner: AnyWindowHandle = r.vcx.window.into();
+        // Another window becomes the active one.
+        let other = r.vcx.update(|_, cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let host = cx.new(|_| Host);
+                Root::new(host, window, cx)
+            })
+            .unwrap()
+        });
+        r.vcx.update(|_, cx| {
+            other
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap()
+        });
+        r.vcx.run_until_parked();
+        let (queue, tracker) = (r.queue.downgrade(), r.tracker.clone());
+        r.vcx.update(|_, cx| {
+            tracker.update(cx, |t, cx| {
+                t.track_or_toast_in(
+                    privileged_end_task(),
+                    queue,
+                    ToastTexts::new("", "Could not end task."),
+                    Some(owner),
+                    None,
+                    cx,
+                )
+            })
+        });
+        r.vcx.run_until_parked();
+        let open = dialogs(&mut r);
+        assert_eq!(open.len(), 1);
+        let parent = open[0].1.read_with(&r.vcx, |v, _| v.parent());
+        assert_eq!(parent, owner, "modal to the asking window");
+        assert_ne!(parent, other.into(), "not the active window");
+    }
 }
