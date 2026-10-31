@@ -75,6 +75,43 @@ pub const BACKOFF: [Duration; 6] = [
     Duration::from_secs(30),
 ];
 
+/// One step of the client, reported in the order it happened by `RemoteClient::observe`
+/// (`test-hooks`). A test waits for the exact step it then asserts on.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Observed {
+    /// A frame was applied and stored; the wake token follows.
+    SnapshotInstalled { generation: u64, frame: u64 },
+    /// The first snapshot of session `generation` was stored, so `generation()` returns it.
+    Generation(u64),
+    /// `Ack { frame }` waits on the control path.
+    AckQueued(u64),
+    /// `Ack { frame }` was written to the stream.
+    AckWritten(u64),
+    /// A request end was passed to `request_events`.
+    RequestEnded(RequestEvent),
+    /// The session lost its link, and the ends of its open requests were passed on.
+    SessionEnded(u64),
+}
+
+/// The queue behind `RemoteClient::observe` (`test-hooks`).
+#[cfg(feature = "test-hooks")]
+#[derive(Clone)]
+struct Observer {
+    tx: async_channel::Sender<Observed>,
+    rx: async_channel::Receiver<Observed>,
+}
+
+/// Reports a step to the client's `Observer`. Compiles to nothing without `test-hooks`.
+macro_rules! observe {
+    ($observer:expr, $step:expr) => {
+        #[cfg(feature = "test-hooks")]
+        {
+            let _ = $observer.tx.try_send($step);
+        }
+    };
+}
+
 /// One open connection to an engine: the two halves of one byte stream.
 pub struct Connection {
     pub reader: Box<dyn Read + Send>,
@@ -152,6 +189,8 @@ struct Shared {
     requests_tx: async_channel::Sender<RequestEvent>,
     requests_rx: async_channel::Receiver<RequestEvent>,
     state: Mutex<State>,
+    #[cfg(feature = "test-hooks")]
+    observer: Observer,
 }
 
 /// The stored snapshot with the session it came from, swapped as one value so a reader never
@@ -234,6 +273,11 @@ impl RemoteClient {
                 status: Some(LinkStatus::Connecting),
                 ..State::default()
             }),
+            #[cfg(feature = "test-hooks")]
+            observer: {
+                let (tx, rx) = async_channel::unbounded();
+                Observer { tx, rx }
+            },
         });
         let (stop_tx, stop_rx) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
@@ -256,6 +300,13 @@ impl RemoteClient {
     /// The engine of the newest session, from its `Welcome`.
     pub fn host(&self) -> Option<HostIdentity> {
         lock(&self.shared.state).host.clone()
+    }
+
+    /// Every step the client takes from its start, in order. Each receiver shares one queue,
+    /// so a step goes to one of them.
+    #[cfg(feature = "test-hooks")]
+    pub fn observe(&self) -> async_channel::Receiver<Observed> {
+        self.shared.observer.rx.clone()
     }
 }
 
@@ -521,21 +572,31 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                     generation: session,
                     snap: Arc::new(snap),
                 }));
+                observe!(
+                    shared.observer,
+                    Observed::SnapshotInstalled {
+                        generation: session,
+                        frame: frame.frame,
+                    }
+                );
                 let _ = shared.wake_tx.try_send(());
                 installed_frame = frame.frame;
                 let mut st = lock(&shared.state);
                 if first {
                     st.status = Some(LinkStatus::Connected);
                     first = false;
+                    observe!(shared.observer, Observed::Generation(session));
                 }
                 if let Some(link) = &st.link {
                     link.control(ClientMsg::Ack { frame: frame.frame });
+                    observe!(shared.observer, Observed::AckQueued(frame.frame));
                 }
             }
             ServerMsg::Action(ev) => send_event(shared, ev),
             ServerMsg::Request(ev) => {
                 let mut st = lock(&shared.state);
                 if take_pending(&mut st.pending, (ev.kind, ev.id)) {
+                    observe!(shared.observer, Observed::RequestEnded(ev));
                     let _ = shared.requests_tx.try_send(ev);
                 }
             }
@@ -551,6 +612,7 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
     }
     shutdown();
     end_session(shared, &host_name);
+    observe!(shared.observer, Observed::SessionEnded(session));
     Ok(())
 }
 
@@ -596,6 +658,8 @@ struct WriterInputs {
     commands: async_channel::Receiver<ClientMsg>,
     demand: Arc<Mutex<Option<Demand>>>,
     doorbell: async_channel::Receiver<()>,
+    #[cfg(feature = "test-hooks")]
+    observer: Observer,
 }
 
 /// Opens session state for a new connection and queues the session state to send first: the
@@ -636,6 +700,8 @@ fn open_link(shared: &Shared, identity: HostIdentity) -> (u64, WriterInputs) {
             commands,
             demand,
             doorbell,
+            #[cfg(feature = "test-hooks")]
+            observer: shared.observer.clone(),
         },
     )
 }
@@ -665,11 +731,13 @@ fn end_session(shared: &Shared, host_name: &str) {
                     },
                 );
             }
-            let _ = shared.requests_tx.try_send(RequestEvent {
+            let end = RequestEvent {
                 kind,
                 id,
                 end: RequestEnd::Lost,
-            });
+            };
+            observe!(shared.observer, Observed::RequestEnded(end));
+            let _ = shared.requests_tx.try_send(end);
         }
     }
 }
@@ -741,6 +809,10 @@ fn write_loop(mut writer: Box<dyn Write + Send>, inputs: &WriterInputs) -> io::R
                 .encode_client(&msg, &mut out)
                 .map_err(io::Error::other)?;
             writer.write_all(&out)?;
+            #[cfg(feature = "test-hooks")]
+            if let ClientMsg::Ack { frame } = msg {
+                let _ = inputs.observer.tx.try_send(Observed::AckWritten(frame));
+            }
         }
         writer.flush()?;
     }

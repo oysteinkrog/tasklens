@@ -14,6 +14,12 @@ zstd.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+# The crate's own tests always build with its test hooks.
+tl-remote = { workspace = true, features = ["test-hooks"] }
+
+[features]
+# `RemoteClient::observe`: the client's steps in order, for tests (ADR-013).
+test-hooks = []
 
 [lints]
 workspace = true

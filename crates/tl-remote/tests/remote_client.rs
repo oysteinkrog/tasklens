@@ -2,13 +2,16 @@
 //! wake and `Ack` order, the bounded command queue, a connection lost during requests, a new
 //! engine instance, generation and snapshot read together, action summaries with a full event
 //! queue, and journal close.
+//!
+//! A test waits for the exact step it then asserts on, through the client's `observe` steps or
+//! the channel it reads, never for an earlier step that only usually comes first.
 
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
 #![allow(clippy::unwrap_used)]
 
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -28,10 +31,13 @@ use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{Manager, TableQuery, UnitRef};
 use tl_model::time::BootId;
-use tl_remote::client::{ACTION_EVENTS, ClientConfig, Connection, LinkStatus, RemoteClient};
+use tl_remote::client::{
+    ACTION_EVENTS, ClientConfig, Connection, LinkStatus, Observed, RemoteClient,
+};
 use tl_remote::delta::DeltaEncoder;
 use tl_remote::envelope::{FrameReader, FrameWriter};
 
+/// At least the 2 s floor for wall-clock limits in tests (tasklens-cr0.32).
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Polls `f` until it returns `Some`, for at most `TIMEOUT`.
@@ -48,6 +54,22 @@ fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 
 fn recv<T>(what: &str, rx: &async_channel::Receiver<T>) -> T {
     wait_for(what, || rx.try_recv().ok())
+}
+
+/// Waits for the client to report a step that `pick` accepts. Steps before it are skipped.
+fn wait_step<T>(
+    what: &str,
+    steps: &async_channel::Receiver<Observed>,
+    mut pick: impl FnMut(&Observed) -> Option<T>,
+) -> T {
+    wait_for(what, || {
+        while let Ok(step) = steps.try_recv() {
+            if let Some(v) = pick(&step) {
+                return Some(v);
+            }
+        }
+        None
+    })
 }
 
 /// A client whose connector hands out the connections a test pushes, with a 10 ms backoff.
@@ -186,6 +208,7 @@ fn is_command(msg: &ClientMsg, f: impl Fn(&Command) -> bool) -> bool {
 #[test]
 fn snapshot_installed_before_wake_and_ack() {
     let (client, conns) = client();
+    let steps = client.observe();
     let wake = client.wake();
     assert_eq!(client.latest().sequence, 0);
     assert_eq!(client.generation(), 0);
@@ -201,6 +224,23 @@ fn snapshot_installed_before_wake_and_ack() {
     assert_eq!(client.generation(), 1);
     assert_eq!(client.status(), LinkStatus::Connected);
     assert_eq!(&*client.host().unwrap().host_name, "home");
+    let mut order = Vec::new();
+    wait_step("the Ack written", &steps, |s| {
+        order.push(s.clone());
+        (*s == Observed::AckWritten(first)).then_some(())
+    });
+    assert_eq!(
+        order,
+        [
+            Observed::SnapshotInstalled {
+                generation: 1,
+                frame: first,
+            },
+            Observed::Generation(1),
+            Observed::AckQueued(first),
+            Observed::AckWritten(first),
+        ]
+    );
 
     // The next frame is a delta against the acknowledged one.
     let (second, base) = server.publish(&snapshot(2, 101));
@@ -272,6 +312,7 @@ fn gated_server(conns: &mpsc::Sender<Connection>) -> (Server, Arc<Gate>) {
 #[test]
 fn full_queue_is_busy_and_ack_goes_first() {
     let (client, conns) = client();
+    let steps = client.observe();
     assert_eq!(
         client.send(Command::ResetBaselines),
         Err(CommandError::EngineStopped)
@@ -290,10 +331,11 @@ fn full_queue_is_busy_and_ack_goes_first() {
     }
     assert_eq!(client.send(action(1)), Err(CommandError::Busy));
 
-    // An Ack travels on the control path, ahead of the 64 queued commands.
+    // An Ack travels on the control path, ahead of the 64 queued commands. The gate opens only
+    // once it waits there.
     let (frame, _) = server.publish(&snapshot(2, 101));
-    wait_for("the second snapshot", || {
-        (client.latest().sequence == 2).then_some(())
+    wait_step("the Ack queued", &steps, |s| {
+        (*s == Observed::AckQueued(frame)).then_some(())
     });
     gate.set(false);
     assert!(is_command(&server.recv(), |c| matches!(
@@ -309,9 +351,13 @@ fn full_queue_is_busy_and_ack_goes_first() {
     }
     // The refused action was never counted: a drop ends nothing for it.
     drop(server);
-    wait_for("the drop", || {
-        (client.send(Command::ResetBaselines) == Err(CommandError::EngineStopped)).then_some(())
+    wait_step("the session end", &steps, |s| {
+        (*s == Observed::SessionEnded(1)).then_some(())
     });
+    assert_eq!(
+        client.send(Command::ResetBaselines),
+        Err(CommandError::EngineStopped)
+    );
     assert!(client.request_events().try_recv().is_err());
 }
 
@@ -421,22 +467,23 @@ fn engine_instance_change_starts_a_new_generation() {
     assert_eq!(client.generation(), 1);
     assert_eq!(client.status(), LinkStatus::Connecting);
 
+    // The session state goes to the new session: demand, then the table query. They are read
+    // before the first snapshot is sent, since its Ack may pass them on the control path.
+    assert!(matches!(server.recv(), ClientMsg::SetDemand(d) if d == demand));
+    assert!(is_command(&server.recv(), |c| matches!(
+        c,
+        Command::SetTableQuery(q) if *q == query
+    )));
+
     // The new engine's versions start over and reach the same value with other data.
     let (_, base) = server.publish(&snapshot(5, 200));
     assert_eq!(base, 0);
     let (_, before) = server.ack();
+    assert!(before.is_empty(), "{before:?}");
     let latest = client.latest();
     assert_eq!((latest.sequence, latest.system.boot_time_s), (2, 200));
     assert_eq!(client.generation(), 2);
     assert_eq!(client.status(), LinkStatus::Connected);
-
-    // The session state went to the new session first: demand, then the table query.
-    assert_eq!(before.len(), 2, "{before:?}");
-    assert!(matches!(&before[0], ClientMsg::SetDemand(d) if *d == demand));
-    assert!(is_command(&before[1], |c| matches!(
-        c,
-        Command::SetTableQuery(q) if *q == query
-    )));
 }
 
 #[test]
@@ -444,11 +491,14 @@ fn generation_and_snapshot_are_read_together() {
     let (client, conns) = client();
     let client = Arc::new(client);
     let stop = Arc::new(AtomicBool::new(false));
+    // The newest generation the reader has read.
+    let seen = Arc::new(AtomicU64::new(0));
     // Reads while the client moves to a new engine instance. Each pair must hold that
     // generation's own data, or the hub would install old data under the new generation.
     let reader = {
         let client = Arc::clone(&client);
         let stop = Arc::clone(&stop);
+        let seen = Arc::clone(&seen);
         std::thread::spawn(move || {
             let mut newest = 0;
             while !stop.load(Ordering::Acquire) {
@@ -461,6 +511,7 @@ fn generation_and_snapshot_are_read_together() {
                 };
                 assert_eq!(snap.system.boot_time_s, expected, "generation {generation}");
                 newest = newest.max(generation);
+                seen.store(newest, Ordering::Release);
             }
             newest
         })
@@ -472,6 +523,11 @@ fn generation_and_snapshot_are_read_together() {
     let mut server = Server::connect(&conns, "home", 2);
     server.publish(&snapshot(5, 200));
     server.ack();
+    // The reader stops only after it has read generation 2 itself. If it panicked, the join
+    // below passes its message on.
+    wait_for("the reader to read generation 2", || {
+        (seen.load(Ordering::Acquire) == 2 || reader.is_finished()).then_some(())
+    });
     stop.store(true, Ordering::Release);
     assert_eq!(reader.join().unwrap(), 2);
     assert_eq!(client.generation(), 2);
