@@ -2026,6 +2026,7 @@ fn settings_p2_page_list(cx: &mut TestAppContext) {
             PageId::Services,
             PageId::StartupWindow,
             PageId::Privileges,
+            PageId::Hosts,
             PageId::Advanced,
         ]
     );
@@ -2042,7 +2043,8 @@ fn privileges_page_position(cx: &mut TestAppContext) {
         .position(|id| *id == PageId::Privileges)
         .expect("Privileges listed");
     assert_eq!(ids[at - 1], PageId::StartupWindow);
-    assert_eq!(ids[at + 1], PageId::Advanced);
+    assert_eq!(ids[at + 1], PageId::Hosts);
+    assert_eq!(ids[at + 2], PageId::Advanced);
 }
 
 #[gpui_kit::test]

@@ -205,11 +205,7 @@ fn draw(vcx: &mut VisualTestContext) {
 #[gpui_kit::test]
 fn settings_hosts_add_edit_remove_update_settings_and_tabs(cx: &mut TestAppContext) {
     let mut rig = boot(cx, &["home"]);
-    assert_eq!(
-        rig.tab_names(),
-        Vec::<String>::new(),
-        "one remote: tabs show"
-    );
+    assert_eq!(rig.tab_names().len(), 2, "the local host and home");
     let (editor, mut svcx) = rig.open_settings(cx);
     assert_eq!(editor.read_with(&svcx, |e, _| e.row_count()), 1);
 

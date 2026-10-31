@@ -277,7 +277,10 @@ impl TlSettings {
         let state_changed = current.state != next.state;
         let language_changed = current.settings.general.language != next.settings.general.language;
         let unpersisted = cx.global::<TlSettings>().unpersisted;
-        if changed.is_empty() && !state_changed && !(persist && unpersisted) {
+        // `[[hosts]]` is in no section: it has no version, but a change must still be saved
+        // and announced (the main window adds and removes host tabs from it).
+        let hosts_changed = current.settings.hosts != next.settings.hosts;
+        if changed.is_empty() && !state_changed && !hosts_changed && !(persist && unpersisted) {
             return;
         }
 
