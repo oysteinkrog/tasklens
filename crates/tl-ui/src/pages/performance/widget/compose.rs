@@ -1,0 +1,332 @@
+//! Widget compositions (UI-PRF-061, ADR-019): the fixed arrangement a widget uses for its forms
+//! at its size, the minimum size of each, and the order a narrow Row drops its parts in.
+//!
+//! A widget uses the first composition that fits its forms and size:
+//!
+//! - **Cell**: the widget shows a chart and is at least the Cell minimum. A header line with the
+//!   name and the value, the stats line, the bar, then the chart filling the rest.
+//! - **Tile**: no chart, and at least the Tile minimum. The name, the value under it in large
+//!   text, the stats line, and the bar along the bottom.
+//! - **Row**: everything else, and the fallback when the widget is below its other minimum. One
+//!   line: name, bar, value, stats, and a sparkline of the chart.
+//!
+//! A Row narrower than its parts drops them in this order: stats, then the bar (the sparkline
+//! takes the bar's place), then the sparkline, then the name. The value stays. The last form a
+//! widget has is never dropped.
+//!
+//! Every size here is logical px at `ui_scale_pct = 100`; the functions take the UI scale and
+//! multiply. This module does no drawing and keeps no state.
+
+use gpui_kit::{Pixels, Size, px, size};
+use tl_model::layout::FormSet;
+
+/// The header line of a Cell: name at the left, value at the right.
+pub const CELL_HEADER_H: f32 = 18.;
+/// The stats line of a Cell.
+pub const CELL_STATS_H: f32 = 16.;
+/// The bar of a Cell: `METER_H` 6 px with 4 px above and below.
+pub const CELL_BAR_H: f32 = 14.;
+/// The space above and below the bar of a Cell.
+pub const CELL_BAR_PAD: f32 = 4.;
+/// The smallest chart a Cell draws.
+pub const CELL_CHART_MIN_H: f32 = 30.;
+/// The narrowest Cell.
+pub const CELL_MIN_W: f32 = 120.;
+
+/// The name and value of a Tile.
+pub const TILE_BASE_H: f32 = 40.;
+/// The stats line of a Tile.
+pub const TILE_STATS_H: f32 = 16.;
+/// The bar of a Tile.
+pub const TILE_BAR_H: f32 = 10.;
+/// The narrowest Tile.
+pub const TILE_MIN_W: f32 = 96.;
+
+/// The line of a Row. A taller Row grows its bar and sparkline (D-040).
+pub const ROW_H: f32 = 18.;
+/// The name column of a Row, its trailing space included.
+pub const ROW_NAME_W: f32 = 72.;
+/// The narrowest bar a Row keeps.
+pub const ROW_BAR_MIN_W: f32 = 40.;
+/// The value column of a Row.
+pub const ROW_VALUE_W: f32 = 48.;
+/// The stats column of a Row ("min 6%  avg 42%  peak 100%" at `t_xs`).
+pub const ROW_STATS_W: f32 = 160.;
+/// The sparkline column of a Row next to a bar (`parts::SPARK_W`). Without a bar the sparkline
+/// takes the bar's place and is as narrow as a bar may be.
+pub const ROW_SPARK_W: f32 = 96.;
+/// The gap between the parts of a Row after the name.
+pub const ROW_GAP: f32 = 8.;
+/// The narrowest Row with a name.
+pub const ROW_MIN_W_NAME: f32 = 120.;
+/// The narrowest Row without a name.
+pub const ROW_MIN_W: f32 = 48.;
+
+/// The order a narrow Row drops its parts in. CHART stands for the sparkline.
+pub const ROW_DROP_ORDER: [FormSet; 4] =
+    [FormSet::STATS, FormSet::BAR, FormSet::CHART, FormSet::LABEL];
+
+/// The three arrangements of UI-PRF-061.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Composition {
+    Cell,
+    Tile,
+    Row,
+}
+
+/// What a widget draws at its size: the composition and the forms it keeps there. In a Row,
+/// CHART is the sparkline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Composed {
+    pub composition: Composition,
+    pub forms: FormSet,
+}
+
+impl Composed {
+    /// A number that changes when the composition or the kept forms change: the class the
+    /// widget's size probe compares (`parts::class_probe`).
+    pub fn class(self) -> u32 {
+        let c = match self.composition {
+            Composition::Cell => 0,
+            Composition::Tile => 1,
+            Composition::Row => 2,
+        };
+        c | (u32::from(self.forms.bits()) << 2)
+    }
+}
+
+/// The smallest Cell for `forms`, logical px: 120 wide, 30 for the chart plus 18 for the header
+/// (with a name or a value), 16 for stats and 14 for the bar.
+pub fn cell_min(forms: FormSet) -> Size<f32> {
+    let mut h = CELL_CHART_MIN_H;
+    if forms.intersects(FormSet::LABEL | FormSet::VALUE) {
+        h += CELL_HEADER_H;
+    }
+    if forms.contains(FormSet::STATS) {
+        h += CELL_STATS_H;
+    }
+    if forms.contains(FormSet::BAR) {
+        h += CELL_BAR_H;
+    }
+    size(CELL_MIN_W, h)
+}
+
+/// The smallest Tile for `forms`, logical px: 96 × 40, plus 16 for stats and 10 for the bar.
+pub fn tile_min(forms: FormSet) -> Size<f32> {
+    let mut h = TILE_BASE_H;
+    if forms.contains(FormSet::STATS) {
+        h += TILE_STATS_H;
+    }
+    if forms.contains(FormSet::BAR) {
+        h += TILE_BAR_H;
+    }
+    size(TILE_MIN_W, h)
+}
+
+/// The smallest Row for `forms`, logical px: 120 wide with a name, else 48, and 18 high.
+pub fn row_min(forms: FormSet) -> Size<f32> {
+    let w = if forms.contains(FormSet::LABEL) {
+        ROW_MIN_W_NAME
+    } else {
+        ROW_MIN_W
+    };
+    size(w, ROW_H)
+}
+
+/// The smallest size of `composition` for `forms`, logical px.
+pub fn min_size(composition: Composition, forms: FormSet) -> Size<f32> {
+    match composition {
+        Composition::Cell => cell_min(forms),
+        Composition::Tile => tile_min(forms),
+        Composition::Row => row_min(forms),
+    }
+}
+
+/// The smallest composition of `forms`, logical px: a Row. The inner grid takes its minimum
+/// span from this (ADR-019 "Minimum span").
+pub fn smallest(forms: FormSet) -> Size<f32> {
+    row_min(forms)
+}
+
+/// The width the parts of a Row with `forms` take, logical px. The name column carries its
+/// own trailing space; every other part after the first adds a gap. With a bar the sparkline
+/// is a fixed column; without one it takes the bar's place at a bar's minimum width.
+pub fn row_parts_w(forms: FormSet) -> f32 {
+    let mut parts: [f32; 4] = [0.; 4];
+    let mut n = 0;
+    let mut push = |w: f32| {
+        parts[n] = w;
+        n += 1;
+    };
+    if forms.contains(FormSet::BAR) {
+        push(ROW_BAR_MIN_W);
+    }
+    if forms.contains(FormSet::VALUE) {
+        push(ROW_VALUE_W);
+    }
+    if forms.contains(FormSet::STATS) {
+        push(ROW_STATS_W);
+    }
+    if forms.contains(FormSet::CHART) {
+        push(if forms.contains(FormSet::BAR) {
+            ROW_SPARK_W
+        } else {
+            ROW_BAR_MIN_W
+        });
+    }
+    let rest: f32 = parts[..n].iter().sum::<f32>() + ROW_GAP * n.saturating_sub(1) as f32;
+    let name = if forms.contains(FormSet::LABEL) {
+        ROW_NAME_W
+    } else {
+        0.
+    };
+    name + rest
+}
+
+/// The forms a Row `width` logical px wide keeps: parts are dropped in [`ROW_DROP_ORDER`] until
+/// the rest fit. The last form is never dropped.
+pub fn row_forms(forms: FormSet, width: f32) -> FormSet {
+    let mut kept = forms;
+    for part in ROW_DROP_ORDER {
+        if row_parts_w(kept) <= width {
+            break;
+        }
+        let less = kept - part;
+        if kept.contains(part) && !less.is_empty() {
+            kept = less;
+        }
+    }
+    kept
+}
+
+/// The composition of a widget with `forms` at `area` (window px) and UI scale `scale`.
+pub fn compose(forms: FormSet, area: Size<Pixels>, scale: f32) -> Composed {
+    let scale = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    let w = f32::from(area.width) / scale;
+    let h = f32::from(area.height) / scale;
+    let fits = |min: Size<f32>| w >= min.width && h >= min.height;
+    if forms.contains(FormSet::CHART) && fits(cell_min(forms)) {
+        return Composed {
+            composition: Composition::Cell,
+            forms,
+        };
+    }
+    if !forms.contains(FormSet::CHART) && !forms.is_empty() && fits(tile_min(forms)) {
+        return Composed {
+            composition: Composition::Tile,
+            forms,
+        };
+    }
+    Composed {
+        composition: Composition::Row,
+        forms: row_forms(forms, w),
+    }
+}
+
+/// [`min_size`] in window px at UI scale `scale`.
+pub fn min_px(composition: Composition, forms: FormSet, scale: f32) -> Size<Pixels> {
+    let s = min_size(composition, forms);
+    size(px(s.width * scale), px(s.height * scale))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(forms: FormSet, w: f32, h: f32, scale: f32) -> Composed {
+        compose(forms, size(px(w), px(h)), scale)
+    }
+
+    #[test]
+    fn cell_at_its_minimum_and_larger() {
+        for forms in [
+            FormSet::CHART,
+            FormSet::CHART | FormSet::LABEL | FormSet::VALUE,
+            FormSet::all(),
+        ] {
+            let min = cell_min(forms);
+            for scale in [1.0, 1.5, 2.0] {
+                let (w, h) = (min.width * scale, min.height * scale);
+                assert_eq!(at(forms, w, h, scale).composition, Composition::Cell);
+                assert_eq!(at(forms, w, h, scale).forms, forms);
+                assert_eq!(
+                    at(forms, w * 3., h * 4., scale).composition,
+                    Composition::Cell
+                );
+                assert_eq!(
+                    at(forms, w - 1., h, scale).composition,
+                    Composition::Row,
+                    "{forms:?} narrower than a Cell"
+                );
+                assert_eq!(at(forms, w, h - 1., scale).composition, Composition::Row);
+            }
+        }
+        assert_eq!(cell_min(FormSet::CHART), size(120., 30.));
+        assert_eq!(cell_min(FormSet::all()), size(120., 30. + 18. + 16. + 14.));
+    }
+
+    #[test]
+    fn tile_at_its_minimum_and_larger() {
+        let forms = FormSet::LABEL | FormSet::VALUE | FormSet::STATS | FormSet::BAR;
+        assert_eq!(tile_min(forms), size(96., 66.));
+        assert_eq!(tile_min(FormSet::VALUE), size(96., 40.));
+        assert_eq!(at(forms, 96., 66., 1.).composition, Composition::Tile);
+        assert_eq!(at(forms, 400., 200., 1.).composition, Composition::Tile);
+        assert_eq!(at(forms, 144., 99., 1.5).composition, Composition::Tile);
+        assert_eq!(at(forms, 95., 66., 1.).composition, Composition::Row);
+        assert_eq!(at(forms, 96., 65., 1.).composition, Composition::Row);
+    }
+
+    #[test]
+    fn row_is_the_fallback() {
+        let forms = FormSet::LABEL | FormSet::VALUE;
+        assert_eq!(row_min(forms), size(120., 18.));
+        assert_eq!(row_min(FormSet::VALUE), size(48., 18.));
+        assert_eq!(smallest(forms), row_min(forms));
+        let r = at(forms, 120., 18., 1.);
+        assert_eq!(r.composition, Composition::Row);
+        assert_eq!(r.forms, forms, "a name and a value fit at the Row minimum");
+        let r = at(FormSet::VALUE, 48., 18., 1.);
+        assert_eq!(r.forms, FormSet::VALUE);
+    }
+
+    #[test]
+    fn narrow_row_drop_order() {
+        let all = FormSet::all();
+        let full = row_parts_w(all);
+        assert_eq!(row_forms(all, full), all);
+        let no_stats = all - FormSet::STATS;
+        assert_eq!(row_forms(all, full - 1.), no_stats);
+        let w = row_parts_w(no_stats);
+        // Then the bar: the sparkline takes its place.
+        let no_bar = no_stats - FormSet::BAR;
+        assert_eq!(row_forms(all, w - 1.), no_bar);
+        assert!(row_parts_w(no_bar) < w);
+        // Then the sparkline, then the name. The value stays.
+        let no_spark = no_bar - FormSet::CHART;
+        assert_eq!(row_forms(all, row_parts_w(no_bar) - 1.), no_spark);
+        assert_eq!(row_forms(all, row_parts_w(no_spark) - 1.), FormSet::VALUE);
+        assert_eq!(row_forms(all, 1.), FormSet::VALUE);
+        // The last form stays even when it does not fit.
+        assert_eq!(
+            row_forms(FormSet::LABEL | FormSet::BAR, 10.),
+            FormSet::LABEL
+        );
+        assert_eq!(row_forms(FormSet::BAR, 1.), FormSet::BAR);
+    }
+
+    #[test]
+    fn class_follows_composition_and_forms() {
+        let a = at(FormSet::all(), 400., 300., 1.);
+        let b = at(FormSet::all(), 401., 300., 1.);
+        assert_eq!(a.class(), b.class());
+        let row = at(FormSet::all(), 400., 18., 1.);
+        assert_ne!(a.class(), row.class());
+        let narrow = at(FormSet::all(), 130., 18., 1.);
+        assert_ne!(row.class(), narrow.class());
+    }
+}
