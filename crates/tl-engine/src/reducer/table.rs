@@ -1093,8 +1093,8 @@ fn worse(a: Validity, b: Validity) -> Validity {
 ///
 /// The identity fields are a starting point the grouped builder overwrites: node
 /// `NodeId::Group` of the cgroup's (else the first member's) group key, kind `Unit` when `unit`
-/// is given and `App` otherwise, class, name and icon of the first member that has an app id,
-/// else of the first member.
+/// is given and `App` otherwise, class, name and icon of the primary member (the same rule the
+/// grouped builder uses for the name).
 pub fn aggregate(
     records: &[ProcessRecord],
     members: &[u32],
