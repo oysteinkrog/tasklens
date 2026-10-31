@@ -9,6 +9,7 @@ use crate::actions::ActionEvent;
 use crate::command::{Command, CommandError};
 use crate::demand::Demand;
 use crate::journal::{JournalHandle, JournalQuery};
+use crate::remote_proto::{HostSettingsChanges, SetHostSettingsReply};
 use crate::request::RequestEvent;
 use crate::settings::EngineSettings;
 use crate::snapshot::Snapshot;
@@ -43,6 +44,22 @@ pub trait EngineClient: Send + Sync + 'static {
     fn set_demand(&self, demand: Demand);
     /// Replace engine settings. Never blocks. Last value wins.
     fn set_settings(&self, settings: EngineSettings);
+    /// Changes the host settings (ADR-018 Settings). `base_rev` is the `rev` of the
+    /// `Snapshot.host_settings` the change was made from, so a client never writes values it
+    /// has not read: the engine applies `changes` only when `base_rev` is its current revision.
+    /// Never blocks. The reply comes on the returned channel: `Ack { rev }` with the new
+    /// revision, or `Conflict { current }`. The new values reach every session in its next
+    /// snapshot either way. The channel closes with no reply when the connection drops first.
+    /// `Err(Busy)` when the queue is full. The default is `Err(EngineStopped)`: a client with no
+    /// engine behind it has no host settings.
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        let _ = (base_rev, changes);
+        Err(CommandError::EngineStopped)
+    }
     /// Queue a command. Never blocks. Err(Busy) when the queue is full.
     fn send(&self, cmd: Command) -> Result<(), CommandError>;
     /// Open a journal stream for one unit. The engine runs journalctl and batches entries at most
@@ -129,6 +146,15 @@ mod tests {
         assert_eq!(NullClient::new().generation(), 0);
         let (generation, snap) = NullClient::new().latest_with_generation();
         assert_eq!((generation, snap.sequence), (0, 0));
+    }
+
+    #[test]
+    fn default_set_host_settings_is_stopped() {
+        let client = NullClient::new();
+        assert!(matches!(
+            client.set_host_settings(1, HostSettingsChanges::default()),
+            Err(CommandError::EngineStopped)
+        ));
     }
 
     #[test]

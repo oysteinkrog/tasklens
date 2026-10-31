@@ -18,6 +18,7 @@ use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{
     AppCgroupSample, Coverage, LowMemoryInfo, ProcessExtras, ProcessExtrasP2, ProcessRecord,
 };
+use crate::remote_proto::HostSettings;
 use crate::series::SeriesView;
 use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, NetTotals,
@@ -40,7 +41,7 @@ pub struct ComponentHeader {
 /// One bit per `Snapshot` component, computed by the UI hub (ADR-005). Never stored, so the bit
 /// positions are not part of any file format. They follow the order ADR-003 lists them in.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
-pub struct ComponentMask(pub u16);
+pub struct ComponentMask(pub u32);
 
 impl ComponentMask {
     pub const SYSTEM: Self = Self(1 << 0);
@@ -62,8 +63,10 @@ impl ComponentMask {
     pub const DEVICE_DETAILS: Self = Self(1 << 14);
     /// `Snapshot.device_history` (ADR-017).
     pub const DEVICE_HISTORY: Self = Self(1 << 15);
-    /// All sixteen bits.
-    pub const ALL: Self = Self(0xFFFF);
+    /// `Snapshot.host_settings` (ADR-018 Settings).
+    pub const HOST_SETTINGS: Self = Self(1 << 16);
+    /// All seventeen bits.
+    pub const ALL: Self = Self(0x1_FFFF);
     pub const NONE: Self = Self(0);
 
     /// True when every bit of `other` is set in `self`.
@@ -1696,6 +1699,10 @@ pub struct Snapshot {
     pub device_details: Arc<DeviceDetailsSnapshot>,
     /// P2, mask bit `DEVICE_HISTORY` (ADR-017).
     pub device_history: Arc<DeviceHistory>,
+    /// The host's settings, mask bit `HOST_SETTINGS` (ADR-018 Settings). Every session gets
+    /// them. `rev` 0 means the engine has not given them yet: the window then shows the
+    /// default values and keeps its host setting controls disabled.
+    pub host_settings: Arc<HostSettings>,
 }
 
 impl Snapshot {
@@ -1733,6 +1740,7 @@ impl Snapshot {
             process_series: Arc::default(),
             device_details: Arc::default(),
             device_history: Arc::default(),
+            host_settings: Arc::default(),
         }
     }
 
@@ -1839,6 +1847,10 @@ impl Snapshot {
                 mask |= bit;
             }
         }
+        let (now, before) = (&*self.host_settings, &*prev.host_settings);
+        if (now.rev, now.read_only) != (before.rev, before.read_only) {
+            mask |= ComponentMask::HOST_SETTINGS;
+        }
         if !Arc::ptr_eq(&self.series, &prev.series) {
             let fast = diff_series(&self.series.series, &prev.series.series, changed_series);
             let slow = diff_series(&self.series.slow, &prev.series.slow, changed_series);
@@ -1889,7 +1901,7 @@ mod tests {
     use crate::process::{ProcFlags, ProcState, ProcessMeta};
     use crate::validity::FieldValidity;
 
-    const BITS: [ComponentMask; 16] = [
+    const BITS: [ComponentMask; 17] = [
         ComponentMask::SYSTEM,
         ComponentMask::SERIES,
         ComponentMask::PROCESSES,
@@ -1906,6 +1918,7 @@ mod tests {
         ComponentMask::PROCESS_SERIES,
         ComponentMask::DEVICE_DETAILS,
         ComponentMask::DEVICE_HISTORY,
+        ComponentMask::HOST_SETTINGS,
     ];
 
     fn view(id: SeriesId) -> Arc<SeriesView> {
@@ -2002,7 +2015,7 @@ mod tests {
             all |= *a;
         }
         assert_eq!(all, ComponentMask::ALL);
-        assert_eq!(ComponentMask::ALL.0, 0xFFFF);
+        assert_eq!(ComponentMask::ALL.0, 0x1_FFFF);
     }
 
     #[test]
@@ -2619,6 +2632,22 @@ mod tests {
             ComponentMask::TABLE
         );
         assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn changed_since_host_settings_on_a_new_revision() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        assert_eq!(prev.host_settings.rev, 0, "not given by the engine yet");
+        let mut next = prev.clone();
+        let mut changed = SmallVec::new();
+        // The same revision in a new Arc is no change.
+        next.host_settings = Arc::new((*prev.host_settings).clone());
+        assert_eq!(next.changed_since(&prev, &mut changed), ComponentMask::NONE);
+        Arc::make_mut(&mut next.host_settings).rev = 1;
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::HOST_SETTINGS
+        );
     }
 
     #[test]

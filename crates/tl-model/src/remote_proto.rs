@@ -34,8 +34,8 @@ use crate::process::{
 use crate::request::RequestEvent;
 use crate::series::{Sample, SeriesView};
 use crate::settings::{
-    HISTORY_RETENTION_H_RANGE, HistorySettings, PROCESS_INTERVAL_MS_RANGE, ProcessesSettings,
-    clamp_key,
+    EngineSettings, HISTORY_RETENTION_H_RANGE, HistorySettings, PROCESS_INTERVAL_MS_RANGE,
+    ProcessesSettings, Settings, clamp_key,
 };
 use crate::snapshot::{
     ComponentHeader, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory, DeviceTimeline,
@@ -608,6 +608,7 @@ pub struct SnapshotFrame {
     pub process_series: Option<Part<Arc<ProcessSeriesSet>, ProcessSeriesDelta>>,
     pub device_details: Option<Arc<DeviceDetailsSnapshot>>,
     pub device_history: Option<Part<Arc<DeviceHistory>, DeviceHistoryDelta>>,
+    pub host_settings: Option<Arc<HostSettings>>,
 }
 
 impl SnapshotFrame {
@@ -641,6 +642,7 @@ impl SnapshotFrame {
             process_series: None,
             device_details: None,
             device_history: None,
+            host_settings: None,
         }
     }
 }
@@ -861,6 +863,26 @@ impl HostSettingsValues {
             &mut changed,
         );
         changed
+    }
+
+    /// The host keys of the window's `settings.toml`: what an engine that has no `engine.toml`
+    /// of its own starts from. `remote_admin` is off; only `tasklens-setup` turns it on.
+    pub fn from_settings(settings: &Settings) -> Self {
+        let mut values = Self {
+            interval_ms: settings.processes.interval_ms,
+            history: settings.history.clone(),
+            remote_admin: false,
+        };
+        values.clamp();
+        values
+    }
+
+    /// What the engine's workers read: the update interval and the `[history]` table.
+    pub fn engine_settings(&self) -> EngineSettings {
+        EngineSettings {
+            interval_ms: self.interval_ms,
+            history: self.history.clone(),
+        }
     }
 
     /// These values with `changes` applied, then clamped.
@@ -1321,6 +1343,24 @@ mod tests {
         assert_eq!(next.history.retention_h, 12);
         assert!(!next.history.enabled);
         assert!(next.remote_admin);
+    }
+
+    #[test]
+    fn host_settings_from_the_window_settings_keep_the_host_keys() {
+        let mut settings = Settings::default();
+        settings.processes.interval_ms = 5000;
+        settings.history.enabled = true;
+        settings.history.retention_h = 40;
+        let values = HostSettingsValues::from_settings(&settings);
+        assert_eq!(values.interval_ms, 5000);
+        assert!(values.history.enabled);
+        assert_eq!(values.history.retention_h, 12, "clamped");
+        assert!(!values.remote_admin);
+        let engine = values.engine_settings();
+        assert_eq!(
+            (engine.interval_ms, engine.history),
+            (values.interval_ms, values.history)
+        );
     }
 
     #[test]
