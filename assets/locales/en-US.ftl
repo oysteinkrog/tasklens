@@ -1741,6 +1741,16 @@ fnd-action-reject-already-running = Already running
 fnd-action-reject-no-desktop-session = This PC has no desktop session. Nobody is logged in to its screen.
 fnd-action-reject-no-desktop-session-on-host = { $host } has no desktop session. Nobody is logged in to its screen.
 fnd-action-reject-remote-admin-off = Remote admin is off on that PC. Run tasklens remote-admin on there.
+fnd-action-reject-remote-admin-off-on-host = Remote admin is off on { $host }. Run tasklens remote-admin on there.
+# Confirmation before a root action on a remote host (ADR-018 Remote root actions).
+fnd-action-root-confirm-text = { $action } as root on { $host }?
+fnd-action-root-confirm-button = Run as root
+fnd-action-root-what-end-task = End task
+fnd-action-root-what-end-process = End process
+fnd-action-root-what-end-tree = End process tree
+fnd-action-root-what-close-connection = Close connection
+fnd-action-root-what-unit = Change service
+fnd-action-root-what-other = Run this action
 # Desktop commands on a remote host (ADR-018, UI-SHL-008).
 fnd-action-on-host-opened = Opened on { $host }
 fnd-action-on-host-started = Started on { $host }

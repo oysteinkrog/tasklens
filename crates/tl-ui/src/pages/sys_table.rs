@@ -39,9 +39,11 @@ use tracing::{debug, warn};
 
 #[cfg(any(test, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
-use crate::action_tracker::{ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message};
+use crate::action_tracker::{
+    ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
+};
 use crate::actions::RefreshCurrentTab;
-use crate::components::dialog::TlDialog;
+use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
@@ -537,6 +539,9 @@ struct Tracked {
     /// The request's kind and the remote host's name when it is a desktop command on that PC:
     /// its toasts say "on <host>" (ADR-018).
     remote: Option<(ActionKind, Arc<str>)>,
+    /// The remote host's name when the request is a root action there: a remote-admin refusal
+    /// names it.
+    host: Option<Arc<str>>,
 }
 
 impl Tracked {
@@ -595,7 +600,45 @@ impl SysActions {
     /// Sends `kind` on `targets`, marks every target pending and shows the pending toast(s) on
     /// `window`'s toast queue. `None` when nothing was sent: a target is already pending with
     /// the same tag (Warning `texts.busy`), the engine queue is full, or the engine stopped.
+    ///
+    /// A root action on a remote host (a unit of the system manager, a socket) asks first,
+    /// "Change service as root on home?", and is sent after the user confirms, so the result is
+    /// `None` at once (ADR-018).
     pub fn submit(
+        &mut self,
+        kind: ActionKind,
+        tag: ActionKindTag,
+        targets: SmallVec<[ActionTarget; 1]>,
+        texts: ActionTexts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ActionId> {
+        let probe = ActionRequest {
+            id: ActionId(0),
+            kind: kind.clone(),
+            targets: targets.clone(),
+            privileged: false,
+        };
+        let Some(host) = self.tracker.read(cx).remote_root_host(&probe) else {
+            return self.send(kind, tag, targets, texts, window, cx);
+        };
+        let dialog = root_confirm_dialog(&kind, &host, cx);
+        let this = cx.weak_entity();
+        let opened = dialog.open(window, cx, move |result, window, cx| {
+            if !matches!(result, DialogResult::Confirmed { .. }) {
+                return;
+            }
+            let _ = this.update(cx, |t, cx| {
+                t.send(kind, tag, targets, texts, window, cx);
+            });
+        });
+        if opened.is_err() {
+            warn!(target: "tasklens::ui", "root confirmation did not open; nothing sent");
+        }
+        None
+    }
+
+    fn send(
         &mut self,
         kind: ActionKind,
         tag: ActionKindTag,
@@ -626,6 +669,7 @@ impl SysActions {
             targets: targets.clone(),
             privileged: false,
         };
+        let host = self.tracker.read(cx).remote_root_host(&request);
         let tracker_texts = ToastTexts {
             owner_toasts: true,
             ..ToastTexts::new(SharedString::default(), SharedString::default())
@@ -647,6 +691,7 @@ impl SysActions {
         }
 
         let tracked = Tracked {
+            host,
             done: SmallVec::from_elem(false, targets.len().max(1)),
             targets,
             texts,
@@ -767,6 +812,7 @@ impl SysActions {
             &tracked.texts,
             target.as_ref(),
             tracked.remote.as_ref(),
+            tracked.host.as_deref(),
             cx,
         ) {
             Some((kind, text, button)) => self.push(&queue, kind, text, Some(key), button, cx),
@@ -926,6 +972,7 @@ fn final_toast(
     texts: &ActionTexts,
     target: Option<&ActionTarget>,
     remote: Option<&(ActionKind, Arc<str>)>,
+    host: Option<&str>,
     cx: &mut App,
 ) -> Option<(ToastKind, SharedString, Option<ToastAction>)> {
     let toast = match state {
@@ -988,6 +1035,10 @@ fn final_toast(
             action_words(cx).reject(RejectReason::AlreadyRunning).1,
             None,
         ),
+        ActionState::Rejected(reason @ RejectReason::RemoteAdminOff) if host.is_some() => {
+            let (_, text) = action_words(cx).reject_on(*reason, host?);
+            (ToastKind::Warning, text, None)
+        }
         ActionState::Rejected(reason) => {
             let reason = action_words(cx).reject(*reason).1;
             let text = format!("{}: {reason}", texts.failed_prefix).into();

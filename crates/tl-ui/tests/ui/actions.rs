@@ -1041,3 +1041,160 @@ mod desktop_on_host {
         assert_eq!(remote, "Switch to window on home");
     }
 }
+
+/// Root actions on a remote host: the confirmation names the host, and a remote-admin refusal
+/// says how to turn it on (ADR-018, tasklens-q4x76.32).
+mod remote_root {
+    use super::*;
+    use gpui_kit::{AnyWindowHandle, Modifiers};
+
+    fn rig_on(cx: &mut TestAppContext, host: Option<&str>) -> Rig {
+        let mut r = rig(cx, None);
+        if let Some(host) = host {
+            let tracker = r.tracker.clone();
+            r.vcx.update(|_, cx| {
+                tracker.update(cx, |t, _| t.set_remote_name(Arc::from(host)));
+            });
+        }
+        r
+    }
+
+    fn privileged_end_task() -> ActionRequest {
+        ActionRequest {
+            privileged: true,
+            ..end_task(1)
+        }
+    }
+
+    /// Sends `request` the way an owner does, through `track_or_toast`.
+    fn send(r: &mut Rig, request: ActionRequest) -> Option<ActionId> {
+        let queue = r.queue.downgrade();
+        let tracker = r.tracker.clone();
+        let id = r.vcx.update(|_, cx| {
+            tracker.update(cx, |t, cx| {
+                t.track_or_toast(
+                    request,
+                    queue,
+                    ToastTexts::new("", "Could not end task."),
+                    cx,
+                )
+            })
+        });
+        r.vcx.run_until_parked();
+        id
+    }
+
+    fn dialogs(r: &mut Rig) -> Vec<(AnyWindowHandle, Entity<TlDialogView>)> {
+        r.vcx.update(|_, cx| {
+            cx.windows()
+                .into_iter()
+                .filter_map(|w| {
+                    let handle = w.downcast::<Root>()?;
+                    let frame = TlSecondaryWindow::<TlDialogView>::find(handle, cx)?;
+                    Some((w, frame.read(cx).content().clone()))
+                })
+                .collect()
+        })
+    }
+
+    fn choose(r: &mut Rig, selector: &'static str) {
+        let (any, _) = dialogs(r).pop().expect("a confirmation");
+        let mut vcx = VisualTestContext::from_window(any, &r.vcx.cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let at = vcx.debug_bounds(selector).expect("dialog button").center();
+        vcx.simulate_click(at, Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn root_action_on_a_remote_host_asks_first_and_names_the_host(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        assert!(send(&mut r, privileged_end_task()).is_none());
+        assert!(
+            r.actions_sent().is_empty(),
+            "nothing sent before the answer"
+        );
+        let open = dialogs(&mut r);
+        assert_eq!(open.len(), 1);
+        let (text, destructive) = open[0].1.read_with(&r.vcx, |v, _| {
+            (v.dialog().text().to_string(), v.dialog().is_destructive())
+        });
+        assert_eq!(text, "End task as root on home?");
+        assert!(destructive);
+        choose(&mut r, "TlDialogAction");
+        let sent = r.actions_sent();
+        assert_eq!(sent.len(), 1, "sent after the confirmation");
+        assert!(sent[0].privileged);
+    }
+
+    #[gpui_kit::test]
+    fn cancelling_the_root_confirmation_sends_nothing(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        send(&mut r, privileged_end_task());
+        choose(&mut r, "TlDialogCancel");
+        assert!(r.actions_sent().is_empty());
+        assert_eq!(r.pending(), 0);
+    }
+
+    #[gpui_kit::test]
+    fn system_unit_and_socket_actions_ask_on_a_remote_host(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        send(
+            &mut r,
+            request(ActionKind::UnitRestart, [unit("cups.service")]),
+        );
+        let text = dialogs(&mut r)[0]
+            .1
+            .read_with(&r.vcx, |v, _| v.dialog().text().to_string());
+        assert_eq!(text, "Change service as root on home?");
+        assert!(r.actions_sent().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn local_host_sends_root_actions_at_once(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, None);
+        assert!(send(&mut r, privileged_end_task()).is_some());
+        assert!(dialogs(&mut r).is_empty(), "no dialog on this PC");
+        assert_eq!(r.actions_sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_remote_action_that_needs_no_root_sends_at_once(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        assert!(send(&mut r, end_task(1)).is_some());
+        assert!(dialogs(&mut r).is_empty());
+        assert_eq!(r.actions_sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn refusal_for_remote_admin_says_how_to_turn_it_on(cx: &mut TestAppContext) {
+        let mut r = rig_on(cx, Some("home"));
+        let id = r.track(
+            privileged_end_task(),
+            ToastTexts::new("", "Could not end task."),
+        );
+        r.finish(id, &[ActionState::Rejected(RejectReason::RemoteAdminOff)]);
+        assert_eq!(
+            r.last().text.as_ref(),
+            "Remote admin is off on home. Run tasklens remote-admin on there."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn retry_as_administrator_on_a_remote_host_follows_that_hosts_helper(cx: &mut TestAppContext) {
+        let eperm = ActionState::Failed(ActionError::PermissionDenied);
+        let texts = || ToastTexts {
+            retry_as_admin: true,
+            ..ToastTexts::new("", "Could not end task.")
+        };
+        let mut r = rig(cx, Some(HelperState::Missing));
+        let tracker = r.tracker.clone();
+        r.vcx
+            .update(|_, cx| tracker.update(cx, |t, _| t.set_remote_name(Arc::from("home"))));
+        let id = r.track(end_task(1), texts());
+        r.finish(id, &[eperm.clone()]);
+        assert_eq!(r.last().button, None, "no helper on home: no retry button");
+    }
+}

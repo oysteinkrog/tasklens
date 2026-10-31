@@ -49,23 +49,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{
     Action, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global,
     IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Task,
-    WeakEntity, div,
+    WeakEntity, Window, div,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    MAX_ACTION_TARGETS, RejectReason,
+    MAX_ACTION_TARGETS, RejectReason, Signal,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::health::HelperState;
 use tracing::{debug, warn};
 
-use crate::components::dialog::TlDialog;
+use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::host::{HostContext, HostRegistry};
 use crate::hub::{LinkChanged, SnapshotChanged, SnapshotHub};
@@ -221,6 +222,9 @@ pub struct PendingAction {
     /// The remote host's name when the request is a desktop command on that PC: its toasts
     /// say "on <host>" (ADR-018). `None` for the local host and for other kinds.
     pub remote: Option<Arc<str>>,
+    /// The remote host's name for any kind (`None` for the local host). A refusal for remote
+    /// admin names it.
+    pub host: Option<Arc<str>>,
 }
 
 impl PendingAction {
@@ -522,6 +526,7 @@ impl ActionTracker {
                 results: SmallVec::new(),
                 session,
                 remote,
+                host: self.remote_name.clone(),
             },
         );
         self.start_sweep(cx);
@@ -531,7 +536,68 @@ impl ActionTracker {
     /// [`Self::track`] for owners: a refused send shows the Warning "Too many actions are
     /// running. Try again shortly." on `queue`, or "Not sent while reconnecting to <host>."
     /// while the host is reconnecting.
+    ///
+    /// A root action on a remote host (`ActionRequest::needs_root`) asks first, "End task as
+    /// root on home?", and is sent only after the user confirms (ADR-018). Nothing is sent now,
+    /// so the result is `None`.
     pub fn track_or_toast(
+        &mut self,
+        request: ActionRequest,
+        queue: WeakEntity<ToastQueue>,
+        texts: ToastTexts,
+        cx: &mut Context<Self>,
+    ) -> Option<ActionId> {
+        if let Some(host) = self.remote_root_host(&request) {
+            self.confirm_then_send(request, queue, texts, host, cx);
+            return None;
+        }
+        self.send_or_toast(request, queue, texts, cx)
+    }
+
+    /// The name of the remote host `request` would run as root on, `None` for the local host
+    /// and for a request that needs no root.
+    pub fn remote_root_host(&self, request: &ActionRequest) -> Option<Arc<str>> {
+        if request.needs_root() {
+            self.remote_name.clone()
+        } else {
+            None
+        }
+    }
+
+    /// Opens the root confirmation in the active window and sends `request` when it is
+    /// confirmed. Cancel, Esc or no window to ask in sends nothing.
+    fn confirm_then_send(
+        &mut self,
+        request: ActionRequest,
+        queue: WeakEntity<ToastQueue>,
+        texts: ToastTexts,
+        host: Arc<str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(window) = cx.active_window() else {
+            warn!(target: "tasklens::ui", "no window for the root confirmation; nothing sent");
+            return;
+        };
+        let this = cx.weak_entity();
+        let dialog = root_confirm_dialog(&request.kind, &host, cx);
+        // The button's window is being updated while its action runs.
+        cx.defer(move |cx| {
+            let on_result = move |result: DialogResult, _: &mut Window, cx: &mut App| {
+                if !matches!(result, DialogResult::Confirmed { .. }) {
+                    return;
+                }
+                let _ = this.update(cx, |t, cx| {
+                    t.send_or_toast(request, queue, texts, cx);
+                });
+            };
+            let opened = window.update(cx, |_, window, cx| dialog.open(window, cx, on_result));
+            if !matches!(opened, Ok(Ok(()))) {
+                warn!(target: "tasklens::ui", "root confirmation did not open; nothing sent");
+            }
+        });
+    }
+
+    fn send_or_toast(
         &mut self,
         request: ActionRequest,
         queue: WeakEntity<ToastQueue>,
@@ -1110,6 +1176,10 @@ fn result_toast(
             format!("{} {}", texts.failure, words.message(err)).into(),
             None,
         ),
+        ActionState::Rejected(reason @ RejectReason::RemoteAdminOff) if entry.host.is_some() => {
+            let (kind, text) = words.reject_on(*reason, entry.host.as_deref().unwrap_or_default());
+            (kind, text, None)
+        }
         ActionState::Rejected(reason) => {
             let (kind, text) = words.reject(*reason);
             (kind, text, None)
@@ -1122,6 +1192,35 @@ fn result_toast(
 
 fn is_eperm_retry(err: &ActionError, retry: bool) -> bool {
     retry && matches!(err, ActionError::PermissionDenied)
+}
+
+/// The confirmation before a root action on remote host `host` (ADR-018): "End task as root on
+/// home?" and a "Run as root" button. Shared by every owner that sends root actions.
+pub fn root_confirm_dialog(kind: &ActionKind, host: &str, cx: &App) -> TlDialog {
+    let key = match kind {
+        ActionKind::Signal(Signal::Kill) => "fnd-action-root-what-end-process",
+        ActionKind::Signal(_) => "fnd-action-root-what-end-task",
+        ActionKind::KillTree => "fnd-action-root-what-end-tree",
+        ActionKind::SockDestroy => "fnd-action-root-what-close-connection",
+        ActionKind::UnitStart
+        | ActionKind::UnitStop
+        | ActionKind::UnitRestart
+        | ActionKind::UnitReload
+        | ActionKind::UnitResetFailed
+        | ActionKind::UnitEnable
+        | ActionKind::UnitDisable
+        | ActionKind::UnitMask
+        | ActionKind::UnitUnmask => "fnd-action-root-what-unit",
+        _ => "fnd-action-root-what-other",
+    };
+    let args = |action: SharedString| -> Vec<(&str, FluentValue<'static>)> {
+        vec![
+            ("action", FluentValue::from(action.to_string())),
+            ("host", FluentValue::from(host.to_string())),
+        ]
+    };
+    let text = tr_args(cx, "fnd-action-root-confirm-text", &args(tr(cx, key)));
+    TlDialog::confirm(text, tr(cx, "fnd-action-root-confirm-button")).destructive()
 }
 
 /// True for the kinds that act on a PC's desktop: open a link or folder, show a file in the file
@@ -1264,6 +1363,7 @@ pub struct ActionWords {
     reject_no_desktop: SharedString,
     reject_no_desktop_on: Template,
     reject_remote_admin_off: SharedString,
+    reject_remote_admin_off_on: Template,
     on_host_opened: Template,
     on_host_started: Template,
     on_host_switched: Template,
@@ -1303,6 +1403,10 @@ impl ActionWords {
             reject_no_desktop: t("fnd-action-reject-no-desktop-session"),
             reject_no_desktop_on: tmpl("fnd-action-reject-no-desktop-session-on-host", &["host"]),
             reject_remote_admin_off: t("fnd-action-reject-remote-admin-off"),
+            reject_remote_admin_off_on: tmpl(
+                "fnd-action-reject-remote-admin-off-on-host",
+                &["host"],
+            ),
             on_host_opened: tmpl("fnd-action-on-host-opened", &["host"]),
             on_host_started: tmpl("fnd-action-on-host-started", &["host"]),
             on_host_switched: tmpl("fnd-action-on-host-switched", &["host"]),
@@ -1362,6 +1466,10 @@ impl ActionWords {
             RejectReason::NoDesktopSession => (
                 ToastKind::Warning,
                 fill(&self.reject_no_desktop_on, &[&host]),
+            ),
+            RejectReason::RemoteAdminOff => (
+                ToastKind::Warning,
+                fill(&self.reject_remote_admin_off_on, &[&host]),
             ),
             _ => self.reject(reason),
         }
