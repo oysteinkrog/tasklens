@@ -388,7 +388,8 @@ fn name_and_rss(key: ProcessKey, cx: &App) -> (SharedString, u64) {
 
 /// The `{name}` part of a dump file name (R-224). Every char outside `[A-Za-z0-9._-]` becomes
 /// `_`, and a run of them one `_`, because the engine writes no other file name
-/// (`valid_dump_name`). Cut to 64 bytes; `process` when empty.
+/// (`valid_dump_name`). A `.` right after a `.` counts as outside the set, since the engine
+/// refuses any name with `..` in it. Cut to 64 bytes; `process` when empty.
 pub fn dump_file_stem(name: &str) -> String {
     let mut out = String::with_capacity(name.len().min(DUMP_NAME_MAX));
     let mut replaced = false;
@@ -396,7 +397,8 @@ pub fn dump_file_stem(name: &str) -> String {
         if out.len() == DUMP_NAME_MAX {
             break;
         }
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+        let dot_after_dot = ch == '.' && out.ends_with('.');
+        if !dot_after_dot && (ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
             out.push(ch);
             replaced = false;
         } else if !replaced {
@@ -904,7 +906,7 @@ mod tests {
     /// no `/`, not `.` or `..`.
     fn engine_accepts(file: &str) -> bool {
         !file.contains('/')
-            && file != ".."
+            && !file.contains("..")
             && file.len() > ".core".len()
             && file.ends_with(".core")
             && file
@@ -933,6 +935,8 @@ mod tests {
         assert_eq!(dump_file_stem("Блокнот"), "_");
         assert_eq!(dump_file_stem("tab\there\0x"), "tab_here_x");
         assert_eq!(dump_file_stem("ok.name_v-2"), "ok.name_v-2");
+        assert_eq!(dump_file_stem(".."), "._");
+        assert_eq!(dump_file_stem("a...b"), "a._b");
         assert_eq!(dump_file_stem(""), "process");
         let long = "a".repeat(100);
         assert_eq!(dump_file_stem(&long).len(), DUMP_NAME_MAX);
@@ -949,6 +953,8 @@ mod tests {
             "日本語のアプリ",
             "",
             "..",
+            "a..b",
+            "...",
             "/",
             "\u{7}bell",
         ] {

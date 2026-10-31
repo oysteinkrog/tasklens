@@ -48,8 +48,8 @@ pub fn dumps_dir(config: &EngineConfig) -> PathBuf {
     config.state_dir.join("dumps")
 }
 
-/// True when `name` is a bare file name matching `^[A-Za-z0-9._-]+\.core$`: no path separator,
-/// not `.` or `..`. The engine joins it to its dumps dir and writes nowhere else.
+/// True when `name` is a bare file name matching `^[A-Za-z0-9._-]+\.core$` with no path separator
+/// and no `..` anywhere in it. The engine joins it to its dumps dir and writes nowhere else.
 pub fn valid_dump_name(name: &str) -> bool {
     name.len() > DUMP_SUFFIX.len()
         && name.ends_with(DUMP_SUFFIX)
@@ -57,8 +57,7 @@ pub fn valid_dump_name(name: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         && !name.contains('/')
-        && name != "."
-        && name != ".."
+        && !name.contains("..")
 }
 
 /// Runs one `Dump` on one `Process` target into `<dumps dir>/<name>`. `privileged` routes it
@@ -478,7 +477,7 @@ mod tests {
     fn dump_name_validation() {
         assert!(valid_dump_name(NAME));
         assert!(valid_dump_name("a-b_c.1.core"));
-        assert!(valid_dump_name("..core"));
+        assert!(valid_dump_name(".x.core"));
         // Security regression: a bare file name only, so nothing lands outside the dumps dir.
         for bad in [
             "../x.core",
@@ -496,6 +495,10 @@ mod tests {
             "x\\y.core",
             ".",
             "..",
+            "..core",
+            "...core",
+            "a..b.core",
+            "x..core",
             "",
         ] {
             assert!(!valid_dump_name(bad), "{bad:?}");
