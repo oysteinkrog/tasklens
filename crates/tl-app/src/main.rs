@@ -459,6 +459,7 @@ fn start_engine(
             let _ = states_tx.try_send(state);
         }),
         deadline: engine_link::CONNECT_DEADLINE,
+        retry: engine_link::FALLBACK_RETRY,
     };
     let link = EngineLink::open(env)?;
     let weak = Arc::downgrade(&link);

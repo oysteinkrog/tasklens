@@ -234,10 +234,21 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    use std::os::unix::net::UnixStream;
+
+    use gpui_kit::{AppContext as _, TestAppContext};
     use tl_model::actions::{ActionId, ActionState};
+    use tl_model::remote_proto::{
+        BootPrefix, ClientMsg, HelloTail, HostIdentity, ServerMsg, Want, Welcome, decode_hello,
+        encode_welcome,
+    };
     use tl_model::request::{IdKind, RequestEnd};
     use tl_model::table::{SysColumnId, SysSortSpec, SysTable};
     use tl_model::time::BootId;
+    use tl_remote::client::{ClientConfig, Connection, LinkStatus, RemoteClient};
+    use tl_remote::delta::DeltaEncoder;
+    use tl_remote::envelope::{FrameReader, FrameWriter};
+    use tl_ui::hub::SnapshotHub;
 
     /// A backend that records what it gets and publishes what a test gives it.
     pub(crate) struct TestBackend {
@@ -433,5 +444,173 @@ pub(crate) mod tests {
         local.publish(2);
         recv(&wake);
         assert_eq!(client.latest().sequence, 2);
+    }
+
+    /// The service side of one connection: answers the `Hello` with a `Welcome` after `delay`,
+    /// sends each of `snaps` after the `Ack` of the one before, then reads until the client goes
+    /// or sends nothing for 5 s.
+    pub(crate) fn serve(mut stream: UnixStream, delay: Duration, snaps: Vec<Snapshot>) {
+        use std::io::Write;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut frames = FrameReader::new().expect("frame reader");
+        let hello = decode_hello(&frames.read_frame(&mut stream).expect("hello")).expect("hello");
+        assert!(hello.tail.is_some(), "a Hello on our proto");
+        thread::sleep(delay);
+        let mut out = Vec::new();
+        let welcome = Welcome {
+            prefix: BootPrefix::ours(),
+            tail: Some(HostIdentity {
+                host_name: Arc::from("desk"),
+                machine_id: Arc::from("m1"),
+                boot_id: BootId(7),
+                engine_instance: 1,
+            }),
+        };
+        encode_welcome(&welcome, &mut out).expect("welcome");
+        stream.write_all(&out).expect("send welcome");
+        let mut writer = FrameWriter::new().expect("frame writer");
+        let mut encoder = DeltaEncoder::default();
+        for snap in snaps {
+            let built = encoder
+                .next_frame(&snap, 0)
+                .expect("frame")
+                .expect("no frame in flight");
+            out.clear();
+            writer
+                .encode_server(&ServerMsg::Snapshot(Box::new(built.frame)), &mut out)
+                .expect("encode");
+            stream.write_all(&out).expect("send snapshot");
+            loop {
+                let raw = frames.read_frame(&mut stream).expect("client frame");
+                if let ClientMsg::Ack { frame } = frames.decode_client(&raw).expect("decode") {
+                    encoder.on_ack(frame).expect("ack");
+                    break;
+                }
+            }
+        }
+        while frames.read_frame(&mut stream).is_ok() {}
+    }
+
+    /// A `RemoteClient` whose only connection is `stream`.
+    fn remote_on(stream: UnixStream) -> Arc<RemoteClient> {
+        let conn = Mutex::new(Some(Connection::unix(stream).expect("connection")));
+        let connector = move || {
+            lock(&conn)
+                .take()
+                .ok_or_else(|| std::io::Error::other("no more connections"))
+        };
+        let config = ClientConfig {
+            hello: HelloTail {
+                pid: 1,
+                app_id: Arc::from("test"),
+                bridge: false,
+                want: Want { snapshots: true },
+            },
+            backoff: vec![Duration::from_secs(60)],
+        };
+        Arc::new(RemoteClient::start(connector, config).expect("client"))
+    }
+
+    /// The switch client with a wake channel that only the test thread feeds: GPUI's test
+    /// scheduler fails a test when another thread wakes one of its tasks.
+    struct Pumped {
+        switch: Arc<SwitchClient>,
+        wake_tx: async_channel::Sender<()>,
+        wake_rx: async_channel::Receiver<()>,
+    }
+
+    impl Pumped {
+        /// Waits for the switch client's next wake and passes it to the hub.
+        fn pump(&self) {
+            recv(&self.switch.wake());
+            let _ = self.wake_tx.try_send(());
+        }
+    }
+
+    impl EngineClient for Pumped {
+        fn latest(&self) -> Arc<Snapshot> {
+            self.switch.latest()
+        }
+        fn wake(&self) -> async_channel::Receiver<()> {
+            self.wake_rx.clone()
+        }
+        fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
+            self.switch.action_events()
+        }
+        fn generation(&self) -> u64 {
+            self.switch.generation()
+        }
+        fn latest_with_generation(&self) -> (u64, Arc<Snapshot>) {
+            self.switch.latest_with_generation()
+        }
+        fn set_demand(&self, demand: Demand) {
+            self.switch.set_demand(demand);
+        }
+        fn set_settings(&self, settings: EngineSettings) {
+            self.switch.set_settings(settings);
+        }
+        fn send(&self, cmd: Command) -> Result<(), CommandError> {
+            self.switch.send(cmd)
+        }
+        fn journal(&self, query: JournalQuery) -> JournalHandle {
+            self.switch.journal(query)
+        }
+    }
+
+    /// ADR-018 Lifetime: the window moves from its in-process engine, far ahead in sequence, to
+    /// the service's `RemoteClient`, which numbers from 1. The hub shows the service's first
+    /// snapshot, and the old engine's snapshot that the UI loaded before the switch and installs
+    /// after it is dropped.
+    #[gpui_kit::test]
+    fn hub_shows_the_service_after_a_switch(cx: &mut TestAppContext) {
+        let local = TestBackend::new(0, 500);
+        let switch = Arc::new(SwitchClient::new(local.clone()));
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
+        let pumped = Arc::new(Pumped {
+            switch: Arc::clone(&switch),
+            wake_tx,
+            wake_rx,
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(pumped.clone(), cx));
+        hub.read_with(cx, |hub, _| assert_eq!(hub.current().sequence, 500));
+
+        // The old engine publishes once more; the UI loads it just before the switch.
+        local.publish(501);
+        pumped.pump();
+        let late = switch.latest_with_generation();
+        assert_eq!(late.1.sequence, 501);
+
+        let (ours, theirs) = UnixStream::pair().expect("socket pair");
+        let mut first = Snapshot::empty(BootId(7), 1);
+        let system = Arc::make_mut(&mut first.system);
+        system.header.version = 1;
+        system.boot_time_s = 200;
+        thread::spawn(move || serve(ours, Duration::ZERO, vec![first]));
+        let remote = remote_on(theirs);
+        let begin = std::time::Instant::now();
+        while remote.status() != LinkStatus::Connected {
+            assert!(
+                begin.elapsed() < Duration::from_secs(5),
+                "no service snapshot"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(remote.latest().sequence, 1);
+
+        switch.switch_to(remote.clone());
+        pumped.pump();
+        cx.run_until_parked();
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().sequence, 1);
+            assert_eq!(hub.current().system.boot_time_s, 200);
+        });
+
+        hub.update(cx, |hub, cx| hub.install(late.0, late.1, cx));
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().sequence, 1);
+            assert_eq!(hub.current().system.boot_time_s, 200);
+        });
     }
 }

@@ -2,20 +2,24 @@
 //! answer (ADR-018 Window fallback, Lifetime and "One engine per user per machine",
 //! tasklens-q4x76.8).
 //!
+//! The service answers when its `Welcome` arrives on a connection. A socket that accepts the
+//! connection and sends nothing does not count.
+//!
 //! At start (`EngineLink::open`):
-//! 1. A socket that answers at once is used: the window becomes a `RemoteClient` of the service.
-//! 2. Otherwise tl-app runs `systemctl --user start tasklens-engine.service` and tries the socket
-//!    every 50 ms until 3 s after start. A unit that fails to start ends the wait at once.
+//! 1. When the socket accepts a connection at once and the service answers within 3 s of start,
+//!    the window becomes a `RemoteClient` of the service.
+//! 2. Otherwise tl-app runs `systemctl --user start tasklens-engine.service`, which gets at most
+//!    3 s. When it succeeds, the socket is tried every 50 ms, and the service must answer within
+//!    3 s of that moment. A unit that fails to start skips the wait.
 //! 3. Otherwise the window takes the engine lock and runs its own engine, and the status chip
-//!    shows "Engine service not running". When another process holds the lock, the window runs no
-//!    engine, shows "Can't start the engine" and its `RemoteClient` keeps trying the socket.
+//!    shows "Engine service not running". While it runs that engine it tries the socket every
+//!    30 s and logs the first answer; the window keeps its own engine until it restarts. When
+//!    another process holds the lock, the window runs no engine, shows "Can't start the engine"
+//!    and its `RemoteClient` keeps trying the socket.
 //!
 //! "Switch to engine service" (`EngineLink::switch_to_service`) stops the window's engine, which
 //! flushes history, releases the lock and runs the same three steps on a thread of its own. So
 //! when the service does not come up, the window takes the lock again and runs its own engine.
-//!
-//! The ADR also has the fallback window try the socket every 30 s. While the window holds the
-//! lock the service cannot run and its answer would change nothing, so this module does not.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -23,7 +27,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,9 +45,12 @@ use crate::switch_client::SwitchClient;
 pub const UNIT: &str = "tasklens-engine.service";
 /// In the state directory. Whoever holds its `flock` runs the engine (ADR-018).
 pub const LOCK_FILE: &str = "engine.lock";
-/// The socket must answer within this time of start, or of a switch, else the window runs its
-/// own engine.
+/// The service must answer within this time of start, or of a switch, and again within this time
+/// of `systemctl --user start` succeeding, else the window runs its own engine. `systemctl` also
+/// gets at most this time.
 pub const CONNECT_DEADLINE: Duration = Duration::from_secs(3);
+/// How often a window that runs its own engine tries the socket (ADR-018 Window fallback).
+pub const FALLBACK_RETRY: Duration = Duration::from_secs(30);
 /// How often the socket is tried until the deadline.
 const POLL: Duration = Duration::from_millis(50);
 /// How often a window with no engine checks whether its client has connected.
@@ -72,7 +79,10 @@ pub struct LinkEnv {
     pub uid: u32,
     /// Gets every state change. The UI shows it in the status chip.
     pub notify: Box<dyn Fn(EngineLinkState) + Send + Sync>,
+    /// `CONNECT_DEADLINE` in the app.
     pub deadline: Duration,
+    /// `FALLBACK_RETRY` in the app.
+    pub retry: Duration,
 }
 
 /// What runs now.
@@ -111,6 +121,8 @@ pub struct EngineLink {
     client: Arc<SwitchClient>,
     running: Mutex<Running>,
     switching: AtomicBool,
+    /// Raised each time the window's own engine stops, which ends that engine's socket checks.
+    local_runs: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -121,13 +133,13 @@ impl EngineLink {
     /// Runs the start steps of the module docs. `Err` when the window holds the lock and its
     /// engine does not start, or when no client thread starts.
     pub fn open(env: LinkEnv) -> Result<Arc<Self>, String> {
-        let deadline = Instant::now() + env.deadline;
-        let running = establish(&env, deadline)?;
+        let running = establish(&env)?;
         let backend = running.backend().ok_or("no engine")?;
         let link = Arc::new(Self {
             client: Arc::new(SwitchClient::new(backend)),
             running: Mutex::new(running),
             switching: AtomicBool::new(false),
+            local_runs: AtomicU64::new(0),
             env,
         });
         link.announce();
@@ -149,18 +161,22 @@ impl EngineLink {
         self.env.start_unit.is_some()
     }
 
-    /// Sends the current state, and watches a client with no engine behind it until it
-    /// connects.
+    /// Sends the current state. Watches a client with no engine behind it until it connects,
+    /// and has the window's own engine try the socket every `retry`.
     fn announce(self: &Arc<Self>) {
-        let (state, waiting) = {
+        let (state, waiting, local) = {
             let running = lock(&self.running);
             let waiting = match &*running {
                 Running::Waiting(c) => Some(Arc::clone(c)),
                 _ => None,
             };
-            (running.state(self.can_switch()), waiting)
+            let local = matches!(&*running, Running::Local { .. });
+            (running.state(self.can_switch()), waiting, local)
         };
         (self.env.notify)(state);
+        if local {
+            self.check_socket_while_local();
+        }
         if let Some(remote) = waiting {
             let link = Arc::downgrade(self);
             spawn("tl-engine-wait", move || {
@@ -173,6 +189,31 @@ impl EngineLink {
                 }
             });
         }
+    }
+
+    /// Tries the socket every `retry` until the window's current engine stops, and logs the
+    /// first time the service answers. Nothing else changes: the window keeps its own engine
+    /// until it restarts or the user switches (ADR-018 Window fallback). The service cannot run
+    /// while the window holds the lock, so this normally finds nothing.
+    fn check_socket_while_local(self: &Arc<Self>) {
+        let run = self.local_runs.load(Ordering::Acquire);
+        let link = Arc::downgrade(self);
+        let retry = self.env.retry;
+        spawn("tl-engine-check", move || {
+            loop {
+                thread::sleep(retry);
+                let Some(link) = link.upgrade() else {
+                    return;
+                };
+                if link.local_runs.load(Ordering::Acquire) != run {
+                    return;
+                }
+                if try_socket(&link.env).is_some() {
+                    info!(target: "tasklens::engine", "the engine service answers; the window keeps its own engine until it restarts");
+                    return;
+                }
+            }
+        });
     }
 
     /// True when `remote` is no longer the waiting client, or has connected, which makes it
@@ -227,10 +268,11 @@ impl EngineLink {
         let Running::Local { engine, lock: file } = old else {
             return;
         };
+        self.local_runs.fetch_add(1, Ordering::AcqRel);
         info!(target: "tasklens::engine", "switching to the engine service");
         (engine.stop)();
         drop(file);
-        let next = match establish(&self.env, Instant::now() + self.env.deadline) {
+        let next = match establish(&self.env) {
             Ok(next) => next,
             Err(e) => {
                 warn!(target: "tasklens::engine", "after the switch: {e}");
@@ -255,32 +297,30 @@ impl EngineLink {
     pub fn shutdown(&self) {
         let old = std::mem::replace(&mut *lock(&self.running), Running::Stopped);
         if let Running::Local { engine, lock: file } = old {
+            self.local_runs.fetch_add(1, Ordering::AcqRel);
             (engine.stop)();
             drop(file);
         }
     }
 }
 
-/// The start steps of the module docs, with the socket answering by `deadline`.
-fn establish(env: &LinkEnv, deadline: Instant) -> Result<Running, String> {
+/// The start steps of the module docs.
+fn establish(env: &LinkEnv) -> Result<Running, String> {
     if let Some(conn) = try_socket(env) {
-        info!(target: "tasklens::engine", "using the engine service");
-        return Ok(Running::Service(remote(env, Some(conn))?));
+        let client = remote(env, Some(conn))?;
+        if answered(&client, Instant::now() + env.deadline) {
+            info!(target: "tasklens::engine", "using the engine service");
+            return Ok(Running::Service(client));
+        }
+        info!(target: "tasklens::engine", "the engine socket accepted but the service did not answer within {} ms", env.deadline.as_millis());
     }
     if let Some(start_unit) = &env.start_unit {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if start_unit(left) {
-            loop {
-                if let Some(conn) = try_socket(env) {
-                    info!(target: "tasklens::engine", "started the engine service");
-                    return Ok(Running::Service(remote(env, Some(conn))?));
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                thread::sleep(POLL);
+        if start_unit(env.deadline) {
+            if let Some(client) = wait_for_service(env, Instant::now() + env.deadline)? {
+                info!(target: "tasklens::engine", "started the engine service");
+                return Ok(Running::Service(client));
             }
-            info!(target: "tasklens::engine", "the engine service did not answer within {} s", env.deadline.as_secs());
+            info!(target: "tasklens::engine", "the engine service did not answer within {} ms of {UNIT} starting", env.deadline.as_millis());
         } else {
             info!(target: "tasklens::engine", "{UNIT} did not start");
         }
@@ -299,6 +339,35 @@ fn establish(env: &LinkEnv, deadline: Instant) -> Result<Running, String> {
             warn!(target: "tasklens::engine", "engine lock: {e}");
             Ok(Running::Waiting(remote(env, None)?))
         }
+    }
+}
+
+/// Tries the socket every `POLL` until it accepts, then waits for the service to answer on that
+/// connection. `None` when no answer came by `deadline`.
+fn wait_for_service(env: &LinkEnv, deadline: Instant) -> Result<Option<Arc<RemoteClient>>, String> {
+    loop {
+        if let Some(conn) = try_socket(env) {
+            let client = remote(env, Some(conn))?;
+            return Ok(answered(&client, deadline).then_some(client));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// True when the service's `Welcome` reaches `client` by `deadline`. The client reconnects on
+/// its own after a refused or dropped connection, and an answer on a later connection counts.
+fn answered(client: &RemoteClient, deadline: Instant) -> bool {
+    loop {
+        if client.host().is_some() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(POLL);
     }
 }
 
@@ -413,7 +482,7 @@ mod tests {
 
     use tl_model::remote_proto::Want;
 
-    use crate::switch_client::tests::TestBackend;
+    use crate::switch_client::tests::{TestBackend, serve};
 
     struct Rig {
         dir: tempfile::TempDir,
@@ -476,12 +545,37 @@ mod tests {
                 uid: server::own_uid(),
                 notify: Box::new(move |s| lock(&states).push(s)),
                 deadline: Duration::from_millis(300),
+                retry: Duration::from_secs(60),
             }
         }
 
         fn states(&self) -> Vec<EngineLinkState> {
             lock(&self.states).clone()
         }
+    }
+
+    /// A service on `listener`: it answers each connection's `Hello` with a `Welcome` after
+    /// `delay`.
+    fn service(listener: UnixListener, delay: Duration) {
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                thread::spawn(move || serve(stream, delay, Vec::new()));
+            }
+        });
+    }
+
+    /// Accepts one connection on `listener` within 5 s. True when one came.
+    fn accepts(listener: &UnixListener) -> bool {
+        listener.set_nonblocking(true).unwrap();
+        let begin = Instant::now();
+        while begin.elapsed() < Duration::from_secs(5) {
+            if listener.accept().is_ok() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
     }
 
     /// Accepts one connection on `listener` and returns its first bytes: the client's `Hello`.
@@ -499,16 +593,47 @@ mod tests {
     #[test]
     fn socket_present_uses_the_service() {
         let rig = Rig::new();
-        let listener = UnixListener::bind(rig.socket()).unwrap();
+        service(UnixListener::bind(rig.socket()).unwrap(), Duration::ZERO);
         let link = EngineLink::open(rig.env(Some(Box::new(|_| panic!("no unit start"))))).unwrap();
         assert_eq!(link.state(), EngineLinkState::Service);
         assert_eq!(rig.states(), [EngineLinkState::Service]);
         assert_eq!(rig.engines_started.load(Ordering::Acquire), 0);
         assert_eq!(rig.unit_runs.load(Ordering::Acquire), 0);
-        // The client sends its Hello on the connection that answered.
-        assert_eq!(first_bytes(&listener), b"TLR1");
         // The window holds no lock while the service runs.
         assert!(lock_engine(&rig.lock_file()).unwrap().is_some());
+    }
+
+    /// A socket that accepts and never sends a `Welcome` is no service.
+    #[test]
+    fn silent_socket_falls_back_at_the_deadline() {
+        let rig = Rig::new();
+        let _listener = UnixListener::bind(rig.socket()).unwrap();
+        let begin = Instant::now();
+        let link = EngineLink::open(rig.env(Some(Box::new(|_| false)))).unwrap();
+        assert!(begin.elapsed() >= Duration::from_millis(300));
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
+        assert_eq!(rig.engines_started.load(Ordering::Acquire), 1);
+        link.shutdown();
+    }
+
+    /// The service gets the whole deadline after `systemctl` succeeds, however long that took.
+    #[test]
+    fn deadline_counts_from_the_unit_start() {
+        let rig = Rig::new();
+        let socket = rig.socket();
+        let link = EngineLink::open(rig.env(Some(Box::new(move |_| {
+            thread::sleep(Duration::from_millis(200));
+            // Answers 250 ms after the unit started: 450 ms after start, within 300 ms of
+            // systemctl.
+            service(
+                UnixListener::bind(&socket).unwrap(),
+                Duration::from_millis(250),
+            );
+            true
+        }))))
+        .unwrap();
+        assert_eq!(link.state(), EngineLinkState::Service);
+        assert_eq!(rig.engines_started.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -536,10 +661,44 @@ mod tests {
     fn unit_started_but_silent_falls_back_at_the_deadline() {
         let rig = Rig::new();
         let begin = Instant::now();
-        let link = EngineLink::open(rig.env(Some(Box::new(|_| true)))).unwrap();
-        assert!(begin.elapsed() >= Duration::from_millis(300));
+        let link = EngineLink::open(rig.env(Some(Box::new(|_| {
+            thread::sleep(Duration::from_millis(200));
+            true
+        }))))
+        .unwrap();
+        // 200 ms for the unit, then the whole 300 ms deadline.
+        assert!(begin.elapsed() >= Duration::from_millis(500));
         assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
         link.shutdown();
+    }
+
+    /// ADR-018 Window fallback: the window's own engine tries the socket every `retry` and
+    /// keeps running when something answers.
+    #[test]
+    fn fallback_tries_the_socket_while_it_runs() {
+        let rig = Rig::new();
+        let mut env = rig.env(Some(Box::new(|_| false)));
+        env.retry = Duration::from_millis(20);
+        let link = EngineLink::open(env).unwrap();
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
+        let listener = UnixListener::bind(rig.socket()).unwrap();
+        assert!(accepts(&listener), "the window tried the socket");
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
+        assert_eq!(rig.engines_stopped.load(Ordering::Acquire), 0);
+        link.shutdown();
+    }
+
+    #[test]
+    fn stopped_engine_no_longer_tries_the_socket() {
+        let rig = Rig::new();
+        let mut env = rig.env(Some(Box::new(|_| false)));
+        env.retry = Duration::from_millis(20);
+        let link = EngineLink::open(env).unwrap();
+        link.shutdown();
+        let listener = UnixListener::bind(rig.socket()).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(150));
+        assert!(listener.accept().is_err());
     }
 
     #[test]
@@ -575,8 +734,8 @@ mod tests {
         let lock_file = rig.lock_file();
         // The unit starts once the window has released the lock: like the service, it takes the
         // lock first and then binds the socket. The first run, at start, fails.
-        let service: Arc<Mutex<Option<(File, UnixListener)>>> = Arc::default();
-        let held = Arc::clone(&service);
+        let service_lock: Arc<Mutex<Option<File>>> = Arc::default();
+        let held = Arc::clone(&service_lock);
         let runs = AtomicU32::new(0);
         let env = rig.env(Some(Box::new(move |_| {
             if runs.fetch_add(1, Ordering::AcqRel) == 0 {
@@ -585,8 +744,8 @@ mod tests {
             let Ok(Some(file)) = lock_engine(&lock_file) else {
                 return false;
             };
-            let listener = UnixListener::bind(&socket).unwrap();
-            *lock(&held) = Some((file, listener));
+            *lock(&held) = Some(file);
+            service(UnixListener::bind(&socket).unwrap(), Duration::ZERO);
             true
         })));
         let link = EngineLink::open(env).unwrap();
@@ -603,12 +762,10 @@ mod tests {
                 EngineLinkState::Service,
             ]
         );
-        assert!(lock(&service).is_some(), "the service took the lock");
+        assert!(lock(&service_lock).is_some(), "the service took the lock");
         // The proxy now reads the service client, on a higher generation.
         assert!(link.client().generation() > before);
         assert_eq!(link.client().latest().sequence, 0);
-        let (_, listener) = lock(&service).take().unwrap();
-        assert_eq!(first_bytes(&listener), b"TLR1");
         // No engine of the window's own ran again.
         assert_eq!(rig.engines_started.load(Ordering::Acquire), 1);
     }
