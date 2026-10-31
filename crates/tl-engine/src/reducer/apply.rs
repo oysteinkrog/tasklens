@@ -49,7 +49,7 @@ use crate::update::{
     DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, HistoryUpdate,
     MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
-use crate::workers::history::HistoryMsg;
+use crate::workers::history::{HistoryMsg, SessionList};
 use crate::workers::process_detail::pss_keys;
 use crate::workers::processes;
 
@@ -882,11 +882,16 @@ impl Reducer {
                 what,
             } => {
                 if let Some(engine) = self.admit(id, IdSlot::History, client) {
+                    // The query carries the list of open sessions (ADR-018, level-triggered).
+                    if let Some(sink) = self.history_cmd.as_mut() {
+                        sink.note_sessions(self.clients.iter().map(|s| s.id()));
+                    }
                     let msg = HistoryMsg::Query {
                         owner: id,
                         id: engine,
                         range,
                         what,
+                        sessions: SessionList::default(),
                     };
                     match self.send_history(msg) {
                         Some(generation) => {

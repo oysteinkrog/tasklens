@@ -19,7 +19,7 @@ use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::{WorkerFactory, build_supervisor};
 use tl_engine::update::{EngineMsg, HistoryUpdate, SourceUpdate, WorkerError};
 use tl_engine::workers::history::{
-    HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, run_history,
+    HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, SessionList, run_history,
 };
 use tl_history::format::{FORMAT_VERSION, SegmentHeader, boot_dir_name};
 use tl_history::segment::SegmentReader;
@@ -284,6 +284,7 @@ impl Rig {
                 keys: Arc::from([]),
                 overview: false,
             },
+            sessions: SessionList::default(),
         });
         self.lab.run_until_idle();
         while let Ok(msg) = self.rx.try_recv() {

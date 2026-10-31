@@ -149,12 +149,14 @@ impl Rig {
         out
     }
 
-    /// The last `MetricMsg::Ranges` the metric worker received.
+    /// The ranges of the sessions other than the local one in the last `MetricMsg::Ranges` the
+    /// metric worker received. Each list holds every session, the local one first.
     fn last_ranges(&mut self) -> Option<Vec<Option<DeviceHistoryRequest>>> {
         let mut last = None;
         while let Ok(msg) = self.metric_rx.try_recv() {
-            if let MetricMsg::Ranges(ranges) = msg {
-                last = Some(ranges.to_vec());
+            if let MetricMsg::Ranges(list) = msg {
+                assert_eq!(list.ranges[0].0, ClientSessionId::LOCAL);
+                last = Some(list.ranges[1..].iter().map(|(_, r)| *r).collect());
             }
         }
         last
@@ -344,8 +346,15 @@ fn two_sessions_on_one_range_share_one_answer() {
         demand(REMOTE, Some(DAY)),
         demand(second, Some(DAY)),
     ]);
-    assert_eq!(rig.reducer().clients.linked_ranges(), [Some(DAY)]);
-    assert_eq!(rig.last_ranges(), Some(vec![Some(DAY)]));
+    assert_eq!(
+        rig.reducer().clients.device_history_ranges(),
+        [
+            (ClientSessionId::LOCAL, Some(DAY)),
+            (REMOTE, Some(DAY)),
+            (second, Some(DAY))
+        ]
+    );
+    assert_eq!(rig.last_ranges(), Some(vec![Some(DAY), Some(DAY)]));
 
     let day = answer(DAY, 1.0);
     let local = rig.run(vec![histories(&[(DAY, &day)])]);
@@ -376,7 +385,10 @@ fn a_session_that_clears_its_range_shows_the_empty_answer() {
     rig.last_ranges();
 
     rig.run(vec![demand(REMOTE, None)]);
-    assert_eq!(rig.reducer().clients.linked_ranges(), [None]);
+    assert_eq!(
+        rig.reducer().clients.device_history_ranges(),
+        [(ClientSessionId::LOCAL, Some(DAY)), (REMOTE, None)]
+    );
     assert_eq!(
         rig.last_ranges(),
         Some(vec![None]),
@@ -515,7 +527,7 @@ fn closing_a_session_forgets_its_history() {
     let lists = |rig: &mut Rig| -> Vec<Vec<ClientSessionId>> {
         std::iter::from_fn(|| rig.history_rx.try_recv().ok())
             .filter_map(|msg| match msg {
-                HistoryMsg::Sessions { ids, .. } => Some(ids.to_vec()),
+                HistoryMsg::Sessions(list) => Some(list.ids.to_vec()),
                 _ => None,
             })
             .collect()

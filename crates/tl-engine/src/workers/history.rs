@@ -15,10 +15,11 @@
 //! TopAt queries and last view apart, answers a session only with its own, and after a delete
 //! sends each session its view again.
 //!
-//! The sink tells the worker which sessions are open with `HistoryMsg::Sessions`, the full list
-//! and its number. The worker drops the queries and view of every session not in the list. The
-//! sink sends the list again until the current generation has it, so a send that a full queue
-//! refused only delays the drop.
+//! The sink tells the worker which sessions are open with a `SessionList`, the full list and its
+//! number, carried by every query and sent as `HistoryMsg::Sessions` after each reducer turn
+//! (level-triggered). The worker drops the queries and view of every session not in the newest
+//! list. The sink sends the list again until the current generation has it, so a send that a full
+//! queue refused only delays the drop.
 //!
 //! The worker switches between three modes each turn (ADR-012, D-010, PROC-086): recording to
 //! the store when `history.enabled` is true, the 10-minute `RollingWindow` when recording is off
@@ -93,19 +94,17 @@ pub enum HistoryMsg {
     },
     /// `DeviceCatalog` holds its entries in an `Arc`, so the clone is cheap.
     Catalog(DeviceCatalog),
-    /// Query `id`, an engine id, of client session `owner`.
+    /// Query `id`, an engine id, of client session `owner`. `HistorySink::command` sets
+    /// `sessions` to its current list; the worker applies it before the query.
     Query {
         owner: ClientSessionId,
         id: u64,
         range: HistoryRange,
         what: HistoryWhat,
+        sessions: SessionList,
     },
-    /// The open client sessions, numbered from 1 by the sink. The worker drops the queries and
-    /// view of every other session and ignores a list older than one it applied.
-    Sessions {
-        seq: u64,
-        ids: Arc<[ClientSessionId]>,
-    },
+    /// The open client sessions.
+    Sessions(SessionList),
     Delete {
         keys: Arc<[ProcessKey]>,
     },
@@ -117,6 +116,15 @@ pub enum HistoryMsg {
     /// Test seam for `tests/lab_history.rs`: runs on the blocking pool with the worker's mode, in message order.
     #[doc(hidden)]
     Inspect(Box<dyn FnOnce(&Mode) + Send>),
+}
+
+/// The open client sessions, numbered from 1 by the sink (ADR-018). List 0 is the empty one each
+/// worker starts with. The worker drops the queries and view of every session not in the list and
+/// ignores a list that is not newer than the last one it applied.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionList {
+    pub seq: u64,
+    pub ids: Arc<[ClientSessionId]>,
 }
 
 /// The sender of one worker generation.
@@ -139,9 +147,8 @@ pub struct HistorySink {
     dropped: u64,
     /// The last `dropped` value the worker received.
     reported: u64,
-    /// The open client sessions and their list number.
-    sessions: Arc<[ClientSessionId]>,
-    sessions_seq: u64,
+    /// The open client sessions.
+    sessions: SessionList,
     /// The generation that has `sessions`.
     sessions_sent_to: Option<u64>,
     /// The last generation that took a query. A generation that took none holds no session.
@@ -154,22 +161,46 @@ impl HistorySink {
             slot,
             dropped: 0,
             reported: 0,
-            sessions: Arc::from([]),
-            sessions_seq: 0,
+            sessions: SessionList::default(),
             sessions_sent_to: None,
             queried_by: None,
         }
     }
 
     /// For `Command::HistoryQuery` and `Command::HistoryDelete` routed by the reducer (E30-A2).
-    /// The generation that took `msg`, or `None` when it was dropped.
-    pub fn command(&mut self, msg: HistoryMsg) -> Option<u64> {
-        let query = matches!(msg, HistoryMsg::Query { .. });
+    /// A query carries the current session list. The generation that took `msg`, or `None` when
+    /// it was dropped.
+    pub fn command(&mut self, mut msg: HistoryMsg) -> Option<u64> {
+        let query = match &mut msg {
+            HistoryMsg::Query { sessions, .. } => {
+                *sessions = self.sessions.clone();
+                true
+            }
+            _ => false,
+        };
         let took = self.send(msg);
         if query && took.is_some() {
             self.queried_by = took;
+            self.sessions_sent_to = took;
         }
         took
+    }
+
+    /// The open client sessions, in connect order. A changed list gets the next number. Nothing
+    /// is sent: the next query or `set_sessions` carries it.
+    pub fn note_sessions<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = ClientSessionId>,
+        I::IntoIter: Clone,
+    {
+        let ids = ids.into_iter();
+        if !self.sessions.ids.iter().copied().eq(ids.clone()) {
+            self.sessions = SessionList {
+                seq: self.sessions.seq + 1,
+                ids: ids.collect(),
+            };
+            self.sessions_sent_to = None;
+        }
     }
 
     /// The open client sessions, called after each reducer turn. The list goes to the current
@@ -180,12 +211,7 @@ impl HistorySink {
         I: IntoIterator<Item = ClientSessionId>,
         I::IntoIter: Clone,
     {
-        let ids = ids.into_iter();
-        if !self.sessions.iter().copied().eq(ids.clone()) {
-            self.sessions = ids.collect();
-            self.sessions_seq += 1;
-            self.sessions_sent_to = None;
-        }
+        self.note_sessions(ids);
         let guard = self.slot.load();
         let Some(HistoryTx { generation, tx }) = guard.as_deref() else {
             return;
@@ -193,11 +219,10 @@ impl HistorySink {
         if self.sessions_sent_to == Some(*generation) || self.queried_by != Some(*generation) {
             return;
         }
-        let msg = HistoryMsg::Sessions {
-            seq: self.sessions_seq,
-            ids: Arc::clone(&self.sessions),
-        };
-        if tx.try_send(msg).is_ok() {
+        if tx
+            .try_send(HistoryMsg::Sessions(self.sessions.clone()))
+            .is_ok()
+        {
             self.sessions_sent_to = Some(*generation);
         }
     }
@@ -425,7 +450,7 @@ impl RecordingState {
             // `State::apply` handles queries and deletes (E30-015).
             HistoryMsg::Delete { .. }
             | HistoryMsg::Query { .. }
-            | HistoryMsg::Sessions { .. }
+            | HistoryMsg::Sessions(_)
             | HistoryMsg::Dropped { .. }
             | HistoryMsg::Inspect(_) => {}
         }
@@ -689,7 +714,7 @@ struct State {
     dropped: u64,
     /// The client sessions that sent a query, in the order of their first one.
     owners: Vec<Owner>,
-    /// The number of the last `HistoryMsg::Sessions` applied.
+    /// The number of the last `SessionList` applied.
     sessions_seq: u64,
 }
 
@@ -751,7 +776,9 @@ impl State {
                     id,
                     range,
                     what,
+                    sessions,
                 } => {
+                    self.take_sessions(sessions);
                     let view = self.answer(owner, id, range, what);
                     out.push(SourceUpdate::History(HistoryUpdate::View {
                         owner,
@@ -759,12 +786,7 @@ impl State {
                         view: Arc::new(view),
                     }));
                 }
-                HistoryMsg::Sessions { seq, ids } => {
-                    if seq >= self.sessions_seq {
-                        self.sessions_seq = seq;
-                        self.owners.retain(|o| ids.contains(&o.id));
-                    }
-                }
+                HistoryMsg::Sessions(list) => self.take_sessions(list),
                 HistoryMsg::Delete { keys } => {
                     for (owner, view) in self.delete(&keys) {
                         out.push(SourceUpdate::History(HistoryUpdate::View {
@@ -780,6 +802,15 @@ impl State {
                     Mode::Recording(rec) => rec.record(msg, now),
                 },
             }
+        }
+    }
+
+    /// Drops the queries and view of every session not in `list`, when it is newer than the
+    /// last list applied.
+    fn take_sessions(&mut self, list: SessionList) {
+        if list.seq > self.sessions_seq {
+            self.sessions_seq = list.seq;
+            self.owners.retain(|o| list.ids.contains(&o.id));
         }
     }
 
@@ -919,7 +950,7 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         // `State::apply` handles queries and deletes (E30-015).
         HistoryMsg::Delete { .. }
         | HistoryMsg::Query { .. }
-        | HistoryMsg::Sessions { .. }
+        | HistoryMsg::Sessions(_)
         | HistoryMsg::Dropped { .. } => {}
         HistoryMsg::Inspect(_) => {}
     }
@@ -1311,11 +1342,14 @@ mod tests {
             metric: HistoryMetric::Cpu,
             n: 3,
         };
+        let ids = [ClientSessionId::LOCAL, ClientSessionId(2)];
+        sink.note_sessions(ids);
         let took = sink.command(HistoryMsg::Query {
             owner: ClientSessionId(2),
             id: 42,
             range: HistoryRange::At(5),
             what: what.clone(),
+            sessions: SessionList::default(),
         });
         assert_eq!(took, Some(3), "the generation that took it");
         match rx.try_recv() {
@@ -1324,11 +1358,14 @@ mod tests {
                 id,
                 range,
                 what: got,
+                sessions,
             }) => {
                 assert_eq!(owner, ClientSessionId(2));
                 assert_eq!(id, 42);
                 assert_eq!(range, HistoryRange::At(5));
                 assert_eq!(got, what);
+                assert_eq!(sessions.seq, 1);
+                assert_eq!(*sessions.ids, ids, "the query carries the session list");
             }
             _ => panic!("expected one Query message"),
         }
@@ -1412,11 +1449,14 @@ mod tests {
                 }
                 2..=5 => {
                     let i = rng.below(open.len() as u64) as usize;
+                    // As the reducer: the query carries the current session list.
+                    sink.note_sessions(open.iter().map(|(id, _)| *id));
                     let msg = HistoryMsg::Query {
                         owner: open[i].0,
                         id: next_query,
                         range: HistoryRange::Live,
                         what: what.clone(),
+                        sessions: SessionList::default(),
                     };
                     if let Some(g) = sink.command(msg) {
                         open[i].1 = Some((g, next_query));
