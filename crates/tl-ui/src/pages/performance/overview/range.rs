@@ -101,10 +101,13 @@ pub fn history_request(
     })
 }
 
-/// `history.device_metrics`, on before settings load. 24 h and 7 d read only the stored history,
-/// so with it off their segments are disabled (UI-PRF-060).
+/// `history.device_metrics`, a host setting, on before the engine gives it. 24 h and 7 d read
+/// only the stored history, so with it off their segments are disabled (UI-PRF-060).
 pub fn history_kept(cx: &App) -> bool {
-    !cx.has_global::<TlSettings>() || TlSettings::settings(cx).history.device_metrics
+    crate::host_settings::current(cx)
+        .values
+        .history
+        .device_metrics
 }
 
 /// The segmented switch: one segment per range, the current one on. A click saves the range.

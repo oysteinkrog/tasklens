@@ -1255,10 +1255,10 @@ mod row_actions {
             tl_ui::theme::metrics::init_metrics(&appearance, cx);
             tl_ui::i18n::init_strings(cx, "en-US");
             tl_ui::table::actions::bind_keys_table(cx);
-            let mut settings = Settings::default();
-            settings.history.enabled = recording;
+            // `history.enabled` is a host setting: the engine's snapshot carries it.
+            engine.publish_host_settings(|v| v.history.enabled = recording);
             cx.set_global(BootSettings {
-                settings,
+                settings: Settings::default(),
                 state,
                 persist: None,
                 startup_toasts: Vec::new(),
@@ -1527,9 +1527,11 @@ mod row_actions {
         r.vcx.debug_bounds("history-off-banner").is_some()
     }
 
+    /// The host setting `history.enabled` the window shows.
     fn recording(r: &mut Rig<'_>) -> bool {
+        r.vcx.run_until_parked();
         r.vcx
-            .update(|_, cx| TlSettings::settings(cx).history.enabled)
+            .update(|_, cx| tl_ui::host_settings::values(cx).history.enabled)
     }
 
     #[gpui_kit::test]
@@ -2699,10 +2701,10 @@ mod mode {
             tl_ui::theme::metrics::init_metrics(&appearance, cx);
             tl_ui::i18n::init_strings(cx, "en-US");
             tl_ui::table::actions::bind_keys_table(cx);
-            let mut settings = Settings::default();
-            settings.history.enabled = recording;
+            // `history.enabled` is a host setting: the engine's snapshot carries it.
+            engine.publish_host_settings(|v| v.history.enabled = recording);
             cx.set_global(BootSettings {
-                settings,
+                settings: Settings::default(),
                 state,
                 persist: Some(Box::new(move |_, _| count.set(count.get() + 1))),
                 startup_toasts: Vec::new(),
@@ -3021,8 +3023,10 @@ fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
         .expect("Processes page listed")
 }
 
+/// The `[history]` host settings the window shows (tasklens-q4x76.23).
 fn history_settings(cx: &mut TestAppContext) -> HistorySettings {
-    cx.update(|cx| TlSettings::settings(cx).history.clone())
+    cx.run_until_parked();
+    cx.update(|cx| tl_ui::host_settings::values(cx).history)
 }
 
 #[gpui_kit::test]
@@ -3078,8 +3082,11 @@ fn retention_choice_sent_to_engine(cx: &mut TestAppContext) {
     cx.update(|cx| page.pick(SettingKey::HistoryRetentionH, "12 hours", cx));
     cx.run_until_parked();
     assert_eq!(history_settings(cx).retention_h, 12);
-    let sent = engine.settings();
-    assert_eq!(sent.last().expect("settings sent").history.retention_h, 12);
+    let writes = engine.host_writes();
+    let (base_rev, changes) = writes.last().expect("a host settings write");
+    assert_eq!(*base_rev, 1);
+    assert_eq!(changes.history.as_ref().map(|h| h.retention_h), Some(12));
+    assert!(engine.settings().is_empty());
 }
 
 #[gpui_kit::test]

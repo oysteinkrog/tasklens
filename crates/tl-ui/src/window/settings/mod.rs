@@ -63,6 +63,7 @@ use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::slider::{TlSlider, TlSliderEvent};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use crate::host_settings;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -1402,8 +1403,16 @@ impl PageBuilder {
 }
 
 /// The current value of `key`, read from the settings as their serialized form. `Null` when
-/// there are no settings or the key is not found.
+/// there are no settings or the key is not found. A host key reads the host settings in the
+/// newest snapshot (ADR-018 Settings).
 fn read(cx: &App, key: SettingKey) -> serde_json::Value {
+    if let Some(value) = host_settings::read_key(&host_settings::current(cx).values, key) {
+        return match value {
+            SettingValue::Bool(b) => serde_json::Value::from(b),
+            SettingValue::Int(i) => serde_json::Value::from(i),
+            _ => serde_json::Value::Null,
+        };
+    }
     if !cx.has_global::<TlSettings>() {
         return serde_json::Value::Null;
     }
@@ -1599,10 +1608,11 @@ impl SettingsWindow {
             .map(|h| h.0.clone())
             .map(|hub| {
                 cx.subscribe(&hub, |_, _, ev: &SnapshotChanged, cx| {
-                    if ev
-                        .mask
-                        .intersects(ComponentMask::DEVICES | ComponentMask::HEALTH)
-                    {
+                    if ev.mask.intersects(
+                        ComponentMask::DEVICES
+                            | ComponentMask::HEALTH
+                            | ComponentMask::HOST_SETTINGS,
+                    ) {
                         cx.notify();
                     }
                 })

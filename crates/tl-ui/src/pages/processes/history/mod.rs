@@ -492,15 +492,16 @@ pub fn open_at(t: TimeNs, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// True while `history.enabled` is off. Without settings (tests) recording counts as on.
+/// True while `history.enabled`, a host setting, is off. Before the engine gives it (and
+/// without a hub, in tests) recording does not count as off.
 fn recording_off(cx: &App) -> bool {
-    cx.try_global::<TlSettings>()
-        .is_some_and(|_| !TlSettings::settings(cx).history.enabled)
+    let host = crate::host_settings::current(cx);
+    host.rev > 0 && !host.values.history.enabled
 }
 
-/// Turns recording on through the settings, which makes the engine switch to the store.
+/// Turns recording on in the host settings, which makes the engine switch to the store.
 fn enable_recording(cx: &mut App) {
-    TlSettings::update(cx, |d| d.settings.history.enabled = true);
+    crate::host_settings::change(cx, |v| v.history.enabled = true);
 }
 
 fn problem_index(p: HistoryLoadProblem) -> usize {
@@ -591,8 +592,6 @@ pub struct HistoryPage {
     table: Entity<TlTreeTable<HistoryTableDelegate>>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 3],
-    /// The `history` section version last seen, so a `history.enabled` change repaints.
-    history_version: u64,
     /// The strip's built geometry and shaped labels, filled by `HistoryScrubber` in paint.
     scrubber: ScrubberCache,
     /// The strip's own view, created on the first render that shows it.
@@ -655,6 +654,10 @@ impl HistoryPage {
             if ev.mask.contains(ComponentMask::HISTORY) {
                 this.on_hub_history(cx);
             }
+            // `history.enabled` is a host setting: the recording banner follows it.
+            if ev.mask.contains(ComponentMask::HOST_SETTINGS) {
+                cx.notify();
+            }
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
@@ -699,9 +702,6 @@ impl HistoryPage {
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 3], |tl| SECTIONS.map(|s| tl.version(s)));
-        let history_version = cx
-            .try_global::<TlSettings>()
-            .map_or(0, |tl| tl.version(Section::History));
         let (words, legend_words, strings_version) = match cx.try_global::<Strings>() {
             Some(s) => (
                 HistoryWords::new(cx),
@@ -726,7 +726,6 @@ impl HistoryPage {
             retry_timer: None,
             table,
             section_versions,
-            history_version,
             scrubber: ScrubberCache::default(),
             strip_view: None,
             strip_focus: cx.focus_handle().tab_stop(true),
@@ -1229,12 +1228,7 @@ impl HistoryPage {
         let Some(tl) = cx.try_global::<TlSettings>() else {
             return;
         };
-        let history_version = tl.version(Section::History);
         let versions = SECTIONS.map(|s| tl.version(s));
-        if history_version != self.history_version {
-            self.history_version = history_version;
-            cx.notify();
-        }
         if versions == self.section_versions {
             return;
         }

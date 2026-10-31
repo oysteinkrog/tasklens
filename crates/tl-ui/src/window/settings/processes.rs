@@ -5,13 +5,18 @@
 //!
 //! Group order when every phase is built: Refresh, View, Tables (every table), Properties
 //! windows, Dumps (E21-036), History (E30-027).
+//!
+//! The refresh interval and the History group are host settings (ADR-018 Settings): they show
+//! the host's values and stay disabled until the engine has given them.
 
 use gpui_kit::{App, SharedString};
 use tl_model::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
 
 use super::{PageBuilder, PageId};
+use crate::components::banner::TlBannerKind;
+use crate::host_settings;
 use crate::i18n::tr;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::settings_global::{SettingKey, SettingValue};
 use crate::window::menus_settings::{HISTORY_STORAGE_KEYS, REFRESH_KEYS};
 
 pub fn page(cx: &mut App) -> PageBuilder {
@@ -20,13 +25,23 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let view = tr(cx, "shell-settings-group-view");
     let tables = tr(cx, "shell-settings-group-tables");
     let properties = tr(cx, "shell-settings-group-properties");
+    let host = host_settings::current(cx);
+    let known = host.rev > 0;
+    let waiting = (!known).then(|| tr(cx, "shell-settings-host-waiting"));
 
     let intervals: Vec<(SharedString, SettingValue)> = REFRESH_KEYS
         .into_iter()
         .zip(PROCESS_INTERVAL_MENU_MS)
         .map(|(key, ms)| (tr(cx, key), SettingValue::Int(i64::from(ms))))
         .collect();
-    page.dropdown(
+    if host.read_only {
+        page.banner(
+            refresh.clone(),
+            TlBannerKind::Warning,
+            tr(cx, "shell-settings-host-read-only"),
+        );
+    }
+    page.disable_next(!known).dropdown(
         refresh,
         SettingKey::ProcessesIntervalMs,
         tr(cx, "shell-menu-settings-refresh"),
@@ -126,40 +141,48 @@ pub fn page(cx: &mut App) -> PageBuilder {
     );
 
     let history = tr(cx, "shell-settings-group-history");
-    let recording = TlSettings::settings(cx).history.enabled;
+    let recording = host.values.history.enabled;
     let storage: Vec<(SharedString, SettingValue)> = HISTORY_STORAGE_KEYS
         .into_iter()
         .zip(HISTORY_RETENTION_MENU_H)
         .map(|(key, h)| (tr(cx, key), SettingValue::Int(i64::from(h))))
         .collect();
-    page.switch(
-        history.clone(),
-        SettingKey::HistoryEnabled,
-        tr(cx, "shell-menu-settings-record-history"),
-        None,
-    )
-    .dropdown(
-        history.clone(),
-        SettingKey::HistoryRetentionH,
-        tr(cx, "shell-menu-settings-history-storage"),
-        &storage,
-    )
-    .disable_next(!recording)
-    .tooltip_next((!recording).then(|| tr(cx, "shell-menu-settings-history-first")))
-    .switch(
-        history.clone(),
-        SettingKey::HistoryPersist,
-        tr(cx, "shell-menu-settings-history-persist"),
-        None,
-    )
-    .number(
-        history,
-        SettingKey::HistoryMaxDiskMb,
-        tr(cx, "shell-settings-history-disk-limit"),
-        64..=4096,
-        64,
-        tr(cx, "shell-settings-unit-mib"),
-    );
+    page.disable_next(!known)
+        .tooltip_next(waiting.clone())
+        .switch(
+            history.clone(),
+            SettingKey::HistoryEnabled,
+            tr(cx, "shell-menu-settings-record-history"),
+            None,
+        )
+        .disable_next(!known)
+        .dropdown(
+            history.clone(),
+            SettingKey::HistoryRetentionH,
+            tr(cx, "shell-menu-settings-history-storage"),
+            &storage,
+        )
+        .disable_next(!known || !recording)
+        .tooltip_next(
+            waiting
+                .clone()
+                .or_else(|| (!recording).then(|| tr(cx, "shell-menu-settings-history-first"))),
+        )
+        .switch(
+            history.clone(),
+            SettingKey::HistoryPersist,
+            tr(cx, "shell-menu-settings-history-persist"),
+            None,
+        )
+        .disable_next(!known)
+        .number(
+            history,
+            SettingKey::HistoryMaxDiskMb,
+            tr(cx, "shell-settings-history-disk-limit"),
+            64..=4096,
+            64,
+            tr(cx, "shell-settings-unit-mib"),
+        );
     page
 }
 

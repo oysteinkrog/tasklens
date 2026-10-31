@@ -582,15 +582,19 @@ fn processes_refresh_dropdown(cx: &mut TestAppContext) {
     );
     cx.update(|cx| processes.pick(SettingKey::ProcessesIntervalMs, "2.0s", cx));
     cx.run_until_parked();
+    // A host setting: the engine gets it from the revision read, settings.toml keeps its value.
     assert_eq!(
         cx.update(|cx| TlSettings::settings(cx).processes.interval_ms),
+        1000
+    );
+    let writes = engine.host_writes();
+    assert_eq!(writes.len(), 1, "the engine gets the interval");
+    assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
+    assert_eq!(
+        cx.update(|cx| tl_ui::host_settings::values(cx).interval_ms),
         2000
     );
-    assert_eq!(
-        engine.settings().last().map(|s| s.interval_ms),
-        Some(2000),
-        "the engine gets the interval"
-    );
+    assert!(engine.settings().is_empty());
 }
 
 #[gpui_kit::test]
@@ -741,9 +745,11 @@ fn performance_range_dropdown(cx: &mut TestAppContext) {
 /// a change while the Settings window stays open (UI-PRF-057).
 #[gpui_kit::test]
 fn performance_timeline_click_follows_recording(cx: &mut TestAppContext) {
-    setup(cx);
+    let (engine, _) = setup(cx);
+    // `history.enabled` is a host setting, which the engine's snapshot carries.
     let recording = |on: bool, cx: &mut TestAppContext| {
-        cx.update(|cx| TlSettings::update(cx, |d| d.settings.history.enabled = on));
+        engine.publish_host_settings(|v| v.history.enabled = on);
+        cx.run_until_parked();
     };
     recording(false, cx);
     let labels = |cx: &mut TestAppContext| {

@@ -1564,14 +1564,17 @@ mod reset_settings {
         assert!(!is_open(cx, handle));
         let now = settings(cx);
         assert_eq!(now.appearance.ui_scale_pct, 100);
-        assert_eq!(now, Settings::default());
+        // The host keys stay as loaded: they belong to the engine (tasklens-q4x76.23).
+        let mut expected = Settings::default();
+        expected.processes.interval_ms = 2000;
+        assert_eq!(now, expected);
         let kept = cx.update(|cx| TlSettings::state(cx).clone());
         assert_eq!(kept.window.width, state.window.width);
         assert_eq!(kept.window.height, state.window.height);
         assert_eq!(kept.columns, state.columns);
         let saves = r.saves.borrow().clone();
         let (saved, saved_state) = saves.last().expect("persisted");
-        assert_eq!(*saved, Settings::default());
+        assert_eq!(*saved, expected);
         assert_eq!(saved_state.columns, state.columns);
         assert_eq!(toasts(&mut r), ["Settings reset to defaults"]);
     }
@@ -1589,14 +1592,19 @@ mod reset_settings {
         assert_eq!(active(cx), "Default Dark");
     }
 
+    /// The host settings belong to the engine: a reset neither changes them there nor writes
+    /// their default to `settings.toml` (ADR-018 Settings, tasklens-q4x76.23).
     #[gpui_kit::test]
-    fn reset_sends_engine_settings(cx: &mut TestAppContext) {
+    fn reset_leaves_the_host_settings_alone(cx: &mut TestAppContext) {
         let mut r = rig(cx, true);
         let (_, view, mut vcx) = open_confirm(&mut r, cx);
         drop(view);
         click_reset(&mut vcx);
-        let sent = r.engine.settings();
-        assert_eq!(sent.last().map(|s| s.interval_ms), Some(1000));
+        assert!(r.engine.settings().is_empty());
+        assert!(r.engine.host_writes().is_empty());
+        let saves = r.saves.borrow().clone();
+        let (saved, _) = saves.last().expect("persisted");
+        assert_eq!(saved.processes.interval_ms, 2000);
     }
 
     #[gpui_kit::test]

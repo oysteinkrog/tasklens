@@ -20,6 +20,7 @@ use gpui_kit::{
 use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionState, LaunchWhat};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
+use tl_model::remote_proto::HostSettingsValues;
 use tl_model::settings::{
     AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
 };
@@ -186,6 +187,9 @@ fn rig_with(cx: &mut TestAppContext, toasts: bool) -> Rig<'_> {
         TlSettings::init(cx);
         menus_view::init(cx);
         register_global_handlers(cx);
+        // The Settings menu reads the host settings from the hub (tasklens-q4x76.23).
+        let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(Arc::clone(&client), cx));
+        cx.set_global(tl_ui::hub::GlobalHub(hub));
         cx.set_global(EngineGlobal(client));
         cx.on_action(move |_: &ResetSettings, _| reset_count.set(reset_count.get() + 1));
         cx.set_reduce_motion(true);
@@ -919,6 +923,11 @@ fn settings(cx: &mut VisualTestContext) -> Settings {
     cx.update(|_, cx| TlSettings::settings(cx).clone())
 }
 
+/// The host settings the fake engine publishes now.
+fn host(r: &Rig<'_>) -> HostSettingsValues {
+    r.engine.latest().host_settings.values.clone()
+}
+
 #[gpui_kit::test]
 fn settings_menu_p1_rows(cx: &mut TestAppContext) {
     let r = rig(cx);
@@ -946,7 +955,8 @@ fn settings_menu_refresh_labels(cx: &mut TestAppContext) {
     // interval_ms = 1000: the mark is on "1.0s". A value off the list marks nothing.
     let marks = |cx: &mut VisualTestContext| cx.update(|_, cx| menus_settings::refresh_marks(cx));
     assert_eq!(marks(r.cx), [false, false, true, false, false, false]);
-    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.processes.interval_ms = 1500));
+    r.engine.publish_host_settings(|v| v.interval_ms = 1500);
+    r.cx.run_until_parked();
     assert_eq!(marks(r.cx), [false; 6]);
 }
 
@@ -954,11 +964,15 @@ fn settings_menu_refresh_labels(cx: &mut TestAppContext) {
 fn settings_menu_refresh_radio(cx: &mut TestAppContext) {
     let r = rig(cx);
     keys(r.cx, "alt-s right down down down enter");
-    assert_eq!(settings(r.cx).processes.interval_ms, 2000);
-    assert_eq!(
-        r.engine.settings().last().map(|s| s.interval_ms),
-        Some(2000)
-    );
+    r.cx.run_until_parked();
+    // A host setting: it goes to the engine from the revision read, not to settings.toml.
+    assert_eq!(settings(r.cx).processes.interval_ms, 1000);
+    let writes = r.engine.host_writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
+    assert_eq!(host(&r).interval_ms, 2000);
+    let marks = r.cx.update(|_, cx| menus_settings::refresh_marks(cx));
+    assert_eq!(marks, [false, false, false, true, false, false]);
 }
 
 #[gpui_kit::test]
@@ -1868,7 +1882,7 @@ fn settings_entry(
 fn save_history_disabled_without_recording(cx: &mut TestAppContext) {
     use tl_ui::components::menu::MenuEntryKind;
     let r = rig(cx);
-    assert!(!settings(r.cx).history.enabled);
+    assert!(!host(&r).history.enabled);
     keys(r.cx, "alt-s");
     assert_eq!(
         settings_entry(r.cx, "Save history to disk"),
@@ -1878,7 +1892,8 @@ fn save_history_disabled_without_recording(cx: &mut TestAppContext) {
         )
     );
     keys(r.cx, "escape");
-    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.history.enabled = true));
+    r.engine.publish_host_settings(|v| v.history.enabled = true);
+    r.cx.run_until_parked();
     keys(r.cx, "alt-s");
     let (kind, tooltip) = settings_entry(r.cx, "Save history to disk");
     assert_ne!(kind, MenuEntryKind::Disabled);
@@ -1892,11 +1907,15 @@ fn record_history_toast_and_engine_settings(cx: &mut TestAppContext) {
     keys(r.cx, "alt-s");
     click_label(r.cx, "Record history");
     draw(r.cx);
-    assert!(settings(r.cx).history.enabled);
-    assert_eq!(
-        r.engine.settings().last().map(|s| s.history.enabled),
-        Some(true)
+    r.cx.run_until_parked();
+    assert!(
+        !settings(r.cx).history.enabled,
+        "not written to settings.toml"
     );
+    let writes = r.engine.host_writes();
+    assert_eq!(writes.len(), 1);
+    assert!(writes[0].1.history.as_ref().is_some_and(|h| h.enabled));
+    assert!(host(&r).history.enabled);
     assert_eq!(toast_texts(&mut r), ["History recording on"]);
 }
 
@@ -1912,7 +1931,8 @@ fn history_storage_radio(cx: &mut TestAppContext) {
         ]
     );
     keys(r.cx, "down down down down down down enter");
-    assert_eq!(settings(r.cx).history.retention_h, 12);
+    r.cx.run_until_parked();
+    assert_eq!(host(&r).history.retention_h, 12);
 }
 
 #[gpui_kit::test]

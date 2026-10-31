@@ -129,7 +129,11 @@ fn delete_theme(name: &str, window: &mut Window, cx: &mut App) {
 /// Writes the default settings, then applies them and the default theme, and shows the result
 /// as a toast in `window`. On a write failure nothing changes.
 pub fn reset_settings(window: &mut Window, cx: &mut App) {
-    let defaults = Settings::default();
+    let mut defaults = Settings::default();
+    // The host keys belong to the engine (ADR-018 Settings): settings.toml keeps them as loaded.
+    let loaded = TlSettings::settings(cx);
+    defaults.processes.interval_ms = loaded.processes.interval_ms;
+    defaults.history = loaded.history.clone();
     let written = match cx.try_global::<AppEnv>() {
         Some(env) => (env.write_settings_now.clone())(&defaults),
         None => Err("no AppEnv".to_owned()),

@@ -65,9 +65,13 @@ pub fn power_saving(cx: &App) -> bool {
     cx.try_global::<PowerSaving>().is_some_and(|p| p.0)
 }
 
-/// `history.device_metrics`. It counts as on (its default) before settings load.
+/// `history.device_metrics`, a host setting from the newest snapshot. It counts as on (its
+/// default) before the engine gives it.
 fn device_metrics_now(cx: &App) -> bool {
-    !cx.has_global::<TlSettings>() || TlSettings::settings(cx).history.device_metrics
+    crate::host_settings::current(cx)
+        .values
+        .history
+        .device_metrics
 }
 
 /// On battery with the setting on. The setting counts as on (its default) before settings load.
@@ -97,16 +101,24 @@ impl DemandAggregator {
             if ev.mask.contains(ComponentMask::DEVICE_DETAILS) {
                 this.sync_power_saving(&hub, cx);
             }
+            if ev.mask.contains(ComponentMask::HOST_SETTINGS) {
+                let device_metrics = hub
+                    .read(cx)
+                    .current()
+                    .host_settings
+                    .values
+                    .history
+                    .device_metrics;
+                if device_metrics != this.device_metrics {
+                    this.device_metrics = device_metrics;
+                    this.schedule_flush(cx);
+                }
+            }
         })
         .detach();
         let settings_hub = hub.clone();
         cx.observe_global::<TlSettings>(move |this, cx| {
             this.sync_power_saving(&settings_hub, cx);
-            let device_metrics = device_metrics_now(cx);
-            if device_metrics != this.device_metrics {
-                this.device_metrics = device_metrics;
-                this.schedule_flush(cx);
-            }
         })
         .detach();
         let power_saving = power_saving_now(hub, cx);

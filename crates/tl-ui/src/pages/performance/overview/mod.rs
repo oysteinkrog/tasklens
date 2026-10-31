@@ -644,6 +644,10 @@ impl OverviewPage {
         if self.active && ev.mask.intersects(wanted) {
             self.sync_range(cx);
         }
+        // `history.device_metrics` is a host setting: the range switches follow it.
+        if ev.mask.contains(ComponentMask::HOST_SETTINGS) {
+            self.sync_layout(cx);
+        }
     }
 
     /// Works out each device box's min, avg and peak text for the range, and hands it to the

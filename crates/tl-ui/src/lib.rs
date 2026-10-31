@@ -10,6 +10,7 @@ pub mod demand;
 pub mod engine_link;
 pub mod focus;
 pub mod helper_flow;
+pub mod host_settings;
 pub mod hub;
 pub mod i18n;
 pub mod net_totals;

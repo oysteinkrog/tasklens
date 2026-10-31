@@ -87,17 +87,28 @@ fn settings_update_bumps_only_changed_section(cx: &mut TestAppContext) {
     cx.read(|cx| assert!(!cx.reduce_motion()));
 }
 
+/// The host keys belong to the engine (ADR-018 Settings, tasklens-q4x76.23): a write keeps
+/// them as they were loaded, so `settings.toml` never gets new values for them, and nothing goes
+/// to the engine through `set_settings`.
 #[gpui_kit::test]
-fn settings_engine_fields_sent(cx: &mut TestAppContext) {
+fn settings_host_keys_are_never_written(cx: &mut TestAppContext) {
     let (engine, persisted) = install(cx, Settings::default());
 
-    cx.update(|cx| TlSettings::update(cx, |d| d.settings.processes.interval_ms = 2000));
+    cx.update(|cx| {
+        TlSettings::update(cx, |d| {
+            d.settings.processes.interval_ms = 2000;
+            d.settings.history.enabled = true;
+        })
+    });
 
-    assert_eq!(bumped(cx), vec![Section::Processes]);
-    assert_eq!(persisted.get(), 1);
-    let sent = engine.settings();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].interval_ms, 2000);
+    assert!(bumped(cx).is_empty());
+    assert_eq!(persisted.get(), 0);
+    cx.read(|cx| {
+        let s = TlSettings::settings(cx);
+        assert_eq!(s.processes.interval_ms, 1000);
+        assert!(!s.history.enabled);
+    });
+    assert!(engine.settings().is_empty());
 }
 
 /// `hide_system` is a window setting: it travels in the table query, not in the engine
@@ -149,10 +160,9 @@ fn settings_preview_does_not_persist(cx: &mut TestAppContext) {
 
     cx.update(|cx| TlSettings::update(cx, |d| d.settings.appearance.ui_scale_pct = 150));
     assert_eq!(persisted.get(), 1);
-    // The previewed engine field reaches the engine with the persisting write.
-    let sent = engine.settings();
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].interval_ms, 2000);
+    // The previewed host key is not kept and never reaches the engine this way.
+    cx.read(|cx| assert_eq!(TlSettings::settings(cx).processes.interval_ms, 1000));
+    assert!(engine.settings().is_empty());
 
     // Nothing left to persist.
     cx.update(|cx| TlSettings::update(cx, |d| d.settings.appearance.ui_scale_pct = 150));

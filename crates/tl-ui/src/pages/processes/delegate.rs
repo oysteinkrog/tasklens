@@ -1508,7 +1508,8 @@ impl TreeTableDelegate for ProcessDelegate {
             flags,
             since,
             self.tint_now,
-            p.interval_ms,
+            // A host setting, from the snapshot the rows come from.
+            self.snapshot.host_settings.values.interval_ms,
             self.tint_animations,
             p.highlight_new_exited,
         )
@@ -1531,15 +1532,15 @@ impl TreeTableDelegate for ProcessDelegate {
         let now = self.clock();
         self.tint_now = now;
         self.tint_animations = self.settings.motion.animations && !cx.reduce_motion();
-        let p = &self.settings.processes;
-        if !p.highlight_new_exited {
+        if !self.settings.processes.highlight_new_exited {
             return;
         }
+        let interval_ms = self.snapshot.host_settings.values.interval_ms;
         let mut next: Option<TimeNs> = None;
         for ix in range {
             if let Some((flags, since)) = self.record_flags(ix)
                 && let Some(at) =
-                    tint_deadline(flags, since, now, p.interval_ms, self.tint_animations, true)
+                    tint_deadline(flags, since, now, interval_ms, self.tint_animations, true)
             {
                 next = Some(next.map_or(at, |n| n.min(at)));
             }

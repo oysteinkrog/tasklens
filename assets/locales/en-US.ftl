@@ -2974,6 +2974,9 @@ shell-settings-dump-full = Full
 shell-settings-group-history = History
 shell-settings-history-disk-limit = History disk limit
 shell-settings-unit-mib = MiB
+# Host settings: the refresh interval and History belong to the engine (tasklens-q4x76.23, ADR-018).
+shell-settings-host-waiting = Waiting for the engine's settings
+shell-settings-host-read-only = Changes apply until the engine stops. engine.toml was written by a newer tasklens, so they are not saved.
 # Go to parent process and Open file location (tasklens-pdu.23, PROC-071, PROC-073)
 processes-toast-switched-to-parent = Switched to parent process
 processes-toast-parent-not-found = Parent process not found in current view

@@ -3,6 +3,11 @@
 //! Tests publish scripted snapshots and read back every demand, settings value, command and
 //! journal query the UI sent. The channels match the real engine (ADR-005, ADR-018): a one-token
 //! wake channel, a 256-slot action event channel and an unbounded request end channel.
+//!
+//! Host settings (ADR-018 Settings) start known, at revision 1 with the defaults, as from an
+//! engine that has given them. `set_host_settings` checks the revision as the engine does and
+//! publishes the result; `change_host_settings_elsewhere` changes them as another window would,
+//! without a publish, so a test can make a write conflict.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -12,6 +17,9 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::remote_proto::{
+    HostSettings, HostSettingsChanges, HostSettingsValues, SetHostSettingsReply,
+};
 use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
@@ -36,6 +44,10 @@ struct FakeState {
     settings: Vec<EngineSettings>,
     commands: Vec<Command>,
     journals: Vec<JournalQuery>,
+    /// Every `set_host_settings` call, in call order.
+    host_writes: Vec<(u64, HostSettingsChanges)>,
+    /// Host settings changed elsewhere and not published yet. `None`: the latest snapshot's.
+    host_elsewhere: Option<HostSettings>,
     /// The engine ends of each journal handle. Kept so the handle's channels stay open.
     journal_ends: Vec<(
         async_channel::Sender<JournalEvent>,
@@ -57,6 +69,8 @@ impl FakeEngine {
                 settings: Vec::new(),
                 commands: Vec::new(),
                 journals: Vec::new(),
+                host_writes: Vec::new(),
+                host_elsewhere: None,
                 journal_ends: Vec::new(),
                 busy: false,
             })),
@@ -143,6 +157,34 @@ impl FakeEngine {
         self.state().journal_ends.get(i).cloned()
     }
 
+    /// Every `set_host_settings` call: the base revision and the changes, in call order.
+    pub fn host_writes(&self) -> Vec<(u64, HostSettingsChanges)> {
+        self.state().host_writes.clone()
+    }
+
+    /// Publishes the latest snapshot with host settings at the next revision, `f` applied to
+    /// their values.
+    pub fn publish_host_settings(&self, f: impl FnOnce(&mut HostSettingsValues)) {
+        self.publish_with(|s| {
+            let host = Arc::make_mut(&mut s.host_settings);
+            host.rev += 1;
+            f(&mut host.values);
+        });
+    }
+
+    /// Changes the host settings as another window would: the next revision, `f` applied, not
+    /// published. A write from the published revision then conflicts.
+    pub fn change_host_settings_elsewhere(&self, f: impl FnOnce(&mut HostSettingsValues)) {
+        let mut state = self.state();
+        let mut next = state
+            .host_elsewhere
+            .clone()
+            .unwrap_or_else(|| (*state.latest.host_settings).clone());
+        next.rev += 1;
+        f(&mut next.values);
+        state.host_elsewhere = Some(next);
+    }
+
     /// While `busy` is true, `send` returns `Err(CommandError::Busy)` and records nothing.
     pub fn set_busy(&self, busy: bool) {
         self.state().busy = busy;
@@ -178,6 +220,45 @@ impl EngineClient for FakeEngine {
         self.state().settings.push(settings);
     }
 
+    /// Records the call, then answers as the engine does: `Conflict` unless `base_rev` is the
+    /// current revision, else the next revision. Either way the current settings are published.
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        let (reply, current) = {
+            let mut state = self.state();
+            if state.busy {
+                return Err(CommandError::Busy);
+            }
+            state.host_writes.push((base_rev, changes.clone()));
+            let current = state
+                .host_elsewhere
+                .take()
+                .unwrap_or_else(|| (*state.latest.host_settings).clone());
+            if current.rev == 0 || base_rev != current.rev {
+                let reply = SetHostSettingsReply::Conflict {
+                    current: current.clone(),
+                };
+                (reply, current)
+            } else {
+                let next = HostSettings {
+                    rev: current.rev + 1,
+                    values: current.values.with_changes(&changes),
+                    read_only: current.read_only,
+                };
+                (SetHostSettingsReply::Ack { rev: next.rev }, next)
+            }
+        };
+        if *self.latest().host_settings != current {
+            self.publish_with(|s| s.host_settings = Arc::new(current));
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tx.try_send(reply);
+        Ok(rx)
+    }
+
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
         let mut state = self.state();
         if state.busy {
@@ -197,9 +278,15 @@ impl EngineClient for FakeEngine {
     }
 }
 
-/// Every component at its default, every header `WarmingUp`, sequence 0.
+/// Every component at its default, every header `WarmingUp`, sequence 0. The host settings are
+/// the defaults at revision 1, as from an engine that has given them.
 pub fn empty_snapshot() -> Snapshot {
-    Snapshot::empty(BootId(0), 0)
+    let mut snap = Snapshot::empty(BootId(0), 0);
+    snap.host_settings = Arc::new(HostSettings {
+        rev: 1,
+        ..HostSettings::default()
+    });
+    snap
 }
 
 #[cfg(test)]

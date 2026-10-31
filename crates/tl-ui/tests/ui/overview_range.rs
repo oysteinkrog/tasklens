@@ -425,10 +425,11 @@ fn overview_range_long_ranges_need_device_history(cx: &mut TestAppContext) {
         r.vcx
             .update(|_, cx| TlSettings::settings(cx).performance.overview_range)
     };
+    // A host setting: the engine's snapshot carries it (tasklens-q4x76.23).
     let set_kept = |r: &mut Rig, on: bool| {
-        r.vcx.update(|_, cx| {
-            TlSettings::update(cx, |d| d.settings.history.device_metrics = on);
-        });
+        r.engine
+            .publish_host_settings(|v| v.history.device_metrics = on);
+        r.vcx.run_until_parked();
         draw(r.vcx);
     };
     set_kept(&mut r, false);

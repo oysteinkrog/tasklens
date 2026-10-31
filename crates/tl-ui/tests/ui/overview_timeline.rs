@@ -145,12 +145,13 @@ fn click_bands(r: &mut Rig, frac: f32) {
     release(r.vcx, at);
 }
 
+/// `recording` is the host setting `history.enabled`, which the engine's snapshot carries.
 fn set_click(r: &mut Rig, click: TimelineClick, recording: bool) {
+    r.engine
+        .publish_host_settings(|v| v.history.enabled = recording);
+    r.vcx.run_until_parked();
     r.vcx.update(|_, cx| {
-        TlSettings::update(cx, |d| {
-            d.settings.history.enabled = recording;
-            d.settings.performance.timeline_click = click;
-        });
+        TlSettings::update(cx, |d| d.settings.performance.timeline_click = click);
     });
     draw(r.vcx);
 }

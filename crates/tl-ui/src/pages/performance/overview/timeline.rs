@@ -235,16 +235,16 @@ pub fn click_mode(cx: &App) -> TimelineClick {
     if !cx.has_global::<TlSettings>() {
         return TimelineClick::default();
     }
-    let s = TlSettings::settings(cx);
-    match s.performance.timeline_click {
-        TimelineClick::History if !s.history.enabled => TimelineClick::Pause,
+    let recording = crate::host_settings::current(cx).values.history.enabled;
+    match TlSettings::settings(cx).performance.timeline_click {
+        TimelineClick::History if !recording => TimelineClick::Pause,
         click => click,
     }
 }
 
 /// The click choices offered now: `history` only while `history.enabled` is on.
 pub fn click_choices(cx: &App) -> SmallVec<[TimelineClick; 3]> {
-    let recording = cx.has_global::<TlSettings>() && TlSettings::settings(cx).history.enabled;
+    let recording = crate::host_settings::current(cx).values.history.enabled;
     let mut choices: SmallVec<[TimelineClick; 3]> =
         SmallVec::from_slice(&[TimelineClick::Pause, TimelineClick::Preview]);
     if recording {

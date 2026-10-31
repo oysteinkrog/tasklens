@@ -4,7 +4,11 @@
 //! Every settings write in tl-ui goes through `TlSettings::update` (persisting) or
 //! `TlSettings::preview` (in memory only). Each settings section has its own version counter, so
 //! a view that observes the Global redraws only when a section it draws changed. `update` calls
-//! the tl-app persist callback and pushes changed `EngineSettings` to the engine.
+//! the tl-app persist callback.
+//!
+//! The host keys (`processes.interval_ms` and `[history]`) belong to the host's engine (ADR-018
+//! Settings). `set` and `toggle` send them to `host_settings`, and every write keeps their
+//! values in `settings.toml` as they were loaded, so the window never writes them.
 //!
 //! `SettingKey` and `SettingValue` name one table (a) key and a value for it. The generic
 //! `ToggleSetting` and `SetSetting` Actions (E20-002) carry them. Logs name dotted keys only,
@@ -15,11 +19,11 @@ use std::sync::Arc;
 use gpui_kit::{App, BorrowAppContext, Global, SharedString};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
-use tl_model::settings::{EngineSettings, Settings, UiState};
+use tl_model::settings::{Settings, UiState};
 use tracing::{debug, warn};
 
-use crate::app::{BootSettings, EngineGlobal, PersistFn};
-use crate::i18n;
+use crate::app::{BootSettings, PersistFn};
+use crate::{host_settings, i18n};
 
 /// The parsed settings and state.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,8 +149,6 @@ pub struct TlSettings {
     persist: Option<PersistFn>,
     /// A `preview` changed `data` and no `update` has persisted it yet.
     unpersisted: bool,
-    /// The `EngineSettings` the engine has: the boot value, then the last one `update` sent.
-    engine_sent: EngineSettings,
     /// `TlSettings` turned `App::reduce_motion` on because `motion.animations` is off. It turns
     /// it off again only in that case, so a reduce-motion set elsewhere stays.
     forced_reduce_motion: bool,
@@ -164,7 +166,6 @@ impl TlSettings {
             settings: boot.settings.clone(),
             state: boot.state.clone(),
         };
-        let engine_sent = EngineSettings::from(&data.settings);
         let forced_reduce_motion = !data.settings.motion.animations && !cx.reduce_motion();
         if forced_reduce_motion {
             cx.set_reduce_motion(true);
@@ -175,7 +176,6 @@ impl TlSettings {
             state_version: 1,
             persist,
             unpersisted: false,
-            engine_sent,
             forced_reduce_motion,
         });
     }
@@ -201,19 +201,24 @@ impl TlSettings {
     }
 
     /// Persisting write: run `f`, clamp, bump the versions of every section that changed,
-    /// bump `state_version` if UiState changed, call `persist`, and send EngineSettings if they changed.
+    /// bump `state_version` if UiState changed, and call `persist`. Host keys keep their values.
     pub fn update(cx: &mut App, f: impl FnOnce(&mut SettingsData)) {
         Self::write(cx, true, f);
     }
 
     /// In-memory write for live previews (slider Change events): same as `update` but never calls
-    /// `persist` and never calls `EngineClient::set_settings`. A later `update` persists the value.
+    /// `persist`. A later `update` persists the value.
     pub fn preview(cx: &mut App, f: impl FnOnce(&mut SettingsData)) {
         Self::write(cx, false, f);
     }
 
-    /// Flips a Bool key. Any other kind logs a warning and changes nothing.
+    /// Flips a Bool key. Any other kind logs a warning and changes nothing. A host key goes to
+    /// the host's engine (`host_settings::toggle`).
     pub fn toggle(cx: &mut App, key: SettingKey) {
+        if host_settings::is_host_key(key) {
+            host_settings::toggle(cx, key);
+            return;
+        }
         if key.kind() != SettingKind::Bool {
             warn!(target: "tasklens::settings", key = key.as_str(), "toggle on non-bool key");
             return;
@@ -226,8 +231,13 @@ impl TlSettings {
     }
 
     /// Writes one key. A kind mismatch, an out-of-range integer or a string that names no enum
-    /// value logs a warning and changes nothing. `Map` keys always reject.
+    /// value logs a warning and changes nothing. `Map` keys always reject. A host key goes to
+    /// the host's engine (`host_settings::set`).
     pub fn set(cx: &mut App, key: SettingKey, value: SettingValue) {
+        if host_settings::is_host_key(key) {
+            host_settings::set(cx, key, &value);
+            return;
+        }
         let mut rejected = None;
         Self::update(cx, |d| {
             if let Err(why) = assign(&mut d.settings, key, &value) {
@@ -243,6 +253,9 @@ impl TlSettings {
         let current = &cx.global::<TlSettings>().data;
         let mut next = current.clone();
         f(&mut next);
+        // The host keys belong to the engine: `settings.toml` keeps them as they were loaded.
+        next.settings.processes.interval_ms = current.settings.processes.interval_ms;
+        next.settings.history = current.settings.history.clone();
         for key in next.settings.clamp() {
             debug!(target: "tasklens::settings", key, "clamped");
         }
@@ -261,8 +274,6 @@ impl TlSettings {
             return;
         }
 
-        let engine = EngineSettings::from(&next.settings);
-        let send_engine = persist && engine != cx.global::<TlSettings>().engine_sent;
         cx.update_global::<TlSettings, _>(|tl, cx| {
             for s in &changed {
                 tl.versions[*s as usize] += 1;
@@ -280,17 +291,11 @@ impl TlSettings {
                 tl.unpersisted = true;
             }
             tl.sync_reduce_motion(cx);
-            if send_engine {
-                tl.engine_sent = engine.clone();
-            }
         });
 
         if language_changed {
             let language = TlSettings::settings(cx).general.language.clone();
             i18n::set_language(cx, &language);
-        }
-        if send_engine && let Some(client) = cx.try_global::<EngineGlobal>() {
-            client.0.set_settings(engine);
         }
     }
 

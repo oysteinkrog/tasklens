@@ -59,6 +59,7 @@ use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
 use crate::app::{AdapterInfo, AppEnv, EngineGlobal};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host_settings;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -140,7 +141,12 @@ pub fn init(cx: &mut App) {
         }
     });
     cx.on_action(|_: &ToggleRecordHistory, cx| {
-        let on = !settings_now(cx).history.enabled;
+        // A host setting: nothing to flip before the engine gave it.
+        let host = host_settings::current(cx);
+        if host.rev == 0 {
+            return;
+        }
+        let on = !host.values.history.enabled;
         TlSettings::set(cx, SettingKey::HistoryEnabled, SettingValue::Bool(on));
         let key = if on {
             "shell-toast-history-on"
@@ -211,14 +217,19 @@ pub fn build(
     let tab_switch = sliders.tab_switch.clone();
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let s = settings_now(cx);
+        // The refresh interval and History are host settings, disabled until the engine gave
+        // them (ADR-018 Settings).
+        let host = host_settings::current(cx);
+        let waiting = (host.rev == 0).then(|| tr(cx, "shell-settings-host-waiting"));
+        let history = &host.values.history;
+        let refresh = tr(cx, "shell-menu-settings-refresh");
+        let menu = menu.header(tr(cx, "shell-menu-settings-monitoring"));
+        let menu = if waiting.is_some() {
+            menu.item_disabled(refresh, waiting.clone())
+        } else {
+            menu.submenu(refresh, window, cx, refresh_submenu)
+        };
         let menu = menu
-            .header(tr(cx, "shell-menu-settings-monitoring"))
-            .submenu(
-                tr(cx, "shell-menu-settings-refresh"),
-                window,
-                cx,
-                refresh_submenu,
-            )
             .submenu(
                 tr(cx, "shell-menu-settings-network-unit"),
                 window,
@@ -229,27 +240,23 @@ pub fn build(
                 tr(cx, "shell-menu-settings-network-auto-scale"),
                 s.units.network_auto_scale,
                 toggle(SettingKey::UnitsNetworkAutoScale),
-            )
-            .check_item(
-                tr(cx, "shell-menu-settings-record-history"),
-                s.history.enabled,
-                Box::new(ToggleRecordHistory),
-            )
-            .submenu(
-                tr(cx, "shell-menu-settings-history-storage"),
-                window,
-                cx,
-                history_storage_submenu,
             );
+        let record = tr(cx, "shell-menu-settings-record-history");
+        let storage = tr(cx, "shell-menu-settings-history-storage");
         let persist = tr(cx, "shell-menu-settings-history-persist");
-        let menu = if s.history.enabled {
-            menu.check_item(
-                persist,
-                s.history.persist,
-                toggle(SettingKey::HistoryPersist),
-            )
+        let menu = if waiting.is_some() {
+            menu.item_disabled(record, waiting.clone())
+                .item_disabled(storage, waiting.clone())
+                .item_disabled(persist, waiting.clone())
         } else {
-            menu.item_disabled(persist, Some(tr(cx, "shell-menu-settings-history-first")))
+            let menu = menu
+                .check_item(record, history.enabled, Box::new(ToggleRecordHistory))
+                .submenu(storage, window, cx, history_storage_submenu);
+            if history.enabled {
+                menu.check_item(persist, history.persist, toggle(SettingKey::HistoryPersist))
+            } else {
+                menu.item_disabled(persist, Some(tr(cx, "shell-menu-settings-history-first")))
+            }
         };
         let menu = menu
             .submenu(
@@ -463,7 +470,7 @@ fn network_unit_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
 
 /// "1 hour" to "12 hours". A stored value that is none of the seven marks nothing.
 fn history_storage_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
-    let current = settings_now(cx).history.retention_h;
+    let current = host_settings::current(cx).values.history.retention_h;
     for (key, hours) in HISTORY_STORAGE_KEYS
         .into_iter()
         .zip(HISTORY_RETENTION_MENU_H)
@@ -622,9 +629,9 @@ pub(crate) fn probe_adapters(cx: &App) -> impl Future<Output = Vec<AdapterInfo>>
     }
 }
 
-/// The radio marks of the Refresh items, in menu order.
+/// The radio marks of the Refresh items, in menu order. The interval is a host setting.
 pub fn refresh_marks(cx: &App) -> [bool; 6] {
-    let current = settings_now(cx).processes.interval_ms;
+    let current = host_settings::current(cx).values.interval_ms;
     PROCESS_INTERVAL_MENU_MS.map(|ms| ms == current)
 }
 
