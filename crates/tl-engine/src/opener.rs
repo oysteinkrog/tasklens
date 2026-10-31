@@ -70,12 +70,9 @@ pub(crate) struct Detached {
 
 impl Spawn for Detached {
     async fn spawn(&self, cx: &Cx, argv: Vec<String>) -> Result<(), ActionError> {
-        let argv = match &self.env {
-            Some(env) => env.wrap(argv),
-            None => argv,
-        };
+        let env = self.env.as_ref().map(|e| e.child_env()).unwrap_or_default();
         let mut job = cx
-            .spawn_blocking(move |_| tl_ops::launch::spawn_detached(&argv, None))
+            .spawn_blocking(move |_| tl_ops::launch::spawn_detached_env(&argv, None, &env))
             .map_err(|_| internal("spawn job not admitted"))?;
         let child = match job.join(cx).await {
             Ok(Ok(child)) => child,

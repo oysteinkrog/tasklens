@@ -44,14 +44,8 @@ pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 /// A longer value is not taken.
 const VALUE_MAX: usize = 4096;
 
-/// `env` runs the program with the session's variables added.
-pub const ENV_PATH: &str = "/usr/bin/env";
-
-/// `env` reads every argument with `=` before the program as a variable, and has no way to stop
-/// that. A program whose name holds `=` is started through this shell line, which runs its
-/// arguments as they are: `exec "$@"` never reads a word as a variable.
-pub const SH_PATH: &str = "/bin/sh";
-const EXEC_ARGS: &str = "exec \"$@\"";
+/// Never passed to a program the service starts (ADR-018).
+const ACTIVATION_TOKEN: &str = "XDG_ACTIVATION_TOKEN";
 
 /// Switch to window calls waiting for the KWin worker. A full queue fails the call at once.
 const ACTIVATE_QUEUE: usize = 8;
@@ -108,26 +102,16 @@ impl DesktopEnv {
         self.get("WAYLAND_DISPLAY").is_some() || self.get("DISPLAY").is_some()
     }
 
-    /// `argv` run through `/usr/bin/env` with the session's variables, so the program starts on
-    /// the session's screen. `env` would read a program name that contains `=` as a variable,
-    /// so such a program runs through `/bin/sh -c 'exec "$@"' sh`. An empty `argv`, or any
-    /// `argv` when there are no variables, is returned as it is.
-    pub fn wrap(&self, argv: Vec<String>) -> Vec<String> {
-        let Some(program) = argv.first() else {
-            return argv;
-        };
-        if self.vars.is_empty() {
-            return argv;
-        }
-        let through_sh = program.contains('=');
-        let mut out = Vec::with_capacity(4 + self.vars.len() + argv.len());
-        out.push(ENV_PATH.to_owned());
-        out.extend(self.vars.iter().map(|(k, v)| format!("{k}={v}")));
-        if through_sh {
-            out.extend([SH_PATH, "-c", EXEC_ARGS, "sh"].map(str::to_owned));
-        }
-        out.extend(argv);
-        out
+    /// The environment changes for a program started on the session's screen, applied on the
+    /// spawn itself (`tl_ops::launch::spawn_detached_env`): each session key set to the
+    /// session's value, or removed when the session has none, and `XDG_ACTIVATION_TOKEN`
+    /// removed. The program is spawned directly, so a spawn error is the program's own.
+    pub fn child_env(&self) -> Vec<tl_ops::launch::EnvChange> {
+        SESSION_KEYS
+            .iter()
+            .map(|key| ((*key).to_owned(), self.get(key).map(str::to_owned)))
+            .chain(std::iter::once((ACTIVATION_TOKEN.to_owned(), None)))
+            .collect()
     }
 }
 
@@ -478,39 +462,22 @@ mod tests {
     }
 
     #[test]
-    fn wrap_adds_the_session_through_env() {
+    fn child_env_sets_the_session_and_removes_the_rest() {
         let env = DesktopEnv::from_lines(&["WAYLAND_DISPLAY=wayland-1", "DISPLAY=:0"]);
-        let argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), "a=b x".to_owned()];
+        let set = |k: &str, v: &str| (k.to_owned(), Some(v.to_owned()));
+        let gone = |k: &str| (k.to_owned(), None);
         assert_eq!(
-            env.wrap(argv.clone()),
+            env.child_env(),
             [
-                ENV_PATH,
-                "WAYLAND_DISPLAY=wayland-1",
-                "DISPLAY=:0",
-                "/bin/sh",
-                "-c",
-                "a=b x"
+                set("WAYLAND_DISPLAY", "wayland-1"),
+                set("DISPLAY", ":0"),
+                gone("XAUTHORITY"),
+                gone("DBUS_SESSION_BUS_ADDRESS"),
+                gone("XDG_CURRENT_DESKTOP"),
+                gone("XDG_SESSION_TYPE"),
+                gone("XDG_ACTIVATION_TOKEN"),
             ]
         );
-        // `env` would take a program name with `=` as a variable, so it runs through `sh`,
-        // and it still gets the session's variables.
-        let odd = vec!["./a=b".to_owned(), "x=y".to_owned()];
-        assert_eq!(
-            env.wrap(odd),
-            [
-                ENV_PATH,
-                "WAYLAND_DISPLAY=wayland-1",
-                "DISPLAY=:0",
-                SH_PATH,
-                "-c",
-                "exec \"$@\"",
-                "sh",
-                "./a=b",
-                "x=y"
-            ]
-        );
-        assert_eq!(DesktopEnv::default().wrap(argv.clone()), argv);
-        assert!(env.wrap(Vec::new()).is_empty());
     }
 
     #[test]

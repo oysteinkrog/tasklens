@@ -34,7 +34,8 @@ use tl_model::actions::{ActionError, ActionState, LaunchSpec, LaunchWhat};
 use tl_model::table::Manager;
 use tl_ops::OpsError;
 use tl_ops::launch::{
-    ADMIN_ENV_KEYS, ExecContext, ExitKind, PKEXEC_DISMISSED, PKEXEC_NOT_AUTHORIZED, Spawned,
+    ADMIN_ENV_KEYS, EnvChange, ExecContext, ExitKind, PKEXEC_DISMISSED, PKEXEC_NOT_AUTHORIZED,
+    Spawned,
 };
 use zbus::message::Type;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -96,19 +97,21 @@ trait Host: Sync {
     type Child: Send + Sync + 'static;
 
     fn var(&self, key: &str) -> Option<String>;
-    /// `argv` as it must be spawned to start on the desktop session's screen. Not used for the
-    /// administrator path, which passes the session's variables through `pkexec env` itself.
-    fn session_argv(&self, argv: Vec<String>) -> Vec<String> {
-        argv
+    /// The environment changes that start a program on the desktop session's screen. Not used
+    /// for the administrator path, which passes the session's variables through `pkexec env`
+    /// itself.
+    fn session_env(&self) -> Vec<EnvChange> {
+        Vec::new()
     }
     fn startup_env(&self) -> StartupEnv;
-    /// Starts `argv` detached in `cwd`. The caller passes the child to `detach` or reaps it
-    /// through `poll`.
+    /// Starts `argv` itself detached in `cwd`, with `env` applied to its environment. The
+    /// caller passes the child to `detach` or reaps it through `poll`.
     fn spawn(
         &self,
         cx: &Cx,
         argv: Vec<String>,
         cwd: Option<PathBuf>,
+        env: Vec<EnvChange>,
     ) -> impl Future<Output = Result<Self::Child, ActionError>> + Send;
     fn pid(&self, child: &Self::Child) -> u32;
     /// Reaps the child in a background task.
@@ -151,11 +154,11 @@ impl Host for RealHost {
         }
     }
 
-    fn session_argv(&self, argv: Vec<String>) -> Vec<String> {
-        match self.desktop.overrides() {
-            Some(env) => env.wrap(argv),
-            None => argv,
-        }
+    fn session_env(&self) -> Vec<EnvChange> {
+        self.desktop
+            .overrides()
+            .map(|env| env.child_env())
+            .unwrap_or_default()
     }
 
     fn startup_env(&self) -> StartupEnv {
@@ -167,13 +170,17 @@ impl Host for RealHost {
         cx: &Cx,
         argv: Vec<String>,
         cwd: Option<PathBuf>,
+        env: Vec<EnvChange>,
     ) -> Result<Arc<Spawned>, ActionError> {
+        let program = argv.first().cloned().unwrap_or_default();
         let mut job = cx
-            .spawn_blocking(move |_| tl_ops::launch::spawn_detached(&argv, cwd.as_deref()))
+            .spawn_blocking(move |_| {
+                tl_ops::launch::spawn_detached_env(&argv, cwd.as_deref(), &env)
+            })
             .map_err(|_| internal("spawn job not admitted"))?;
         match job.join(cx).await {
             Ok(Ok(child)) => Ok(Arc::new(child)),
-            Ok(Err(e)) => Err(ops_error(&e)),
+            Ok(Err(e)) => Err(spawn_error(&program, &e)),
             Err(_) => Err(internal("spawn job failed")),
         }
     }
@@ -332,7 +339,7 @@ async fn launch_command<H: Host>(
             .map(|(k, v)| (*k, v.as_deref()))
             .collect();
         let argv = tl_ops::launch::admin_argv(text, &env).map_err(invalid_text)?;
-        let child = host.spawn(cx, argv, cwd).await?;
+        let child = host.spawn(cx, argv, cwd, Vec::new()).await?;
         return wait_admin(cx, host, child).await;
     }
 
@@ -425,7 +432,7 @@ async fn spawn_in_scope<H: Host>(
     scope: &str,
     description: &str,
 ) -> Result<LaunchOutcome, ActionError> {
-    let child = host.spawn(cx, host.session_argv(argv), cwd).await?;
+    let child = host.spawn(cx, argv, cwd, host.session_env()).await?;
     let pid = host.pid(&child);
     host.detach(cx, child);
     match session {
@@ -794,6 +801,17 @@ fn ops_error(e: &OpsError) -> ActionError {
     }
 }
 
+/// A failed spawn names the program, so "not found" and "not executable" say which one. The
+/// error travels in the action's result only; launcher logs never carry it (ADR-015).
+fn spawn_error(program: &str, e: &OpsError) -> ActionError {
+    match e {
+        OpsError::Os(code) => ActionError::Internal(
+            format!("{program}: {}", std::io::Error::from_raw_os_error(*code)).into(),
+        ),
+        _ => ops_error(e),
+    }
+}
+
 fn internal(reason: &str) -> ActionError {
     ActionError::Internal(reason.into())
 }
@@ -871,6 +889,7 @@ mod tests {
             _cx: &Cx,
             argv: Vec<String>,
             cwd: Option<PathBuf>,
+            _env: Vec<EnvChange>,
         ) -> Result<u32, ActionError> {
             self.spawns.lock().expect("spawns").push((argv, cwd));
             Ok(FAKE_PID)
@@ -1674,36 +1693,77 @@ mod tests {
     }
 
     /// ADR-018: under the engine service a program starts with the desktop session's
-    /// variables, and the session's values win for those keys only.
+    /// variables, set on the spawn itself, and the session's values win for those keys only.
     #[test]
     fn real_host_takes_the_session_under_the_service() {
         let desktop = DesktopSession::new(DesktopSource::UserManager);
         let host = RealHost {
             desktop: desktop.clone(),
         };
-        let argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), "kate".to_owned()];
-        assert_eq!(host.session_argv(argv.clone()), argv, "no session yet");
+        assert!(host.session_env().is_empty(), "no session yet");
         assert_eq!(host.var("WAYLAND_DISPLAY"), None);
-        desktop.set(Some(crate::desktop::DesktopEnv::from_lines(&[
+        let session = crate::desktop::DesktopEnv::from_lines(&[
             "WAYLAND_DISPLAY=wayland-1",
             "HOME=/elsewhere",
-        ])));
-        assert_eq!(
-            host.session_argv(argv),
-            [
-                crate::desktop::ENV_PATH,
-                "WAYLAND_DISPLAY=wayland-1",
-                "/bin/sh",
-                "-c",
-                "kate"
-            ]
-        );
+        ]);
+        desktop.set(Some(session.clone()));
+        assert_eq!(host.session_env(), session.child_env());
         assert_eq!(host.var("WAYLAND_DISPLAY").as_deref(), Some("wayland-1"));
         assert_eq!(host.var("HOME"), std::env::var("HOME").ok());
         // The window's engine: children inherit the process environment as before.
-        let local = real_host();
-        let argv = vec!["kate".to_owned()];
-        assert_eq!(local.session_argv(argv.clone()), argv);
+        assert!(real_host().session_env().is_empty());
+    }
+
+    /// Leader decision on q4x76.12: a launch spawns the program itself with the session's
+    /// variables on the spawn, never through `env` or a shell. A missing program and a file
+    /// that is not executable fail the launch with an error that names the program, and a
+    /// program that starts gets the session's `DISPLAY` and `WAYLAND_DISPLAY`.
+    #[test]
+    fn launch_spawns_the_program_itself_with_the_session() {
+        let dir = scratch();
+        let missing = dir.path().join("no-such-program");
+        let plain = dir.path().join("not-executable");
+        write(&plain, "#!/bin/sh\n", 0o644);
+        let out = dir.path().join("env");
+        let script = format!(
+            "printf '%s|%s' \"$DISPLAY\" \"$WAYLAND_DISPLAY\" > '{}'",
+            out.display()
+        );
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        desktop.set(Some(crate::desktop::DesktopEnv::from_lines(&[
+            "WAYLAND_DISPLAY=wayland-5",
+            "DISPLAY=:5",
+        ])));
+        let host = Arc::new(RealHost { desktop });
+        let start = |argv: Vec<String>| {
+            let host = Arc::clone(&host);
+            run(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                spawn_in_scope(&cx, None, &*host, argv, None, "app-test.scope", "test").await
+            })
+        };
+
+        for program in [&missing, &plain] {
+            let program = program.to_str().expect("utf-8").to_owned();
+            match start(vec![program.clone()]) {
+                Err(ActionError::Internal(text)) => {
+                    assert!(text.starts_with(&format!("{program}: ")), "{text}");
+                }
+                other => panic!("{program}: {other:?}"),
+            }
+        }
+
+        let argv = vec!["/bin/sh".to_owned(), "-c".to_owned(), script];
+        assert_eq!(start(argv), Ok(LaunchOutcome::Launched));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let got = loop {
+            match std::fs::read_to_string(&out) {
+                Ok(text) if !text.is_empty() => break text,
+                _ if std::time::Instant::now() > deadline => panic!("the program never ran"),
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        assert_eq!(got, ":5|wayland-5");
     }
 
     /// Spawns `/bin/true` for real and waits for it through `RealHost::poll`.
@@ -1712,7 +1772,7 @@ mod tests {
         let probe = run(async move {
             let cx = Cx::current().expect("task has a Cx");
             let child = real_host()
-                .spawn(&cx, vec!["/bin/true".to_owned()], None)
+                .spawn(&cx, vec!["/bin/true".to_owned()], None, Vec::new())
                 .await
                 .expect("spawned");
             loop {

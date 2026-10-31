@@ -260,9 +260,14 @@ impl Drop for FileActionsGuard {
 }
 
 /// Starts `argv[0]` (searched in `PATH`) in a new session with stdin, stdout and stderr on
-/// `/dev/null`, default signal dispositions, an empty signal mask, the current environment and
-/// `cwd` when given. Returns the child pid. The caller reaps the child.
-pub(crate) fn spawn_setsid(argv: &[CString], cwd: Option<&CStr>) -> Result<u32, Errno> {
+/// `/dev/null`, default signal dispositions, an empty signal mask, `cwd` when given, and `envp`
+/// as its whole environment (`KEY=value` entries), or the current environment when `envp` is
+/// `None`. Returns the child pid. The caller reaps the child.
+pub(crate) fn spawn_setsid(
+    argv: &[CString],
+    cwd: Option<&CStr>,
+    envp: Option<&[CString]>,
+) -> Result<u32, Errno> {
     let Some(file) = argv.first() else {
         return Err(Errno::INVAL);
     };
@@ -271,6 +276,13 @@ pub(crate) fn spawn_setsid(argv: &[CString], cwd: Option<&CStr>) -> Result<u32, 
         .map(|arg| arg.as_ptr().cast_mut())
         .chain(std::iter::once(std::ptr::null_mut()))
         .collect();
+    let envp_ptrs: Option<Vec<*mut libc::c_char>> = envp.map(|entries| {
+        entries
+            .iter()
+            .map(|entry| entry.as_ptr().cast_mut())
+            .chain(std::iter::once(std::ptr::null_mut()))
+            .collect()
+    });
 
     // The objects stay in these locals and are used only through raw pointers, so they never
     // move after init. Each guard is declared after its storage and drops first.
@@ -341,18 +353,23 @@ pub(crate) fn spawn_setsid(argv: &[CString], cwd: Option<&CStr>) -> Result<u32, 
 
     let mut pid: libc::pid_t = 0;
     // SAFETY: `file` and every `argv_ptrs` entry point into the `CString`s of `argv`, which live
-    // until this call returns, and `argv_ptrs` ends in a null pointer. The child only reads
-    // them. `environ` is the process environment as a null-terminated array; tasklens does not
-    // call `setenv` after startup, so it is not changed during the call. `attr` and
-    // `actions` are initialised objects. `pid` is valid writable storage.
+    // until this call returns, and `argv_ptrs` ends in a null pointer. The same holds for
+    // `envp_ptrs` and the `CString`s of `envp`. The child only reads them. `environ` is the
+    // process environment as a null-terminated array; tasklens does not call `setenv` after
+    // startup, so it is not changed during the call. `attr` and `actions` are initialised
+    // objects. `pid` is valid writable storage.
     let rc = unsafe {
+        let env: *const *mut libc::c_char = match &envp_ptrs {
+            Some(ptrs) => ptrs.as_ptr(),
+            None => libc::environ,
+        };
         libc::posix_spawnp(
             &mut pid,
             file.as_ptr(),
             actions,
             attr,
             argv_ptrs.as_ptr(),
-            libc::environ,
+            env,
         )
     };
     check_rc(rc)?;
@@ -429,7 +446,7 @@ pub(crate) mod tests {
     fn spawn_setsid_new_session_devnull_cwd() {
         let _children = lock_children();
         let argv = [c"sleep".to_owned(), c"30".to_owned()];
-        let pid = spawn_setsid(&argv, Some(c"/tmp")).expect("spawn sleep");
+        let pid = spawn_setsid(&argv, Some(c"/tmp"), None).expect("spawn sleep");
 
         // SAFETY: getsid takes an integer and no pointers.
         let sid = unsafe { libc::getsid(pid as libc::pid_t) };
@@ -475,14 +492,14 @@ pub(crate) mod tests {
 
     #[test]
     fn spawn_setsid_empty_argv_is_einval() {
-        assert_eq!(spawn_setsid(&[], None), Err(Errno::INVAL));
+        assert_eq!(spawn_setsid(&[], None, None), Err(Errno::INVAL));
     }
 
     #[test]
     fn spawn_setsid_missing_binary_fails() {
         let _children = lock_children();
         let argv = [c"/nonexistent/tasklens-test-binary".to_owned()];
-        assert_eq!(spawn_setsid(&argv, None), Err(Errno::NOENT));
+        assert_eq!(spawn_setsid(&argv, None, None), Err(Errno::NOENT));
 
         let mut status = 0;
         // SAFETY: `status` is valid writable storage for an int.
