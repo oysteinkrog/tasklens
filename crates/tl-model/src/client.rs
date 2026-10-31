@@ -27,6 +27,14 @@ pub trait EngineClient: Send + Sync + 'static {
     fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
         async_channel::unbounded().1
     }
+    /// Changes when the snapshots start over from another engine session: a reconnect or a new
+    /// engine instance (ADR-018 Delta flow). Component versions in snapshots from different
+    /// generations cannot be compared, so the hub treats a new value as everything changed.
+    /// It changes before the first snapshot of the new generation is stored. The default is 0
+    /// for a client whose engine never changes.
+    fn generation(&self) -> u64 {
+        0
+    }
     /// Replace demand. Never blocks. Last value wins.
     fn set_demand(&self, demand: Demand);
     /// Replace engine settings. Never blocks. Last value wins.
@@ -110,6 +118,11 @@ mod tests {
     fn default_request_events_are_closed() {
         let client = NullClient::new();
         assert!(client.request_events().is_closed());
+    }
+
+    #[test]
+    fn default_generation_is_zero() {
+        assert_eq!(NullClient::new().generation(), 0);
     }
 
     #[test]

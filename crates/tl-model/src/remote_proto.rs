@@ -31,6 +31,7 @@ use crate::process::{
     AppCgroupSample, Coverage, GroupRow, LowMemoryInfo, ProcFlags, ProcState, ProcessExtras,
     ProcessExtrasP2, ProcessMeta, ProcessRecord,
 };
+use crate::request::RequestEvent;
 use crate::series::{Sample, SeriesView};
 use crate::snapshot::{
     ComponentHeader, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory, DeviceTimeline,
@@ -876,6 +877,9 @@ pub enum ServerMsg {
     /// Boxed: a frame is about 1 KiB before its parts' heap data.
     Snapshot(Box<SnapshotFrame>),
     Action(ActionEvent),
+    /// The one end of a request the client sent (`EngineClient::request_events`). It travels in
+    /// the ordered action queue, after that request's action events, and is never dropped.
+    Request(RequestEvent),
     Journal {
         stream: StreamId,
         event: JournalEvent,
@@ -904,6 +908,7 @@ mod tests {
     use crate::history::{HistoryMetric, HistoryRange};
     use crate::ids::{ColumnId, GraphTarget, GroupKey, NodeId, ProcessKey};
     use crate::journal::{JournalAccess, JournalEntry, JournalError};
+    use crate::request::{IdKind, RequestEnd};
     use crate::snapshot::FrameGeometry;
     use crate::system::CpuSet;
     use crate::table::{
@@ -1132,6 +1137,7 @@ mod tests {
         match msg {
             ServerMsg::Snapshot(_) => "snapshot",
             ServerMsg::Action(_) => "action",
+            ServerMsg::Request(_) => "request",
             ServerMsg::Journal { .. } => "journal",
             ServerMsg::HostSettings(_) => "host_settings",
             ServerMsg::SetHostSettings(_) => "set_host_settings",
@@ -1225,6 +1231,11 @@ mod tests {
                 state,
             })
         }));
+        msgs.push(ServerMsg::Request(RequestEvent {
+            kind: IdKind::Scan,
+            id: 11,
+            end: RequestEnd::Lost,
+        }));
         let entry = JournalEntry {
             realtime_us: 1_700_000_000_000_000,
             priority: 6,
@@ -1264,7 +1275,7 @@ mod tests {
         let mut names: Vec<_> = msgs.iter().map(server_name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         for msg in &msgs {
             round_trip(msg);
         }
