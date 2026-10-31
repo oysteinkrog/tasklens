@@ -741,7 +741,8 @@ impl Reducer {
     }
 
     /// Opens session `id`, with the state its `SessionPort` shares when it has one, and builds
-    /// its tables. A refused port is ended, so the server learns it got no session.
+    /// its tables. A port gets the answer, so `EngineHandle::open_session` returns a refusal
+    /// as an error and the server never welcomes a session the engine does not have.
     fn open_client(
         &mut self,
         id: ClientSessionId,

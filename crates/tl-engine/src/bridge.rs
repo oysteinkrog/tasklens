@@ -46,6 +46,11 @@ pub const MSGS_CAPACITY: usize = 256;
 pub const DRAIN_BUDGET: Duration = Duration::from_millis(1000);
 /// How long `shutdown` waits for runtime teardown (ADR-004 step 4).
 pub const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
+/// How long `open_session` waits for the reducer to admit or refuse the session. A reducer pass
+/// takes milliseconds, so only a stuck engine reaches it.
+pub const OPEN_WAIT: Duration = Duration::from_secs(2);
+/// How often `open_session` checks for a stopped engine while it waits.
+const OPEN_POLL: Duration = Duration::from_millis(50);
 
 /// One engine's shutdown diagnostics: when its `shutdown` began, and which tasks and blocking
 /// jobs are still running. Every thread of the engine's runtime holds it in a thread-local, set
@@ -334,11 +339,32 @@ impl EngineHandle {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Opens client session `id` for the engine service (ADR-018) and returns its port. At most
+    /// Opens client session `id` for the engine service (ADR-018) and returns its port once the
+    /// reducer has the session in its registry. A reducer refusal comes back as its
+    /// `OpenError`, so the server never welcomes a session the engine does not have. At most
     /// `SESSIONS_MAX - 1` ports are open at once, beside the local session. A port's slot frees
     /// when its session ends: the reducer has seen the port dropped, or removed the session
-    /// itself. Never blocks.
+    /// itself.
+    ///
+    /// Blocks until the reducer answers, at most `OPEN_WAIT`. Without an answer by then the
+    /// open is withdrawn and the result is `Err(Busy)`.
     pub fn open_session(&self, id: ClientSessionId) -> Result<SessionPort, OpenError> {
+        let port = self.send_open(id)?;
+        let deadline = Instant::now() + OPEN_WAIT;
+        let stopped = || self.inner.stopped.load(Ordering::Acquire);
+        match port.state.wait_admission(deadline, OPEN_POLL, stopped) {
+            Some(Ok(())) => Ok(port),
+            Some(Err(e)) => Err(e),
+            // Dropping the port withdraws the open: the reducer refuses a closed port, or closes
+            // the session at its next pass if it opened it meanwhile.
+            None if stopped() => Err(OpenError::Stopped),
+            None => Err(OpenError::Busy),
+        }
+    }
+
+    /// The checks of `open_session` and its `OpenPort` message. The port it returns is not
+    /// admitted yet.
+    fn send_open(&self, id: ClientSessionId) -> Result<SessionPort, OpenError> {
         if id == ClientSessionId::LOCAL {
             return Err(OpenError::Duplicate);
         }
@@ -575,8 +601,8 @@ impl SessionPort {
             })
     }
 
-    /// The engine removed the session (its link broke or its reducer stopped), refused to open
-    /// it, or stopped. The server then closes the connection.
+    /// The engine removed the session (its link broke or its reducer stopped) or stopped. The
+    /// server then closes the connection.
     pub fn is_ended(&self) -> bool {
         self.state.is_ended() || self.handle.inner.stopped.load(Ordering::Acquire)
     }

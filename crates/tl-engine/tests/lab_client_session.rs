@@ -6,6 +6,7 @@
 //! sender is dropped, so `run` drains the queue and then returns.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
@@ -578,6 +579,76 @@ fn a_port_closed_before_its_open_is_never_opened() {
     rig.run(vec![open_port(REMOTE, &l, &port)]);
     assert!(rig.reducer().clients.get(REMOTE).is_none());
     assert!(port.is_ended());
+    assert_eq!(port.admission(), Some(Err(OpenError::Closed)));
+}
+
+#[test]
+fn an_open_port_is_admitted() {
+    let mut rig = Rig::new();
+    let (l, _wake) = link();
+    let port = Arc::new(PortState::default());
+    assert_eq!(port.admission(), None);
+    rig.run(vec![open_port(REMOTE, &l, &port)]);
+    assert!(rig.reducer().clients.get(REMOTE).is_some());
+    assert_eq!(port.admission(), Some(Ok(())));
+}
+
+#[test]
+fn a_waiter_learns_the_refusal() {
+    let empty = Snapshot::empty(BOOT, 1);
+    let mut clients = ClientSessions::new(&empty);
+    let mut wakes = Vec::new();
+    for i in 1..SESSIONS_MAX as u32 {
+        let (l, w) = link();
+        wakes.push(w);
+        clients
+            .open_port(
+                ClientSessionId(i),
+                l,
+                Arc::new(PortState::default()),
+                &empty,
+            )
+            .expect("room");
+    }
+    let refused = Arc::new(PortState::default());
+    let waiter = {
+        let refused = Arc::clone(&refused);
+        std::thread::spawn(move || {
+            refused.wait_admission(
+                Instant::now() + Duration::from_secs(10),
+                Duration::from_millis(10),
+                || false,
+            )
+        })
+    };
+    let (l, _w) = link();
+    assert!(clients.open_port(REMOTE, l, refused, &empty).is_err());
+    assert_eq!(
+        waiter.join().expect("waiter"),
+        Some(Err(OpenError::Full)),
+        "the refusal reaches the waiter, not only the log"
+    );
+
+    // No answer: the wait ends at the deadline, or as soon as the engine is gone.
+    let silent = PortState::default();
+    let begin = Instant::now();
+    assert_eq!(
+        silent.wait_admission(
+            begin + Duration::from_millis(50),
+            Duration::from_millis(10),
+            || false
+        ),
+        None
+    );
+    assert!(begin.elapsed() >= Duration::from_millis(50));
+    assert_eq!(
+        silent.wait_admission(
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_millis(10),
+            || true
+        ),
+        None
+    );
 }
 
 #[test]
@@ -638,6 +709,8 @@ fn refused_and_dropped_sessions_end_their_ports() {
         refused.is_ended(),
         "a refused port learns it got no session"
     );
+    assert_eq!(refused.admission(), Some(Err(OpenError::Full)));
+    assert!(ports.iter().all(|p| p.admission() == Some(Ok(()))));
 
     assert!(clients.close(ClientSessionId(1)));
     assert!(ports[0].is_ended());

@@ -16,7 +16,8 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::supervision::ManagedGeneration;
 use tl_collect::sysroot::SysRoot;
-use tl_engine::bridge::{DRAIN_BUDGET, Engine, EngineHooks, HookCtx, TEARDOWN_BUDGET};
+use tl_engine::bridge::{DRAIN_BUDGET, Engine, EngineHooks, HookCtx, OPEN_WAIT, TEARDOWN_BUDGET};
+use tl_engine::client_session::{ClientSessionId, OpenError, SESSIONS_MAX};
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::reducer::{ActionGate, AdmissionView, Publisher};
 use tl_engine::session::engine_root;
@@ -192,6 +193,58 @@ fn command_queue_busy_on_257th() {
     // Unpark before the drop, which joins the engine thread.
     let _ = release_tx.send(());
     drop(handle);
+}
+
+#[test]
+fn open_session_returns_only_after_the_reducer_admits() {
+    // Park the reducer before its first `recv`, as in `command_queue_busy_on_257th`.
+    let (parked_tx, parked_rx) = std_mpsc::channel::<()>();
+    let (release_tx, release_rx) = std_mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let hooks = EngineHooks {
+        action_gate: Some(Arc::new(move |_ctx: HookCtx| {
+            let _ = parked_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv_timeout(Duration::from_secs(10));
+            Box::new(IdleGate) as Box<dyn ActionGate>
+        })),
+        ..EngineHooks::default()
+    };
+    let handle =
+        Engine::start(fixture_config(EngineMode::LowMemory), hooks).expect("engine starts");
+    parked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the session calls the gate factory");
+
+    // A parked reducer never answers: no port, and the open is withdrawn after `OPEN_WAIT`.
+    let begin = Instant::now();
+    assert_eq!(
+        handle.open_session(ClientSessionId(1)).err(),
+        Some(OpenError::Busy)
+    );
+    assert!(begin.elapsed() >= OPEN_WAIT);
+
+    // Once the reducer runs, every open it admits returns a port, up to the 8 beside the local
+    // session. The reducer refuses the withdrawn open first (the queue is in order), so it
+    // holds no slot. New ids, since session 1 may still be listed until that refusal.
+    let _ = release_tx.send(());
+    let ports: Vec<_> = (2..=SESSIONS_MAX as u32)
+        .map(|i| {
+            handle
+                .open_session(ClientSessionId(i))
+                .unwrap_or_else(|e| panic!("open {i}: {e}"))
+        })
+        .collect();
+    assert!(ports.iter().all(|p| !p.is_ended()));
+    assert_eq!(
+        handle.open_session(ClientSessionId(99)).err(),
+        Some(OpenError::Full)
+    );
+    drop(ports);
+    let report = handle.shutdown();
+    assert!(report.clean(), "{report:?}");
 }
 
 /// A CPU worker on the wall clock: every sample is one core at 50 %.

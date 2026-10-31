@@ -77,7 +77,8 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use tl_model::actions::ActionEvent;
@@ -379,6 +380,10 @@ pub struct PortState {
     /// The newest demand the port set that the reducer has not taken yet. A newer one replaces
     /// it.
     demand: Mutex<Option<Demand>>,
+    /// The reducer's answer to the open: `Ok` once the session is in the registry, the reason
+    /// once it refused. `None` until then.
+    admission: Mutex<Option<Result<(), OpenError>>>,
+    admitted: Condvar,
 }
 
 impl PortState {
@@ -400,6 +405,56 @@ impl PortState {
 
     pub fn set_demand(&self, demand: Demand) {
         *self.demand.lock().unwrap_or_else(PoisonError::into_inner) = Some(demand);
+    }
+
+    /// The reducer's answer to the open, if it gave one yet.
+    pub fn admission(&self) -> Option<Result<(), OpenError>> {
+        *self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits for the reducer's answer to the open until `deadline`. Wakes every `slice` to ask
+    /// `gone` whether the engine stopped, since a stopped engine drops the open unanswered.
+    /// `None` when the deadline passed or `gone` said so first.
+    pub fn wait_admission(
+        &self,
+        deadline: Instant,
+        slice: Duration,
+        gone: impl Fn() -> bool,
+    ) -> Option<Result<(), OpenError>> {
+        let mut answer = self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(result) = *answer {
+                return Some(result);
+            }
+            let now = Instant::now();
+            if now >= deadline || gone() {
+                return None;
+            }
+            let wait = slice.min(deadline - now);
+            answer = self
+                .admitted
+                .wait_timeout(answer, wait)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Records the reducer's answer. A refusal also ends the port, so its slot frees.
+    fn answer(&self, result: Result<(), OpenError>) {
+        if result.is_err() {
+            self.end();
+        }
+        *self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(result);
+        self.admitted.notify_all();
     }
 
     fn take_demand(&self) -> Option<Demand> {
@@ -453,7 +508,8 @@ pub enum OpenError {
     /// The port was dropped before the reducer opened its session.
     #[error("the session's port is closed")]
     Closed,
-    /// `EngineHandle::open_session` found the engine's message queue full.
+    /// `EngineHandle::open_session` found the engine's message queue full, or the reducer did
+    /// not answer within `bridge::OPEN_WAIT`.
     #[error("the engine is busy")]
     Busy,
     #[error("the engine has stopped")]
@@ -1470,8 +1526,9 @@ impl ClientSessions {
     }
 
     /// `open` for a session that shares `port` with its `SessionPort`. A port that is already
-    /// closed is not opened. On any refusal the port is ended, so its slot frees. The port's
-    /// newest demand is the session's first.
+    /// closed is not opened. The port gets the answer, so `EngineHandle::open_session` returns
+    /// it; on any refusal the port is also ended, so its slot frees. The port's newest demand is
+    /// the session's first.
     pub fn open_port(
         &mut self,
         id: ClientSessionId,
@@ -1480,7 +1537,7 @@ impl ClientSessions {
         empty: &Snapshot,
     ) -> Result<&mut ClientSession, OpenError> {
         if port.is_closed() {
-            port.end();
+            port.answer(Err(OpenError::Closed));
             return Err(OpenError::Closed);
         }
         match self.open(id, link, empty) {
@@ -1488,11 +1545,12 @@ impl ClientSessions {
                 if let Some(demand) = port.take_demand() {
                     session.demand = demand;
                 }
+                port.answer(Ok(()));
                 session.port = Some(port);
                 Ok(session)
             }
             Err(e) => {
-                port.end();
+                port.answer(Err(e));
                 Err(e)
             }
         }
