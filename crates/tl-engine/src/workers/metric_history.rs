@@ -565,6 +565,16 @@ impl State {
         }
     }
 
+    /// Applies the range lists among `msgs` and leaves `msgs` as they are, so the empty answer
+    /// can go out before the batch is folded in. Applying a list again later does nothing.
+    pub fn apply_ranges(&mut self, msgs: &[MetricMsg]) {
+        for msg in msgs {
+            if let MetricMsg::Ranges(list) = msg {
+                self.apply(MetricMsg::Ranges(list.clone()));
+            }
+        }
+    }
+
     /// The keys to answer: `local`, the local window's range from the demand watch, which is
     /// never older than the list's, then each other session's range that is not in the list yet.
     /// `None` is the empty answer for a session that shows no range.
@@ -690,6 +700,38 @@ impl State {
         let answer = Arc::new(self.current(None));
         self.sent = vec![(None, Arc::clone(&answer))];
         Some(Arc::from([(None, answer)]))
+    }
+
+    /// The answer for the key `None` with an open store, before the ranged keys are read
+    /// (ADR-018): it needs no store read, so a slow or failing read never delays it. The other
+    /// keys of `wanted` keep the answer sent last and a key not sent yet waits for its read, so
+    /// each session that shows a range keeps what it shows. `None` when no key of `wanted` is
+    /// `None` or the reducer holds this answer already.
+    pub fn answer_no_range_first(
+        &mut self,
+        wanted: &[Option<DeviceHistoryRequest>],
+    ) -> Option<DeviceHistories> {
+        if !wanted.contains(&None) || self.no_range_held() {
+            return None;
+        }
+        let empty = Arc::new(self.current(None));
+        let mut next: Vec<(Option<DeviceHistoryRequest>, Arc<DeviceHistory>)> =
+            Vec::with_capacity(wanted.len());
+        for &key in wanted {
+            if next.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let answer = match key {
+                None => Arc::clone(&empty),
+                Some(_) => match self.sent.iter().find(|(k, _)| *k == key) {
+                    Some((_, h)) => Arc::clone(h),
+                    None => continue,
+                },
+            };
+            next.push((key, answer));
+        }
+        self.sent = next.clone();
+        Some(next.into())
     }
 
     /// True when the key `None` was sent last with the current timeline.
@@ -1313,6 +1355,21 @@ pub async fn run_metric_history(
             }
         }
 
+        let request = demand.device_history_range;
+        // The empty answer needs no store read either: it goes out before the reads, so a slow
+        // or failing read never delays it (ADR-018).
+        let empty = {
+            let mut st = lock(&state);
+            st.apply_ranges(&msgs);
+            let wanted = st.wanted(request);
+            st.answer_no_range_first(&wanted)
+        };
+        if let Some(empty) = empty
+            && let Some(outcome) = send(&cx, &io, SourceUpdate::DeviceHistory(empty)).await
+        {
+            stop!(outcome);
+        }
+
         let now = cx.now().as_nanos();
         if msgs.is_empty() && now < next_tick {
             continue;
@@ -1321,7 +1378,6 @@ pub async fn run_metric_history(
         if tick {
             next_tick = now.saturating_add(TICK_NS);
         }
-        let request = demand.device_history_range;
         let timeline = demand.device_timeline;
         let job_state = Arc::clone(&state);
         let mut batch = std::mem::take(&mut msgs);
@@ -2517,8 +2573,8 @@ mod tests {
     /// dropped. The reducer keeps the answers of the generation before a restart. After each
     /// settled step with the store open every open session finds the answer for its own range,
     /// the worker's list holds no closed session, and the worker keeps no read for a range no
-    /// open session shows. With the store not open every session that shows no range finds the
-    /// empty answer.
+    /// open session shows. Every session that shows no range finds the empty answer: with the
+    /// store not open, and with it open before the last settling turn reads the store.
     #[test]
     fn range_list_model() {
         let mut rng: u64 = 0x2545_f491_4f6c_dd1d;
@@ -2554,28 +2610,52 @@ mod tests {
         let (mut refused, mut settled, mut restarts) = (0, 0, 0);
         let (mut failed_opens, mut closes, mut settled_closed) = (0, 0, 0);
 
-        // One worker turn: up to `n` messages, then the answers. Without a store the slot is
-        // empty, so no message comes, and the worker answers the key `None` alone.
-        let turn = |st: &mut State,
-                    rx: &mut mpsc::Receiver<MetricMsg>,
-                    shown: &mut DeviceHistories,
-                    local: Option<DeviceHistoryRequest>,
-                    now: TimeNs,
-                    n: usize| {
-            if !st.is_open() {
-                if let Some(answer) = st.answer_no_range() {
+        // One worker turn: up to `n` messages, the empty answer with no store read, then the
+        // reads. Without a store the slot is empty, so no message comes, and the worker answers
+        // the key `None` alone. With `check`, the open sessions, each one that shows no range
+        // must find the empty answer before the reads.
+        let turn =
+            |st: &mut State,
+             rx: &mut mpsc::Receiver<MetricMsg>,
+             shown: &mut DeviceHistories,
+             local: Option<DeviceHistoryRequest>,
+             now: TimeNs,
+             n: usize,
+             check: Option<&[(ClientSessionId, Option<DeviceHistoryRequest>)]>| {
+                if !st.is_open() {
+                    if let Some(answer) = st.answer_no_range() {
+                        *shown = answer;
+                    }
+                    return;
+                }
+                let msgs: Vec<MetricMsg> =
+                    std::iter::from_fn(|| rx.try_recv().ok()).take(n).collect();
+                st.apply_ranges(&msgs);
+                let reads = st.range_reads();
+                let wanted = st.wanted(local);
+                if let Some(answer) = st.answer_no_range_first(&wanted) {
                     *shown = answer;
                 }
-                return;
-            }
-            for msg in std::iter::from_fn(|| rx.try_recv().ok()).take(n) {
-                st.apply(msg);
-            }
-            let wanted = st.wanted(local);
-            if let Some(answer) = st.answer_all(&wanted, false, now).expect("read") {
-                *shown = answer;
-            }
-        };
+                assert_eq!(st.range_reads(), reads, "the empty answer read the store");
+                for (id, _) in check
+                    .iter()
+                    .flat_map(|s| s.iter())
+                    .filter(|(_, k)| k.is_none())
+                {
+                    let found = shown.iter().find(|(k, _)| k.is_none());
+                    let Some((_, answer)) = found else {
+                        panic!("no empty answer for session {id:?} before the reads");
+                    };
+                    assert!(answer.request.is_none() && answer.series.is_empty());
+                }
+                for msg in msgs {
+                    st.apply(msg);
+                }
+                let wanted = st.wanted(local);
+                if let Some(answer) = st.answer_all(&wanted, false, now).expect("read") {
+                    *shown = answer;
+                }
+            };
 
         for _ in 0..2000 {
             now += SEC;
@@ -2646,13 +2726,15 @@ mod tests {
                 refused += 1;
             }
             let n = below(3) as usize;
-            turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, n);
+            turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, n, None);
 
             if below(4) == 0 {
                 // Settle: the worker catches up and the next turn sends the list again.
-                turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, usize::MAX);
+                let local = sessions[0].1;
+                turn(&mut st, &mut rx, &mut shown, local, now, usize::MAX, None);
                 sink.set_ranges(&sessions);
-                turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, usize::MAX);
+                let check = Some(sessions.as_slice());
+                turn(&mut st, &mut rx, &mut shown, local, now, usize::MAX, check);
                 settled += 1;
                 if !st.is_open() {
                     settled_closed += 1;
@@ -2715,6 +2797,45 @@ mod tests {
                 .expect("read")
                 .is_none()
         );
+    }
+
+    /// With the store open, a session that clears its range gets the empty answer before any
+    /// store read. The other ranges keep the `Arc` sent last, so their sessions show no change,
+    /// and the read that follows has nothing new to send.
+    #[test]
+    fn no_range_goes_out_before_the_reads() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let day = live(DeviceRange::H24);
+        let first = st
+            .answer_all(&[day], false, t0)
+            .expect("read")
+            .expect("sent");
+        let reads = st.range_reads();
+        assert!(st.answer_no_range_first(&[day]).is_none());
+
+        let early = st.answer_no_range_first(&[day, None]).expect("sent");
+        assert_eq!(st.range_reads(), reads);
+        assert_eq!(early.len(), 2);
+        assert!(Arc::ptr_eq(&early[0].1, &first[0].1));
+        assert_eq!(early[1].0, None);
+        assert!(early[1].1.series.is_empty() && early[1].1.request.is_none());
+        assert!(st.answer_no_range_first(&[day, None]).is_none());
+        assert!(
+            st.answer_all(&[day, None], false, t0 + SEC)
+                .expect("read")
+                .is_none()
+        );
+
+        // A range not sent yet waits for its read; the empty answer does not.
+        let week = live(DeviceRange::D7);
+        let dir = tempdir();
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let early = st.answer_no_range_first(&[week, None]).expect("sent");
+        assert_eq!(early.len(), 1);
+        assert_eq!(early[0].0, None);
+        assert_eq!(st.range_reads(), 0);
     }
 
     /// A worker whose store does not open answers the key `None` once, with no store read.
