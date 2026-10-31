@@ -1508,13 +1508,14 @@ mod tests {
                 }
             }
         }
-        // Queries carry the list too, so a separate list is needed, and refused, less often.
+        // Queries carry the list too, so a separate list is needed, and refused, less often, and
+        // the fewer lists in the queue leave more room for queries.
         assert!(
             lists_refused > 20,
             "the queue refused {lists_refused} lists"
         );
         assert!(
-            sink.dropped() > 50,
+            sink.dropped() > 20,
             "the queue dropped {} queries",
             sink.dropped()
         );
