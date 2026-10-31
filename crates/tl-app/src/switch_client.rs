@@ -388,13 +388,12 @@ pub(crate) mod tests {
         assert_eq!(*lock(&service.demands), [demand]);
         assert_eq!(*lock(&service.settings), [EngineSettings::default()]);
         // One table query and one per system table; other commands are never replayed.
-        assert_eq!(
-            *lock(&service.commands),
-            [
-                Command::SetTableQuery(table),
-                Command::SetSysTableQuery(sys(2)),
-            ]
-        );
+        {
+            let sent = lock(&service.commands);
+            assert_eq!(sent.len(), 2);
+            assert!(matches!(&sent[0], Command::SetTableQuery(q) if *q == table));
+            assert!(matches!(&sent[1], Command::SetSysTableQuery(q) if *q == sys(2)));
+        }
         // Later calls go to the new backend only.
         client.send(Command::ResetBaselines).unwrap();
         assert_eq!(lock(&service.commands).len(), 3);
