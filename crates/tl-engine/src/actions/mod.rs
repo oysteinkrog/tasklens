@@ -19,7 +19,7 @@ use std::future::Future;
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -682,6 +682,9 @@ pub struct Gate {
     busy_units: FxHashSet<UnitRef>,
     /// Read from the ops once in `new` (R-141). Not re-checked per snapshot.
     caps: tl_model::health::EngineCaps,
+    /// Events of actions that had already ended: they reached no session (ADR-018). Every
+    /// `EndLock` the gate hands out counts into it.
+    late: Arc<AtomicU64>,
 }
 
 struct InFlight {
@@ -704,6 +707,12 @@ impl Gate {
         self.in_flight.len()
     }
 
+    /// The count of events dropped because their action had ended. Its tasks share it, so it
+    /// keeps counting after the gate is dropped. For debugging only.
+    pub fn late(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.late)
+    }
+
     pub fn new(ctx: Arc<ActionCtx>) -> Self {
         let mut caps = tl_model::health::EngineCaps::empty();
         if ctx.ops.dump_available() {
@@ -714,6 +723,7 @@ impl Gate {
             ctx,
             in_flight: FxHashMap::default(),
             busy_units: FxHashSet::default(),
+            late: Arc::default(),
         }
     }
 }
@@ -770,7 +780,7 @@ impl ActionGate for Gate {
         let client = req.id;
         let kind = req.kind.clone();
         let ctx = Arc::clone(&self.ctx);
-        let ended = Arc::new(EndLock::default());
+        let ended = Arc::new(EndLock::new(Arc::clone(&self.late)));
         let (task_route, task_ended) = (route.clone(), Arc::clone(&ended));
         let handle = cx
             .spawn(move |cx| async move {
@@ -1268,11 +1278,27 @@ async fn dispatch(
 /// gate has ended the action no event of it reaches the session: neither one that waits for room
 /// in the channel nor one from a task that checked just before the gate took the lock.
 #[derive(Default)]
-struct EndLock(Mutex<bool>);
+struct EndLock {
+    ended: Mutex<bool>,
+    /// The gate's count of events dropped because the action had ended.
+    late: Arc<AtomicU64>,
+}
 
 impl EndLock {
+    fn new(late: Arc<AtomicU64>) -> Self {
+        EndLock {
+            ended: Mutex::new(false),
+            late,
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, bool> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.ended.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Counts one event dropped because the action had ended.
+    fn count_late(&self) {
+        self.late.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1283,9 +1309,9 @@ struct Emitter<'a> {
 }
 
 impl Emitter<'_> {
-    /// Pushes `ev` unless the action has ended; `None` when it had. Each try holds the end lock,
-    /// and `pushed` runs under it right after the push, so the gate cannot end the action
-    /// between the check and the push.
+    /// Pushes `ev` unless the action has ended; `None`, counted as late, when it had. Each try
+    /// holds the end lock, and `pushed` runs under it right after the push, so the gate cannot
+    /// end the action between the check and the push.
     async fn push(
         &self,
         ev: ActionEvent,
@@ -1295,6 +1321,7 @@ impl Emitter<'_> {
         std::future::poll_fn(|task| {
             let mut ended = self.ended.lock();
             if *ended {
+                self.ended.count_late();
                 return Poll::Ready(None);
             }
             let sent = std::task::ready!(send.as_mut().poll(task));
@@ -1306,10 +1333,13 @@ impl Emitter<'_> {
 }
 
 /// Sends one event with a 1 s timeout. When the UI is not draining, the event is dropped and the
-/// action continues. An event of an action that has ended is dropped.
+/// action continues. An event of an action that has ended is dropped and counted as late.
 async fn emit(events: &Emitter<'_>, cx: &Cx, ev: ActionEvent) {
     let id = ev.id.0;
     if cx.is_cancel_requested() {
+        if *events.ended.lock() {
+            events.ended.count_late();
+        }
         tracing::debug!(target: "tasklens::action", id, "action cancelled, event dropped");
         return;
     }
@@ -1816,7 +1846,7 @@ mod tests {
     /// q4x76.17: an aborted task whose event waits for room in the channel pushes nothing after
     /// the gate ended the action. The session's channel holds one event and is full, so the task
     /// waits on `Started` when the gate is dropped. When the reader frees the room the task wakes
-    /// after the `Lost` end and must drop `Started`.
+    /// after the `Lost` end and must drop `Started`, and the gate's late count goes up by one.
     #[test]
     fn dropped_gate_ends_an_action_waiting_for_room() {
         use asupersync::types::Budget;
@@ -1860,8 +1890,11 @@ mod tests {
         lab.run_until_idle();
         assert!(handle.is_finished());
         assert!(requests.is_empty(), "the action waits to send Started");
+        let gate = held.lock().expect("not poisoned").take().expect("gate");
+        let late = gate.late();
+        assert_eq!(late.load(Ordering::Relaxed), 0);
         // The reducer stops: `Reducer::stopped` drops the gate outside any action task.
-        drop(held.lock().expect("not poisoned").take());
+        drop(gate);
         let end = RequestEvent {
             kind: IdKind::Action,
             id: 1,
@@ -1874,6 +1907,11 @@ mod tests {
         let after: Vec<ActionEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(after.is_empty(), "events after the end: {after:?}");
         assert!(requests.is_empty(), "one end only");
+        assert_eq!(
+            late.load(Ordering::Relaxed),
+            1,
+            "the dropped Started is counted"
+        );
     }
 
     /// ADR-018: two sessions send action id 1. Each run's events carry id 1 and go only to its
