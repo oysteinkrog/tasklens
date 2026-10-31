@@ -1060,3 +1060,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.13 prep: user-mode 'tasklens remote-admin' (pkexec only for the rules file, setting over the socket, undo on failure); remote admin covers the three tasklens ids now, SMART gets its own polkit action (generic exec rule rejected); split into .13 engine check + .31 CLI + .32 window + .33 SMART. Requeued.
 - 2026-10-31 q4x76.13: start check asks polkit CheckAuthorization for the service's own process (rules dir not readable); off in memory only; a session without Hello counts as remote.
 - 2026-10-31 q4x76.31 held: remote-admin on/off is one transaction: flock for the whole command, CLI records the prior rules-file state (no shared backup), restore on any failure after the script starts. Requeued.
+- 2026-10-31 q4x76.31 held again: idempotent restore on any failure before the commit point (socket save); nothing undone after it; one fixed lock file. Requeued.
