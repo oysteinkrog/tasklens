@@ -1508,8 +1508,9 @@ mod tests {
                 }
             }
         }
+        // Queries carry the list too, so a separate list is needed, and refused, less often.
         assert!(
-            lists_refused > 50,
+            lists_refused > 20,
             "the queue refused {lists_refused} lists"
         );
         assert!(
