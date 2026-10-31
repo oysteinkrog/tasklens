@@ -2,12 +2,23 @@
 //! answer (ADR-018 Window fallback, Lifetime and "One engine per user per machine",
 //! tasklens-q4x76.8).
 //!
-//! The service answers when its `Welcome` arrives on a connection. A socket that accepts the
-//! connection and sends nothing does not count.
+//! The service answers when its `Welcome` arrives on a connection and the client has checked it.
+//! A socket that accepts the connection and sends nothing does not count.
+//!
+//! Every blocking step of a connection attempt ends by that attempt's deadline:
+//! - `connect`: a non-blocking socket. A full backlog (`EAGAIN`) is tried again every 50 ms
+//!   until the deadline.
+//! - the `Hello` write and the `Welcome` read: the socket's write and read timeouts are set to
+//!   the time left before each call, until the first frame from the service is read whole.
+//! - `answered`: polls the client every 50 ms until the deadline.
+//!
+//! An attempt starts at start, at each `systemctl` success, at each 30 s check and at each
+//! reconnect of the client, and has `CONNECT_DEADLINE` (3 s).
 //!
 //! At start (`EngineLink::open`):
-//! 1. When the socket accepts a connection at once and the service answers within 3 s of start,
-//!    the window becomes a `RemoteClient` of the service.
+//! 1. When the socket accepts a connection and the service answers on it within 3 s of start,
+//!    the window becomes a `RemoteClient` of the service. A socket that does not exist or
+//!    refuses ends this step at once.
 //! 2. Otherwise tl-app runs `systemctl --user start tasklens-engine.service`, which gets at most
 //!    3 s. When it succeeds, the socket is tried every 50 ms, and the service must answer within
 //!    3 s of that moment. A unit that fails to start skips the wait.
@@ -22,7 +33,8 @@
 //! when the service does not come up, the window takes the lock again and runs its own engine.
 
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -32,8 +44,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::Errno;
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
 use tl_model::client::EngineClient;
-use tl_model::remote_proto::HelloTail;
+use tl_model::remote_proto::{FrameHeader, HEADER_LEN, HelloTail};
 use tl_remote::client::{BACKOFF, ClientConfig, Connection, LinkStatus, RemoteClient};
 use tl_remote::server;
 use tl_ui::engine_link::EngineLinkState;
@@ -192,9 +207,10 @@ impl EngineLink {
     }
 
     /// Tries the socket every `retry` until the window's current engine stops, and logs the
-    /// first time the service answers. Nothing else changes: the window keeps its own engine
-    /// until it restarts or the user switches (ADR-018 Window fallback). The service cannot run
-    /// while the window holds the lock, so this normally finds nothing.
+    /// first time the service answers with its `Welcome`. A refused, failed or silent attempt
+    /// counts as no answer, and the checks go on. Nothing else changes: the window keeps its own
+    /// engine until it restarts or the user switches (ADR-018 Window fallback). The service
+    /// cannot run while the window holds the lock, so this normally finds nothing.
     fn check_socket_while_local(self: &Arc<Self>) {
         let run = self.local_runs.load(Ordering::Acquire);
         let link = Arc::downgrade(self);
@@ -208,7 +224,8 @@ impl EngineLink {
                 if link.local_runs.load(Ordering::Acquire) != run {
                     return;
                 }
-                if try_socket(&link.env).is_some() {
+                let answer = attempt(&link.env, Instant::now() + link.env.deadline);
+                if matches!(answer, Ok(Some(_))) {
                     info!(target: "tasklens::engine", "the engine service answers; the window keeps its own engine until it restarts");
                     return;
                 }
@@ -306,13 +323,9 @@ impl EngineLink {
 
 /// The start steps of the module docs.
 fn establish(env: &LinkEnv) -> Result<Running, String> {
-    if let Some(conn) = try_socket(env) {
-        let client = remote(env, Some(conn))?;
-        if answered(&client, Instant::now() + env.deadline) {
-            info!(target: "tasklens::engine", "using the engine service");
-            return Ok(Running::Service(client));
-        }
-        info!(target: "tasklens::engine", "the engine socket accepted but the service did not answer within {} ms", env.deadline.as_millis());
+    if let Some(client) = attempt(env, Instant::now() + env.deadline)? {
+        info!(target: "tasklens::engine", "using the engine service");
+        return Ok(Running::Service(client));
     }
     if let Some(start_unit) = &env.start_unit {
         if start_unit(env.deadline) {
@@ -346,7 +359,7 @@ fn establish(env: &LinkEnv) -> Result<Running, String> {
 /// connection. `None` when no answer came by `deadline`.
 fn wait_for_service(env: &LinkEnv, deadline: Instant) -> Result<Option<Arc<RemoteClient>>, String> {
     loop {
-        if let Some(conn) = try_socket(env) {
+        if let Some(conn) = try_socket(env, deadline) {
             let client = remote(env, Some(conn))?;
             return Ok(answered(&client, deadline).then_some(client));
         }
@@ -355,6 +368,20 @@ fn wait_for_service(env: &LinkEnv, deadline: Instant) -> Result<Option<Arc<Remot
         }
         thread::sleep(POLL);
     }
+}
+
+/// One attempt: a connection now, and the service's answer on it by `deadline`. `None` when
+/// the socket does not accept by `deadline` or the service does not answer by then.
+fn attempt(env: &LinkEnv, deadline: Instant) -> Result<Option<Arc<RemoteClient>>, String> {
+    let Some(conn) = try_socket(env, deadline) else {
+        return Ok(None);
+    };
+    let client = remote(env, Some(conn))?;
+    if answered(&client, deadline) {
+        return Ok(Some(client));
+    }
+    info!(target: "tasklens::engine", "the engine socket accepted but the service did not answer within {} ms", env.deadline.as_millis());
+    Ok(None)
 }
 
 /// True when the service's `Welcome` reaches `client` by `deadline`. The client reconnects on
@@ -371,30 +398,179 @@ fn answered(client: &RemoteClient, deadline: Instant) -> bool {
     }
 }
 
-/// A connection to the socket whose peer runs as `env.uid`, if one answers now.
-fn try_socket(env: &LinkEnv) -> Option<Connection> {
+/// A connection to the socket whose peer runs as `env.uid`, if the socket accepts by
+/// `deadline`. The handshake on it must also end by `deadline`.
+fn try_socket(env: &LinkEnv, deadline: Instant) -> Option<Connection> {
     let path = env.socket.as_ref().ok()?;
-    connect(path, env.uid).ok()
+    connect(path, env.uid, deadline).ok()
 }
 
-fn connect(path: &Path, uid: u32) -> io::Result<Connection> {
-    let stream = UnixStream::connect(path)?;
+/// Connects without blocking past `deadline` and bounds the handshake by it.
+fn connect(path: &Path, uid: u32, deadline: Instant) -> io::Result<Connection> {
+    let stream = connect_by(path, deadline)?;
     server::check_peer(&stream, uid).map_err(|e| io::Error::other(e.to_string()))?;
-    Connection::unix(stream)
+    bounded_connection(stream, deadline)
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "the engine service connect deadline passed",
+    )
+}
+
+/// The time left until `deadline`, or `TimedOut` when there is none.
+fn time_left(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(timed_out());
+    }
+    Ok(left)
+}
+
+/// A non-blocking connect. A Unix socket whose backlog is full refuses with `EAGAIN` and does
+/// not queue the attempt, so it is tried again every `POLL` until `deadline`. The stream it
+/// returns blocks.
+fn connect_by(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let addr = SocketAddrUnix::new(path)?;
+    let fd = loop {
+        let fd = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        match rustix::net::connect(&fd, &addr) {
+            Ok(()) => break fd,
+            Err(Errno::AGAIN) => thread::sleep(time_left(deadline)?.min(POLL)),
+            Err(Errno::INPROGRESS) => {
+                let left = Timespec::try_from(time_left(deadline)?).map_err(io::Error::other)?;
+                let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
+                if poll(&mut fds, Some(&left))? == 0 {
+                    return Err(timed_out());
+                }
+                rustix::net::sockopt::socket_error(&fd)??;
+                break fd;
+            }
+            Err(Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let stream = UnixStream::from(OwnedFd::from(fd));
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+/// The handshake deadline of one connection, shared by its reader and writer. Lifted once the
+/// first frame from the service (its `Welcome` or `Refused`) has been read whole.
+struct HandshakeBound {
+    deadline: Instant,
+    lifted: AtomicBool,
+}
+
+/// The read half of a connection. Until the first frame is read whole, every read gets the
+/// time left as its timeout and reads no further than the end of that frame.
+struct WelcomeReader {
+    stream: UnixStream,
+    bound: Arc<HandshakeBound>,
+    header: [u8; HEADER_LEN],
+    filled: usize,
+    /// Payload bytes of the first frame still to read, once its header is read.
+    rest: Option<usize>,
+}
+
+impl Read for WelcomeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.bound.lifted.load(Ordering::Acquire) {
+            return self.stream.read(buf);
+        }
+        self.stream
+            .set_read_timeout(Some(time_left(self.bound.deadline)?))?;
+        let want = self.rest.unwrap_or(HEADER_LEN - self.filled);
+        let n = self.stream.read(&mut buf[..buf.len().min(want)])?;
+        match &mut self.rest {
+            None => {
+                self.header[self.filled..self.filled + n].copy_from_slice(&buf[..n]);
+                self.filled += n;
+                if self.filled == HEADER_LEN {
+                    // A header that does not parse ends the session, so the deadline stays.
+                    self.rest = Some(
+                        FrameHeader::parse(&self.header)
+                            .map_or(usize::MAX, |h| h.encoded_len as usize),
+                    );
+                }
+            }
+            Some(rest) => *rest -= n,
+        }
+        if self.rest == Some(0) {
+            self.bound.lifted.store(true, Ordering::Release);
+            self.stream.set_read_timeout(None)?;
+            self.stream.set_write_timeout(None)?;
+        }
+        Ok(n)
+    }
+}
+
+/// The write half of a connection. Until the reader lifts the bound, every write gets the time
+/// left as its timeout. Only the `Hello` is written before that.
+struct HelloWriter {
+    stream: UnixStream,
+    bound: Arc<HandshakeBound>,
+}
+
+impl Write for HelloWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.bound.lifted.load(Ordering::Acquire) {
+            self.stream
+                .set_write_timeout(Some(time_left(self.bound.deadline)?))?;
+        }
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// `Connection::unix` with the handshake bounded by `deadline`.
+fn bounded_connection(stream: UnixStream, deadline: Instant) -> io::Result<Connection> {
+    let bound = Arc::new(HandshakeBound {
+        deadline,
+        lifted: AtomicBool::new(false),
+    });
+    let writer = HelloWriter {
+        stream: stream.try_clone()?,
+        bound: Arc::clone(&bound),
+    };
+    let control = stream.try_clone()?;
+    Ok(Connection {
+        reader: Box::new(WelcomeReader {
+            stream,
+            bound,
+            header: [0; HEADER_LEN],
+            filled: 0,
+            rest: None,
+        }),
+        writer: Box::new(writer),
+        shutdown: Arc::new(move || {
+            let _ = control.shutdown(std::net::Shutdown::Both);
+        }),
+    })
 }
 
 /// A `RemoteClient` of the socket. Its first connection is `first` when given; every later one
-/// connects again, with the client's backoff.
+/// connects again, with the client's backoff, and gets `env.deadline` for connect and handshake.
 fn remote(env: &LinkEnv, first: Option<Connection>) -> Result<Arc<RemoteClient>, String> {
     let first = Mutex::new(first);
     let socket = env.socket.clone();
     let uid = env.uid;
+    let deadline = env.deadline;
     let connector = move || {
         if let Some(conn) = lock(&first).take() {
             return Ok(conn);
         }
         match &socket {
-            Ok(path) => connect(path, uid),
+            Ok(path) => connect(path, uid, Instant::now() + deadline),
             Err(e) => Err(io::Error::other(e.clone())),
         }
     };
@@ -611,8 +787,86 @@ mod tests {
         let begin = Instant::now();
         let link = EngineLink::open(rig.env(Some(Box::new(|_| false)))).unwrap();
         assert!(begin.elapsed() >= Duration::from_millis(300));
+        assert!(begin.elapsed() < Duration::from_secs(2));
         assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
         assert_eq!(rig.engines_started.load(Ordering::Acquire), 1);
+        link.shutdown();
+    }
+
+    /// Leader decision 2026-10-31: a socket that accepts and never sends a `Welcome` counts as
+    /// no answer, so the window's own engine keeps trying it every `retry`.
+    #[test]
+    fn silent_socket_keeps_the_checks_going() {
+        let rig = Rig::new();
+        let listener = UnixListener::bind(rig.socket()).unwrap();
+        let mut env = rig.env(Some(Box::new(|_| false)));
+        env.retry = Duration::from_millis(20);
+        let begin = Instant::now();
+        let link = EngineLink::open(env).unwrap();
+        assert!(begin.elapsed() < Duration::from_secs(2));
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
+        // Each check waits the whole 300 ms deadline on the silent socket, then the next one
+        // follows 20 ms later. Count the checks after the first one.
+        listener.set_nonblocking(true).unwrap();
+        let mut held = Vec::new();
+        let mut checks = 0;
+        let until = Instant::now() + Duration::from_secs(5);
+        while checks < 4 && Instant::now() < until {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    checks += 1;
+                    held.push(stream);
+                }
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert!(checks >= 4, "the checks stopped after {checks} connections");
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
+        link.shutdown();
+    }
+
+    /// A listener whose backlog is full and that never accepts. A blocking connect would wait
+    /// until it accepts.
+    fn full_listener(path: &Path) -> (OwnedFd, Vec<OwnedFd>) {
+        let addr = SocketAddrUnix::new(path).unwrap();
+        let listener = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        rustix::net::bind(&listener, &addr).unwrap();
+        rustix::net::listen(&listener, 0).unwrap();
+        let mut queued = Vec::new();
+        loop {
+            let fd = rustix::net::socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+                None,
+            )
+            .unwrap();
+            match rustix::net::connect(&fd, &addr) {
+                Ok(()) => queued.push(fd),
+                Err(Errno::AGAIN) => return (listener, queued),
+                Err(e) => panic!("filling the backlog: {e}"),
+            }
+            assert!(queued.len() < 1000, "the backlog does not fill");
+        }
+    }
+
+    #[test]
+    fn full_backlog_does_not_hold_up_start() {
+        let rig = Rig::new();
+        let _listener = full_listener(&rig.socket());
+        let begin = Instant::now();
+        let link = EngineLink::open(rig.env(Some(Box::new(|_| false)))).unwrap();
+        // The 300 ms deadline, then the unit fails at once.
+        let took = begin.elapsed();
+        assert!(took >= Duration::from_millis(250), "{took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert_eq!(link.state(), EngineLinkState::Fallback { can_switch: true });
         link.shutdown();
     }
 
