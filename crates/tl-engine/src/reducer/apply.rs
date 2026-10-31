@@ -41,7 +41,8 @@ use super::{
     ActionRoute, AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index,
 };
 use crate::client_session::{
-    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, Report, RequestEnd, RequestEvent,
+    ClientMsg, ClientSessionId, IdKind, IdSlot, MapError, OpenError, PortState, Report, RequestEnd,
+    RequestEvent, SessionLink,
 };
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
@@ -711,17 +712,12 @@ impl Reducer {
     /// table and system tables are built at once, so its first publish has them.
     fn apply_client(&mut self, cx: &Cx, msg: ClientMsg, settings: &EngineSettings) {
         match msg {
-            ClientMsg::Open { id, link } => {
-                let empty = Snapshot::empty(self.boot_id, self.epoch);
-                if let Err(e) = self.clients.open(id, link, &empty) {
-                    tracing::warn!(target: "tasklens::engine", id = id.0, "client session refused: {e}");
-                    return;
-                }
-                self.rebuild_tables(settings, Some(id));
-                for table in [SysTable::Services, SysTable::Startup, SysTable::Connections] {
-                    self.rebuild_sys_for(table, settings, Some(id));
-                }
+            ClientMsg::Open { id, link } => self.open_client(id, link, None, settings),
+            ClientMsg::OpenPort { id, link, port } => {
+                self.open_client(id, link, Some(port), settings);
             }
+            // The pass this message starts reads the ports' shared state (`sync_ports`).
+            ClientMsg::Wake => {}
             // The history worker learns of the close from the session list sent after the turn.
             ClientMsg::Close(id) => {
                 if !self.clients.close(id) {
@@ -741,6 +737,37 @@ impl Reducer {
                 }
                 self.apply_command(cx, id, *cmd, settings);
             }
+        }
+    }
+
+    /// Opens session `id`, with the state its `SessionPort` shares when it has one, and builds
+    /// its tables. A refused port is ended, so the server learns it got no session.
+    fn open_client(
+        &mut self,
+        id: ClientSessionId,
+        link: SessionLink,
+        port: Option<Arc<PortState>>,
+        settings: &EngineSettings,
+    ) {
+        let empty = Snapshot::empty(self.boot_id, self.epoch);
+        let opened = match port {
+            Some(port) => self.clients.open_port(id, link, port, &empty).map(|_| ()),
+            None => self.clients.open(id, link, &empty).map(|_| ()),
+        };
+        match opened {
+            Ok(()) => {}
+            Err(OpenError::Closed) => {
+                tracing::debug!(target: "tasklens::engine", id = id.0, "client session not opened: its port is closed");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(target: "tasklens::engine", id = id.0, "client session refused: {e}");
+                return;
+            }
+        }
+        self.rebuild_tables(settings, Some(id));
+        for table in [SysTable::Services, SysTable::Startup, SysTable::Connections] {
+            self.rebuild_sys_for(table, settings, Some(id));
         }
     }
 

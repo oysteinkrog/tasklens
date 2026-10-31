@@ -26,6 +26,9 @@ use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
 use crate::EngineError;
+use crate::client_session::{
+    ClientMsg, ClientSessionId, OpenError, PortState, SESSIONS_MAX, SessionLink,
+};
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
 use crate::helper::LinkEnv;
@@ -273,6 +276,8 @@ struct Inner {
     stopped: AtomicBool,
     /// What `shutdown` names when the engine does not stop in time.
     trace: Arc<ShutdownTrace>,
+    /// The ports `open_session` handed out whose session has not ended yet.
+    ports: Mutex<Vec<(ClientSessionId, Arc<PortState>)>>,
 }
 
 /// The UI-side channel ends that `shutdown` drops first.
@@ -317,6 +322,7 @@ impl EngineHandle {
                 rt_handle: Mutex::new(None),
                 stopped: AtomicBool::new(false),
                 trace,
+                ports: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -326,6 +332,83 @@ impl EngineHandle {
             .links
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opens client session `id` for the engine service (ADR-018) and returns its port. At most
+    /// `SESSIONS_MAX - 1` ports are open at once, beside the local session. A port's slot frees
+    /// when its session ends: the reducer has seen the port dropped, or removed the session
+    /// itself. Never blocks.
+    pub fn open_session(&self, id: ClientSessionId) -> Result<SessionPort, OpenError> {
+        if id == ClientSessionId::LOCAL {
+            return Err(OpenError::Duplicate);
+        }
+        if self.inner.stopped.load(Ordering::Acquire) {
+            return Err(OpenError::Stopped);
+        }
+        let links = self.links();
+        let Some(links) = &*links else {
+            return Err(OpenError::Stopped);
+        };
+        let mut ports = self
+            .inner
+            .ports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        ports.retain(|(_, port)| !port.is_ended());
+        if ports.iter().any(|(open, _)| *open == id) {
+            return Err(OpenError::Duplicate);
+        }
+        if ports.len() >= SESSIONS_MAX - 1 {
+            return Err(OpenError::Full);
+        }
+        let now = self.inner.latest.load();
+        let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(
+            now.boot_id,
+            now.epoch,
+        )));
+        let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
+        let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
+        // Unbounded: an end is never dropped, and admission bounds how many are outstanding.
+        let (requests_tx, requests_rx) = async_channel::unbounded::<RequestEvent>();
+        let state = Arc::new(PortState::default());
+        let link = SessionLink {
+            latest: Arc::clone(&latest),
+            wake_tx,
+            events_tx,
+            requests_tx,
+        };
+        let open = ClientMsg::OpenPort {
+            id,
+            link,
+            port: Arc::clone(&state),
+        };
+        links
+            .msgs_tx
+            .try_send(EngineMsg::Client(open))
+            .map_err(|e| match e {
+                mpsc::SendError::Full(_) => OpenError::Busy,
+                mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                    OpenError::Stopped
+                }
+            })?;
+        ports.push((id, Arc::clone(&state)));
+        Ok(SessionPort {
+            id,
+            latest,
+            wake_rx,
+            events_rx,
+            requests_rx,
+            state,
+            handle: self.clone(),
+        })
+    }
+
+    /// Sends `ClientMsg::Wake` when the queue has room. The reducer reads the ports' shared state
+    /// on every pass anyway, so a full queue only delays it until the next tick.
+    fn wake_reducer(&self) {
+        if let Some(links) = &*self.links() {
+            let _ = links.msgs_tx.try_send(EngineMsg::Client(ClientMsg::Wake));
+        }
     }
 
     /// Stops the engine in the five ADR-004 steps and consumes the handle. Call it on the main
@@ -409,6 +492,100 @@ impl EngineHandle {
             );
         }
         report
+    }
+}
+
+/// One client session of the engine service (ADR-018), from `EngineHandle::open_session`: its
+/// snapshots, events and request ends, and the way to send it demand and commands. Dropping the
+/// port closes the session. The close goes through state the reducer reads on every pass, not
+/// through the message queue, so it is never lost.
+pub struct SessionPort {
+    id: ClientSessionId,
+    latest: Arc<ArcSwap<Snapshot>>,
+    wake_rx: async_channel::Receiver<()>,
+    events_rx: async_channel::Receiver<ActionEvent>,
+    requests_rx: async_channel::Receiver<RequestEvent>,
+    state: Arc<PortState>,
+    handle: EngineHandle,
+}
+
+impl std::fmt::Debug for SessionPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionPort")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionPort {
+    pub fn id(&self) -> ClientSessionId {
+        self.id
+    }
+
+    /// The session's newest snapshot. Until the reducer first publishes for the session, an
+    /// empty snapshot with sequence 0.
+    pub fn latest(&self) -> Arc<Snapshot> {
+        self.latest.load_full()
+    }
+
+    /// One token after each publish, as `EngineClient::wake`. Closed once the session ended.
+    pub fn wake(&self) -> async_channel::Receiver<()> {
+        self.wake_rx.clone()
+    }
+
+    /// The session's action events, with its own action ids.
+    pub fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
+        self.events_rx.clone()
+    }
+
+    /// The end of each of the session's requests, with its own ids.
+    pub fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
+        self.requests_rx.clone()
+    }
+
+    /// The session's demand. The reducer takes the newest one at its next pass; a newer demand
+    /// replaces one it has not taken, so none is lost to a full queue.
+    pub fn set_demand(&self, demand: Demand) {
+        self.state.set_demand(demand);
+        self.handle.wake_reducer();
+    }
+
+    /// A command from this session (`ClientMsg::Command`). Never blocks: a full queue is
+    /// `Err(Busy)`, a stopped engine or an ended session `Err(EngineStopped)`.
+    pub fn send(&self, cmd: Command) -> Result<(), CommandError> {
+        if self.is_ended() {
+            return Err(CommandError::EngineStopped);
+        }
+        let links = self.handle.links();
+        let Some(links) = &*links else {
+            return Err(CommandError::EngineStopped);
+        };
+        let msg = ClientMsg::Command {
+            id: self.id,
+            cmd: Box::new(cmd),
+        };
+        links
+            .msgs_tx
+            .try_send(EngineMsg::Client(msg))
+            .map_err(|e| match e {
+                mpsc::SendError::Full(_) => CommandError::Busy,
+                mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                    CommandError::EngineStopped
+                }
+            })
+    }
+
+    /// The engine removed the session (its link broke or its reducer stopped), refused to open
+    /// it, or stopped. The server then closes the connection.
+    pub fn is_ended(&self) -> bool {
+        self.state.is_ended() || self.handle.inner.stopped.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for SessionPort {
+    fn drop(&mut self) {
+        self.state.close();
+        self.handle.wake_reducer();
     }
 }
 
@@ -803,6 +980,130 @@ mod tests {
             .expect("wake within 5 s");
         assert_eq!(woke, Ok(()));
         assert!(handle.latest().sequence >= 1);
+    }
+
+    /// The `OpenPort` messages on the queue, with their ports' state. Other messages are
+    /// dropped.
+    fn opened(rx: &mut mpsc::Receiver<EngineMsg>) -> Vec<(ClientSessionId, Arc<PortState>)> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let EngineMsg::Client(ClientMsg::OpenPort { id, port, .. }) = msg {
+                out.push((id, port));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn open_session_serves_eight_ports_beside_the_local_session() {
+        let mut r = rig(None);
+        let ports: Vec<SessionPort> = (1..SESSIONS_MAX as u32)
+            .map(|i| r.handle.open_session(ClientSessionId(i)).expect("room"))
+            .collect();
+        assert_eq!(ports.len(), 8);
+        assert_eq!(
+            r.handle.open_session(ClientSessionId(99)).err(),
+            Some(OpenError::Full)
+        );
+        assert_eq!(
+            r.handle.open_session(ClientSessionId(1)).err(),
+            Some(OpenError::Duplicate)
+        );
+        assert_eq!(
+            r.handle.open_session(ClientSessionId::LOCAL).err(),
+            Some(OpenError::Duplicate)
+        );
+        let sent = opened(&mut r.msgs_rx);
+        assert_eq!(sent.len(), 8);
+
+        // A dropped port keeps its slot until the reducer has ended its session.
+        drop(ports.into_iter().next());
+        assert!(sent[0].1.is_closed());
+        assert_eq!(
+            r.handle.open_session(ClientSessionId(99)).err(),
+            Some(OpenError::Full)
+        );
+        sent[0].1.end();
+        r.handle
+            .open_session(ClientSessionId(99))
+            .expect("the ended session's slot is free");
+    }
+
+    #[test]
+    fn a_port_dropped_on_a_full_queue_still_closes() {
+        let mut r = rig(None);
+        let port = r.handle.open_session(ClientSessionId(1)).expect("room");
+        for _ in 1..QUEUE {
+            assert_eq!(r.handle.send(Command::ResetBaselines), Ok(()));
+        }
+        assert_eq!(
+            r.handle.open_session(ClientSessionId(2)).err(),
+            Some(OpenError::Busy),
+            "a full queue refuses an open and keeps no slot"
+        );
+        assert_eq!(port.send(Command::ResetBaselines), Err(CommandError::Busy));
+        // The demand is not queued, so a full queue does not lose it.
+        port.set_demand(Demand {
+            memory: true,
+            ..Demand::default()
+        });
+        drop(port);
+        let sent = opened(&mut r.msgs_rx);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.is_closed(), "the close is in the shared state");
+    }
+
+    #[test]
+    fn open_session_after_stop() {
+        let r = rig(None);
+        r.handle.inner.stopped.store(true, Ordering::Release);
+        assert_eq!(
+            r.handle.open_session(ClientSessionId(1)).err(),
+            Some(OpenError::Stopped)
+        );
+    }
+
+    #[test]
+    fn port_gets_snapshots_and_its_drop_frees_the_slot() {
+        let base =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
+        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
+            .with_sys_root(SysRoot::at(&base));
+        let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
+        let port = handle.open_session(ClientSessionId(1)).expect("room");
+        let wake = port.wake();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(futures_lite::future::block_on(wake.recv()));
+        });
+        let woke = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wake within 5 s");
+        assert_eq!(woke, Ok(()));
+        assert!(port.latest().sequence >= 1);
+
+        let others: Vec<SessionPort> = (2..SESSIONS_MAX as u32)
+            .map(|i| handle.open_session(ClientSessionId(i)).expect("room"))
+            .collect();
+        assert_eq!(
+            handle.open_session(ClientSessionId(99)).err(),
+            Some(OpenError::Full)
+        );
+        drop(port);
+        let begin = Instant::now();
+        let reopened = loop {
+            match handle.open_session(ClientSessionId(99)) {
+                Ok(port) => break port,
+                Err(OpenError::Full) if begin.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("the dropped port's slot did not free: {e}"),
+            }
+        };
+        assert!(!reopened.is_ended());
+        drop(others);
+        drop(reopened);
+        let _ = handle.shutdown();
     }
 
     #[test]

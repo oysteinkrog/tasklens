@@ -9,7 +9,11 @@
 //! The local session (`ClientSessionId::LOCAL`) always exists and is first. The in-process
 //! `EngineHandle` is that session: its commands come as `EngineMsg::Command` and its snapshots
 //! go to the reducer's own `Publisher`. Other sessions are opened with `ClientMsg::Open` and get
-//! their snapshots through their `SessionLink`.
+//! their snapshots through their `SessionLink`. The engine service opens them through
+//! `EngineHandle::open_session`, which sends `ClientMsg::OpenPort`: the session then also shares
+//! a `PortState` with its `SessionPort`. Dropping the port closes the session through that
+//! state, not through a queued message, so a full message queue never leaks a session
+//! (`ClientSessions::sync_ports`).
 //!
 //! Each session also has its own `Demand`. The workers collect for the combined demand
 //! (`ClientSessions::combined`): every session's demand plus the background demand of the host
@@ -72,7 +76,8 @@
 //! in the reducer, so a reducer restart drops every session but the local one.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 use tl_model::actions::ActionEvent;
@@ -101,8 +106,8 @@ use crate::reducer::sys_table::{self, SysTableInput};
 use crate::reducer::{Components, bump, sys_table_index};
 use crate::source::CommandProgress;
 
-/// Sessions at most, the local one included (ADR-018).
-pub const SESSIONS_MAX: usize = 8;
+/// Sessions at most, the local one included (ADR-018): 8 connections plus the local session.
+pub const SESSIONS_MAX: usize = 9;
 
 /// The six snapshot parts each session builds itself, in `ClientSession::published` order.
 pub const SESSION_BITS: [ComponentMask; 6] = [
@@ -363,6 +368,48 @@ impl SessionLink {
     }
 }
 
+/// What a `SessionPort` and the reducer share about one session (ADR-018). The reducer reads
+/// it on every pass, so nothing here can be lost to a full message queue.
+#[derive(Debug, Default)]
+pub struct PortState {
+    /// The port was dropped: the session closes at the reducer's next pass.
+    closed: AtomicBool,
+    /// The session left the registry, or was never opened. Its slot is free again.
+    ended: AtomicBool,
+    /// The newest demand the port set that the reducer has not taken yet. A newer one replaces
+    /// it.
+    demand: Mutex<Option<Demand>>,
+}
+
+impl PortState {
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub fn end(&self) {
+        self.ended.store(true, Ordering::Release);
+    }
+
+    pub fn is_ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    pub fn set_demand(&self, demand: Demand) {
+        *self.demand.lock().unwrap_or_else(PoisonError::into_inner) = Some(demand);
+    }
+
+    fn take_demand(&self) -> Option<Demand> {
+        self.demand
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
 /// What the server sends the reducer about a session.
 #[derive(Clone, Debug)]
 pub enum ClientMsg {
@@ -370,7 +417,17 @@ pub enum ClientMsg {
         id: ClientSessionId,
         link: SessionLink,
     },
+    /// `Open` from `EngineHandle::open_session`: the session also shares `port` with its
+    /// `SessionPort`. A port closed before this message arrives is not opened.
+    OpenPort {
+        id: ClientSessionId,
+        link: SessionLink,
+        port: Arc<PortState>,
+    },
     Close(ClientSessionId),
+    /// Only wakes the reducer, so it reads the ports' shared state now instead of at the next
+    /// tick.
+    Wake,
     /// The demand of session `id` (ADR-018). It joins the combined demand at the next publish.
     /// The local session's comes from the reducer's demand watch instead.
     Demand {
@@ -393,6 +450,14 @@ pub enum OpenError {
     Full,
     #[error("session id in use")]
     Duplicate,
+    /// The port was dropped before the reducer opened its session.
+    #[error("the session's port is closed")]
+    Closed,
+    /// `EngineHandle::open_session` found the engine's message queue full.
+    #[error("the engine is busy")]
+    Busy,
+    #[error("the engine has stopped")]
+    Stopped,
 }
 
 /// One connected window's queries and the table parts built for them.
@@ -445,6 +510,19 @@ pub struct ClientSession {
     published: [u64; SESSION_BITS.len()],
     /// `None` for the local session, which publishes through the reducer's `Publisher`.
     link: Option<SessionLink>,
+    /// The state shared with the session's `SessionPort`, for a session opened with
+    /// `ClientMsg::OpenPort`. Dropping the session ends it.
+    port: Option<Arc<PortState>>,
+}
+
+impl Drop for ClientSession {
+    /// However the session leaves (closed, broken, gone, or with its reducer), its port learns it
+    /// ended and its slot frees.
+    fn drop(&mut self) {
+        if let Some(port) = &self.port {
+            port.end();
+        }
+    }
 }
 
 impl ClientSession {
@@ -475,6 +553,7 @@ impl ClientSession {
             dirty: ComponentMask::DETAILS | ComponentMask::DEVICE_DETAILS,
             published: [0; SESSION_BITS.len()],
             link,
+            port: None,
         }
     }
 
@@ -1388,6 +1467,55 @@ impl ClientSessions {
         self.sessions
             .push(ClientSession::new(id, Some(link), empty));
         Ok(self.sessions.last_mut().expect("just pushed"))
+    }
+
+    /// `open` for a session that shares `port` with its `SessionPort`. A port that is already
+    /// closed is not opened. On any refusal the port is ended, so its slot frees. The port's
+    /// newest demand is the session's first.
+    pub fn open_port(
+        &mut self,
+        id: ClientSessionId,
+        link: SessionLink,
+        port: Arc<PortState>,
+        empty: &Snapshot,
+    ) -> Result<&mut ClientSession, OpenError> {
+        if port.is_closed() {
+            port.end();
+            return Err(OpenError::Closed);
+        }
+        match self.open(id, link, empty) {
+            Ok(session) => {
+                if let Some(demand) = port.take_demand() {
+                    session.demand = demand;
+                }
+                session.port = Some(port);
+                Ok(session)
+            }
+            Err(e) => {
+                port.end();
+                Err(e)
+            }
+        }
+    }
+
+    /// Reads every port's shared state (ADR-018): closes the sessions whose port was dropped and
+    /// takes each open port's newest demand. The reducer calls it on every pass. Returns true
+    /// when a session was closed.
+    pub fn sync_ports(&mut self) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|s| match &s.port {
+            Some(port) if port.is_closed() => {
+                tracing::debug!(target: "tasklens::engine", id = s.id.0, "client session closed: port dropped");
+                false
+            }
+            _ => true,
+        });
+        for session in &mut self.sessions {
+            if let Some(demand) = session.port.as_ref().and_then(|p| p.take_demand()) {
+                session.demand = demand;
+            }
+        }
+        self.sessions.len() != before
     }
 
     /// Removes session `id` with its mappings; its requests get no event. The local session

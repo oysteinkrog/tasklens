@@ -336,6 +336,9 @@ impl Reducer {
                 self.apply(cx, msg, &settings)?;
                 applied += 1;
             }
+            // Every pass, so a dropped port closes its session even when its wake message did
+            // not fit in the queue (ADR-018).
+            self.clients.sync_ports();
             if let Some(local) = self
                 .demand_rx
                 .as_mut()

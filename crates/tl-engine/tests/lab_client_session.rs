@@ -1,5 +1,6 @@
 //! LabRuntime tests for client sessions (q4x76.4, ADR-018): each session has its own table
 //! and system table queries and gets its own views; the local session alone behaves as before.
+//! Sessions opened with a `PortState` (q4x76.5) close and take demand through that state.
 //!
 //! Each `run` call gets its own task. The messages are queued before the task starts and the
 //! sender is dropped, so `run` drains the queue and then returns.
@@ -11,13 +12,14 @@ use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use tl_engine::client_session::{
-    ClientMsg, ClientSessionId, ClientSessions, OpenError, SESSIONS_MAX, SessionLink,
+    ClientMsg, ClientSessionId, ClientSessions, OpenError, PortState, SESSIONS_MAX, SessionLink,
 };
 use tl_engine::reducer::{Publisher, Reducer};
 use tl_engine::source::WorkerControl;
 use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate};
 use tl_model::actions::SchedPolicy;
 use tl_model::command::Command;
+use tl_model::demand::Demand;
 use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
@@ -491,7 +493,7 @@ fn registry_limits() {
         wakes.push(w);
         clients
             .open(ClientSessionId(i), l, &empty)
-            .expect("room for 8");
+            .expect("room for 8 beside the local session");
     }
     let (l, _w) = link();
     assert_eq!(
@@ -511,7 +513,7 @@ fn registry_limits() {
     let order: Vec<u32> = clients.iter().map(|s| s.id().0).collect();
     assert_eq!(
         order,
-        [0, 1, 2, 4, 5, 6, 7, 99],
+        [0, 1, 2, 4, 5, 6, 7, 8, 99],
         "connect order, local first"
     );
 }
@@ -540,4 +542,108 @@ fn closed_or_gone_sessions_stop_getting_snapshots() {
     assert_eq!(rig.reducer().clients.len(), 1);
     assert_eq!(local.table.query_generation, 0);
     assert!(Arc::ptr_eq(&kept.latest.load_full(), &before));
+}
+
+fn open_port(id: ClientSessionId, link: &SessionLink, port: &Arc<PortState>) -> EngineMsg {
+    EngineMsg::Client(ClientMsg::OpenPort {
+        id,
+        link: link.clone(),
+        port: Arc::clone(port),
+    })
+}
+
+#[test]
+fn a_dropped_port_closes_its_session_without_a_close_message() {
+    let mut rig = Rig::new();
+    let (l, _wake) = link();
+    let port = Arc::new(PortState::default());
+    rig.run(vec![open_port(REMOTE, &l, &port)]);
+    assert!(rig.reducer().clients.get(REMOTE).is_some());
+    assert!(!port.is_ended());
+
+    // The port's drop only sets the flag. No `Close` and no `Wake` reaches the queue, as when
+    // the queue was full; the next pass for any other message closes the session.
+    port.close();
+    rig.run(data());
+    assert!(rig.reducer().clients.get(REMOTE).is_none());
+    assert!(port.is_ended(), "the slot is free again");
+}
+
+#[test]
+fn a_port_closed_before_its_open_is_never_opened() {
+    let mut rig = Rig::new();
+    let (l, _wake) = link();
+    let port = Arc::new(PortState::default());
+    port.close();
+    rig.run(vec![open_port(REMOTE, &l, &port)]);
+    assert!(rig.reducer().clients.get(REMOTE).is_none());
+    assert!(port.is_ended());
+}
+
+#[test]
+fn port_demand_is_level_state() {
+    let empty = Snapshot::empty(BOOT, 1);
+    let mut clients = ClientSessions::new(&empty);
+    let (l, _wake) = link();
+    let port = Arc::new(PortState::default());
+    let first = Demand {
+        memory: true,
+        ..Demand::default()
+    };
+    port.set_demand(first.clone());
+    let session = clients
+        .open_port(REMOTE, l, Arc::clone(&port), &empty)
+        .expect("room");
+    assert_eq!(
+        session.demand, first,
+        "the demand set before the open is the first"
+    );
+
+    // Two demands between passes: the newer one wins, and nothing is queued.
+    port.set_demand(Demand::default());
+    let last = Demand {
+        memory: true,
+        disks: true,
+        ..Demand::default()
+    };
+    port.set_demand(last.clone());
+    assert!(!clients.sync_ports());
+    assert_eq!(clients.get(REMOTE).expect("open").demand, last);
+}
+
+#[test]
+fn refused_and_dropped_sessions_end_their_ports() {
+    let empty = Snapshot::empty(BOOT, 1);
+    let mut clients = ClientSessions::new(&empty);
+    let mut wakes = Vec::new();
+    let mut ports = Vec::new();
+    for i in 1..SESSIONS_MAX as u32 {
+        let (l, w) = link();
+        wakes.push(w);
+        let port = Arc::new(PortState::default());
+        clients
+            .open_port(ClientSessionId(i), l, Arc::clone(&port), &empty)
+            .expect("room for 8 beside the local session");
+        ports.push(port);
+    }
+    let (l, _w) = link();
+    let refused = Arc::new(PortState::default());
+    assert_eq!(
+        clients
+            .open_port(ClientSessionId(99), l, Arc::clone(&refused), &empty)
+            .err(),
+        Some(OpenError::Full)
+    );
+    assert!(
+        refused.is_ended(),
+        "a refused port learns it got no session"
+    );
+
+    assert!(clients.close(ClientSessionId(1)));
+    assert!(ports[0].is_ended());
+    assert!(!ports[1].is_ended());
+
+    // A reducer restart drops its registry; every port of it ends.
+    drop(clients);
+    assert!(ports.iter().all(|p| p.is_ended()));
 }

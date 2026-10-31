@@ -28,7 +28,7 @@ pub mod workers;
 // actions (E11); gpu (E13); launcher, opener (E14); helper (E29); history_query (E30);
 // client_session (q4x76.4).
 
-pub use bridge::{Engine, EngineHandle, EngineHooks, ShutdownReport};
+pub use bridge::{Engine, EngineHandle, EngineHooks, SessionPort, ShutdownReport};
 pub use config::{EngineConfig, EngineMode};
 
 /// The hooks `EngineHooks::default()` returns. Later beads replace one field each: E11-A1 the
