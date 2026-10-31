@@ -1432,6 +1432,11 @@ impl EngineRig {
         ));
         let (ep, ui) = fake_sources::root_endpoints(config, vec![spec_with(Arc::clone(&link))]);
         ui.demand_tx.send(demand).expect("demand sends");
+        // Device history off: its background demand would keep the GPU totals at 1 s while
+        // the window shows nothing (ADR-018).
+        let mut settings = EngineSettings::default();
+        settings.history.device_metrics = false;
+        ui.settings_tx.send(settings).expect("settings send");
         let root = fake.spawn(async move {
             let cx = Cx::current().expect("task has a Cx");
             engine_root(cx, ep).await;

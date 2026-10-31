@@ -31,7 +31,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::time::{BootId, now_boot_ns};
 
 use crate::bridge::{EngineHooks, HookCtx};
-use crate::client_session::{ClientMsg, ClientSessionId, RequestEvent};
+use crate::client_session::RequestEvent;
 use crate::config::{EngineConfig, EngineMode};
 use crate::controller::SourceController;
 use crate::dbus::SharedHandles;
@@ -307,11 +307,6 @@ async fn run_session(
         let _running = crate::bridge::task_running("tick");
         tick(cx, tick_tx).await;
     })?);
-    let (local, wake_tx) = (ep.demand.clone(), ep.msgs_tx.clone());
-    children.0.push(spawn(cx, move |cx| async move {
-        let _running = crate::bridge::task_running("local_demand");
-        wake_on_local_demand(cx, local, wake_tx).await;
-    })?);
 
     let running = crate::bridge::task_running("reducer");
     let run = AssertUnwindSafe(reducer.run(cx, &mut ep.msgs, &mut ep.publisher))
@@ -419,26 +414,6 @@ async fn tick(cx: Cx, msgs_tx: mpsc::Sender<EngineMsg>) {
             return;
         }
         if msgs_tx.send(&cx, EngineMsg::Tick).await.is_err() {
-            return;
-        }
-    }
-}
-
-/// Sends the local window's demand to the reducer each time it changes, so the reducer
-/// publishes the new combined demand at once instead of at its next message. Ends when the
-/// demand watch or the queue closes, or on cancel.
-async fn wake_on_local_demand(
-    cx: Cx,
-    mut local: watch::Receiver<Demand>,
-    msgs_tx: mpsc::Sender<EngineMsg>,
-) {
-    while local.changed(&cx).await.is_ok() {
-        let demand = Box::new(local.borrow_and_update_clone());
-        let msg = EngineMsg::Client(ClientMsg::Demand {
-            id: ClientSessionId::LOCAL,
-            demand,
-        });
-        if msgs_tx.send(&cx, msg).await.is_err() {
             return;
         }
     }

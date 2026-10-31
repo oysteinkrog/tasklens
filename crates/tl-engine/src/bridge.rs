@@ -26,6 +26,7 @@ use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
 use crate::EngineError;
+use crate::client_session::{ClientMsg, ClientSessionId};
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
 use crate::helper::LinkEnv;
@@ -575,7 +576,13 @@ impl EngineClient for EngineHandle {
         // `watch::Sender::send` needs no `Cx` and never blocks. An error means the engine has
         // stopped, and then the demand no longer matters.
         if let Some(links) = &*self.links() {
-            let _ = links.demand_tx.send(demand);
+            let _ = links.demand_tx.send(demand.clone());
+            // Wakes the reducer, so the workers get the new combined demand now and not at its
+            // next message (ADR-018). A full queue means the reducer runs soon anyway.
+            let _ = links.msgs_tx.try_send(EngineMsg::Client(ClientMsg::Demand {
+                id: ClientSessionId::LOCAL,
+                demand: Box::new(demand),
+            }));
         }
     }
 
@@ -708,6 +715,15 @@ mod tests {
         // One send means one version step, so a worker's `changed()` wakes once.
         assert_eq!(r.demand_rx.seen_version(), 1);
         assert!(!r.demand_rx.has_changed());
+        // One wake for the reducer, with the local session's demand.
+        match r.msgs_rx.try_recv() {
+            Ok(EngineMsg::Client(ClientMsg::Demand { id, demand })) => {
+                assert_eq!(id, ClientSessionId::LOCAL);
+                assert_eq!(*demand, d);
+            }
+            other => panic!("expected a local Demand, got {other:?}"),
+        }
+        assert!(r.msgs_rx.try_recv().is_err());
         // A demand equal to the initial value is not sent either.
         let r2 = rig(None);
         r2.handle.set_demand(Demand::default());

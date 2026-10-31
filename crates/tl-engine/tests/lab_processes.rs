@@ -545,6 +545,11 @@ fn engine_publishes_table_from_fixture() {
     fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
     let mut fl = FakeLab::new();
     let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![processes::spec()]);
+    // Device history off: its background demand would keep the memory group sweep at 10 s
+    // with no table demanded (ADR-018).
+    let mut settings = EngineSettings::default();
+    settings.history.device_metrics = false;
+    ui.settings_tx.send(settings).expect("watch has receivers");
     let handle = fl.spawn(async move {
         let cx = Cx::current().expect("task has a Cx");
         engine_root(cx, ep).await;

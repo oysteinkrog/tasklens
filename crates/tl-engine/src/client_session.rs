@@ -372,8 +372,8 @@ pub enum ClientMsg {
     },
     Close(ClientSessionId),
     /// The demand of session `id` (ADR-018). It joins the combined demand at the next publish.
-    /// The local session's comes from the reducer's demand watch; a `Demand` for it only wakes
-    /// the reducer, so the workers see a change at once.
+    /// The local session's comes from the reducer's demand watch; `EngineHandle::set_demand`
+    /// sends a `Demand` for it only to wake the reducer, so the workers see a change at once.
     Demand {
         id: ClientSessionId,
         demand: Box<Demand>,
