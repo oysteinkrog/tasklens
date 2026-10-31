@@ -10,7 +10,8 @@
 //!   `ProcessRecordPatch`, changed extras rows whole, removed keys. `coverage`, `apps` and
 //!   `low_memory` whole when they differ.
 //! - `table`: rows keyed by `NodeId`. Added and changed rows whole, and the node order whenever
-//!   the order or the set of rows changed. `groups` and `subtree` whole when they differ.
+//!   the order or the set of rows changed. `groups` and `subtree` whole when they differ. The
+//!   whole table when the base has no rows.
 //! - `series` and `process_series`: per series id, the samples after the base's last sample.
 //!   A series whose base samples left the ring, or whose ring was reset, goes whole.
 //! - `device_history`: whole when `request`, `step_ns` or `realtime_offset_ns` changed, or when a
@@ -488,6 +489,11 @@ fn processes_delta(b: &ProcessSnapshot, n: &ProcessSnapshot) -> Result<Processes
 }
 
 fn table_delta(b: &ProcessTableView, n: &ProcessTableView) -> Result<TableDelta, SendWhole> {
+    // A base with no rows, such as the empty table a session gets while it does not ask for
+    // one, has nothing to build on: the table goes whole, a full resync.
+    if b.rows.is_empty() {
+        return Err(SendWhole);
+    }
     let index: HashMap<&NodeId, usize> = b
         .rows
         .iter()

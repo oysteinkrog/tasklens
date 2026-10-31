@@ -25,7 +25,7 @@ use tl_model::process::{
     AppCgroupSample, Coverage, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState,
     ProcessExtras, ProcessExtrasP2, ProcessMeta, ProcessRecord,
 };
-use tl_model::remote_proto::{ClientMsg, ServerMsg, SnapshotFrame, encode_message};
+use tl_model::remote_proto::{ClientMsg, Part, ServerMsg, SnapshotFrame, encode_message};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet, Snapshot, SystemSnapshot};
 use tl_model::system::{
@@ -963,10 +963,35 @@ fn part_sizes(frame: &SnapshotFrame) -> Vec<(&'static str, usize)> {
     out
 }
 
-/// One session for `SECONDS`: a frame each second from the newest snapshot, the client applies
-/// it and acknowledges it before the next.
-fn run_session(processes_tab: bool) -> Wire {
+/// What the engine publishes to a session whose host is not shown in any window: the system
+/// part, which holds the title bar value, and the session's empty parts, the same `Arc` on every
+/// publish (`ClientSession::snapshot` in tl-engine, leader decision on tasklens-q4x76.15; tested
+/// by `a_session_gets_only_the_parts_its_demand_asks_for` in tl-engine's lab_client_session.rs).
+fn hidden(shared: &Snapshot, empty: &Snapshot) -> Snapshot {
+    Snapshot {
+        sequence: shared.sequence,
+        epoch: shared.epoch,
+        boot_id: shared.boot_id,
+        published_ns: shared.published_ns,
+        system: shared.system.clone(),
+        ..empty.clone()
+    }
+}
+
+/// One session for `SECONDS`, on the Processes tab while `shown(second)` and hidden otherwise:
+/// a frame each second from the newest snapshot, the client applies it and acknowledges it
+/// before the next.
+fn run_session(shown: impl Fn(u64) -> bool) -> Wire {
+    run_session_with(shown, |_, _| {})
+}
+
+/// `run_session`, with `check(second, frame)` called on each frame.
+fn run_session_with(
+    shown: impl Fn(u64) -> bool,
+    mut check: impl FnMut(u64, &SnapshotFrame),
+) -> Wire {
     let mut host = Host::new(0x7a51_0e25);
+    let empty = Snapshot::empty(BOOT, 0);
     let mut encoder = DeltaEncoder::default();
     let mut writer = FrameWriter::new().unwrap();
     let mut wire = Wire {
@@ -977,8 +1002,15 @@ fn run_session(processes_tab: bool) -> Wire {
     };
     let mut installed = Snapshot::empty(BOOT, 0);
     let mut installed_frame = 0;
+    let mut shared = host.base.clone();
     for second in 0..SECONDS {
-        let newest = host.snapshot(second, processes_tab);
+        let processes_tab = shown(second);
+        shared = host.snapshot(second, processes_tab);
+        let newest = if processes_tab {
+            shared.clone()
+        } else {
+            hidden(&shared, &empty)
+        };
         let built = encoder.next_frame(&newest, second * SEC).unwrap().unwrap();
         assert!(!built.trimmed);
         let frame = built.frame;
@@ -1006,6 +1038,7 @@ fn run_session(processes_tab: bool) -> Wire {
             }
         }
 
+        check(second, &frame);
         installed = apply(&installed, installed_frame, &frame, second + 1).unwrap();
         installed_frame = frame.frame;
         assert!(*installed.processes == *newest.processes);
@@ -1020,13 +1053,13 @@ fn run_session(processes_tab: bool) -> Wire {
         encoder.on_ack(frame.frame).unwrap();
     }
     // Starts and exits balance, so the host keeps its size.
-    assert_eq!(installed.processes.records.len(), m::PROCESSES);
+    assert_eq!(shared.processes.records.len(), m::PROCESSES);
     wire
 }
 
 #[test]
 fn processes_tab_session_with_1500_processes_sends_at_most_64_kib_per_second() {
-    let wire = run_session(true);
+    let wire = run_session(|_| true);
     wire.print("Processes tab session");
     assert!(
         wire.per_second() <= PROCESSES_TAB_MAX,
@@ -1036,16 +1069,41 @@ fn processes_tab_session_with_1500_processes_sends_at_most_64_kib_per_second() {
 }
 
 #[test]
-#[ignore = "over budget, about 23.4 KiB/s: the engine publishes the shared system, series and \
-            processes parts to every session, and each 60 s complete frame carries 292 full series \
-            rings; the fix is a change to what a session receives, leader decision pending on \
-            tasklens-q4x76.15"]
 fn hidden_host_sends_at_most_2_kib_per_second() {
-    let wire = run_session(false);
+    let wire = run_session(|_| false);
     wire.print("hidden host");
     assert!(
         wire.per_second() <= HIDDEN_HOST_MAX,
         "{:.0} B/s is over the budget of {HIDDEN_HOST_MAX} B/s",
         wire.per_second()
     );
+}
+
+/// Leader decision on tasklens-q4x76.15: when a session that was hidden shows its Processes
+/// surface again, its next frame carries the table whole, a full resync, and the client's table
+/// is the server's. `run_session_with` checks after every frame that the client's processes,
+/// table and series equal what the session was sent.
+#[test]
+fn hiding_then_showing_the_processes_tab_resyncs_the_whole_table() {
+    const HIDE: u64 = 10;
+    const SHOW: u64 = 30;
+    let wire = run_session_with(
+        |second| !(HIDE..SHOW).contains(&second),
+        |second, frame| match second {
+            HIDE => assert!(frame.table.is_some(), "hiding sends the empty table"),
+            s if s > HIDE && s < SHOW => {
+                assert!(frame.table.is_none() && frame.processes.is_none());
+                assert!(frame.series.is_none() && frame.services.is_none());
+            }
+            SHOW => {
+                let Some(Part::Whole(table)) = &frame.table else {
+                    panic!("the first frame after showing carries the table whole")
+                };
+                assert!(!table.rows.is_empty());
+                assert!(frame.processes.is_some() && frame.series.is_some());
+            }
+            _ => {}
+        },
+    );
+    wire.print("Processes tab, hidden from 10 s to 30 s");
 }
