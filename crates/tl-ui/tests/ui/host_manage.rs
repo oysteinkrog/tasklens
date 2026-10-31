@@ -310,6 +310,40 @@ fn settings_hosts_add_edit_remove_update_settings_and_tabs(cx: &mut TestAppConte
     assert_eq!(editor.read_with(&svcx, |e, _| e.row_count()), 1);
 }
 
+/// Closing Settings and opening it again builds a new editor whose Enter still applies a rename.
+#[gpui_kit::test]
+fn settings_hosts_reopened_window_still_edits_with_enter(cx: &mut TestAppContext) {
+    let mut rig = boot(cx, &["home"]);
+    let (first, svcx) = rig.open_settings(cx);
+    drop(svcx);
+    let handle = cx
+        .read(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::Settings)
+        })
+        .expect("registered");
+    cx.update(|cx| handle.update(cx, |_, window, _| window.remove_window()))
+        .expect("window open");
+    cx.run_until_parked();
+
+    let (editor, mut svcx) = rig.open_settings(cx);
+    assert_ne!(
+        editor.entity_id(),
+        first.entity_id(),
+        "a new editor for the new window"
+    );
+    editor.update_in(&mut svcx, |e, window, cx| {
+        e.type_name(0, "base", window, cx);
+        e.press_enter_in_name(0, cx);
+    });
+    draw(&mut svcx);
+    rig.draw();
+    assert_eq!(rig.entries()[0].0, "base");
+    assert_eq!(rig.tab_names()[1], "base");
+}
+
 /// "Test connection" asks the host manager about the typed destination and shows the answer.
 #[gpui_kit::test]
 fn settings_hosts_test_connection_shows_the_result(cx: &mut TestAppContext) {

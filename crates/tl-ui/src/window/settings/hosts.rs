@@ -14,8 +14,8 @@ use std::sync::Arc;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
-    px,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
+    WindowId, div, px,
 };
 use tl_model::settings::HostEntry;
 
@@ -47,23 +47,28 @@ pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
 
 /// The editor of the open Settings window, made on first use.
 fn editor(window: &mut Window, cx: &mut App) -> Entity<HostsEditor> {
-    if let Some(slot) = cx.try_global::<EditorSlot>() {
-        return slot.0.clone();
+    let id = window.window_handle().window_id();
+    if let Some(slot) = cx.try_global::<EditorSlot>()
+        && slot.0 == id
+    {
+        return slot.1.clone();
     }
+    // A closed Settings window leaves its editor behind: its inputs and subscriptions belong to
+    // that window, so a new window gets a new editor.
     let editor = cx.new(|cx| HostsEditor::new(window, cx));
-    cx.set_global(EditorSlot(editor.clone()));
+    cx.set_global(EditorSlot(id, editor.clone()));
     editor
 }
 
 /// The editor entity, kept for the page's renders.
-struct EditorSlot(Entity<HostsEditor>);
+struct EditorSlot(WindowId, Entity<HostsEditor>);
 
 impl Global for EditorSlot {}
 
 /// The editor of the open Settings window, for tests.
 #[cfg(any(test, feature = "test-hooks"))]
 pub fn open_editor(cx: &App) -> Option<Entity<HostsEditor>> {
-    cx.try_global::<EditorSlot>().map(|s| s.0.clone())
+    cx.try_global::<EditorSlot>().map(|s| s.1.clone())
 }
 
 /// What a row's "Test connection" shows.
@@ -300,6 +305,14 @@ impl HostsEditor {
     ) {
         let input = self.rows[index].target.clone();
         input.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+    }
+
+    /// Presses Enter in row `index`'s name field.
+    pub fn press_enter_in_name(&mut self, index: usize, cx: &mut Context<Self>) {
+        let input = self.rows[index].name.clone();
+        input.update(cx, |_, cx| {
+            cx.emit(InputEvent::PressEnter { secondary: false })
+        });
     }
 
     /// Types in the add form.
