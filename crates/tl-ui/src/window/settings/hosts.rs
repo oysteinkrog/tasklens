@@ -311,7 +311,10 @@ impl HostsEditor {
     pub fn press_enter_in_name(&mut self, index: usize, cx: &mut Context<Self>) {
         let input = self.rows[index].name.clone();
         input.update(cx, |_, cx| {
-            cx.emit(InputEvent::PressEnter { secondary: false })
+            cx.emit(InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            })
         });
     }
 
