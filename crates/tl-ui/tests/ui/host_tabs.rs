@@ -7,13 +7,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, px};
+use gpui_kit::base::Root;
+use gpui_kit::{
+    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px,
+};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::demand::DEMAND_COALESCE;
 use tl_ui::host::HostContext;
 use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
 use tl_ui::pages::processes::ProcessesPage;
@@ -127,6 +132,12 @@ impl Rig {
     fn draw(&mut self) {
         self.vcx.run_until_parked();
         self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// Lets the demand aggregators send what they hold.
+    fn settle(&mut self) {
+        self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
+        self.draw();
     }
 
     fn select_host(&mut self, index: usize) {
@@ -256,6 +267,7 @@ fn host_tabs_switch_keeps_page_state(cx: &mut TestAppContext) {
     rig.type_filter("ssh");
     let home_services = rig.page::<ServicesPage>(Tab::Services).expect("built");
     // The home pages ask the home engine, not the local one.
+    rig.settle();
     assert!(
         rig.remotes["home"]
             .demands()
@@ -383,11 +395,17 @@ fn host_tabs_properties_window_stays_on_its_host(cx: &mut TestAppContext) {
         assert!(p.host().same_host(&host));
         assert!(!p.host().same_host(&HostContext::shown(cx)));
     });
-    let mut pcx = VisualTestContext::from_window(handle, &rig.vcx.cx);
-    let title = pcx.window_title().expect("the window has a title");
+    let title = rig.vcx.update(|_, cx| {
+        let frame = TlSecondaryWindow::<PropsWindow>::find(
+            WindowHandle::<Root>::new(handle.window_id()),
+            cx,
+        )
+        .expect("props frame");
+        frame.read(cx).title().to_string()
+    });
     assert!(title.ends_with(" - home"), "{title}");
     // Its detail demand goes to home's engine, never to the local one.
-    rig.draw();
+    rig.settle();
     assert!(
         rig.remotes["home"]
             .demands()
