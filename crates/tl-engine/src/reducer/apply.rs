@@ -575,7 +575,7 @@ impl Reducer {
                     .apply_sweep(sweep, now_boot_ns(), settings.interval_ms, sink);
                 // The worker's period: 10 s while only device history needs the memory group
                 // series (D-036). Then the sweep feeds those series and no table work runs.
-                let demand = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone());
+                let demand = self.demand(settings);
                 let history_only = demand
                     .as_ref()
                     .is_some_and(|d| processes::history_only(d, settings));
@@ -1079,11 +1079,11 @@ impl Reducer {
             self.republish_processes(settings);
         }
         // Closed Properties windows and Set Affinity dialogs free their data (E09-026).
-        if let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) {
+        if let Some(demand) = self.demand(settings) {
             self.details.retain(&demand);
             self.refresh_opened_tabs(&demand);
         }
-        self.refresh_app_details();
+        self.refresh_app_details(settings);
     }
 
     /// Sends the ProcessDetail worker a `DetailOpened` for each process tab that opened since
@@ -1109,8 +1109,8 @@ impl Reducer {
 
     /// Builds the App General tab of each `DetailTarget::App` in `Demand.details` from the
     /// process snapshot (tasklens-dwy.12).
-    fn refresh_app_details(&mut self) {
-        let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) else {
+    fn refresh_app_details(&mut self, settings: &EngineSettings) {
+        let Some(demand) = self.demand(settings) else {
             return;
         };
         let mut groups: Vec<GroupKey> = demand
@@ -2306,7 +2306,7 @@ impl Reducer {
             view.header = header;
             session.set_table(view);
         }
-        self.refresh_app_details();
+        self.refresh_app_details(settings);
     }
 
     /// Merges one manager's update into `services`: the other manager's units and details stay,
@@ -2351,11 +2351,7 @@ impl Reducer {
             details: Arc::new(details),
             backend: u.backend,
         });
-        if let Some(wanted) = self
-            .demand_rx
-            .as_ref()
-            .map(|rx| rx.borrow().unit_details.clone())
-        {
+        if let Some(wanted) = self.demand(settings).map(|d| d.unit_details) {
             self.retain_unit_details(&wanted);
         }
         self.rebuild_sys(SysTable::Services, settings);

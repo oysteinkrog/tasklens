@@ -11,10 +11,15 @@
 //! go to the reducer's own `Publisher`. Other sessions are opened with `ClientMsg::Open` and get
 //! their snapshots through their `SessionLink`.
 //!
-//! Each session also has its own `Demand`; so far only its `device_history_range` is read. The
-//! `MetricHistory` worker answers each distinct range once, and each session shows the answer
-//! for its own range in its own `device_history`. Each session's `history` shows only the
-//! answers to its own `HistoryQuery`s.
+//! Each session also has its own `Demand`. The workers collect for the combined demand
+//! (`ClientSessions::combined`): every session's demand plus the background demand of the host
+//! settings (`background_demand`). Its lists are filled round robin across the sessions in
+//! connect order, the local session first in each round, up to the same caps a single window
+//! has (`DETAILS_MAX`, `GRAPH_TARGETS_MAX` and the others), so a later session is never starved
+//! to 0 while the first holds a whole list. A session that closes leaves the combined demand at
+//! the next publish. The `MetricHistory` worker answers each distinct `device_history_range`
+//! once, and each session shows the answer for its own range in its own `device_history`. Each
+//! session's `history` shows only the answers to its own `HistoryQuery`s.
 //!
 //! Ids a client picks (actions, string scans, handle searches, ejects, history queries) are its
 //! own. The reducer gives each one a new engine-wide id from one counter before it reaches the
@@ -72,7 +77,10 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tl_model::actions::ActionEvent;
 use tl_model::command::Command;
-use tl_model::demand::{Demand, DeviceHistoryRequest};
+use tl_model::demand::{
+    AFFINITY_TARGETS_MAX, CpuDemand, DETAIL_KEYS_MAX, DETAILS_MAX, Demand, DeviceHistoryRequest,
+    GRAPH_TARGETS_MAX, UNIT_DETAILS_MAX,
+};
 use tl_model::details::{
     DetailTab, DetailTarget, DetailsSnapshot, HandlePhase, HandleSearchState, ScanId, ScanPhase,
     SearchId, StringScanState, TabPayload, TabSlot,
@@ -81,6 +89,7 @@ use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::history::{HistoryTop, HistoryView};
 use tl_model::ids::{DeviceIdx, ProcessKey};
+use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
     DiskDetails, EjectState, ServicesSnapshot, Snapshot, StartupSnapshot,
@@ -362,7 +371,9 @@ pub enum ClientMsg {
         link: SessionLink,
     },
     Close(ClientSessionId),
-    /// The demand of session `id` (ADR-018). Only its `device_history_range` is read so far.
+    /// The demand of session `id` (ADR-018). It joins the combined demand at the next publish.
+    /// The local session's comes from the reducer's demand watch; a `Demand` for it only wakes
+    /// the reducer, so the workers see a change at once.
     Demand {
         id: ClientSessionId,
         demand: Box<Demand>,
@@ -388,8 +399,8 @@ pub enum OpenError {
 /// One connected window's queries and the table parts built for them.
 pub struct ClientSession {
     id: ClientSessionId,
-    /// The window's demand (ADR-018). Only `device_history_range` is read so far. The local
-    /// session's comes from the reducer's demand watch at each publish.
+    /// The window's demand (ADR-018), part of the combined demand. The local session's comes
+    /// from the reducer's demand watch at each publish.
     pub demand: Demand,
     pub query: TableQuery,
     /// The last `SetSysTableQuery` per system table: Services, Startup, Connections.
@@ -1014,6 +1025,114 @@ fn unversioned(header: ComponentHeader) -> ComponentHeader {
     }
 }
 
+/// What the engine collects with no window connected (ADR-018 "Background demand"): the device
+/// series at 1 s, the memory group sweep every 10 s and the event detector's journal sources,
+/// all of which `Demand.device_history` turns on. With `history.device_metrics` off it is
+/// empty, so nothing is collected for history and the memory group sweep runs only on demand.
+pub fn background_demand(settings: &EngineSettings) -> Demand {
+    Demand {
+        device_history: settings.history.device_metrics,
+        ..Demand::default()
+    }
+}
+
+fn cpu_rank(cpu: CpuDemand) -> u8 {
+    match cpu {
+        CpuDemand::Off => 0,
+        CpuDemand::Total => 1,
+        CpuDemand::PerCore => 2,
+    }
+}
+
+/// Field-wise union of `parts`, which come in fill order: bools OR, `cpu` maximum, column sets
+/// union, lists filled round robin up to their caps (`fill`). `device_history_range` is the
+/// first part's: the `MetricHistory` worker answers it from the demand watch, and the other
+/// sessions' ranges through `ClientSessions::linked_ranges`.
+pub fn combine(parts: &[&Demand]) -> Demand {
+    let mut m = Demand::default();
+    for p in parts {
+        m.any_surface_visible |= p.any_surface_visible;
+        if cpu_rank(p.cpu) > cpu_rank(m.cpu) {
+            m.cpu = p.cpu;
+        }
+        m.cpu_fast |= p.cpu_fast;
+        m.memory |= p.memory;
+        m.disks |= p.disks;
+        m.nets |= p.nets;
+        m.gpus |= p.gpus;
+        m.sensors |= p.sensors;
+        m.process_table |= p.process_table;
+        m.process_top |= p.process_top;
+        for (word, part) in m.process_columns.0.iter_mut().zip(p.process_columns.0) {
+            *word |= part;
+        }
+        m.gpu_process |= p.gpu_process;
+        m.connections |= p.connections;
+        m.services |= p.services;
+        m.startup |= p.startup;
+        m.inventory |= p.inventory;
+        m.service_cgroup_stats |= p.service_cgroup_stats;
+        m.connections_all_netns |= p.connections_all_netns;
+        m.tray.icons_shown |= p.tray.icons_shown;
+        m.tray.cpu |= p.tray.cpu;
+        m.tray.memory |= p.tray.memory;
+        m.tray.disks |= p.tray.disks;
+        m.tray.nets |= p.tray.nets;
+        m.tray.gpus |= p.tray.gpus;
+        m.recording |= p.recording;
+        m.device_history |= p.device_history;
+        m.device_timeline |= p.device_timeline;
+    }
+    m.device_history_range = parts.first().and_then(|p| p.device_history_range);
+    m.detail_keys = fill(parts.iter().map(|p| &p.detail_keys), DETAIL_KEYS_MAX);
+    m.details = fill(parts.iter().map(|p| &p.details), DETAILS_MAX);
+    m.affinity_targets = fill(
+        parts.iter().map(|p| &p.affinity_targets),
+        AFFINITY_TARGETS_MAX,
+    );
+    m.unit_details = fill(parts.iter().map(|p| &p.unit_details), UNIT_DETAILS_MAX);
+    m.remote_host_cookies = fill(parts.iter().map(|p| &p.remote_host_cookies), usize::MAX);
+    m.graph_targets = fill(parts.iter().map(|p| &p.graph_targets), GRAPH_TARGETS_MAX);
+    m
+}
+
+/// Fills one list of at most `max` entries round robin from `lists`, in their order. In each
+/// round every list adds its next entry that is not in the result yet, so with 3 lists of 8 and
+/// `max` 16 they get 6, 5 and 5. Entries past a list's share are not collected, as entries past
+/// the cap of a single window are not (`Demand::clamp_lists`). A single non-empty list keeps its
+/// `Arc` when it fits.
+fn fill<'a, T: Clone + PartialEq + 'a>(
+    lists: impl Iterator<Item = &'a Arc<[T]>>,
+    max: usize,
+) -> Arc<[T]> {
+    let lists: Vec<&Arc<[T]>> = lists.filter(|l| !l.is_empty()).collect();
+    match lists.as_slice() {
+        [] => return Arc::from([]),
+        [one] if one.len() <= max => return Arc::clone(one),
+        _ => {}
+    }
+    let mut out: Vec<T> = Vec::new();
+    let mut next = vec![0; lists.len()];
+    let mut added = true;
+    while added && out.len() < max {
+        added = false;
+        for (list, at) in lists.iter().zip(next.iter_mut()) {
+            if out.len() == max {
+                break;
+            }
+            while let Some(item) = list.get(*at) {
+                *at += 1;
+                if !out.contains(item) {
+                    out.push(item.clone());
+                    added = true;
+                    break;
+                }
+            }
+        }
+    }
+    out.into()
+}
+
 /// The open sessions in connect order, the local one first.
 pub struct ClientSessions {
     sessions: Vec<ClientSession>,
@@ -1315,6 +1434,17 @@ impl ClientSessions {
             }
         }
         out
+    }
+
+    /// The demand the workers collect for (ADR-018): `local`, the local window's current demand,
+    /// then every other session's in connect order, then `background`. Lists are filled round
+    /// robin in that order (`combine`).
+    pub fn combined(&self, local: &Demand, background: &Demand) -> Demand {
+        let mut parts = Vec::with_capacity(self.sessions.len() + 1);
+        parts.push(local);
+        parts.extend(self.sessions[1..].iter().map(|s| &s.demand));
+        parts.push(background);
+        combine(&parts)
     }
 
     pub fn len(&self) -> usize {

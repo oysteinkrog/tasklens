@@ -51,7 +51,7 @@ use tl_model::table::{ProcessTableView, SysTable, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
-use crate::client_session::ClientSessions;
+use crate::client_session::{ClientSessions, background_demand};
 use crate::source::WorkerControl;
 use crate::update::{DeviceHistories, EngineMsg};
 use crate::workers::history::HistorySink;
@@ -196,9 +196,12 @@ pub struct Reducer {
     /// The engine settings watch. `run` reads it once per publish; `None` uses
     /// `EngineSettings::default()`.
     pub settings_rx: Option<watch::Receiver<EngineSettings>>,
-    /// The UI demand watch. `run` reads it once per publish for the PSS keys (E09-006); `None`
-    /// leaves PSS as the updates set it.
+    /// The local window's demand watch. `None` leaves PSS, details and the other demand-driven
+    /// state as the updates set it, and sends no combined demand.
     pub demand_rx: Option<watch::Receiver<Demand>>,
+    /// The combined demand of every client session plus the background demand (ADR-018), which
+    /// the workers read. `run` sends it at each publish when it changed.
+    pub demand_out: Option<watch::Sender<Demand>>,
     /// State only `apply` reads and writes (E09-007).
     pub apply_state: apply::ApplyState,
     /// The non-empty `Description` of every unit a `ServicesUpdate` reported, for the unit row
@@ -283,6 +286,7 @@ impl Reducer {
             helper_tx: None,
             settings_rx: None,
             demand_rx: None,
+            demand_out: None,
             apply_state: apply::ApplyState::default(),
             unit_names: FxHashMap::default(),
             unit_users: FxHashMap::default(),
@@ -329,13 +333,20 @@ impl Reducer {
                 self.apply(cx, msg, &settings)?;
                 applied += 1;
             }
-            if let Some(demand) = self
+            if let Some(local) = self
                 .demand_rx
                 .as_ref()
                 .map(watch::Receiver::borrow_and_clone)
             {
+                let demand = self.clients.combined(&local, &background_demand(&settings));
+                self.clients.set_local_demand(local);
                 self.apply_demand(&demand, &settings);
-                self.clients.set_local_demand(demand);
+                if let Some(tx) = self.demand_out.as_ref()
+                    && *tx.borrow() != demand
+                {
+                    // An error means every worker is gone; the session is ending.
+                    let _ = tx.send(demand);
+                }
             }
             if let Some(sink) = self.metric_sink.as_mut() {
                 sink.set_ranges(&self.clients.linked_ranges());
@@ -350,6 +361,13 @@ impl Reducer {
             publisher.publish(next);
         }
         Ok(())
+    }
+
+    /// The combined demand now (ADR-018): the local window's current demand, every other client
+    /// session's and the background demand of `settings`. `None` without a demand watch.
+    pub fn demand(&self, settings: &EngineSettings) -> Option<Demand> {
+        let local = self.demand_rx.as_ref()?.borrow_and_clone();
+        Some(self.clients.combined(&local, &background_demand(settings)))
     }
 
     /// Installs or removes the record sink: E30's recording switch. `None` stops every sink call

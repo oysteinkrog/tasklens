@@ -31,7 +31,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::time::{BootId, now_boot_ns};
 
 use crate::bridge::{EngineHooks, HookCtx};
-use crate::client_session::RequestEvent;
+use crate::client_session::{ClientMsg, ClientSessionId, RequestEvent};
 use crate::config::{EngineConfig, EngineMode};
 use crate::controller::SourceController;
 use crate::dbus::SharedHandles;
@@ -69,6 +69,8 @@ pub struct RootEndpoints {
     pub msgs: mpsc::Receiver<EngineMsg>,
     /// Cloned into every worker's `WorkerIo` and into the tick task.
     pub msgs_tx: mpsc::Sender<EngineMsg>,
+    /// The local window's demand. Each session's reducer joins it with the other client
+    /// sessions' and the background demand into the watch its workers read (ADR-018).
     pub demand: watch::Receiver<Demand>,
     pub settings: watch::Receiver<EngineSettings>,
     /// Lent to the reducer for each session and taken back when the session ends.
@@ -187,6 +189,13 @@ async fn run_session(
     reducer.sequence = ep.next_sequence;
     reducer.settings_rx = Some(ep.settings.clone());
     reducer.demand_rx = Some(ep.demand.clone());
+    // The workers read the combined demand of every client session plus the background demand
+    // (ADR-018), which the reducer sends at each publish.
+    let initial = reducer
+        .demand(&ep.settings.borrow_and_clone())
+        .unwrap_or_default();
+    let (demand_out, demand) = watch::channel(initial);
+    reducer.demand_out = Some(demand_out);
     if epoch > 1 {
         // The rings are new, but the charts must not join the old epoch's line to this one.
         reducer.series.mark_gap_all();
@@ -242,7 +251,7 @@ async fn run_session(
     for spec in &ep.workers {
         let io = WorkerIo::new(
             ep.msgs_tx.clone(),
-            ep.demand.clone(),
+            demand.clone(),
             ep.settings.clone(),
             reducer.control.subscribe(),
             shared.clone(),
@@ -258,7 +267,7 @@ async fn run_session(
     if let Some(slot) = history_slot {
         let io = WorkerIo::new(
             ep.msgs_tx.clone(),
-            ep.demand.clone(),
+            demand.clone(),
             ep.settings.clone(),
             reducer.control.subscribe(),
             shared.clone(),
@@ -279,7 +288,7 @@ async fn run_session(
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
         let io = WorkerIo::new(
             ep.msgs_tx.clone(),
-            ep.demand.clone(),
+            demand.clone(),
             ep.settings.clone(),
             reducer.control.subscribe(),
             shared.clone(),
@@ -297,6 +306,11 @@ async fn run_session(
     children.0.push(spawn(cx, move |cx| async move {
         let _running = crate::bridge::task_running("tick");
         tick(cx, tick_tx).await;
+    })?);
+    let (local, wake_tx) = (ep.demand.clone(), ep.msgs_tx.clone());
+    children.0.push(spawn(cx, move |cx| async move {
+        let _running = crate::bridge::task_running("local_demand");
+        wake_on_local_demand(cx, local, wake_tx).await;
     })?);
 
     let running = crate::bridge::task_running("reducer");
@@ -405,6 +419,26 @@ async fn tick(cx: Cx, msgs_tx: mpsc::Sender<EngineMsg>) {
             return;
         }
         if msgs_tx.send(&cx, EngineMsg::Tick).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Sends the local window's demand to the reducer each time it changes, so the reducer
+/// publishes the new combined demand at once instead of at its next message. Ends when the
+/// demand watch or the queue closes, or on cancel.
+async fn wake_on_local_demand(
+    cx: Cx,
+    mut local: watch::Receiver<Demand>,
+    msgs_tx: mpsc::Sender<EngineMsg>,
+) {
+    while local.changed(&cx).await.is_ok() {
+        let demand = Box::new(local.borrow_and_update_clone());
+        let msg = EngineMsg::Client(ClientMsg::Demand {
+            id: ClientSessionId::LOCAL,
+            demand,
+        });
+        if msgs_tx.send(&cx, msg).await.is_err() {
             return;
         }
     }
