@@ -7982,7 +7982,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tl-app"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8010,7 +8010,7 @@ dependencies = [
 
 [[package]]
 name = "tl-collect"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "criterion",
@@ -8034,7 +8034,7 @@ dependencies = [
 
 [[package]]
 name = "tl-engine"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "asupersync",
@@ -8061,7 +8061,7 @@ dependencies = [
 
 [[package]]
 name = "tl-gpu-probe"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "ash",
  "khronos-egl",
@@ -8074,7 +8074,7 @@ dependencies = [
 
 [[package]]
 name = "tl-helper"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "postcard",
  "rustix",
@@ -8086,7 +8086,7 @@ dependencies = [
 
 [[package]]
 name = "tl-history"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "crc32fast",
  "postcard",
@@ -8100,7 +8100,7 @@ dependencies = [
 
 [[package]]
 name = "tl-model"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "async-channel",
  "bitflags 2.13.2",
@@ -8116,7 +8116,7 @@ dependencies = [
 
 [[package]]
 name = "tl-ops"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "libc",
  "proptest",
@@ -8128,7 +8128,7 @@ dependencies = [
 
 [[package]]
 name = "tl-remote"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "arc-swap",
  "async-channel",
@@ -8142,7 +8142,7 @@ dependencies = [
 
 [[package]]
 name = "tl-server"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "libc",
  "sd-notify",
@@ -8158,7 +8158,7 @@ dependencies = [
 
 [[package]]
 name = "tl-tray"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "async-channel",
  "ksni",
@@ -8169,7 +8169,7 @@ dependencies = [
 
 [[package]]
 name = "tl-ui"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "async-channel",
  "fastrand",
@@ -8192,7 +8192,7 @@ dependencies = [
 
 [[package]]
 name = "tl-watch"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "libc",
  "proptest",
@@ -10117,7 +10117,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "serde",
