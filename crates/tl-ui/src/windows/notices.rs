@@ -18,7 +18,8 @@
 //! While the action runs, the Info toast `DumpToast(action_id)` shows the file size from the
 //! engine's `Progress` events, and is pushed again every 500 ms so it stays up. Closing it stops
 //! the updates; the result still shows. The result replaces that toast. A click on the path in
-//! the success toast copies the full path. A privilege failure offers the tracker's "Retry as
+//! the success toast copies the full path. On a remote host the success toast reads "Saved on
+//! <host>: <full path>" with "Copy path" and no "Open folder" (ADR-018). A privilege failure offers the tracker's "Retry as
 //! administrator"; the retry shows its progress and result in the same toast. The UI never reads
 //! the core file or its size: the file is on the engine's host and holds process memory.
 
@@ -324,6 +325,8 @@ const TOAST_CLOSE_W: f32 = 24.0;
 const DUMP_WRITING: &str = "pwn-notices-dump-writing";
 const DUMP_WRITING_SIZE: &str = "pwn-notices-dump-writing-size";
 const DUMP_CREATED: &str = "pwn-notices-dump-created";
+const DUMP_SAVED_ON: &str = "pwn-notices-dump-saved-on";
+const DUMP_COPY_PATH: &str = "pwn-notices-dump-copy-path";
 const DUMP_OPEN_FOLDER: &str = "pwn-notices-dump-open-folder";
 const DUMP_OPENING: &str = "pwn-notices-dump-opening";
 const DUMP_COPIED: &str = "pwn-notices-dump-copied";
@@ -785,17 +788,39 @@ impl DumpRequest {
 
     /// "Dump created: ~/…/name_1_20261003_101500.core" with "Open folder". A click on the text
     /// copies the full path, which the engine reported.
+    ///
+    /// On a remote host the text is "Saved on {host}: {path}" with the full path (no `~`: the
+    /// remote `$HOME` is not known here) and the button "Copy path". There is no "Open folder",
+    /// because it would open a file manager on that PC's screen (ADR-018).
     fn show_success(&self, path: Arc<str>, cx: &mut Context<Self>) {
-        let shown = shown_dump_path(&path, &home_dir(cx));
-        let shown = fit_path(self.window, &shown, cx);
-        let text = tr_args(
-            cx,
-            DUMP_CREATED,
-            &[("path", FluentValue::from(shown.to_string()))],
-        );
-        let button = ToastAction {
-            label: tr(cx, DUMP_OPEN_FOLDER),
-            action: Box::new(OpenDumpFolder(self.toast.0)),
+        let (text, button) = if let Some(host) = self.host.remote_name() {
+            let shown = fit_path(self.window, &path, cx);
+            let text = tr_args(
+                cx,
+                DUMP_SAVED_ON,
+                &[
+                    ("host", FluentValue::from(host.to_string())),
+                    ("path", FluentValue::from(shown.to_string())),
+                ],
+            );
+            let button = ToastAction {
+                label: tr(cx, DUMP_COPY_PATH),
+                action: Box::new(CopyDumpPath(self.toast.0)),
+            };
+            (text, button)
+        } else {
+            let shown = shown_dump_path(&path, &home_dir(cx));
+            let shown = fit_path(self.window, &shown, cx);
+            let text = tr_args(
+                cx,
+                DUMP_CREATED,
+                &[("path", FluentValue::from(shown.to_string()))],
+            );
+            let button = ToastAction {
+                label: tr(cx, DUMP_OPEN_FOLDER),
+                action: Box::new(OpenDumpFolder(self.toast.0)),
+            };
+            (text, button)
         };
         DumpFlows::prune(cx);
         cx.default_global::<DumpFlows>().done.push(DoneDump {

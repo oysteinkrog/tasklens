@@ -2959,6 +2959,91 @@ mod dump {
         );
     }
 
+    /// A dump of `pid` started on a remote host "home", which has its own fake engine. Returns
+    /// that engine and the dump request it received.
+    fn start_remote(r: &mut Rig, pid: u32) -> (Arc<FakeEngine>, ActionRequest) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        r.pcx.update(|window, cx| {
+            let host = HostContext::remote(Arc::from("home"), client, 1 << 48, cx);
+            start_dump(&host, key(pid), window, cx);
+        });
+        r.pcx.run_until_parked();
+        let request = engine
+            .commands()
+            .into_iter()
+            .find_map(|c| match c {
+                Command::Action(req) => Some(req),
+                _ => None,
+            })
+            .expect("dump sent to the remote engine");
+        (engine, request)
+    }
+
+    fn finish_remote(r: &mut Rig, engine: &FakeEngine, request: &ActionRequest) {
+        let state = saved(request);
+        engine.emit(ActionEvent {
+            id: request.id,
+            target: Some(0),
+            state: state.clone(),
+        });
+        engine.emit(ActionEvent {
+            id: request.id,
+            target: None,
+            state,
+        });
+        r.pcx.run_until_parked();
+    }
+
+    /// A dump on a remote host says where it was saved and shows the engine's full path, with no
+    /// `~` even when the path lies under the local home.
+    #[gpui_kit::test]
+    fn dump_remote_toast_says_saved_on_host(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(1, "x", GIB)]);
+        r.pcx.update(|_, cx| set_test_home(cx, "/home/u"));
+        let (engine, request) = start_remote(&mut r, 1);
+        assert!(actions(&r).is_empty(), "the local engine got a dump");
+        finish_remote(&mut r, &engine, &request);
+        assert_eq!(
+            toasts(&mut r),
+            [format!("Saved on home: {}", engine_path(&request))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn dump_remote_toast_has_copy_path_not_open_folder(cx: &mut TestAppContext) {
+        let state = PathBuf::from("/s/tasklens");
+        let mut r = rig(cx, &state, DumpMode::Mini, vec![record(1, "x", GIB)]);
+        r.pcx.update(|_, cx| set_test_home(cx, "/home/u"));
+        let (engine, request) = start_remote(&mut r, 1);
+        finish_remote(&mut r, &engine, &request);
+        let key = toast_key(&request);
+        click(&mut r, format!("TlButton-TlToast-k{key}-action"));
+        let copied = r
+            .pcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(copied.as_deref(), Some(engine_path(&request).as_str()));
+        let shown = toasts(&mut r);
+        assert_eq!(
+            shown.last().map(String::as_str),
+            Some("Copied to clipboard")
+        );
+        let open = |commands: Vec<Command>| {
+            commands.into_iter().any(|c| {
+                matches!(
+                    c,
+                    Command::Action(ActionRequest {
+                        kind: ActionKind::ShowInFileManager { .. },
+                        ..
+                    })
+                )
+            })
+        };
+        assert!(!open(engine.commands()), "remote got ShowInFileManager");
+        assert!(!open(r.engine.commands()), "local got ShowInFileManager");
+    }
+
     #[gpui_kit::test]
     fn dump_failure_toast_text(cx: &mut TestAppContext) {
         let state = PathBuf::from("/s/tasklens");

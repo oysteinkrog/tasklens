@@ -1201,6 +1201,7 @@ Real-time signal…
 - **Implements:** PROC-075 ("Dump created: <path>" with "Open folder").
 - **Anatomy:** the progress toast is replaced in place (same id) by:
   - Success: TlToast Success, text "Dump created: {path}" [spec] with `$HOME` shown as `~` [chosen], path ellipsized in the middle at the toast width; action button "Open folder" [spec]. Because the kit turns autohide off for toasts with an action, this toast stays until closed or replaced [consequence of the kit, accepted].
+  - Remote host: TlToast Success, "Saved on {host}: {path}" with the full path the engine returned (no `~`, the remote `$HOME` is not known), ellipsized in the middle; action button "Copy path". No "Open folder", because it would open a file manager on that PC. The host is the one the dump started on [ADR-018].
   - Failure: TlToast Error, "Could not create dump file." with the error text on a second line [chosen]; 8 s.
   - Rejected for privileges: as UI-PWN-034.
 - **Interaction:** "Open folder" (`OpenDumpFolder`) calls `org.freedesktop.FileManager1.ShowItems(["file://{path}"], "")`, so the file manager opens the dumps folder with the new file selected; toast "Opening file location" [chosen reuse]. Clicking the path text copies the full path, toast "Copied to clipboard" [chosen].
