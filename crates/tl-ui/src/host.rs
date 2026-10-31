@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Entity, Global};
+use gpui_kit::{App, AppContext as _, Entity, Global, SharedString};
 use tl_model::client::EngineClient;
 use tl_model::settings::HostEntry;
 use tracing::{info, warn};
@@ -32,6 +32,7 @@ use crate::app::{AppEnv, EngineGlobal};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hosts_api::HostLinkStatus;
 use crate::hub::{GlobalHub, SnapshotHub};
+use crate::i18n::tr_args;
 use crate::settings_global::TlSettings;
 use crate::window::main::{GlobalShellEvents, ShellEvents, ShellState};
 
@@ -73,8 +74,9 @@ impl HostContext {
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
         let tracker = cx.new(|cx| {
-            let tracker = ActionTracker::new(Arc::clone(&client), Some(hub.clone()), cx);
+            let mut tracker = ActionTracker::new(Arc::clone(&client), Some(hub.clone()), cx);
             tracker.start_ids_at(first_action_id);
+            tracker.set_remote_name(Arc::clone(&name));
             tracker
         });
         let events = cx.new(|_| ShellEvents);
@@ -129,6 +131,21 @@ impl HostContext {
     /// The host's name when it is a remote host; `None` for the local host.
     pub fn remote_name(&self) -> Option<&Arc<str>> {
         self.remote.as_ref()
+    }
+
+    /// `label` of a menu item that acts on this PC's desktop (open file location, switch to
+    /// window, launch): unchanged for the local host, `"<label> on <host>"` for a remote one
+    /// (UI-SHL-008).
+    pub fn desktop_label(&self, label: SharedString, cx: &App) -> SharedString {
+        let Some(host) = self.remote.as_deref() else {
+            return label;
+        };
+        let suffix = tr_args(
+            cx,
+            "fnd-action-on-host-suffix",
+            &[("host", host.to_string().into())],
+        );
+        format!("{label} {suffix}").into()
     }
 
     /// True for a host other than the PC this window runs on.

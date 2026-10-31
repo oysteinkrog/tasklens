@@ -14,6 +14,7 @@ use super::actions::{
     StartupRunNow,
 };
 use crate::components::menu::TlMenu;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
@@ -43,6 +44,7 @@ impl StartupMenuTargets {
 pub fn row_menu(
     mut menu: TlMenu,
     targets: &StartupMenuTargets,
+    host: &HostContext,
     _window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
@@ -101,7 +103,8 @@ pub fn row_menu(
     let run_tip = (!run_enabled)
         .then(|| toggle_tip(entries.iter(), cx))
         .flatten();
-    menu = item_enabled(
+    menu = desktop_item_enabled(
+        host,
         menu,
         "startup-menu-run-now",
         run_enabled,
@@ -132,7 +135,8 @@ pub fn row_menu(
         Box::new(StartupCopyCommand),
         cx,
     );
-    menu = item_enabled(
+    menu = desktop_item_enabled(
+        host,
         menu,
         "startup-menu-open-location",
         targets.is_one(),
@@ -163,7 +167,31 @@ fn item_enabled(
     action: Box<dyn gpui_kit::Action>,
     cx: &App,
 ) -> TlMenu {
-    let label = tr(cx, key);
+    item_labeled(menu, tr(cx, key), enabled, tooltip, action)
+}
+
+/// [`item_enabled`] for an item that acts on the host's desktop: a remote host's label ends
+/// with "on <host>" (UI-SHL-008).
+fn desktop_item_enabled(
+    host: &HostContext,
+    menu: TlMenu,
+    key: &str,
+    enabled: bool,
+    tooltip: Option<SharedString>,
+    action: Box<dyn gpui_kit::Action>,
+    cx: &App,
+) -> TlMenu {
+    let label = host.desktop_label(tr(cx, key), cx);
+    item_labeled(menu, label, enabled, tooltip, action)
+}
+
+fn item_labeled(
+    menu: TlMenu,
+    label: SharedString,
+    enabled: bool,
+    tooltip: Option<SharedString>,
+    action: Box<dyn gpui_kit::Action>,
+) -> TlMenu {
     if enabled {
         menu.item(label, action)
     } else {

@@ -762,11 +762,13 @@ impl TreeTableDelegate for StartupDelegate {
         if captured.entries.is_empty() {
             return menu;
         }
+        let mut host = HostContext::local(cx);
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             let stored = captured.clone();
+            host = page.read(cx).host.clone();
             page.update(cx, |page, _| page.set_menu_targets(stored));
         }
-        row_menu(menu, &captured, window, cx)
+        row_menu(menu, &captured, &host, window, cx)
     }
 
     /// Drops the snapshot taken when the menu opened, so a dismissed menu cannot feed a later

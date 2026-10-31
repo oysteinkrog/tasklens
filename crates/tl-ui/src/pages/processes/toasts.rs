@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::{App, Context, Global, SharedString, WeakEntity};
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionState, RejectReason, Signal};
@@ -173,6 +174,42 @@ pub fn submit_to(
     // PROC-058, ADR-006: a permission-denied result offers "Retry as administrator".
     texts.retry_as_admin = true;
     tracker.update(cx, |t, cx| t.track_or_toast(req, queue, texts, cx))
+}
+
+/// Switches to the window `internal_id` on the host: an `ActivateWindow` request whose result
+/// toast replaces the old fire-and-forget `KWin(Activate)` (ADR-018, PROC-054). A remote host's
+/// toast says "on <host>" (the tracker adds it).
+pub fn activate_window(
+    host: &HostContext,
+    internal_id: Arc<str>,
+    queue: Option<WeakEntity<ToastQueue>>,
+    cx: &mut App,
+) -> Option<ActionId> {
+    let req = ActionRequest {
+        id: ActionId(0),
+        kind: ActionKind::ActivateWindow { internal_id },
+        targets: smallvec::SmallVec::new(),
+        privileged: false,
+    };
+    let texts = ActionToastTexts {
+        requested: None,
+        success: (ToastKind::Success, tr(cx, "processes-toast-window-shown")),
+        failure: (
+            ToastKind::Error,
+            tr(cx, "processes-toast-window-show-failed"),
+        ),
+        partial: None,
+    };
+    submit_to(host, req, texts, queue, cx)
+}
+
+/// [`activate_window`] with the toasts on the main window.
+pub fn activate_window_on_main(
+    host: &HostContext,
+    internal_id: Arc<str>,
+    cx: &mut App,
+) -> Option<ActionId> {
+    activate_window(host, internal_id, main_queue(cx), cx)
 }
 
 fn main_queue(cx: &App) -> Option<WeakEntity<ToastQueue>> {

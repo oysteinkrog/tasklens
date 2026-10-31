@@ -1739,6 +1739,13 @@ fnd-action-reject-not-owner = This process belongs to another user. Administrato
 fnd-action-reject-unsupported = This action is not available for this process.
 fnd-action-reject-already-running = Already running
 fnd-action-reject-no-desktop-session = This PC has no desktop session. Nobody is logged in to its screen.
+fnd-action-reject-no-desktop-session-on-host = { $host } has no desktop session. Nobody is logged in to its screen.
+# Desktop commands on a remote host (ADR-018, UI-SHL-008).
+fnd-action-on-host-opened = Opened on { $host }
+fnd-action-on-host-started = Started on { $host }
+fnd-action-on-host-switched = Switched to window on { $host }
+fnd-action-on-host-failed = Failed on { $host }.
+fnd-action-on-host-suffix = on { $host }
 # Target labels in the Details dialog lines.
 fnd-action-target-pid = PID { $pid }
 fnd-action-target-tid = Thread { $tid }
@@ -1887,6 +1894,7 @@ processes-toast-refuse-self = Refusing to end tasklens itself.
 processes-toast-refuse-pid1 = PID 1 (systemd) cannot be ended.
 processes-toast-exited = Process exited
 processes-toast-window-shown = Process window shown.
+processes-toast-window-show-failed = Could not show the window.
 processes-toast-plasma-restarting = Restarting Plasma Shell...
 processes-toast-plasma-restarted = Plasma Shell restarted
 processes-toast-plasma-in-progress = Plasma Shell restart is already in progress.

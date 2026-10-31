@@ -418,6 +418,8 @@ fn specs(words: &HandleSearchWords) -> Vec<ColumnSpec<HitColumn>> {
 /// The result table's rows, columns and sort. A row id is the hit's index in the search's
 /// chunks; rows read the hits through the chunk index and never copy them.
 pub struct HandleHitsDelegate {
+    /// The host the window shows: its desktop commands say "on <host>" for a remote one.
+    host: HostContext,
     chunks: Arc<[Arc<[HandleHit]>]>,
     /// The hit index each chunk starts at.
     starts: Vec<u32>,
@@ -437,11 +439,12 @@ pub struct HandleHitsDelegate {
 }
 
 impl HandleHitsDelegate {
-    fn new(words: Rc<HandleSearchWords>, procs: Arc<ProcessSnapshot>) -> Self {
+    fn new(words: Rc<HandleSearchWords>, procs: Arc<ProcessSnapshot>, host: HostContext) -> Self {
         let specs = specs(&words);
         let layout =
             ColumnLayout::defaults(TableId::Processes, &specs, &HitColumn::ALL, &HitColumn::ALL);
         Self {
+            host,
             chunks: Arc::from([]),
             starts: Vec::new(),
             len: 0,
@@ -708,9 +711,10 @@ impl TreeTableDelegate for HandleHitsDelegate {
         _: Option<HitColumn>,
         menu: TlMenu,
         _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
         let w = self.words.clone();
+        let open_location = self.host.desktop_label(w.open_location.clone(), cx);
         let menu = menu
             .item(w.end_task.clone(), Box::new(HandleSearchEndTask))
             .item(w.end_process.clone(), Box::new(HandleSearchEndProcess))
@@ -723,9 +727,9 @@ impl TreeTableDelegate for HandleHitsDelegate {
             _ => false,
         };
         if one_path {
-            menu.item(w.open_location.clone(), Box::new(HandleSearchOpenLocation))
+            menu.item(open_location, Box::new(HandleSearchOpenLocation))
         } else {
-            menu.item_disabled(w.open_location.clone(), None)
+            menu.item_disabled(open_location, None)
         }
     }
 
@@ -1009,7 +1013,7 @@ impl HandleSearchWindow {
             .as_ref()
             .map(|hub| hub.read(cx).current().processes.clone())
             .unwrap_or_default();
-        let delegate = HandleHitsDelegate::new(words.clone(), procs.clone());
+        let delegate = HandleHitsDelegate::new(words.clone(), procs.clone(), host.clone());
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut this = Self {
             host: host.clone(),

@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 use tl_model::actions::{
     ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, SchedPolicy,
 };
-use tl_model::command::{Command, KWinCommand, Tab};
+use tl_model::command::Tab;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
 use tl_model::snapshot::Snapshot;
@@ -39,7 +39,7 @@ use super::actions::{
 use super::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use super::jump::JumpTexts;
 use super::menu::{GraphKind, graph_source};
-use super::toasts::{ActionToastTexts, refusal_reason, submit_to, toast_words};
+use super::toasts::{ActionToastTexts, activate_window, refusal_reason, submit_to, toast_words};
 use super::{
     ConfirmWords, End, EndPlan, GroupOp, GroupPlan, ProcessesPage, dialog_targets, exe_deleted,
     group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
@@ -699,8 +699,7 @@ impl Run {
     }
 
     /// Show Window (PROC-054): brings the topmost window of the captured process, or of any
-    /// member of an app or unit row, to the front. The bridge does not answer an activation
-    /// (ADR-005), so the toast follows the send.
+    /// member of an app or unit row, to the front. The `ActivateWindow` result gives the toast.
     fn show_window(&self, targets: CapturedTargets, cx: &mut App) {
         let [t] = &targets.items[..] else {
             return;
@@ -708,11 +707,8 @@ impl Run {
         let Some(hub) = self.host.hub().cloned() else {
             return;
         };
-        let (internal_id, client) = {
-            let hub = hub.read(cx);
-            let id = topmost_window(hub.current(), t).map(|w| Arc::clone(&w.internal_id));
-            (id, Arc::clone(hub.client()))
-        };
+        let internal_id =
+            topmost_window(hub.read(cx).current(), t).map(|w| Arc::clone(&w.internal_id));
         let Some(internal_id) = internal_id else {
             self.toast(ToastKind::Warning, tr(cx, "prc-055-no-window-found"), cx);
             return;
@@ -721,15 +717,7 @@ impl Run {
             self.toast(ToastKind::Warning, text, cx);
             return;
         }
-        if let Err(err) = client.send(Command::KWin(KWinCommand::Activate { internal_id })) {
-            warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
-            return;
-        }
-        self.toast(
-            ToastKind::Success,
-            tr(cx, "processes-toast-window-shown"),
-            cx,
-        );
+        activate_window(&self.host, internal_id, self.queue.clone(), cx);
     }
 
     /// Steps 1 and 2 of every process action (E22-017): drops pseudo and exited rows ("Process

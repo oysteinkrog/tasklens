@@ -19,6 +19,7 @@ use super::actions::{
 };
 use super::copy::column_alias;
 use crate::components::menu::TlMenu;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_table::SysActions;
@@ -136,6 +137,7 @@ pub fn service_menu(
     menu: TlMenu,
     t: &ServiceMenuTargets,
     backend: ServiceBackend,
+    host: &HostContext,
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
@@ -210,7 +212,8 @@ pub fn service_menu(
     );
     let binary = t.records.iter().any(has_binary);
     let image_tip = (!binary).then(|| tr(cx, "services-sys017-image-unavailable"));
-    menu = item_enabled(
+    menu = desktop_item_enabled(
+        host,
         menu,
         "services-sys017-file-properties",
         binary || t.records.iter().any(has_unit_file),
@@ -218,7 +221,8 @@ pub fn service_menu(
         Box::new(ServiceFileProperties),
         cx,
     );
-    menu = item_enabled(
+    menu = desktop_item_enabled(
+        host,
         menu,
         "services-sys017-open-file-location",
         binary,
@@ -227,7 +231,8 @@ pub fn service_menu(
         cx,
     );
     if !openrc {
-        menu = item_enabled(
+        menu = desktop_item_enabled(
+            host,
             menu,
             "services-sys017-open-unit-file",
             t.records.iter().any(has_unit_file),
@@ -332,7 +337,31 @@ fn item_enabled(
     action: Box<dyn gpui_kit::Action>,
     cx: &App,
 ) -> TlMenu {
-    let label = tr(cx, key);
+    item_labeled(menu, tr(cx, key), enabled, tooltip, action)
+}
+
+/// [`item_enabled`] for an item that acts on the host's desktop: a remote host's label ends
+/// with "on <host>" (UI-SHL-008).
+fn desktop_item_enabled(
+    host: &HostContext,
+    menu: TlMenu,
+    key: &str,
+    enabled: bool,
+    tooltip: Option<SharedString>,
+    action: Box<dyn gpui_kit::Action>,
+    cx: &App,
+) -> TlMenu {
+    let label = host.desktop_label(tr(cx, key), cx);
+    item_labeled(menu, label, enabled, tooltip, action)
+}
+
+fn item_labeled(
+    menu: TlMenu,
+    label: SharedString,
+    enabled: bool,
+    tooltip: Option<SharedString>,
+    action: Box<dyn gpui_kit::Action>,
+) -> TlMenu {
     if enabled {
         menu.item(label, action)
     } else {

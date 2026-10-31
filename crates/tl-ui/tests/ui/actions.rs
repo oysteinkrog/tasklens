@@ -920,3 +920,120 @@ mod with_shell {
         );
     }
 }
+
+mod desktop_on_host {
+    use super::*;
+    use tl_ui::host::HostContext;
+
+    fn open_uri() -> ActionRequest {
+        request(ActionKind::OpenUri("file:///a".into()), [])
+    }
+
+    fn remote_rig(cx: &mut TestAppContext, name: Option<&str>) -> Rig {
+        let mut r = rig(cx, None);
+        if let Some(name) = name {
+            let tracker = r.tracker.clone();
+            r.vcx.update(|_, cx| {
+                tracker.update(cx, |t, _| t.set_remote_name(Arc::from(name)));
+            });
+        }
+        r
+    }
+
+    #[gpui_kit::test]
+    fn remote_success_toast_says_opened_on_host(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, Some("home"));
+        let id = r.track(open_uri(), ToastTexts::new("", ""));
+        r.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(r.last().text.as_ref(), "Opened on home");
+    }
+
+    #[gpui_kit::test]
+    fn remote_launch_and_switch_say_started_and_switched(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, Some("home"));
+        let id = r.track(
+            request(
+                ActionKind::ActivateWindow {
+                    internal_id: "{w}".into(),
+                },
+                [],
+            ),
+            ToastTexts::new("Process window shown.", "Could not show the window."),
+        );
+        r.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(r.last().text.as_ref(), "Switched to window on home");
+        let id = r.track(
+            request(ActionKind::StartupRunNow, []),
+            ToastTexts::new("", ""),
+        );
+        r.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(r.last().text.as_ref(), "Started on home");
+    }
+
+    #[gpui_kit::test]
+    fn remote_failure_names_the_host(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, Some("home"));
+        let texts = ToastTexts::new("", "Could not open file location.");
+        let id = r.track(open_uri(), texts);
+        r.finish(id, &[ActionState::Failed(ActionError::Unsupported)]);
+        let text = r.last().text.to_string();
+        assert!(
+            text.starts_with("Could not open file location on home."),
+            "{text}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn remote_no_desktop_session_names_the_host(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, Some("home"));
+        let id = r.track(open_uri(), ToastTexts::new("", "Could not open."));
+        r.finish(id, &[ActionState::Rejected(RejectReason::NoDesktopSession)]);
+        assert_eq!(
+            r.last().text.as_ref(),
+            "home has no desktop session. Nobody is logged in to its screen."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn local_host_toasts_are_unchanged(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, None);
+        let id = r.track(
+            open_uri(),
+            ToastTexts::new("Opened it", "Could not open file location."),
+        );
+        r.finish(id, &[ActionState::Succeeded]);
+        assert_eq!(r.last().text.as_ref(), "Opened it");
+        let id = r.track(
+            open_uri(),
+            ToastTexts::new("", "Could not open file location."),
+        );
+        r.finish(id, &[ActionState::Failed(ActionError::Unsupported)]);
+        let text = r.last().text.to_string();
+        assert!(!text.contains(" on "), "{text}");
+    }
+
+    #[gpui_kit::test]
+    fn other_kinds_on_a_remote_host_are_unchanged(cx: &mut TestAppContext) {
+        let mut r = remote_rig(cx, Some("home"));
+        let id = r.track(end_task(1), end_task_texts());
+        r.finish(id, &[ActionState::Succeeded]);
+        assert!(!r.last().text.contains("on home"), "{:?}", r.last().text);
+    }
+
+    #[gpui_kit::test]
+    fn menu_label_gets_the_suffix_only_on_a_remote_host(cx: &mut TestAppContext) {
+        let r = remote_rig(cx, None);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (local, remote) = r.vcx.update(|_, cx| {
+            let remote = HostContext::remote(Arc::from("home"), client, 1 << 48, cx);
+            let local = HostContext::from_parts(None, None, None, None, None);
+            let label = |h: &HostContext, cx: &gpui_kit::App| {
+                h.desktop_label("Switch to window".into(), cx).to_string()
+            };
+            (label(&local, cx), label(&remote, cx))
+        });
+        assert_eq!(local, "Switch to window");
+        assert_eq!(remote, "Switch to window on home");
+    }
+}

@@ -534,6 +534,9 @@ struct Tracked {
     queue: WeakEntity<ToastQueue>,
     /// Per target: its final toast is shown and it is no longer pending.
     done: SmallVec<[bool; 4]>,
+    /// The request's kind and the remote host's name when it is a desktop command on that PC:
+    /// its toasts say "on <host>" (ADR-018).
+    remote: Option<(ActionKind, Arc<str>)>,
 }
 
 impl Tracked {
@@ -611,6 +614,11 @@ impl SysActions {
             self.push(&queue, ToastKind::Warning, busy, None, None, cx);
             return None;
         }
+        let remote = self
+            .tracker
+            .read(cx)
+            .remote_desktop_host(&kind)
+            .map(|host| (kind.clone(), host));
         let id = self.tracker.read(cx).next_id();
         let request = ActionRequest {
             id,
@@ -643,6 +651,7 @@ impl SysActions {
             targets,
             texts,
             queue,
+            remote,
         };
         for target in &tracked.targets {
             self.pending.insert(target.clone(), (id, tag));
@@ -753,7 +762,13 @@ impl SysActions {
         };
         let key = target_key(id, index, tracked.targets.len());
         let queue = tracked.queue.clone();
-        match final_toast(&state, &tracked.texts, target.as_ref(), cx) {
+        match final_toast(
+            &state,
+            &tracked.texts,
+            target.as_ref(),
+            tracked.remote.as_ref(),
+            cx,
+        ) {
             Some((kind, text, button)) => self.push(&queue, kind, text, Some(key), button, cx),
             None => {
                 if let Some(queue) = queue.upgrade() {
@@ -910,9 +925,36 @@ fn final_toast(
     state: &ActionState,
     texts: &ActionTexts,
     target: Option<&ActionTarget>,
+    remote: Option<&(ActionKind, Arc<str>)>,
     cx: &mut App,
 ) -> Option<(ToastKind, SharedString, Option<ToastAction>)> {
     let toast = match state {
+        // A desktop command on a remote host says where it ran or failed (ADR-018).
+        ActionState::Succeeded | ActionState::Saved(_) if remote.is_some() => {
+            let (kind, host) = remote?;
+            let text = action_words(cx).on_host_success(kind, host);
+            (ToastKind::Success, text, None)
+        }
+        ActionState::Failed(err)
+            if remote.is_some() && !matches!(err, ActionError::AuthCancelled) =>
+        {
+            let (_, host) = remote?;
+            let words = action_words(cx);
+            let prefix = words.on_host_failure(&texts.failed_prefix, host);
+            let text = if texts.failed_suffix {
+                failure_text(&prefix, err)
+            } else {
+                prefix
+            };
+            (ToastKind::Error, text, None)
+        }
+        ActionState::Rejected(reason)
+            if remote.is_some() && *reason == RejectReason::NoDesktopSession =>
+        {
+            let (_, host) = remote?;
+            let (_, text) = action_words(cx).reject_on(*reason, host);
+            (ToastKind::Error, text, None)
+        }
         ActionState::Succeeded | ActionState::Saved(_) if texts.done_one.is_empty() => return None,
         ActionState::Succeeded | ActionState::Saved(_) => {
             (ToastKind::Success, texts.done_one.clone(), None)

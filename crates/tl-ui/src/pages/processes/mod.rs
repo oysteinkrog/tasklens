@@ -34,7 +34,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionTarget, Signal};
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
@@ -650,9 +649,9 @@ impl ProcessesPage {
         self.copy(CopyKind::AllMetrics, cx);
     }
 
-    /// A window popup item (PROC-053, PROC-054): sends `KWin(Activate)` for the window and shows
-    /// "Process window shown." The bridge does not answer an activation (ADR-005), so the toast
-    /// follows the send. A window gone from the live windows snapshot gets "No window found".
+    /// A window popup item (PROC-053, PROC-054): sends `ActivateWindow` for the window; its
+    /// result gives the toast. A window gone from the live windows snapshot gets "No window
+    /// found".
     fn on_activate_window(&mut self, a: &ActivateWindow, _: &mut Window, cx: &mut Context<Self>) {
         if !host_send_allowed(&self.host, cx) {
             return;
@@ -670,18 +669,7 @@ impl ProcessesPage {
             warning_toast(tr(cx, "prc-055-no-window-found"), cx);
             return;
         };
-        if let Err(err) = self
-            .client
-            .send(Command::KWin(KWinCommand::Activate { internal_id }))
-        {
-            warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
-            return;
-        }
-        toast(
-            ToastKind::Success,
-            tr(cx, "processes-toast-window-shown"),
-            cx,
-        );
+        toasts::activate_window_on_main(&self.host, internal_id, cx);
     }
 
     /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in

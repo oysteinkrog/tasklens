@@ -400,6 +400,8 @@ pub fn flatten(
 
 /// The Memory maps tree's rows, columns and sort.
 pub struct MapsDelegate {
+    /// The host the tab shows: its desktop commands say "on <host>" for a remote one.
+    host: HostContext,
     detail: Arc<MapsDetail>,
     /// Per node: its key and the key's hash.
     keys: Vec<Box<str>>,
@@ -427,7 +429,7 @@ pub struct MapsDelegate {
 }
 
 impl MapsDelegate {
-    fn new(words: Rc<MapsWords>, shared_only: bool) -> Self {
+    fn new(words: Rc<MapsWords>, shared_only: bool, host: HostContext) -> Self {
         let specs = specs(&words);
         let layout = ColumnLayout::defaults(
             TableId::Processes,
@@ -436,6 +438,7 @@ impl MapsDelegate {
             &MapsColumn::ALL,
         );
         Self {
+            host,
             detail: Arc::default(),
             keys: Vec::new(),
             ids: Vec::new(),
@@ -776,9 +779,10 @@ impl TreeTableDelegate for MapsDelegate {
         col: Option<MapsColumn>,
         menu: TlMenu,
         _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
         let w = self.words.clone();
+        let open_location = self.host.desktop_label(w.open_location.clone(), cx);
         self.menu_cell = targets
             .first()
             .map(|&id| (id, col.unwrap_or(MapsColumn::Name)));
@@ -786,7 +790,7 @@ impl TreeTableDelegate for MapsDelegate {
             return menu
                 .item_disabled(w.copy.clone(), None)
                 .item_disabled(w.copy_path.clone(), None)
-                .item_disabled(w.open_location.clone(), None);
+                .item_disabled(open_location.clone(), None);
         }
         let menu = menu.item(w.copy.clone(), Box::new(MapsCopyCell));
         let path = match targets {
@@ -795,10 +799,10 @@ impl TreeTableDelegate for MapsDelegate {
         };
         if path.is_some() {
             menu.item(w.copy_path.clone(), Box::new(MapsCopyPath))
-                .item(w.open_location.clone(), Box::new(MapsOpenFileLocation))
+                .item(open_location, Box::new(MapsOpenFileLocation))
         } else {
             menu.item_disabled(w.copy_path.clone(), None)
-                .item_disabled(w.open_location.clone(), None)
+                .item_disabled(open_location.clone(), None)
         }
     }
 
@@ -919,7 +923,7 @@ impl MapsTab {
         cx: &mut Context<Self>,
     ) -> Self {
         let words = Rc::new(MapsWords::new(cx));
-        let mut delegate = MapsDelegate::new(words.clone(), shared_setting(cx));
+        let mut delegate = MapsDelegate::new(words.clone(), shared_setting(cx), host.clone());
         delegate.tips = Some(tip_views(&words, cx));
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut subs = SmallVec::new();

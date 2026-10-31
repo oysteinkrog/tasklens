@@ -1129,7 +1129,8 @@ pub(super) fn row_menu(
                 page.menu_targets = Some(stored);
                 page.menu_rows = Some(rows);
             });
-            service_menu(menu, &targets, delegate.backend(), window, cx)
+            let host = page.read(cx).host.clone();
+            service_menu(menu, &targets, delegate.backend(), &host, window, cx)
         }
         MenuChoice::Process => {
             let targets = child_targets(delegate.processes(), nodes);

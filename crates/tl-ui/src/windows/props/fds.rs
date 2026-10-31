@@ -350,6 +350,8 @@ fn has_location(r: &FdRow) -> bool {
 
 /// The File descriptors table's rows, columns and sort.
 pub struct FdsDelegate {
+    /// The host the tab shows: its desktop commands say "on <host>" for a remote one.
+    host: HostContext,
     /// The payload rows, in payload order.
     rows: Arc<[FdRow]>,
     /// Row indexes in sort order.
@@ -374,11 +376,12 @@ pub struct FdsDelegate {
 }
 
 impl FdsDelegate {
-    fn new(words: Rc<FdWords>, hide_unnamed: bool) -> Self {
+    fn new(words: Rc<FdWords>, hide_unnamed: bool, host: HostContext) -> Self {
         let specs = specs(&words);
         let layout =
             ColumnLayout::defaults(TableId::Processes, &specs, &FdColumn::ALL, &FdColumn::ALL);
         Self {
+            host,
             rows: Arc::from([]),
             order: Vec::new(),
             filtered: None,
@@ -634,16 +637,17 @@ impl TreeTableDelegate for FdsDelegate {
         col: Option<FdColumn>,
         menu: TlMenu,
         _: &mut Window,
-        _: &mut Context<TlTreeTable<Self>>,
+        cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
         let w = self.words.clone();
+        let open_location = self.host.desktop_label(w.open_location.clone(), cx);
         self.menu_cell = targets
             .first()
             .map(|&fd| (fd, col.unwrap_or(FdColumn::Name)));
         if self.exited {
             return menu
                 .item_disabled(w.copy.clone(), None)
-                .item_disabled(w.open_location.clone(), None)
+                .item_disabled(open_location.clone(), None)
                 .item_disabled(w.go_to_connection.clone(), None);
         }
         let menu = menu.item(w.copy.clone(), Box::new(FdsCopyCell));
@@ -652,9 +656,9 @@ impl TreeTableDelegate for FdsDelegate {
             _ => false,
         };
         let menu = if one_file {
-            menu.item(w.open_location.clone(), Box::new(FdsOpenFileLocation))
+            menu.item(open_location, Box::new(FdsOpenFileLocation))
         } else {
-            menu.item_disabled(w.open_location.clone(), None)
+            menu.item_disabled(open_location.clone(), None)
         };
         let one_socket = match targets {
             [fd] => self
@@ -935,7 +939,7 @@ impl FdsTab {
         cx: &mut Context<Self>,
     ) -> Self {
         let words = Rc::new(FdWords::new(cx));
-        let delegate = FdsDelegate::new(words.clone(), hide_setting(cx));
+        let delegate = FdsDelegate::new(words.clone(), hide_setting(cx), host.clone());
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let pane = cx.new(|cx| FdDetailsPane {
             row: None,

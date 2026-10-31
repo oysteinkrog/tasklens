@@ -218,6 +218,9 @@ pub struct PendingAction {
     pub results: SmallVec<[(u16, ActionState); 4]>,
     /// `EngineClient::generation` when the request was sent: the session it belongs to.
     pub session: u64,
+    /// The remote host's name when the request is a desktop command on that PC: its toasts
+    /// say "on <host>" (ADR-018). `None` for the local host and for other kinds.
+    pub remote: Option<Arc<str>>,
 }
 
 impl PendingAction {
@@ -344,6 +347,8 @@ pub struct ActionTracker {
     sweeping: bool,
     /// The newest client generation seen for this host. Requests from an older one have ended.
     seen_generation: u64,
+    /// The remote host's name; `None` for the local host. Desktop commands say "on <host>".
+    remote_name: Option<Arc<str>>,
     _events: Task<()>,
     /// The hub's `LinkChanged` and `SnapshotChanged`: each can show a newer generation.
     _hub_events: SmallVec<[Subscription; 2]>,
@@ -428,6 +433,7 @@ impl ActionTracker {
             finished: VecDeque::new(),
             sweeping: false,
             seen_generation,
+            remote_name: None,
             _events: task,
             _hub_events: hub_events,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -443,6 +449,11 @@ impl ActionTracker {
     /// two trackers never meet (tasklens-q4x76.27).
     pub fn start_ids_at(&self, first: u64) {
         self.next_id.store(first, Ordering::Relaxed);
+    }
+
+    /// Names the remote host this tracker serves (ADR-018). The local tracker has no name.
+    pub fn set_remote_name(&mut self, name: Arc<str>) {
+        self.remote_name = Some(name);
     }
 
     /// A new request id, from 1 (ADR-005).
@@ -464,6 +475,16 @@ impl ActionTracker {
             .as_ref()
             .and_then(|hub| HostRegistry::remote_name_of(hub, cx))
             .unwrap_or_else(|| HostRegistry::local_name(cx))
+    }
+
+    /// The name of the remote host `kind` would act on, when `kind` is a desktop command (open,
+    /// file manager, launch, switch to window, run now) and this tracker's host is remote.
+    /// `None` for the local host and for every other kind (ADR-018, UI-SHL-008).
+    pub fn remote_desktop_host(&self, kind: &ActionKind) -> Option<Arc<str>> {
+        if !is_desktop_command(kind) {
+            return None;
+        }
+        self.remote_name.clone()
     }
 
     /// Sends `request` and records it (R-197). A request whose id is 0 gets [`Self::next_id`].
@@ -488,6 +509,7 @@ impl ActionTracker {
         }
         self.client.send(Command::Action(request.clone()))?;
         let deadline = request_deadline(&request);
+        let remote = self.remote_desktop_host(&request.kind);
         debug!(target: "tasklens::ui", ?id, ?deadline, "action tracked");
         self.pending.insert(
             id,
@@ -499,6 +521,7 @@ impl ActionTracker {
                 deadline,
                 results: SmallVec::new(),
                 session,
+                remote,
             },
         );
         self.start_sweep(cx);
@@ -636,7 +659,7 @@ impl ActionTracker {
         };
         let words = action_words(cx);
         let retry = retry_allowed(entry, helper);
-        let (kind, text, button) = result_toast(id, state, &entry.texts, retry, &words);
+        let (kind, text, button) = result_toast(id, state, entry, retry, &words);
         let queue = entry.queue.clone();
         let key = ToastKey(id.0 << 8 | u64::from(index));
         self.push(&queue, kind, text, Some(key), button, cx);
@@ -692,7 +715,7 @@ impl ActionTracker {
                 } else {
                     ActionState::summarize(states.iter().copied())
                 };
-                let (kind, text, button) = result_toast(id, &state, &entry.texts, retry, &words);
+                let (kind, text, button) = result_toast(id, &state, &entry, retry, &words);
                 self.push(&queue, kind, text, Some(key), button, cx);
             }
             Mode::PerTarget => {
@@ -700,7 +723,7 @@ impl ActionTracker {
                 for i in 0..total {
                     if entry.result(i).is_none() {
                         let (kind, text, button) =
-                            result_toast(id, &summary, &entry.texts, retry, &words);
+                            result_toast(id, &summary, &entry, retry, &words);
                         let target_key = ToastKey(id.0 << 8 | u64::from(i));
                         self.push(&queue, kind, text, Some(target_key), button, cx);
                     }
@@ -1043,13 +1066,35 @@ fn retry_button(id: ActionId, words: &ActionWords) -> ToastAction {
 fn result_toast(
     id: ActionId,
     state: &ActionState,
-    texts: &ToastTexts,
+    entry: &PendingAction,
     retry: bool,
     words: &ActionWords,
 ) -> (ToastKind, SharedString, Option<ToastAction>) {
+    let texts = &entry.texts;
+    let remote = entry.remote.as_deref();
     match state {
+        // A desktop command on a remote host always says where it ran (ADR-018).
+        ActionState::Succeeded | ActionState::Saved(_) if remote.is_some() => (
+            ToastKind::Success,
+            words.on_host_success(&entry.request.kind, remote.unwrap_or_default()),
+            None,
+        ),
         ActionState::Succeeded | ActionState::Saved(_) => {
             (ToastKind::Success, texts.success.clone(), None)
+        }
+        ActionState::Failed(err) if remote.is_some() && !is_eperm_retry(err, retry) => (
+            ToastKind::Error,
+            format!(
+                "{} {}",
+                words.on_host_failure(&texts.failure, remote.unwrap_or_default()),
+                words.message(err)
+            )
+            .into(),
+            None,
+        ),
+        ActionState::Rejected(reason) if remote.is_some() => {
+            let (kind, text) = words.reject_on(*reason, remote.unwrap_or_default());
+            (kind, text, None)
         }
         ActionState::Failed(ActionError::PermissionDenied) if retry => (
             ToastKind::Error,
@@ -1073,6 +1118,23 @@ fn result_toast(
             (ToastKind::Warning, words.outcome_unknown.clone(), None)
         }
     }
+}
+
+fn is_eperm_retry(err: &ActionError, retry: bool) -> bool {
+    retry && matches!(err, ActionError::PermissionDenied)
+}
+
+/// True for the kinds that act on a PC's desktop: open a link or folder, show a file in the file
+/// manager, launch a program, switch to a window, run a startup entry now (ADR-018).
+pub fn is_desktop_command(kind: &ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::OpenUri(_)
+            | ActionKind::ShowInFileManager { .. }
+            | ActionKind::Launch(_)
+            | ActionKind::ActivateWindow { .. }
+            | ActionKind::StartupRunNow
+    )
 }
 
 /// One "<target label>: <message>" line per target that did not succeed (R-197).
@@ -1200,6 +1262,12 @@ pub struct ActionWords {
     reject_unsupported: SharedString,
     reject_running: SharedString,
     reject_no_desktop: SharedString,
+    reject_no_desktop_on: Template,
+    on_host_opened: Template,
+    on_host_started: Template,
+    on_host_switched: Template,
+    on_host_failed: Template,
+    on_host_suffix: Template,
     target_pid: Template,
     target_tid: Template,
     target_socket: Template,
@@ -1232,6 +1300,12 @@ impl ActionWords {
             reject_unsupported: t("fnd-action-reject-unsupported"),
             reject_running: t("fnd-action-reject-already-running"),
             reject_no_desktop: t("fnd-action-reject-no-desktop-session"),
+            reject_no_desktop_on: tmpl("fnd-action-reject-no-desktop-session-on-host", &["host"]),
+            on_host_opened: tmpl("fnd-action-on-host-opened", &["host"]),
+            on_host_started: tmpl("fnd-action-on-host-started", &["host"]),
+            on_host_switched: tmpl("fnd-action-on-host-switched", &["host"]),
+            on_host_failed: tmpl("fnd-action-on-host-failed", &["host"]),
+            on_host_suffix: tmpl("fnd-action-on-host-suffix", &["host"]),
             target_pid: tmpl("fnd-action-target-pid", &["pid"]),
             target_tid: tmpl("fnd-action-target-tid", &["tid"]),
             target_socket: tmpl("fnd-action-target-socket", &["local", "remote"]),
@@ -1257,6 +1331,37 @@ impl ActionWords {
             ActionError::NotAuthorized => self.not_authorized.clone(),
             ActionError::AuthCancelled => self.auth_cancelled.clone(),
             ActionError::Unsupported => self.unsupported.clone(),
+        }
+    }
+
+    /// The success toast of a desktop command on remote host `host`, such as "Opened on home".
+    pub fn on_host_success(&self, kind: &ActionKind, host: &str) -> SharedString {
+        let template = match kind {
+            ActionKind::ActivateWindow { .. } => &self.on_host_switched,
+            ActionKind::Launch(_) | ActionKind::StartupRunNow => &self.on_host_started,
+            _ => &self.on_host_opened,
+        };
+        fill(template, &[&host])
+    }
+
+    /// `failure` ("Could not open file location.") with " on <host>" before its full stop. An
+    /// empty `failure` gives "Failed on <host>.".
+    pub fn on_host_failure(&self, failure: &str, host: &str) -> SharedString {
+        let prefix = failure.trim_end_matches('.');
+        if prefix.is_empty() {
+            return fill(&self.on_host_failed, &[&host]);
+        }
+        format!("{prefix} {}.", fill(&self.on_host_suffix, &[&host])).into()
+    }
+
+    /// [`Self::reject`] for a request to remote host `host`: no desktop session names the host.
+    pub fn reject_on(&self, reason: RejectReason, host: &str) -> (ToastKind, SharedString) {
+        match reason {
+            RejectReason::NoDesktopSession => (
+                ToastKind::Warning,
+                fill(&self.reject_no_desktop_on, &[&host]),
+            ),
+            _ => self.reject(reason),
         }
     }
 

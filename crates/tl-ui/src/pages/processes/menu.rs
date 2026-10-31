@@ -156,8 +156,8 @@ pub fn row_menu(
     menu = add_tray_graph(host, menu, targets, shape, window, cx);
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
-    menu = add_file_properties(menu, targets, caps, shape, cx);
-    menu = add_open_file_location(menu, targets, shape, cx);
+    menu = add_file_properties(host, menu, targets, caps, shape, cx);
+    menu = add_open_file_location(host, menu, targets, shape, cx);
     menu = add_open_virustotal(menu, shape, cx);
     menu = add_create_dump(menu, caps, shape, cx);
     menu = menu.separator();
@@ -832,7 +832,7 @@ fn add_show_window(
     if !(shape.process || shape.group) || !caps.kwin_bridge {
         return menu;
     }
-    let label = tr(cx, "processes-menu-show-window");
+    let label = host.desktop_label(tr(cx, "processes-menu-show-window"), cx);
     if !shape.exited {
         let has_window = host
             .client()
@@ -883,6 +883,7 @@ fn is_compositor(name: &str, unit: &str) -> bool {
 /// Item 20: File properties, on one process row. Hidden without a FileManager1 owner.
 /// Disabled when the executable was deleted.
 fn add_file_properties(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     caps: &MenuCaps,
@@ -892,7 +893,7 @@ fn add_file_properties(
     if !shape.process || !caps.file_manager1 {
         return menu;
     }
-    let label = tr(cx, "processes-menu-file-properties");
+    let label = host.desktop_label(tr(cx, "processes-menu-file-properties"), cx);
     if !shape.exited && targets.items.iter().any(|t| t.exe_deleted) {
         return menu.item_disabled(label, Some(tr(cx, "processes-menu-executable-deleted")));
     }
@@ -902,6 +903,7 @@ fn add_file_properties(
 /// Item 21: Open file location, on one process row. Disabled when the executable was deleted
 /// (E22-020).
 fn add_open_file_location(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     shape: Shape,
@@ -910,7 +912,7 @@ fn add_open_file_location(
     if !shape.process {
         return menu;
     }
-    let label = tr(cx, "processes-menu-open-file-location");
+    let label = host.desktop_label(tr(cx, "processes-menu-open-file-location"), cx);
     if !shape.exited && targets.items.iter().any(|t| t.exe_deleted) {
         return menu.item_disabled(label, Some(tr(cx, "processes-menu-executable-deleted")));
     }
