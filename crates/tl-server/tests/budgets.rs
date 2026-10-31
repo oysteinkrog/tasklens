@@ -9,7 +9,7 @@
 //!
 //! - `idle_service_cpu_is_within_10_percent_of_the_hidden_window_engine`: the service with no
 //!   client uses at most 10% more CPU time than today's in-process engine with the window hidden
-//!   to the tray (leader decision on tasklens-q4x76.15, Q3 A).
+//!   to the tray. Both run at once for 6 windows of 10 s; the limit applies to the summed CPU (leader decision on tasklens-q4x76.15, Q3 A).
 //! - `wire_bytes_of_the_real_engine_on_this_host`: the bytes a Processes tab session and a
 //!   hidden host send, from the snapshots this host's real engine publishes to a session. A cross-check of the synthetic
 //!   fixture in `tl-remote/tests/budgets.rs`; it prints and asserts nothing.
@@ -41,8 +41,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_tasklens-engine");
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
 /// Each engine runs this long before its CPU time is counted: history open, first sweeps.
 const WARM_UP: Duration = Duration::from_secs(10);
-/// CPU time is counted over this long (leader decision: 60 s each).
+/// CPU time is counted over this long in total (leader decision: 60 s each), in `WINDOWS`
+/// windows in which both engines run at once.
 const MEASURE: Duration = Duration::from_secs(60);
+/// Number of equal windows `MEASURE` is split into.
+const WINDOWS: u32 = 6;
 /// The wire measurement waits this long first, so every 1 Hz ring (602 samples) is full and the
 /// complete frame is as large as it gets.
 const RINGS_FULL: Duration = Duration::from_secs(610);
@@ -127,13 +130,47 @@ fn loadavg() -> String {
         .join(" ")
 }
 
-/// CPU seconds `pid` uses over `MEASURE`, with the load average before and after.
-fn measure(pid: &str) -> (f64, String, String) {
-    let before = loadavg();
-    let start = cpu_seconds(pid);
-    std::thread::sleep(MEASURE);
-    let used = cpu_seconds(pid) - start;
-    (used, before, loadavg())
+/// CPU seconds per thread of `pid`, keyed by thread id, with the thread name.
+fn thread_cpu(pid: &str) -> std::collections::BTreeMap<u64, (String, f64)> {
+    let hz = clock_ticks() as f64;
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+    {
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue; // the thread ended
+        };
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let rest: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+        let ticks = rest[11].parse::<u64>().unwrap() + rest[12].parse::<u64>().unwrap();
+        let tid = entry.file_name().to_string_lossy().parse().unwrap();
+        out.insert(tid, (stat[open + 1..close].to_string(), ticks as f64 / hz));
+    }
+    out
+}
+
+/// Adds the per-thread CPU growth between two snapshots to `total`, keyed by thread name.
+fn add_thread_growth(
+    total: &mut std::collections::BTreeMap<String, f64>,
+    before: &std::collections::BTreeMap<u64, (String, f64)>,
+    after: &std::collections::BTreeMap<u64, (String, f64)>,
+) {
+    for (tid, (name, secs)) in after {
+        let start = before.get(tid).map_or(0.0, |(_, s)| *s);
+        *total.entry(name.clone()).or_default() += secs - start;
+    }
+}
+
+fn print_threads(label: &str, threads: &std::collections::BTreeMap<String, f64>) {
+    let mut sorted: Vec<_> = threads.iter().filter(|(_, s)| **s > 0.0).collect();
+    sorted.sort_by(|a, b| b.1.total_cmp(a.1));
+    println!("{label} CPU by thread name:");
+    for (name, secs) in sorted {
+        println!("  {name:<20} {secs:.2} s");
+    }
 }
 
 fn start_engine(state: &Path) -> EngineHandle {
@@ -164,14 +201,13 @@ fn idle_service_cpu_is_within_10_percent_of_the_hidden_window_engine() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Today: the window's in-process engine with the window hidden. This test process runs
-    // nothing else, so its CPU time is the engine's.
+    // nothing else, so its CPU time is the engine's. It keeps running while the service is
+    // measured, so both see the same machine load.
     let window_state = tmp.path().join("window-state");
     std::fs::create_dir(&window_state).unwrap();
     let engine = start_engine(&window_state);
     engine.set_demand(hidden_window_demand());
     std::thread::sleep(WARM_UP);
-    let (window, w_before, w_after) = measure("self");
-    assert!(engine.shutdown().clean());
 
     // The service with no client, on the same defaults. Its own state and runtime directories,
     // so it never meets an installed service's lock or socket; the rest of the environment,
@@ -208,9 +244,31 @@ fn idle_service_cpu_is_within_10_percent_of_the_hidden_window_engine() {
         std::thread::sleep(Duration::from_millis(50));
     }
     std::thread::sleep(WARM_UP);
-    let (service, s_before, s_after) = measure(&pid);
+
+    // Both run now, so each window sees the same machine load. The CPU time of each is read
+    // per window, and the verdict is on the sums.
+    let mut window = 0.0;
+    let mut service = 0.0;
+    let mut window_threads = std::collections::BTreeMap::new();
+    let mut service_threads = std::collections::BTreeMap::new();
+    for i in 1..=WINDOWS {
+        let (w0, s0) = (cpu_seconds("self"), cpu_seconds(&pid));
+        let (wt0, st0) = (thread_cpu("self"), thread_cpu(&pid));
+        let load = loadavg();
+        std::thread::sleep(MEASURE / WINDOWS);
+        let (dw, ds) = (cpu_seconds("self") - w0, cpu_seconds(&pid) - s0);
+        add_thread_growth(&mut window_threads, &wt0, &thread_cpu("self"));
+        add_thread_growth(&mut service_threads, &st0, &thread_cpu(&pid));
+        println!(
+            "window {i}/{WINDOWS}: hidden engine {dw:.2} s, service {ds:.2} s, ratio {:.3}, load {load}",
+            ds / dw
+        );
+        window += dw;
+        service += ds;
+    }
     let killed = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
     assert!(killed.success());
+    assert!(engine.shutdown().clean());
     let begin = Instant::now();
     while guard.0.try_wait().unwrap().is_none() {
         assert!(
@@ -222,14 +280,16 @@ fn idle_service_cpu_is_within_10_percent_of_the_hidden_window_engine() {
 
     let secs = MEASURE.as_secs_f64();
     println!(
-        "hidden window engine: {window:.2} s CPU in {secs:.0} s ({:.3}%), load {w_before} -> {w_after}",
+        "hidden window engine: {window:.2} s CPU in {secs:.0} s ({:.3}%)",
         100.0 * window / secs
     );
     println!(
-        "service, no client:   {service:.2} s CPU in {secs:.0} s ({:.3}%), load {s_before} -> {s_after}",
+        "service, no client:   {service:.2} s CPU in {secs:.0} s ({:.3}%)",
         100.0 * service / secs
     );
-    println!("ratio service / window: {:.3}", service / window);
+    println!("ratio of sums, service / window: {:.3}", service / window);
+    print_threads("hidden window engine (this test process)", &window_threads);
+    print_threads("service", &service_threads);
     assert!(
         service <= window * 1.10,
         "the service used {service:.2} s of CPU, more than 110% of the hidden window engine's {window:.2} s"
