@@ -11,7 +11,7 @@ use std::sync::Arc;
 use gpui_kit::TestAppContext;
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::HostSettings;
-use tl_model::settings::{Settings, UiState};
+use tl_model::settings::{Settings, TimelineClick, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -185,4 +185,30 @@ fn the_window_never_writes_host_keys_to_settings_toml(cx: &mut TestAppContext) {
         want.values.history.retention_h = 12;
         want
     });
+}
+
+/// UI-PRF-057 keeps a `history` timeline click only while recording is on. Recording is a host
+/// setting, so the rule reads the engine's value, not the one `settings.toml` was loaded with.
+#[gpui_kit::test]
+fn the_history_timeline_click_follows_the_host_recording_setting(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    // settings.toml from before the engine service: recording off.
+    setup(cx, &engine, Settings::default());
+    let pick_history = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.timeline_click = TimelineClick::History
+            })
+        });
+        cx.update(|cx| TlSettings::settings(cx).performance.timeline_click)
+    };
+    assert_eq!(pick_history(cx), TimelineClick::Pause, "recording is off");
+
+    engine.publish_host_settings(|v| v.history.enabled = true);
+    cx.run_until_parked();
+    assert_eq!(pick_history(cx), TimelineClick::History);
+    assert!(
+        !cx.update(|cx| TlSettings::settings(cx).history.enabled),
+        "still not written"
+    );
 }
