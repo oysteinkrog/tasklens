@@ -118,18 +118,16 @@ impl HostSettingsFile {
     }
 }
 
-/// The settings file shared by every session of the engine. `apply` hands new values to the
-/// engine; it runs under the lock, so the engine sees changes in revision order.
+/// The settings file shared by every session of the engine. `apply` hands new settings, with
+/// their revision, to the engine; it runs under the lock, so the engine sees changes in revision
+/// order.
 pub struct SharedHostSettings {
     file: Mutex<HostSettingsFile>,
-    apply: Box<dyn Fn(&HostSettingsValues) + Send + Sync>,
+    apply: Box<dyn Fn(&HostSettings) + Send + Sync>,
 }
 
 impl SharedHostSettings {
-    pub fn new(
-        file: HostSettingsFile,
-        apply: Box<dyn Fn(&HostSettingsValues) + Send + Sync>,
-    ) -> Self {
+    pub fn new(file: HostSettingsFile, apply: Box<dyn Fn(&HostSettings) + Send + Sync>) -> Self {
         Self {
             file: Mutex::new(file),
             apply,
@@ -145,7 +143,7 @@ impl SharedHostSettings {
         let rev = file.current().rev;
         let reply = file.set(base_rev, changes);
         if file.current().rev != rev {
-            (self.apply)(&file.current().values);
+            (self.apply)(file.current());
         }
         reply
     }
@@ -538,7 +536,9 @@ device_metrics_max_mb = 32
         let sink = Arc::clone(&applied);
         let shared = SharedHostSettings::new(
             file,
-            Box::new(move |v: &HostSettingsValues| sink.lock().unwrap().push(v.interval_ms)),
+            Box::new(move |h: &HostSettings| {
+                sink.lock().unwrap().push((h.rev, h.values.interval_ms));
+            }),
         );
         assert!(matches!(
             shared.set(1, &interval(500)),
@@ -552,7 +552,7 @@ device_metrics_max_mb = 32
             shared.set(2, &interval(500)),
             SetHostSettingsReply::Ack { rev: 2 }
         ));
-        assert_eq!(*applied.lock().unwrap(), vec![500]);
+        assert_eq!(*applied.lock().unwrap(), vec![(2, 500)]);
         assert_eq!(shared.get().values.interval_ms, 500);
     }
 }

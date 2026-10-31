@@ -36,11 +36,9 @@ use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::remote_proto::{
-    HostIdentity, HostSettings, HostSettingsChanges, HostSettingsValues, RefuseReason,
-    SetHostSettingsReply,
+    HostIdentity, HostSettings, HostSettingsChanges, RefuseReason, SetHostSettingsReply,
 };
 use tl_model::request::RequestEvent;
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_remote::envelope::FrameReader;
 use tl_remote::server::{self, EndpointError, Port, Receiver, SessionConfig};
@@ -123,7 +121,7 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
             "engine.toml was unreadable and has been reset; the old file was kept as {kept_as}"
         ),
     }
-    let start_values = file.current().values.clone();
+    let start = file.current().clone();
 
     let uid = server::own_uid();
     let runtime = server::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), uid)
@@ -139,15 +137,15 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     }
     let engine = Engine::start(config, EngineHooks::default())
         .map_err(|e| format!("engine start failed: {e}"))?;
-    // As the window does: the settings follow the start at once.
-    engine.set_settings(engine_settings(&start_values));
+    // The settings follow the start at once, and every session's snapshot carries them.
+    engine.install_host_settings(start);
     info!(target: "tasklens::engine", socket = %socket.display(), "engine started");
 
     let applier = engine.clone();
     let host = Arc::new(SharedHostSettings::new(
         file,
-        Box::new(move |values: &HostSettingsValues| {
-            applier.set_settings(engine_settings(values));
+        Box::new(move |current: &HostSettings| {
+            applier.install_host_settings(current.clone());
         }),
     ));
     let identity = Arc::new(host_identity(&engine));
@@ -172,16 +170,6 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     let _ = std::fs::remove_file(&socket);
     drop(lock);
     Ok(ExitCode::SUCCESS)
-}
-
-/// The engine's settings are the host settings. The keys each window sets for itself travel in
-/// the session's table query, and the engine counts every network adapter kind
-/// (tasklens-q4x76.22).
-fn engine_settings(values: &HostSettingsValues) -> EngineSettings {
-    EngineSettings {
-        interval_ms: values.interval_ms,
-        history: values.history.clone(),
-    }
 }
 
 fn now_unix() -> u64 {

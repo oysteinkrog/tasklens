@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use tl_model::remote_proto::{
     BootPrefix, ClientMsg, Hello, HelloTail, HostSettingsChanges, RefuseReason, ServerBootstrap,
-    ServerMsg, SetHostSettingsReply, Want, decode_server_bootstrap, encode_hello,
+    ServerMsg, SetHostSettingsReply, SnapshotFrame, Want, decode_server_bootstrap, encode_hello,
 };
 use tl_remote::envelope::{FrameReader, FrameWriter};
 
@@ -393,6 +393,16 @@ fn next_reply(stream: &mut UnixStream, frames: &mut FrameReader) -> ServerMsg {
     }
 }
 
+/// The next snapshot frame. Replies before it are skipped.
+fn next_frame(stream: &mut UnixStream, frames: &mut FrameReader) -> SnapshotFrame {
+    loop {
+        let frame = frames.read_frame(stream).unwrap();
+        if let ServerMsg::Snapshot(f) = frames.decode_server(&frame).unwrap() {
+            return *f;
+        }
+    }
+}
+
 fn send(stream: &mut UnixStream, msg: &ClientMsg) {
     let mut out = Vec::new();
     FrameWriter::new()
@@ -417,6 +427,14 @@ fn service_imports_host_settings_once_and_saves_changes() {
     let (mut stream, answer) = connect(&dirs.socket());
     assert!(matches!(answer, ServerBootstrap::Welcome(_)));
     let mut frames = FrameReader::new().unwrap();
+    // The session's first frame is complete and carries the host settings (q4x76.23). No Ack
+    // is sent yet, so no other frame follows until then.
+    let first = next_frame(&mut stream, &mut frames);
+    let host = first
+        .host_settings
+        .as_ref()
+        .expect("a complete frame has them");
+    assert_eq!((host.rev, host.values.interval_ms), (1, 2000));
     send(&mut stream, &ClientMsg::GetHostSettings);
     let ServerMsg::HostSettings(read) = next_reply(&mut stream, &mut frames) else {
         panic!("not a HostSettings reply");
@@ -451,6 +469,17 @@ fn service_imports_host_settings_once_and_saves_changes() {
         next_reply(&mut stream, &mut frames),
         ServerMsg::SetHostSettings(SetHostSettingsReply::Conflict { current }) if current.rev == 2
     ));
+    // The new revision reaches the session in a later snapshot.
+    let mut acked = first.frame;
+    loop {
+        send(&mut stream, &ClientMsg::Ack { frame: acked });
+        let frame = next_frame(&mut stream, &mut frames);
+        acked = frame.frame;
+        if let Some(host) = frame.host_settings {
+            assert_eq!((host.rev, host.values.interval_ms), (2, 500));
+            break;
+        }
+    }
 
     let pid = child.child().id().to_string();
     assert!(
