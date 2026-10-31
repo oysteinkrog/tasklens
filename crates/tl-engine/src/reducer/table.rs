@@ -1123,13 +1123,10 @@ pub fn aggregate(
         let Some(r) = records.get(i as usize) else {
             continue;
         };
-        // 0: no app id, 1: app id, 2: app id and primary. The first of the best rank wins, so
-        // a child that sorts before its parent (a `cat` helper) never names the group.
-        let rank = match &r.meta.app_id {
-            None => 0,
-            Some(_) if app_pids.contains(&r.ppid) => 1,
-            Some(_) => 2,
-        };
+        // 0: no app id, 1: app id, 2: app id and primary, 3: primary whose desktop entry
+        // resolved (its name is the .desktop Name). The first of the best rank wins, so a child
+        // that sorts before its parent (a `cat` helper) never names the group.
+        let rank = name_rank(r, app_pids.contains(&r.ppid));
         if first.is_none() || rank > first_rank {
             first = Some(r);
             first_rank = rank;
@@ -1718,6 +1715,18 @@ pub fn build_grouped(
 }
 
 /// `build_grouped` plus the number of processes shown.
+/// How well a record names its app row (PROC-008). 0: no app id. 1: app id, parent in the app.
+/// 2: app id, parent outside the app (the primary process). 3: a primary whose desktop entry
+/// resolved, so its name is the .desktop Name; this wins over a helper such as `cat`.
+fn name_rank(r: &ProcessRecord, parent_in_app: bool) -> u8 {
+    match &r.meta.app_id {
+        None => 0,
+        Some(_) if parent_in_app => 1,
+        Some(_) if r.meta.desktop_path.is_some() => 3,
+        Some(_) => 2,
+    }
+}
+
 fn grouped_rows(
     input: &TableInput<'_>,
     query: &TableQuery,
@@ -1739,25 +1748,26 @@ fn grouped_rows(
     let is_kthread = |i: usize| records[i].flags.contains(ProcFlags::KERNEL_THREAD);
     let unit_of = |i: usize| input.extras.get(i).and_then(|x| x.unit.as_ref());
 
-    // Lowercase app names for the filter, by the same rule as the row name: the app's primary
-    // record (an app id, parent outside the app's own pids), else its first record. The pid
+    // Lowercase app names for the filter, by the same rule as the row name (`name_rank`): a
+    // primary with a resolved desktop entry, else a primary (an app id, parent outside the
+    // app's own pids), else the first record. The pid
     // set is per group, so an app started from another app still has a primary.
     let app_pids: FxHashSet<(GroupKey, u32)> = records
         .iter()
         .filter(|r| r.meta.app_id.is_some())
         .map(|r| (r.group, r.key.pid))
         .collect();
-    let mut app_names: FxHashMap<GroupKey, (bool, String)> = FxHashMap::default();
+    let mut app_names: FxHashMap<GroupKey, (u8, String)> = FxHashMap::default();
     for (i, r) in records.iter().enumerate() {
         if class[i] != GroupClass::Apps {
             continue;
         }
-        let primary = r.meta.app_id.is_some() && !app_pids.contains(&(r.group, r.ppid));
+        let rank = name_rank(r, app_pids.contains(&(r.group, r.ppid)));
         match app_names.get_mut(&r.group) {
             None => {
-                app_names.insert(r.group, (primary, r.meta.name.to_lowercase()));
+                app_names.insert(r.group, (rank, r.meta.name.to_lowercase()));
             }
-            Some(entry) if primary && !entry.0 => *entry = (true, r.meta.name.to_lowercase()),
+            Some(entry) if rank > entry.0 => *entry = (rank, r.meta.name.to_lowercase()),
             Some(_) => {}
         }
     }
@@ -2914,6 +2924,44 @@ mod tests {
         assert_eq!(view.groups.len(), 1);
         assert_eq!(&*view.groups[0].name, "Google Chrome");
         assert_eq!(view.groups[0].members, 3);
+    }
+
+    /// A fixture shaped like the home machine: the main process is outside the group, so every
+    /// member's parent is outside it and all rank as primary. The helpers have no desktop entry;
+    /// the renderer resolved one and carries the desktop Name.
+    fn home_fixture(desktop: bool) -> Fixture {
+        let mut cat = in_app(rec(50, 900, "cat", 0.0), "chrome", true);
+        Arc::make_mut(&mut cat.meta).app_id = Some("chrome".into());
+        let mut crash = in_app(rec(60, 1, "chrome_crashpad", 0.0), "chrome", true);
+        Arc::make_mut(&mut crash.meta).app_id = Some("chrome".into());
+        let mut render = in_app(rec(101, 900, "Google Chrome", 1.0), "chrome", true);
+        if desktop {
+            Arc::make_mut(&mut render.meta).desktop_path =
+                Some("/usr/share/applications/chrome.desktop".into());
+        } else {
+            Arc::make_mut(&mut render.meta).name = "chrome-renderer".into();
+        }
+        Fixture::new(vec![(cat, None), (crash, None), (render, None)])
+    }
+
+    #[test]
+    fn app_row_uses_desktop_name_when_main_process_is_outside_group() {
+        let view = home_fixture(true).build("", &headers(), CPU_DESC);
+        assert_eq!(&*view.groups[0].name, "Google Chrome");
+        let view = home_fixture(true).build("google", &headers(), CPU_DESC);
+        assert_eq!(view.groups.len(), 1);
+        let view = home_fixture(true).build("cat", &headers(), CPU_DESC);
+        assert!(view.groups.iter().all(|g| &*g.name != "Google Chrome"));
+    }
+
+    #[test]
+    fn app_row_without_desktop_entry_uses_primary_rule() {
+        // No desktop entry: all rank 2, the first member (`cat`) names the row.
+        let view = home_fixture(false).build("", &headers(), CPU_DESC);
+        assert_eq!(&*view.groups[0].name, "cat");
+        // With a parent inside the group the real primary still wins.
+        let view = chrome_fixture(false).build("", &headers(), CPU_DESC);
+        assert_eq!(&*view.groups[0].name, "Google Chrome");
     }
 
     /// Chrome's cat-first fixture, with the main process started from another app (Konsole).
