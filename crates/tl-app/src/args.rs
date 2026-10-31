@@ -63,6 +63,20 @@ pub struct Args {
 pub enum Cmd {
     /// Connect stdin and stdout to this user's engine service (the far end of ssh, ADR-018)
     Bridge,
+    /// Let tasklens windows on other PCs run administrator actions here without a password
+    /// prompt, or stop that, or show whether it is on (ADR-018)
+    RemoteAdmin {
+        #[arg(value_enum)]
+        what: RemoteAdminArg,
+    },
+}
+
+/// Values of `tasklens remote-admin`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteAdminArg {
+    On,
+    Off,
+    Status,
 }
 
 /// Values of `--tab`.
@@ -186,6 +200,24 @@ mod tests {
         let args = parse_from(&["--app-id", "dev", "bridge"]).unwrap();
         assert_eq!(args.command, Some(Cmd::Bridge));
         assert_eq!(args.app_id.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn remote_admin_subcommand() {
+        for (word, what) in [
+            ("on", RemoteAdminArg::On),
+            ("off", RemoteAdminArg::Off),
+            ("status", RemoteAdminArg::Status),
+        ] {
+            let args = parse_from(&["remote-admin", word]).unwrap();
+            assert_eq!(args.command, Some(Cmd::RemoteAdmin { what }));
+        }
+        let err = parse_from(&["remote-admin"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.exit_code(), 2);
+        let err = parse_from(&["remote-admin", "maybe"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]

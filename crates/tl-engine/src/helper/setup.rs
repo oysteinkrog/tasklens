@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn script_usage_exit_2() {
         let fake = rules_root();
-        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off\n";
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off|remote-admin on|off\n";
         for args in [&["bogus"][..], &[]] {
             let (code, out, err) = script(Some(fake.dir.path()), args);
             assert_eq!(code, 2, "{args:?}");
@@ -796,7 +796,7 @@ polkit.addRule(function(action, subject) {
     #[test]
     fn script_polkit_rule_bad_arg() {
         let fake = polkit_root();
-        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off\n";
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off|remote-admin on|off\n";
         for args in [&["polkit-rule", "maybe"][..], &["polkit-rule"]] {
             let (code, out, err) = script(Some(fake.dir.path()), args);
             assert_eq!(code, 2, "{args:?}");

@@ -17,7 +17,7 @@ LC_ALL=C
 export LC_ALL
 
 RULE='SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"'
-USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off'
+USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off|linger on|off|remote-admin on|off'
 
 if [ "$(id -u)" -eq 0 ]; then
     ROOT=""
@@ -39,6 +39,7 @@ SAVED="$STATE_DIR/sensors-saved"
 SAVED_CONF="$STATE_DIR/lm_sensors.before"
 SAVED_ENABLED="$STATE_DIR/lm_sensors-service.enabled"
 POLKIT_RULE="$ROOT/etc/polkit-1/rules.d/49-tasklens.rules"
+REMOTE_ADMIN_RULE="$ROOT/etc/polkit-1/rules.d/49-tasklens-remote-admin.rules"
 
 # Runs an external system command, or prints it in test mode.
 run() {
@@ -250,17 +251,66 @@ polkit_rule_off() {
     echo 'Reverted'
 }
 
-# Lets the user's engine service run with nobody logged in. pkexec sets PKEXEC_UID to the
-# user who asked.
-linger() {
+# Exits unless PKEXEC_UID, which pkexec sets to the user who asked, is a number.
+check_pkexec_uid() {
     case ${PKEXEC_UID-} in
         '' | *[!0-9]*)
             echo 'tasklens-setup: PKEXEC_UID is missing or not a number' >&2
             exit 1
             ;;
     esac
+}
+
+# Lets the user's engine service run with nobody logged in.
+linger() {
+    check_pkexec_uid
     run loginctl "$1-linger" "$PKEXEC_UID"
     if [ "$1" = enable ]; then echo 'Enabled'; else echo 'Reverted'; fi
+}
+
+# ADR-018 Remote root actions: lets the user who asked run tasklens's root actions with no
+# password prompt, from any session, so a tasklens window on another PC can use them over ssh.
+# It covers the three tasklens polkit actions, systemd's manage-units only for a single unit
+# (the action has a "unit" detail) and manage-unit-files. `tasklens remote-admin on|off` runs
+# this through pkexec and saves remote_admin in engine.toml itself, through the engine socket;
+# this script never writes engine.toml.
+remote_admin_on() {
+    check_pkexec_uid
+    user=$(id -nu -- "$PKEXEC_UID" 2>/dev/null) || {
+        echo "tasklens-setup: no user with uid $PKEXEC_UID" >&2
+        exit 1
+    }
+    # The name goes into a JavaScript string, so only these characters are allowed.
+    case $user in
+        '' | -* | *[!A-Za-z0-9._-]*)
+            echo 'tasklens-setup: the user name has characters a polkit rule cannot hold' >&2
+            exit 1
+            ;;
+    esac
+    tmp="$REMOTE_ADMIN_RULE.tmp"
+    cat > "$tmp" <<EOF
+polkit.addRule(function(action, subject) {
+    if (subject.user != "$user") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id == "io.github.oysteinkrog.tasklens.helper" ||
+        action.id == "io.github.oysteinkrog.tasklens.setup" ||
+        action.id == "io.github.oysteinkrog.tasklens.netmon" ||
+        action.id == "org.freedesktop.systemd1.manage-unit-files" ||
+        (action.id == "org.freedesktop.systemd1.manage-units" && action.lookup("unit"))) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});
+EOF
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$REMOTE_ADMIN_RULE"
+    echo 'Enabled'
+}
+
+remote_admin_off() {
+    rm -f "$REMOTE_ADMIN_RULE"
+    echo 'Reverted'
 }
 
 usage() {
@@ -284,6 +334,13 @@ case "${1-}" in
         case "${2-}" in
             on) linger enable ;;
             off) linger disable ;;
+            *) usage ;;
+        esac
+        ;;
+    remote-admin)
+        case "${2-}" in
+            on) remote_admin_on ;;
+            off) remote_admin_off ;;
             *) usage ;;
         esac
         ;;

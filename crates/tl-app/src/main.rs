@@ -31,6 +31,7 @@ mod migrations;
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
+mod remote_admin;
 mod rendering_env;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod settings_store;
@@ -102,6 +103,10 @@ fn main() -> ExitCode {
     // it starts before paths and logging (ADR-018 Remote transport).
     if args.command == Some(args::Cmd::Bridge) {
         return bridge::main(args.app_id.as_deref());
+    }
+    // `tasklens remote-admin` is a terminal command: no display, no window, no log file.
+    if let Some(args::Cmd::RemoteAdmin { what }) = args.command {
+        return remote_admin::main(args.app_id.as_deref(), what);
     }
 
     // Step 1: paths, panic hook, logging.
