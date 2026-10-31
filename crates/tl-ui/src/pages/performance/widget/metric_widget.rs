@@ -6,11 +6,15 @@
 //! shows stats, the bar's bucket when it shows a bar, and the name or the unavailable state. A
 //! sample on another source never reaches it.
 //!
-//! It owns its `ChartView` while it shows a chart and the source is available; the chart is a
-//! cached child view whose geometry is rebuilt only when its series version, scale or size
-//! changes (ADR-009). The widget picks its composition (Cell, Tile or Row, `compose.rs`) from
-//! its forms and the size of its last paint. A resize renders it again only when the
-//! composition or the forms it keeps change.
+//! "Shows" means the forms its composition keeps at its size: a part a narrow Row drops does not
+//! notify it.
+//!
+//! It owns its `ChartView` while it draws a chart or sparkline and the source is available; the
+//! chart is a cached child view whose geometry is rebuilt only when its series version, scale
+//! or size changes (ADR-009). A new Y scale from the source reaches the chart even when nothing
+//! else the widget shows changed. The widget picks its composition (Cell, Tile or Row,
+//! `compose.rs`) from its forms and the size of its last paint. A resize renders it again only
+//! when the composition or the forms it keeps change.
 //!
 //! An unavailable widget shows its name (with the saved device name when the device is gone)
 //! and one centred line: "Not connected", "Not reported by this GPU" or "Needs a newer
@@ -77,8 +81,11 @@ fn bar_bucket(fraction: Option<f32>) -> Option<u16> {
 #[derive(Clone, Debug, PartialEq)]
 struct Shown {
     availability: Availability,
-    /// The forms drawn: the widget's forms the device offers.
+    /// The widget's forms the device offers. The composition is picked from these.
     forms: FormSet,
+    /// The forms the composition keeps at the widget's size. Only these parts are read from
+    /// the source.
+    kept: FormSet,
     name: SharedString,
     value: SharedString,
     stats: SharedString,
@@ -142,6 +149,7 @@ impl MetricWidget {
             shown: Shown {
                 availability: Availability::Gone,
                 forms: FormSet::empty(),
+                kept: FormSet::empty(),
                 name: SharedString::default(),
                 value: SharedString::default(),
                 stats: SharedString::default(),
@@ -255,13 +263,15 @@ impl MetricWidget {
     }
 
     /// The size the container places the widget at. It renders again only when its
-    /// composition changes; otherwise the next paint just uses the size.
+    /// composition or kept forms change; otherwise the next paint just uses the size.
     pub fn set_size(&mut self, area: Size<Pixels>, cx: &mut Context<Self>) {
         if self.size.get() == area {
             return;
         }
         self.size.set(area);
         if self.class_at(area, metrics(cx).ui_scale) != self.class() {
+            self.shown = self.read_shown(cx);
+            self.sync_chart(cx);
             self.notify(cx);
         }
     }
@@ -277,18 +287,20 @@ impl MetricWidget {
         self.refresh(cx);
     }
 
+    /// Reads what the widget shows and notifies when that changed. The chart is synced every
+    /// time: a new Y scale changes only the chart's spec, and the chart renders itself.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let shown = self.read_shown(cx);
-        if shown == self.shown {
-            return;
-        }
+        let changed = shown != self.shown;
         self.shown = shown;
-        self.sync_chart(cx);
-        self.notify(cx);
+        let chart_changed = self.sync_chart(cx);
+        if changed || chart_changed {
+            self.notify(cx);
+        }
     }
 
-    /// What the widget shows from the source now. Parts it does not draw stay empty, so their
-    /// changes never notify it.
+    /// What the widget shows from the source now. Parts its composition does not keep at its
+    /// size stay empty, so their changes never notify it.
     fn read_shown(&self, cx: &App) -> Shown {
         let src = self.source.read(cx);
         let availability = src.availability();
@@ -303,6 +315,11 @@ impl MetricWidget {
         } else {
             FormSet::empty()
         };
+        let kept = if drawn.is_empty() {
+            drawn
+        } else {
+            compose(drawn, self.size.get(), metrics(cx).ui_scale).forms
+        };
         let device = match availability {
             Availability::Gone => self
                 .setting
@@ -312,7 +329,7 @@ impl MetricWidget {
             _ if self.device_prefix => src.device_name().cloned(),
             _ => None,
         };
-        let name = if drawn.contains(FormSet::LABEL) || availability != Availability::Available {
+        let name = if kept.contains(FormSet::LABEL) || availability != Availability::Available {
             match device {
                 Some(d) if !d.is_empty() => format!("{d}{SEP}{}", src.name()).into(),
                 _ => src.name().clone(),
@@ -321,13 +338,13 @@ impl MetricWidget {
             SharedString::default()
         };
         let pick = |form: FormSet, text: &SharedString| {
-            if drawn.contains(form) {
+            if kept.contains(form) {
                 text.clone()
             } else {
                 SharedString::default()
             }
         };
-        let fraction = drawn
+        let fraction = kept
             .contains(FormSet::BAR)
             .then(|| src.bar_fraction())
             .flatten();
@@ -348,21 +365,23 @@ impl MetricWidget {
         Shown {
             availability,
             forms: drawn,
+            kept,
             name,
             value: pick(FormSet::VALUE, src.value_text()),
             stats: pick(FormSet::STATS, src.stats_text()),
             bar,
             fraction,
             reason,
-            series: drawn
+            series: kept
                 .contains(FormSet::CHART)
                 .then(|| src.series())
                 .flatten(),
         }
     }
 
-    /// Creates, updates or drops the chart to match what is shown.
-    fn sync_chart(&mut self, cx: &mut Context<Self>) {
+    /// Creates, updates or drops the chart to match what is shown. Returns whether the chart
+    /// was created or dropped, which the widget must render; a new spec only renders the chart.
+    fn sync_chart(&mut self, cx: &mut Context<Self>) -> bool {
         let src = self.source.read(cx);
         let key = self
             .shown
@@ -375,20 +394,23 @@ impl MetricWidget {
                 format: meta.format,
             });
         let Some(key) = key else {
-            self.chart = None;
             self.chart_key = None;
-            return;
+            return self.chart.take().is_some();
         };
         if self.chart_key == Some(key) && self.chart.is_some() {
-            return;
+            return false;
         }
         self.chart_key = Some(key);
         let spec = chart_spec(key, self.chart_cell, &self.settings, current(cx));
         match &self.chart {
-            Some(chart) => chart.update(cx, |v, cx| v.set_spec(spec, cx)),
+            Some(chart) => {
+                chart.update(cx, |v, cx| v.set_spec(spec, cx));
+                false
+            }
             None => {
                 let hub = self.hub.clone();
                 self.chart = Some(box_chart(spec, spark_labels(key.format), &hub, cx));
+                true
             }
         }
     }
@@ -741,6 +763,12 @@ impl Render for MetricWidget {
         let forms = self.shown.forms;
         let body = if available {
             self.composed = compose(forms, self.size.get(), scale);
+            // The size probe asked for this render after a resize changed the kept forms:
+            // read the parts that are now kept.
+            if self.composed.forms != self.shown.kept {
+                self.shown = self.read_shown(cx);
+                self.sync_chart(cx);
+            }
             let cell = self.composed.composition == Composition::Cell;
             self.style_chart(cell, cx);
             let kept = self.composed.forms;

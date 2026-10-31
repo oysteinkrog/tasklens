@@ -22,6 +22,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::chart::YScale;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::DeviceKey;
@@ -662,4 +663,101 @@ fn overview_widget_sample_notifies_only_its_widgets(cx: &mut TestAppContext) {
         h.widgets.iter().map(|(w, _, _)| w.entity_id()).collect()
     });
     assert_eq!(after, ids);
+}
+
+#[gpui_kit::test]
+fn overview_widget_hidden_parts_do_not_notify(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let util = || selector(DeviceSelector::Key(key(1)), &engine_gpu());
+    let forms = FormSet::VALUE | FormSet::STATS;
+    // Wide enough for the value and the stats; a narrow Row keeps only the value.
+    let wide = r.add(widget(1, util(), forms), 300., 18.);
+    let narrow = r.add(widget(2, util(), forms), 100., 18.);
+    // A narrow Row that drops its sparkline has no chart.
+    let spark = r.add(
+        widget(3, util(), FormSet::VALUE | FormSet::STATS | FormSet::CHART),
+        60.,
+        18.,
+    );
+    assert_eq!(r.read(&wide, |w| w.composed().forms), forms);
+    assert_eq!(r.read(&narrow, |w| w.composed().forms), FormSet::VALUE);
+    assert_eq!(r.read(&spark, |w| w.composed().forms), FormSet::VALUE);
+    assert!(
+        r.read(&spark, |w| w.chart().is_none()),
+        "no hidden sparkline"
+    );
+    assert!(!r.has_part(2, "stats") && !r.has_part(3, "chart"));
+
+    // A new series changes only the stats: the widgets that drop them do not notify.
+    let base: Vec<_> = [&wide, &narrow, &spark]
+        .iter()
+        .map(|w| r.counts(w))
+        .collect();
+    r.util_series(&[10., 30., 20.]);
+    let now: Vec<_> = [&wide, &narrow, &spark]
+        .iter()
+        .map(|w| r.counts(w))
+        .collect();
+    assert_eq!(now[0].0, base[0].0 + 1, "the wide widget shows the stats");
+    assert_eq!(now[1], base[1], "the narrow widget hides them");
+    assert_eq!(now[2], base[2], "the sparkline widget hides them");
+    let stats = |r: &mut Rig, w: &Entity<MetricWidget>| r.read(w, |w| w.texts()[2].to_string());
+    assert_eq!(stats(&mut r, &wide), "min 10.0%  avg 20.0%  peak 30.0%");
+    assert!(stats(&mut r, &narrow).is_empty());
+
+    // Widened, the narrow widget keeps the stats and shows the current text.
+    let host = r.host.clone();
+    r.vcx.update(|_, cx| {
+        host.update(cx, |h, cx| {
+            h.widgets[1].1 = 300.;
+            h.widgets[2].1 = 400.;
+            cx.notify();
+        })
+    });
+    draw(r.vcx);
+    assert_eq!(r.read(&narrow, |w| w.composed().forms), forms);
+    assert_eq!(stats(&mut r, &narrow), "min 10.0%  avg 20.0%  peak 30.0%");
+    assert!(r.has_part(2, "stats"));
+    assert!(
+        r.read(&spark, |w| w.chart().is_some()),
+        "the sparkline is back"
+    );
+    assert!(r.has_part(3, "chart"));
+}
+
+#[gpui_kit::test]
+fn overview_widget_chart_follows_source_scale(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    // A chart alone on VRAM: its Y scale is the card's total.
+    let chart = r.add(
+        widget(
+            1,
+            selector(DeviceSelector::Key(key(1)), "vram"),
+            FormSet::CHART,
+        ),
+        240.,
+        120.,
+    );
+    let y = |r: &mut Rig| {
+        let view = r.read(&chart, |w| w.chart().cloned()).expect("chart");
+        r.vcx.read_entity(&view, |v, _| v.spec.y)
+    };
+    assert_eq!(y(&mut r), YScale::FixedTotal((16 * GIB) as f32));
+    let (notified, _) = r.counts(&chart);
+
+    // A new total keeps the series and the forms; only the chart's scale changes.
+    r.system(|s| {
+        let mut a = gpu_totals(GPU_A, 25.);
+        a.mem_total = Metric::valid(24 * GIB);
+        s.gpus = Arc::from([
+            (DeviceIdx(GPU_A), a),
+            (DeviceIdx(GPU_B), gpu_totals(GPU_B, 50.)),
+        ]);
+    });
+    assert_eq!(y(&mut r), YScale::FixedTotal((24 * GIB) as f32));
+    assert_eq!(
+        r.counts(&chart).0,
+        notified,
+        "the widget itself shows nothing new"
+    );
 }
