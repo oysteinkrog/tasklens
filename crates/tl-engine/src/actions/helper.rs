@@ -28,8 +28,8 @@ use tl_model::helper_proto::{
 use tl_model::ids::ProcessKey;
 
 use super::{
-    ActionCtx, Emitter, HelperCallError, PROMPT_DEADLINE, PrivilegedOps, QUICK_DEADLINE, dump,
-    emit, event, internal_error, kind_name, summarize, target_pid, with_deadline,
+    ActionCtx, Emitter, HelperCallError, PROMPT_DEADLINE, PrivilegedOps, Progress, QUICK_DEADLINE,
+    dump, emit, event, internal_error, kind_name, summarize, target_pid, with_deadline,
 };
 use crate::helper::HelperHandle;
 
@@ -73,7 +73,7 @@ enum Route {
 /// The arguments `dump::run_target` needs besides the context.
 struct DumpArgs {
     mode: DumpMode,
-    path: Arc<str>,
+    name: Arc<str>,
     key: ProcessKey,
 }
 
@@ -140,7 +140,9 @@ pub(super) async fn run_privileged(
             states[i] = match route {
                 Route::Call(call) => run.call(cx, call).await,
                 Route::Dump(d) => {
-                    AssertUnwindSafe(dump::run_target(cx, actx, d.mode, &d.path, d.key, true))
+                    let progress = Progress::new(events, req.id, i);
+                    let dump = dump::run_target(cx, actx, d.mode, &d.name, d.key, true, &progress);
+                    AssertUnwindSafe(dump)
                         .catch_unwind()
                         .await
                         .unwrap_or_else(|_| internal_error())
@@ -207,9 +209,9 @@ fn route(kind: &ActionKind, target: &ActionTarget) -> Option<Route> {
         (K::FreezeGroup, T::Cgroup(cg)) => Some(call(HelperRequest::FreezeGroup(cgroup(cg)))),
         (K::ThawGroup, T::Cgroup(cg)) => Some(call(HelperRequest::ThawGroup(cgroup(cg)))),
         (K::KillGroup, T::Cgroup(cg)) => Some(call(HelperRequest::KillGroup(cgroup(cg)))),
-        (K::Dump { mode, path }, T::Process(key)) => Some(Route::Dump(DumpArgs {
+        (K::Dump { mode, name }, T::Process(key)) => Some(Route::Dump(DumpArgs {
             mode: *mode,
-            path: Arc::clone(path),
+            name: Arc::clone(name),
             key: *key,
         })),
         _ => None,

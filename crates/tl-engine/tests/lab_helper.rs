@@ -1241,7 +1241,7 @@ fn unprivileged_never_touches_helper() {
         rel_path: Arc::from("user.slice/app.slice/app-a.scope"),
         cgroup_id: 42,
     });
-    let dump_path = Arc::from("/var/tmp/claude/qfx.17-state/dumps/a.core");
+    let dump_name = Arc::from("a.core");
     let cases = [
         (ActionKind::Signal(Signal::Term), procs(&[11, 12])),
         (ActionKind::Suspend, procs(&[11])),
@@ -1251,7 +1251,7 @@ fn unprivileged_never_touches_helper() {
         (
             ActionKind::Dump {
                 mode: DumpMode::Mini,
-                path: dump_path,
+                name: dump_name,
             },
             procs(&[11]),
         ),
@@ -1305,8 +1305,9 @@ fn privileged_dump_through_helper() {
     lock(&fake.state).answers = [Answer::Replies(1)].into();
     let kind = ActionKind::Dump {
         mode: DumpMode::Mini,
-        path: Arc::from(file.to_str().expect("utf-8 path")),
+        name: Arc::from("a.core"),
     };
+    let saved = ActionState::Saved(Arc::from(file.to_str().expect("utf-8 path")));
     let events = run_request(
         lab(27),
         env,
@@ -1314,14 +1315,7 @@ fn privileged_dump_through_helper() {
         true,
         action(kind, procs(&[11]), true),
     );
-    assert_eq!(
-        events,
-        [
-            STARTED,
-            (Some(0), ActionState::Succeeded),
-            (None, ActionState::Succeeded)
-        ]
-    );
+    assert_eq!(events, [STARTED, (Some(0), saved.clone()), (None, saved)]);
     let want = HelperRequest::Dump {
         key: pkey(11),
         mode: DumpMode::Mini,

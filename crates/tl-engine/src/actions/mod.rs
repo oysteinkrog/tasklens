@@ -244,10 +244,7 @@ pub fn map_ops_error(e: &OpsError) -> ActionState {
 pub fn summarize(states: &[ActionState]) -> ActionState {
     let worst = ActionState::summarize(states);
     if states.len() > 1 && matches!(worst, ActionState::Failed(_)) {
-        let done = states
-            .iter()
-            .filter(|s| matches!(s, ActionState::Succeeded))
-            .count();
+        let done = states.iter().filter(|s| s.is_success()).count();
         return ActionState::Failed(ActionError::Partial {
             done: index_u16(done),
             total: index_u16(states.len()),
@@ -851,12 +848,14 @@ impl Drop for Gate {
 /// The `RequestEnd` an action with final summary `state` ends with.
 pub fn action_end(state: &ActionState) -> RequestEnd {
     match state {
-        ActionState::Succeeded => RequestEnd::Done,
+        ActionState::Succeeded | ActionState::Saved(_) => RequestEnd::Done,
         ActionState::Rejected(RejectReason::Busy) => RequestEnd::Busy,
+        // A summary is never `Started` or `Progress`.
         ActionState::Rejected(_)
         | ActionState::Failed(_)
         | ActionState::OutcomeUnknown(_)
-        | ActionState::Started => RequestEnd::Failed,
+        | ActionState::Started
+        | ActionState::Progress { .. } => RequestEnd::Failed,
     }
 }
 
@@ -954,6 +953,7 @@ type Dispatch = for<'a> fn(
     &'a ActionCtx,
     &'a ActionKind,
     &'a ActionTarget,
+    &'a Progress<'a>,
 ) -> Pin<Box<dyn Future<Output = ActionState> + Send + 'a>>;
 
 /// One admitted request: `Started`, one final state per target, one summary with
@@ -1099,10 +1099,11 @@ async fn run_body(
             if cx.is_cancel_requested() {
                 return None;
             }
+            let progress = Progress::new(events, req.id, i);
             let state = match (per_target.get(i).copied().flatten(), tree.as_mut()) {
                 (Some(reason), _) => ActionState::Rejected(reason),
                 (None, Some(tree)) => tree.next().unwrap_or_else(internal_error),
-                (None, None) => run_target(cx, actx, &req.kind, target, dispatch).await,
+                (None, None) => run_target(cx, actx, &req.kind, target, &progress, dispatch).await,
             };
             tracing::info!(
                 target: "tasklens::action",
@@ -1145,9 +1146,10 @@ async fn run_target(
     actx: &ActionCtx,
     kind: &ActionKind,
     target: &ActionTarget,
+    progress: &Progress<'_>,
     dispatch: Dispatch,
 ) -> ActionState {
-    AssertUnwindSafe(dispatch(cx, actx, kind, target))
+    AssertUnwindSafe(dispatch(cx, actx, kind, target, progress))
         .catch_unwind()
         .await
         .unwrap_or_else(|_| internal_error())
@@ -1158,8 +1160,9 @@ fn dispatch_boxed<'a>(
     actx: &'a ActionCtx,
     kind: &'a ActionKind,
     target: &'a ActionTarget,
+    progress: &'a Progress<'a>,
 ) -> Pin<Box<dyn Future<Output = ActionState> + Send + 'a>> {
-    Box::pin(dispatch(cx, actx, kind, target))
+    Box::pin(dispatch(cx, actx, kind, target, progress))
 }
 
 /// The `(kind, target)` table (E11-A2). No arm matches every kind, so a new `ActionKind` does not
@@ -1172,7 +1175,7 @@ fn dispatch_boxed<'a>(
 ///   `recovery::run_target`
 /// - `Startup` × `Startup*` → `startup::run_target`
 /// - `Socket` × `SockDestroy` → `socket::run_target`
-/// - `Process` × `Dump` → `dump::run_target`
+/// - `Process` × `Dump` → `dump::run_target`, which reports progress through `progress`
 ///
 /// Every other pair is `Rejected(Unsupported)`. `KillTree` runs in `run_tree` and the targetless
 /// kinds in `targetless::run`, so they never reach this function.
@@ -1181,6 +1184,7 @@ async fn dispatch(
     actx: &ActionCtx,
     kind: &ActionKind,
     target: &ActionTarget,
+    progress: &Progress<'_>,
 ) -> ActionState {
     use ActionKind as K;
     use ActionTarget as T;
@@ -1231,8 +1235,8 @@ async fn dispatch(
         ) => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
         // A privileged dump goes through `helper::run_privileged`, so this call is the
         // unprivileged one.
-        (K::Dump { mode, path }, T::Process(key)) => {
-            dump::run_target(cx, actx, *mode, path, *key, false).await
+        (K::Dump { mode, name }, T::Process(key)) => {
+            dump::run_target(cx, actx, *mode, name, *key, false, progress).await
         }
         // The mismatched pairs, one arm per kind group.
         (
@@ -1329,6 +1333,50 @@ impl Emitter<'_> {
             Poll::Ready(Some(sent))
         })
         .await
+    }
+}
+
+/// Where a running target reports progress: `ActionState::Progress` events for one target of
+/// one action (ADR-005, ADR-018). A report never waits: one that finds the queue full is
+/// dropped, as the next one replaces it. None goes out after the action has ended.
+pub struct Progress<'a> {
+    events: Option<&'a Emitter<'a>>,
+    id: ActionId,
+    target: usize,
+}
+
+impl<'a> Progress<'a> {
+    fn new(events: &'a Emitter<'a>, id: ActionId, target: usize) -> Self {
+        Progress {
+            events: Some(events),
+            id,
+            target,
+        }
+    }
+
+    /// Reports nothing. For calls that have no action events, such as tests of one target.
+    pub fn none() -> Progress<'static> {
+        Progress {
+            events: None,
+            id: ActionId(0),
+            target: 0,
+        }
+    }
+
+    /// Sends `Progress { bytes }` for this target unless the action has ended.
+    pub fn report(&self, bytes: u64) {
+        let Some(events) = self.events else {
+            return;
+        };
+        let ended = events.ended.lock();
+        if *ended {
+            events.ended.count_late();
+            return;
+        }
+        let ev = event(self.id, Some(self.target), ActionState::Progress { bytes });
+        if events.events.try_send(ev).is_err() {
+            tracing::debug!(target: "tasklens::action", id = self.id.0, "progress event dropped: queue full or closed");
+        }
     }
 }
 
@@ -2109,7 +2157,7 @@ mod tests {
             ActionKind::KillGroup,
             ActionKind::Dump {
                 mode: DumpMode::Mini,
-                path: Arc::from("/tmp/x.core"),
+                name: Arc::from("x.core"),
             },
             ActionKind::UnitStart,
             ActionKind::UnitStop,
@@ -2405,7 +2453,7 @@ mod tests {
                 let cx = Cx::current().expect("task has a Cx");
                 let (actx, _events, _msgs) = ctx();
                 for (kind, target) in &pairs {
-                    let state = dispatch(&cx, &actx, kind, target).await;
+                    let state = dispatch(&cx, &actx, kind, target, &Progress::none()).await;
                     assert_eq!(state, unsupported, "{kind:?} on {target:?}");
                 }
             })
@@ -2557,6 +2605,7 @@ mod run_tests {
         _: &'a ActionCtx,
         kind: &'a ActionKind,
         t: &'a ActionTarget,
+        _: &'a Progress<'a>,
     ) -> Boxed<'a> {
         Box::pin(async move {
             let d = deadline(kind, Some(t), false);
@@ -2573,6 +2622,7 @@ mod run_tests {
         _: &'a ActionCtx,
         _: &'a ActionKind,
         t: &'a ActionTarget,
+        _: &'a Progress<'a>,
     ) -> Boxed<'a> {
         Box::pin(async move {
             match target_pid(t) {
@@ -2587,6 +2637,7 @@ mod run_tests {
         _: &'a ActionCtx,
         _: &'a ActionKind,
         _: &'a ActionTarget,
+        _: &'a Progress<'a>,
     ) -> Boxed<'a> {
         Box::pin(async move { panic!("fake op panicked") })
     }
@@ -2596,12 +2647,61 @@ mod run_tests {
         _: &'a ActionCtx,
         _: &'a ActionKind,
         _: &'a ActionTarget,
+        _: &'a Progress<'a>,
     ) -> Boxed<'a> {
         Box::pin(async move { ActionState::Succeeded })
     }
 
     fn failed(e: ActionError) -> ActionState {
         ActionState::Failed(e)
+    }
+
+    const SAVED: &str = "/s/tasklens/dumps/x_1.core";
+
+    /// Reports 100 and then 250 bytes, then ends as a dump does.
+    fn reports_progress<'a>(
+        _: &'a Cx,
+        _: &'a ActionCtx,
+        _: &'a ActionKind,
+        _: &'a ActionTarget,
+        progress: &'a Progress<'a>,
+    ) -> Boxed<'a> {
+        Box::pin(async move {
+            progress.report(100);
+            progress.report(250);
+            ActionState::Saved(Arc::from(SAVED))
+        })
+    }
+
+    /// ADR-005 as ADR-018 changes it: `Started`, the target's progress in order, its final state,
+    /// then the summary. A one-target dump's summary keeps the path, and the action ends `Done`.
+    #[test]
+    fn progress_events_in_order() {
+        let mut rig = Rig::new();
+        let req = ActionRequest {
+            id: ActionId(1),
+            kind: ActionKind::Dump {
+                mode: tl_model::actions::DumpMode::Mini,
+                name: Arc::from("x_1.core"),
+            },
+            targets: smallvec::smallvec![ActionTarget::Process(key(1))],
+            privileged: false,
+        };
+        rig.start(req, vec![None], reports_progress);
+        let saved = ActionState::Saved(Arc::from(SAVED));
+        assert_eq!(
+            rig.events(),
+            vec![
+                (None, ActionState::Started),
+                (Some(0), ActionState::Progress { bytes: 100 }),
+                (Some(0), ActionState::Progress { bytes: 250 }),
+                (Some(0), saved.clone()),
+                (None, saved.clone()),
+            ]
+        );
+        assert_eq!(action_end(&saved), RequestEnd::Done);
+        assert_eq!(rig.finished(), 1);
+        rig.passed();
     }
 
     /// ADR-018, q4x76.17: the action's end is its last event. An event queue of one holds each

@@ -2351,10 +2351,11 @@ fn dump_path(dumps: &std::path::Path, name: &str) -> String {
     dumps.join(name).to_str().expect("a UTF-8 path").to_owned()
 }
 
-fn dump_kind(dumps: &std::path::Path, name: &str) -> ActionKind {
+/// A `Dump` of file `name`; the engine puts it in `dumps`, which the request does not carry.
+fn dump_kind(_dumps: &std::path::Path, name: &str) -> ActionKind {
     ActionKind::Dump {
         mode: DumpMode::Mini,
-        path: Arc::from(dump_path(dumps, name)),
+        name: Arc::from(name),
     }
 }
 
@@ -2433,9 +2434,11 @@ fn dump_through_pipeline_has_no_deadline() {
     h.submit(req(1, dump_kind(&p3.dumps, "app.core"), &procs(&[500])));
     h.run();
     h.advance(Duration::ZERO);
+    // The engine chose the full path and reports it in the end event.
+    let saved = ActionState::Saved(Arc::from(dump_path(&p3.dumps, "app.core")));
     assert_eq!(
         h.events_for(ActionId(1)),
-        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+        expected(std::slice::from_ref(&saved), saved.clone())
     );
     assert_eq!(h.finished(), [ActionId(1)]);
     assert_eq!(h.ops.calls(), [FakeCall::Dump(500)]);
@@ -2451,10 +2454,11 @@ fn dump_failure_through_pipeline_leaves_no_file() {
     let tmp = scratch();
     let (mut h, p3) = harness_p3(&tmp, None);
     h.ops.script(500, &[eperm()]);
-    // A path outside the dumps directory is refused before anything runs.
+    // A name that is a path, even one outside the dumps directory, is refused before anything
+    // runs.
     let outside = ActionKind::Dump {
         mode: DumpMode::Full,
-        path: Arc::from(dump_path(tmp.path(), "x.core")),
+        name: Arc::from(dump_path(tmp.path(), "x.core")),
     };
     h.submit(req(1, dump_kind(&p3.dumps, "app.core"), &procs(&[500])));
     h.submit(req(2, outside, &procs(&[501])));

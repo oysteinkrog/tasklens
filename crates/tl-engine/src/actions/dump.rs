@@ -2,16 +2,22 @@
 //! runs `tl_ops::dump::dump_to_path` itself. A privileged request instead opens the output file
 //! here and passes the descriptor to the helper, which never receives a path (R-145).
 //!
+//! The request carries a file name only. The engine puts it in its own `<state_dir>/dumps/` and
+//! returns the full path in the target's final state, `Saved(path)`: a path on a host is always
+//! chosen by that host's engine (ADR-018). While the dump runs, the engine reads the file size
+//! every 500 ms and reports it as `Progress { bytes }` (ADR-005).
+//!
 //! Core files hold process memory: they are created with mode `0600` and never read or logged.
-//! The path is logged at debug only. The action has no deadline; the UI reads the file size for
-//! progress.
+//! The path is logged at debug only. The action has no deadline.
 
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use asupersync::Cx;
+use asupersync::time;
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use tl_model::actions::{ActionError, ActionState, DumpMode, RejectReason};
@@ -19,7 +25,7 @@ use tl_model::health::HelperState;
 use tl_model::helper_proto::{HelperError, HelperReplyBody, HelperRequest};
 use tl_model::ids::ProcessKey;
 
-use super::{ActionCtx, HelperCallError, PROMPT_DEADLINE, internal_error, map_ops_error};
+use super::{ActionCtx, HelperCallError, PROMPT_DEADLINE, Progress, internal_error, map_ops_error};
 use crate::config::EngineConfig;
 
 /// The dumps directory is created with this mode when missing.
@@ -34,57 +40,86 @@ const HELPER_NO_ANSWER: &str = "no answer from the administrator helper";
 const HELPER_STOPPED: &str = "administrator helper stopped";
 /// The `Internal` text when the helper refused the request.
 const HELPER_REFUSED: &str = "refused by the administrator helper";
+/// How often a running dump reports the size of its file.
+pub const PROGRESS_EVERY: Duration = Duration::from_millis(500);
 
 /// `$XDG_STATE_HOME/tasklens/dumps/` (UI-PWN-034).
 pub fn dumps_dir(config: &EngineConfig) -> PathBuf {
     config.state_dir.join("dumps")
 }
 
-/// True when `path` is absolute, its parent is `dir` (component compare, no canonicalisation)
-/// and its file name matches `^[A-Za-z0-9._-]+\.core$`. The engine writes nowhere else.
-pub fn valid_dump_path(path: &str, dir: &Path) -> bool {
-    if !Path::new(path).is_absolute() {
-        return false;
-    }
-    // Split on the raw text, so a trailing "/." or "/" cannot hide the real last component.
-    let Some((parent, name)) = path.rsplit_once('/') else {
-        return false;
-    };
-    let name_ok = name.len() > DUMP_SUFFIX.len()
+/// True when `name` is a bare file name matching `^[A-Za-z0-9._-]+\.core$`: no path separator,
+/// not `.` or `..`. The engine joins it to its dumps dir and writes nowhere else.
+pub fn valid_dump_name(name: &str) -> bool {
+    name.len() > DUMP_SUFFIX.len()
         && name.ends_with(DUMP_SUFFIX)
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.contains('/')
         && name != "."
-        && name != "..";
-    name_ok && Path::new(parent).components().eq(dir.components())
+        && name != ".."
 }
 
-/// Runs one `Dump` on one `Process` target. `privileged` routes it through the helper.
+/// Runs one `Dump` on one `Process` target into `<dumps dir>/<name>`. `privileged` routes it
+/// through the helper. A success is `Saved` with the full path.
 pub async fn run_target(
     cx: &Cx,
     actx: &ActionCtx,
     mode: DumpMode,
-    path: &str,
+    name: &str,
     key: ProcessKey,
     privileged: bool,
+    progress: &Progress<'_>,
 ) -> ActionState {
-    let dir = dumps_dir(&actx.config);
-    if !valid_dump_path(path, &dir) {
+    if !valid_dump_name(name) {
         return ActionState::Rejected(RejectReason::Unsupported);
     }
     // UI tooltip "Install gdb to create dumps".
     if !actx.ops.dump_available() {
         return ActionState::Rejected(RejectReason::Unsupported);
     }
-    let path = PathBuf::from(path);
-    let state = if privileged {
-        through_helper(cx, actx, mode, dir, path.clone(), key).await
-    } else {
-        direct(cx, actx, mode, dir, path.clone(), key).await
+    let dir = dumps_dir(&actx.config);
+    let path = dir.join(name);
+    // The state dir is UTF-8 in practice; a path that is not cannot be reported.
+    let Some(full) = path.to_str().map(Arc::<str>::from) else {
+        return ActionState::Rejected(RejectReason::Unsupported);
+    };
+    let job = async {
+        if privileged {
+            through_helper(cx, actx, mode, dir, path.clone(), key).await
+        } else {
+            direct(cx, actx, mode, dir, path.clone(), key).await
+        }
+    };
+    let state = match with_progress(cx, &path, progress, job).await {
+        ActionState::Succeeded => ActionState::Saved(full),
+        other => other,
     };
     tracing::debug!(target: "tasklens::action", pid = key.pid, ?mode, path = %path.display(), result = ?state);
     state
+}
+
+/// Awaits `job`. Every [`PROGRESS_EVERY`] while it runs, reads the size of `path` and reports it;
+/// nothing is reported while the file does not exist yet. One `stat` of a file in the state dir
+/// is cheap enough for the engine's own thread.
+async fn with_progress<T>(
+    cx: &Cx,
+    path: &Path,
+    progress: &Progress<'_>,
+    job: impl Future<Output = T>,
+) -> T {
+    let mut job = std::pin::pin!(job);
+    loop {
+        match time::timeout(cx.now(), PROGRESS_EVERY, job.as_mut()).await {
+            Ok(out) => return out,
+            Err(_) => {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    progress.report(meta.len());
+                }
+            }
+        }
+    }
 }
 
 /// Dumps in this process on the blocking pool, with no deadline. tl-ops removes the file when
@@ -220,20 +255,19 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::pin::Pin;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use asupersync::channel::mpsc;
     use asupersync::time::{TimeSource, TimerDriverHandle, VirtualClock};
     use asupersync::types::{Budget, Time};
     use asupersync::{LabConfig, LabRuntime};
-    use tl_model::actions::{ActionKind, ActionTarget, CgroupRef};
+    use tl_model::actions::{ActionEvent, ActionId, ActionKind, ActionTarget, CgroupRef};
     use tl_model::helper_proto::HelperReply;
     use tl_model::time::BootId;
     use tl_ops::OpsError;
 
     use super::*;
-    use crate::actions::{ActionOps, PrivilegedOps, RealOps};
+    use crate::actions::{ActionOps, Emitter, EndLock, PrivilegedOps, RealOps};
     use crate::config::EngineMode;
     use crate::dbus::ManagerConnSlot;
 
@@ -369,14 +403,19 @@ mod tests {
         ms: u64,
     }
 
-    /// Runs one dump of `key()` to `path` and returns its state, the fake's call log and the
-    /// virtual time in ms when the state was ready.
+    /// `Saved` with `path`.
+    fn saved(path: &Path) -> ActionState {
+        ActionState::Saved(Arc::from(path_str(path)))
+    }
+
+    /// Runs one dump of `key()` to file `name` and returns its state, the fake's call log and
+    /// the virtual time in ms when the state was ready.
     fn run(
         dir: &StateDir,
         available: bool,
         step: Step,
         helper: Option<Arc<FakeHelper>>,
-        path: &str,
+        name: &str,
         privileged: bool,
     ) -> Run {
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
@@ -409,13 +448,15 @@ mod tests {
         let out = Arc::new(Mutex::new(None));
         let out_task = Arc::clone(&out);
         let task_clock = Arc::clone(&clock);
-        let path = path.to_string();
+        let name = name.to_string();
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task, _handle) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                let state = run_target(&cx, &actx, DumpMode::Full, &path, key(), privileged).await;
+                let none = Progress::none();
+                let state =
+                    run_target(&cx, &actx, DumpMode::Full, &name, key(), privileged, &none).await;
                 let ms = task_clock.now().as_nanos() / 1_000_000;
                 *out_task.lock().unwrap() = Some((state, ms));
             })
@@ -434,29 +475,30 @@ mod tests {
     }
 
     #[test]
-    fn dump_path_validation() {
-        let dir = Path::new("/home/u/.local/state/tasklens/dumps");
-        let d = "/home/u/.local/state/tasklens/dumps";
-        assert!(valid_dump_path(&format!("{d}/{NAME}"), dir));
-        assert!(valid_dump_path(&format!("{d}/a-b_c.1.core"), dir));
-        // Security regression: nothing outside the dumps dir, no other suffix, no sub dirs.
+    fn dump_name_validation() {
+        assert!(valid_dump_name(NAME));
+        assert!(valid_dump_name("a-b_c.1.core"));
+        assert!(valid_dump_name("..core"));
+        // Security regression: a bare file name only, so nothing lands outside the dumps dir.
         for bad in [
-            format!("{d}/../x.core"),
-            "/tmp/x.core".to_string(),
-            format!("{d}/x.txt"),
-            format!("{d}/sub/x.core"),
-            format!("{d}/.core"),
-            format!("{d}/x.core/."),
-            format!("{d}/x.core/"),
-            format!("{d}/x y.core"),
-            format!("{d}/x\0.core"),
-            format!("{d}/../dumps/x.core"),
-            "x.core".to_string(),
-            "dumps/x.core".to_string(),
-            d.to_string(),
-            String::new(),
+            "../x.core",
+            "/tmp/x.core",
+            "sub/x.core",
+            "dumps/x.core",
+            "x.core/",
+            "x.core/.",
+            "../dumps/x.core",
+            "/home/u/.local/state/tasklens/dumps/x.core",
+            "x.txt",
+            ".core",
+            "x y.core",
+            "x\0.core",
+            "x\\y.core",
+            ".",
+            "..",
+            "",
         ] {
-            assert!(!valid_dump_path(&bad, dir), "{bad:?}");
+            assert!(!valid_dump_name(bad), "{bad:?}");
         }
     }
 
@@ -470,8 +512,9 @@ mod tests {
     fn dump_direct_ok() {
         let dir = StateDir::new("direct-ok");
         let path = dir.dump_path();
-        let r = run(&dir, true, Step::Ok, None, path_str(&path), false);
-        assert_eq!(r.state, ActionState::Succeeded);
+        let r = run(&dir, true, Step::Ok, None, NAME, false);
+        // The engine chose the full path and reports it.
+        assert_eq!(r.state, saved(&path));
         assert_eq!(r.log, [(key(), DumpMode::Full, path.clone())]);
         // The dumps dir was created with mode 0700.
         let meta = fs::metadata(path.parent().unwrap()).expect("dumps dir exists");
@@ -481,13 +524,12 @@ mod tests {
     #[test]
     fn dump_direct_permission_denied() {
         let dir = StateDir::new("direct-eperm");
-        let path = dir.dump_path();
         let r = run(
             &dir,
             true,
             Step::Err(OpsError::PermissionDenied),
             None,
-            path_str(&path),
+            NAME,
             false,
         );
         assert_eq!(r.state, ActionState::Failed(ActionError::PermissionDenied));
@@ -496,13 +538,12 @@ mod tests {
     #[test]
     fn dump_direct_identity_changed() {
         let dir = StateDir::new("direct-identity");
-        let path = dir.dump_path();
         let r = run(
             &dir,
             true,
             Step::Err(OpsError::IdentityChanged),
             None,
-            path_str(&path),
+            NAME,
             false,
         );
         assert_eq!(
@@ -511,12 +552,19 @@ mod tests {
         );
     }
 
+    /// Security regression: a name with a path in it is refused before anything runs.
     #[test]
-    fn dump_invalid_path_rejected() {
-        let dir = StateDir::new("invalid-path");
-        let r = run(&dir, true, Step::Ok, None, "/tmp/x.core", false);
-        assert_eq!(r.state, ActionState::Rejected(RejectReason::Unsupported));
-        assert!(r.log.is_empty());
+    fn dump_invalid_name_rejected() {
+        let dir = StateDir::new("invalid-name");
+        for name in ["/tmp/x.core", "../x.core", "sub/x.core"] {
+            let r = run(&dir, true, Step::Ok, None, name, false);
+            assert_eq!(
+                r.state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{name}"
+            );
+            assert!(r.log.is_empty(), "{name}");
+        }
     }
 
     #[test]
@@ -524,15 +572,8 @@ mod tests {
         let dir = StateDir::new("priv-ok");
         let path = dir.dump_path();
         let h = helper(Ok(HelperReplyBody::Ok));
-        let r = run(
-            &dir,
-            true,
-            Step::Ok,
-            Some(Arc::clone(&h)),
-            path_str(&path),
-            true,
-        );
-        assert_eq!(r.state, ActionState::Succeeded);
+        let r = run(&dir, true, Step::Ok, Some(Arc::clone(&h)), NAME, true);
+        assert_eq!(r.state, saved(&path));
         // The engine never dumps itself on the privileged path.
         assert!(r.log.is_empty());
         let calls = h.calls.lock().unwrap().clone();
@@ -557,14 +598,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"keep").unwrap();
         let h = helper(Ok(HelperReplyBody::Ok));
-        let r = run(
-            &dir,
-            true,
-            Step::Ok,
-            Some(Arc::clone(&h)),
-            path_str(&path),
-            true,
-        );
+        let r = run(&dir, true, Step::Ok, Some(Arc::clone(&h)), NAME, true);
         assert_eq!(
             r.state,
             ActionState::Failed(ActionError::Os(Errno::EXIST.raw_os_error()))
@@ -578,14 +612,7 @@ mod tests {
         let dir = StateDir::new("priv-identity");
         let path = dir.dump_path();
         let h = helper(Ok(HelperReplyBody::Err(HelperError::IdentityChanged)));
-        let r = run(
-            &dir,
-            true,
-            Step::Ok,
-            Some(Arc::clone(&h)),
-            path_str(&path),
-            true,
-        );
+        let r = run(&dir, true, Step::Ok, Some(Arc::clone(&h)), NAME, true);
         assert_eq!(
             r.state,
             ActionState::Rejected(RejectReason::IdentityChanged)
@@ -633,14 +660,7 @@ mod tests {
         for (i, (answer, want)) in cases.into_iter().enumerate() {
             let dir = StateDir::new(&format!("priv-err-{i}"));
             let path = dir.dump_path();
-            let r = run(
-                &dir,
-                true,
-                Step::Ok,
-                Some(helper(answer)),
-                path_str(&path),
-                true,
-            );
+            let r = run(&dir, true, Step::Ok, Some(helper(answer)), NAME, true);
             assert_eq!(r.state, want, "case {i}");
             assert!(!path.exists(), "case {i}: file left behind");
         }
@@ -650,7 +670,7 @@ mod tests {
     fn dump_privileged_without_helper_unsupported() {
         let dir = StateDir::new("priv-missing");
         let path = dir.dump_path();
-        let r = run(&dir, true, Step::Ok, None, path_str(&path), true);
+        let r = run(&dir, true, Step::Ok, None, NAME, true);
         assert_eq!(r.state, ActionState::Rejected(RejectReason::Unsupported));
 
         let missing = Arc::new(FakeHelper {
@@ -658,14 +678,7 @@ mod tests {
             answer: Ok(HelperReplyBody::Ok),
             calls: Mutex::new(Vec::new()),
         });
-        let r = run(
-            &dir,
-            true,
-            Step::Ok,
-            Some(Arc::clone(&missing)),
-            path_str(&path),
-            true,
-        );
+        let r = run(&dir, true, Step::Ok, Some(Arc::clone(&missing)), NAME, true);
         assert_eq!(r.state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(missing.calls.lock().unwrap().is_empty());
         assert!(!path.exists());
@@ -675,19 +688,13 @@ mod tests {
     fn dump_without_gdb_unsupported() {
         let dir = StateDir::new("no-gdb");
         let path = dir.dump_path();
-        let r = run(&dir, false, Step::Ok, None, path_str(&path), false);
+        let r = run(&dir, false, Step::Ok, None, NAME, false);
         assert_eq!(r.state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(r.log.is_empty());
+        assert!(!path.exists());
 
         let h = helper(Ok(HelperReplyBody::Ok));
-        let r = run(
-            &dir,
-            false,
-            Step::Ok,
-            Some(Arc::clone(&h)),
-            path_str(&path),
-            true,
-        );
+        let r = run(&dir, false, Step::Ok, Some(Arc::clone(&h)), NAME, true);
         assert_eq!(r.state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(h.calls.lock().unwrap().is_empty());
     }
@@ -701,10 +708,10 @@ mod tests {
             true,
             Step::Block(Duration::from_secs(3)),
             None,
-            path_str(&path),
+            NAME,
             false,
         );
-        assert_eq!(r.state, ActionState::Succeeded);
+        assert_eq!(r.state, saved(&path));
         // The fake moved the clock 3 s, past every quick deadline.
         assert!(r.ms >= 3_000, "{} ms", r.ms);
     }
@@ -739,7 +746,7 @@ mod tests {
         });
         let kind = ActionKind::Dump {
             mode: DumpMode::Mini,
-            path: Arc::from(path_str(&path)),
+            name: Arc::from(NAME),
         };
         let out = Arc::new(Mutex::new(Vec::new()));
         let out_task = Arc::clone(&out);
@@ -760,7 +767,8 @@ mod tests {
                     ActionTarget::Process(key()),
                 ];
                 for t in &targets {
-                    let state = crate::actions::dispatch(&cx, &actx, &kind, t).await;
+                    let none = Progress::none();
+                    let state = crate::actions::dispatch(&cx, &actx, &kind, t, &none).await;
                     out_task.lock().unwrap().push(state);
                 }
             })
@@ -774,13 +782,98 @@ mod tests {
             [
                 ActionState::Rejected(RejectReason::Unsupported),
                 ActionState::Rejected(RejectReason::Unsupported),
-                ActionState::Succeeded,
+                saved(&path),
             ]
         );
         assert_eq!(
             *ops.log.lock().unwrap(),
             [(key(), DumpMode::Mini, path.clone())]
         );
+    }
+
+    /// ADR-018: while the dump runs, its file size goes out every 500 ms as `Progress`, in
+    /// order, for the dump's target. Nothing goes out before the file exists.
+    #[test]
+    fn dump_progress_reports_file_size_in_order() {
+        let dir = StateDir::new("progress");
+        let path = dir.0.join(NAME);
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
+        let (tx, rx) = async_channel::bounded(16);
+        let out = Arc::new(Mutex::new(None));
+        let out_task = Arc::clone(&out);
+        let file = path.clone();
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let ended = EndLock::default();
+                let emitter = Emitter {
+                    events: &tx,
+                    ended: &ended,
+                };
+                let progress = Progress::new(&emitter, ActionId(3), 1);
+                // Writes 100 bytes at 0.2 s and 300 at 0.8 s, done at 1.4 s.
+                let job = async {
+                    time::sleep(cx.now(), Duration::from_millis(200)).await;
+                    fs::write(&file, [0u8; 100]).expect("write");
+                    time::sleep(cx.now(), Duration::from_millis(600)).await;
+                    fs::write(&file, [0u8; 300]).expect("write");
+                    time::sleep(cx.now(), Duration::from_millis(600)).await;
+                    7
+                };
+                let value = with_progress(&cx, &file, &progress, job).await;
+                *out_task.lock().unwrap() = Some(value);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        for _ in 0..20 {
+            lab.advance_time(Duration::from_millis(100).as_nanos() as u64);
+            // `run_until_idle` stops when no task is ready; one step fires the due timers.
+            lab.step_for_test();
+            lab.run_until_idle();
+        }
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+        assert_eq!(*out.lock().unwrap(), Some(7));
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        // Reads at 0.5 s (100), 1.0 s (300); the job ends at 1.4 s, before the 1.5 s read.
+        assert_eq!(
+            events,
+            [100, 300].map(|bytes| ActionEvent {
+                id: ActionId(3),
+                target: Some(1),
+                state: ActionState::Progress { bytes },
+            })
+        );
+    }
+
+    /// No progress goes out once the action has ended; it is counted as late.
+    #[test]
+    fn progress_after_the_end_is_dropped() {
+        let (tx, rx) = async_channel::bounded(4);
+        let late = Arc::new(AtomicU64::new(0));
+        let ended = EndLock::new(Arc::clone(&late));
+        let emitter = Emitter {
+            events: &tx,
+            ended: &ended,
+        };
+        let progress = Progress::new(&emitter, ActionId(5), 0);
+        progress.report(10);
+        *ended.lock() = true;
+        progress.report(20);
+        Progress::none().report(30);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            events,
+            [ActionEvent {
+                id: ActionId(5),
+                target: Some(0),
+                state: ActionState::Progress { bytes: 10 },
+            }]
+        );
+        assert_eq!(late.load(Ordering::Relaxed), 1);
     }
 
     #[test]
