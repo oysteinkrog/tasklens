@@ -297,9 +297,34 @@ fn start_client(connector: impl Connector) -> RemoteClient {
     client
 }
 
+/// Polls the client's status every 10 ms until `pick` accepts one, for at most `STEP`. A
+/// timeout names every status seen, in order.
+fn wait_status<T>(
+    client: &RemoteClient,
+    what: &str,
+    mut pick: impl FnMut(&LinkStatus) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + STEP;
+    let mut seen: Vec<LinkStatus> = Vec::new();
+    loop {
+        let status = client.status();
+        if let Some(v) = pick(&status) {
+            return v;
+        }
+        if seen.last() != Some(&status) {
+            seen.push(status);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; statuses seen: {seen:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn wait_connected(client: &RemoteClient, what: &str) {
-    wait_for(&format!("{what}: connected"), || {
-        (client.status() == LinkStatus::Connected).then_some(())
+    wait_status(client, &format!("{what}: connected"), |s| {
+        (*s == LinkStatus::Connected).then_some(())
     });
 }
 
@@ -451,16 +476,21 @@ fn killed_engine_reconnects() {
         let old_generation = client.latest_with_generation().0;
         host.kill_engine();
         // The window shows the host as reconnecting: the link is down and the client's
-        // generation is newer than its stored snapshot's.
-        wait_for(&format!("{what}: link down"), || {
-            (client.status() != LinkStatus::Connected).then_some(())
-        });
-        assert!(client.generation() > old_generation, "{what}");
+        // generation is newer than its stored snapshot's. The engine stays down until an
+        // attempt to reach it has failed, so B's bridge has found no engine there.
+        let reason = wait_status(
+            client,
+            &format!("{what}: a failed reconnect"),
+            |s| match s {
+                LinkStatus::Failed(reason) => Some(Arc::clone(reason)),
+                _ => None,
+            },
+        );
+        assert!(client.generation() > old_generation, "{what}: {reason}");
         host.start();
-        wait_for(&format!("{what}: a new engine instance"), || {
-            (client.status() == LinkStatus::Connected
-                && client.host().is_some_and(|h| h.engine_instance != old))
-            .then_some(())
+        wait_status(client, &format!("{what}: a new engine instance"), |s| {
+            (*s == LinkStatus::Connected && client.host().is_some_and(|h| h.engine_instance != old))
+                .then_some(())
         });
         // The snapshot is the new session's.
         let (generation, _) = client.latest_with_generation();
@@ -521,8 +551,8 @@ fn proto_mismatch_shows_version() {
         })
     };
     let client = start_client(connector);
-    let text = wait_for("host B: the version refusal", || match client.status() {
-        LinkStatus::Failed(text) if text.contains("protocol") => Some(text),
+    let text = wait_status(&client, "host B: the version refusal", |s| match s {
+        LinkStatus::Failed(text) if text.contains("protocol") => Some(Arc::clone(text)),
         _ => None,
     });
     assert!(text.contains(&format!("(protocol {PROTO})")), "{text}");
