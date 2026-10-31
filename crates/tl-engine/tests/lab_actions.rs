@@ -280,6 +280,8 @@ impl Harness {
             boot_id: BOOT,
             live: &self.live,
             exited_within_linger: &exited,
+            remote: false,
+            remote_admin: false,
         };
         match admit(&req, &view, self.in_flight.len(), &FxHashSet::default()) {
             Admission::Reject(reason) => {
@@ -322,6 +324,8 @@ impl Harness {
                     boot_id: BOOT,
                     live: &live,
                     exited_within_linger: &exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 lock(&gate).submit(&cx, req, &view);
             })

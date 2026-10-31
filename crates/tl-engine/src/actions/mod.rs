@@ -87,8 +87,9 @@ pub fn needs_desktop(kind: &ActionKind) -> bool {
     )
 }
 
-/// Admission rules in ADR-006 order. A request whose every target is rejected still runs, so the
-/// UI gets `Started`, the per-target `Rejected` events and a `Rejected` summary.
+/// Admission rules in ADR-006 order, with the remote admin check of ADR-018 after the request
+/// limits. A request whose every target is rejected still runs, so the UI gets `Started`, the
+/// per-target `Rejected` events and a `Rejected` summary.
 pub fn admit(
     req: &ActionRequest,
     view: &AdmissionView<'_>,
@@ -100,6 +101,11 @@ pub fn admit(
     }
     if req.targets.len() > MAX_TARGETS {
         return Admission::Reject(RejectReason::TooManyTargets);
+    }
+    // ADR-018: a root action from a remote session would wait on a polkit prompt nobody at
+    // this host's screen can answer, unless remote admin is on here.
+    if view.remote && !view.remote_admin && req.needs_root() {
+        return Admission::Reject(RejectReason::RemoteAdminOff);
     }
     if targetless(&req.kind) {
         if !req.targets.is_empty() {
@@ -1592,6 +1598,8 @@ mod tests {
                 boot_id: BOOT,
                 live: &self.live,
                 exited_within_linger: &self.exited,
+                remote: false,
+                remote_admin: false,
             };
             admit(req, &view, in_flight, &self.busy)
         }
@@ -1634,6 +1642,89 @@ mod tests {
             Admission::Run { per_target } => assert_eq!(per_target.len(), 256),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    /// q4x76.13, ADR-018: a remote session's root actions are refused with `RemoteAdminOff`
+    /// while remote admin is off, and admitted once it is on. Its other actions, and every
+    /// action of a session on this host, are admitted either way.
+    #[test]
+    fn remote_root_actions_need_remote_admin() {
+        let mut f = Fixture::new();
+        f.live.insert(key(500), ProcFlags::empty());
+        let admit_from = |req: &ActionRequest, remote, remote_admin| {
+            let view = AdmissionView {
+                boot_id: BOOT,
+                live: &f.live,
+                exited_within_linger: &f.exited,
+                remote,
+                remote_admin,
+            };
+            admit(req, &view, 0, &f.busy)
+        };
+        let system = ActionTarget::Unit(UnitRef {
+            manager: Manager::System,
+            name: Arc::from("sshd.service"),
+        });
+        let as_admin = ActionRequest {
+            privileged: true,
+            ..term(vec![ActionTarget::Process(key(500))])
+        };
+        let root = [
+            as_admin,
+            request(ActionKind::UnitRestart, vec![system]),
+            request(
+                ActionKind::SockDestroy,
+                vec![ActionTarget::Socket {
+                    cookie: 1,
+                    family: tl_model::actions::Family::Inet,
+                    proto: tl_model::actions::Proto::Tcp,
+                    four_tuple: tl_model::actions::FourTuple {
+                        local: "127.0.0.1:1".parse().expect("address"),
+                        remote: "127.0.0.1:2".parse().expect("address"),
+                    },
+                }],
+            ),
+        ];
+        let refused = Admission::Reject(RejectReason::RemoteAdminOff);
+        for req in &root {
+            assert_eq!(admit_from(req, true, false), refused, "{:?}", req.kind);
+            assert!(
+                matches!(admit_from(req, true, true), Admission::Run { .. }),
+                "{:?} with remote admin on",
+                req.kind
+            );
+            assert!(
+                matches!(admit_from(req, false, false), Admission::Run { .. }),
+                "{:?} from this host",
+                req.kind
+            );
+        }
+        let user = [
+            term(vec![ActionTarget::Process(key(500))]),
+            request(
+                ActionKind::UnitRestart,
+                vec![ActionTarget::Unit(unit("a.service"))],
+            ),
+        ];
+        for req in &user {
+            assert!(
+                matches!(admit_from(req, true, false), Admission::Run { .. }),
+                "{:?} needs no root",
+                req.kind
+            );
+        }
+        // The request limits come first: a full gate is Busy whoever asks.
+        let view = AdmissionView {
+            boot_id: BOOT,
+            live: &f.live,
+            exited_within_linger: &f.exited,
+            remote: true,
+            remote_admin: false,
+        };
+        assert_eq!(
+            admit(&root[0], &view, MAX_IN_FLIGHT, &f.busy),
+            Admission::Reject(RejectReason::Busy)
+        );
     }
 
     #[test]
@@ -1893,6 +1984,8 @@ mod tests {
                     boot_id: BOOT,
                     live: &f.live,
                     exited_within_linger: &f.exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 let open = |id| {
                     let mut req = request(
@@ -1991,6 +2084,8 @@ mod tests {
                     boot_id: BOOT,
                     live: &f.live,
                     exited_within_linger: &f.exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 let mut req = request(
                     ActionKind::OpenUri(Arc::from("https://example.org")),
@@ -2066,6 +2161,8 @@ mod tests {
                     boot_id: BOOT,
                     live: &f.live,
                     exited_within_linger: &f.exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 let route = |id| ActionRoute {
                     id: ActionId(id),
@@ -2148,6 +2245,8 @@ mod tests {
                     boot_id: BOOT,
                     live: &f.live,
                     exited_within_linger: &f.exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 // No openers, so the run ends with one `Rejected(Unsupported)` summary.
                 let open = request(
@@ -2220,6 +2319,8 @@ mod tests {
                     boot_id: BOOT,
                     live: &f.live,
                     exited_within_linger: &f.exited,
+                    remote: false,
+                    remote_admin: false,
                 };
                 let submit = |gate: &mut Gate, id: u64, kind, targets| {
                     let mut req = request(kind, targets);

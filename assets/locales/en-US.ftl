@@ -1740,6 +1740,7 @@ fnd-action-reject-unsupported = This action is not available for this process.
 fnd-action-reject-already-running = Already running
 fnd-action-reject-no-desktop-session = This PC has no desktop session. Nobody is logged in to its screen.
 fnd-action-reject-no-desktop-session-on-host = { $host } has no desktop session. Nobody is logged in to its screen.
+fnd-action-reject-remote-admin-off = Remote admin is off on that PC. Run tasklens remote-admin on there.
 # Desktop commands on a remote host (ADR-018, UI-SHL-008).
 fnd-action-on-host-opened = Opened on { $host }
 fnd-action-on-host-started = Started on { $host }

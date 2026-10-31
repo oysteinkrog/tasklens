@@ -388,6 +388,9 @@ pub struct PortState {
     /// act only on its pid's windows with this app id (ADR-018, q4x76.12). `None` for a bridge
     /// session and a session with no `Hello`.
     own_app_id: Option<Arc<str>>,
+    /// The session's `Hello` said it comes through `tasklens bridge`, so its window runs on
+    /// another host. Root actions from it need remote admin (ADR-018 Remote root actions).
+    remote: bool,
 }
 
 impl PortState {
@@ -399,8 +402,22 @@ impl PortState {
         }
     }
 
+    /// The state of a session that comes through `tasklens bridge`. It has no own windows on
+    /// this host.
+    pub fn for_bridge() -> Self {
+        Self {
+            remote: true,
+            ..Self::default()
+        }
+    }
+
     pub fn own_app_id(&self) -> Option<&Arc<str>> {
         self.own_app_id.as_ref()
+    }
+
+    /// True for a session from `for_bridge`.
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 
     pub fn close(&self) {
@@ -644,6 +661,12 @@ impl ClientSession {
     /// The app id this session announced as a window on this host (`PortState::own_app_id`).
     pub fn own_app_id(&self) -> Option<&Arc<str>> {
         self.port.as_ref().and_then(|p| p.own_app_id())
+    }
+
+    /// True when the session's window runs on another host (`PortState::is_remote`). The local
+    /// session and a session with no `Hello` are not remote.
+    pub fn is_remote(&self) -> bool {
+        self.port.as_ref().is_some_and(|p| p.is_remote())
     }
 
     /// The stored query of `table`, or the default one: generation 0, default sort, no filter,

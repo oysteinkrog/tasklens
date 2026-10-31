@@ -19,7 +19,7 @@ use smallvec::SmallVec;
 
 use crate::ids::ProcessKey;
 use crate::system::CpuSet;
-use crate::table::{StartupRef, UnitRef};
+use crate::table::{Manager, StartupRef, UnitRef};
 
 /// Most targets one request may carry (ADR-005, ADR-006 admission).
 pub const MAX_ACTION_TARGETS: usize = 256;
@@ -39,6 +39,26 @@ pub struct ActionRequest {
     pub targets: SmallVec<[ActionTarget; 1]>,
     /// The user chose "Retry as administrator" (P3).
     pub privileged: bool,
+}
+
+impl ActionRequest {
+    /// True when the request needs root on its host, so polkit asks there (ADR-018 Remote root
+    /// actions): a privileged request runs through `tl-helper`, `SockDestroy` always does, and a
+    /// unit of the system manager goes through systemd's `manage-units` or the helper. A
+    /// targetless kind never counts: `Launch { as_admin }` asks on the host's own desktop. On a
+    /// remote host the engine refuses these with `RemoteAdminOff` unless remote admin is on, and
+    /// the window confirms them first.
+    pub fn needs_root(&self) -> bool {
+        if self.kind.is_targetless() {
+            return false;
+        }
+        self.privileged
+            || matches!(self.kind, ActionKind::SockDestroy)
+            || self
+                .targets
+                .iter()
+                .any(|t| matches!(t, ActionTarget::Unit(unit) if unit.manager == Manager::System))
+    }
 }
 
 /// A cgroup captured with its inode so the engine can tell a recreated cgroup apart.
@@ -388,6 +408,10 @@ pub enum RejectReason {
     /// while nobody is logged in to a desktop there. UI text "home has no desktop session"
     /// (ADR-018).
     NoDesktopSession,
+    /// A root action (`ActionRequest::needs_root`) from a remote session while remote admin is
+    /// off on this host. Nobody at its screen can answer the polkit prompt. UI text "Remote
+    /// admin is off on home. Run tasklens remote-admin on there." (ADR-018).
+    RemoteAdminOff,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -485,6 +509,84 @@ mod tests {
         let numbers: Vec<i32> = named.iter().map(|s| s.number()).collect();
         assert_eq!(numbers, [15, 9, 1, 2, 3, 19, 18, 10, 12]);
         assert_eq!(Signal::Other(34).number(), 34);
+    }
+
+    /// q4x76.13, ADR-018: which requests count as root actions on their host.
+    #[test]
+    fn needs_root_kinds() {
+        use crate::ids::ProcessKey;
+        use crate::table::StartupSource;
+        use crate::time::BootId;
+
+        let process = || {
+            ActionTarget::Process(ProcessKey {
+                boot_id: BootId(1),
+                pid: 4000,
+                start_ticks: 7,
+            })
+        };
+        let unit = |manager| {
+            ActionTarget::Unit(UnitRef {
+                manager,
+                name: Arc::from("sshd.service"),
+            })
+        };
+        let req = |kind, targets: Vec<ActionTarget>, privileged| ActionRequest {
+            id: ActionId(1),
+            kind,
+            targets: targets.into_iter().collect(),
+            privileged,
+        };
+        let socket = ActionTarget::Socket {
+            cookie: 1,
+            family: Family::Inet,
+            proto: Proto::Tcp,
+            four_tuple: FourTuple {
+                local: SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+                remote: SocketAddr::from((Ipv4Addr::LOCALHOST, 2)),
+            },
+        };
+        let root = [
+            req(ActionKind::Signal(Signal::Term), vec![process()], true),
+            req(
+                ActionKind::Dump {
+                    mode: DumpMode::Full,
+                    name: Arc::from("a.core"),
+                },
+                vec![process()],
+                true,
+            ),
+            req(ActionKind::SockDestroy, vec![socket], false),
+            req(ActionKind::UnitRestart, vec![unit(Manager::System)], false),
+            req(ActionKind::FreezeGroup, vec![unit(Manager::System)], false),
+            req(
+                ActionKind::UnitStop,
+                vec![unit(Manager::User), unit(Manager::System)],
+                false,
+            ),
+        ];
+        for r in &root {
+            assert!(r.needs_root(), "{:?}", r.kind);
+        }
+        let launch = LaunchSpec {
+            what: LaunchWhat::Command(Arc::from("kate")),
+            cwd: None,
+            as_admin: true,
+        };
+        let startup = ActionTarget::Startup(StartupRef {
+            source: StartupSource::AutostartSystem,
+            id: Arc::from("a.desktop"),
+        });
+        let user = [
+            req(ActionKind::Signal(Signal::Term), vec![process()], false),
+            req(ActionKind::UnitRestart, vec![unit(Manager::User)], false),
+            req(ActionKind::StartupDisable, vec![startup], false),
+            // Asks on the host's own desktop, so a remote host does not refuse it.
+            req(ActionKind::Launch(launch), vec![], true),
+        ];
+        for r in &user {
+            assert!(!r.needs_root(), "{:?}", r.kind);
+        }
     }
 
     #[test]

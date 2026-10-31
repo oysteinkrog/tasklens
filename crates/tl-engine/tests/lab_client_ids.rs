@@ -34,6 +34,7 @@ use tl_model::details::{
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::ids::ProcessKey;
+use tl_model::remote_proto::{HostSettings, HostSettingsValues};
 use tl_model::snapshot::{DiskDetails, EjectState, Snapshot};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
@@ -1244,4 +1245,94 @@ fn kwin_command_carries_the_bridge_generation() {
         })
         .collect();
     assert_eq!(bridges, [expected]);
+}
+
+/// Records what admission sees for each request: the session is remote, remote admin is on.
+struct ViewGate(Arc<Mutex<Vec<(bool, bool)>>>);
+
+impl ActionGate for ViewGate {
+    fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
+        panic!("the reducer submits every request with its route");
+    }
+
+    fn submit_routed(
+        &mut self,
+        _cx: &Cx,
+        _req: ActionRequest,
+        view: &AdmissionView<'_>,
+        _route: ActionRoute,
+    ) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((view.remote, view.remote_admin));
+    }
+
+    fn finished(&mut self, _id: ActionId) -> Option<SourceId> {
+        None
+    }
+}
+
+/// q4x76.13, ADR-018: admission sees a bridge session as remote, and a window on this host, a
+/// session with no `Hello` and the local session as not remote. It reads the host setting
+/// `remote_admin` for each request, so turning it on needs no restart.
+#[test]
+fn admission_sees_the_sessions_remote_flag_and_remote_admin() {
+    const LOCAL_WINDOW: ClientSessionId = ClientSessionId(8);
+    const NO_HELLO: ClientSessionId = ClientSessionId(9);
+    let mut rig = Rig::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    rig.reducer_mut().action_gate = Some(Box::new(ViewGate(Arc::clone(&seen))));
+    let ports = [
+        (REMOTE, Arc::new(PortState::for_bridge())),
+        (
+            LOCAL_WINDOW,
+            Arc::new(PortState::for_window(Some(Arc::from(
+                "io.github.oysteinkrog.Tasklens",
+            )))),
+        ),
+        (NO_HELLO, Arc::new(PortState::default())),
+    ];
+    let remotes: Vec<Remote> = ports.iter().map(|_| Remote::new()).collect();
+    let mut msgs: Vec<EngineMsg> = ports
+        .iter()
+        .zip(&remotes)
+        .map(|((id, port), remote)| {
+            EngineMsg::Client(ClientMsg::OpenPort {
+                id: *id,
+                link: remote.link.clone(),
+                port: Arc::clone(port),
+            })
+        })
+        .collect();
+    msgs.extend([
+        on(REMOTE, action(1)),
+        on(LOCAL_WINDOW, action(1)),
+        on(NO_HELLO, action(1)),
+        on(ClientSessionId::LOCAL, action(1)),
+    ]);
+    rig.run(msgs);
+    let on_settings = HostSettings {
+        rev: 2,
+        values: HostSettingsValues {
+            remote_admin: true,
+            ..HostSettingsValues::default()
+        },
+        read_only: false,
+    };
+    rig.reducer_mut().host_settings.store(Arc::new(on_settings));
+    rig.run(vec![on(REMOTE, action(2))]);
+
+    let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(
+        seen,
+        [
+            (true, false),
+            (false, false),
+            (false, false),
+            (false, false),
+            (true, true),
+        ]
+    );
+    drop((ports, remotes));
 }

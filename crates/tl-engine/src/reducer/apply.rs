@@ -843,6 +843,8 @@ impl Reducer {
                         boot_id: self.boot_id,
                         live: self.processes.live_keys(),
                         exited_within_linger: &exited,
+                        remote: self.clients.get(id).is_some_and(|s| s.is_remote()),
+                        remote_admin: self.host_settings.load().values.remote_admin,
                     };
                     gate.submit_routed(cx, req, &view, route);
                 } else {

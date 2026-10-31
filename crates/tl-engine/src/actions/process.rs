@@ -927,6 +927,8 @@ mod tests {
             boot_id: BOOT,
             live: &live,
             exited_within_linger: &exited,
+            remote: false,
+            remote_admin: false,
         };
         let req = ActionRequest {
             id: ActionId(1),

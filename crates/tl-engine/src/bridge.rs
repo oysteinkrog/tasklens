@@ -442,11 +442,12 @@ impl EngineHandle {
         // Unbounded: an end is never dropped, and admission bounds how many are outstanding.
         let (requests_tx, requests_rx) = async_channel::unbounded::<RequestEvent>();
         // A window on this host acts only on its own windows: its pid and the app id it announced.
-        let own_app_id = peer
-            .as_ref()
-            .filter(|p| !p.bridge)
-            .map(|p| Arc::clone(&p.app_id));
-        let state = Arc::new(PortState::for_window(own_app_id));
+        // A bridge session is remote: its root actions need remote admin (ADR-018).
+        let state = Arc::new(match &peer {
+            Some(p) if p.bridge => PortState::for_bridge(),
+            Some(p) => PortState::for_window(Some(Arc::clone(&p.app_id))),
+            None => PortState::for_window(None),
+        });
         let link = SessionLink {
             latest: Arc::clone(&latest),
             wake_tx,
@@ -1645,6 +1646,10 @@ mod tests {
         assert_eq!(local.state.own_app_id(), Some(&devel));
         assert_eq!(remote.state.own_app_id(), None, "a bridge session");
         assert_eq!(unknown.state.own_app_id(), None, "no Hello peer");
+        // q4x76.13: only a bridge session is remote, so only its root actions need remote admin.
+        assert!(!local.state.is_remote());
+        assert!(remote.state.is_remote(), "a bridge session");
+        assert!(!unknown.state.is_remote(), "no Hello peer");
         drop(local);
         assert!(desktop.window_pids().is_empty());
         assert!(!desktop.has_window(4000, &devel));

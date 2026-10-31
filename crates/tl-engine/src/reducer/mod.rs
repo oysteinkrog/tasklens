@@ -160,11 +160,16 @@ pub trait ActionGate: Send + 'static {
     }
 }
 
-/// What admission checks a process target against (ADR-006).
+/// What admission checks a request against (ADR-006, ADR-018).
 pub struct AdmissionView<'a> {
     pub boot_id: BootId,
     pub live: &'a FxHashMap<ProcessKey, ProcFlags>,
     pub exited_within_linger: &'a FxHashSet<ProcessKey>,
+    /// The request comes from a remote session (`ClientSession::is_remote`).
+    pub remote: bool,
+    /// The host setting `remote_admin` (ADR-018 Remote root actions). With it off, a remote
+    /// session's root actions are refused with `RemoteAdminOff`.
+    pub remote_admin: bool,
 }
 
 pub struct Reducer {

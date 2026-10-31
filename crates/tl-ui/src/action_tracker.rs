@@ -1263,6 +1263,7 @@ pub struct ActionWords {
     reject_running: SharedString,
     reject_no_desktop: SharedString,
     reject_no_desktop_on: Template,
+    reject_remote_admin_off: SharedString,
     on_host_opened: Template,
     on_host_started: Template,
     on_host_switched: Template,
@@ -1301,6 +1302,7 @@ impl ActionWords {
             reject_running: t("fnd-action-reject-already-running"),
             reject_no_desktop: t("fnd-action-reject-no-desktop-session"),
             reject_no_desktop_on: tmpl("fnd-action-reject-no-desktop-session-on-host", &["host"]),
+            reject_remote_admin_off: t("fnd-action-reject-remote-admin-off"),
             on_host_opened: tmpl("fnd-action-on-host-opened", &["host"]),
             on_host_started: tmpl("fnd-action-on-host-started", &["host"]),
             on_host_switched: tmpl("fnd-action-on-host-switched", &["host"]),
@@ -1375,6 +1377,7 @@ impl ActionWords {
             RejectReason::NotOwner => self.reject_not_owner.clone(),
             RejectReason::Unsupported => self.reject_unsupported.clone(),
             RejectReason::NoDesktopSession => self.reject_no_desktop.clone(),
+            RejectReason::RemoteAdminOff => self.reject_remote_admin_off.clone(),
             RejectReason::AlreadyRunning => {
                 return (ToastKind::Info, self.reject_running.clone());
             }
@@ -1565,6 +1568,10 @@ mod tests {
                 warn("This action is not available for this process."),
             ),
             (AlreadyRunning, (ToastKind::Info, "Already running".into())),
+            (
+                RemoteAdminOff,
+                warn("Remote admin is off on that PC. Run tasklens remote-admin on there."),
+            ),
         ];
         for (reason, want) in cases {
             let (kind, text) = reject_text(reason);
