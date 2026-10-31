@@ -26,7 +26,10 @@
 //!   `JournalError::Overflow` and its `journalctl` stops; the session goes on. Each opening of a
 //!   stream gets a new generation, and the pump keys what it holds by stream id and generation.
 //!   An event or end from an earlier opening of a reused id is dropped, so it cannot reach or end
-//!   the stream opened after it.
+//!   the stream opened after it. The writer keeps the generation with each journal message it
+//!   takes and writes it only if that opening is still open; a close waits for a write of its
+//!   stream that has started. So nothing of an opening goes on the wire once its close is
+//!   handled.
 //! - `Ack`: one waits for the writer at most, since one frame is in flight at most. A second
 //!   `Ack` before the writer applied the first closes the session.
 //! - A message not written within `WRITE_TIMEOUT` of the start of its write, or a frame with no
@@ -220,6 +223,9 @@ pub enum Step {
     Evicted(Item),
     /// A journal stream went over its limit and ended.
     JournalOverflow(StreamId),
+    /// The writer took a journal message off its queue, but its stream closed before the write,
+    /// so it was not written.
+    JournalClosed(StreamId),
     /// The writer is about to write the message.
     Writing(Item),
     /// The writer applied `Ack { frame }`.
@@ -296,6 +302,10 @@ struct Shared<P> {
     stream: UnixStream,
     config: SessionConfig,
     queues: Mutex<Queues>,
+    /// Held by the writer from its last check of a journal message's stream to the end of the
+    /// write, and by `journal_close` while it removes the stream. Nothing of a stream is
+    /// written once its close is handled, so a reopened id gets nothing from before.
+    journal_gate: Mutex<()>,
     /// Table queries the engine refused with `Busy`, the newest per table. Held across each
     /// send of a table query, so a retry cannot overtake a newer query.
     refused: Mutex<Vec<Command>>,
@@ -323,6 +333,7 @@ impl<P: Port> Shared<P> {
             stream,
             config,
             queues: Mutex::new(Queues::default()),
+            journal_gate: Mutex::new(()),
             refused: Mutex::new(Vec::new()),
             writer_bell,
             pump_bell,
@@ -840,8 +851,11 @@ fn journal_open<P: Port>(
 }
 
 /// Closes a journal stream and drops what it had queued. The id may be opened again at once.
+/// Waits for a write of the stream's message that has started, at most the write timeout.
 fn journal_close<P: Port>(sh: &Shared<P>, stream: StreamId) {
+    let gate = lock(&sh.journal_gate);
     let closed = lock(&sh.queues).streams.remove(&stream);
+    drop(gate);
     // Stops its journalctl, outside the lock.
     drop(closed);
     let _ = sh.pump_bell.try_send(());
@@ -1004,6 +1018,8 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
 /// What the writer sends next.
 enum Next {
     Bytes(Vec<u8>, Item),
+    /// A journal message and the opening of its stream it belongs to.
+    Journal(Vec<u8>, StreamKey),
     Snapshot,
     Nothing,
 }
@@ -1033,8 +1049,12 @@ fn pick(q: &mut Queues, snapshot_due: bool, floor_passed: bool) -> Next {
         && let Some(bytes) = s.queue.pop_front()
     {
         s.bytes -= bytes.len();
+        let key = StreamKey {
+            id,
+            generation: s.generation,
+        };
         q.journal_turn = Some(id);
-        return Next::Bytes(bytes, Item::Journal(id));
+        return Next::Journal(bytes, key);
     }
     if snapshot_due {
         return Next::Snapshot;
@@ -1068,6 +1088,23 @@ fn take_ack<P: Port>(
         }
         _ => Ok(()),
     }
+}
+
+/// Writes a journal message the writer took off its stream's queue, if that opening of the
+/// stream is still open. The stream may have closed, and its id opened again, since then.
+fn write_journal<P: Port>(
+    sh: &Shared<P>,
+    bytes: &[u8],
+    key: StreamKey,
+    ack_due: Option<(u64, Instant)>,
+) -> Result<(), SessionEnd> {
+    let _gate = lock(&sh.journal_gate);
+    if lock(&sh.queues).stream_mut(key).is_none() {
+        observe!(sh, Step::JournalClosed(key.id));
+        return Ok(());
+    }
+    observe!(sh, Step::Writing(Item::Journal(key.id)));
+    sh.write(bytes, ack_due)
 }
 
 /// Writes what the queues hold and the snapshot frames, until the session closes.
@@ -1118,6 +1155,7 @@ fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
                     observe!(sh, Step::Writing(_what));
                     sh.write(&bytes, ack_due)
                 }
+                Next::Journal(bytes, key) => write_journal(sh, &bytes, key, ack_due),
                 Next::Snapshot => {
                     let now_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     let built = match encoder.next_frame(&latest, now_ns) {
@@ -1194,7 +1232,7 @@ mod tests {
         let mut got = Vec::new();
         loop {
             match pick(q, snapshot_due, floor_passed) {
-                Next::Bytes(b, _) => got.push(b[0]),
+                Next::Bytes(b, _) | Next::Journal(b, _) => got.push(b[0]),
                 // A snapshot is one byte 0 here, and the writer sends one per frame.
                 Next::Snapshot => {
                     got.push(0);
@@ -1347,5 +1385,67 @@ mod tests {
         assert_eq!(key, new);
         sh.queue_journal(&mut frames, *key, rx.try_recv().unwrap());
         assert_eq!(lock(&sh.queues).streams[&id].queue.len(), 1);
+    }
+
+    /// What the client end of the socket has received so far.
+    fn received(client: &mut UnixStream) -> Vec<u8> {
+        use std::io::Read;
+        client.set_nonblocking(true).unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match client.read(&mut buf) {
+                Ok(0) => return got,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return got,
+                Err(e) => panic!("read: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_writer_drops_a_taken_journal_message_whose_stream_was_reopened() {
+        let engine = Arc::new(Journals::default());
+        let (socket, mut client) = UnixStream::pair().unwrap();
+        let (sh, _writer_bell, _pump_bell) =
+            Shared::new(socket, Arc::clone(&engine), SessionConfig::default());
+        let mut frames = FrameWriter::new().unwrap();
+        let id = StreamId(1);
+
+        assert!(journal_open(&sh, &mut frames, id, query()));
+        let pass = sh.journal_receivers();
+        let [(old, _)] = pass.as_slice() else {
+            panic!("one stream is open");
+        };
+        let old = *old;
+        sh.queue_journal(&mut frames, old, old_event());
+        // The writer takes the old event off the queue, with its opening.
+        let Next::Journal(old_bytes, taken) = pick(&mut lock(&sh.queues), false, false) else {
+            panic!("the old event is next");
+        };
+        assert_eq!(taken, old);
+
+        // Before the writer writes it, the client closes the stream and opens its id again.
+        journal_close(&sh, id);
+        assert!(journal_open(&sh, &mut frames, id, query()));
+        write_journal(&sh, &old_bytes, taken, None).unwrap();
+        assert!(
+            received(&mut client).is_empty(),
+            "nothing of the old opening went out after its close"
+        );
+
+        // The new opening's events are written.
+        let pass = sh.journal_receivers();
+        let [(new, _)] = pass.as_slice() else {
+            panic!("one stream is open");
+        };
+        let new = *new;
+        sh.queue_journal(&mut frames, new, new_event());
+        let Next::Journal(new_bytes, taken) = pick(&mut lock(&sh.queues), false, false) else {
+            panic!("the new event is next");
+        };
+        assert_eq!(taken, new);
+        write_journal(&sh, &new_bytes, taken, None).unwrap();
+        assert_eq!(received(&mut client), new_bytes);
     }
 }
