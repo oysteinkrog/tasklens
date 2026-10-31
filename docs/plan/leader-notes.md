@@ -1045,3 +1045,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.6 prep: C (READY=1 before the lock-held exit 0, plus RestartPreventExitStatus=0); prep plan accepted; model:sonnet. Requeued.
 - 2026-10-31 q4x76.14 prep: ActionState::Progress, PROTO stays 1 (nothing released), host engine chooses every path on that host, toast split to tasklens-q4x76.21 after q4x76.11. Requeued.
 - 2026-10-31 q4x76.8 prep: switching proxy client; hub orders by (generation, seq); 3 s socket fallback; status chip segment; rescue mode never writes history. Requeued.
+- 2026-10-31 q4x76.8 held: up = handshake complete, not socket accepted; every blocking step of an attempt under one overall deadline; sweep engine_link.rs blocking calls. Requeued.
