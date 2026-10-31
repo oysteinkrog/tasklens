@@ -507,8 +507,9 @@ fn killed_engine_reconnects() {
     );
 }
 
-/// Sets the bootstrap `proto` of the first frame written (the window's `Hello`) to another
-/// value, as a window of another tasklens version would send it.
+/// Sets the `proto` of the first frame written (the window's `Hello`) to another value, in the
+/// envelope header and in the bootstrap prefix, as a window of another tasklens version would
+/// send it. A `Hello` whose two values differ is unreadable, not another version.
 struct OtherProto {
     inner: Box<dyn Write + Send>,
     done: bool,
@@ -520,11 +521,14 @@ impl Write for OtherProto {
             return self.inner.write(buf);
         }
         self.done = true;
-        // The client writes the whole `Hello` with one `write_all`; bootstrap frames are never
-        // compressed, so the payload starts with the proto.
+        // The client writes the whole `Hello` with one `write_all`. The header holds the proto
+        // at bytes 4 and 5; bootstrap frames are never compressed, so the payload starts with
+        // it too.
         assert!(buf.len() >= HEADER_LEN + 2, "short Hello write");
+        let other = (PROTO + 1).to_le_bytes();
         let mut patched = buf.to_vec();
-        patched[HEADER_LEN..HEADER_LEN + 2].copy_from_slice(&(PROTO + 1).to_le_bytes());
+        patched[4..6].copy_from_slice(&other);
+        patched[HEADER_LEN..HEADER_LEN + 2].copy_from_slice(&other);
         self.inner.write_all(&patched)?;
         Ok(buf.len())
     }
