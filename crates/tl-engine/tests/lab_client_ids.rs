@@ -16,7 +16,8 @@ use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use smallvec::SmallVec;
 use tl_engine::client_session::{
-    ACTIVE_MAX, ClientMsg, ClientSessionId, IdKind, RequestEnd, RequestEvent, SessionLink,
+    ACTIVE_MAX, ClientMsg, ClientSessionId, IdKind, PortState, RequestEnd, RequestEvent,
+    SessionLink,
 };
 use tl_engine::reducer::apply::QUEUE_MAX;
 use tl_engine::reducer::{ActionGate, ActionRoute, AdmissionView, Publisher, Reducer};
@@ -25,7 +26,7 @@ use tl_engine::update::{DetailsUpdate, DeviceDetailsUpdate, EngineMsg, SourceUpd
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, Signal,
 };
-use tl_model::command::{Command, DeviceCommand};
+use tl_model::command::{Command, DeviceCommand, KWinCommand};
 use tl_model::details::{
     DetailTab, DetailTarget, HandlePhase, HandleSearchState, ScanId, ScanPhase, SearchId,
     StringScanOpts, StringScanState, TabPayload,
@@ -1157,4 +1158,65 @@ fn worker_restart_loses_the_requests_it_took() {
         ]
     );
     assert!(remote.snapshot().details.handle_search.is_none());
+}
+
+/// q4x76.12 leader decision: an own-window command goes to the KWin worker with the app id its
+/// own session announced, never another session's, even when both share a pid. The local
+/// session and a session with no own windows forward none.
+#[test]
+fn kwin_command_carries_its_sessions_app_id() {
+    const OTHER: ClientSessionId = ClientSessionId(8);
+    const BRIDGED: ClientSessionId = ClientSessionId(9);
+    let mut rig = Rig::new();
+    let (main, devel): (Arc<str>, Arc<str>) = (
+        Arc::from("io.github.oysteinkrog.Tasklens"),
+        Arc::from("io.github.oysteinkrog.Tasklens.Devel"),
+    );
+    let ports = [
+        (
+            REMOTE,
+            Arc::new(PortState::for_window(Some(Arc::clone(&main)))),
+        ),
+        (
+            OTHER,
+            Arc::new(PortState::for_window(Some(Arc::clone(&devel)))),
+        ),
+        (BRIDGED, Arc::new(PortState::for_window(None))),
+    ];
+    let remotes: Vec<Remote> = ports.iter().map(|_| Remote::new()).collect();
+    let keep = || {
+        Command::KWin(KWinCommand::KeepAbove {
+            pid: 4000,
+            caption: None,
+            on: true,
+        })
+    };
+    let mut msgs: Vec<EngineMsg> = ports
+        .iter()
+        .zip(&remotes)
+        .map(|((id, port), remote)| {
+            EngineMsg::Client(ClientMsg::OpenPort {
+                id: *id,
+                link: remote.link.clone(),
+                port: Arc::clone(port),
+            })
+        })
+        .collect();
+    msgs.extend([
+        on(REMOTE, keep()),
+        on(OTHER, keep()),
+        on(BRIDGED, keep()),
+        on(ClientSessionId::LOCAL, keep()),
+    ]);
+    rig.run(msgs);
+
+    let app_ids: Vec<Option<Arc<str>>> = rig
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            WorkerCommand::KWin { app_id, .. } => Some(app_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(app_ids, [Some(main), Some(devel), None, None]);
 }

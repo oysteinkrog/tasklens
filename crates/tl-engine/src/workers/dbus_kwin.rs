@@ -114,10 +114,11 @@ const SYSTEMD_NAME: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER: &str = "org.freedesktop.systemd1.Manager";
 const PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
-/// How long the engine service waits for the user manager's environment to name a display
-/// after KWin appeared, and how often it reads it meanwhile.
-const ENV_WAIT: Duration = Duration::from_secs(5);
-const ENV_RETRY: Duration = Duration::from_millis(500);
+/// How long the engine service keeps reading the user manager's environment after KWin
+/// appeared while it names no display, and the first wait between reads. Each wait doubles:
+/// reads at 0, 0.25, 0.75, 1.75, 3.75, 7.75 and 10 s, then none until KWin's name changes.
+const ENV_WAIT: Duration = Duration::from_secs(10);
+const ENV_RETRY: Duration = Duration::from_millis(250);
 
 /// Both engines. The low-memory engine runs only `KWinCommand::KeepAbove` (R-152).
 pub fn spec() -> WorkerSpec {
@@ -309,11 +310,15 @@ async fn cycles(
     }
 }
 
-/// The session's variables from the user manager. Plasma may import `WAYLAND_DISPLAY` a
-/// moment after KWin takes its name, so a read that names no display is read again every
-/// `ENV_RETRY`, for at most `ENV_WAIT`; then the session starts with what it has.
+/// The session's variables from the user manager, read when KWin's name appears. The user
+/// manager sends no signal when its environment changes, and Plasma may import
+/// `WAYLAND_DISPLAY` a moment after KWin takes its name. So a read that names no display is
+/// read again with a doubling wait from `ENV_RETRY`, for at most `ENV_WAIT`. Then the session
+/// starts with what it has, and nothing reads the environment again until KWin's name changes.
+/// There is no steady polling (leader decision on q4x76.12).
 async fn session_env(cx: &Cx, bus: &mut impl SessionBus) -> Result<DesktopEnv, WorkerError> {
     let start = cx.now();
+    let mut wait = ENV_RETRY;
     loop {
         let env = DesktopEnv::from_lines(&bus.manager_env(cx).await?);
         let waited = Duration::from_nanos(cx.now().duration_since(start));
@@ -323,10 +328,11 @@ async fn session_env(cx: &Cx, bus: &mut impl SessionBus) -> Result<DesktopEnv, W
             }
             return Ok(env);
         }
-        time::sleep(cx.now(), ENV_RETRY).await;
+        time::sleep(cx.now(), wait.min(ENV_WAIT - waited)).await;
         if cx.checkpoint().is_err() {
             return Ok(env);
         }
+        wait = wait.saturating_mul(2);
     }
 }
 
@@ -576,7 +582,8 @@ async fn serve(
         return closed(cx);
     }
     // Switch to window calls are taken while this lives; dropping it fails those still queued.
-    let _serving = commands.desktop.bridge_serving();
+    // A call checked against an earlier bridge is dropped (ADR-018 "Generations").
+    let serving = commands.desktop.bridge_serving();
 
     let owner_events = owner_signals.filter_map(|msg| owner_event(&msg));
     let control_events = control_changes(cx, io.control.clone());
@@ -638,7 +645,7 @@ async fn serve(
             Ok(Some(event @ (Event::PickReply { .. } | Event::Picked { .. }))) => {
                 picked = picker.handle(cx, &host, dir, files, event).await;
             }
-            Ok(Some(Event::Activate(call))) => activations.push(call),
+            Ok(Some(Event::Activate(call))) => activations.extend(serving.accept(call)),
             Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
             Err(e) => return Err(e.into()),
         }
@@ -862,13 +869,14 @@ struct Queue {
 impl Queue {
     /// The KWin commands queued after `last_seq`, oldest first. Moves `last_seq` to the newest
     /// queued seq.
-    fn take(&mut self, control: &WorkerControl) -> Vec<(u64, KWinCommand)> {
+    /// The new commands, each with the app id its session announced (`WorkerCommand::KWin`).
+    fn take(&mut self, control: &WorkerControl) -> Vec<(u64, KWinCommand, Option<Arc<str>>)> {
         let new = control
             .commands
             .iter()
             .filter(|c| c.seq > self.last_seq && c.target == SourceId::KWin)
             .filter_map(|c| match &c.command {
-                WorkerCommand::KWin(cmd) => Some((c.seq, cmd.clone())),
+                WorkerCommand::KWin { cmd, app_id } => Some((c.seq, cmd.clone(), app_id.clone())),
                 _ => None,
             })
             .collect();
@@ -880,7 +888,7 @@ impl Queue {
 
     /// Takes the queued commands and counts them as done without running them.
     fn drop_all(&mut self, control: &WorkerControl) {
-        if let Some(&(seq, _)) = self.take(control).last() {
+        if let Some(&(seq, ..)) = self.take(control).last() {
             self.progress.set_started(SourceId::KWin, seq);
             self.progress.set_done(SourceId::KWin, seq);
         }
@@ -912,9 +920,20 @@ struct Commands {
 }
 
 impl Commands {
-    /// The plugin name and script text for `cmd`, or `None` when the command is dropped.
+    /// `prepare_from` for a command no session announced an app id for: the engine's own.
     fn prepare(&self, cmd: &KWinCommand, windows: &[WindowEntry]) -> Option<(String, String)> {
-        let target = match resolve(cmd, windows, self.mode, &self.desktop) {
+        self.prepare_from(cmd, None, windows)
+    }
+
+    /// The plugin name and script text for `cmd`, or `None` when the command is dropped.
+    /// `app_id` is the app id the sending session announced (`WorkerCommand::KWin`).
+    fn prepare_from(
+        &self,
+        cmd: &KWinCommand,
+        app_id: Option<&Arc<str>>,
+        windows: &[WindowEntry],
+    ) -> Option<(String, String)> {
+        let target = match resolve(cmd, app_id, windows, self.mode, &self.desktop) {
             Ok(target) => target,
             Err(reason) => {
                 tracing::debug!(target: "tasklens::engine", reason, "kwin command dropped");
@@ -943,10 +962,13 @@ enum CmdOp {
     Geometry(FrameGeometry),
 }
 
-/// Finds the window `cmd` names in `windows`. `Err` holds the reason the command is dropped;
-/// it never holds the id or a caption.
+/// Finds the window `cmd` names in `windows`. Keep above and frame geometry act only on the
+/// sending session's own window: `pid` with the session's announced `app_id`
+/// (`DesktopSession::own_app_id`). `Err` holds the reason the command is dropped; it never holds
+/// the id or a caption.
 fn resolve(
     cmd: &KWinCommand,
+    app_id: Option<&Arc<str>>,
     windows: &[WindowEntry],
     mode: EngineMode,
     desktop: &DesktopSession,
@@ -961,7 +983,7 @@ fn resolve(
             own_window(
                 windows,
                 *pid,
-                &desktop.own_app_ids(*pid),
+                &own_class(desktop, *pid, app_id)?,
                 caption.as_deref(),
             )?,
             CmdOp::KeepAbove(*on),
@@ -977,7 +999,12 @@ fn resolve(
                 ..*geometry
             };
             (
-                own_window(windows, *pid, &desktop.own_app_ids(*pid), Some(caption))?,
+                own_window(
+                    windows,
+                    *pid,
+                    &own_class(desktop, *pid, app_id)?,
+                    Some(caption),
+                )?,
                 CmdOp::Geometry(g),
             )
         }
@@ -1007,19 +1034,29 @@ fn by_id<'a>(windows: &'a [WindowEntry], id: &str) -> Result<&'a WindowEntry, &'
         .ok_or("window is not in the current list")
 }
 
-/// A tasklens window: `pid` and one of `app_ids`, the app ids that window announced
-/// (`DesktopSession::own_app_ids`), plus the caption for a secondary window (APP-009, R-086).
-/// `None` is the main window: the one titled "tasklens", or the only tasklens window of `pid`
-/// (the low-memory rescue window).
+/// The `resourceClass` the sending session's own windows carry.
+fn own_class(
+    desktop: &DesktopSession,
+    pid: u32,
+    app_id: Option<&Arc<str>>,
+) -> Result<Arc<str>, &'static str> {
+    desktop
+        .own_app_id(pid, app_id)
+        .ok_or("not the sending session's own window")
+}
+
+/// A tasklens window: `pid` and `class`, the app id the sending session announced, plus the
+/// caption for a secondary window (APP-009, R-086). `None` is the main window: the one titled
+/// "tasklens", or the only tasklens window of `pid` (the low-memory rescue window).
 fn own_window<'a>(
     windows: &'a [WindowEntry],
     pid: u32,
-    app_ids: &[Arc<str>],
+    class: &str,
     caption: Option<&str>,
 ) -> Result<&'a WindowEntry, &'static str> {
     let mut ours = windows
         .iter()
-        .filter(|w| w.pid == pid && app_ids.contains(&w.resource_class));
+        .filter(|w| w.pid == pid && &*w.resource_class == class);
     let found = match caption {
         Some(caption) => ours.find(|w| &*w.caption == caption),
         None => {
@@ -1462,7 +1499,7 @@ async fn run_commands(
 ) -> bool {
     let mut picked = false;
     let new = queue.take(&io.control.borrow_and_clone());
-    for (seq, cmd) in new {
+    for (seq, cmd, app_id) in new {
         if cx.checkpoint().is_err() {
             break;
         }
@@ -1471,7 +1508,9 @@ async fn run_commands(
             KWinCommand::Pick { seq: pick } => picked |= picker.start(cx, host, pick),
             KWinCommand::CancelPick { seq: pick } => picked |= picker.cancel(pick),
             cmd => {
-                if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
+                if let Some((plugin, script)) =
+                    commands.prepare_from(&cmd, app_id.as_ref(), windows)
+                {
                     let _ = run_script(cx, host, dir, &plugin, script, files).await;
                 }
             }
@@ -2300,10 +2339,64 @@ mod tests {
             caption: None,
             on: true,
         };
-        assert_eq!(cmds.prepare(&keep, &windows), None, "no window connected");
-        let _window = desktop.add_window(7, Arc::from(DEVEL));
-        let (_, script) = cmds.prepare(&keep, &windows).expect("the announced app id");
+        let devel: Arc<str> = Arc::from(DEVEL);
+        assert_eq!(
+            cmds.prepare_from(&keep, Some(&devel), &windows),
+            None,
+            "no window connected"
+        );
+        assert_eq!(cmds.prepare(&keep, &windows), None, "no announced app id");
+        let _window = desktop.add_window(7, Arc::clone(&devel));
+        let (_, script) = cmds
+            .prepare_from(&keep, Some(&devel), &windows)
+            .expect("the announced app id");
         assert_eq!(args_of(&script)["id"], ID_B);
+    }
+
+    /// q4x76.12 leader decision: own-window checks are keyed by the requesting session. Two
+    /// sessions share pid 7 with different app ids; each acts only on its own window.
+    #[test]
+    fn sessions_sharing_a_pid_keep_to_their_own_windows() {
+        const DEVEL: &str = "io.github.oysteinkrog.Tasklens.Devel";
+        let windows = [
+            entry(ID_A, 7, "tasklens", APP_ID),
+            entry(ID_B, 7, "tasklens", DEVEL),
+            entry(ID_C, 7, "tasklens Graph 1", DEVEL),
+        ];
+        let desktop = DesktopSession::new(DesktopSource::UserManager);
+        let cmds = Commands {
+            mode: EngineMode::Full,
+            counter: Arc::new(AtomicU64::new(0)),
+            desktop: desktop.clone(),
+        };
+        let devel: Arc<str> = Arc::from(DEVEL);
+        let main: Arc<str> = Arc::from(APP_ID);
+        let _a = desktop.add_window(7, Arc::clone(&main));
+        let _b = desktop.add_window(7, Arc::clone(&devel));
+        let keep = |caption: Option<&str>| KWinCommand::KeepAbove {
+            pid: 7,
+            caption: caption.map(Arc::from),
+            on: true,
+        };
+        let place = KWinCommand::SetFrameGeometry {
+            pid: 7,
+            caption: Arc::from("tasklens Graph 1"),
+            geometry: FrameGeometry::default(),
+        };
+        let id_of = |from: &Arc<str>, cmd: &KWinCommand| {
+            cmds.prepare_from(cmd, Some(from), &windows)
+                .and_then(|(_, script)| args_of(&script)["id"].as_str().map(str::to_owned))
+        };
+        assert_eq!(id_of(&main, &keep(None)).as_deref(), Some(ID_A));
+        assert_eq!(id_of(&devel, &keep(None)).as_deref(), Some(ID_B));
+        // The other session's graph window is not this session's.
+        assert_eq!(id_of(&main, &keep(Some("tasklens Graph 1"))), None);
+        assert_eq!(id_of(&main, &place), None);
+        assert_eq!(
+            id_of(&devel, &keep(Some("tasklens Graph 1"))).as_deref(),
+            Some(ID_C)
+        );
+        assert_eq!(id_of(&devel, &place).as_deref(), Some(ID_C));
     }
 
     /// Records each script as KWin would read it, and fails when told to. As the pick call layer
@@ -2613,7 +2706,10 @@ mod tests {
                 all.push(QueuedCommand {
                     seq: self.next_seq,
                     target: SourceId::KWin,
-                    command: WorkerCommand::KWin(cmd.clone()),
+                    command: WorkerCommand::KWin {
+                        cmd: cmd.clone(),
+                        app_id: None,
+                    },
                 });
             }
             let value = WorkerControl {
@@ -2957,8 +3053,15 @@ mod tests {
     /// counted.
     struct FakeBus {
         steps: async_channel::Receiver<BusStep>,
-        env: Vec<String>,
+        /// The user manager's environment; the test may change it.
+        env: Arc<Mutex<Vec<String>>>,
+        /// How often `manager_env` was read.
+        reads: Arc<AtomicU64>,
         bridges: Arc<AtomicU64>,
+    }
+
+    fn manager_env(lines: &[&str]) -> Arc<Mutex<Vec<String>>> {
+        Arc::new(Mutex::new(lines.iter().map(|l| (*l).to_owned()).collect()))
     }
 
     impl SessionBus for FakeBus {
@@ -2978,7 +3081,8 @@ mod tests {
         }
 
         async fn manager_env(&mut self, _cx: &Cx) -> Result<Vec<String>, WorkerError> {
-            Ok(self.env.clone())
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.env.lock().expect("lock").clone())
         }
 
         async fn bridge(
@@ -3026,10 +3130,8 @@ mod tests {
         let bridges = Arc::new(AtomicU64::new(0));
         let mut bus = FakeBus {
             steps,
-            env: vec![
-                "WAYLAND_DISPLAY=wayland-1".to_owned(),
-                "XDG_CURRENT_DESKTOP=KDE".to_owned(),
-            ],
+            env: manager_env(&["WAYLAND_DISPLAY=wayland-1", "XDG_CURRENT_DESKTOP=KDE"]),
+            reads: Arc::default(),
             bridges: Arc::clone(&bridges),
         };
         let root = lab.state.create_root_region(Budget::INFINITE);
@@ -3094,7 +3196,8 @@ mod tests {
         let (steps_tx, steps) = async_channel::unbounded();
         let mut bus = FakeBus {
             steps,
-            env: vec!["WAYLAND_DISPLAY=wayland-1".to_owned()],
+            env: manager_env(&["WAYLAND_DISPLAY=wayland-1"]),
+            reads: Arc::default(),
             bridges: Arc::new(AtomicU64::new(0)),
         };
         let ended = Arc::new(Mutex::new(None));
@@ -3131,5 +3234,97 @@ mod tests {
         assert!(!desktop.is_present(), "the session is cleared");
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+    /// Advances lab time by `d`, firing the timers that come due.
+    fn advance(lab: &mut LabRuntime, d: Duration) {
+        lab.advance_time(d.as_nanos() as u64);
+        // `run_until_idle` stops when no task is ready; one step fires the due timers.
+        lab.step_for_test();
+        lab.run_until_idle();
+    }
+
+    /// q4x76.12 leader decision: the environment is read when KWin's name appears, again with
+    /// a doubling wait while it names no display, for at most 10 s. A display that appears 2 s
+    /// after the name is picked up; once the session runs, nothing reads it while idle. When no
+    /// display appears in 10 s the reads stop too.
+    #[test]
+    fn manager_env_read_with_backoff_then_never_while_idle() {
+        for display_after in [Some(Duration::from_secs(2)), None] {
+            let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+            let (io, _rx) = worker_io();
+            let desktop = DesktopSession::new(DesktopSource::UserManager);
+            let (steps_tx, steps) = async_channel::unbounded();
+            let env = manager_env(&["XDG_CURRENT_DESKTOP=KDE"]);
+            let reads = Arc::new(AtomicU64::new(0));
+            let bridges = Arc::new(AtomicU64::new(0));
+            let mut bus = FakeBus {
+                steps,
+                env: Arc::clone(&env),
+                reads: Arc::clone(&reads),
+                bridges: Arc::clone(&bridges),
+            };
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let task_desktop = desktop.clone();
+            let (task, handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    let mut queue = Queue {
+                        last_seq: 0,
+                        progress: Arc::default(),
+                    };
+                    let commands = commands(EngineMode::Full);
+                    let _ =
+                        session_cycles(&cx, &io, &task_desktop, &mut bus, &commands, &mut queue)
+                            .await;
+                })
+                .expect("task is created");
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_idle();
+            assert_eq!(reads.load(Ordering::Relaxed), 0, "no read before KWin");
+
+            steps_tx.try_send(BusStep::KWinUp).expect("send");
+            lab.run_until_idle();
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                1,
+                "read when the name appears"
+            );
+            assert!(!desktop.is_present(), "no display yet");
+
+            let tick = Duration::from_millis(250);
+            let mut elapsed = Duration::ZERO;
+            while elapsed < Duration::from_secs(12) {
+                if display_after == Some(elapsed) {
+                    env.lock()
+                        .expect("lock")
+                        .push("WAYLAND_DISPLAY=wayland-1".to_owned());
+                }
+                advance(&mut lab, tick);
+                elapsed += tick;
+            }
+            // Reads at 0, 0.25, 0.75, 1.75 and 3.75 s find the display at the fifth; with none,
+            // at 7.75 and 10 s too.
+            let want = if display_after.is_some() { 5 } else { 7 };
+            assert_eq!(reads.load(Ordering::Relaxed), want, "{display_after:?}");
+            assert_eq!(bridges.load(Ordering::Relaxed), 1, "the bridge started");
+            assert!(desktop.is_present(), "the session started");
+            assert_eq!(
+                desktop.var("WAYLAND_DISPLAY").is_some(),
+                display_after.is_some()
+            );
+
+            // Idle with the bridge running: no more reads.
+            for _ in 0..8 {
+                advance(&mut lab, Duration::from_secs(60));
+            }
+            assert_eq!(reads.load(Ordering::Relaxed), want, "no reads while idle");
+
+            drop(steps_tx);
+            handle.abort();
+            lab.run_until_idle();
+            let report = lab.run_until_quiescent_with_report();
+            assert!(report.lab_test_passed(), "{report:?}");
+        }
     }
 }

@@ -178,7 +178,13 @@ pub struct QueuedCommand {
 pub enum WorkerCommand {
     RefreshNow,
     Reprobe,
-    KWin(KWinCommand),
+    /// `app_id` is the app id the sending session announced as a window on this host. Keep
+    /// above and frame geometry act only on that pid's window with this app id (q4x76.12).
+    /// `None` from the local session and from sessions with no own windows.
+    KWin {
+        cmd: KWinCommand,
+        app_id: Option<Arc<str>>,
+    },
     DetailRefresh {
         target: DetailTarget,
         tab: DetailTab,
@@ -226,7 +232,7 @@ impl WorkerCommand {
         match self {
             WorkerCommand::RefreshNow => "RefreshNow",
             WorkerCommand::Reprobe => "Reprobe",
-            WorkerCommand::KWin(_) => "KWin",
+            WorkerCommand::KWin { .. } => "KWin",
             WorkerCommand::DetailRefresh { .. } => "DetailRefresh",
             WorkerCommand::DetailOpened { .. } => "DetailOpened",
             WorkerCommand::ComputeHashes(_) => "ComputeHashes",

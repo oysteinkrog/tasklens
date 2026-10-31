@@ -441,7 +441,12 @@ impl EngineHandle {
         let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
         // Unbounded: an end is never dropped, and admission bounds how many are outstanding.
         let (requests_tx, requests_rx) = async_channel::unbounded::<RequestEvent>();
-        let state = Arc::new(PortState::default());
+        // A window on this host acts only on its own windows: its pid and the app id it announced.
+        let own_app_id = peer
+            .as_ref()
+            .filter(|p| !p.bridge)
+            .map(|p| Arc::clone(&p.app_id));
+        let state = Arc::new(PortState::for_window(own_app_id));
         let link = SessionLink {
             latest: Arc::clone(&latest),
             wake_tx,
@@ -632,9 +637,10 @@ pub struct SessionPeer {
 
 /// True when `peer`'s session may send `cmd` (leader decision on q4x76.12). Keep above and frame
 /// geometry name a tasklens window by its pid: only a window on this host may send them, for its
-/// own pid. The KWin worker then acts only on a window of that pid whose `resourceClass` is the
-/// app id the session announced (`DesktopSession::own_app_ids`). A bridge session's pid names a
-/// process on another host. Other KWin commands act on any window and pass.
+/// own pid. The reducer forwards the command with the app id this session announced
+/// (`PortState::own_app_id`), and the KWin worker acts only on a window with that pid and that
+/// `resourceClass`, never on another session's window of the same pid. A bridge session's pid
+/// names a process on another host. Other KWin commands act on any window and pass.
 pub fn own_window_allowed(peer: Option<&SessionPeer>, cmd: &KWinCommand) -> bool {
     let pid = match cmd {
         KWinCommand::KeepAbove { pid, .. } | KWinCommand::SetFrameGeometry { pid, .. } => *pid,
@@ -1632,14 +1638,16 @@ mod tests {
             .send_open(ClientSessionId(3), None)
             .expect("open sent");
         assert_eq!(desktop.window_pids(), [4000]);
-        assert!(desktop.own_app_ids(4000).contains(&devel));
-        assert!(
-            !desktop.own_app_ids(5000).contains(&devel),
-            "a bridge session"
-        );
+        assert!(desktop.has_window(4000, &devel));
+        assert!(!desktop.has_window(5000, &devel), "a bridge session");
+        // Own-window commands are keyed by the session: only a local window's port carries
+        // the app id it announced.
+        assert_eq!(local.state.own_app_id(), Some(&devel));
+        assert_eq!(remote.state.own_app_id(), None, "a bridge session");
+        assert_eq!(unknown.state.own_app_id(), None, "no Hello peer");
         drop(local);
         assert!(desktop.window_pids().is_empty());
-        assert!(!desktop.own_app_ids(4000).contains(&devel));
+        assert!(!desktop.has_window(4000, &devel));
         drop((remote, unknown));
     }
 }

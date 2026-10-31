@@ -13,12 +13,16 @@
 //! The same handle keeps the pid and app id of each window connected to the service from this
 //! host (`WindowGuard`). With the engine's own pid they are "self": the processes sweep marks
 //! them `IS_SELF`, so ending them is refused as before the service (leader decision on
-//! q4x76.12). The KWin worker finds a window's own windows by that pid and app id.
+//! q4x76.12). An own-window command acts only on the requesting session's own pair: the pid and
+//! the app id that session announced (`own_app_id`), never on another session's window that
+//! shares the pid.
 //!
 //! It also carries Switch to window (`ActionKind::ActivateWindow`) from the action gate to the
-//! KWin worker and the worker's answer back (`activate_window`).
+//! KWin worker and the worker's answer back (`activate_window`). Each bridge run has its own
+//! generation (ADR-018 "Generations"). A call carries the generation it was checked against,
+//! and a bridge drops a call from another generation, so a call never runs on a later bridge.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tl_model::actions::ActionError;
@@ -155,8 +159,11 @@ struct Shared {
     env: Mutex<Option<Arc<DesktopEnv>>>,
     /// The pid and app id of each window connected from this host, one entry per connection.
     windows: Mutex<Vec<(u32, Arc<str>)>>,
-    /// True while the KWin worker serves its bridge and reads `activate_rx`.
-    bridge_up: AtomicBool,
+    /// The generation of the bridge the KWin worker serves, while it serves one and reads
+    /// `activate_rx`.
+    bridge: Mutex<Option<u64>>,
+    /// The last bridge generation handed out.
+    generations: AtomicU64,
     activate_tx: async_channel::Sender<ActivateCall>,
     activate_rx: async_channel::Receiver<ActivateCall>,
 }
@@ -167,6 +174,8 @@ struct Shared {
 pub struct ActivateCall {
     /// The KWin window id, as in `WindowEntry::internal_id`.
     pub internal_id: Arc<str>,
+    /// The bridge generation the call was checked against.
+    pub generation: u64,
     pub reply: async_channel::Sender<Result<(), ActionError>>,
 }
 
@@ -178,7 +187,8 @@ impl DesktopSession {
                 source,
                 env: Mutex::new(None),
                 windows: Mutex::new(Vec::new()),
-                bridge_up: AtomicBool::new(false),
+                bridge: Mutex::new(None),
+                generations: AtomicU64::new(0),
                 activate_tx,
                 activate_rx,
             }),
@@ -238,22 +248,24 @@ impl DesktopSession {
         pids
     }
 
-    /// The app ids a window of `pid` may carry as its `resourceClass` for an own-window command
-    /// (keep above, frame geometry): the app id each connection from `pid` announced in its
-    /// `Hello`. The engine in the window (`Process`) also takes `APP_ID`, its own window's.
-    pub fn own_app_ids(&self, pid: u32) -> Vec<Arc<str>> {
-        let mut ids: Vec<Arc<str>> = self
-            .lock_windows()
+    /// True while a window connection from this host announced `pid` with `app_id`.
+    pub fn has_window(&self, pid: u32, app_id: &str) -> bool {
+        self.lock_windows()
             .iter()
-            .filter(|(p, _)| *p == pid)
-            .map(|(_, app_id)| Arc::clone(app_id))
-            .collect();
-        if self.shared.source == DesktopSource::Process {
-            ids.push(Arc::from(APP_ID));
+            .any(|(p, a)| *p == pid && **a == *app_id)
+    }
+
+    /// The `resourceClass` an own-window command (keep above, frame geometry) for `pid` may act
+    /// on. `announced` is the app id the requesting session announced in its `Hello`
+    /// (`WorkerCommand::KWin`); it counts only while that session's (pid, app id) pair is
+    /// connected. With no announced app id, the engine in the window (`Process`) takes its own
+    /// `APP_ID`, and the service takes nothing. `None` drops the command.
+    pub fn own_app_id(&self, pid: u32, announced: Option<&Arc<str>>) -> Option<Arc<str>> {
+        match announced {
+            Some(app_id) => self.has_window(pid, app_id).then(|| Arc::clone(app_id)),
+            None if self.shared.source == DesktopSource::Process => Some(Arc::from(APP_ID)),
+            None => None,
         }
-        ids.sort_unstable();
-        ids.dedup();
-        ids
     }
 
     /// Adds the window `pid` with `app_id` until the guard is dropped.
@@ -270,21 +282,42 @@ impl DesktopSession {
     /// for its answer. `Unsupported` when the worker does not serve its bridge (no KWin, or the
     /// bridge has not started yet). Never blocks on a full queue.
     pub async fn activate_window(&self, internal_id: Arc<str>) -> Result<(), ActionError> {
-        if !self.shared.bridge_up.load(Ordering::Acquire) {
-            return Err(ActionError::Unsupported);
-        }
+        let generation = self.bridge_generation().ok_or(ActionError::Unsupported)?;
+        self.send_activate(generation, internal_id).await
+    }
+
+    /// The generation of the bridge the KWin worker serves now, `None` while it serves none.
+    pub fn bridge_generation(&self) -> Option<u64> {
+        *self.lock_bridge()
+    }
+
+    /// Queues the call checked against bridge `generation` and waits for its answer. The bridge
+    /// may stop between that check and this queue; the call then fails here at once, and a
+    /// later bridge drops it unrun (`BridgeGuard::accept`).
+    async fn send_activate(
+        &self,
+        generation: u64,
+        internal_id: Arc<str>,
+    ) -> Result<(), ActionError> {
         let (reply, answer) = async_channel::bounded(1);
-        let call = ActivateCall { internal_id, reply };
+        let call = ActivateCall {
+            internal_id,
+            generation,
+            reply,
+        };
         if self.shared.activate_tx.try_send(call).is_err() {
             return Err(ActionError::Internal(Arc::from(
                 "too many window switches waiting",
             )));
         }
+        let stopped =
+            || ActionError::Internal(Arc::from("the KWin bridge stopped before the switch"));
+        if self.bridge_generation() != Some(generation) {
+            return Err(stopped());
+        }
         match answer.recv().await {
             Ok(result) => result,
-            Err(_) => Err(ActionError::Internal(Arc::from(
-                "the KWin bridge stopped before the switch",
-            ))),
+            Err(_) => Err(stopped()),
         }
     }
 
@@ -293,13 +326,22 @@ impl DesktopSession {
         self.shared.activate_rx.clone()
     }
 
-    /// The KWin worker serves its bridge until the guard is dropped. Dropping it fails every
-    /// call still waiting in the queue.
+    /// The KWin worker serves a new bridge generation until the guard is dropped. Dropping it
+    /// fails every call still waiting in the queue.
     pub(crate) fn bridge_serving(&self) -> BridgeGuard {
-        self.shared.bridge_up.store(true, Ordering::Release);
+        let generation = self.shared.generations.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.lock_bridge() = Some(generation);
         BridgeGuard {
             shared: Arc::clone(&self.shared),
+            generation,
         }
+    }
+
+    fn lock_bridge(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.shared
+            .bridge
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_windows(&self) -> std::sync::MutexGuard<'_, Vec<(u32, Arc<str>)>> {
@@ -341,15 +383,41 @@ impl Drop for WindowGuard {
     }
 }
 
-/// The KWin worker serves its bridge while this lives (`DesktopSession::bridge_serving`).
+/// The KWin worker serves one bridge generation while this lives
+/// (`DesktopSession::bridge_serving`).
 #[derive(Debug)]
 pub(crate) struct BridgeGuard {
     shared: Arc<Shared>,
+    generation: u64,
+}
+
+impl BridgeGuard {
+    /// The call when it was checked against this bridge. A call from an earlier generation is
+    /// answered with a failure and never runs (ADR-018 "Generations").
+    pub(crate) fn accept(&self, call: ActivateCall) -> Option<ActivateCall> {
+        if call.generation == self.generation {
+            return Some(call);
+        }
+        tracing::debug!(target: "tasklens::engine", "window switch from an earlier KWin bridge dropped");
+        let _ = call.reply.try_send(Err(ActionError::Internal(Arc::from(
+            "the KWin bridge stopped before the switch",
+        ))));
+        None
+    }
 }
 
 impl Drop for BridgeGuard {
     fn drop(&mut self) {
-        self.shared.bridge_up.store(false, Ordering::Release);
+        {
+            let mut bridge = self
+                .shared
+                .bridge
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *bridge == Some(self.generation) {
+                *bridge = None;
+            }
+        }
         // A dropped call fails its waiter.
         while self.shared.activate_rx.try_recv().is_ok() {}
     }
@@ -464,24 +532,31 @@ mod tests {
         assert!(session.window_pids().is_empty());
     }
 
-    /// q4x76.12: own-window commands match the app id each window announced in its `Hello`,
-    /// not a fixed one. The engine in the window also takes its own `APP_ID`.
+    /// q4x76.12: an own-window command acts on the app id its own session announced, and
+    /// only while that (pid, app id) pair is connected. Two sessions that share a pid keep
+    /// their own app ids. The engine in the window takes its own `APP_ID`.
     #[test]
-    fn own_app_ids_are_the_announced_ones() {
+    fn own_app_id_is_the_requesting_sessions() {
+        let devel: Arc<str> = Arc::from("io.github.oysteinkrog.Tasklens.Devel");
+        let main: Arc<str> = Arc::from(APP_ID);
         let service = DesktopSession::new(DesktopSource::UserManager);
-        assert!(service.own_app_ids(40).is_empty(), "no window connected");
-        let dev = service.add_window(40, Arc::from("io.github.oysteinkrog.Tasklens.Devel"));
-        let other = service.add_window(41, Arc::from(APP_ID));
+        assert_eq!(service.own_app_id(40, Some(&devel)), None, "not connected");
+        assert_eq!(service.own_app_id(40, None), None, "no announced app id");
+        let a = service.add_window(40, Arc::clone(&devel));
+        let b = service.add_window(40, Arc::clone(&main));
         assert_eq!(
-            service.own_app_ids(40),
-            [Arc::from("io.github.oysteinkrog.Tasklens.Devel")]
+            service.own_app_id(40, Some(&devel)),
+            Some(Arc::clone(&devel))
         );
-        drop(dev);
-        assert!(service.own_app_ids(40).is_empty());
-        drop(other);
+        assert_eq!(service.own_app_id(40, Some(&main)), Some(Arc::clone(&main)));
+        assert_eq!(service.own_app_id(41, Some(&main)), None, "another pid");
+        drop(a);
+        assert_eq!(service.own_app_id(40, Some(&devel)), None, "session gone");
+        assert_eq!(service.own_app_id(40, Some(&main)), Some(Arc::clone(&main)));
+        drop(b);
 
         let window = DesktopSession::new(DesktopSource::Process);
-        assert_eq!(window.own_app_ids(7), [Arc::from(APP_ID)]);
+        assert_eq!(window.own_app_id(7, None), Some(Arc::clone(&main)));
     }
 
     /// q4x76.12: Switch to window waits for the KWin worker's answer. With no bridge it fails
@@ -524,5 +599,38 @@ mod tests {
             futures_lite::future::block_on(session.activate_window(id)),
             Err(ActionError::Unsupported)
         );
+    }
+
+    /// q4x76.12, ADR-018 rule 4: the bridge shuts down between the check and the enqueue. The
+    /// call fails, and the next bridge drops it unrun.
+    #[test]
+    fn activate_from_an_earlier_bridge_never_runs() {
+        let session = DesktopSession::new(DesktopSource::UserManager);
+        let id: Arc<str> = Arc::from("{0a1b2c3d-0000-4000-8000-00000000000a}");
+        let calls = session.activate_calls();
+        let first = session.bridge_serving();
+        // The check.
+        let checked = session.bridge_generation().expect("a bridge serves");
+        // The bridge shuts down and the next one starts before the call is queued.
+        drop(first);
+        let next = session.bridge_serving();
+        assert_ne!(session.bridge_generation(), Some(checked));
+        let answer = futures_lite::future::block_on(session.send_activate(checked, id));
+        assert!(
+            matches!(answer, Err(ActionError::Internal(_))),
+            "the action ends with a failure: {answer:?}"
+        );
+        // The next bridge reads the call and drops it: it never runs there.
+        let call = calls.try_recv().expect("the call was queued");
+        assert_eq!(call.generation, checked);
+        assert!(next.accept(call).is_none());
+        // A call checked against the current bridge is accepted.
+        let (reply, _answer) = async_channel::bounded(1);
+        let current = ActivateCall {
+            internal_id: Arc::from("{0a1b2c3d-0000-4000-8000-00000000000b}"),
+            generation: session.bridge_generation().expect("a bridge serves"),
+            reply,
+        };
+        assert!(next.accept(current).is_some());
     }
 }
