@@ -2030,35 +2030,40 @@ impl Reducer {
                 let t = now_boot_ns();
                 let period = self.apply_state.period(SourceId::UPower, t, SLOW_NS);
                 let mut rows = Vec::with_capacity(list.len());
-                for (identity, battery) in list {
-                    let (idx, _) = self.sample_device(&identity)?;
-                    let pct = battery.percentage;
-                    self.push(
-                        idx,
-                        MetricId::BATTERY_PCT,
-                        t,
-                        pct.value,
-                        pct.validity.is_valid(),
-                        period,
-                    );
-                    if battery.power_supply {
-                        let rate = battery.energy_rate_w;
-                        let power = match &*battery.state {
-                            "Charging" => rate.value,
-                            "Discharging" => -rate.value,
-                            _ => 0.0,
-                        };
-                        self.push(
+                // The charge and power samples go to the sinks like a system batch, so the
+                // device metric history stores them (crw.107).
+                self.record_system(t, |r| {
+                    for (identity, battery) in list {
+                        let (idx, _) = r.sample_device(&identity)?;
+                        let pct = battery.percentage;
+                        r.push(
                             idx,
-                            MetricId::BATTERY_POWER,
+                            MetricId::BATTERY_PCT,
                             t,
-                            power,
-                            rate.validity.is_valid(),
+                            pct.value,
+                            pct.validity.is_valid(),
                             period,
                         );
+                        if battery.power_supply {
+                            let rate = battery.energy_rate_w;
+                            let power = match &*battery.state {
+                                "Charging" => rate.value,
+                                "Discharging" => -rate.value,
+                                _ => 0.0,
+                            };
+                            r.push(
+                                idx,
+                                MetricId::BATTERY_POWER,
+                                t,
+                                power,
+                                rate.validity.is_valid(),
+                                period,
+                            );
+                        }
+                        rows.push((idx, battery));
                     }
-                    rows.push((idx, battery));
-                }
+                    Ok(())
+                })?;
                 rows.sort_unstable_by_key(|(idx, _)| *idx);
                 next.batteries = rows.into();
                 self.mark(ComponentMask::SERIES);

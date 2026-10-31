@@ -1355,6 +1355,43 @@ fn battery_power_is_signed_by_state() {
     );
 }
 
+/// crw.107: a battery update hands its charge and power samples to the sinks as one system
+/// batch, so the device metric history stores them.
+#[test]
+fn battery_samples_reach_the_sinks() {
+    let mut rig = Rig::new();
+    let log = LogSink::install(&mut rig);
+    let bat0 = DeviceIdentity::Battery {
+        native_path: Arc::from("BAT0"),
+    };
+    let mut b = battery("BAT0", 64.0);
+    b.power_supply = true;
+    b.state = Arc::from("Discharging");
+    b.energy_rate_w = Total {
+        value: 7.5,
+        validity: Validity::Valid,
+    };
+    rig.run(vec![src(SourceUpdate::DeviceDetails(
+        DeviceDetailsUpdate::Batteries(vec![(bat0.clone(), b)]),
+    ))])
+    .expect("no invariant violation");
+    let idx = rig.idx(&bat0);
+    let log = log.lock().unwrap_or_else(PoisonError::into_inner);
+    let (_, batch) = log.system.last().expect("a battery batch");
+    let got: Vec<(SeriesId, f32)> = batch.iter().map(|(id, s)| (*id, s.value)).collect();
+    let id = |metric| SeriesId {
+        device: idx,
+        metric,
+    };
+    assert_eq!(
+        got,
+        [
+            (id(MetricId::BATTERY_PCT), 64.0),
+            (id(MetricId::BATTERY_POWER), -7.5)
+        ]
+    );
+}
+
 #[test]
 fn on_battery_publishes_only_on_change() {
     let mut rig = Rig::new();

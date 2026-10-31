@@ -12,6 +12,11 @@
 //! open gets a new sender generation, and the sink sends the latest catalog to every new
 //! generation before its first samples.
 //!
+//! Battery charge and power (crw.107) come with each UPower publish, at least once per 60 s
+//! resync, not once a second. The sink repeats the last valid sample of each such series once per
+//! second, at the time of the next system batch, for up to `HOLD_NS` after it. So every second of
+//! the 1 s tier has a value and the 1 h range draws a line, not one dot per publish.
+//!
 //! Series are stored by `(persistent_key, MetricId)` (ADR-017 "Series identity") and mapped back
 //! to the current catalog's `DeviceIdx` on read, so a renumbered device continues its series.
 //!
@@ -80,6 +85,11 @@ pub const METRIC_CHANNEL_CAPACITY: usize = 512;
 const RECV_WAIT: Duration = Duration::from_millis(500);
 /// At most this many messages go into one blocking job.
 const BATCH_MAX: usize = 64;
+/// Series that arrive less than once a second; the sink repeats their last sample (crw.107).
+const HELD: [MetricId; 2] = [MetricId::BATTERY_PCT, MetricId::BATTERY_POWER];
+/// How long the sink repeats a held sample: the 60 s UPower resync plus its 0.5 s wait, with
+/// room to spare.
+const HOLD_NS: u64 = 90 * NS_PER_SEC;
 /// The store is ticked this often: it writes due minutes, ages the ring and drops idle spans.
 const TICK_NS: u64 = 1_000_000_000;
 /// A store that failed to open is tried again after this long.
@@ -116,6 +126,13 @@ pub type MetricHistorySlot = Arc<ArcSwapOption<MetricTx>>;
 /// Sender generations, unique per process.
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// The last valid sample of one `HELD` series and the boottime second it was last sent for.
+struct Held {
+    id: SeriesId,
+    sample: Sample,
+    sent_sec: u64,
+}
+
 /// The reducer side: a thin forwarder to the worker's channel.
 pub struct MetricSink {
     slot: MetricHistorySlot,
@@ -125,6 +142,8 @@ pub struct MetricSink {
     catalog_sent_to: Option<u64>,
     /// The CLOCK_BOOTTIME second of the last `Reading` sent.
     reading_sec: Option<u64>,
+    /// The `HELD` series the sink repeats.
+    held: Vec<Held>,
 }
 
 impl MetricSink {
@@ -134,6 +153,7 @@ impl MetricSink {
             catalog: None,
             catalog_sent_to: None,
             reading_sec: None,
+            held: Vec::new(),
         }
     }
 
@@ -162,16 +182,55 @@ impl MetricSink {
         }
     }
 
-    /// Sends the batch when a store is open. A store that has not received the catalog gets it
-    /// first; without a catalog the samples cannot be keyed and are dropped.
-    pub fn on_system_sample(&mut self, _t_ns: TimeNs, series: &[(SeriesId, Sample)]) {
+    /// Sends the batch when a store is open, with a copy at `t_ns` of each held sample not yet
+    /// sent for this second. A store that has not received the catalog gets it first; without a
+    /// catalog the samples cannot be keyed and are dropped.
+    pub fn on_system_sample(&mut self, t_ns: TimeNs, series: &[(SeriesId, Sample)]) {
         let guard = self.slot.load();
         let Some(tx) = guard.as_deref() else {
             return;
         };
-        if self.sync_catalog(tx) {
-            let _ = tx.tx.try_send(MetricMsg::System(series.into()));
+        if !self.sync_catalog(tx) {
+            return;
         }
+        let held = self.hold(t_ns, series);
+        let batch: Box<[(SeriesId, Sample)]> = if held.is_empty() {
+            series.into()
+        } else {
+            series.iter().copied().chain(held).collect()
+        };
+        let _ = tx.tx.try_send(MetricMsg::System(batch));
+    }
+
+    /// Keeps the newest valid sample of each `HELD` series in `series`; a sample that is not
+    /// valid ends the hold. A batch without `HELD` series gets the held samples younger than
+    /// `HOLD_NS` that were not sent for the second of `t_ns` yet.
+    fn hold(&mut self, t_ns: TimeNs, series: &[(SeriesId, Sample)]) -> Vec<(SeriesId, Sample)> {
+        let mut fresh = false;
+        for &(id, sample) in series.iter().filter(|(id, _)| HELD.contains(&id.metric)) {
+            fresh = true;
+            self.held.retain(|h| h.id != id);
+            if sample.is_valid() {
+                let sent_sec = sample.t_ns / NS_PER_SEC;
+                self.held.push(Held {
+                    id,
+                    sample,
+                    sent_sec,
+                });
+            }
+        }
+        if fresh {
+            return Vec::new();
+        }
+        self.held
+            .retain(|h| t_ns.saturating_sub(h.sample.t_ns) <= HOLD_NS);
+        let sec = t_ns / NS_PER_SEC;
+        let mut out = Vec::new();
+        for h in self.held.iter_mut().filter(|h| sec > h.sent_sec) {
+            h.sent_sec = sec;
+            out.push((h.id, Sample::valid(t_ns, h.sample.value)));
+        }
+        out
     }
 
     pub fn on_device_catalog(&mut self, catalog: &DeviceCatalog) {
@@ -1922,6 +1981,150 @@ mod tests {
                 ("sleep", 5 * SEC),
             ]
         );
+    }
+
+    /// crw.107: a battery sample is sent again once per second with the next system batches,
+    /// up to `HOLD_NS` after it. A sample that is not valid ends the hold of its series only.
+    #[test]
+    fn sink_repeats_battery_samples_each_second() {
+        let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let mut sink = MetricSink::new(Arc::clone(&slot));
+        sink.on_device_catalog(&catalog(1, Vec::new()));
+        let (tx, mut rx) = mpsc::channel::<MetricMsg>(16);
+        slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
+        let pct = sid(1, MetricId::BATTERY_PCT);
+        let power = sid(1, MetricId::BATTERY_POWER);
+        let cpu = |t: TimeNs| [(sid(0, MetricId::CPU_TOTAL), sample(t, 1.0))];
+        let gap = Sample {
+            t_ns: 3 * SEC,
+            value: 0.0,
+            flags: SampleFlags::empty(),
+        };
+
+        sink.on_system_sample(SEC, &[(pct, sample(SEC, 80.0)), (power, sample(SEC, -9.5))]);
+        for t in [SEC + SEC / 2, 2 * SEC, 2 * SEC + SEC / 2] {
+            sink.on_system_sample(t, &cpu(t));
+        }
+        sink.on_system_sample(3 * SEC, &[(pct, gap)]);
+        for t in [4 * SEC, SEC + HOLD_NS, 2 * SEC + HOLD_NS] {
+            sink.on_system_sample(t, &cpu(t));
+        }
+        let got: Vec<Vec<(SeriesId, TimeNs, f32)>> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m {
+                MetricMsg::System(b) => Some(
+                    b.iter()
+                        .filter(|(id, _)| id.device == DeviceIdx(1))
+                        .map(|(id, s)| (*id, s.t_ns, s.value))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                vec![(pct, SEC, 80.0), (power, SEC, -9.5)],
+                // Second 1 already has them.
+                vec![],
+                vec![(pct, 2 * SEC, 80.0), (power, 2 * SEC, -9.5)],
+                vec![],
+                vec![(pct, 3 * SEC, 0.0)],
+                vec![(power, 4 * SEC, -9.5)],
+                vec![(power, SEC + HOLD_NS, -9.5)],
+                // Past `HOLD_NS`.
+                vec![],
+            ]
+        );
+    }
+
+    /// crw.107: the battery charge and power series round-trip through the store. UPower
+    /// publishes once per 60 s and the sink holds the values between, so the 1 h and 24 h reads
+    /// have a value in every bucket, and the 1 h read gets them back after a restart.
+    #[test]
+    fn battery_series_round_trip() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let battery = DeviceIdentity::Battery {
+            native_path: Arc::from("BAT0"),
+        };
+        let cat = catalog(
+            1,
+            vec![
+                entry(0, battery.clone(), "battery:BAT0", true),
+                entry(1, DeviceIdentity::CpuPackage, "cpu", true),
+            ],
+        );
+        st.set_catalog(cat.clone());
+        let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let mut sink = MetricSink::new(Arc::clone(&slot));
+        let (tx, mut rx) = mpsc::channel::<MetricMsg>(512);
+        slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
+        sink.on_device_catalog(&cat);
+        let pct = sid(0, MetricId::BATTERY_PCT);
+        let power = sid(0, MetricId::BATTERY_POWER);
+        for i in 0..120 {
+            let t = t0 + i * SEC;
+            if i % 60 == 0 {
+                let charge = 80.0 - (i / 60) as f32;
+                sink.on_system_sample(t, &[(pct, sample(t, charge)), (power, sample(t, -10.0))]);
+            }
+            let t = t + SEC / 10;
+            sink.on_system_sample(t, &[(sid(1, MetricId::CPU_TOTAL), sample(t, 5.0))]);
+        }
+        while let Ok(msg) = rx.try_recv() {
+            st.apply(msg);
+        }
+        let now = t0 + 125 * SEC;
+        st.tick(now).expect("tick");
+
+        // 1 h: 4 s buckets. Second 119 is still open, so seconds 0 to 118 fill 30 buckets.
+        let h = st
+            .answer(live(DeviceRange::H1), now)
+            .expect("read")
+            .expect("sent");
+        let mut charge_h1 = vec![80.0; 15];
+        charge_h1.extend([79.0; 15]);
+        assert_eq!(means(&h, pct), charge_h1);
+        assert_eq!(means(&h, power), [-10.0; 30]);
+        for id in [pct, power] {
+            let points = h.get(id).expect("series");
+            let first = points.iter().position(|p| !p.is_gap()).expect("valid");
+            let last = points.iter().rposition(|p| !p.is_gap()).expect("valid");
+            assert!(points[first..=last].iter().all(|p| !p.is_gap()), "{id:?}");
+        }
+
+        // 24 h: the 10 s tier in 90 s buckets, the second one partial.
+        let h = st
+            .answer(live(DeviceRange::H24), now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(means(&h, power), [-10.0, -10.0]);
+        let charge = means(&h, pct);
+        assert_eq!(charge.len(), 2);
+        assert!((charge[0] - (60.0 * 80.0 + 30.0 * 79.0) / 90.0).abs() < 0.01);
+        assert_eq!(charge[1], 79.0);
+        st.close(now).expect("close");
+
+        // A restart on a new boot: the battery is idx 4 now and its last hour comes back.
+        let offset2 = OFFSET + 1_200 * SEC as i64;
+        let t1 = 5 * SEC;
+        let mut st = open(dir.path(), 2, offset2, t1);
+        let mut entries: Vec<DeviceEntry> = (0..4)
+            .map(|i| {
+                let identity = DeviceIdentity::CpuLogical { id: i };
+                entry(i, identity, &format!("cpu:{i}"), true)
+            })
+            .collect();
+        entries.push(entry(4, battery, "battery:BAT0", true));
+        st.set_catalog(catalog(1, entries));
+        st.tick(t1).expect("tick");
+        let h = st
+            .answer(live(DeviceRange::H1), t1)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(means(&h, sid(4, MetricId::BATTERY_PCT)), charge_h1);
+        assert_eq!(means(&h, sid(4, MetricId::BATTERY_POWER)), [-10.0; 30]);
     }
 
     #[test]
