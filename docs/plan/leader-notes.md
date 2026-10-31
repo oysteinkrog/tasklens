@@ -1056,3 +1056,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.12 prep: self = engine pid + local Hello window pids; own-window commands checked per session, refused from bridge sessions; remote-only success toasts; KWin name watch; UI split to tasklens-q4x76.30 before q4x76.13. Requeued.
 - 2026-10-31 q4x76.12 held: own-window checks keyed by session Hello (pid, app id); desktop calls carry the bridge generation; env read on KWin name appear with bounded 10 s backoff, no steady polling. Requeued.
 - 2026-10-31 q4x76.12 held again: launches set env on the Command and spawn directly (no env/shell wrapper) so spawn errors surface. Requeued.
+- 2026-10-31 q4x76.29 held: tracker keys requests by (host, generation) and ends older-generation requests on first sight of a newer generation, never via link-down events or timers. Requeued.
