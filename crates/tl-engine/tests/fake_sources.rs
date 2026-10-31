@@ -479,6 +479,7 @@ pub fn root_endpoints(
         msgs_tx: msgs_tx.clone(),
         demand,
         settings,
+        host_settings: Arc::default(),
         control,
         publisher: Publisher {
             latest: Arc::clone(&latest),

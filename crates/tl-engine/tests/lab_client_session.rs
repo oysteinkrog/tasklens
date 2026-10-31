@@ -1,6 +1,7 @@
 //! LabRuntime tests for client sessions (q4x76.4, ADR-018): each session has its own table
 //! and system table queries and gets its own views; the local session alone behaves as before.
 //! Sessions opened with a `PortState` (q4x76.5) close and take demand through that state.
+//! Every session, shown or hidden, carries the host settings (q4x76.23).
 //!
 //! Each `run` call gets its own task. The messages are queued before the task starts and the
 //! sender is dropped, so `run` drains the queue and then returns.
@@ -28,6 +29,7 @@ use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GraphTarget, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
+use tl_model::remote_proto::HostSettings;
 use tl_model::snapshot::{
     InventorySnapshot, ServiceBackend, ServiceStatus, Snapshot, StartupType, UnitRecord,
 };
@@ -514,6 +516,31 @@ fn local_session_is_unchanged_by_another_session() {
         assert_eq!(a.services.counts, s.services.counts);
         assert_eq!(a.services.manager_counts, s.services.manager_counts);
     }
+}
+
+/// The host settings are the same `Arc` in the local snapshot and in a hidden session's, and a
+/// new revision reaches both at the next publish (ADR-018 Settings).
+#[test]
+fn every_session_carries_the_host_settings() {
+    let mut rig = Rig::new();
+    let first = HostSettings {
+        rev: 5,
+        ..HostSettings::default()
+    };
+    rig.reducer().host_settings.store(Arc::new(first.clone()));
+    let (remote, _remote_wake) = link();
+    let local = rig.run(vec![open(REMOTE, &remote), demand(REMOTE, hidden_host())]);
+    let hidden = remote.latest.load_full();
+    assert_eq!(*local.host_settings, first);
+    assert!(Arc::ptr_eq(&hidden.host_settings, &local.host_settings));
+
+    let mut next = first;
+    next.rev = 6;
+    next.values.interval_ms = 5000;
+    rig.reducer().host_settings.store(Arc::new(next.clone()));
+    let local = rig.run(vec![EngineMsg::Client(ClientMsg::Wake)]);
+    assert_eq!(*local.host_settings, next);
+    assert_eq!(*remote.latest.load_full().host_settings, next);
 }
 
 /// Leader decision on tasklens-q4x76.15: a session's snapshot carries only what its demand

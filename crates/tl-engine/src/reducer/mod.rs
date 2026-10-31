@@ -40,6 +40,7 @@ use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
+use tl_model::remote_proto::HostSettings;
 use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -196,6 +197,9 @@ pub struct Reducer {
     /// The engine settings watch. `run` reads it once per publish; `None` uses
     /// `EngineSettings::default()`.
     pub settings_rx: Option<watch::Receiver<EngineSettings>>,
+    /// The host settings with their revision, which every snapshot carries (ADR-018 Settings).
+    /// `EngineHandle` stores them; the reducer only reads them at each publish.
+    pub host_settings: Arc<ArcSwap<HostSettings>>,
     /// The local window's demand watch. `None` leaves PSS, details and the other demand-driven
     /// state as the updates set it, and sends no combined demand.
     pub demand_rx: Option<watch::Receiver<Demand>>,
@@ -285,6 +289,7 @@ impl Reducer {
             events_tx,
             helper_tx: None,
             settings_rx: None,
+            host_settings: Arc::default(),
             demand_rx: None,
             demand_out: None,
             apply_state: apply::ApplyState::default(),
@@ -491,6 +496,7 @@ impl Reducer {
             process_series: Arc::clone(&c.process_series),
             device_details: Arc::clone(local.device_details()),
             device_history: Arc::clone(local.device_history()),
+            host_settings: self.host_settings.load_full(),
         }
     }
 }

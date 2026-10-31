@@ -19,6 +19,7 @@ use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::history::RecordSink;
 use tl_model::journal::{JournalError, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::remote_proto::{HostSettings, HostSettingsChanges, SetHostSettingsReply};
 use tl_model::request::RequestEvent;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{ComponentHeader, Snapshot, WindowsSnapshot};
@@ -283,6 +284,11 @@ struct Inner {
     trace: Arc<ShutdownTrace>,
     /// The ports `open_session` handed out whose session has not ended yet.
     ports: Mutex<Vec<(ClientSessionId, Arc<PortState>)>>,
+    /// The host settings every snapshot carries (ADR-018 Settings). Revision 0 until
+    /// `install_host_settings`; the reducer reads them at each publish.
+    host: Arc<ArcSwap<HostSettings>>,
+    /// Held while a change is checked against the current revision and stored.
+    host_write: Mutex<()>,
 }
 
 /// The UI-side channel ends that `shutdown` drops first.
@@ -308,6 +314,7 @@ impl EngineHandle {
         msgs_tx: mpsc::Sender<EngineMsg>,
         journal: Option<JournalSpawner>,
         trace: Arc<ShutdownTrace>,
+        host: Arc<ArcSwap<HostSettings>>,
     ) -> Self {
         let last_demand = Mutex::new(demand_tx.borrow().clone());
         Self {
@@ -328,6 +335,8 @@ impl EngineHandle {
                 stopped: AtomicBool::new(false),
                 trace,
                 ports: Mutex::new(Vec::new()),
+                host,
+                host_write: Mutex::new(()),
             }),
         }
     }
@@ -446,6 +455,35 @@ impl EngineHandle {
 
     /// Sends `ClientMsg::Wake` when the queue has room. The reducer reads the ports' shared state
     /// on every pass anyway, so a full queue only delays it until the next tick.
+    /// Makes `current` the host settings: the engine's workers use its values from now on, and
+    /// the next snapshot of every session carries it. The owner of `engine.toml` calls this at
+    /// start and after each change it stored (ADR-018 Settings).
+    pub fn install_host_settings(&self, current: HostSettings) {
+        let _write = self
+            .inner
+            .host_write
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.store_host_settings(current);
+    }
+
+    /// The host settings the engine runs with.
+    pub fn host_settings(&self) -> Arc<HostSettings> {
+        self.inner.host.load_full()
+    }
+
+    /// Stores `current` and passes its values to the workers. The caller holds `host_write`.
+    fn store_host_settings(&self, current: HostSettings) {
+        let settings = current.values.engine_settings();
+        self.inner.host.store(Arc::new(current));
+        if let Some(links) = &*self.links() {
+            // An error means the engine has stopped, and then the settings no longer matter.
+            let _ = links.settings_tx.send(settings);
+        }
+        // A publish now, so every session sees the new revision without waiting for a worker.
+        self.wake_reducer();
+    }
+
     fn wake_reducer(&self) {
         if let Some(links) = &*self.links() {
             let _ = links.msgs_tx.try_send(EngineMsg::Client(ClientMsg::Wake));
@@ -664,6 +702,7 @@ impl Engine {
         let (settings_tx, settings_rx) = watch::channel(EngineSettings::default());
         let (control_tx, _control_rx) = watch::channel(WorkerControl::default());
         let latest = Arc::new(ArcSwap::from_pointee(empty_snapshot(boot_id)));
+        let host_settings = Arc::new(ArcSwap::from_pointee(HostSettings::default()));
 
         let journal = hooks.journal.clone();
         let ep = RootEndpoints {
@@ -671,6 +710,7 @@ impl Engine {
             msgs_tx: msgs_tx.clone(),
             demand: demand_rx,
             settings: settings_rx,
+            host_settings: Arc::clone(&host_settings),
             control: control_tx,
             publisher: Publisher {
                 latest: latest.clone(),
@@ -701,6 +741,7 @@ impl Engine {
             msgs_tx,
             journal,
             trace,
+            host_settings,
         );
         *handle
             .inner
@@ -803,6 +844,44 @@ impl EngineClient for EngineHandle {
         }
     }
 
+    /// Applies `changes` when `base_rev` is the current revision, else `Conflict`. Revision 0
+    /// means no host settings were installed, so nothing can be changed yet. The engine keeps
+    /// the result in memory only; the owner of `engine.toml` stores it (tasklens-q4x76.24).
+    fn set_host_settings(
+        &self,
+        base_rev: u64,
+        changes: HostSettingsChanges,
+    ) -> Result<async_channel::Receiver<SetHostSettingsReply>, CommandError> {
+        if self.inner.stopped.load(Ordering::Acquire) || self.links().is_none() {
+            return Err(CommandError::EngineStopped);
+        }
+        let reply = {
+            let _write = self
+                .inner
+                .host_write
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let current = self.inner.host.load_full();
+            if current.rev == 0 || base_rev != current.rev {
+                SetHostSettingsReply::Conflict {
+                    current: (*current).clone(),
+                }
+            } else {
+                let rev = current.rev + 1;
+                self.store_host_settings(HostSettings {
+                    rev,
+                    values: current.values.with_changes(&changes),
+                    read_only: current.read_only,
+                });
+                SetHostSettingsReply::Ack { rev }
+            }
+        };
+        let (tx, rx) = async_channel::bounded(1);
+        // The channel is new and has one free slot, so this cannot fail.
+        let _ = tx.try_send(reply);
+        Ok(rx)
+    }
+
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
         if self.inner.stopped.load(Ordering::Acquire) {
             return Err(CommandError::EngineStopped);
@@ -860,6 +939,7 @@ mod tests {
     struct Rig {
         handle: EngineHandle,
         demand_rx: watch::Receiver<Demand>,
+        settings_rx: watch::Receiver<EngineSettings>,
         msgs_rx: mpsc::Receiver<EngineMsg>,
     }
 
@@ -869,7 +949,7 @@ mod tests {
         let (_events_tx, events_rx) = async_channel::bounded(256);
         let (_requests_tx, requests_rx) = async_channel::unbounded();
         let (demand_tx, demand_rx) = watch::channel(Demand::default());
-        let (settings_tx, _settings_rx) = watch::channel(EngineSettings::default());
+        let (settings_tx, settings_rx) = watch::channel(EngineSettings::default());
         let (msgs_tx, msgs_rx) = mpsc::channel(QUEUE);
         let handle = EngineHandle::new(
             latest,
@@ -881,10 +961,12 @@ mod tests {
             msgs_tx,
             journal,
             Arc::default(),
+            Arc::default(),
         );
         Rig {
             handle,
             demand_rx,
+            settings_rx,
             msgs_rx,
         }
     }
@@ -935,6 +1017,78 @@ mod tests {
         let r2 = rig(None);
         r2.handle.set_demand(Demand::default());
         assert!(!r2.demand_rx.has_changed());
+    }
+
+    /// The one reply on a channel `set_host_settings` returned.
+    fn reply(rx: &async_channel::Receiver<SetHostSettingsReply>) -> SetHostSettingsReply {
+        rx.try_recv()
+            .expect("the in-process engine replies at once")
+    }
+
+    #[test]
+    fn host_settings_change_only_from_the_current_revision() {
+        let mut r = rig(None);
+        let changes = HostSettingsChanges {
+            interval_ms: Some(2000),
+            ..HostSettingsChanges::default()
+        };
+        // Nothing installed yet: revision 0, and no change applies, not even from base 0.
+        assert_eq!(r.handle.host_settings().rev, 0);
+        let rx = r.handle.set_host_settings(0, changes.clone()).unwrap();
+        assert!(matches!(
+            reply(&rx),
+            SetHostSettingsReply::Conflict { current } if current.rev == 0
+        ));
+        assert!(!r.settings_rx.has_changed());
+
+        let mut installed = HostSettings {
+            rev: 3,
+            ..HostSettings::default()
+        };
+        installed.values.history.enabled = true;
+        r.handle.install_host_settings(installed.clone());
+        assert_eq!(*r.handle.host_settings(), installed);
+        assert!(r.settings_rx.borrow_and_update().history.enabled);
+        // Each store asks the reducer for a publish, so sessions see it at once.
+        assert!(matches!(
+            r.msgs_rx.try_recv(),
+            Ok(EngineMsg::Client(ClientMsg::Wake))
+        ));
+
+        let rx = r.handle.set_host_settings(3, changes.clone()).unwrap();
+        assert_eq!(reply(&rx), SetHostSettingsReply::Ack { rev: 4 });
+        let now = r.handle.host_settings();
+        assert_eq!((now.rev, now.values.interval_ms), (4, 2000));
+        assert!(
+            now.values.history.enabled,
+            "what the change leaves out stays"
+        );
+        assert_eq!(r.settings_rx.borrow_and_update().interval_ms, 2000);
+
+        // A second write from the same base is a conflict and gets the current settings.
+        let rx = r
+            .handle
+            .set_host_settings(
+                3,
+                HostSettingsChanges {
+                    interval_ms: Some(500),
+                    ..HostSettingsChanges::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            reply(&rx),
+            SetHostSettingsReply::Conflict {
+                current: (*now).clone()
+            }
+        );
+        assert_eq!(r.handle.host_settings().values.interval_ms, 2000);
+
+        r.handle.inner.stopped.store(true, Ordering::Release);
+        assert!(matches!(
+            r.handle.set_host_settings(4, changes),
+            Err(CommandError::EngineStopped)
+        ));
     }
 
     #[test]

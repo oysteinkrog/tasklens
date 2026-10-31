@@ -15,7 +15,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::TaskHandle;
@@ -26,6 +26,7 @@ use futures_lite::future::poll_fn;
 use tl_model::actions::ActionEvent;
 use tl_model::demand::Demand;
 use tl_model::health::SourceId;
+use tl_model::remote_proto::HostSettings;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::{BootId, now_boot_ns};
@@ -73,6 +74,8 @@ pub struct RootEndpoints {
     /// sessions' and the background demand into the watch its workers read (ADR-018).
     pub demand: watch::Receiver<Demand>,
     pub settings: watch::Receiver<EngineSettings>,
+    /// The host settings every snapshot carries. `EngineHandle` writes them.
+    pub host_settings: Arc<ArcSwap<HostSettings>>,
     /// Lent to the reducer for each session and taken back when the session ends.
     pub control: watch::Sender<WorkerControl>,
     pub publisher: Publisher,
@@ -188,6 +191,7 @@ async fn run_session(
 ) -> Result<(), SessionEnd> {
     reducer.sequence = ep.next_sequence;
     reducer.settings_rx = Some(ep.settings.clone());
+    reducer.host_settings = Arc::clone(&ep.host_settings);
     reducer.demand_rx = Some(ep.demand.clone());
     // The workers read the combined demand of every client session plus the background demand
     // (ADR-018), which the reducer sends at each publish.
