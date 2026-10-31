@@ -28,6 +28,7 @@ pub mod sensors;
 pub mod sidebar;
 pub mod status_bar;
 pub mod summary;
+pub mod widget;
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
