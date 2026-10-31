@@ -122,11 +122,6 @@ impl SwitchClient {
         old
     }
 
-    /// The current backend.
-    pub fn backend(&self) -> Arc<dyn EngineClient> {
-        Arc::clone(&lock(&self.inner).backend)
-    }
-
     /// The backend and the switch count, from one lock.
     fn current(&self) -> (Arc<dyn EngineClient>, u64) {
         let inner = lock(&self.inner);

@@ -140,7 +140,8 @@ impl EngineLink {
     }
 
     /// The current state.
-    pub fn state(&self) -> EngineLinkState {
+    #[cfg(test)]
+    fn state(&self) -> EngineLinkState {
         lock(&self.running).state(self.can_switch())
     }
 
