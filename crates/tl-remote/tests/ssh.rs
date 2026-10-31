@@ -104,13 +104,15 @@ fn stderr_ring_limits() {
     let long = "y".repeat(20 * 1024);
     ring.feed(&long.as_bytes()[..5000]);
     ring.feed(&long.as_bytes()[5000..]);
-    ring.feed(b"\r\nlast");
-    ring.finish();
+    ring.feed(b"\r\n");
     let lines: Vec<&str> = ring.lines().collect();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].len(), STDERR_BYTES);
-    assert_eq!(lines[1], "last");
-    assert!(ring.bytes() <= STDERR_BYTES);
+    // The next line goes over the total, so the long one is dropped.
+    ring.feed(b"last");
+    ring.finish();
+    assert_eq!(ring.lines().collect::<Vec<_>>(), ["last"]);
+    assert_eq!(ring.bytes(), 4);
 }
 
 #[test]
