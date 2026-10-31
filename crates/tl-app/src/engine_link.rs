@@ -34,7 +34,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -456,7 +455,7 @@ fn connect_by(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
             Err(e) => return Err(e.into()),
         }
     };
-    let stream = UnixStream::from(OwnedFd::from(fd));
+    let stream = UnixStream::from(fd);
     stream.set_nonblocking(false)?;
     Ok(stream)
 }
@@ -654,6 +653,7 @@ fn spawn(name: &str, body: impl FnOnce() + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::AtomicU32;
 
