@@ -285,10 +285,12 @@ pub enum ActionKind {
     FreezeGroup,
     ThawGroup,
     KillGroup,
-    /// P2. The UI picks the path (R-119).
+    /// P2. `name` is a file name only, such as `firefox_1234_20261003_120000.core`. The engine
+    /// puts it in its own dumps dir and reports the full path in `ActionState::Saved`: a path on
+    /// a host is always chosen by that host's engine (ADR-018).
     Dump {
         mode: DumpMode,
-        path: Arc<str>,
+        name: Arc<str>,
     },
     UnitStart,
     UnitStop,
@@ -384,12 +386,25 @@ pub enum ActionState {
     Failed(ActionError),
     /// Timed out, or the target vanished after the effect may have happened.
     OutcomeUnknown(Arc<str>),
+    /// Not final: a running target has written `bytes` so far. Only `Dump` sends it, about every
+    /// 500 ms, between `Started` and the target's final state (ADR-005, ADR-018).
+    Progress {
+        bytes: u64,
+    },
+    /// Succeeded and wrote the file at this full path on the engine's host. A `Dump` target ends
+    /// with it, and so does the summary of a one-target dump.
+    Saved(Arc<str>),
 }
 
 impl ActionState {
-    /// Every state except `Started`.
+    /// Every state except `Started` and `Progress`.
     pub fn is_final(&self) -> bool {
-        !matches!(self, ActionState::Started)
+        !matches!(self, ActionState::Started | ActionState::Progress { .. })
+    }
+
+    /// `Succeeded` or `Saved`.
+    pub fn is_success(&self) -> bool {
+        matches!(self, ActionState::Succeeded | ActionState::Saved(_))
     }
 
     /// Summary rule (ADR-005): Succeeded only if every target succeeded; otherwise the worst state
@@ -397,12 +412,13 @@ impl ActionState {
     /// found. An empty iterator gives Succeeded: a targetless kind has no per-target events.
     ///
     /// A `Started` target ranks below Rejected, so the summary stays `Started` while a target is
-    /// still running and nothing worse has happened.
+    /// still running and nothing worse has happened. `Saved` counts as success; `Progress` is
+    /// skipped.
     pub fn summarize<'a>(per_target: impl IntoIterator<Item = &'a ActionState>) -> ActionState {
         fn rank(state: &ActionState) -> u8 {
             match state {
-                ActionState::Succeeded => 0,
-                ActionState::Started => 1,
+                ActionState::Succeeded | ActionState::Saved(_) => 0,
+                ActionState::Started | ActionState::Progress { .. } => 1,
                 ActionState::Rejected(_) => 2,
                 ActionState::OutcomeUnknown(_) => 3,
                 ActionState::Failed(_) => 4,
@@ -410,6 +426,9 @@ impl ActionState {
         }
         let mut worst: Option<&ActionState> = None;
         for state in per_target {
+            if matches!(state, ActionState::Progress { .. }) {
+                continue;
+            }
             if worst.is_none_or(|w| rank(state) > rank(w)) {
                 worst = Some(state);
             }
@@ -546,14 +565,43 @@ mod tests {
     #[test]
     fn state_is_final() {
         assert!(!ActionState::Started.is_final());
+        assert!(!ActionState::Progress { bytes: 7 }.is_final());
         for state in [
             ActionState::Rejected(RejectReason::Busy),
             ActionState::Succeeded,
             ActionState::Failed(ActionError::NoSuchProcess),
             ActionState::OutcomeUnknown("timeout".into()),
+            ActionState::Saved("/s/dumps/x.core".into()),
         ] {
             assert!(state.is_final(), "{state:?}");
         }
+    }
+
+    #[test]
+    fn state_is_success() {
+        assert!(ActionState::Succeeded.is_success());
+        assert!(ActionState::Saved("/s/dumps/x.core".into()).is_success());
+        for state in [
+            ActionState::Started,
+            ActionState::Progress { bytes: 1 },
+            ActionState::Rejected(RejectReason::Busy),
+            ActionState::Failed(ActionError::NoSuchProcess),
+            ActionState::OutcomeUnknown("timeout".into()),
+        ] {
+            assert!(!state.is_success(), "{state:?}");
+        }
+    }
+
+    /// A one-target dump's summary keeps the path; progress never decides the summary.
+    #[test]
+    fn summarize_saved_and_progress() {
+        let saved = ActionState::Saved("/s/dumps/x.core".into());
+        assert_eq!(ActionState::summarize([&saved]), saved);
+        let progress = ActionState::Progress { bytes: 9 };
+        assert_eq!(ActionState::summarize([&progress]), ActionState::Succeeded);
+        assert_eq!(ActionState::summarize([&progress, &saved]), saved);
+        let failed = ActionState::Failed(ActionError::Os(5));
+        assert_eq!(ActionState::summarize([&saved, &failed]), failed);
     }
 
     /// Formats a value through serde's `fmt::Formatter` serializer, which writes a unit variant

@@ -45,6 +45,10 @@ use crate::validity::FieldValidity;
 /// First 4 bytes of every frame.
 pub const MAGIC: [u8; 4] = *b"TLR1";
 /// Protocol version. Peers are compatible only when their `proto` values are equal.
+///
+/// Still 1 after `ActionState::Progress` and `ActionState::Saved` were added (q4x76.14): no
+/// released build speaks this protocol yet (1.1.0 is the first), so there is nothing to stay
+/// compatible with. Bump it for any wire change after the first release.
 pub const PROTO: u16 = 1;
 /// The app version sent in bootstrap frames.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1115,6 +1119,8 @@ mod tests {
             }),
             ActionState::Failed(ActionError::Partial { done: 1, total: 3 }),
             ActionState::OutcomeUnknown(Arc::from("connection to home lost")),
+            ActionState::Progress { bytes: 1 << 40 },
+            ActionState::Saved(Arc::from("/home/u/.local/state/tasklens/dumps/x_1.core")),
         ]
     }
 
