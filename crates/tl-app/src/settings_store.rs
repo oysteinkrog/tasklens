@@ -380,7 +380,8 @@ struct Written {
     /// so the entry is only touched once the user changes them.
     startup: StartupSettings,
     /// Set by [`Store::keep_pre_layouts_copy`]: the next settings write first copies the file
-    /// on disk to `settings.toml.pre-layouts-v1`. Cleared by that write.
+    /// on disk to `settings.toml.pre-layouts-v1`. Cleared once that copy exists. While the copy
+    /// fails, no settings write happens.
     pre_layouts_copy: bool,
 }
 
@@ -484,7 +485,8 @@ impl Store {
 
     /// Makes the first settings write copy the file on disk to `settings.toml.pre-layouts-v1`
     /// (mode 0600) before it writes, unless that copy already exists. Called when loading
-    /// converted old settings to widget layouts (ADR-019).
+    /// converted old settings to widget layouts (ADR-019). While the copy fails, settings.toml is
+    /// not written; the next change, `write_settings_now` or `flush` tries again.
     pub fn keep_pre_layouts_copy(&self) {
         lock(&self.inner.written).pre_layouts_copy = true;
     }
@@ -636,56 +638,46 @@ fn run_saver(inner: &Inner) {
 }
 
 /// `save_file` for `settings.toml`, which first keeps the pre-layouts copy when it is due and
-/// the file is about to be written.
+/// the file is about to be written. When the copy fails, `settings.toml` is not written and the
+/// copy stays due, so the next save tries both again.
 fn save_settings_file(target: &Target, text: String, written: &mut Written) -> Result<(), String> {
     if written.pre_layouts_copy && !target.read_only && text != written.settings {
-        keep_pre_layouts(&target.path);
+        keep_pre_layouts(&target.path)?;
         written.pre_layouts_copy = false;
     }
     save_file(target, text, &mut written.settings)
 }
 
 /// Copies `path` to `<path>.pre-layouts-v1` in the same directory with mode 0600, unless that
-/// file exists. A failure is a warning only; the save goes on.
-fn keep_pre_layouts(path: &Path) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
+/// file exists. The copy goes through `write_atomic`, so a failed or cut-off copy never leaves
+/// a file under the final name. Returns Ok when there is no `path` to copy.
+fn keep_pre_layouts(path: &Path) -> Result<(), String> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(PRE_LAYOUTS_SUFFIX);
     let to = path.with_file_name(name);
+    let failed = |e: String| {
+        let message = format!(
+            "Could not keep settings.toml{PRE_LAYOUTS_SUFFIX}, so settings.toml was not saved: {e}"
+        );
+        warn!(target: "tasklens::settings", "{message}");
+        message
+    };
+    match std::fs::symlink_metadata(&to) {
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(failed(e.kind().to_string())),
+    }
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) => {
-            warn!(
-                target: "tasklens::settings",
-                "could not read settings.toml to keep its pre-layouts copy: {}",
-                e.kind()
-            );
-            return;
-        }
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(e.kind().to_string())),
     };
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(FILE_MODE)
-        .open(&to);
-    let result = match file {
-        Ok(mut f) => f.write_all(&bytes).and_then(|()| f.sync_all()),
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return,
-        Err(e) => Err(e),
-    };
-    match result {
-        Ok(()) => info!(
-            target: "tasklens::settings",
-            "kept settings.toml as settings.toml{PRE_LAYOUTS_SUFFIX} before its first save with widget layouts"
-        ),
-        Err(e) => warn!(
-            target: "tasklens::settings",
-            "could not keep settings.toml{PRE_LAYOUTS_SUFFIX}: {}",
-            e.kind()
-        ),
-    }
+    atomic::write_atomic(&to, &bytes, FILE_MODE).map_err(|e| failed(e.to_string()))?;
+    info!(
+        target: "tasklens::settings",
+        "kept settings.toml as settings.toml{PRE_LAYOUTS_SUFFIX} before its first save with widget layouts"
+    );
+    Ok(())
 }
 
 /// Writes `text` to the target when it is not read-only and differs from `last`. A write error

@@ -908,3 +908,51 @@ fn pre_layouts_copy_not_replaced() {
     store.flush();
     assert_eq!(std::fs::read_to_string(&copy).unwrap(), "earlier copy\n");
 }
+
+/// A failed pre-layouts copy blocks the settings write and leaves no file under the copy's name.
+/// The next save tries again and keeps the original text.
+#[test]
+fn pre_layouts_copy_failure_blocks_the_write() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    let file = paths.settings_file();
+    std::fs::write(&file, OLD_GPU_BOX).unwrap();
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+
+    let loaded = load_settings(&file, NOW);
+    assert!(loaded.layouts_converted);
+    // The file cannot be read, so the copy fails.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        // Root reads any file, so this run cannot make the copy fail.
+        return;
+    }
+    let store = Store::new(&paths, false, false, (loaded.value, UiState::default()));
+    store.keep_pre_layouts_copy();
+
+    store.persist_callback()(&settings_with(3000), &UiState::default());
+    std::thread::sleep(SETTLE);
+    let err = store
+        .write_settings_now(&settings_with(4000))
+        .expect_err("the copy failed");
+    assert!(
+        err.starts_with("Could not keep settings.toml.pre-layouts-v1"),
+        "{err}"
+    );
+    assert!(!copy.exists());
+    let left: Vec<String> = names(&paths.config_dir)
+        .into_iter()
+        .filter(|n| n != "settings.toml")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), OLD_GPU_BOX);
+
+    // Once the file can be read, the next save keeps the copy and then writes.
+    store.persist_callback()(&settings_with(5000), &UiState::default());
+    store.flush();
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), OLD_GPU_BOX);
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("5000"), "{saved}");
+}
