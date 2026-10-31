@@ -85,16 +85,13 @@ impl Guard {
     /// Waits up to `limit` for the exit, then returns the status and stderr.
     fn wait(&mut self, limit: Duration) -> (ExitStatus, String) {
         let begin = Instant::now();
-        let status = loop {
-            if let Some(status) = self.child().try_wait().unwrap() {
-                break status;
-            }
+        while self.child().try_wait().unwrap().is_none() {
             assert!(
                 begin.elapsed() < limit,
                 "tasklens-engine did not exit within {limit:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
-        };
+        }
         let mut child = self.0.take().unwrap();
         let mut err = String::new();
         child
@@ -103,6 +100,8 @@ impl Guard {
             .unwrap()
             .read_to_string(&mut err)
             .unwrap();
+        // It has exited, so this returns at once.
+        let status = child.wait().unwrap();
         (status, err)
     }
 }
