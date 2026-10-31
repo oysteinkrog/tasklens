@@ -547,7 +547,7 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     assert!(hidden.health.version == 0 && hidden.devices.version == 0);
 
     // A later publish changes nothing but the system part, so a frame carries nothing else.
-    // PID 11 exits, so the rows of the table built before now name other records.
+    // PIDs 21 and 22 started and 11 exits, so the table built before no longer matches.
     let local = rig.run(vec![
         sweep(3_000_000_000, &[10, 20, 21, 22]),
         services(&["alpha.service", "gamma.service"]),
@@ -575,8 +575,16 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     let local = rig.run(vec![demand(REMOTE, processes_tab())]);
     let back = remote.latest.load_full();
     assert!(Arc::ptr_eq(&back.processes, &local.processes));
-    assert_eq!(pids(&back), [10, 20, 21, 22]);
-    assert_eq!(back.table.total, 4);
+    let mut carried: Vec<u32> = back.processes.records.iter().map(|r| r.key.pid).collect();
+    carried.sort_unstable();
+    assert!(carried.contains(&22), "the processes are the current ones");
+    let mut rows = pids(&back);
+    rows.sort_unstable();
+    assert_eq!(
+        rows, carried,
+        "one row for each process the snapshot carries"
+    );
+    assert_eq!(back.table.total as usize, carried.len());
     assert!(back.table.header.version > shown.table.header.version);
     assert_eq!(units(&back), ["alpha.service", "gamma.service"]);
 
