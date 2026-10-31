@@ -1034,3 +1034,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.7 held: remaining findings are test ordering; rule: tests wait on the exact observed event via a test-only client observer, sweep remote_client.rs, 20 repeat runs. Requeued.
 - 2026-10-31 q4x76.5 held: handshake gets one 5 s overall deadline from accept (per-read timeout = time left); bridge tests that open sessions run with a live reducer. Requeued.
 - 2026-10-31 q4x76.7 round 2: observer reports emit-before-publish; tests assert only orders the code causes; list every observer site with why its order holds. Requeued.
+- 2026-10-31 q4x76.15 prep: synthetic 1500-row fixture with measured churn rates (Q1 C); bytes from DeltaEncoder+FrameWriter incl. Acks, demands defined in the helper (Q2 A); #[ignore] idle CPU test, leader reruns on a quiet machine before 1.1.0 (Q3 A). Requeued.
