@@ -37,6 +37,8 @@ const COL_SOURCE: f32 = 140.;
 const COL_STATE: f32 = 100.;
 const COL_AGE: f32 = 100.;
 const COL_RESTARTS: f32 = 80.;
+/// How far this PC's boot clock may run ahead of the anchored time before a new anchor.
+const RESYNC_NS: TimeNs = 1_000_000_000;
 /// How often the ages move.
 const TICK: Duration = Duration::from_secs(1);
 /// Last data of a source that has sent nothing yet: the WarmingUp glyph (ADR-003).
@@ -377,9 +379,18 @@ impl CollectorHealthWindow {
     }
 
     /// The host's CLOCK_BOOTTIME at the executor time `clock`.
-    fn now(&self, clock: Instant) -> TimeNs {
+    fn now(&mut self, clock: Instant) -> TimeNs {
         let passed = clock.saturating_duration_since(self.clock_anchor);
-        let local = self.local_anchor + passed.as_nanos() as TimeNs;
+        let mut local = self.local_anchor + passed.as_nanos() as TimeNs;
+        // The executor clock stops during suspend and CLOCK_BOOTTIME does not. When this PC's
+        // boot clock is ahead by more than RESYNC_NS, take a new anchor. A test clock never
+        // falls behind the real one by that much, so tests keep their executor time.
+        let real = self.host_clock.local_now_ns();
+        if real.saturating_sub(local) > RESYNC_NS {
+            self.local_anchor = real;
+            self.clock_anchor = clock;
+            local = real;
+        }
         self.host_clock.now_at(local)
     }
 

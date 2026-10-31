@@ -359,6 +359,27 @@ fn collector_health_ages_use_the_offset_learned_after_open(cx: &mut TestAppConte
         view.rows().map(|r| r.age.to_string()).collect()
     });
     assert_eq!(ages, ["3s ago"]);
+
+    // This PC sleeps for 1 h while the host stays awake. CLOCK_BOOTTIME runs on during the
+    // sleep and the executor's clock does not, so the window must take a new anchor. The host's
+    // CPU source last had data 2 s ago on its clock, so the age reads "2s ago", not "0s ago".
+    let clock = cx.update(|cx| host.clock(cx));
+    clock.shift_local(HOUR as i64);
+    let host_now = host_now + HOUR;
+    remote.publish_with(|s| {
+        s.published_ns = host_now;
+        let mut health = (*s.health).clone();
+        health.version += 1;
+        health.sources[SourceId::Cpu.index()].last_ok_ns = Some(host_now - 2_500 * MS);
+        s.health = Arc::new(health);
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let ages: Vec<String> = vcx.read(|cx| {
+        let view = frame.read(cx).content().read(cx);
+        view.rows().map(|r| r.age.to_string()).collect()
+    });
+    assert_eq!(ages, ["2s ago"], "ages after this PC resumes from suspend");
 }
 
 /// Files that may read this PC's boot clock: the host clock itself, and the bench engine, which

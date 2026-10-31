@@ -61,7 +61,7 @@ struct RemoteOffset {
     window: Mutex<OffsetWindow>,
     /// Added to this PC's clock reading. 0 except in tests, which use it to stand in for a PC
     /// up hours longer than the test machine.
-    local_shift_ns: i64,
+    local_shift_ns: AtomicI64,
 }
 
 /// The highest offset sample in two back-to-back buckets of [`OFFSET_WINDOW_NS`] each.
@@ -118,6 +118,15 @@ impl HostClock {
         Self::remote_shifted(local_shift_ns)
     }
 
+    /// Moves this PC's clock, as this remote clock reads it, `ns` later. Tests use it to stand
+    /// in for a suspend of this PC, during which CLOCK_BOOTTIME runs on and the executor's does not.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn shift_local(&self, ns: i64) {
+        if let Some(r) = &self.remote {
+            r.local_shift_ns.fetch_add(ns, Ordering::Relaxed);
+        }
+    }
+
     fn remote_shifted(local_shift_ns: i64) -> Self {
         Self {
             remote: Some(Arc::new(RemoteOffset {
@@ -126,7 +135,7 @@ impl HostClock {
                     empty: true,
                     ..OffsetWindow::default()
                 }),
-                local_shift_ns,
+                local_shift_ns: AtomicI64::new(local_shift_ns),
             })),
         }
     }
@@ -140,7 +149,10 @@ impl HostClock {
     /// to get the host's time; a view that moves its own anchor with the executor clock keeps
     /// this anchor, so later offset changes still apply.
     pub fn local_now_ns(&self) -> TimeNs {
-        let shift = self.remote.as_ref().map_or(0, |r| r.local_shift_ns);
+        let shift = self
+            .remote
+            .as_ref()
+            .map_or(0, |r| r.local_shift_ns.load(Ordering::Relaxed));
         now_boot_ns().saturating_add_signed(shift)
     }
 
