@@ -1065,3 +1065,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31: 1.1.0 visual check blocked: remote host graphs empty (q4x76.35, P1, opus); Chrome shown as 'cat' on home (q4x76.36). Release waits for .35. Rule for .35: graph time for a host comes from that host's clock.
 - 2026-10-31: q4x76.35 closed by the leader: last finding (suspend anchor in Collector Health) fixed in 0663adb0.
 - 2026-10-31: 1.1.0 released without the Chrome name fix; q4x76.36 reopened: App row name is the .desktop Name (PROC-008), process name only as fallback.
+- 2026-10-31: epic q4x76 closed; the Chrome name fix (q4x76.36) and core rows filling their part (D-040, 4df24ff8) wait for the next release.
