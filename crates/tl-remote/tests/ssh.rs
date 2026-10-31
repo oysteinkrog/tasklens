@@ -528,3 +528,134 @@ fn session_ends_within_1_s_of_ssh_exit_without_pidfd() {
     assert_stderr_threads_end();
     kill_bg(&fake);
 }
+
+#[test]
+fn handshake_read_after_deadline_fails_even_with_bytes_waiting() {
+    // ssh has written a byte, but the deadline passes before the window reads it. The read must
+    // fail with the deadline, not return the byte.
+    let _serial = serial();
+    let fake = Fake::new("printf x\nexec sleep 30");
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .with_deadline(Duration::from_millis(300))
+        .connect()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let mut reader = conn.reader;
+    let mut buf = [0u8; 8];
+    let err = reader.read(&mut buf).unwrap_err();
+    assert_eq!(err.to_string(), "home did not answer within 300 ms");
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    drop(reader);
+    drop(conn.writer);
+    assert_stderr_threads_end();
+}
+
+#[test]
+fn handshake_write_after_deadline_fails_even_with_room() {
+    // ssh's stdin has room, but the deadline has passed. The write must fail with the deadline,
+    // not go into the pipe.
+    let _serial = serial();
+    let fake = Fake::new("exec sleep 30");
+    let conn = SshConnector::new("home", "me@home", fake.program())
+        .with_deadline(Duration::from_millis(300))
+        .connect()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let mut writer = conn.writer;
+    let err = writer.write(&[0u8; 16]).unwrap_err();
+    assert_eq!(err.to_string(), "home did not answer within 300 ms");
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    drop(writer);
+    drop(conn.reader);
+    assert_stderr_threads_end();
+}
+
+/// Kills the processes the fake started in the background and wrote to the files `names`.
+fn kill_all(fake: &Fake, names: &[&str]) {
+    for name in names {
+        let pid: i32 = std::fs::read_to_string(fake.path(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _ = rustix::process::kill_process(
+            rustix::process::Pid::from_raw(pid).unwrap(),
+            rustix::process::Signal::KILL,
+        );
+    }
+}
+
+/// ssh answers with `Welcome`, starts one process that writes to its stdout without end
+/// (pid in `bg`) and one that reads its stdin without end (pid in `bg2`), then exits 0.5 s after
+/// it started. After the handshake the window reads and writes in loops. Both loops must end
+/// within 1 s of ssh's exit, with no shutdown, though both pipes stay ready.
+fn session_ends_while_descendant_keeps_pipes_busy(pidfd: bool) {
+    let _serial = serial();
+    let (fake, _frames) = welcome_then_holder(
+        "kill $!\n\
+         yes &\n\
+         echo $! > \"$(dirname \"$0\")/bg\"\n\
+         cat <&3 >/dev/null &\n\
+         echo $! > \"$(dirname \"$0\")/bg2\"\n\
+         sleep 0.5\n\
+         exit 0",
+    );
+    let begin = Instant::now();
+    let mut connector = SshConnector::new("home", "me@home", fake.program());
+    if !pidfd {
+        connector = connector.without_pidfd();
+    }
+    let conn = connector.connect().unwrap();
+    let shutdown = Arc::clone(&conn.shutdown);
+    let mut reader = conn.reader;
+    let mut writer = conn.writer;
+    read_frame(&mut reader).unwrap();
+    let (wrote_tx, wrote) = std::sync::mpsc::channel();
+    let (read_tx, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let chunk = vec![0u8; 4096];
+        let result = loop {
+            if let Err(e) = writer.write_all(&chunk) {
+                break e;
+            }
+        };
+        let _ = wrote_tx.send(result);
+    });
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 64 * 1024];
+        let result = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(_) => {}
+                Err(e) => break Err(e),
+            }
+        };
+        let _ = read_tx.send(result);
+    });
+    let by = begin + Duration::from_millis(1500);
+    let wrote = wrote
+        .recv_timeout(by.saturating_duration_since(Instant::now()))
+        .expect("the write loop ends within 1 s of ssh's exit");
+    assert_eq!(wrote.to_string(), "ssh has exited");
+    let read = read
+        .recv_timeout(by.saturating_duration_since(Instant::now()))
+        .expect("the read loop ends within 1 s of ssh's exit");
+    assert!(read.is_ok(), "the read sees the end: {read:?}");
+    shutdown();
+    let pid = fake.pid();
+    assert!(gone(pid), "ssh child {pid} still exists");
+    assert_stderr_threads_end();
+    kill_all(&fake, &["bg", "bg2"]);
+}
+
+#[test]
+fn session_ends_when_ssh_exits_while_descendant_keeps_pipes_busy() {
+    session_ends_while_descendant_keeps_pipes_busy(true);
+}
+
+#[test]
+fn session_ends_when_ssh_exits_while_descendant_keeps_pipes_busy_without_pidfd() {
+    session_ends_while_descendant_keeps_pipes_busy(false);
+}

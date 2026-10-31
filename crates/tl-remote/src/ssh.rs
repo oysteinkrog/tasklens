@@ -18,6 +18,11 @@
 //! and checks with `try_wait` after each one whether ssh has exited. Before the first frame it
 //! also wakes at the deadline.
 //!
+//! Every read and write also checks the deadline, `shutdown` and ssh's exit before it touches
+//! the pipe, and ssh's exit wins over a ready pipe. So a process that ssh started cannot keep
+//! the connection going by keeping the pipe busy: once ssh has exited, a read returns only the
+//! bytes the pipe held at that moment and then the end, and a write fails.
+//!
 //! `Connection::shutdown` and the drop of the connection's last half kill and reap the child,
 //! close the stop pipe and so end the stderr thread and every waiting read and write.
 
@@ -408,6 +413,7 @@ impl Connector for SshConnector {
                 header: [0; HEADER_LEN],
                 filled: 0,
                 rest: None,
+                left: None,
             }),
             writer: Box::new(SshWriter { input: stdin, proc }),
             shutdown: Arc::new(move || control.terminate()),
@@ -602,17 +608,44 @@ impl Proc {
             if !stopped.is_empty() {
                 return Ok(Woke::Stopped);
             }
+            // ssh's exit wins over a ready pipe, so a process it started cannot keep the
+            // connection going by keeping the pipe busy.
+            let gone = match self.exited {
+                Some(_) => !exited.is_empty(),
+                None => self.child_exited(),
+            };
+            if gone {
+                return Ok(Woke::Exited);
+            }
             if !ready.is_empty() {
                 return Ok(Woke::Ready);
             }
-            if self.exited.is_some() {
-                if !exited.is_empty() {
-                    return Ok(Woke::Exited);
-                }
-            } else if self.child_exited() {
-                return Ok(Woke::Exited);
-            }
         }
+    }
+
+    /// Whether the stop pipe has closed or ssh has exited, without waiting. A read or write
+    /// asks before it touches the pipe, so neither can go on after ssh's exit just because the
+    /// pipe stays ready.
+    fn check(&self) -> Option<Woke> {
+        let exited: &OwnedFd = self.exited.as_ref().unwrap_or(&*self.stop_rx);
+        let mut fds = [
+            PollFd::new(&*self.stop_rx, PollFlags::IN),
+            PollFd::new(exited, PollFlags::IN),
+        ];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let polled = poll(&mut fds, Some(&now)).is_ok();
+        let [stopped, exited] = fds.map(|fd| fd.revents());
+        if polled && !stopped.is_empty() {
+            return Some(Woke::Stopped);
+        }
+        let gone = match self.exited {
+            Some(_) if polled => !exited.is_empty(),
+            _ => self.child_exited(),
+        };
+        gone.then_some(Woke::Exited)
     }
 
     /// Kills and reaps the child if it still runs, and ends the stderr thread.
@@ -653,7 +686,8 @@ enum Got {
 }
 
 /// ssh's stdout. Until the first frame is read whole, a read waits only until the deadline and
-/// reads no further than the end of that frame.
+/// reads no further than the end of that frame. Once ssh has exited, only the bytes that were in
+/// the pipe when the exit was seen are read, then the stream ends.
 struct SshReader {
     out: ChildStdout,
     proc: Arc<Proc>,
@@ -661,30 +695,58 @@ struct SshReader {
     filled: usize,
     /// Payload bytes of the first frame still to read, once its header is read.
     rest: Option<usize>,
+    /// Once ssh has exited: the bytes still to read of what the pipe held then.
+    left: Option<usize>,
 }
 
 impl SshReader {
-    /// One read of what stdout has, waiting for bytes until `until` (`None`: no limit).
-    fn read_some(&self, buf: &mut [u8], until: Option<Instant>) -> io::Result<Got> {
-        let mut exited = false;
+    /// One read of what stdout has, waiting for bytes until `until` (`None`: no limit). A limit
+    /// that has passed ends the read before it reads, even when bytes are waiting.
+    fn read_some(&mut self, buf: &mut [u8], until: Option<Instant>) -> io::Result<Got> {
         loop {
-            match rustix::io::read(&self.out, &mut *buf) {
+            if until.is_some_and(|until| Instant::now() >= until) {
+                return Ok(Got::TimedOut);
+            }
+            match self.proc.check() {
+                Some(Woke::Stopped) => return Ok(Got::Stopped),
+                Some(Woke::Exited) if self.left.is_none() => self.left = Some(self.queued()),
+                _ => {}
+            }
+            let len = match self.left {
+                Some(0) => return Ok(Got::End),
+                Some(left) => buf.len().min(left),
+                None => buf.len(),
+            };
+            match rustix::io::read(&self.out, &mut buf[..len]) {
                 Ok(0) => return Ok(Got::End),
-                Ok(n) => return Ok(Got::Bytes(n)),
+                Ok(n) => {
+                    if let Some(left) = &mut self.left {
+                        *left -= n;
+                    }
+                    return Ok(Got::Bytes(n));
+                }
                 Err(Errno::INTR) => continue,
-                // All that ssh wrote before it exited has been read. Only a process it started
-                // could still write, and that is not ssh's stream.
-                Err(Errno::AGAIN) if exited => return Ok(Got::End),
+                // All that was in the pipe at ssh's exit has been read.
+                Err(Errno::AGAIN) if self.left.is_some() => return Ok(Got::End),
                 Err(Errno::AGAIN) => {}
                 Err(e) => return Err(e.into()),
             }
             match self.proc.wait(&self.out, PollFlags::IN, until)? {
                 Woke::Ready => {}
-                Woke::Exited => exited = true,
+                Woke::Exited => self.left = Some(self.queued()),
                 Woke::Stopped => return Ok(Got::Stopped),
                 Woke::TimedOut => return Ok(Got::TimedOut),
             }
         }
+    }
+
+    /// The bytes waiting in the pipe now. All that ssh wrote before it exited is among them;
+    /// what a process it started writes later is not ssh's stream and is not read.
+    fn queued(&self) -> usize {
+        rustix::io::ioctl_fionread(&self.out)
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
     }
 }
 
@@ -732,7 +794,9 @@ impl Read for SshReader {
 /// ssh's stdin. Until the first frame from the server is read whole, a write that finds the
 /// pipe full waits only until the deadline, and a write that fails returns the named failure,
 /// since ssh has then exited or not read in time. After that frame, a write waits until there
-/// is room, `shutdown` runs or ssh exits.
+/// is room, `shutdown` runs or ssh exits. Every write first checks the deadline (before the
+/// first frame), `shutdown` and ssh's exit, so a process that ssh started and that keeps
+/// reading the pipe cannot keep the connection going.
 struct SshWriter {
     input: ChildStdin,
     proc: Arc<Proc>,
@@ -745,6 +809,15 @@ impl Write for SshWriter {
         }
         loop {
             let lifted = self.proc.lifted.load(Ordering::Acquire);
+            if !lifted && Instant::now() >= self.proc.deadline {
+                return Err(self.proc.failed(true));
+            }
+            match self.proc.check() {
+                Some(Woke::Stopped) => return Err(self.proc.closed()),
+                Some(Woke::Exited) if lifted => return Err(exited()),
+                Some(Woke::Exited) => return Err(self.proc.failed(false)),
+                _ => {}
+            }
             match rustix::io::write(&self.input, buf) {
                 Ok(n) => return Ok(n),
                 Err(Errno::INTR) => continue,
@@ -752,21 +825,11 @@ impl Write for SshWriter {
                 Err(e) if lifted => return Err(e.into()),
                 Err(_) => return Err(self.proc.failed(false)),
             }
-            let until = if lifted {
-                None
-            } else {
-                let now = Instant::now();
-                if now >= self.proc.deadline {
-                    return Err(self.proc.failed(true));
-                }
-                Some(self.proc.deadline.min(now + WRITE_SLICE))
-            };
+            let until = (!lifted).then(|| self.proc.deadline.min(Instant::now() + WRITE_SLICE));
             match self.proc.wait(&self.input, PollFlags::OUT, until) {
                 Ok(Woke::Ready | Woke::TimedOut) => {}
                 Ok(Woke::Stopped) => return Err(self.proc.closed()),
-                Ok(Woke::Exited) if lifted => {
-                    return Err(io::Error::new(ErrorKind::BrokenPipe, "ssh has exited"));
-                }
+                Ok(Woke::Exited) if lifted => return Err(exited()),
                 Err(e) if lifted => return Err(e),
                 Ok(Woke::Exited) | Err(_) => return Err(self.proc.failed(false)),
             }
@@ -777,4 +840,9 @@ impl Write for SshWriter {
         // A pipe has no buffer of its own to flush.
         Ok(())
     }
+}
+
+/// The error for a write after the first frame once ssh has exited.
+fn exited() -> io::Error {
+    io::Error::new(ErrorKind::BrokenPipe, "ssh has exited")
 }
