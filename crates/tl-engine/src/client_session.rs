@@ -1301,12 +1301,14 @@ impl ClientSessions {
     }
 
     /// The distinct device history ranges of the sessions other than the local one, in connect
-    /// order. The `MetricHistory` worker answers them after the local one (ADR-018).
-    pub fn linked_ranges(&self) -> Vec<DeviceHistoryRequest> {
+    /// order. `None` stands for a session that shows no range: it needs the empty answer, so a
+    /// session that clears its range stops showing its old points. The `MetricHistory` worker
+    /// answers them after the local one (ADR-018).
+    pub fn linked_ranges(&self) -> Vec<Option<DeviceHistoryRequest>> {
         let mut out = Vec::new();
         for r in self.sessions[1..]
             .iter()
-            .filter_map(|s| s.demand.device_history_range)
+            .map(|s| s.demand.device_history_range)
         {
             if !out.contains(&r) {
                 out.push(r);

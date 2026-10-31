@@ -150,7 +150,7 @@ impl Rig {
     }
 
     /// The last `MetricMsg::Ranges` the metric worker received.
-    fn last_ranges(&mut self) -> Option<Vec<DeviceHistoryRequest>> {
+    fn last_ranges(&mut self) -> Option<Vec<Option<DeviceHistoryRequest>>> {
         let mut last = None;
         while let Ok(msg) = self.metric_rx.try_recv() {
             if let MetricMsg::Ranges(ranges) = msg {
@@ -294,7 +294,7 @@ fn sessions_on_24h_and_7d_each_get_their_own_range() {
     rig.run(vec![remote.open(), demand(REMOTE, Some(WEEK))]);
     assert_eq!(
         rig.last_ranges(),
-        Some(vec![WEEK]),
+        Some(vec![Some(WEEK)]),
         "the worker learns the 7 d range"
     );
 
@@ -323,7 +323,7 @@ fn sessions_on_24h_and_7d_each_get_their_own_range() {
         &remote.snapshot().device_history.series,
         &day.series
     ));
-    assert_eq!(rig.last_ranges(), Some(vec![DAY]));
+    assert_eq!(rig.last_ranges(), Some(vec![Some(DAY)]));
 }
 
 /// ADR-018: two sessions on one range share one answer, and the worker is asked for the range
@@ -344,8 +344,8 @@ fn two_sessions_on_one_range_share_one_answer() {
         demand(REMOTE, Some(DAY)),
         demand(second, Some(DAY)),
     ]);
-    assert_eq!(rig.reducer().clients.linked_ranges(), [DAY]);
-    assert_eq!(rig.last_ranges(), Some(vec![DAY]));
+    assert_eq!(rig.reducer().clients.linked_ranges(), [Some(DAY)]);
+    assert_eq!(rig.last_ranges(), Some(vec![Some(DAY)]));
 
     let day = answer(DAY, 1.0);
     let local = rig.run(vec![histories(&[(DAY, &day)])]);
@@ -355,8 +355,42 @@ fn two_sessions_on_one_range_share_one_answer() {
 
     // The remote session asks for 7 d: until its answer comes it keeps showing 24 h.
     rig.run(vec![demand(REMOTE, Some(WEEK))]);
-    assert_eq!(rig.last_ranges(), Some(vec![WEEK, DAY]));
+    assert_eq!(rig.last_ranges(), Some(vec![Some(WEEK), Some(DAY)]));
     assert_eq!(remote.snapshot().device_history.request, Some(DAY));
+}
+
+/// ADR-018: a remote session that clears its range while the local window keeps 24 h asks the
+/// worker for the key `None`, and shows the empty answer once it comes instead of its old points.
+#[test]
+fn a_session_that_clears_its_range_shows_the_empty_answer() {
+    let mut rig = Rig::new();
+    let remote = Remote::new();
+    rig.local_range(Some(DAY));
+    rig.run(vec![remote.open(), demand(REMOTE, Some(WEEK))]);
+    let (day, week) = (answer(DAY, 1.0), answer(WEEK, 2.0));
+    rig.run(vec![histories(&[(DAY, &day), (WEEK, &week)])]);
+    assert!(Arc::ptr_eq(
+        &remote.snapshot().device_history.series,
+        &week.series
+    ));
+    rig.last_ranges();
+
+    rig.run(vec![demand(REMOTE, None)]);
+    assert_eq!(rig.reducer().clients.linked_ranges(), [None]);
+    assert_eq!(
+        rig.last_ranges(),
+        Some(vec![None]),
+        "the worker learns `None`"
+    );
+
+    let empty = Arc::new(DeviceHistory::default());
+    let local = rig.run(vec![EngineMsg::Source(SourceUpdate::DeviceHistory(
+        vec![(Some(DAY), Arc::clone(&day)), (None, empty)].into(),
+    ))]);
+    let other = remote.snapshot();
+    assert!(Arc::ptr_eq(&local.device_history.series, &day.series));
+    assert_eq!(other.device_history.request, None);
+    assert!(other.device_history.series.is_empty());
 }
 
 /// ADR-018: history queries are per session. Each gets a new engine id, the answer goes to the

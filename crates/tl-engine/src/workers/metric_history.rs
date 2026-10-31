@@ -27,7 +27,8 @@
 //!
 //! Read path: the worker answers each wanted range (ADR-018): the local window's
 //! `Demand.device_history_range`, then the distinct ranges of the other client sessions, which the
-//! sink sends as `MetricMsg::Ranges`. Two sessions on one range share one read and one answer.
+//! sink sends as `MetricMsg::Ranges`. A session that shows no range is the key `None`. Two sessions
+//! on one range share one read and one answer.
 //! For each range the worker reads its tier once per tier point (1 s, 10 s or 60 s) and whenever
 //! the range becomes wanted, and publishes at most 1,024 min/max-decimated points per series. A
 //! series whose points did not change keeps its `Arc`, and a read that changed nothing is not
@@ -115,8 +116,9 @@ pub enum MetricMsg {
     Reading(Box<Reading>),
     /// Logind `PrepareForSleep`.
     Sleep { entering: bool, t_ns: TimeNs },
-    /// The distinct ranges of the client sessions other than the local one (ADR-018).
-    Ranges(Arc<[DeviceHistoryRequest]>),
+    /// The distinct ranges of the client sessions other than the local one (ADR-018); `None`
+    /// for a session that shows no range.
+    Ranges(Arc<[Option<DeviceHistoryRequest>]>),
 }
 
 /// The sender of one open store. `generation` tells the sink that a new store needs the catalog.
@@ -151,7 +153,7 @@ pub struct MetricSink {
     held: Vec<Held>,
     /// The other client sessions' ranges, the sender generation that has them, and the last
     /// generation that received a non-empty list. A new generation starts with none.
-    ranges: Arc<[DeviceHistoryRequest]>,
+    ranges: Arc<[Option<DeviceHistoryRequest>]>,
     ranges_sent_to: Option<u64>,
     ranges_held_by: Option<u64>,
 }
@@ -170,10 +172,11 @@ impl MetricSink {
         }
     }
 
-    /// The distinct ranges of the client sessions other than the local one, in connect order.
-    /// They go to the open store's worker now and to each new one; a send the full queue
-    /// refused is tried again at the next call or system sample.
-    pub fn set_ranges(&mut self, ranges: &[DeviceHistoryRequest]) {
+    /// The distinct ranges of the client sessions other than the local one, in connect order,
+    /// `None` for a session that shows no range. They go to the open store's worker now and to
+    /// each new one; a send the full queue refused is tried again at the next call or system
+    /// sample.
+    pub fn set_ranges(&mut self, ranges: &[Option<DeviceHistoryRequest>]) {
         if *self.ranges != *ranges {
             self.ranges = Arc::from(ranges);
             self.ranges_sent_to = None;
@@ -383,7 +386,7 @@ pub struct State {
     /// `None` and the empty answer, which the reducer's component already is.
     sent: Vec<(Option<DeviceHistoryRequest>, Arc<DeviceHistory>)>,
     /// The other client sessions' ranges (`MetricMsg::Ranges`).
-    ranges: Arc<[DeviceHistoryRequest]>,
+    ranges: Arc<[Option<DeviceHistoryRequest>]>,
     /// Store reads for ranges, for tests.
     range_reads: u64,
     detector: EventDetector,
@@ -535,12 +538,12 @@ impl State {
     }
 
     /// The keys to answer: `local`, the local window's range, then each other session's range
-    /// that is not in the list yet.
+    /// that is not in the list yet. `None` is the empty answer for a session that shows no range.
     pub fn wanted(&self, local: Option<DeviceHistoryRequest>) -> Vec<Option<DeviceHistoryRequest>> {
         let mut wanted = vec![local];
         for &r in self.ranges.iter() {
-            if !wanted.contains(&Some(r)) {
-                wanted.push(Some(r));
+            if !wanted.contains(&r) {
+                wanted.push(r);
             }
         }
         wanted
@@ -1963,9 +1966,7 @@ mod tests {
             vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
         ));
         let (day, hour) = (live(DeviceRange::H24), live(DeviceRange::H1));
-        let day_req = day.expect("a range");
-        let hour_req = hour.expect("a range");
-        st.apply(MetricMsg::Ranges(Arc::from([day_req, hour_req, day_req])));
+        st.apply(MetricMsg::Ranges(Arc::from([day, hour, day])));
         assert_eq!(st.wanted(day), [day, hour]);
         assert_eq!(st.wanted(None), [None, day, hour]);
 
@@ -1996,6 +1997,41 @@ mod tests {
                 .all(|(_, h)| h.request.is_none() && h.series.is_empty())
         );
         assert!(st.answer_closed().is_none());
+    }
+
+    /// ADR-018: while the local window is on 24 h, another session that clears its range gets
+    /// the empty answer under the key `None`, so it stops showing its old points.
+    #[test]
+    fn a_session_without_a_range_gets_the_empty_answer() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
+        ));
+        let (day, week) = (live(DeviceRange::H24), live(DeviceRange::D7));
+        st.apply(MetricMsg::Ranges(Arc::from([week])));
+        let now = t0 + 2 * SEC;
+        let wanted = st.wanted(day);
+        let all = st
+            .answer_all(&wanted, false, now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(all.len(), 2);
+
+        st.apply(MetricMsg::Ranges(Arc::from([None])));
+        assert_eq!(st.wanted(day), [day, None]);
+        let wanted = st.wanted(day);
+        let all = st
+            .answer_all(&wanted, false, now + SEC)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].1.request, day);
+        assert_eq!(all[1].0, None);
+        assert_eq!(all[1].1.request, None);
+        assert!(all[1].1.series.is_empty());
     }
 
     /// UI-PRF-057, ADR-017: the timeline carries the four bands of the last 24 hours (the
