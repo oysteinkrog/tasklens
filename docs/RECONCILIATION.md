@@ -2089,6 +2089,7 @@ container = "overview.gpu"     # phase 1: overview.gpu only; other containers an
 version = 1                    # LAYOUT_VERSION
 preset = { id = "engine_charts", arrange = "auto", split = 0.5 } # flow layout only (omit for a grid layout); id: engine_charts | chart_engines | chart; arrange: auto | vertical | horizontal; split: 0.2..=0.8
 widgets = []                   # [] = empty box, which differs from no entry (the default)
+next_id = 1                    # the id the next new widget takes; only grows, raised on load to at least the highest widget id + 1
 # one widget: { id = 1, device = "<persistent device key>" | slot = 0..=1 (flow only), metric = "engine:<GpuEngine key>" | "vram" | "clock_gfx" | "clock_mem" | "power" | "temp",
 #   forms = subset of ["chart", "bar", "value", "stats", "label"] (not empty), col, row, cols, rows (grid layout only; GPU box: 6 columns),
 #   fill = true, dashed = false (written only when not the default), device_name = "<display only>" }

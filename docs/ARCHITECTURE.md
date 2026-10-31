@@ -2687,6 +2687,10 @@ pub struct ContainerLayout {
     pub preset: Option<PresetSetting>,
     /// Empty is an empty box, which is not the same as no entry (the default).
     pub widgets: Vec<WidgetSetting>,
+    /// The id the next new widget takes. It only grows: removing a widget never lowers it, so
+    /// an id is never given to a second widget. On load it is raised to at least the highest
+    /// widget id plus 1. Key `next_id`.
+    pub next_id: u32,
 }
 
 pub struct PresetSetting {
@@ -2700,8 +2704,8 @@ pub struct PresetSetting {
 }
 
 pub struct WidgetSetting {
-    /// Unique in its container. A new widget takes the highest id plus 1, so ids are never
-    /// reused while the entry exists.
+    /// Unique in its container, taken from `ContainerLayout::next_id`, so an id is never
+    /// reused while the entry exists, not even after the widget that had it is removed.
     pub id: u32,
     pub source: SourceSelector,
     pub forms: FormSet,
