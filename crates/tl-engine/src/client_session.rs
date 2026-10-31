@@ -1153,10 +1153,14 @@ impl ClientSession {
     /// demand comes back, the part is the session's current one again and its next frame
     /// carries it whole.
     ///
-    /// Each part is gated by the narrowest `Demand` field that names it. Window visibility
-    /// (`window_visible`) gates only the parts no field names. "Tray graphs" is any of the
-    /// tray's cpu, memory, disks, nets and gpus flags; "own" is a scan, handle search or eject
-    /// of the session's own that it still shows.
+    /// Each part is gated by the narrowest `Demand` field that names it, plus the field of each
+    /// page that reads it without asking for it: the Services page reads `table`, the
+    /// Processes page reads `services` (unit tooltip, row menu). Window visibility
+    /// (`window_visible`) gates only the parts no field names, and `inventory`, which many
+    /// pages and windows read with no field for it (Start time, card titles, About) and which
+    /// changes only on a rescan. "Tray graphs" is any of the tray's cpu, memory, disks, nets
+    /// and gpus flags; "own" is a scan, handle search or eject of the session's own that it
+    /// still shows.
     ///
     /// | Part | Gate |
     /// |---|---|
@@ -1167,9 +1171,9 @@ impl ClientSession {
     /// | `processes` | a window, `graph_targets` or the `table` gate (table rows index into it) |
     /// | `process_series` | `graph_targets` |
     /// | `table` | `process_table`, `services` (the Services page's cells read it) or `details` |
-    /// | `inventory` | `inventory` |
+    /// | `inventory` | `inventory` or a window |
     /// | `windows` | a window |
-    /// | `services` | `services`, `service_cgroup_stats` or `unit_details` |
+    /// | `services` | `services`, `service_cgroup_stats`, `unit_details` or `process_table` |
     /// | `startup` | `startup` |
     /// | `connections` | `connections` or `connections_all_netns` |
     /// | `details` | `details`, `affinity_targets` or own |
@@ -1188,7 +1192,8 @@ impl ClientSession {
         let targets = !d.graph_targets.is_empty();
         let own = !self.shown.is_empty();
         let table = table_demanded(d);
-        let services = d.services || d.service_cgroup_stats || !d.unit_details.is_empty();
+        let services =
+            d.services || d.service_cgroup_stats || !d.unit_details.is_empty() || d.process_table;
         let details = !d.details.is_empty() || !d.affinity_targets.is_empty() || own;
         Snapshot {
             series: gate(window || tray, base.series, &e.series),
@@ -1197,7 +1202,7 @@ impl ClientSession {
             processes: gate(window || targets || table, base.processes, &e.processes),
             process_series: gate(targets, base.process_series, &e.process_series),
             table: gate(table, Arc::clone(&self.table), &e.table),
-            inventory: gate(d.inventory, base.inventory, &e.inventory),
+            inventory: gate(d.inventory || window, base.inventory, &e.inventory),
             windows: gate(window, base.windows, &e.windows),
             services: gate(services, Arc::clone(&self.services), &e.services),
             startup: gate(d.startup, Arc::clone(&self.startup), &e.startup),

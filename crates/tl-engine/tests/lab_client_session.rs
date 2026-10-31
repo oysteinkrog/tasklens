@@ -22,7 +22,7 @@ use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate};
 use tl_model::actions::SchedPolicy;
 use tl_model::command::Command;
 use tl_model::demand::{
-    CpuDemand, Demand, DetailDemand, DeviceHistoryRequest, DeviceRange, TrayDemand,
+    ColumnSet, CpuDemand, Demand, DetailDemand, DeviceHistoryRequest, DeviceRange, TrayDemand,
 };
 use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::health::ManagerState;
@@ -684,12 +684,12 @@ fn gate_cases() -> Vec<(&'static str, Demand, &'static [&'static str])> {
         "devices",
         "health",
         "processes",
+        "inventory",
         "windows",
         "device_details",
         "device_history",
     ];
     const TRAY_GRAPH: &[&str] = &["series", "devices", "health"];
-    const TABLE: &[&str] = &["processes", "table"];
     vec![
         (
             "any_surface_visible",
@@ -703,7 +703,11 @@ fn gate_cases() -> Vec<(&'static str, Demand, &'static [&'static str])> {
         ("nets", only(&|d| d.nets = true), &[]),
         ("gpus", only(&|d| d.gpus = true), &[]),
         ("sensors", only(&|d| d.sensors = true), &[]),
-        ("process_table", only(&|d| d.process_table = true), TABLE),
+        (
+            "process_table",
+            only(&|d| d.process_table = true),
+            &["processes", "table", "services"],
+        ),
         ("process_top", only(&|d| d.process_top = true), &[]),
         (
             "process_columns",
@@ -796,9 +800,11 @@ fn gate_cases() -> Vec<(&'static str, Demand, &'static [&'static str])> {
 }
 
 /// Leader decision on tasklens-q4x76.15 (second hold): each part goes out only while the
-/// narrowest `Demand` field that names it is set, and window visibility gates only the parts
-/// no field names. A session with one field set gets exactly the parts that field gates; every
-/// other gated part is its empty one, the same `Arc` as while it asks for nothing.
+/// narrowest `Demand` field that names it is set, or the field of a page that reads it
+/// (`process_table` for `services`, `services` for `table`), and window visibility gates only
+/// the parts no field names and `inventory`. A session with one field set gets exactly the
+/// parts that field gates; every other gated part is its empty one, the same `Arc` as while it
+/// asks for nothing.
 #[test]
 fn each_demand_field_alone_sends_exactly_the_parts_it_gates() {
     let parts = gated_parts();
@@ -850,6 +856,77 @@ fn each_demand_field_alone_sends_exactly_the_parts_it_gates() {
     let got = remote.latest.load_full();
     for (name, same) in parts {
         assert!(!same(&got, &hidden), "every field sends {name}");
+    }
+}
+
+/// Each page's demand as the UI sends it, with no field added for the test, and the parts that
+/// page reads. A part a page reads must reach a session that shows only that page.
+fn page_demands() -> Vec<(&'static str, Demand, &'static [&'static str])> {
+    let key = proc_record(10).key;
+    let mut columns = ColumnSet::EMPTY;
+    columns.insert(ColumnId::Name);
+    columns.insert(ColumnId::Cpu);
+    vec![
+        (
+            // `ProcessesDelegate::demand_part`: Start time reads `inventory`, the unit tooltip
+            // and the row menu read `services`.
+            "Processes tab",
+            Demand {
+                any_surface_visible: true,
+                process_table: true,
+                process_columns: columns,
+                detail_keys: Arc::from([key]),
+                ..Demand::default()
+            },
+            &["processes", "table", "services", "inventory"],
+        ),
+        (
+            // The CPU page and its sidebar: card titles and the max MHz read `inventory`.
+            "Performance CPU page",
+            Demand {
+                any_surface_visible: true,
+                cpu: CpuDemand::PerCore,
+                memory: true,
+                disks: true,
+                nets: true,
+                ..Demand::default()
+            },
+            &["series", "devices", "inventory"],
+        ),
+        (
+            // The About window has no demand part of its own and reads `inventory`.
+            "About window",
+            Demand {
+                any_surface_visible: true,
+                ..Demand::default()
+            },
+            &["inventory"],
+        ),
+    ]
+}
+
+/// Review of tasklens-q4x76.15: a session that shows one page gets every part that page reads,
+/// even the parts its demand has no field for.
+#[test]
+fn each_page_gets_the_parts_it_reads_from_the_demand_it_sends() {
+    let parts = gated_parts();
+    for (page, want, reads) in page_demands() {
+        let mut rig = Rig::new();
+        let (remote, _remote_wake) = link();
+        let mut msgs = vec![open(REMOTE, &remote)];
+        msgs.extend(data());
+        rig.run(msgs);
+        let hidden = remote.latest.load_full();
+        rig.run(vec![demand(REMOTE, want)]);
+        let got = remote.latest.load_full();
+        for (name, same) in parts {
+            if reads.contains(&name) {
+                assert!(!same(&got, &hidden), "{page} reads {name}");
+            }
+        }
+        if reads.contains(&"services") {
+            assert_eq!(units(&got).len(), 3, "{page}: every unit");
+        }
     }
 }
 
