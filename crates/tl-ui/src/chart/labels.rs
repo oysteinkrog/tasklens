@@ -803,17 +803,27 @@ pub fn y_tick_label(i: usize, out: &mut String) {
     let _ = write!(out, "{}%", (i + 1) * 100 / (TICK_COUNT + 1));
 }
 
-/// Appends `"<word> over <range>"`: "30 seconds", "60 seconds", "5 minutes", "10 minutes"
-/// (PERF-016). Whole minutes from 2 minutes on, seconds below.
+/// Appends `"<word> over <range>"` in the largest whole unit: "60 seconds", "5 minutes",
+/// "1 hour", "24 hours", "7 days" (PERF-016). Days from 2 days on, hours from 1 hour, minutes
+/// from 2 minutes, seconds below or when no larger unit divides the range.
 pub fn range_label(range_word: &str, range_ns: u64, out: &mut String) {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
     let secs = range_ns / NS_PER_S;
     out.push_str(range_word);
     out.push_str(" over ");
-    if secs >= 120 && secs.is_multiple_of(60) {
-        let _ = write!(out, "{} minutes", secs / 60);
+    let (n, unit) = if secs >= 2 * DAY && secs.is_multiple_of(DAY) {
+        (secs / DAY, "day")
+    } else if secs >= HOUR && secs.is_multiple_of(HOUR) {
+        (secs / HOUR, "hour")
+    } else if secs >= 2 * MIN && secs.is_multiple_of(MIN) {
+        (secs / MIN, "minute")
     } else {
-        let _ = write!(out, "{secs} seconds");
-    }
+        (secs, "second")
+    };
+    let plural = if n == 1 { "" } else { "s" };
+    let _ = write!(out, "{n} {unit}{plural}");
 }
 
 /// How network rates print: `units.network` and `units.network_auto_scale` (R-015). A bare

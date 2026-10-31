@@ -1426,6 +1426,11 @@ mod labels {
             ("Throughput", 300 * S, "Throughput over 5 minutes"),
             ("Memory usage", 30 * S, "Memory usage over 30 seconds"),
             ("Power draw", 600 * S, "Power draw over 10 minutes"),
+            ("Utilization", 3_600 * S, "Utilization over 1 hour"),
+            ("Utilization", 86_400 * S, "Utilization over 24 hours"),
+            ("Utilization", 7 * 86_400 * S, "Utilization over 7 days"),
+            ("Utilization", 90 * 60 * S, "Utilization over 90 minutes"),
+            ("Utilization", 2 * 3_600 * S, "Utilization over 2 hours"),
         ] {
             let mut out = String::new();
             range_label(word, ns, &mut out);
