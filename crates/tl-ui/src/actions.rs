@@ -71,6 +71,15 @@ pub const SHELL_FILTER_CONTEXT: &str = "ShellFilter";
 #[action(namespace = tasklens, no_json)]
 pub struct SelectTab(pub usize);
 
+/// Key context the main window adds while it has more than one host tab (UI-SHL-008).
+pub const HOSTS_CONTEXT: &str = "Hosts";
+
+/// Shows the host tab at this index, local host first (UI-SHL-008). Ctrl+1 to Ctrl+9 while
+/// the main window has more than one host; with one host those keys keep selecting page tabs.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct SelectHost(pub usize);
+
 /// A top-level menu of the menu bar.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MenuId {
@@ -129,6 +138,15 @@ pub fn bind_keys_global(cx: &mut App) {
             &format!("alt-{}", i + 1),
             SelectTab(i),
             global,
+        ));
+    }
+    // After the SelectTab rows, so they win where the "Hosts" context is set.
+    let hosts = Some(HOSTS_CONTEXT);
+    for i in 0..9 {
+        bindings.push(KeyBinding::new(
+            &format!("ctrl-{}", i + 1),
+            SelectHost(i),
+            hosts,
         ));
     }
     let menus = [

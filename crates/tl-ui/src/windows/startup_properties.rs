@@ -31,6 +31,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
+use crate::host::{HostRegistry, with_host_name};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::pages::startup::delegate::StartupWords;
@@ -222,6 +223,8 @@ pub struct StartupPropertiesView {
     /// The entries slice of the last snapshot looked at, for the pointer compare.
     seen: Arc<[StartupEntry]>,
     removed: bool,
+    /// The remote host the entry is on, for the title; `None` on the local host.
+    remote: Option<Arc<str>>,
     lines: Vec<PropLine>,
     sig: Signature,
     copy_focus: Vec<FocusHandle>,
@@ -247,9 +250,10 @@ fn open(r: StartupRef, hub: &Entity<SnapshotHub>, cx: &mut App) -> OpenOutcome {
     };
     let s = metrics(cx).ui_scale;
     let key = WindowKey::StartupProperties(r);
+    let remote = HostRegistry::remote_name_of(hub, cx);
     let spec = TlWindowSpec::new(
         TlWindowKind::Properties,
-        title_for(&entry.name, false, cx),
+        with_host_name(&title_for(&entry.name, false, cx), remote.as_deref()),
         size(px(WINDOW_SIZE.0 * s), px(WINDOW_SIZE.1 * s)),
     )
     .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)))
@@ -317,6 +321,7 @@ impl StartupPropertiesView {
             entry,
             seen: entries,
             removed: false,
+            remote: HostRegistry::remote_name_of(hub, cx),
             lines,
             sig,
             copy_focus,
@@ -366,7 +371,11 @@ impl StartupPropertiesView {
     }
 
     fn set_title(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = title_for(&self.entry.name, self.removed, cx);
+        let title: SharedString = with_host_name(
+            &title_for(&self.entry.name, self.removed, cx),
+            self.remote.as_deref(),
+        )
+        .into();
         let frame = window.root::<Root>().flatten().and_then(|root| {
             root.read(cx)
                 .view()

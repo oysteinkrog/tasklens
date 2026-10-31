@@ -73,7 +73,7 @@ use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::palette::{DeviceAccent, accent_color};
 use crate::theme::{TlTheme, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{ShellPage, WINDOW_TITLE};
+use crate::window::main::{ShellPage, main_window_title};
 use crate::window::status::StatusChanged;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
@@ -618,7 +618,7 @@ impl PerformancePage {
         self.status
             .update(cx, |b, cx| b.set_shown(Slot::Performance, None, cx));
         let suffix = tr(cx, "perf-summary-title-suffix");
-        let title = format!("{WINDOW_TITLE}{suffix}");
+        let title = format!("{}{suffix}", main_window_title(&self.host));
         window.set_window_title(&title);
         #[cfg(any(test, feature = "test-hooks"))]
         {
@@ -645,10 +645,11 @@ impl PerformancePage {
         if let Some(page) = self.selected_view() {
             update_page(&page, cx, |p, cx| p.set_active(page_on, cx));
         }
-        window.set_window_title(WINDOW_TITLE);
+        let title = main_window_title(&self.host);
+        window.set_window_title(&title);
         #[cfg(any(test, feature = "test-hooks"))]
         {
-            self.window_title = WINDOW_TITLE.into();
+            self.window_title = title;
         }
         self.sidebar_focus.focus(window, cx);
         if let Some(key) = select {

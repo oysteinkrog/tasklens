@@ -339,6 +339,8 @@ pub struct TitleBarView {
     menu_bar: Option<AnyView>,
     /// Graph summary mode hides the menus (PERF-010).
     menus_hidden: bool,
+    /// The host tabs, just left of the pin; `None` with one host (UI-SHL-008).
+    host_tabs: Option<AnyView>,
     model: ToolbarModel,
     /// The active tab's page buttons.
     content: Box<dyn ToolbarContent>,
@@ -418,6 +420,7 @@ impl TitleBarView {
         Self {
             menu_bar,
             menus_hidden: false,
+            host_tabs: None,
             model,
             content: Box::new(DefaultToolbar),
             drag: DragState::default(),
@@ -462,6 +465,15 @@ impl TitleBarView {
     pub fn set_menus_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         if self.menus_hidden != hidden {
             self.menus_hidden = hidden;
+            cx.notify();
+        }
+    }
+
+    /// Shows the host tabs left of the pin, or hides them with `None`. Notifies on a change.
+    pub fn set_host_tabs(&mut self, tabs: Option<AnyView>, cx: &mut Context<Self>) {
+        if self.host_tabs.as_ref().map(AnyView::entity_id) != tabs.as_ref().map(AnyView::entity_id)
+        {
+            self.host_tabs = tabs;
             cx.notify();
         }
     }
@@ -765,6 +777,7 @@ impl TitleBarView {
                     .flex_1()
                     .h_full(),
             )
+            .children(self.host_tabs.clone())
             .child(pin)
     }
 
@@ -789,6 +802,7 @@ impl TitleBarView {
                     .min_w(px(DRAG_MIN_W * s))
                     .h_full(),
             )
+            .children(self.host_tabs.clone())
             .child(pin)
             .child(captions);
         drag_handlers(bar, cx)

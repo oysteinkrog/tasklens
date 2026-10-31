@@ -57,6 +57,7 @@ use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
+use super::host_tabs::{HostTabInfo, HostTabs, cpu_percent};
 use super::registry::{GlobalRegistry, WindowKey};
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::{TabStrip, tween_progress};
@@ -69,9 +70,9 @@ use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
     GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab, Quit, RefreshCurrentTab,
-    SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
-    ShowSystemInformation, StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow,
-    ZoomWindow,
+    SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectHost, SelectTab, SetViewMode,
+    ShowMainWindow, ShowSystemInformation, StartWindowPick, ToggleHideSystem, ToggleHistoryMode,
+    ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
@@ -83,7 +84,7 @@ use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
-use crate::host::HostContext;
+use crate::host::{HostContext, HostRegistry, HostTab};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
@@ -122,6 +123,13 @@ const NO_TYPE_TO_FILTER: [&str; 7] = [
     "Dialog",
     DIALOG_CONTEXT,
 ];
+
+/// The main window's key context with more than one host: "Global" plus
+/// [`crate::actions::HOSTS_CONTEXT`], where Ctrl+1 to Ctrl+9 select hosts (UI-SHL-008).
+const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
+
+/// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
+const HOST_TICK: Duration = Duration::from_millis(500);
 
 /// The window's smallest size in logical px (ADR-010).
 pub const MIN_W: f32 = 800.0;
@@ -423,8 +431,8 @@ pub struct ShellState {
     /// Keep-above of the open secondary windows, in memory only (E20-029, R-073). A key is
     /// dropped when its window leaves the registry.
     pub secondary_pins: FxHashMap<WindowKey, bool>,
-    /// The host the main window shows, set when it opens. Read through
-    /// [`HostContext::shown`].
+    /// The host the main window shows, set when it opens and on every host switch. Read
+    /// through [`HostContext::shown`].
     pub shown_host: Option<HostContext>,
 }
 
@@ -647,7 +655,7 @@ fn send_keep_above(on: bool, cx: &App) -> Result<(), CommandError> {
     };
     engine.send(Command::KWin(KWinCommand::KeepAbove {
         pid: std::process::id(),
-        caption: None,
+        caption: main_caption(cx),
         on,
     }))
 }
@@ -885,15 +893,31 @@ fn activate_main(cx: &mut App) {
     }
 }
 
-/// Sends `KWin(Activate)` for this process's window titled [`WINDOW_TITLE`]. Nothing when the
+/// The main window's title while it shows `host`: [`WINDOW_TITLE`] for the local host,
+/// "tasklens - <host>" for a remote one (UI-SHL-008).
+pub fn main_window_title(host: &HostContext) -> String {
+    host.titled(WINDOW_TITLE)
+}
+
+/// The caption KWin finds the main window by: `None` (the window titled [`WINDOW_TITLE`])
+/// while the local host is shown, the full title while a remote host is.
+fn main_caption(cx: &App) -> Option<Arc<str>> {
+    let shown = HostContext::shown(cx);
+    shown
+        .is_remote()
+        .then(|| Arc::from(main_window_title(&shown)))
+}
+
+/// Sends `KWin(Activate)` for this process's main window, found by its title. Nothing when the
 /// windows snapshot has no such window.
 fn kwin_activate_main(cx: &mut App) {
+    let title = main_window_title(&HostContext::shown(cx));
     let Some(internal_id) = HostContext::local_hub(cx).and_then(|hub| {
         let windows = &hub.read(cx).current().windows;
         windows
             .for_pid(std::process::id())
             .iter()
-            .find(|w| &*w.caption == WINDOW_TITLE)
+            .find(|w| *w.caption == *title)
             .map(|w| Arc::clone(&w.internal_id))
     }) else {
         return;
@@ -1225,11 +1249,37 @@ pub fn first_frame_ms_from(stat: &str, uptime: &str) -> Option<u64> {
     Some(now_ms.saturating_sub(start_ms))
 }
 
+/// What the main window keeps of a host while another host is shown (UI-SHL-008): its pages,
+/// filter box, main tab and status bar. Pages keep their own selection and scroll.
+struct ParkedHost {
+    pages: [Option<PageSlot>; 6],
+    filter: Entity<FilterBox>,
+    active: Tab,
+    machine_status: Option<Entity<StatusBar>>,
+}
+
+/// One host tab of the main window.
+struct HostSlot {
+    name: Arc<str>,
+    host: HostContext,
+    /// `None` for the shown host, whose state is in the `MainWindow` fields, and for a host
+    /// that was never shown: its pages are built the first time it is shown.
+    parked: Option<ParkedHost>,
+    _hub: Option<Subscription>,
+}
+
 /// The main window's root view.
 pub struct MainWindow {
     /// The host this window shows (ADR-018 "Hosts"). Its pages, menus and the dialogs opened
     /// from them are built with it. With one host it is the local host.
     host: HostContext,
+    /// Every host, the local host first (UI-SHL-008). `hosts[shown]` is `host`.
+    hosts: Vec<HostSlot>,
+    shown: usize,
+    /// The host tabs, in the title bar while there is more than one host.
+    host_tabs: Entity<HostTabs>,
+    /// Reads the link status and flips the connecting pulse while there are host tabs.
+    _host_tick: Option<Task<()>>,
     /// Key context "Global".
     root_focus: FocusHandle,
     titlebar: Entity<TitleBarView>,
@@ -1325,7 +1375,9 @@ impl MainWindow {
         let built = cx
             .try_global::<ShellState>()
             .map_or_else(|| built_tabs(cx), |state| state.built_tabs.clone());
-        let host = HostContext::local(cx);
+        HostRegistry::sync(cx);
+        let tabs = HostRegistry::tabs(cx);
+        let host = tabs[0].host.clone();
         cx.default_global::<ShellState>().shown_host = Some(host.clone());
         let titlebar = cx.new(|cx| TitleBarView::new(window, cx));
         let tabstrip = cx.new(|cx| TabStrip::new(built, start, window, cx));
@@ -1337,10 +1389,11 @@ impl MainWindow {
         let anim = cx.new(AnimationDriver::new);
         AnimationDriver::register(&anim, window, cx);
         crate::theme::store::set_anim_window(window.window_handle(), cx);
-        if let Some(demand) = host.demand().cloned() {
-            let handle = window.window_handle();
-            demand.update(cx, |demand, _| demand.set_main_window(handle));
-        }
+        let hosts: Vec<HostSlot> = tabs
+            .into_iter()
+            .map(|tab| Self::host_slot(tab, window, cx))
+            .collect();
+        let host_tabs = cx.new(|_| HostTabs::new());
 
         let fps = cx.new(FpsOverlay::new);
         let machine_status = host
@@ -1437,37 +1490,23 @@ impl MainWindow {
             window,
             |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
         ));
-        // Health items in the status chip (E20-016), and the frame note for hidden detection.
-        if let Some(hub) = host.hub().cloned() {
-            subs.push(cx.subscribe_in(
-                &hub,
-                window,
-                |this: &mut Self, hub, ev: &SnapshotChanged, window, cx| {
-                    if ev.mask.contains(ComponentMask::HEALTH) {
-                        this.sync_health(cx);
-                        // The shield follows the helper state; set_model notifies only on a
-                        // change.
-                        let model = this.toolbar_model(cx);
-                        this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
-                    }
-                    // The picker follows the KWin bridge; picking ends when the bridge goes.
-                    if ev.mask.contains(ComponentMask::WINDOWS) {
-                        // A new pick result, read from the live snapshot (E22-045, PROC-055).
-                        let windows = Arc::clone(&hub.read(cx).current().windows);
-                        if let Some(result) = this.pick_watch.take(&windows) {
-                            let host = this.host.clone();
-                            pick::on_pick_result(&host, this, result, window, cx);
-                        }
-                        if this.picking && !keep_above_supported(cx) {
-                            this.end_window_pick(cx);
-                        }
-                        let model = this.toolbar_model(cx);
-                        this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
-                    }
-                    this.note_next_frame(hub.clone(), window, cx);
-                },
-            ));
-        }
+        // The title bar values each host was asked for end with this window.
+        subs.push(cx.on_release(|this: &mut Self, cx| {
+            let source = this.host_tabs.entity_id();
+            for slot in &this.hosts {
+                if let Some(demand) = slot.host.demand() {
+                    demand.update(cx, |d, cx| d.remove(source, cx));
+                }
+            }
+        }));
+        // `[[hosts]]` changes add and remove host tabs (UI-SHL-008).
+        subs.push(
+            cx.observe_global_in::<TlSettings>(window, |this: &mut Self, window, cx| {
+                if HostRegistry::sync(cx) {
+                    this.rebuild_hosts(window, cx);
+                }
+            }),
+        );
         // The compositor's close request follows the same decision; tasklens then removes the
         // window or quits itself, so the platform never closes it.
         let view = cx.weak_entity();
@@ -1487,6 +1526,10 @@ impl MainWindow {
 
         let mut this = Self {
             host,
+            hosts,
+            shown: 0,
+            host_tabs,
+            _host_tick: None,
             root_focus,
             titlebar,
             tabstrip,
@@ -1533,6 +1576,7 @@ impl MainWindow {
             start_minimizes: 0,
         };
         this.sync_fps(cx);
+        this.sync_hosts(cx);
         this.switch_to(start, false, window, cx);
         cx.on_next_frame(window, |this, window, cx| {
             this.after_first_frame(window, cx)
@@ -1615,6 +1659,263 @@ impl MainWindow {
     /// The host this window shows.
     pub fn host(&self) -> &HostContext {
         &self.host
+    }
+
+    /// The index of the shown host tab; 0 is the local host.
+    pub fn shown_host_index(&self) -> usize {
+        self.shown
+    }
+
+    /// The number of hosts. Host tabs show from two.
+    pub fn host_count(&self) -> usize {
+        self.hosts.len()
+    }
+
+    /// The host tab row.
+    pub fn host_tabs_view(&self) -> &Entity<HostTabs> {
+        &self.host_tabs
+    }
+
+    /// A slot for `tab`: its hub subscription, and the main window set on its demand.
+    fn host_slot(tab: HostTab, window: &mut Window, cx: &mut Context<Self>) -> HostSlot {
+        if let Some(demand) = tab.host.demand().cloned() {
+            let handle = window.window_handle();
+            demand.update(cx, |demand, _| demand.set_main_window(handle));
+        }
+        let hub = tab.host.hub().map(|hub| Self::watch_hub(hub, window, cx));
+        HostSlot {
+            name: tab.name,
+            host: tab.host,
+            parked: None,
+            _hub: hub,
+        }
+    }
+
+    /// One host's snapshot changes: the CPU percent on its tab, and for the shown host the
+    /// health items in the status chip (E20-016), the picker and the frame note for hidden
+    /// detection.
+    fn watch_hub(
+        hub: &Entity<SnapshotHub>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            hub,
+            window,
+            |this: &mut Self, hub, ev: &SnapshotChanged, window, cx| {
+                if ev.mask.contains(ComponentMask::SERIES) && this.hosts.len() > 1 {
+                    this.sync_host_tabs(cx);
+                }
+                if this.host.hub() != Some(hub) {
+                    return;
+                }
+                if ev.mask.contains(ComponentMask::HEALTH) {
+                    this.sync_health(cx);
+                    // The shield follows the helper state; set_model notifies only on a
+                    // change.
+                    let model = this.toolbar_model(cx);
+                    this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
+                }
+                // The picker follows the KWin bridge; picking ends when the bridge goes.
+                if ev.mask.contains(ComponentMask::WINDOWS) {
+                    // A new pick result, read from the live snapshot (E22-045, PROC-055).
+                    let windows = Arc::clone(&hub.read(cx).current().windows);
+                    if let Some(result) = this.pick_watch.take(&windows) {
+                        let host = this.host.clone();
+                        pick::on_pick_result(&host, this, result, window, cx);
+                    }
+                    if this.picking && !keep_above_supported(cx) {
+                        this.end_window_pick(cx);
+                    }
+                    let model = this.toolbar_model(cx);
+                    this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
+                }
+                this.note_next_frame(hub.clone(), window, cx);
+            },
+        )
+    }
+
+    /// Makes the host tabs match `HostRegistry` after a `[[hosts]]` change. A host that is gone
+    /// takes its pages with it; when it was shown, the local host is shown first.
+    fn rebuild_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs = HostRegistry::tabs(cx);
+        if !tabs.iter().any(|t| t.host.same_host(&self.host)) {
+            self.select_host(0, window, cx);
+        }
+        let mut old = mem::take(&mut self.hosts);
+        let mut hosts = Vec::with_capacity(tabs.len());
+        for tab in tabs {
+            match old.iter().position(|slot| slot.host.same_host(&tab.host)) {
+                Some(ix) => {
+                    let mut slot = old.swap_remove(ix);
+                    slot.name = tab.name;
+                    hosts.push(slot);
+                }
+                None => hosts.push(Self::host_slot(tab, window, cx)),
+            }
+        }
+        // The hosts that are gone stop asking for their title bar value.
+        let source = self.host_tabs.entity_id();
+        for slot in &old {
+            if let Some(demand) = slot.host.demand() {
+                demand.update(cx, |d, cx| d.remove(source, cx));
+            }
+        }
+        self.shown = hosts
+            .iter()
+            .position(|slot| slot.host.same_host(&self.host))
+            .unwrap_or(0);
+        self.hosts = hosts;
+        self.sync_hosts(cx);
+        cx.notify();
+    }
+
+    /// Shows or hides the host tabs, asks each host for its title bar value while they show,
+    /// and runs the status tick while they show.
+    fn sync_hosts(&mut self, cx: &mut Context<Self>) {
+        let multi = self.hosts.len() > 1;
+        // A hidden host asks only for the title bar value (UI-SHL-008, ADR-018 Sessions). The
+        // part has no window, so it counts while the host's pages are hidden.
+        let source = self.host_tabs.entity_id();
+        for slot in &self.hosts {
+            let Some(demand) = slot.host.demand() else {
+                continue;
+            };
+            demand.update(cx, |d, cx| {
+                if multi {
+                    let part = tl_model::demand::Demand {
+                        any_surface_visible: true,
+                        cpu: tl_model::demand::CpuDemand::Total,
+                        ..Default::default()
+                    };
+                    d.set(source, None, part, cx);
+                } else {
+                    d.remove(source, cx);
+                }
+            });
+        }
+        self._host_tick = multi.then(|| {
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    cx.background_executor().timer(HOST_TICK).await;
+                    let alive = this.update(cx, |this, cx| {
+                        this.host_tabs.update(cx, |t, cx| t.flip_pulse(cx));
+                        this.sync_host_tabs(cx);
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        self.sync_host_tabs(cx);
+    }
+
+    /// Sets the host tabs from the hosts' status and CPU, and shows them in the title bar with
+    /// more than one host.
+    fn sync_host_tabs(&mut self, cx: &mut Context<Self>) {
+        let multi = self.hosts.len() > 1;
+        let tabs: Vec<HostTabInfo> = if multi {
+            self.hosts
+                .iter()
+                .map(|slot| HostTabInfo {
+                    name: Arc::clone(&slot.name),
+                    status: HostRegistry::status(&slot.host, cx),
+                    cpu: slot
+                        .host
+                        .hub()
+                        .and_then(|hub| cpu_percent(hub.read(cx).current())),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let shown = self.shown;
+        self.host_tabs.update(cx, |t, cx| t.set(tabs, shown, cx));
+        let view = multi.then(|| AnyView::from(self.host_tabs.clone()));
+        self.titlebar
+            .update(cx, |bar, cx| bar.set_host_tabs(view, cx));
+    }
+
+    /// A host's state the first time it is shown: a filter box on its own event bus, its own
+    /// status bar, no pages yet and the main tab shown now.
+    fn new_host_state(
+        &mut self,
+        host: &HostContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ParkedHost {
+        let active = self.active;
+        let filter = cx.new(|cx| FilterBox::new(active, host.events().cloned(), window, cx));
+        self._subs.push(cx.subscribe_in(
+            &filter,
+            window,
+            |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
+        ));
+        let machine_status = host
+            .hub()
+            .cloned()
+            .zip(host.demand().cloned())
+            .map(|(hub, demand)| machine_status::status_bar(&hub, &demand, cx));
+        ParkedHost {
+            pages: Default::default(),
+            filter,
+            active,
+            machine_status,
+        }
+    }
+
+    /// Shows the host tab at `index` (UI-SHL-008). The shown host's pages, filter, main tab and
+    /// status bar are kept for when it is shown again; the new host's are restored, or built
+    /// the first time. Windows opened from a host stay on it. Nothing for the shown host or an
+    /// index past the last tab.
+    pub fn select_host(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index == self.shown || index >= self.hosts.len() {
+            return;
+        }
+        // Picking and a pending `--select-pid` belong to the host shown now.
+        self.end_window_pick(cx);
+        self.pending_pid = None;
+        self.fade = None;
+        if let Some(page) = &self.pages[self.active as usize] {
+            page.handle.set_active(false, cx);
+        }
+        if let Some(status) = &self.machine_status {
+            status.update(cx, |b, cx| b.set_shown(Slot::Main, None, cx));
+        }
+        let host = self.hosts[index].host.clone();
+        let next = match self.hosts[index].parked.take() {
+            Some(parked) => parked,
+            None => self.new_host_state(&host, window, cx),
+        };
+        let parked = ParkedHost {
+            pages: mem::take(&mut self.pages),
+            filter: mem::replace(&mut self.filter, next.filter),
+            active: self.active,
+            machine_status: mem::replace(&mut self.machine_status, next.machine_status),
+        };
+        self.hosts[self.shown].parked = Some(parked);
+        self.pages = next.pages;
+        self.shown = index;
+        self.host = host;
+        cx.default_global::<ShellState>().shown_host = Some(self.host.clone());
+        // Graph summary mode belongs to the host's own Performance page (UI-PRF-016).
+        let summary = self
+            .page_entity::<PerformancePage>(Tab::Performance)
+            .is_some_and(|page| page.read(cx).summary().is_some());
+        self.titlebar
+            .update(cx, |bar, cx| bar.set_menus_hidden(summary, cx));
+        // `switch_to` with the restored tab already active builds a missing page and wires the
+        // tab strip, filter slot, toolbar and status chip to this host.
+        self.active = next.active;
+        self.switch_to(next.active, false, window, cx);
+        window.set_window_title(&main_window_title(&self.host));
+        self.sync_host_tabs(cx);
+        cx.notify();
+    }
+
+    fn on_select_host(&mut self, a: &SelectHost, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_host(a.0, window, cx);
     }
 
     /// The shell filter box. E20-A2 routes type-to-filter through it.
@@ -2654,9 +2955,14 @@ impl Render for MainWindow {
             .debug_selector(|| "MainWindow".into())
             .size_full()
             .bg(bg)
-            .key_context(GLOBAL_CONTEXT)
+            .key_context(if self.hosts.len() > 1 {
+                GLOBAL_WITH_HOSTS
+            } else {
+                GLOBAL_CONTEXT
+            })
             .track_focus(&self.root_focus)
             .on_action(cx.listener(Self::on_select_tab))
+            .on_action(cx.listener(Self::on_select_host))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_refresh))

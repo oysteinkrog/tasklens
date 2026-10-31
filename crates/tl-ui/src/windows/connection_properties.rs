@@ -34,7 +34,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::host::HostContext;
+use crate::host::{HostContext, with_host_name};
 use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::connections::actions::ConnectionJumpToProcess;
@@ -371,6 +371,8 @@ pub struct ConnectionPropertiesView {
     /// The last record seen. Kept after the socket closes.
     record: ConnRecord,
     closed: bool,
+    /// The remote host the socket is on, for the title; `None` on the local host.
+    remote: Option<Arc<str>>,
     lines: Vec<PropLine>,
     sig: Vec<(SharedString, SharedString, Validity)>,
     copy_focus: Vec<FocusHandle>,
@@ -401,7 +403,7 @@ pub fn open_connection_properties(host: &HostContext, cookie: u64, cx: &mut App)
     let key = WindowKey::ConnectionProperties(cookie);
     let spec = TlWindowSpec::new(
         TlWindowKind::Properties,
-        title_for(&record, false, cx),
+        host.titled(&title_for(&record, false, cx)),
         size(px(WINDOW_SIZE.0 * s), px(WINDOW_SIZE.1 * s)),
     )
     .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)))
@@ -477,6 +479,7 @@ impl ConnectionPropertiesView {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
+            remote: host.remote_name().cloned(),
             cookie: record.cookie,
             record,
             closed: false,
@@ -525,7 +528,11 @@ impl ConnectionPropertiesView {
     }
 
     fn set_title(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = title_for(&self.record, self.closed, cx);
+        let title: SharedString = with_host_name(
+            &title_for(&self.record, self.closed, cx),
+            self.remote.as_deref(),
+        )
+        .into();
         let frame = window.root::<Root>().flatten().and_then(|root| {
             root.read(cx)
                 .view()

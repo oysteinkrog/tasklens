@@ -1216,6 +1216,7 @@ shell-titlebar-minimize = Minimize
 shell-titlebar-maximize = Maximize
 shell-titlebar-restore = Restore
 shell-titlebar-close = Close
+shell-host-tab-failed = Can't connect: { $reason }
 shell-tab-processes = Processes
 shell-tab-history = History
 shell-tab-performance = Performance

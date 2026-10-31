@@ -27,6 +27,7 @@ mod handle_search;
 mod helper_flow;
 mod history;
 mod host_settings;
+mod host_tabs;
 mod hub;
 mod information;
 mod keymap;

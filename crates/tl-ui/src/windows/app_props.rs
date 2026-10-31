@@ -202,7 +202,7 @@ pub fn open_app_properties(host: &HostContext, group: GroupKey, cx: &mut App) {
                     "app group is not running"
                 ));
             };
-            let title = app_props_title(&row.name, false);
+            let title: SharedString = host.titled(&app_props_title(&row.name, false)).into();
             // The key lets the title bar pin send keep-above for this window (R-073, D-031).
             let spec = pwn_window_spec(cx, PwnWindow::AppProperties, title, None)
                 .key(WindowKey::AppProperties(group));
@@ -2266,7 +2266,7 @@ impl AppPropsWindow {
         self.processes.update(cx, |tab, _| tab.set_exited(true));
         self.general.update(cx, |g, cx| g.set_exited(true, cx));
         self.remove_demand(cx);
-        let title = app_props_title(&self.name, true);
+        let title: SharedString = self.host.titled(&app_props_title(&self.name, true)).into();
         let frame = window.root::<Root>().flatten().and_then(|root| {
             root.read(cx)
                 .view()

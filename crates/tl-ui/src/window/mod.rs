@@ -5,6 +5,7 @@ pub mod collector_health;
 pub mod confirm;
 pub mod crash_report;
 pub mod filter;
+pub mod host_tabs;
 pub mod main;
 pub mod menubar;
 pub mod menus_debug;

@@ -124,7 +124,7 @@ impl DetachedGraphWindow {
         let panel = MinigraphPanel::global(cx)
             .map(|p| p.downgrade())
             .unwrap_or_else(WeakEntity::new_invalid);
-        let title: SharedString = format!("tasklens Graph {window_id}").into();
+        let title: SharedString = host.titled(&format!("tasklens Graph {window_id}")).into();
         window.set_window_title(&title);
         if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();

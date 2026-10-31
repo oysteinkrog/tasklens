@@ -304,7 +304,7 @@ impl ServicePropertiesWindow {
         let key = WindowKey::Service(unit.clone());
         let spec = TlWindowSpec::new(
             TlWindowKind::Properties,
-            title_for(&unit, not_loaded, cx),
+            host.titled(&title_for(&unit, not_loaded, cx)),
             size(px(WINDOW_SIZE.0 * s), px(WINDOW_SIZE.1 * s)),
         )
         .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)))
@@ -670,7 +670,10 @@ impl ServicePropertiesWindow {
     }
 
     fn retitle(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = title_for(&self.unit, self.not_loaded, cx);
+        let title: SharedString = self
+            .host
+            .titled(&title_for(&self.unit, self.not_loaded, cx))
+            .into();
         let frame = window.root::<Root>().flatten().and_then(|root| {
             root.read(cx)
                 .view()

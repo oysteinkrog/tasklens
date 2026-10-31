@@ -361,6 +361,12 @@ impl ActionTracker {
         }
     }
 
+    /// Makes the next id `first`. A remote host's tracker starts at its own base, so ids from
+    /// two trackers never meet (tasklens-q4x76.27).
+    pub fn start_ids_at(&self, first: u64) {
+        self.next_id.store(first, Ordering::Relaxed);
+    }
+
     /// A new request id, from 1 (ADR-005).
     pub fn next_id(&self) -> ActionId {
         ActionId(self.next_id.fetch_add(1, Ordering::Relaxed))

@@ -439,7 +439,9 @@ pub fn open_process_properties(host: &HostContext, key: ProcessKey, cx: &mut App
                     key.pid
                 ));
             };
-            let title = props_title(&record.meta.name, key.pid, false);
+            let title: SharedString = host
+                .titled(&props_title(&record.meta.name, key.pid, false))
+                .into();
             // The key lets the title bar pin send keep-above for this window (R-073, D-031).
             let spec = pwn_window_spec(cx, PwnWindow::ProcessProperties, title, None)
                 .key(WindowKey::Properties(key));
@@ -623,6 +625,11 @@ impl PropsWindow {
 
     pub fn key(&self) -> ProcessKey {
         self.key
+    }
+
+    /// The host this window shows. It never changes after the window opens.
+    pub fn host(&self) -> &HostContext {
+        &self.host
     }
 
     pub fn active(&self) -> DetailTab {
@@ -1205,7 +1212,10 @@ impl PropsWindow {
             t.update(cx, |t, cx| t.set_exited(true, cx));
         }
         self.remove_demand(cx);
-        let title = props_title(&self.name, self.key.pid, true);
+        let title: SharedString = self
+            .host
+            .titled(&props_title(&self.name, self.key.pid, true))
+            .into();
         let frame = window.root::<Root>().flatten().and_then(|root| {
             root.read(cx)
                 .view()
