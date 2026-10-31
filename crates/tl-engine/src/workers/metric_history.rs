@@ -2447,6 +2447,8 @@ mod tests {
         let mut st = open(dir.path(), 1, OFFSET, t0);
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
         let (tx, mut rx) = mpsc::channel::<MetricMsg>(2);
+        // Empty sample batches stand in for the other traffic that fills the queue.
+        let samples = tx.clone();
         slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
         let mut sink = MetricSink::new(Arc::clone(&slot));
         // The local session first, as in `ClientSessions`.
@@ -2499,6 +2501,9 @@ mod tests {
                     ranges.remove(i);
                 }
                 _ => {}
+            }
+            for _ in 0..below(3) {
+                let _ = samples.try_send(MetricMsg::System(Box::new([])));
             }
             // The end of the reducer turn.
             sink.set_ranges(&linked(&ranges));
