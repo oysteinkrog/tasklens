@@ -79,6 +79,7 @@ use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
     AppRequestHandler, BootSettings, OpenHooks, StartOptions, ToastKindTag, UiExit, request_exit,
 };
+use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::shield::StartHelperSession;
@@ -87,7 +88,7 @@ use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::host::{HostContext, HostRegistry, HostTab};
 use crate::hosts_edit;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, LinkChanged, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
 use crate::pages::connections::actions::GoToConnection;
@@ -132,6 +133,8 @@ const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
 
 /// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
 const HOST_TICK: Duration = Duration::from_millis(500);
+/// The page's opacity while its host reconnects (UI-SHL-008).
+const RECONNECT_OPACITY: f32 = 0.6;
 
 /// The window's smallest size in logical px (ADR-010).
 pub const MIN_W: f32 = 800.0;
@@ -1267,7 +1270,8 @@ struct HostSlot {
     /// `None` for the shown host, whose state is in the `MainWindow` fields, and for a host
     /// that was never shown: its pages are built the first time it is shown.
     parked: Option<ParkedHost>,
-    _hub: Option<Subscription>,
+    /// The hub's `SnapshotChanged` and `LinkChanged`.
+    _hub: Vec<Subscription>,
 }
 
 /// The main window's root view.
@@ -1345,6 +1349,9 @@ pub struct MainWindow {
     /// The page container's opacity at the last render.
     #[cfg(any(test, feature = "test-hooks"))]
     page_opacity: f32,
+    /// The reconnect banner text at the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    reconnect_banner: Option<SharedString>,
     /// Animation frames the fade asked for.
     #[cfg(any(test, feature = "test-hooks"))]
     fade_frames: u32,
@@ -1569,6 +1576,8 @@ impl MainWindow {
             #[cfg(any(test, feature = "test-hooks"))]
             page_opacity: 1.0,
             #[cfg(any(test, feature = "test-hooks"))]
+            reconnect_banner: None,
+            #[cfg(any(test, feature = "test-hooks"))]
             fade_frames: 0,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
@@ -1631,6 +1640,12 @@ impl MainWindow {
         self.page_opacity
     }
 
+    /// The reconnect banner text at the last render; `None` while the shown host is live.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn reconnect_banner(&self) -> Option<&SharedString> {
+        self.reconnect_banner.as_ref()
+    }
+
     /// Animation frames the page fade asked for.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn fade_frames(&self) -> u32 {
@@ -1684,7 +1699,11 @@ impl MainWindow {
             let handle = window.window_handle();
             demand.update(cx, |demand, _| demand.set_main_window(handle));
         }
-        let hub = tab.host.hub().map(|hub| Self::watch_hub(hub, window, cx));
+        let hub = tab
+            .host
+            .hub()
+            .map(|hub| vec![Self::watch_hub(hub, window, cx), Self::watch_link(hub, cx)])
+            .unwrap_or_default();
         HostSlot {
             name: tab.name,
             host: tab.host,
@@ -1735,6 +1754,35 @@ impl MainWindow {
                 this.note_next_frame(hub.clone(), window, cx);
             },
         )
+    }
+
+    /// One host's link state (ADR-018 Reconnect): the shown host's pages dim and show the
+    /// reconnect banner while it is stale.
+    fn watch_link(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(hub, |this: &mut Self, hub, ev: &LinkChanged, cx| {
+            debug!(target: "tasklens::ui", live = ev.live, "host link changed");
+            if this.host.hub() == Some(&hub) {
+                cx.notify();
+            }
+        })
+    }
+
+    /// The reconnect banner text while the shown host's session has ended and the first
+    /// snapshot of the next one is not installed (UI-SHL-008, ADR-018 Reconnect): "Reconnecting
+    /// to <host>", or "Connecting to <host>" before the host's first session. `None` while it is
+    /// live.
+    fn reconnect_text(&self, cx: &App) -> Option<SharedString> {
+        let hub = self.host.hub()?.read(cx);
+        if hub.is_live() {
+            return None;
+        }
+        let key = if hub.never_connected() {
+            "shell-host-connecting"
+        } else {
+            "shell-host-reconnecting"
+        };
+        let name = self.hosts.get(self.shown).map_or("", |slot| &*slot.name);
+        Some(tr_args(cx, key, &[("host", name.to_owned().into())]))
     }
 
     /// Makes the host tabs match `HostRegistry` after a `[[hosts]]` change. A host that is gone
@@ -2963,15 +3011,45 @@ impl Render for MainWindow {
         {
             self.page_opacity = opacity.unwrap_or(1.0);
         }
+        // While the shown host reconnects its page keeps the last data, dimmed, under the
+        // banner, and takes no clicks (UI-SHL-008, ADR-018 Reconnect).
+        let reconnect = self.reconnect_text(cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.reconnect_banner = reconnect.clone();
+        }
         let page = self.pages[self.active as usize].as_ref().map(|slot| {
-            if opacity.is_some() || self.active == Tab::Performance {
-                slot.view.clone().into_any_element()
-            } else {
-                slot.view
-                    .clone()
-                    .cached(StyleRefinement::default().size_full())
+            // A cached view replays its last paint, so a dimmed page is drawn uncached for the
+            // container's opacity to reach it.
+            let page =
+                if opacity.is_some() || reconnect.is_some() || self.active == Tab::Performance {
+                    slot.view.clone().into_any_element()
+                } else {
+                    slot.view
+                        .clone()
+                        .cached(StyleRefinement::default().size_full())
+                        .into_any_element()
+                };
+            if reconnect.is_some() {
+                div()
+                    .size_full()
+                    .opacity(RECONNECT_OPACITY)
+                    .child(page)
                     .into_any_element()
+            } else {
+                page
             }
+        });
+        // Over the page: blocks clicks, hover and drags, lets the wheel scroll the last data.
+        let reconnect = reconnect.map(|text| {
+            div()
+                .debug_selector(|| "MainWindowReconnect".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .block_mouse_except_scroll()
+                .child(TlBanner::new(TlBannerKind::Warning, text))
         });
         // Graph summary mode: the summary view takes the place of the tab strip and the page.
         let summary = (self.active == Tab::Performance)
@@ -3078,7 +3156,9 @@ impl Render for MainWindow {
                                 .top(px(FPS_INSET * s))
                                 .right(px(FPS_INSET * s))
                                 .child(self.fps.clone())
-                        })),
+                        }))
+                        // Last, so it covers the status chip too.
+                        .children(reconnect),
                 )
             })
             // Last: an open context menu covers the window (E16-A3).

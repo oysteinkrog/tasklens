@@ -39,6 +39,15 @@ pub struct HiddenChanged {
     pub hidden: bool,
 }
 
+/// Emitted when the host's link goes stale or live again (ADR-018 Implementation contracts
+/// "Reconnect"). Stale: the client's generation is newer than the installed snapshot's, so the
+/// session that snapshot came from has ended and the first complete frame of the next one has
+/// not been installed yet. Live again: that frame is installed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LinkChanged {
+    pub live: bool,
+}
+
 /// Chips report -128 °C or exactly 0 °C for a pin with nothing connected.
 pub(crate) fn is_dead_reading(celsius: f32) -> bool {
     celsius <= -128.0 || celsius == 0.0
@@ -71,13 +80,17 @@ pub struct SnapshotHub {
     /// Temperature sensors that have read a real value (not -128 °C or 0 °C) in any installed
     /// snapshot since the app started. Pages use it to keep a sensor whose history has expired.
     live_sensors: FxHashSet<DeviceIdx>,
+    /// The link state last reported with `LinkChanged`.
+    live: bool,
 }
 
 impl EventEmitter<SnapshotChanged> for SnapshotHub {}
 impl EventEmitter<HiddenChanged> for SnapshotHub {}
+impl EventEmitter<LinkChanged> for SnapshotHub {}
 
 impl SnapshotHub {
-    /// Installs `client.latest()` and spawns the receive task and the 500 ms hidden-state timer.
+    /// Installs `client.latest()` and spawns the receive task and the 500 ms timer that checks
+    /// the hidden state and the link.
     pub fn new(client: Arc<dyn EngineClient>, cx: &mut Context<Self>) -> Self {
         let wake = client.wake();
         let receiver = Arc::clone(&client);
@@ -102,7 +115,11 @@ impl SnapshotHub {
                 cx.background_executor().timer(HIDDEN_CHECK_PERIOD).await;
                 tick = tick.wrapping_add(1);
                 if this
-                    .update(cx, |hub, cx| hub.check_hidden(tick, cx))
+                    .update(cx, |hub, cx| {
+                        // A lost connection sends no wake, so the link is checked here.
+                        hub.check_link(cx);
+                        hub.check_hidden(tick, cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -114,9 +131,11 @@ impl SnapshotHub {
         let (generation, current) = client.latest_with_generation();
         let mut live_sensors = FxHashSet::default();
         note_live_sensors(&mut live_sensors, &current);
+        let live = client.generation() <= generation;
         Self {
             current,
             generation,
+            live,
             client,
             pending_notify_since: None,
             last_render: None,
@@ -159,6 +178,9 @@ impl SnapshotHub {
             snap.changed_since(&self.current, &mut changed_series)
         };
         self.current = snap;
+        if new_generation {
+            self.check_link(cx);
+        }
         if mask == ComponentMask::NONE {
             return;
         }
@@ -197,6 +219,34 @@ impl SnapshotHub {
     /// `EngineClient::generation` of the installed snapshot.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The installed snapshot belongs to the client's current session: its generation is not
+    /// older than `EngineClient::generation`. Read now, not at the last check, so an action is
+    /// never sent from a snapshot whose session has ended (ADR-018 Reconnect).
+    pub fn session_current(&self) -> bool {
+        self.client.generation() <= self.generation
+    }
+
+    /// The link state last reported with `LinkChanged`. False from the 500 ms check after the
+    /// session ended until the first snapshot of the next session is installed. Pages show
+    /// their last data dimmed and actions are off while it is false.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// No snapshot from an engine session was ever installed: the host has not connected yet.
+    pub fn never_connected(&self) -> bool {
+        self.generation == 0 && self.current.sequence == 0
+    }
+
+    /// Emits `LinkChanged` when the link state differs from the one last reported.
+    fn check_link(&mut self, cx: &mut Context<Self>) {
+        let live = self.session_current();
+        if live != self.live {
+            self.live = live;
+            cx.emit(LinkChanged { live });
+        }
     }
 
     /// One timer tick. Goes hidden when a change has waited more than 1000 ms for a render.
@@ -304,6 +354,42 @@ mod tests {
         engine.publish_with(|_| {});
         cx.run_until_parked();
         assert_eq!(masks.lock().unwrap().len(), 2);
+    }
+
+    /// ADR-018 Reconnect: a drop raises the client's generation and sends no wake. The 500 ms
+    /// check reports the link stale; the first snapshot of the next session makes it live.
+    #[gpui_kit::test]
+    fn link_stale_after_drop_until_next_session(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        let links = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&links);
+        cx.update(|cx| {
+            cx.subscribe(&hub, move |_, ev: &LinkChanged, _| {
+                seen.lock().unwrap().push(ev.live);
+            })
+            .detach();
+        });
+        assert!(hub.read_with(cx, |hub, _| hub.is_live()));
+
+        engine.bump_generation();
+        hub.read_with(cx, |hub, _| {
+            assert!(!hub.session_current(), "known at once");
+            assert!(hub.is_live(), "reported at the next check");
+        });
+        cx.executor()
+            .advance_clock(HIDDEN_CHECK_PERIOD + Duration::from_millis(1));
+        cx.run_until_parked();
+        assert_eq!(*links.lock().unwrap(), [false]);
+        hub.read_with(cx, |hub, _| assert!(!hub.is_live()));
+
+        let mut fresh = empty_snapshot();
+        fresh.sequence = 1;
+        engine.restart(fresh);
+        cx.run_until_parked();
+        assert_eq!(*links.lock().unwrap(), [false, true]);
+        hub.read_with(cx, |hub, _| assert!(hub.is_live() && hub.session_current()));
     }
 
     #[gpui_kit::test]

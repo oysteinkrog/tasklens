@@ -26,6 +26,14 @@
 //! "Outcome unknown" (ADR-005). Nothing is ever retried automatically; "Retry as administrator"
 //! is a button the user clicks (ADR-006, P3).
 //!
+//! Tracking is keyed by host and session (ADR-018 Implementation contracts "Reconnect"). Each
+//! host has its own tracker, and each request keeps the client generation it was sent in. When
+//! the host's hub reports the link stale, every request from an older session becomes "Outcome
+//! unknown" with "connection to <host> lost", unless the client ended it first. While the link
+//! is stale, until the first complete frame of the next session, nothing is sent:
+//! [`ActionTracker::track`] returns `EngineStopped` and [`ActionTracker::track_or_toast`] shows
+//! "Not sent while reconnecting to <host>.".
+//!
 //! Texts follow R-132: the tracker's words are translated once per strings version. The free
 //! functions [`message`] and [`short_reason`] have no `App`, so they give the en-US text.
 
@@ -38,7 +46,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{
     Action, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global,
-    IntoElement as _, ParentElement as _, SharedString, Styled as _, Task, WeakEntity, div,
+    IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Task,
+    WeakEntity, div,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -53,8 +62,9 @@ use tracing::{debug, warn};
 
 use crate::components::dialog::TlDialog;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::hub::SnapshotHub;
-use crate::i18n::{Strings, tr, tr_en};
+use crate::host::HostRegistry;
+use crate::hub::{LinkChanged, SnapshotHub};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 
 /// Added to a request's deadline before it becomes "Outcome unknown" (ADR-005).
@@ -163,6 +173,8 @@ pub struct PendingAction {
     pub deadline: Option<Duration>,
     /// Final state per target index, in arrival order.
     pub results: SmallVec<[(u16, ActionState); 4]>,
+    /// `EngineClient::generation` when the request was sent: the session it belongs to.
+    pub session: u64,
 }
 
 impl PendingAction {
@@ -288,6 +300,8 @@ pub struct ActionTracker {
     /// The deadline sweep runs only while requests are pending.
     sweeping: bool,
     _events: Task<()>,
+    /// The hub's `LinkChanged`: a lost session ends its requests.
+    _link: Option<Subscription>,
     #[cfg(any(test, feature = "test-hooks"))]
     pushed: Vec<PushedToast>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -341,6 +355,13 @@ impl ActionTracker {
         App::on_action(cx, move |a: &ShowActionDetails, cx| {
             let _ = this.update(cx, |t, cx| t.show_details(ActionId(a.0), cx));
         });
+        let link = hub.as_ref().map(|hub| {
+            cx.subscribe(hub, |t: &mut Self, _, ev: &LinkChanged, cx| {
+                if !ev.live {
+                    t.end_lost_sessions(cx);
+                }
+            })
+        });
 
         Self {
             client,
@@ -352,6 +373,7 @@ impl ActionTracker {
             finished: VecDeque::new(),
             sweeping: false,
             _events: task,
+            _link: link,
             #[cfg(any(test, feature = "test-hooks"))]
             pushed: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -372,8 +394,25 @@ impl ActionTracker {
         ActionId(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// The host's installed snapshot belongs to its client's current session, so an action
+    /// may be sent (ADR-018 Reconnect). Always true without a hub.
+    pub fn host_live(&self, cx: &App) -> bool {
+        self.hub
+            .as_ref()
+            .is_none_or(|hub| hub.read(cx).session_current())
+    }
+
+    /// The host's tab name: the remote host's name, else this PC's.
+    fn host_name(&self, cx: &mut App) -> Arc<str> {
+        self.hub
+            .as_ref()
+            .and_then(|hub| HostRegistry::remote_name_of(hub, cx))
+            .unwrap_or_else(|| HostRegistry::local_name(cx))
+    }
+
     /// Sends `request` and records it (R-197). A request whose id is 0 gets [`Self::next_id`].
-    /// On `Busy` or `EngineStopped` nothing is recorded.
+    /// On `Busy` or `EngineStopped` nothing is recorded. While the host is reconnecting
+    /// ([`Self::host_live`] is false) nothing is sent and the result is `EngineStopped`.
     pub fn track(
         &mut self,
         mut request: ActionRequest,
@@ -385,6 +424,11 @@ impl ActionTracker {
             request.id = self.next_id();
         }
         let id = request.id;
+        if !self.host_live(cx) {
+            debug!(target: "tasklens::ui", ?id, "action not sent: the host is reconnecting");
+            return Err(CommandError::EngineStopped);
+        }
+        let session = self.client.generation();
         self.client.send(Command::Action(request.clone()))?;
         let deadline = request_deadline(&request);
         debug!(target: "tasklens::ui", ?id, ?deadline, "action tracked");
@@ -397,6 +441,7 @@ impl ActionTracker {
                 started_at: cx.background_executor().now(),
                 deadline,
                 results: SmallVec::new(),
+                session,
             },
         );
         self.start_sweep(cx);
@@ -404,7 +449,8 @@ impl ActionTracker {
     }
 
     /// [`Self::track`] for owners: a refused send shows the Warning "Too many actions are
-    /// running. Try again shortly." on `queue`.
+    /// running. Try again shortly." on `queue`, or "Not sent while reconnecting to <host>."
+    /// while the host is reconnecting.
     pub fn track_or_toast(
         &mut self,
         request: ActionRequest,
@@ -412,6 +458,16 @@ impl ActionTracker {
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
+        if !self.host_live(cx) {
+            let host = self.host_name(cx);
+            let text = tr_args(
+                cx,
+                "fnd-action-send-reconnecting",
+                &[("host", host.to_string().into())],
+            );
+            self.push(&queue, ToastKind::Warning, text, None, None, cx);
+            return None;
+        }
         match self.track(request, queue.clone(), texts, cx) {
             Ok(id) => Some(id),
             Err(CommandError::Busy) => {
@@ -654,6 +710,28 @@ impl ActionTracker {
         let keep = !self.pending.is_empty();
         self.sweeping = keep;
         keep
+    }
+
+    /// The host's session ended: every pending request sent in an older session than the
+    /// client's current one gets the summary `OutcomeUnknown("connection to <host> lost")`.
+    /// A request the client already ended is not pending any more, so each ends once.
+    fn end_lost_sessions(&mut self, cx: &mut Context<Self>) {
+        let current = self.client.generation();
+        let lost: SmallVec<[ActionId; 4]> = self
+            .pending
+            .iter()
+            .filter(|(_, e)| e.session < current)
+            .map(|(id, _)| *id)
+            .collect();
+        if lost.is_empty() {
+            return;
+        }
+        let host = self.host_name(cx);
+        let reason: Arc<str> = Arc::from(format!("connection to {host} lost"));
+        warn!(target: "tasklens::ui", host = %host, count = lost.len(), "actions lost with the session");
+        for id in lost {
+            self.on_summary(id, ActionState::OutcomeUnknown(Arc::clone(&reason)), cx);
+        }
     }
 
     /// The event channel closed: every pending request becomes "Outcome unknown".

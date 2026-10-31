@@ -11,11 +11,13 @@ use gpui_kit::base::Root;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px,
 };
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
 use tl_model::client::EngineClient;
-use tl_model::command::Tab;
+use tl_model::command::{Command, Tab};
 use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::validity::Validity;
+use tl_ui::action_tracker::ToastTexts;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::DEMAND_COALESCE;
@@ -189,6 +191,50 @@ impl Rig {
     fn page<T: 'static>(&mut self, tab: Tab) -> Option<Entity<T>> {
         self.vcx
             .read_entity(&self.main, |m, _| m.page_entity::<T>(tab))
+    }
+
+    /// Sends an End task on `pid` through `host`'s tracker, as a page does.
+    fn end_task(&mut self, host: &HostContext, pid: u32) -> Option<ActionId> {
+        let tracker = host.tracker().expect("tracker").clone();
+        let queue = self
+            .vcx
+            .read_entity(&self.main, |m, _| m.toasts().downgrade());
+        let request = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::Signal(Signal::Term),
+            targets: [ActionTarget::Process(key(pid))].into_iter().collect(),
+            privileged: false,
+        };
+        let id = self.vcx.update(|_, cx| {
+            tracker.update(cx, |t, cx| {
+                t.track_or_toast(request, queue, ToastTexts::new("Ended", "Not ended."), cx)
+            })
+        });
+        self.draw();
+        id
+    }
+
+    /// The actions `engine` received.
+    fn actions(engine: &FakeEngine) -> usize {
+        engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::Action(_)))
+            .count()
+    }
+
+    fn banner(&mut self) -> Option<String> {
+        self.vcx.read_entity(&self.main, |m, _| {
+            m.reconnect_banner().map(ToString::to_string)
+        })
+    }
+
+    /// Runs the hubs' 500 ms link check.
+    fn tick(&mut self) {
+        self.vcx
+            .executor()
+            .advance_clock(Duration::from_millis(600));
+        self.draw();
     }
 
     /// The host tabs as last drawn: (label, selected, tooltip).
@@ -482,4 +528,106 @@ fn host_tabs_properties_window_stays_on_its_host(cx: &mut TestAppContext) {
             .all(|d| d.details.iter().all(|t| !format!("{t:?}").contains("4321"))),
         "the local engine never got it"
     );
+}
+
+/// UI-SHL-008, ADR-018 Reconnect: when home's connection drops, its pages keep the last data at
+/// 60% opacity under "Reconnecting to home", take no clicks and send no action until the first
+/// snapshot of the next session. An action sent in the lost session ends as outcome unknown.
+/// The local host and office stay live.
+#[gpui_kit::test]
+fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
+    let mut rig = boot(cx, &["home", "office"]);
+    let pid = 4321;
+    rig.remotes["home"].publish_with(|s| {
+        s.processes = Arc::new(ProcessSnapshot {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            records: vec![record(pid)].into(),
+            ..ProcessSnapshot::default()
+        });
+    });
+    rig.select_host(1);
+    let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
+    let local = rig.vcx.update(|_, cx| HostContext::local(cx));
+    let office = rig.vcx.update(|_, cx| {
+        tl_ui::host::HostRegistry::tabs(cx)
+            .into_iter()
+            .find(|t| &*t.name == "office")
+            .expect("office")
+            .host
+    });
+    assert_eq!(rig.banner(), None);
+    assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
+
+    // Live: an action reaches home and waits for its result.
+    rig.end_task(&home, pid).expect("sent while live");
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
+    let tracker = home.tracker().expect("tracker").clone();
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+
+    // The connection drops: the client's generation goes up at once, no snapshot follows.
+    rig.statuses
+        .lock()
+        .expect("statuses")
+        .insert("home".into(), HostLinkStatus::Connecting);
+    rig.remotes["home"].bump_generation();
+    rig.tick();
+    assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
+    let page = rig.vcx.debug_bounds("MainWindowPage").expect("page");
+    let cover = rig.vcx.debug_bounds("MainWindowReconnect").expect("cover");
+    assert_eq!(cover, page, "the cover takes every click on the page");
+    // The last data is still there.
+    let rows = rig.vcx.update(|_, cx| {
+        let hub = home.hub().expect("hub").read(cx);
+        hub.current().processes.records.len()
+    });
+    assert_eq!(rows, 1);
+    // The action from the lost session ended once, as outcome unknown.
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 0);
+    // Every action is refused on home, and says why.
+    assert_eq!(rig.end_task(&home, pid), None);
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
+    let pushed = rig.vcx.read_entity(&tracker, |t, _| {
+        t.pushed()
+            .iter()
+            .map(|p| p.text.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        pushed.iter().any(|t| t == "Outcome unknown"),
+        "the lost action: {pushed:?}"
+    );
+    assert_eq!(
+        pushed.last().map(String::as_str),
+        Some("Not sent while reconnecting to home.")
+    );
+
+    // The other hosts are live: their actions go out.
+    assert!(rig.end_task(&local, pid).is_some());
+    assert_eq!(Rig::actions(&rig.local), 1);
+    assert!(rig.end_task(&office, pid).is_some());
+    assert_eq!(Rig::actions(&rig.remotes["office"]), 1);
+    rig.select_host(0);
+    assert_eq!(rig.banner(), None);
+    rig.select_host(2);
+    assert_eq!(rig.banner(), None);
+
+    // Back on home: still reconnecting. The first snapshot of the next session ends it.
+    rig.select_host(1);
+    assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
+    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    fresh.sequence = 1;
+    rig.statuses
+        .lock()
+        .expect("statuses")
+        .insert("home".into(), HostLinkStatus::Connected);
+    rig.remotes["home"].restart(fresh);
+    rig.draw();
+    assert_eq!(rig.banner(), None);
+    assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
+    assert!(rig.end_task(&home, pid).is_some());
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 2);
 }
