@@ -15,7 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tl_model::remote_proto::{
     BootPrefix, HelloTail, HostIdentity, RefuseReason, Refused, Welcome, decode_hello,
@@ -28,8 +28,9 @@ use crate::envelope::{EnvelopeError, FrameReader};
 pub const SOCKET_NAME: &str = "engine.sock";
 /// The only mode the runtime directory and the socket directory may have.
 pub const DIR_MODE: u32 = 0o700;
-/// How long the server waits for a client's `Hello`.
-pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a connection may take for its whole handshake, from accept. One deadline for all
+/// reads, so a client that sends its `Hello` a byte at a time cannot hold its place longer.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why an endpoint check, a bind or a peer check failed.
 #[derive(Debug)]
@@ -224,6 +225,35 @@ pub fn accept_peer(listener: &UnixListener, uid: u32) -> Result<UnixStream, Endp
             let _ = stream.shutdown(std::net::Shutdown::Both);
             Err(e)
         }
+    }
+}
+
+/// Reads from a stream until one fixed `deadline` (a monotonic `Instant`). Before every read it
+/// checks the clock and sets the stream's read timeout to the time left; a read at or after the
+/// deadline fails with `TimedOut`.
+pub struct DeadlineReader<'a> {
+    stream: &'a UnixStream,
+    deadline: Instant,
+}
+
+impl<'a> DeadlineReader<'a> {
+    pub fn new(stream: &'a UnixStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the handshake deadline passed",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
     }
 }
 
@@ -607,5 +637,35 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, HandshakeError::Read(_)));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_trickled_hello_fails_at_the_deadline() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let hello = hello_bytes(BootPrefix::ours().proto);
+        // One byte every 50 ms: each read gets a byte well within any per-read timeout.
+        let writer = std::thread::spawn(move || {
+            let mut client = client;
+            for byte in hello {
+                if client.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let begin = Instant::now();
+        let mut reader = DeadlineReader::new(&server, begin + Duration::from_millis(300));
+        let frames = FrameReader::new().unwrap();
+        let mut out = Vec::new();
+        let err = handshake(&mut reader, &mut out, &frames, |_| Ok((identity(), ()))).unwrap_err();
+        let elapsed = begin.elapsed();
+        assert!(matches!(err, HandshakeError::Read(_)), "{err}");
+        assert!(out.is_empty());
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(2),
+            "{elapsed:?}"
+        );
+        drop(server);
+        writer.join().unwrap();
     }
 }
