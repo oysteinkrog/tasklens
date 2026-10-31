@@ -301,7 +301,7 @@ impl ServicePropertiesWindow {
             .hub()
             .is_some_and(|hub| unit_not_loaded(&hub.read(cx).current().services.units, &unit));
         let s = metrics(cx).ui_scale;
-        let key = WindowKey::Service(unit.clone());
+        let key = WindowKey::Service(unit.clone()).on_host(host.remote_name());
         let spec = TlWindowSpec::new(
             TlWindowKind::Properties,
             host.titled(&title_for(&unit, not_loaded, cx)),

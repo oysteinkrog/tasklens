@@ -352,6 +352,67 @@ fn host_tab_failed_tooltip(cx: &mut TestAppContext) {
     );
 }
 
+/// The same ProcessKey on the local host and on home opens two Properties windows, one per
+/// host: the second open does not focus the first host's window.
+#[gpui_kit::test]
+fn host_tabs_same_process_key_on_two_hosts_opens_two_windows(cx: &mut TestAppContext) {
+    let mut rig = boot(cx, &["home"]);
+    let pid = 4321;
+    let publish = |engine: &Arc<FakeEngine>| {
+        engine.publish_with(|s| {
+            s.processes = Arc::new(ProcessSnapshot {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                records: vec![record(pid)].into(),
+                ..ProcessSnapshot::default()
+            });
+        });
+    };
+    publish(&rig.local);
+    publish(&rig.remotes["home"]);
+    rig.draw();
+    let local = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
+    rig.vcx
+        .update(|_, cx| open_process_properties(&local, key(pid), cx));
+    rig.draw();
+    rig.select_host(1);
+    let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
+    assert!(!home.same_host(&local));
+    rig.vcx
+        .update(|_, cx| open_process_properties(&home, key(pid), cx));
+    rig.draw();
+
+    let (local_window, home_window) = rig.vcx.update(|_, cx| {
+        let registry = cx.global::<GlobalRegistry>().0.clone();
+        let registry = registry.read(cx);
+        let local_key = WindowKey::Properties(key(pid)).on_host(local.remote_name());
+        let home_key = WindowKey::Properties(key(pid)).on_host(home.remote_name());
+        assert_eq!(local_key, WindowKey::Properties(key(pid)));
+        assert_ne!(local_key, home_key);
+        assert_eq!(
+            registry.count(tl_ui::window::registry::CapClass::ProcessProps),
+            2
+        );
+        (
+            registry.get(&local_key).expect("the local window"),
+            registry.get(&home_key).expect("the home window"),
+        )
+    });
+    assert_ne!(local_window.window_id(), home_window.window_id());
+    rig.vcx.update(|_, cx| {
+        let local_props = PropsWindow::find(local_window, cx).expect("local props");
+        let home_props = PropsWindow::find(home_window, cx).expect("home props");
+        assert_eq!(local_props.read(cx).host().remote_name(), None);
+        assert_eq!(
+            home_props.read(cx).host().remote_name().map(|n| &**n),
+            Some("home")
+        );
+    });
+}
+
 /// A Properties window opened on home stays on home after the main window shows another host:
 /// its host, its title and its demand do not follow the tab.
 #[gpui_kit::test]
@@ -379,7 +440,8 @@ fn host_tabs_properties_window_stays_on_its_host(cx: &mut TestAppContext) {
         .vcx
         .update(|_, cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
-            registry.read(cx).get(&WindowKey::Properties(key(pid)))
+            let window_key = WindowKey::Properties(key(pid)).on_host(host.remote_name());
+            registry.read(cx).get(&window_key)
         })
         .expect("the properties window opens on home");
     let props = rig

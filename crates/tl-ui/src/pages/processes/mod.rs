@@ -580,7 +580,7 @@ impl ProcessesPage {
             match (target.kind, target.node) {
                 (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
                     if should_attempt_properties(
-                        &WindowKey::Properties(key),
+                        &WindowKey::Properties(key).on_host(host.remote_name()),
                         CapClass::ProcessProps,
                         &mut process_cap_notified,
                         cx,
@@ -590,7 +590,7 @@ impl ProcessesPage {
                 }
                 (RowKind::App, NodeId::Group(group)) => {
                     if should_attempt_properties(
-                        &WindowKey::AppProperties(group),
+                        &WindowKey::AppProperties(group).on_host(host.remote_name()),
                         CapClass::AppProps,
                         &mut app_cap_notified,
                         cx,
@@ -601,7 +601,7 @@ impl ProcessesPage {
                 (RowKind::Unit, node @ NodeId::Unit(_)) => {
                     if let Some(group) = unit_groups.get(&node)
                         && should_attempt_properties(
-                            &WindowKey::AppProperties(*group),
+                            &WindowKey::AppProperties(*group).on_host(host.remote_name()),
                             CapClass::AppProps,
                             &mut app_cap_notified,
                             cx,

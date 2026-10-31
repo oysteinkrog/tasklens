@@ -195,8 +195,9 @@ pub fn open_app_properties(host: &HostContext, group: GroupKey, cx: &mut App) {
     });
     let source = cx.active_window();
     let mut opened = None;
+    let window_key = WindowKey::AppProperties(group).on_host(host.remote_name());
     let outcome = registry.update(cx, |registry, cx| {
-        registry.open_or_focus(WindowKey::AppProperties(group), cx, |cx| {
+        registry.open_or_focus(window_key.clone(), cx, |cx| {
             let Some(row) = row else {
                 return Err(gpui_kit::gpui::private::anyhow::anyhow!(
                     "app group is not running"
@@ -204,8 +205,7 @@ pub fn open_app_properties(host: &HostContext, group: GroupKey, cx: &mut App) {
             };
             let title: SharedString = host.titled(&app_props_title(&row.name, false)).into();
             // The key lets the title bar pin send keep-above for this window (R-073, D-031).
-            let spec = pwn_window_spec(cx, PwnWindow::AppProperties, title, None)
-                .key(WindowKey::AppProperties(group));
+            let spec = pwn_window_spec(cx, PwnWindow::AppProperties, title, None).key(window_key);
             let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
                 cx.new(|cx| AppPropsWindow::new(host, group, row, window, cx))
             })?;

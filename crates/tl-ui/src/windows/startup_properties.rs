@@ -249,8 +249,8 @@ fn open(r: StartupRef, hub: &Entity<SnapshotHub>, cx: &mut App) -> OpenOutcome {
         return OpenOutcome::Failed;
     };
     let s = metrics(cx).ui_scale;
-    let key = WindowKey::StartupProperties(r);
     let remote = HostRegistry::remote_name_of(hub, cx);
+    let key = WindowKey::StartupProperties(r).on_host(remote.as_ref());
     let spec = TlWindowSpec::new(
         TlWindowKind::Properties,
         with_host_name(&title_for(&entry.name, false, cx), remote.as_deref()),

@@ -6,6 +6,8 @@
 //! caps, drops a key when its window closes, and closes the children when the main window
 //! closes. Every insert and every removal notifies the registry entity.
 
+use std::sync::Arc;
+
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, Context, Entity, Global, Subscription};
 use rustc_hash::FxHashMap;
 use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
@@ -45,6 +47,11 @@ pub enum WindowKey {
     Mini,
     /// The main window (R-176). Never stored in the registry and has no cap class.
     Main,
+    /// A window opened from the remote host named by the first field: the key it would have on
+    /// the local host, wrapped with the host name, so the same process, app, unit, startup
+    /// entry or socket on two hosts gets two windows (ADR-018, leader decision Q2 on
+    /// tasklens-q4x76.11). Build it with `WindowKey::on_host`; local keys are never wrapped.
+    OnHost(Arc<str>, Box<WindowKey>),
 }
 
 /// The window kinds that have a cap on open windows.
@@ -77,9 +84,28 @@ impl CapClass {
 }
 
 impl WindowKey {
-    /// The cap class of a Properties key; `None` for single windows and `Main`.
-    pub fn cap_class(&self) -> Option<CapClass> {
+    /// This key for a window of the host whose remote name is `remote`: unchanged for the
+    /// local host (`None`), wrapped in `OnHost` for a remote one. `Main` and a key that is
+    /// already wrapped stay as they are.
+    pub fn on_host(self, remote: Option<&Arc<str>>) -> Self {
+        match (remote, self) {
+            (_, key @ (Self::OnHost(..) | Self::Main)) | (None, key) => key,
+            (Some(name), key) => Self::OnHost(Arc::clone(name), Box::new(key)),
+        }
+    }
+
+    /// The key without its host: the inner key of `OnHost`, else this key.
+    pub fn base(&self) -> &WindowKey {
         match self {
+            Self::OnHost(_, key) => key.base(),
+            key => key,
+        }
+    }
+
+    /// The cap class of a Properties key; `None` for single windows and `Main`. The caps count
+    /// the windows of every host together.
+    pub fn cap_class(&self) -> Option<CapClass> {
+        match self.base() {
             Self::Properties(_) => Some(CapClass::ProcessProps),
             Self::AppProperties(_) => Some(CapClass::AppProps),
             Self::Service(_) => Some(CapClass::ServiceProps),
@@ -202,7 +228,7 @@ impl WindowRegistry {
         let keys: Vec<WindowKey> = self
             .windows
             .keys()
-            .filter(|k| !(keep_detached && matches!(k, WindowKey::DetachedGraph(_))))
+            .filter(|k| !(keep_detached && matches!(k.base(), WindowKey::DetachedGraph(_))))
             .cloned()
             .collect();
         for key in keys {

@@ -431,8 +431,9 @@ pub fn open_process_properties(host: &HostContext, key: ProcessKey, cx: &mut App
         .filter(|r| !r.flags.contains(ProcFlags::EXITED));
     let source = cx.active_window();
     let mut opened = None;
+    let window_key = WindowKey::Properties(key).on_host(host.remote_name());
     let outcome = registry.update(cx, |r, cx| {
-        r.open_or_focus(WindowKey::Properties(key), cx, |cx| {
+        r.open_or_focus(window_key.clone(), cx, |cx| {
             let Some(record) = record else {
                 return Err(gpui_kit::gpui::private::anyhow::anyhow!(
                     "process {} is not running",
@@ -443,8 +444,8 @@ pub fn open_process_properties(host: &HostContext, key: ProcessKey, cx: &mut App
                 .titled(&props_title(&record.meta.name, key.pid, false))
                 .into();
             // The key lets the title bar pin send keep-above for this window (R-073, D-031).
-            let spec = pwn_window_spec(cx, PwnWindow::ProcessProperties, title, None)
-                .key(WindowKey::Properties(key));
+            let spec =
+                pwn_window_spec(cx, PwnWindow::ProcessProperties, title, None).key(window_key);
             let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
                 cx.new(|cx| PropsWindow::new(host, key, Some(record), window, cx))
             })?;

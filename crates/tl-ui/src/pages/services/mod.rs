@@ -781,7 +781,7 @@ impl ServicesPage {
         let mut cap_notified = false;
         for key in keys {
             if should_attempt_properties(
-                &WindowKey::Properties(key),
+                &WindowKey::Properties(key).on_host(self.host.remote_name()),
                 CapClass::ProcessProps,
                 &mut cap_notified,
                 cx,

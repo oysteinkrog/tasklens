@@ -400,7 +400,7 @@ pub fn open_connection_properties(host: &HostContext, cookie: u64, cx: &mut App)
         return;
     };
     let s = metrics(cx).ui_scale;
-    let key = WindowKey::ConnectionProperties(cookie);
+    let key = WindowKey::ConnectionProperties(cookie).on_host(host.remote_name());
     let spec = TlWindowSpec::new(
         TlWindowKind::Properties,
         host.titled(&title_for(&record, false, cx)),
