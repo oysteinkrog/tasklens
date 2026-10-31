@@ -12,8 +12,10 @@
 //! A change also carries the hub's generation, the one its revision came with. After the window
 //! switched engines or reconnected, the client refuses a change made from the older snapshot,
 //! since two engines can have the same revision (ADR-018 Generations). Every control reads the
-//! hub's installed snapshot, so after a switch it is enabled only once that snapshot is the new
-//! engine's and carries a revision, as in a fresh window.
+//! hub's installed snapshot through `current`. While that snapshot is from an older generation
+//! than the hub's client (after a switch or a reconnect, before the new engine's first snapshot
+//! is installed) `current` gives revision 0, so the controls are disabled until the new engine's
+//! host settings arrive, as in a fresh window.
 
 use std::sync::Arc;
 
@@ -24,7 +26,7 @@ use tl_model::remote_proto::{
 };
 use tracing::{debug, info, warn};
 
-use crate::hub::GlobalHub;
+use crate::hub::{GlobalHub, SnapshotHub};
 use crate::settings_global::{SettingKey, SettingValue};
 
 /// The `SettingKey`s whose values are host settings.
@@ -42,22 +44,33 @@ pub fn is_host_key(key: SettingKey) -> bool {
 }
 
 /// The host settings in the newest snapshot. Revision 0 with the default values before the
-/// engine gave them, and without a hub.
+/// engine gave them, and without a hub. Revision 0 with the last values shown while the hub's
+/// snapshot is from an older generation than its client, so nothing enables or writes from a
+/// session that has ended.
 pub fn current(cx: &App) -> Arc<HostSettings> {
     cx.try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(&hub.0.read(cx).current().host_settings))
+        .map(|hub| installed(hub.0.read(cx)))
         .unwrap_or_default()
+}
+
+/// The host settings of `hub`'s snapshot, with revision 0 while that snapshot's generation is
+/// not the client's current one (ADR-018 Generations).
+fn installed(hub: &SnapshotHub) -> Arc<HostSettings> {
+    let host = &hub.current().host_settings;
+    if host.rev == 0 || hub.generation() == hub.client().generation() {
+        return Arc::clone(host);
+    }
+    Arc::new(HostSettings {
+        rev: 0,
+        ..HostSettings::clone(host)
+    })
 }
 
 /// The hub's client, its generation and the host settings in its snapshot, from one read.
 fn hub_state(cx: &App) -> Option<(Arc<dyn EngineClient>, u64, Arc<HostSettings>)> {
     cx.try_global::<GlobalHub>().map(|hub| {
         let hub = hub.0.read(cx);
-        (
-            Arc::clone(hub.client()),
-            hub.generation(),
-            Arc::clone(&hub.current().host_settings),
-        )
+        (Arc::clone(hub.client()), hub.generation(), installed(hub))
     })
 }
 

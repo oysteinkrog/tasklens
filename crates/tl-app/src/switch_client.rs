@@ -710,8 +710,9 @@ pub(crate) mod tests {
 
     /// Leader decision on tasklens-q4x76.23 (ADR-018 Generations): both engines have host
     /// settings revision 3. A change the window makes after the switch, while the hub still
-    /// shows the old engine's snapshot, is refused and reaches neither engine. Once the hub
-    /// shows the new engine's snapshot, the same change goes to the new engine.
+    /// shows the old engine's snapshot, is refused and reaches neither engine, and the host
+    /// controls are disabled until then. Once the hub shows the new engine's snapshot, they are
+    /// enabled and the same change goes to the new engine.
     #[gpui_kit::test]
     fn a_host_settings_change_waits_for_the_new_backends_snapshot(cx: &mut TestAppContext) {
         let host = |interval_ms| {
@@ -751,8 +752,13 @@ pub(crate) mod tests {
 
         let service = TestBackend::new(1, 1);
         service.publish_host(1, host(3000));
+        assert!(cx.update(|cx| host_settings::known(cx)));
         switch.switch_to(service.clone());
-        // The hub has not loaded the new engine's snapshot yet.
+        // The hub has not loaded the new engine's snapshot yet, so the host controls are
+        // disabled again, as in a fresh window, and the old values stay shown.
+        assert!(!cx.update(|cx| host_settings::known(cx)));
+        assert_eq!(cx.update(|cx| host_settings::current(cx)).rev, 0);
+        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
         set_interval(cx);
         assert!(lock(&local.host_writes).is_empty());
         assert!(lock(&service.host_writes).is_empty());
@@ -761,6 +767,7 @@ pub(crate) mod tests {
         pumped.pump();
         cx.run_until_parked();
         assert_eq!(interval(cx, &hub), 3000);
+        assert!(cx.update(|cx| host_settings::known(cx)));
         set_interval(cx);
         assert_eq!(*lock(&service.host_writes), [(1, 3)]);
         assert!(lock(&local.host_writes).is_empty());
