@@ -2084,6 +2084,16 @@ overview_range = "1m"          # 1m | 5m | 1h | 24h | 7d; the Overview ignores g
 overview_row_unit_px = 40      # 24..=80, snap grid row height in logical px (UI-PRF-056, P2)
 timeline_click = "pause"       # pause | preview | history; history only while history.enabled (UI-PRF-057, P2)
 
+[[performance.layouts]]         # P2, ADR-019 (D-041): one entry per widget container; none by default
+container = "overview.gpu"     # phase 1: overview.gpu only; other containers and newer versions are kept and written back unchanged
+version = 1                    # LAYOUT_VERSION
+preset = { id = "engine_charts", arrange = "auto", split = 0.5 } # flow layout only (omit for a grid layout); id: engine_charts | chart_engines | chart; arrange: auto | vertical | horizontal; split: 0.2..=0.8
+widgets = []                   # [] = empty box, which differs from no entry (the default)
+# one widget: { id = 1, device = "<persistent device key>" | slot = 0..=1 (flow only), metric = "engine:<GpuEngine key>" | "vram" | "clock_gfx" | "clock_mem" | "power" | "temp",
+#   forms = subset of ["chart", "bar", "value", "stats", "label"] (not empty), col, row, cols, rows (grid layout only; GPU box: 6 columns),
+#   fill = true, dashed = false (written only when not the default), device_name = "<display only>" }
+# The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v1 once (ADR-019).
+
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
 # both fields optional: label omitted when empty, temp omitted for None; an entry with neither is removed (R-221)
