@@ -1,13 +1,14 @@
 //! `RemoteClient` against an in-memory server on a Unix socket pair (ADR-018): snapshot install,
 //! wake and `Ack` order, the bounded command queue, a connection lost during requests, a new
-//! engine instance, and journal close.
+//! engine instance, generation and snapshot read together, action summaries with a full event
+//! queue, and journal close.
 
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
 #![allow(clippy::unwrap_used)]
 
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -27,7 +28,7 @@ use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{Manager, TableQuery, UnitRef};
 use tl_model::time::BootId;
-use tl_remote::client::{ClientConfig, Connection, LinkStatus, RemoteClient};
+use tl_remote::client::{ACTION_EVENTS, ClientConfig, Connection, LinkStatus, RemoteClient};
 use tl_remote::delta::DeltaEncoder;
 use tl_remote::envelope::{FrameReader, FrameWriter};
 
@@ -251,14 +252,9 @@ impl Write for GatedWriter {
     }
 }
 
-#[test]
-fn full_queue_is_busy_and_ack_goes_first() {
-    let (client, conns) = client();
-    assert_eq!(
-        client.send(Command::ResetBaselines),
-        Err(CommandError::EngineStopped)
-    );
-
+/// Connects a server whose reads of the client's writes pass through `Gate`, and installs its
+/// first snapshot.
+fn gated_server(conns: &mpsc::Sender<Connection>) -> (Server, Arc<Gate>) {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let gate = Arc::new(Gate::default());
     let mut conn = Connection::unix(theirs.try_clone().unwrap()).unwrap();
@@ -270,6 +266,18 @@ fn full_queue_is_busy_and_ack_goes_first() {
     let mut server = Server::accept(ours, "home", 1);
     server.publish(&snapshot(1, 100));
     server.ack();
+    (server, gate)
+}
+
+#[test]
+fn full_queue_is_busy_and_ack_goes_first() {
+    let (client, conns) = client();
+    assert_eq!(
+        client.send(Command::ResetBaselines),
+        Err(CommandError::EngineStopped)
+    );
+
+    let (mut server, gate) = gated_server(&conns);
 
     // The writer takes the first command and waits at the gate with it.
     gate.set(true);
@@ -429,6 +437,132 @@ fn engine_instance_change_starts_a_new_generation() {
         c,
         Command::SetTableQuery(q) if *q == query
     )));
+}
+
+#[test]
+fn generation_and_snapshot_are_read_together() {
+    let (client, conns) = client();
+    let client = Arc::new(client);
+    let stop = Arc::new(AtomicBool::new(false));
+    // Reads while the client moves to a new engine instance. Each pair must hold that
+    // generation's own data, or the hub would install old data under the new generation.
+    let reader = {
+        let client = Arc::clone(&client);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut newest = 0;
+            while !stop.load(Ordering::Acquire) {
+                let (generation, snap) = client.latest_with_generation();
+                let expected = match generation {
+                    0 => 0,
+                    1 => 100,
+                    2 => 200,
+                    other => panic!("generation {other}"),
+                };
+                assert_eq!(snap.system.boot_time_s, expected, "generation {generation}");
+                newest = newest.max(generation);
+            }
+            newest
+        })
+    };
+    let mut server = Server::connect(&conns, "home", 1);
+    server.publish(&snapshot(5, 100));
+    server.ack();
+    drop(server);
+    let mut server = Server::connect(&conns, "home", 2);
+    server.publish(&snapshot(5, 200));
+    server.ack();
+    stop.store(true, Ordering::Release);
+    assert_eq!(reader.join().unwrap(), 2);
+    assert_eq!(client.generation(), 2);
+}
+
+#[test]
+fn action_summary_survives_a_full_event_queue() {
+    let (client, conns) = client();
+    let events = client.action_events();
+    let ends = client.request_events();
+    let mut server = Server::connect(&conns, "home", 1);
+    server.publish(&snapshot(1, 100));
+    server.ack();
+    client.send(action(7)).unwrap();
+    assert!(matches!(server.recv(), ClientMsg::Command(_)));
+    // The UI reads nothing while more progress arrives than the queue holds.
+    for _ in 0..ACTION_EVENTS + 10 {
+        server.send(&ServerMsg::Action(ActionEvent {
+            id: ActionId(7),
+            target: None,
+            state: ActionState::Started,
+        }));
+    }
+    // Messages are read in order: once this snapshot is acknowledged, all progress was read.
+    server.publish(&snapshot(2, 101));
+    server.ack();
+    assert_eq!(events.len(), ACTION_EVENTS);
+    drop(server);
+
+    let end = recv("the lost end", &ends);
+    assert_eq!(
+        (end.kind, end.id, end.end),
+        (IdKind::Action, 7, RequestEnd::Lost)
+    );
+    let mut all = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        all.push(ev);
+    }
+    // Only progress was dropped: the summary is the last event.
+    assert_eq!(all.len(), ACTION_EVENTS + 1);
+    assert_eq!(
+        all.last().unwrap().state,
+        ActionState::OutcomeUnknown(Arc::from("connection to home lost"))
+    );
+}
+
+#[test]
+fn journal_close_before_its_open_sends_neither() {
+    let (client, conns) = client();
+    let (mut server, gate) = gated_server(&conns);
+    let query = JournalQuery {
+        unit: UnitRef {
+            manager: Manager::User,
+            name: Arc::from("a.service"),
+        },
+        follow: true,
+    };
+    // The writer waits at the gate with a command, so the open stays in the command queue.
+    gate.set(true);
+    client.send(Command::SetupStatus).unwrap();
+    wait_for("the writer at the gate", || {
+        (gate.waiting.load(Ordering::SeqCst) == 1).then_some(())
+    });
+    let handle = client.journal(query.clone());
+    let events = handle.events();
+    drop(handle);
+    // The stream's events close when its close is queued on the control path.
+    wait_for("the close to be queued", || {
+        events.is_closed().then_some(())
+    });
+    client.send(Command::ResetBaselines).unwrap();
+    gate.set(false);
+    assert!(is_command(&server.recv(), |c| matches!(
+        c,
+        Command::SetupStatus
+    )));
+    let next = server.recv();
+    assert!(
+        is_command(&next, |c| matches!(c, Command::ResetBaselines)),
+        "neither open nor close of stream 1 is sent: {next:?}"
+    );
+
+    // The next stream opens as usual.
+    let _handle = client.journal(query);
+    assert!(matches!(
+        server.recv(),
+        ClientMsg::JournalOpen {
+            stream: StreamId(2),
+            ..
+        }
+    ));
 }
 
 #[test]

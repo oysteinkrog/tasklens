@@ -83,12 +83,9 @@ impl SnapshotHub {
         let receiver = Arc::clone(&client);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while wake.recv().await.is_ok() {
-                // Load after receive (ADR-005). The generation is read first: the client changes
-                // it before it stores the first snapshot of a new generation and wakes after
-                // that store, so a snapshot read with the old value is installed again on the
-                // next wake under the new one.
-                let generation = receiver.generation();
-                let snap = receiver.latest();
+                // Load after receive (ADR-005). One load gives the snapshot with its own
+                // generation, so old data is never installed under a new generation.
+                let (generation, snap) = receiver.latest_with_generation();
                 if this
                     .update(cx, |hub, cx| hub.install(generation, snap, cx))
                     .is_err()
@@ -114,8 +111,7 @@ impl SnapshotHub {
         })
         .detach();
 
-        let generation = client.generation();
-        let current = client.latest();
+        let (generation, current) = client.latest_with_generation();
         let mut live_sensors = FxHashSet::default();
         note_live_sensors(&mut live_sensors, &current);
         Self {
@@ -309,14 +305,13 @@ mod tests {
         let client: Arc<dyn EngineClient> = engine.clone();
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
         let masks = watch(&hub, cx);
-        // The hub read the old generation, then the client stored the new generation's first
-        // snapshot: the hub installs it by version.
+        // Within one generation the hub installs by version.
         let mut first = empty_snapshot();
         first.sequence = 1;
         let generation = engine.generation();
         hub.update(cx, |hub, cx| hub.install(generation, Arc::new(first), cx));
         assert!(masks.lock().unwrap().is_empty());
-        // The next wake reads the new generation with the same snapshot.
+        // A new generation installs a snapshot with the same sequence again, as all changed.
         engine.bump_generation();
         let snap = engine.latest();
         let mut same = Snapshot::clone(&snap);

@@ -3,16 +3,17 @@
 //!
 //! One connection thread per client connects through a `Connector`, sends `Hello`, reads
 //! `Welcome` and then reads the session's messages:
-//! - a snapshot frame is applied to the installed snapshot (`delta::apply`), stored, and then the
-//!   wake token is sent with `try_send`. `Ack { frame }` goes out after that, so the server never
-//!   builds on a frame the client has not installed;
+//! - a snapshot frame is applied to the installed snapshot (`delta::apply`), stored with its
+//!   session number, and then the wake token is sent with `try_send`. `Ack { frame }` goes out
+//!   after that, so the server never builds on a frame the client has not installed;
 //! - action events go to `action_events`, request ends to `request_events`, journal batches to
-//!   their stream's handle.
+//!   their stream's handle. Only progress (`Started`) is dropped when the UI falls behind.
 //!
 //! A writer thread per connection sends what the client queues, in this order: the control path
 //! (`Ack`, `JournalClose`), which has no limit, so it works when the command queue is full; the
 //! newest demand; then the command queue of `COMMAND_QUEUE` messages. `send` never blocks: a full
-//! queue is `Err(Busy)`, no connection is `Err(EngineStopped)`.
+//! queue is `Err(Busy)`, no connection is `Err(EngineStopped)`. A `JournalClose` that overtakes
+//! its stream's `JournalOpen` is held back by the writer, which then sends neither.
 //!
 //! Every action, scan, handle search, eject and history query sent is tracked by `IdKind` and id
 //! until its `RequestEvent` arrives. When the connection drops, each one still open ends here
@@ -22,14 +23,14 @@
 //! again on each new connection.
 //!
 //! After a drop the client connects again after 1, 2, 4, 8, 16, then every 30 s. Each new
-//! session starts from a complete frame. Its component versions are the new session's, so
-//! `generation` changes before the session's first snapshot is stored and the hub compares
-//! nothing across it. Until that first snapshot `latest` keeps the last data.
+//! session starts from a complete frame. Its component versions are the new session's, so each
+//! snapshot is stored together with its session number as `generation`, and the hub compares
+//! nothing across two of them. Until that first snapshot `latest` keeps the last data.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -56,7 +57,8 @@ use crate::envelope::{FrameReader, FrameWriter};
 
 /// Commands queued for the writer at most. One more is `Err(Busy)`.
 pub const COMMAND_QUEUE: usize = 64;
-/// Action events waiting for the UI, as in the in-process engine. A full channel drops the event.
+/// Action events waiting for the UI, as in the in-process engine. Beyond this a progress event
+/// (`Started`) is dropped. A final state is never dropped: an action's summary must reach the UI.
 pub const ACTION_EVENTS: usize = 256;
 /// Journal events waiting for the UI per stream, the server's per-stream batch queue.
 pub const JOURNAL_EVENTS: usize = 64;
@@ -141,9 +143,7 @@ pub struct RemoteClient {
 }
 
 struct Shared {
-    latest: ArcSwap<Snapshot>,
-    /// The session whose snapshots `latest` holds; 0 before the first.
-    generation: AtomicU64,
+    latest: ArcSwap<Installed>,
     stopped: AtomicBool,
     wake_tx: async_channel::Sender<()>,
     wake_rx: async_channel::Receiver<()>,
@@ -152,6 +152,14 @@ struct Shared {
     requests_tx: async_channel::Sender<RequestEvent>,
     requests_rx: async_channel::Receiver<RequestEvent>,
     state: Mutex<State>,
+}
+
+/// The stored snapshot with the session it came from, swapped as one value so a reader never
+/// pairs a snapshot with another session's generation.
+struct Installed {
+    /// The session number; 0 before the first snapshot.
+    generation: u64,
+    snap: Arc<Snapshot>,
 }
 
 #[derive(Default)]
@@ -206,11 +214,14 @@ impl RemoteClient {
     pub fn start(connector: impl Connector, config: ClientConfig) -> io::Result<Self> {
         assert!(!config.backoff.is_empty(), "backoff must not be empty");
         let (wake_tx, wake_rx) = async_channel::bounded(1);
-        let (events_tx, events_rx) = async_channel::bounded(ACTION_EVENTS);
+        // Unbounded so final states always fit; `send_event` caps progress at `ACTION_EVENTS`.
+        let (events_tx, events_rx) = async_channel::unbounded();
         let (requests_tx, requests_rx) = async_channel::unbounded();
         let shared = Arc::new(Shared {
-            latest: ArcSwap::from_pointee(Snapshot::empty(BootId(0), 0)),
-            generation: AtomicU64::new(0),
+            latest: ArcSwap::from_pointee(Installed {
+                generation: 0,
+                snap: Arc::new(Snapshot::empty(BootId(0), 0)),
+            }),
             stopped: AtomicBool::new(false),
             wake_tx,
             wake_rx,
@@ -264,7 +275,7 @@ impl Drop for RemoteClient {
 
 impl EngineClient for RemoteClient {
     fn latest(&self) -> Arc<Snapshot> {
-        self.shared.latest.load_full()
+        Arc::clone(&self.shared.latest.load().snap)
     }
 
     fn wake(&self) -> async_channel::Receiver<()> {
@@ -280,7 +291,12 @@ impl EngineClient for RemoteClient {
     }
 
     fn generation(&self) -> u64 {
-        self.shared.generation.load(Ordering::Acquire)
+        self.shared.latest.load().generation
+    }
+
+    fn latest_with_generation(&self) -> (u64, Arc<Snapshot>) {
+        let installed = self.shared.latest.load();
+        (installed.generation, Arc::clone(&installed.snap))
     }
 
     fn set_demand(&self, demand: Demand) {
@@ -493,17 +509,18 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
         };
         match msg {
             ServerMsg::Snapshot(frame) => {
-                let installed = shared.latest.load_full();
+                let installed = Arc::clone(&shared.latest.load().snap);
                 let Ok(snap) =
                     delta::apply(&installed, installed_frame, &frame, installed.sequence + 1)
                 else {
                     break;
                 };
-                if first {
-                    // Before the store: the hub reads the generation first (ADR-018 Delta flow).
-                    shared.generation.store(session, Ordering::Release);
-                }
-                shared.latest.store(Arc::new(snap));
+                // One store for both, so the hub never sees this session's number with the last
+                // session's data (ADR-018 Delta flow).
+                shared.latest.store(Arc::new(Installed {
+                    generation: session,
+                    snap: Arc::new(snap),
+                }));
                 let _ = shared.wake_tx.try_send(());
                 installed_frame = frame.frame;
                 let mut st = lock(&shared.state);
@@ -515,9 +532,7 @@ fn run_session(shared: &Shared, conn: Connection, hello: &HelloTail) -> Result<(
                     link.control(ClientMsg::Ack { frame: frame.frame });
                 }
             }
-            ServerMsg::Action(ev) => {
-                let _ = shared.events_tx.try_send(ev);
-            }
+            ServerMsg::Action(ev) => send_event(shared, ev),
             ServerMsg::Request(ev) => {
                 let mut st = lock(&shared.state);
                 if take_pending(&mut st.pending, (ev.kind, ev.id)) {
@@ -641,11 +656,14 @@ fn end_session(shared: &Shared, host_name: &str) {
     for ((kind, id), count) in pending {
         for _ in 0..count {
             if kind == IdKind::Action {
-                let _ = shared.events_tx.try_send(ActionEvent {
-                    id: ActionId(id),
-                    target: None,
-                    state: ActionState::OutcomeUnknown(Arc::clone(&lost)),
-                });
+                send_event(
+                    shared,
+                    ActionEvent {
+                        id: ActionId(id),
+                        target: None,
+                        state: ActionState::OutcomeUnknown(Arc::clone(&lost)),
+                    },
+                );
             }
             let _ = shared.requests_tx.try_send(RequestEvent {
                 kind,
@@ -653,6 +671,14 @@ fn end_session(shared: &Shared, host_name: &str) {
                 end: RequestEnd::Lost,
             });
         }
+    }
+}
+
+/// Passes an action event to the UI. Progress is dropped once `ACTION_EVENTS` wait; a final
+/// state always goes, since the channel has no limit.
+fn send_event(shared: &Shared, ev: ActionEvent) {
+    if ev.state.is_final() || shared.events_tx.len() < ACTION_EVENTS {
+        let _ = shared.events_tx.try_send(ev);
     }
 }
 
@@ -695,6 +721,7 @@ fn spawn_writer(
 fn write_loop(mut writer: Box<dyn Write + Send>, inputs: &WriterInputs) -> io::Result<()> {
     let mut frames = FrameWriter::new().map_err(io::Error::other)?;
     let mut out = Vec::new();
+    let mut streams = StreamOrder::default();
     while inputs.doorbell.recv_blocking().is_ok() {
         loop {
             let msg = if let Ok(msg) = inputs.control.try_recv() {
@@ -706,6 +733,9 @@ fn write_loop(mut writer: Box<dyn Write + Send>, inputs: &WriterInputs) -> io::R
             } else {
                 break;
             };
+            if !streams.pass(&msg) {
+                continue;
+            }
             out.clear();
             frames
                 .encode_client(&msg, &mut out)
@@ -715,4 +745,41 @@ fn write_loop(mut writer: Box<dyn Write + Send>, inputs: &WriterInputs) -> io::R
         writer.flush()?;
     }
     Ok(())
+}
+
+/// Keeps one session's journal messages in order on the wire. `JournalOpen` and `JournalCtl`
+/// wait in the command queue, `JournalClose` on the control path, so a handle dropped at once
+/// can close its stream before the open is written. The server would then get the close for a
+/// stream it does not know and keep the stream it opens next.
+#[derive(Default)]
+struct StreamOrder {
+    /// Streams whose `JournalOpen` was written and that are not closed.
+    open: HashSet<StreamId>,
+    /// Streams closed before their `JournalOpen` was written.
+    closed_early: HashSet<StreamId>,
+}
+
+impl StreamOrder {
+    /// Whether to write `msg`. A close that comes before its open is held, and then neither is
+    /// written. A control for a stream that is not open is not written either.
+    fn pass(&mut self, msg: &ClientMsg) -> bool {
+        match msg {
+            ClientMsg::JournalOpen { stream, .. } => {
+                if self.closed_early.remove(stream) {
+                    return false;
+                }
+                self.open.insert(*stream);
+                true
+            }
+            ClientMsg::JournalCtl { stream, .. } => self.open.contains(stream),
+            ClientMsg::JournalClose { stream } => {
+                if self.open.remove(stream) {
+                    return true;
+                }
+                self.closed_early.insert(*stream);
+                false
+            }
+            _ => true,
+        }
+    }
 }

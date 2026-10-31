@@ -30,10 +30,14 @@ pub trait EngineClient: Send + Sync + 'static {
     /// Changes when the snapshots start over from another engine session: a reconnect or a new
     /// engine instance (ADR-018 Delta flow). Component versions in snapshots from different
     /// generations cannot be compared, so the hub treats a new value as everything changed.
-    /// It changes before the first snapshot of the new generation is stored. The default is 0
-    /// for a client whose engine never changes.
+    /// The default is 0 for a client whose engine never changes.
     fn generation(&self) -> u64 {
         0
+    }
+    /// `latest` with the generation it belongs to. A client whose generation changes returns
+    /// both from one load, so a snapshot is never paired with another session's generation.
+    fn latest_with_generation(&self) -> (u64, Arc<Snapshot>) {
+        (self.generation(), self.latest())
     }
     /// Replace demand. Never blocks. Last value wins.
     fn set_demand(&self, demand: Demand);
@@ -123,6 +127,8 @@ mod tests {
     #[test]
     fn default_generation_is_zero() {
         assert_eq!(NullClient::new().generation(), 0);
+        let (generation, snap) = NullClient::new().latest_with_generation();
+        assert_eq!((generation, snap.sequence), (0, 0));
     }
 
     #[test]
