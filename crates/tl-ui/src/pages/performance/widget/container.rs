@@ -21,8 +21,9 @@ use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, canvas, div, px, size,
+    AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
+    Subscription, Window, canvas, div, px, size,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
