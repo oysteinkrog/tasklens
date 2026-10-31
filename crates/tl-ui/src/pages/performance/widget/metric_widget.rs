@@ -734,7 +734,7 @@ impl Render for MetricWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
-        let m = metrics(cx).clone();
+        let m = *metrics(cx);
         let theme = current(cx).clone();
         let scale = m.ui_scale;
         let available = self.shown.availability == Availability::Available;
