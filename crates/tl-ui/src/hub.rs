@@ -2,8 +2,8 @@
 //! subscribed views (ADR-005 "UI receiver"). It also detects when the compositor has parked the
 //! main window and reports it as hidden (ADR-010 "Hidden state", ADR-008 "Hidden detection").
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AsyncApp, Context, Entity, EventEmitter, Global, WeakEntity};
@@ -27,10 +27,11 @@ const HIDDEN_CHECK_PERIOD: Duration = Duration::from_millis(500);
 /// A change pending longer than this without a render means the window is hidden.
 const HIDDEN_AFTER: Duration = Duration::from_millis(1000);
 
-/// How fast a remote host's clock offset may move down per snapshot, ns. Offsets move up at
-/// once, since a sample is never ahead of the true offset; this lets the estimate follow a host
-/// clock that runs slower than this PC's while a single late snapshot moves it only 1 ms.
-const OFFSET_DECAY_NS: i64 = 1_000_000;
+/// The window a remote host's clock offset is the highest sample of, in this PC's ns. The
+/// estimate is the highest sample of the last 5 to 10 s, so a late snapshot does not pull it
+/// down, while a true step down (this PC resumed from suspend, a host clock that runs slow)
+/// is taken within 10 s.
+const OFFSET_WINDOW_NS: TimeNs = 5_000_000_000;
 
 /// The offset slot before a remote host's first published snapshot: read as 0.
 const OFFSET_UNKNOWN: i64 = i64::MIN;
@@ -42,13 +43,60 @@ const OFFSET_UNKNOWN: i64 = i64::MIN;
 ///
 /// For the local host it is this PC's CLOCK_BOOTTIME. For a remote host it is this PC's clock
 /// plus an offset learned from the snapshots: `published_ns` minus this PC's clock at install.
-/// The transport delay makes each sample a little low, so the estimate keeps the highest sample
-/// and moves down by at most [`OFFSET_DECAY_NS`] per snapshot. A new connection or a new boot of
-/// the host starts the estimate over. Cheap to clone: clones share the offset.
+/// The transport delay makes each sample a little low, so the estimate is the highest sample
+/// of the last 5 to 10 s ([`OFFSET_WINDOW_NS`]). A new connection or a new boot of the host
+/// starts the estimate over. Cheap to clone: clones share the offset.
 #[derive(Clone, Debug, Default)]
 pub struct HostClock {
-    /// The offset in ns, host minus this PC; `None` for the local host.
-    remote: Option<Arc<AtomicI64>>,
+    /// The offset estimate; `None` for the local host.
+    remote: Option<Arc<RemoteOffset>>,
+}
+
+/// A remote host's offset, shared by every clone of its [`HostClock`].
+#[derive(Debug)]
+struct RemoteOffset {
+    /// The offset in ns, host minus this PC, read at paint without a lock.
+    offset: AtomicI64,
+    /// The windowed maximum the offset comes from. Only `SnapshotHub::install` writes it.
+    window: Mutex<OffsetWindow>,
+    /// Added to this PC's clock reading. 0 except in tests, which use it to stand in for a PC
+    /// up hours longer than the test machine.
+    local_shift_ns: i64,
+}
+
+/// The highest offset sample in two back-to-back buckets of [`OFFSET_WINDOW_NS`] each.
+#[derive(Clone, Copy, Debug, Default)]
+struct OffsetWindow {
+    /// No sample since the last reset.
+    empty: bool,
+    /// This PC's clock when the current bucket started.
+    start_ns: TimeNs,
+    /// The highest sample in the current bucket.
+    current: i64,
+    /// The highest sample in the bucket before, if it ended less than one window ago.
+    previous: Option<i64>,
+}
+
+impl OffsetWindow {
+    /// Takes `sample` at this PC's time `local_ns` and returns the new estimate.
+    fn push(&mut self, sample: i64, local_ns: TimeNs, reset: bool) -> i64 {
+        let age = local_ns.saturating_sub(self.start_ns);
+        if reset || self.empty || age >= 2 * OFFSET_WINDOW_NS {
+            *self = Self {
+                empty: false,
+                start_ns: local_ns,
+                current: sample,
+                previous: None,
+            };
+        } else if age >= OFFSET_WINDOW_NS {
+            self.previous = Some(self.current);
+            self.current = sample;
+            self.start_ns = local_ns;
+        } else {
+            self.current = self.current.max(sample);
+        }
+        self.previous.map_or(self.current, |p| p.max(self.current))
+    }
 }
 
 impl HostClock {
@@ -60,8 +108,26 @@ impl HostClock {
     /// A remote host whose offset is learned from its snapshots. Reads this PC's clock until
     /// the first published snapshot.
     pub fn remote() -> Self {
+        Self::remote_shifted(0)
+    }
+
+    /// A remote host's clock that reads this PC's clock as `local_shift_ns` later than it is.
+    /// Tests use it to put a host hours behind this PC whatever the test machine's uptime.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn remote_with_local_shift(local_shift_ns: i64) -> Self {
+        Self::remote_shifted(local_shift_ns)
+    }
+
+    fn remote_shifted(local_shift_ns: i64) -> Self {
         Self {
-            remote: Some(Arc::new(AtomicI64::new(OFFSET_UNKNOWN))),
+            remote: Some(Arc::new(RemoteOffset {
+                offset: AtomicI64::new(OFFSET_UNKNOWN),
+                window: Mutex::new(OffsetWindow {
+                    empty: true,
+                    ..OffsetWindow::default()
+                }),
+                local_shift_ns,
+            })),
         }
     }
 
@@ -70,12 +136,21 @@ impl HostClock {
         self.remote.is_some()
     }
 
-    /// The host's CLOCK_BOOTTIME now.
-    pub fn now_ns(&self) -> TimeNs {
-        self.now_at(now_boot_ns())
+    /// This PC's CLOCK_BOOTTIME now, as this clock reads it. Pass it to [`HostClock::now_at`]
+    /// to get the host's time; a view that moves its own anchor with the executor clock keeps
+    /// this anchor, so later offset changes still apply.
+    pub fn local_now_ns(&self) -> TimeNs {
+        let shift = self.remote.as_ref().map_or(0, |r| r.local_shift_ns);
+        now_boot_ns().saturating_add_signed(shift)
     }
 
-    /// The host's CLOCK_BOOTTIME when this PC's reads `local_ns`.
+    /// The host's CLOCK_BOOTTIME now.
+    pub fn now_ns(&self) -> TimeNs {
+        self.now_at(self.local_now_ns())
+    }
+
+    /// The host's CLOCK_BOOTTIME when this PC's clock, as [`HostClock::local_now_ns`] reads it,
+    /// is `local_ns`.
     pub fn now_at(&self, local_ns: TimeNs) -> TimeNs {
         local_ns.saturating_add_signed(self.offset_ns())
     }
@@ -83,7 +158,7 @@ impl HostClock {
     /// The offset in ns, host minus this PC: 0 for the local host and before the first sample.
     pub fn offset_ns(&self) -> i64 {
         match &self.remote {
-            Some(slot) => match slot.load(Ordering::Relaxed) {
+            Some(r) => match r.offset.load(Ordering::Relaxed) {
                 OFFSET_UNKNOWN => 0,
                 offset => offset,
             },
@@ -93,7 +168,7 @@ impl HostClock {
 
     /// Learns from `snap` installed now. `reset` starts the estimate over.
     fn observe(&self, snap: &Snapshot, reset: bool) {
-        self.observe_at(snap.published_ns, now_boot_ns(), reset);
+        self.observe_at(snap.published_ns, self.local_now_ns(), reset);
     }
 
     /// Learns from a snapshot published at the host time `published_ns` and installed when
@@ -101,7 +176,7 @@ impl HostClock {
     /// old estimate. Does nothing for the local host or for a snapshot never published
     /// (`published_ns` 0).
     pub fn observe_at(&self, published_ns: TimeNs, local_ns: TimeNs, reset: bool) {
-        let Some(slot) = &self.remote else {
+        let Some(r) = &self.remote else {
             return;
         };
         if published_ns == 0 {
@@ -110,13 +185,12 @@ impl HostClock {
         let sample = (i128::from(published_ns) - i128::from(local_ns))
             .clamp(i128::from(OFFSET_UNKNOWN + 1), i128::from(i64::MAX))
             as i64;
-        let old = slot.load(Ordering::Relaxed);
-        let next = if reset || old == OFFSET_UNKNOWN || sample >= old {
-            sample
-        } else {
-            old - (old - sample).min(OFFSET_DECAY_NS)
-        };
-        slot.store(next, Ordering::Relaxed);
+        let mut window = r
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = window.push(sample, local_ns, reset);
+        r.offset.store(next, Ordering::Relaxed);
     }
 }
 
@@ -246,8 +320,23 @@ impl SnapshotHub {
     /// A hub for a remote host: like [`SnapshotHub::new`], but its clock is the host's, learned
     /// from the snapshots' `published_ns` ([`HostClock`]).
     pub fn new_remote(client: Arc<dyn EngineClient>, cx: &mut Context<Self>) -> Self {
+        Self::with_clock(client, HostClock::remote(), cx)
+    }
+
+    /// A remote host's hub on `clock`, for tests that need this PC's clock read as shifted
+    /// ([`HostClock::remote_with_local_shift`]).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn new_remote_with_clock(
+        client: Arc<dyn EngineClient>,
+        clock: HostClock,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_clock(client, clock, cx)
+    }
+
+    fn with_clock(client: Arc<dyn EngineClient>, clock: HostClock, cx: &mut Context<Self>) -> Self {
         let mut hub = Self::new(client, cx);
-        hub.clock = HostClock::remote();
+        hub.clock = clock;
         hub.clock.observe(&hub.current, true);
         hub
     }

@@ -23,7 +23,7 @@ use crate::actions::OpenCollectorHealth;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
+use crate::hub::{ComponentMask, HostClock, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::text::style::{numeric_style, t_sm};
@@ -301,9 +301,12 @@ pub struct CollectorHealthWindow {
     strings_version: u64,
     /// `HealthSnapshot::version` the rows show.
     health_version: Option<u64>,
-    /// The host's CLOCK_BOOTTIME and the executor time at open; now is the boot time plus the
-    /// executor time passed, so the test clock moves the ages.
-    boot_anchor: TimeNs,
+    /// The host's clock. Read at every age, so a later offset (the first published snapshot,
+    /// a host reboot, a reconnect) moves the ages too.
+    host_clock: HostClock,
+    /// This PC's CLOCK_BOOTTIME and the executor time at open; now is the host's time at this
+    /// PC's anchor plus the executor time passed, so the test clock moves the ages.
+    local_anchor: TimeNs,
     clock_anchor: Instant,
     buf: String,
     _strings: Subscription,
@@ -351,13 +354,15 @@ impl CollectorHealthWindow {
                 }
             }
         });
+        let host_clock = host.clock(cx);
         let mut this = Self {
             host: host.clone(),
             rows: SourceId::ALL.into_iter().map(HealthRow::new).collect(),
             words: HealthWords::new(cx),
             strings_version: strings_version(cx),
             health_version: None,
-            boot_anchor: host.clock(cx).now_ns(),
+            host_clock: host_clock.clone(),
+            local_anchor: host_clock.local_now_ns(),
             clock_anchor: cx.background_executor().now(),
             buf: String::new(),
             _strings: strings,
@@ -374,7 +379,8 @@ impl CollectorHealthWindow {
     /// The host's CLOCK_BOOTTIME at the executor time `clock`.
     fn now(&self, clock: Instant) -> TimeNs {
         let passed = clock.saturating_duration_since(self.clock_anchor);
-        self.boot_anchor + passed.as_nanos() as TimeNs
+        let local = self.local_anchor + passed.as_nanos() as TimeNs;
+        self.host_clock.now_at(local)
     }
 
     /// Takes a new health snapshot at the executor time `clock`. Returns whether a row changed.
