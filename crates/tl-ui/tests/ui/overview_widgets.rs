@@ -1,7 +1,10 @@
-//! Overview box widgets (UI-PRF-061, ADR-019): the widget entity, its compositions and the
-//! shared source data. Run with `--features test-hooks`.
+//! Overview box widgets (UI-PRF-061, ADR-019): the widget entity, its compositions, the
+//! shared source data and the widget container on its inner grid. Run with
+//! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
@@ -12,7 +15,8 @@ use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
-    DeviceSelector, FormSet, MetricKey, SourceSelector, WidgetOptions, WidgetSetting,
+    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
+    PresetSetting, SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
 };
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
@@ -29,7 +33,9 @@ use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::widget::compose::{
     Composition, cell_min, row_forms, row_min, tile_min,
 };
-use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id};
+use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
+use tl_ui::pages::performance::widget::grid::{self, InnerGrid};
+use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
 use tl_ui::pages::performance::widget::source::{
     Availability, AvailabilityChanged, SourceData, SourceStore,
 };
@@ -42,13 +48,17 @@ const GPU_B: u16 = 11;
 /// The uuid byte of a GPU the catalog does not list at first.
 const GONE: u8 = 0xee;
 
-/// The widgets, each in a box of its own size, one under the other.
+/// The widgets, each in a box of its own size, one under the other, then the container in a
+/// box of its size. The host stands in for the page in the render counts.
 struct Host {
     widgets: Vec<(Entity<MetricWidget>, f32, f32)>,
+    container: Option<(Entity<WidgetContainer>, f32, f32)>,
+    render_count: Cell<u32>,
 }
 
 impl Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.render_count.set(self.render_count.get() + 1);
         div()
             .flex()
             .flex_col()
@@ -59,6 +69,13 @@ impl Render for Host {
                     .w(px(*width))
                     .h(px(*height))
                     .child(w.clone().cached(StyleRefinement::default().size_full()))
+            }))
+            .children(self.container.iter().map(|(c, width, height)| {
+                div()
+                    .flex_none()
+                    .w(px(*width))
+                    .h(px(*height))
+                    .child(c.clone().cached(StyleRefinement::default().size_full()))
             }))
     }
 }
@@ -218,6 +235,8 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let store = SourceStore::new(&hub);
     let (host, vcx) = cx.add_window_view(|_, _| Host {
         widgets: Vec::new(),
+        container: None,
+        render_count: Cell::new(0),
     });
     vcx.simulate_scale_factor_change(1.0);
     let driver = vcx.update(|window, cx| {
@@ -797,4 +816,400 @@ fn overview_widget_source_switch_updates_chart_labels(cx: &mut TestAppContext) {
         Some(view.entity_id()),
         "the chart entity is kept"
     );
+}
+
+// The widget container on its inner grid (tasklens-lhliq.5).
+
+/// A grid layout of the GPU box with (id, source, forms, cell) widgets.
+fn grid_layout(widgets: Vec<(u32, SourceSelector, FormSet, WidgetCell)>) -> ContainerLayout {
+    let next_id = widgets.iter().map(|w| w.0 + 1).max().unwrap_or(1);
+    ContainerLayout {
+        container: GPU_BOX_CONTAINER.to_owned(),
+        version: LAYOUT_VERSION,
+        preset: None,
+        widgets: widgets
+            .into_iter()
+            .map(|(id, source, forms, cell)| WidgetSetting {
+                cell: Some(cell),
+                ..widget(id, source, forms)
+            })
+            .collect(),
+        next_id,
+    }
+}
+
+fn cell(col: u16, row: u16, cols: u16, rows: u16) -> WidgetCell {
+    WidgetCell {
+        col,
+        row,
+        cols,
+        rows,
+    }
+}
+
+const CHART_FORMS: FormSet = FormSet::CHART.union(FormSet::VALUE).union(FormSet::LABEL);
+const ROW_FORMS: FormSet = FormSet::BAR.union(FormSet::VALUE).union(FormSet::LABEL);
+
+/// Two charts side by side on GPU A, the VRAM row under them, and GPU B's value row.
+fn four_widgets() -> ContainerLayout {
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    grid_layout(vec![
+        (1, a(&engine_gpu()), CHART_FORMS, cell(0, 0, 3, 4)),
+        (2, a("engine:enc"), CHART_FORMS, cell(3, 0, 3, 4)),
+        (3, a("vram"), ROW_FORMS, cell(0, 4, 6, 1)),
+        (
+            4,
+            selector(DeviceSelector::Key(key(2)), &engine_gpu()),
+            FormSet::VALUE | FormSet::LABEL,
+            cell(0, 5, 6, 1),
+        ),
+    ])
+}
+
+impl Rig<'_> {
+    /// Puts a container showing `layout` in a box `w × h` px under the widgets, and draws.
+    fn container(&mut self, layout: ContainerLayout, w: f32, h: f32) -> Entity<WidgetContainer> {
+        let hub = self.hub.clone();
+        let host = self.host.clone();
+        let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
+        let c = self.vcx.update(|_, cx| {
+            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
+            host.update(cx, |host, cx| {
+                host.container = Some((c.clone(), w, h));
+                cx.notify();
+            });
+            c
+        });
+        draw(self.vcx);
+        c
+    }
+
+    fn resize_container(&mut self, w: f32, h: f32) {
+        let host = self.host.clone();
+        self.vcx.update(|_, cx| {
+            host.update(cx, |host, cx| {
+                if let Some(c) = host.container.as_mut() {
+                    c.1 = w;
+                    c.2 = h;
+                }
+                cx.notify();
+            })
+        });
+        draw(self.vcx);
+    }
+
+    fn set_ui_scale(&mut self, pct: u16) {
+        self.vcx.update(|_, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: pct,
+                ..AppearanceSettings::default()
+            };
+            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+        });
+        draw(self.vcx);
+    }
+
+    /// Widget `id`'s bounds relative to the container's top left, (x, y, w, h).
+    fn widget_rect(&mut self, id: u32) -> Option<(f32, f32, f32, f32)> {
+        let body: &'static str = Box::leak(container_id(GPU_BOX_CONTAINER).into_boxed_str());
+        let origin = self.vcx.debug_bounds(body)?.origin;
+        let b = self
+            .vcx
+            .debug_bounds(Box::leak(widget_id(id).into_boxed_str()))?;
+        Some((
+            f32::from(b.origin.x - origin.x),
+            f32::from(b.origin.y - origin.y),
+            f32::from(b.size.width),
+            f32::from(b.size.height),
+        ))
+    }
+
+    /// The container's render and notify counts and the host's render count.
+    fn container_counts(&mut self, c: &Entity<WidgetContainer>) -> (u32, u32, u32) {
+        let (render, notify) = self
+            .vcx
+            .read_entity(c, |c, _| (c.render_count.get(), c.notify_count.get()));
+        let host = self
+            .vcx
+            .read_entity(&self.host, |h, _| h.render_count.get());
+        (render, notify, host)
+    }
+
+    fn entity_ids(&mut self, c: &Entity<WidgetContainer>) -> Vec<(u32, gpui_kit::EntityId)> {
+        self.vcx.read_entity(c, |c, _| {
+            c.placed_ids()
+                .into_iter()
+                .filter_map(|id| c.widget(id).map(|w| (id, w.entity_id())))
+                .collect()
+        })
+    }
+}
+
+fn overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+}
+
+/// The GPU box at its minimum of 200 × 220 px leaves a body of about 176 × 172 px. The four
+/// widgets fill it without overlap; the charts are too narrow for a Cell and draw as Rows. A
+/// taller layout keeps its spans, scrolls and leaves room for the scrollbar.
+#[gpui_kit::test]
+fn overview_widget_grid_small_box(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let c = r.container(four_widgets(), 176., 172.);
+    let rects: Vec<_> = (1..=4)
+        .map(|id| r.widget_rect(id).expect("widget drawn"))
+        .collect();
+    for (i, a) in rects.iter().enumerate() {
+        assert!(a.0 >= 0. && a.0 + a.2 <= 176.5, "{} inside: {a:?}", i + 1);
+        for b in &rects[i + 1..] {
+            assert!(!overlap(*a, *b), "{a:?} {b:?}");
+        }
+    }
+    // Six rows fill 172 px: (172 − 5 · 4) / 6 = 25.3 px each, so the last row ends at the
+    // bottom of the body.
+    let last = rects[3];
+    assert!((last.1 + last.3 - 172.).abs() <= 1., "{last:?}");
+    assert!((last.3 - 25.3).abs() <= 1., "{last:?}");
+    assert!(r.vcx.read_entity(&c, |c, _| !c.placement().scrolls));
+    // 3 of 6 columns are 86 px: below the Cell minimum of 120, so the chart draws as a Row.
+    let w1 = r
+        .vcx
+        .read_entity(&c, |c, _| c.widget(1).cloned())
+        .expect("w1");
+    assert_eq!(r.read(&w1, |w| w.composed().composition), Composition::Row);
+    let scroll: &'static str = Box::leak(scroll_id(GPU_BOX_CONTAINER).into_boxed_str());
+    assert!(r.vcx.debug_bounds(scroll).is_none());
+
+    // A fifth widget four rows high: ten rows do not fit, so the body scrolls at the unit.
+    let mut taller = four_widgets();
+    taller.widgets.push(WidgetSetting {
+        cell: Some(cell(0, 6, 6, 4)),
+        ..widget(
+            5,
+            selector(DeviceSelector::Key(key(1)), "vram"),
+            CHART_FORMS,
+        )
+    });
+    r.vcx
+        .update(|_, cx| c.update(cx, |c, cx| c.set_layout(taller, cx)));
+    draw(r.vcx);
+    let p = r.vcx.read_entity(&c, |c, _| c.placement().clone());
+    assert!(p.scrolls);
+    assert_eq!(p.grid.row, 24.);
+    // Ten rows: 10 · 24 + 9 · 4 = 276.
+    assert_eq!(p.content_h, px(276.));
+    assert!(r.vcx.debug_bounds(scroll).is_some());
+    let b = p.bounds(5).expect("placed");
+    assert_eq!(f32::from(b.right()), 160., "16 px left for the scrollbar");
+    // The spans stay: a shrink changes no cell.
+    let cells: Vec<_> = r.vcx.read_entity(&c, |c, _| {
+        c.layout().widgets.iter().map(|w| w.cell).collect()
+    });
+    assert_eq!(cells[0], Some(cell(0, 0, 3, 4)));
+}
+
+/// The same layout at 1.0, 1.5 and 2.0 UI scale in a body of the same logical size draws every
+/// widget at the same logical rectangle: the unit, the gutter and the minimums scale, the spans
+/// do not.
+#[gpui_kit::test]
+fn overview_widget_grid_scale_1_5_and_2(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let c = r.container(four_widgets(), 400., 300.);
+    let base: Vec<_> = (1..=4)
+        .map(|id| r.widget_rect(id).expect("drawn"))
+        .collect();
+    let row = r.vcx.read_entity(&c, |c, _| c.placement().grid.row);
+    for pct in [150u16, 200] {
+        let s = f32::from(pct) / 100.;
+        r.set_ui_scale(pct);
+        r.resize_container(400. * s, 300. * s);
+        let p = r.vcx.read_entity(&c, |c, _| c.placement().clone());
+        assert!(!p.scrolls, "{pct}%");
+        assert!((p.grid.gutter - 4. * s).abs() < 0.01, "{pct}%");
+        assert!((p.grid.unit - 24. * s).abs() < 0.01, "{pct}%");
+        assert!((p.grid.row - row * s).abs() < 0.01, "{pct}%");
+        for (id, want) in (1..=4).zip(&base) {
+            let got = r.widget_rect(id).expect("drawn");
+            for (g, w) in [got.0, got.1, got.2, got.3]
+                .into_iter()
+                .zip([want.0, want.1, want.2, want.3])
+            {
+                assert!(
+                    (g - w * s).abs() <= 1.5,
+                    "{pct}% widget {id}: {got:?} vs {want:?}"
+                );
+            }
+        }
+        // The minimum span of a Row with a name is the same number of columns.
+        let g = InnerGrid::new(400. * s, 6, s);
+        assert_eq!(
+            g.forms_min_span(ROW_FORMS),
+            InnerGrid::new(400., 6, 1.).forms_min_span(ROW_FORMS)
+        );
+    }
+}
+
+/// The render contract: on a sample the container and the host (the page) never notify, no
+/// widget entity is made or dropped, and only the widgets on the changed source notify. A
+/// sample that changes nothing shown renders neither the container nor the host.
+#[gpui_kit::test]
+fn overview_widget_container_sample_renders_no_container(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let layout = grid_layout(vec![
+        (1, a(&engine_gpu()), ROW_FORMS, cell(0, 0, 6, 1)),
+        (
+            2,
+            a("vram"),
+            FormSet::VALUE | FormSet::LABEL,
+            cell(0, 1, 6, 1),
+        ),
+        (
+            3,
+            selector(DeviceSelector::Key(key(2)), &engine_gpu()),
+            FormSet::VALUE,
+            cell(0, 2, 6, 1),
+        ),
+    ]);
+    let c = r.container(layout, 400., 200.);
+    let ids = r.entity_ids(&c);
+    assert_eq!(ids.len(), 3);
+    let widgets: Vec<Entity<MetricWidget>> = r.vcx.read_entity(&c, |c, _| {
+        (1..=3).filter_map(|id| c.widget(id).cloned()).collect()
+    });
+    let base: Vec<_> = widgets.iter().map(|w| r.counts(w).0).collect();
+    let (render0, notify0, host0) = r.container_counts(&c);
+
+    // A sample that changes nothing a widget shows: no notify, so nothing renders.
+    r.system(|s| {
+        let mut a = gpu_totals(GPU_A, 25.);
+        a.power_w = Metric::valid(210.);
+        s.gpus = Arc::from([
+            (DeviceIdx(GPU_A), a),
+            (DeviceIdx(GPU_B), gpu_totals(GPU_B, 50.)),
+        ]);
+    });
+    assert_eq!(r.container_counts(&c), (render0, notify0, host0));
+    let now: Vec<_> = widgets.iter().map(|w| r.counts(w).0).collect();
+    assert_eq!(now, base);
+
+    // GPU A's utilization changes: widget 1 notifies, the container and the host do not.
+    r.system(|s| {
+        s.gpus = Arc::from([
+            (DeviceIdx(GPU_A), gpu_totals(GPU_A, 70.)),
+            (DeviceIdx(GPU_B), gpu_totals(GPU_B, 50.)),
+        ]);
+    });
+    let now: Vec<_> = widgets.iter().map(|w| r.counts(w).0).collect();
+    assert_eq!(now[0], base[0] + 1, "the widget on GPU A's utilization");
+    assert_eq!(now[1], base[1], "VRAM did not change");
+    assert_eq!(now[2], base[2], "GPU B did not change");
+    let (_, notify, _) = r.container_counts(&c);
+    assert_eq!(notify, notify0, "the container never notifies on a sample");
+    assert_eq!(r.entity_ids(&c), ids, "no widget entity made or dropped");
+    assert_eq!(r.read(&widgets[0], |w| w.texts()[1].to_string()), "70.0%");
+}
+
+/// A layout change keeps the entity of every widget whose id stays: a move of one widget (and
+/// the widgets it pushes down) keeps them all; a new id gets a new entity; a removed id drops
+/// only its own.
+#[gpui_kit::test]
+fn overview_widget_container_keeps_entities_on_move(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let c = r.container(four_widgets(), 400., 300.);
+    let ids = r.entity_ids(&c);
+    assert_eq!(ids.len(), 4);
+    let before = r.widget_rect(3).expect("drawn");
+    let (_, notify0, _) = r.container_counts(&c);
+
+    // Move the VRAM row to the top: the charts move down under it.
+    let mut moved = r.vcx.read_entity(&c, |c, _| c.layout().clone());
+    let g = r.vcx.read_entity(&c, |c, _| c.placement().grid);
+    assert!(grid::set_cell(&mut moved, 3, cell(0, 0, 6, 1), &g));
+    assert_eq!(moved.widgets[0].cell, Some(cell(0, 1, 3, 4)));
+    r.vcx
+        .update(|_, cx| c.update(cx, |c, cx| c.set_layout(moved.clone(), cx)));
+    draw(r.vcx);
+    let mut after = r.entity_ids(&c);
+    after.sort_by_key(|(id, _)| *id);
+    let mut want = ids.clone();
+    want.sort_by_key(|(id, _)| *id);
+    assert_eq!(after, want, "every widget keeps its entity");
+    assert_eq!(
+        r.container_counts(&c).1,
+        notify0 + 1,
+        "one notify for the change"
+    );
+    let now = r.widget_rect(3).expect("drawn");
+    assert!(now.1 < before.1, "the row moved up: {now:?} {before:?}");
+    // The same layout again changes nothing.
+    r.vcx
+        .update(|_, cx| c.update(cx, |c, cx| c.set_layout(moved.clone(), cx)));
+    assert_eq!(r.container_counts(&c).1, notify0 + 1);
+
+    // Remove widget 2 and add widget 5: only those change.
+    let mut edited = moved;
+    edited.widgets.retain(|w| w.id != 2);
+    grid::insert(
+        &mut edited,
+        widget(
+            0,
+            selector(DeviceSelector::Key(key(1)), "temp"),
+            FormSet::VALUE | FormSet::LABEL,
+        ),
+        &g,
+    );
+    assert_eq!(edited.widgets.last().map(|w| w.id), Some(5));
+    r.vcx
+        .update(|_, cx| c.update(cx, |c, cx| c.set_layout(edited, cx)));
+    draw(r.vcx);
+    let now = r.entity_ids(&c);
+    for (id, entity) in &want {
+        let kept = now.iter().find(|(i, _)| i == id).map(|(_, e)| *e);
+        if *id == 2 {
+            assert_eq!(kept, None, "widget 2 dropped");
+        } else {
+            assert_eq!(kept, Some(*entity), "widget {id} kept");
+        }
+    }
+    assert!(now.iter().any(|(id, _)| *id == 5), "widget 5 made");
+}
+
+/// A flow layout leaves out a widget it cannot show, which then has no entity; a grid layout
+/// keeps its cells and shows it as unavailable.
+#[gpui_kit::test]
+fn overview_widget_container_flow_leaves_out_unavailable(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let mut layout = grid_layout(vec![
+        (1, a(&engine_gpu()), ROW_FORMS, cell(0, 0, 6, 1)),
+        (2, a("bogus"), FormSet::VALUE, cell(0, 1, 6, 1)),
+    ]);
+    let c = r.container(layout.clone(), 400., 200.);
+    let placed = r.vcx.read_entity(&c, |c, _| c.placed_ids());
+    assert_eq!(placed.as_slice(), [1, 2]);
+    let w2 = r
+        .vcx
+        .read_entity(&c, |c, _| c.widget(2).cloned())
+        .expect("w2");
+    assert_eq!(r.read(&w2, |w| w.availability()), Availability::Unknown);
+
+    layout.preset = Some(PresetSetting {
+        id: "chart".to_owned(),
+        arrange: None,
+        split: None,
+    });
+    for w in &mut layout.widgets {
+        w.cell = None;
+    }
+    r.vcx
+        .update(|_, cx| c.update(cx, |c, cx| c.set_layout(layout, cx)));
+    draw(r.vcx);
+    let (placed, has2, demand) = r.vcx.read_entity(&c, |c, _| {
+        (c.placed_ids(), c.widget(2).is_some(), c.demand_part().gpus)
+    });
+    assert_eq!(placed.as_slice(), [1]);
+    assert!(!has2, "a widget that takes no space has no entity");
+    assert!(demand);
+    assert!(r.widget_rect(2).is_none());
 }

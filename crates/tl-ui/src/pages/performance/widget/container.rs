@@ -8,8 +8,8 @@
 //!
 //! Render contract (UI-PRF-017, UI-PRF-019): samples go to the widgets only. The container
 //! listens to its sources for [`AvailabilityChanged`] and to nothing else on a sample, so it
-//! never notifies because of one. It renders again on a layout change, a resize, an edit mode
-//! change and an availability change that moves a widget. Its render reads no snapshot, formats
+//! never notifies because of one. It renders again on a layout change, a resize, a UI scale
+//! change, an edit mode change and an availability change that moves a widget. Its render reads no snapshot, formats
 //! nothing and builds no geometry; each widget is a cached child view.
 //!
 //! A layout change compares by widget id: a widget whose id stays keeps its entity and takes
@@ -33,7 +33,7 @@ use super::grid::{self, InnerGrid, InnerPlacement};
 use super::metric_widget::MetricWidget;
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use crate::hub::SnapshotHub;
-use crate::theme::metrics;
+use crate::theme::{UiMetrics, metrics};
 
 /// The debug selector of container `id`'s body ("overview.gpu" gives
 /// "perf-widget-container-overview.gpu").
@@ -103,6 +103,9 @@ pub struct WidgetContainer {
     area: Size<Pixels>,
     /// The drawn row height Edit Widgets holds, logical px.
     frozen: Option<f32>,
+    /// The UI scale of the last placement.
+    scale: f32,
+    _metrics_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -131,6 +134,8 @@ impl WidgetContainer {
             placement: InnerPlacement::default(),
             area: size(px(0.), px(0.)),
             frozen: None,
+            scale: metrics(cx).ui_scale,
+            _metrics_sub: cx.observe_global::<UiMetrics>(Self::on_metrics),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -242,6 +247,13 @@ impl WidgetContainer {
         }
     }
 
+    /// A new UI scale: the unit, the gutter and the minimums change, the spans do not.
+    fn on_metrics(&mut self, cx: &mut Context<Self>) {
+        if metrics(cx).ui_scale != self.scale && self.relayout(cx) {
+            self.notify(cx);
+        }
+    }
+
     /// A source's device went or came back, or it started or stopped reporting the metric. A
     /// grid layout keeps its cells, so only a flow layout can move.
     fn on_availability(
@@ -281,6 +293,7 @@ impl WidgetContainer {
     /// whether anything the container draws changed.
     fn relayout(&mut self, cx: &mut Context<Self>) -> bool {
         let scale = metrics(cx).ui_scale;
+        self.scale = scale;
         let placement = if self.layout.preset.is_none() {
             let cells: SmallVec<[(u32, WidgetCell); 16]> = self
                 .layout
