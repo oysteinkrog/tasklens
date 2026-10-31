@@ -4,6 +4,10 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-31
 
+### D-041 Configurable widget layout everywhere
+
+- **Decision** (owner request and choices, 2026-10-31): every Overview box and every resource page becomes a snap grid of widgets that the user arranges in Edit Layout. A widget shows one metric (a GPU engine, VRAM, a core, a disk, clocks, power, temperature and so on) as any mix of chart, load bar, current value, stats (min, average, peak) and name. The user picks freely which widgets a box or page shows. Today's layouts stay as the defaults, so nothing changes until the user edits. Design and rules: `docs/plan/layout-system.md`; the GPU box is the first to move.
+
 ### D-040 Core rows grow to fill their part
 
 - **Decision** (owner request, 2026-10-31): the core rows of the Overview CPU box and the CPU page's core board grow to fill the height of their part, so they reach the bottom instead of stopping after the last row. The columns are chosen as before (the fewest columns, at most 4, in which 18 px rows fit), then every row gets the same share of the height. The sparkline and the bar grow with the row; the text keeps its size and stays centred. Rows never get shorter than 18 px, and rows that scroll keep 18 px. This replaces the fixed 18 px pitch of UI-PRF-059.
