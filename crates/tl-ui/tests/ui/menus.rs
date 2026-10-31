@@ -2908,16 +2908,11 @@ fn rendering_gpu_restart_toast(cx: &mut TestAppContext) {
 
 const PASSWORDLESS: &str = "Skip password prompts (experimental)";
 
-/// A rig with toasts, a window tall enough for every Settings row, and a hub on the fake engine
-/// (the flow reads the setup result from it).
+/// A rig with toasts and a window tall enough for every Settings row. The flow reads the setup
+/// result from the rig's hub; a second hub would take half of the engine's wake tokens.
 fn passwordless_rig(cx: &mut TestAppContext) -> Rig<'_> {
     let r = rig_with_toasts(cx);
     tall_window(r.cx);
-    let client: Arc<dyn EngineClient> = r.engine.clone();
-    r.cx.update(|_, cx| {
-        let hub = cx.new(|cx| tl_ui::hub::SnapshotHub::new(client, cx));
-        cx.set_global(tl_ui::hub::GlobalHub(hub));
-    });
     draw(r.cx);
     r
 }
