@@ -543,7 +543,7 @@ fn with_process_row(s: &mut Snapshot, pid: u32) {
         ..ComponentHeader::default()
     };
     s.processes = Arc::new(ProcessSnapshot {
-        header: header.clone(),
+        header,
         records: vec![record(pid)].into(),
         ..ProcessSnapshot::default()
     });
