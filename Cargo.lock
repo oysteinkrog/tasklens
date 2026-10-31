@@ -8120,6 +8120,8 @@ dependencies = [
 name = "tl-remote"
 version = "1.0.3"
 dependencies = [
+ "arc-swap",
+ "async-channel",
  "proptest",
  "tl-model",
  "zstd",

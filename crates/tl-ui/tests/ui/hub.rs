@@ -114,7 +114,9 @@ fn ignores_old_sequence(cx: &mut TestAppContext) {
         old.sequence = sequence;
         Arc::make_mut(&mut old.processes).header.version += 10;
         let old = Arc::new(old);
-        hub.update(cx, |h, cx| h.install(Arc::clone(&old), cx));
+        hub.update(cx, |h, cx| {
+            h.install(engine.generation(), Arc::clone(&old), cx)
+        });
         cx.run_until_parked();
         hub.read_with(cx, |h, _| {
             assert_eq!(h.current().sequence, 5);
