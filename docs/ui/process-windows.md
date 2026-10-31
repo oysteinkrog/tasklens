@@ -1182,19 +1182,19 @@ Real-time signal…
 - **Implements:** PROC-075 (confirmation over 2 GiB, progress toast, gdb missing, administrator rights), R-004.
 - **Anatomy:**
   - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PRC-014 row "Create dump file, VmRSS > 2 GiB" (title "Create a large dump?", button "Create dump"), through UI-PWN-025.
-  - Progress toast: TlToast Info, top centre of the window that started the dump, autohide off while running, id `DumpToast(action_id)`, text "Writing core… 1.2 GiB" [spec], the size in table (d) memory format, updated every 500 ms [chosen].
+  - Progress toast: TlToast Info, top centre of the window that started the dump, autohide off while running, id `DumpToast(action_id)`, text "Writing core… 1.2 GiB" [spec], the size in table (d) memory format, updated with each engine `Progress` event, about every 500 ms [chosen].
 - **States:**
   - Before the first size read: "Writing core…" [chosen].
   - Menu item states (the row menu is owned by `docs/ui/processes.md`): disabled with tooltip "Install gdb to create dumps" when `/usr/bin/gcore` is missing [spec].
   - Without administrator access: Warning toast "Creating a dump needs administrator rights" [spec], with the "Retry as administrator" button from P3. When Yama `ptrace_scope` is above 0 the same refusal of the user's own process is not a missing privilege, so the text is "Creating a dump is blocked by the kernel ptrace setting (Yama ptrace_scope)" [chosen: same reason as the Security tab and the Strings tab], with the same button.
-- **Interaction:** "Create dump file" in the row menu (`CreateDump { key }`) opens the confirmation when needed, then sends the dump request. The progress size comes from the UI stat-ing the output path every 500 ms on the background executor (`std::fs::metadata(path).len()`) while the action is pending [chosen: ADR-005 action events carry no progress].
-- **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the output path `$XDG_STATE_HOME/tasklens/dumps/{name}_{pid}_{yyyymmdd_hhmmss}.core` is chosen by the UI and passed in the request, so it can be stat-ed. `{name}`: every character outside `[A-Za-z0-9._-]` becomes `_` (a run of them becomes one `_`), the name part is cut to 64 bytes, and `process` is used when the result is empty, so the name passes the engine's `^[A-Za-z0-9._-]+\.core$` check; the timestamp is local time formatted with `jiff` (R-224). The engine opens the file itself (`O_EXCL`, mode 0600) and runs gdb's `gcore` into it (R-145).
-- **Build:** `crates/tl-ui/src/windows/notices.rs`, `fn start_dump(key, cx)` and the `DumpProgress` task (cancelled when the action ends).
-- **Performance:** one `stat` every 500 ms off the UI thread during a dump.
+- **Interaction:** "Create dump file" in the row menu (`CreateDump { key }`) opens the confirmation when needed, then sends the dump request. The progress size comes from the engine: while the dump runs it reads the output file's size every 500 ms and sends it as `ActionState::Progress { bytes }` for the dump's target (ADR-005, ADR-018). The UI reads no file; it pushes the progress toast again every 500 ms so the toast stays up [chosen].
+- **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the request carries only the file name `{name}_{pid}_{yyyymmdd_hhmmss}.core`. The engine joins it to its own `$XDG_STATE_HOME/tasklens/dumps/`, refuses a name with a path separator or `..`, and reports the full path in the target's final state `Saved(path)`, which the result toast shows (ADR-018: a path on a host is chosen by that host's engine). `{name}`: every character outside `[A-Za-z0-9._-]` becomes `_` (a run of them becomes one `_`), the name part is cut to 64 bytes, and `process` is used when the result is empty, so the name passes the engine's `^[A-Za-z0-9._-]+\.core$` check; the timestamp is local time formatted with `jiff` (R-224). The engine opens the file itself (`O_EXCL`, mode 0600) and runs gdb's `gcore` into it (R-145).
+- **Build:** `crates/tl-ui/src/windows/notices.rs`, `fn start_dump(key, cx)` and the `DumpRequest` refresh task (cancelled when the action ends); `crates/tl-engine/src/actions/dump.rs` for the progress reads.
+- **Performance:** in the engine, one `stat` every 500 ms during a dump; in the UI, one toast push per progress event and every 500 ms.
 - **Accessibility:** toast text is the only progress indicator; it carries the size as text.
 - **Tests:** `dump_confirm_only_over_2gib`; `dump_progress_toast_updates_in_place` (same toast id, new text); `dump_disabled_without_gcore_tooltip`; `dump_refused_under_yama_names_the_ptrace_setting`.
 - **Phase:** P3.
-- **Decided here:** 500 ms stat polling; the UI picks the output path; "Writing core…" before the first size.
+- **Decided here:** 500 ms progress reports by the engine; the UI picks the file name and the engine the directory; "Writing core…" before the first size.
 
 ### UI-PWN-035 Dump result toasts
 
@@ -1204,7 +1204,7 @@ Real-time signal…
   - Failure: TlToast Error, "Could not create dump file." with the error text on a second line [chosen]; 8 s.
   - Rejected for privileges: as UI-PWN-034.
 - **Interaction:** "Open folder" (`OpenDumpFolder`) calls `org.freedesktop.FileManager1.ShowItems(["file://{path}"], "")`, so the file manager opens the dumps folder with the new file selected; toast "Opening file location" [chosen reuse]. Clicking the path text copies the full path, toast "Copied to clipboard" [chosen].
-- **Data binding:** the `ActionEvent` final state for the dump action.
+- **Data binding:** the `ActionEvent` final state for the dump action; success is `Saved(path)`, the path the engine chose.
 - **Build:** `notices.rs`.
 - **Tests:** `dump_success_toast_text_and_button`; `dump_failure_toast_text`.
 - **Phase:** P3.

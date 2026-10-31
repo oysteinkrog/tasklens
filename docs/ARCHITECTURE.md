@@ -1172,7 +1172,7 @@ pub enum ActionKind {
     SetAffinity(CpuSet),
     SetIoPriority(IoPriority),
     FreezeGroup, ThawGroup, KillGroup,
-    Dump { mode: DumpMode, path: Arc<str> },   // P2: Create dump file; the UI picks the path (R-119)
+    Dump { mode: DumpMode, name: Arc<str> },   // P2: Create dump file; a file name only, the engine picks the directory (ADR-018)
     // services and startup
     UnitStart, UnitStop, UnitRestart, UnitReload, UnitResetFailed,
     UnitEnable, UnitDisable, UnitMask, UnitUnmask,
@@ -1201,6 +1201,8 @@ pub enum ActionState {
     Succeeded,
     Failed(ActionError),       // the OS or service reported failure; nothing changed
     OutcomeUnknown(Arc<str>),  // timed out or target vanished after the effect may have happened
+    Progress { bytes: u64 },   // not final: a running dump's file size, about every 500 ms
+    Saved(Arc<str>),           // succeeded and wrote this full path on the engine's host (Dump)
 }
 
 pub enum RejectReason { Busy, TooManyTargets, IdentityChanged, KernelThread, Protected, NotOwner, Unsupported,
@@ -1215,9 +1217,9 @@ pub struct ActionEvent {
 
 `OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134). A `pkexec` launch counts as `Succeeded` when the child is still running 2 s after the prompt closed; the prompt counts as closed when the child's `/proc/<pid>/stat` comm is no longer `pkexec` (pkexec execs the program in place) or the child has exited (R-253); Plasma scripts in Run go as `LaunchWhat::Command` with the shell-quoted path (R-148). `Unsupported` is reported when no `FileManager1` owner exists or the command text is invalid.
 
-Event order per request: `Started` (or a single `Rejected`), then one final state per target, then one final state with `target: None` summarizing (Succeeded only if every target succeeded; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected).
+Event order per request: `Started` (or a single `Rejected`), then for each target any `Progress` events followed by one final state, then one final state with `target: None` summarizing (Succeeded only if every target succeeded, where `Saved` counts as success; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected). `Progress` never decides the summary.
 
-Action events carry no progress. A dump's progress is the size of its output file, which the UI reads with `std::fs::metadata` every 500 ms on the background executor while the action is in flight (UI-PWN-034). Service jobs have no client-side timeout (SYS-005); every other action keeps the ADR-006 deadlines.
+Dumps report progress through action events, on every host (ADR-018): while a dump runs, the engine reads the size of its output file every 500 ms and sends `Progress { bytes }` for that target. A progress event never waits for room in the queue; one that does not fit is dropped. The request carries only the file name; the engine joins it to its own `<state_dir>/dumps/`, refuses a name with a path separator or `..`, and ends the target with `Saved(full path)`, which a one-target dump's summary keeps. A path on a host is always chosen by that host's engine. The UI never reads the file (UI-PWN-034). Service jobs have no client-side timeout (SYS-005); every other action keeps the ADR-006 deadlines.
 
 **UI handling.** `ActionTracker` (entity in `tl-ui/src/action_tracker.rs`, R-129) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
 
