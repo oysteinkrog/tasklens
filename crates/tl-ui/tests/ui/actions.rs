@@ -1194,7 +1194,7 @@ mod remote_root {
         r.vcx
             .update(|_, cx| tracker.update(cx, |t, _| t.set_remote_name(Arc::from("home"))));
         let id = r.track(end_task(1), texts());
-        r.finish(id, &[eperm.clone()]);
+        r.finish(id, &[eperm]);
         assert_eq!(r.last().button, None, "no helper on home: no retry button");
     }
 }
