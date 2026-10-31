@@ -190,7 +190,7 @@ fn turn_on(
         return Ok(1);
     }
     match save(env, true) {
-        Ok(()) => {
+        Ok(_) => {
             writeln!(out, "Remote admin is on for {} on {host}.", env.user).map_err(write_error)?;
             Ok(0)
         }
