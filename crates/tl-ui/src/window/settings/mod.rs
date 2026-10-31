@@ -1406,6 +1406,12 @@ impl PageBuilder {
 /// there are no settings or the key is not found. A host key reads the host settings in the
 /// newest snapshot (ADR-018 Settings).
 fn read(cx: &App, key: SettingKey) -> serde_json::Value {
+    // A saved `history` click acts as `pause` while the host's recording is off (UI-PRF-057),
+    // and `history` is not in the list then.
+    if key == SettingKey::PerformanceTimelineClick && cx.has_global::<TlSettings>() {
+        use crate::pages::performance::overview::timeline;
+        return serde_json::Value::from(timeline::click_key(timeline::click_mode(cx)));
+    }
     if let Some(value) = host_settings::read_key(&host_settings::current(cx).values, key) {
         return match value {
             SettingValue::Bool(b) => serde_json::Value::from(b),

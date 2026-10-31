@@ -254,16 +254,13 @@ impl TlSettings {
         let mut next = current.clone();
         f(&mut next);
         // The host keys belong to the engine: `settings.toml` keeps them as they were loaded.
-        // `Settings::clamp` turns a `history` timeline click into `pause` while recording is
-        // off (UI-PRF-057); recording is a host setting, so the clamp sees the host's value.
-        // Before the engine gave it, a saved choice is kept.
-        let host = host_settings::current(cx);
+        // A saved `history` timeline click is kept while recording is off; `timeline::click_mode`
+        // reads it against the host's value (UI-PRF-057).
         next.settings.processes.interval_ms = current.settings.processes.interval_ms;
-        next.settings.history.enabled = host.rev == 0 || host.values.history.enabled;
+        next.settings.history = current.settings.history.clone();
         for key in next.settings.clamp() {
             debug!(target: "tasklens::settings", key, "clamped");
         }
-        next.settings.history = current.settings.history.clone();
         for key in next.state.clamp() {
             debug!(target: "tasklens::settings", key, "clamped");
         }

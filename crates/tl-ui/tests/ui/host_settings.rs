@@ -16,6 +16,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::host_settings::{self, HOST_KEYS};
+use tl_ui::pages::performance::overview::timeline::click_mode;
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::menus_settings;
@@ -187,28 +188,40 @@ fn the_window_never_writes_host_keys_to_settings_toml(cx: &mut TestAppContext) {
     });
 }
 
-/// UI-PRF-057 keeps a `history` timeline click only while recording is on. Recording is a host
-/// setting, so the rule reads the engine's value, not the one `settings.toml` was loaded with.
+/// UI-PRF-057 reads a `history` timeline click as `pause` while recording is off. Recording is a
+/// host setting, so the rule reads the engine's value. The saved choice is kept: a window started
+/// from a `settings.toml` with recording off still opens History mode once the host records.
 #[gpui_kit::test]
 fn the_history_timeline_click_follows_the_host_recording_setting(cx: &mut TestAppContext) {
     let engine = FakeEngine::new();
-    // settings.toml from before the engine service: recording off.
-    setup(cx, &engine, Settings::default());
-    let pick_history = |cx: &mut TestAppContext| {
+    // settings.toml from before the engine service: recording off, the history click saved.
+    let mut saved = Settings::default();
+    saved.performance.timeline_click = TimelineClick::History;
+    let persisted = setup(cx, &engine, saved);
+    let state = |cx: &mut TestAppContext| {
         cx.update(|cx| {
-            TlSettings::update(cx, |d| {
-                d.settings.performance.timeline_click = TimelineClick::History
-            })
-        });
-        cx.update(|cx| TlSettings::settings(cx).performance.timeline_click)
+            (
+                TlSettings::settings(cx).performance.timeline_click,
+                click_mode(cx),
+            )
+        })
     };
-    assert_eq!(pick_history(cx), TimelineClick::Pause, "recording is off");
+    assert_eq!(
+        state(cx),
+        (TimelineClick::History, TimelineClick::Pause),
+        "kept, read as pause before the engine gave recording"
+    );
 
     engine.publish_host_settings(|v| v.history.enabled = true);
     cx.run_until_parked();
-    assert_eq!(pick_history(cx), TimelineClick::History);
-    assert!(
-        !cx.update(|cx| TlSettings::settings(cx).history.enabled),
-        "still not written"
-    );
+    assert_eq!(state(cx), (TimelineClick::History, TimelineClick::History));
+
+    // Another write keeps the choice while the host stops recording.
+    engine.publish_host_settings(|v| v.history.enabled = false);
+    cx.run_until_parked();
+    cx.update(|cx| TlSettings::update(cx, |d| d.settings.motion.animations = false));
+    assert_eq!(state(cx), (TimelineClick::History, TimelineClick::Pause));
+    let last = persisted.borrow().last().cloned().expect("persisted");
+    assert_eq!(last.performance.timeline_click, TimelineClick::History);
+    assert!(!last.history.enabled, "the host key is not written");
 }

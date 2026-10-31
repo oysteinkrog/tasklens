@@ -2104,10 +2104,9 @@ impl Settings {
             c.push("performance.memory_by_app.colors");
         }
         self.performance.migrate_overview(c);
-        // UI-PRF-057: `history` is offered only while recording is on.
-        if self.performance.timeline_click == TimelineClick::History && !self.history.enabled {
-            self.performance.timeline_click = TimelineClick::Pause;
-        }
+        // UI-PRF-057: a saved `history` timeline click is kept while recording is off. Recording
+        // is a host setting (ADR-018), which this file does not hold, so the window reads
+        // `history` as `pause` while the host's recording is off.
         changed
     }
 }
@@ -3113,7 +3112,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_click_history_needs_recording() {
+    fn timeline_click_history_kept_at_load() {
         assert_eq!(
             PerformanceSettings::default().timeline_click,
             TimelineClick::Pause
@@ -3125,14 +3124,20 @@ mod tests {
             let (s, _) = load_toml(&format!("[performance]\ntimeline_click = \"{text}\"\n"));
             assert_eq!(s.performance.timeline_click, want, "{text}");
         }
-        // UI-PRF-057: a saved `history` loads as `pause` while recording is off.
-        let (s, _) = load_toml("[performance]\ntimeline_click = \"history\"\n");
-        assert_eq!(s.performance.timeline_click, TimelineClick::Pause);
-        let (s, _) =
-            load_toml("[performance]\ntimeline_click = \"history\"\n[history]\nenabled = true\n");
-        assert_eq!(s.performance.timeline_click, TimelineClick::History);
-        let out = toml::to_string(&s).expect("serializes");
-        assert!(out.contains("timeline_click = \"history\""), "{out}");
+        // UI-PRF-057: a saved `history` is kept whatever `[history]` says here. Recording is a
+        // host setting (ADR-018); the window reads `history` as `pause` while it is off.
+        for text in ["", "[history]\nenabled = true\n"] {
+            let (s, _) = load_toml(&format!(
+                "[performance]\ntimeline_click = \"history\"\n{text}"
+            ));
+            assert_eq!(
+                s.performance.timeline_click,
+                TimelineClick::History,
+                "{text}"
+            );
+            let out = toml::to_string(&s).expect("serializes");
+            assert!(out.contains("timeline_click = \"history\""), "{out}");
+        }
     }
 
     #[test]
