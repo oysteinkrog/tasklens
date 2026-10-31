@@ -24,7 +24,10 @@ use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::details::{ScanId, StringScanOpts};
 use tl_model::ids::ProcessKey;
-use tl_model::journal::{JournalAccess, JournalControl, JournalEvent, JournalHandle, JournalQuery};
+use tl_model::journal::{
+    JournalAccess, JournalControl, JournalEntry, JournalError, JournalEvent, JournalHandle,
+    JournalQuery,
+};
 use tl_model::remote_proto::{
     ClientMsg, HostSettings, ServerMsg, SetHostSettingsReply, SnapshotFrame, StreamId,
 };
@@ -620,6 +623,58 @@ fn a_frame_without_its_ack_closes_the_session() {
 }
 
 #[test]
+fn the_ack_deadline_holds_while_other_messages_keep_coming() {
+    let mut rig = Rig::new(|c| c.ack_timeout = Duration::from_millis(300));
+    rig.engine.publish(1);
+    let first = rig.frame();
+    let sent = Instant::now();
+    block_writer(&rig);
+    for id in 100..300 {
+        rig.engine.event(id, ActionState::Started);
+    }
+    rig.wait_step("the last progress event queued", |s| {
+        *s == Step::Queued(Item::Action {
+            id: ActionId(299),
+            progress: true,
+        })
+    });
+    std::thread::sleep(Duration::from_millis(400).saturating_sub(sent.elapsed()));
+
+    // The writer finishes the big write, finds the deadline passed and writes nothing more.
+    assert!(matches!(
+        rig.recv(),
+        ServerMsg::Action(ActionEvent {
+            id: ActionId(1),
+            ..
+        })
+    ));
+    assert!(
+        rig.reader.read_frame(&mut &rig.client).is_err(),
+        "no queued event goes out after the deadline"
+    );
+    let report = rig.join();
+    assert_eq!(report.end, SessionEnd::AckTimeout { frame: first.frame });
+}
+
+#[test]
+fn a_second_ack_before_the_first_is_applied_closes_the_session() {
+    let mut rig = Rig::new(|_| {});
+    rig.engine.publish(1);
+    let first = rig.frame();
+    // The writer is busy, so the first Ack waits for it.
+    block_writer(&rig);
+    rig.send(&ClientMsg::Ack { frame: first.frame });
+    rig.send(&ClientMsg::Ack { frame: first.frame });
+    let report = rig.join();
+    assert!(
+        matches!(&report.end, SessionEnd::BadMessage(why) if why.contains("second Ack")),
+        "{:?}",
+        report.end
+    );
+    assert!(rig.engine.dropped.load(Ordering::SeqCst));
+}
+
+#[test]
 fn a_closed_connection_drops_the_port() {
     let mut rig = Rig::new(|_| {});
     let (other, _keep) = UnixStream::pair().unwrap();
@@ -718,7 +773,7 @@ fn a_journal_stream_over_its_limit_ends_and_a_fifth_stream_is_refused() {
         rig.recv(),
         ServerMsg::Journal {
             stream: StreamId(1),
-            event: JournalEvent::Error(_)
+            event: JournalEvent::Error(JournalError::Overflow)
         }
     ));
 
@@ -746,4 +801,41 @@ fn a_journal_stream_over_its_limit_ends_and_a_fifth_stream_is_refused() {
         4,
         "no fifth journalctl"
     );
+}
+
+#[test]
+fn one_journal_event_over_the_byte_limit_ends_the_stream() {
+    let mut rig = Rig::new(|_| {});
+    rig.send(&ClientMsg::JournalOpen {
+        stream: StreamId(1),
+        query: query(),
+    });
+    let (events, controls) = rig.engine.journal(0);
+    // About 1.6 MiB once compressed, alone in an empty queue.
+    let entry = JournalEntry {
+        realtime_us: 1,
+        priority: 6,
+        pid: None,
+        message: noise(2 << 20),
+        cursor: Arc::from("c1"),
+    };
+    events
+        .try_send(JournalEvent::Batch {
+            entries: vec![entry].into(),
+            older: false,
+            exhausted: false,
+        })
+        .unwrap();
+    rig.wait_step("the overflow", |s| *s == Step::JournalOverflow(StreamId(1)));
+    assert!(
+        controls.recv_blocking().is_err(),
+        "the stream's journalctl stops"
+    );
+    assert!(matches!(
+        rig.recv(),
+        ServerMsg::Journal {
+            stream: StreamId(1),
+            event: JournalEvent::Error(JournalError::Overflow)
+        }
+    ));
 }

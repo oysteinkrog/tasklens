@@ -22,10 +22,13 @@
 //!   oldest queued progress event. With no progress event left to replace, the session closes.
 //! - Replies: `REPLIES_MAX` messages or `REPLY_BYTES_MAX` bytes; more closes the session.
 //! - Journal: at most `JOURNAL_STREAMS_MAX` streams, each with `JOURNAL_BATCHES_MAX` events or
-//!   `JOURNAL_BYTES_MAX` bytes queued. A stream over its limit ends with an error event and its
-//!   `journalctl` stops; the session goes on.
+//!   `JOURNAL_BYTES_MAX` bytes queued. A stream over its limit, even with one event, ends with
+//!   `JournalError::Overflow` and its `journalctl` stops; the session goes on.
+//! - `Ack`: one waits for the writer at most, since one frame is in flight at most. A second
+//!   `Ack` before the writer applied the first closes the session.
 //! - A write blocked for `WRITE_TIMEOUT`, or a frame with no `Ack` for `ACK_TIMEOUT`, closes the
-//!   session.
+//!   session. The writer applies `Ack`s and checks that deadline before each message it writes,
+//!   so a steady flow of other messages cannot put it off.
 //!
 //! A command the engine refuses with `Busy` cannot be refused to the client any more, since the
 //! client's `send` already returned. A request (action, scan, handle search, eject, history
@@ -245,8 +248,8 @@ struct Stream {
 
 #[derive(Default)]
 struct Queues {
-    /// `Ack`s read and not yet applied by the writer.
-    acks: Vec<u64>,
+    /// The `Ack` read and not yet applied by the writer.
+    ack: Option<u64>,
     actions: VecDeque<Entry>,
     replies: VecDeque<Vec<u8>>,
     reply_bytes: usize,
@@ -351,14 +354,12 @@ impl<P: Port> Shared<P> {
         if s.handle.is_none() {
             return;
         }
-        let full = !s.queue.is_empty()
-            && (s.queue.len() >= JOURNAL_BATCHES_MAX || s.bytes + bytes.len() > JOURNAL_BYTES_MAX);
+        let full =
+            s.queue.len() >= JOURNAL_BATCHES_MAX || s.bytes + bytes.len() > JOURNAL_BYTES_MAX;
         let handle = if full {
             let error = ServerMsg::Journal {
                 stream: id,
-                event: JournalEvent::Error(journal_error(
-                    "the window did not read the journal fast enough",
-                )),
+                event: JournalEvent::Error(JournalError::Overflow),
             };
             // Small and plain, so it encodes.
             let mut end = Vec::new();
@@ -516,7 +517,11 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
         }
         let going = match msg {
             ClientMsg::Ack { frame } => {
-                lock(&sh.queues).acks.push(frame);
+                if lock(&sh.queues).ack.replace(frame).is_some() {
+                    return SessionEnd::BadMessage(Arc::from(
+                        "a second Ack before the writer applied the first",
+                    ));
+                }
                 sh.ring_writer();
                 true
             }
@@ -895,6 +900,27 @@ fn pick(q: &mut Queues, snapshot_due: bool, floor_passed: bool) -> Next {
     Next::Nothing
 }
 
+/// Applies the waiting `Ack`, then checks the in-flight frame's deadline.
+fn take_ack<P: Port>(
+    sh: &Shared<P>,
+    encoder: &mut DeltaEncoder,
+    sent_at: &mut Option<Instant>,
+) -> Result<(), SessionEnd> {
+    if let Some(frame) = lock(&sh.queues).ack.take() {
+        encoder
+            .on_ack(frame)
+            .map_err(|e| SessionEnd::BadMessage(Arc::from(e.to_string())))?;
+        *sent_at = None;
+        observe!(sh, Step::Acked(frame));
+    }
+    match (encoder.in_flight(), *sent_at) {
+        (Some(frame), Some(at)) if at.elapsed() >= sh.config.ack_timeout => {
+            Err(SessionEnd::AckTimeout { frame })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Writes what the queues hold and the snapshot frames, until the session closes.
 fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
     let Ok(mut frames) = FrameWriter::new() else {
@@ -916,22 +942,13 @@ fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
             sh.finish(SessionEnd::EngineEnded);
             return;
         }
-        let acks = std::mem::take(&mut lock(&sh.queues).acks);
-        for frame in acks {
-            if let Err(e) = encoder.on_ack(frame) {
-                sh.finish(SessionEnd::BadMessage(Arc::from(e.to_string())));
+        loop {
+            // Before each message, so a steady flow of other messages cannot put off the Ack
+            // deadline.
+            if let Err(end) = take_ack(sh, &mut encoder, &mut sent_at) {
+                sh.finish(end);
                 return;
             }
-            sent_at = None;
-            observe!(sh, Step::Acked(frame));
-        }
-        if let (Some(frame), Some(at)) = (encoder.in_flight(), sent_at)
-            && at.elapsed() >= sh.config.ack_timeout
-        {
-            sh.finish(SessionEnd::AckTimeout { frame });
-            return;
-        }
-        loop {
             let latest = sh.port.latest();
             // Nothing before the first publish: the client keeps its last data until then.
             let snapshot_due = sh.config.snapshots
