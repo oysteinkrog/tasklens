@@ -458,12 +458,32 @@ impl Host {
         });
     }
 
-    /// One second of churn at the measured rates.
-    fn step_processes(&mut self) {
-        for _ in 0..m::CPU_CHANGES {
+    /// `n` distinct rows, drawn at random from those `pick` accepts. A rejected or repeated row
+    /// is drawn again, so a second changes exactly `n` rows.
+    fn draw(&mut self, n: usize, pick: fn(&Proc) -> bool) -> Vec<usize> {
+        let mut rows = Vec::with_capacity(n);
+        while rows.len() < n {
             let i = self.rng.below(self.procs.len());
-            let busy = self.rng.unit() < 0.7;
-            let pct = if busy { self.rng.unit() * 25.0 } else { 0.0 };
+            if pick(&self.procs[i]) && !rows.contains(&i) {
+                rows.push(i);
+            }
+        }
+        rows
+    }
+
+    /// One second of churn at the measured rates. Every drawn row changes. Memory changes and
+    /// exits are drawn from user-space rows only: kernel threads have no RSS, and starts make
+    /// only user-space processes, so exits do too and the host stays at `m::PROCESSES`.
+    fn step_processes(&mut self) {
+        for i in self.draw(m::CPU_CHANGES, |_| true) {
+            let mut pct = if self.rng.unit() < 0.7 {
+                0.1 + self.rng.unit() * 25.0
+            } else {
+                0.0
+            };
+            if pct == self.procs[i].record.cpu_pct {
+                pct = if pct == 0.0 { 0.1 } else { 0.0 };
+            }
             let p = &mut self.procs[i];
             p.record.cpu_pct = pct;
             p.extras.cpu_user_pct = pct * 0.8;
@@ -472,28 +492,23 @@ impl Host {
             p.extras.utime_ticks += (pct * 0.8) as u64;
             p.extras.stime_ticks += (pct * 0.2) as u64;
         }
-        for _ in 0..m::MEMORY_CHANGES {
-            let i = self.rng.below(self.procs.len());
-            if self.procs[i].kind == Kind::Kernel {
-                continue;
-            }
-            let pages = 1 + self.rng.below(512) as u64;
+        for i in self.draw(m::MEMORY_CHANGES, |p| p.kind != Kind::Kernel) {
+            let delta = (1 + self.rng.below(512) as u64) * 4096;
             let grow = self.rng.unit() < 0.5;
             let p = &mut self.procs[i];
-            let delta = pages * 4096;
-            p.record.rss_bytes = if grow {
-                p.record.rss_bytes + delta
+            let rss = p.record.rss_bytes;
+            p.record.rss_bytes = if grow || rss < delta + 4096 {
+                rss + delta
             } else {
-                p.record.rss_bytes.saturating_sub(delta).max(4096)
+                rss - delta
             };
             p.record.rss_anon_bytes = p.record.rss_bytes / 2;
             p.extras.rss_peak_bytes = p.extras.rss_peak_bytes.max(p.record.rss_bytes);
         }
-        for _ in 0..m::EXITS {
-            let i = self.rng.below(self.procs.len());
-            if self.procs[i].kind != Kind::Kernel {
-                self.procs.remove(i);
-            }
+        let mut exits = self.draw(m::EXITS, |p| p.kind != Kind::Kernel);
+        exits.sort_unstable();
+        for i in exits.into_iter().rev() {
+            self.procs.remove(i);
         }
         for _ in 0..m::STARTS {
             // A start joins a group in proportion to the user-space processes.
@@ -1004,13 +1019,8 @@ fn run_session(processes_tab: bool) -> Wire {
         wire.acks += ack.len();
         encoder.on_ack(frame.frame).unwrap();
     }
-    if processes_tab {
-        let n = installed.processes.records.len();
-        assert!(
-            n.abs_diff(m::PROCESSES) <= 2 * m::STARTS * SECONDS as usize,
-            "{n} processes"
-        );
-    }
+    // Starts and exits balance, so the host keeps its size.
+    assert_eq!(installed.processes.records.len(), m::PROCESSES);
     wire
 }
 
@@ -1026,9 +1036,10 @@ fn processes_tab_session_with_1500_processes_sends_at_most_64_kib_per_second() {
 }
 
 #[test]
-#[ignore = "over budget, about 22.8 KiB/s: every 60 s complete frame carries 292 full series rings, \
-            and a hidden session still gets the shared system, series and processes parts; \
-            leader decision pending on tasklens-q4x76.15"]
+#[ignore = "over budget, about 23.4 KiB/s: the engine publishes the shared system, series and \
+            processes parts to every session, and each 60 s complete frame carries 292 full series \
+            rings; the fix is a change to what a session receives, leader decision pending on \
+            tasklens-q4x76.15"]
 fn hidden_host_sends_at_most_2_kib_per_second() {
     let wire = run_session(false);
     wire.print("hidden host");
