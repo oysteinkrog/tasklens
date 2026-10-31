@@ -1220,3 +1220,28 @@ fn kwin_command_carries_its_sessions_app_id() {
         .collect();
     assert_eq!(app_ids, [Some(main), Some(devel), None, None]);
 }
+
+/// q4x76.12, ADR-018 rule 4: the reducer queues each KWin command with the bridge generation of
+/// the engine's desktop session, so the KWin worker can drop one queued for another bridge.
+#[test]
+fn kwin_command_carries_the_bridge_generation() {
+    let mut rig = Rig::new();
+    let expected = rig.reducer_mut().desktop.command_generation();
+    rig.run(vec![on(
+        ClientSessionId::LOCAL,
+        Command::KWin(KWinCommand::KeepAbove {
+            pid: 4000,
+            caption: None,
+            on: true,
+        }),
+    )]);
+    let bridges: Vec<u64> = rig
+        .commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            WorkerCommand::KWin { bridge, .. } => Some(bridge),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bridges, [expected]);
+}

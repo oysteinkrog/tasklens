@@ -233,6 +233,7 @@ async fn run_session(
             .flatten(),
         ..SharedHandles::default()
     };
+    reducer.desktop = ep.config.desktop.clone();
     reducer.action_gate = ep.hooks.action_gate.as_ref().map(|make| {
         make(HookCtx {
             events_tx: ep.events_tx.clone(),

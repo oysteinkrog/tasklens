@@ -291,6 +291,15 @@ impl DesktopSession {
         *self.lock_bridge()
     }
 
+    /// The bridge generation a KWin command queued now is checked against
+    /// (`WorkerCommand::KWin`): the bridge that serves, or while none serves, the next one to
+    /// start. A bridge runs only the commands of its own generation, so a command queued for
+    /// one bridge never runs on a later one (ADR-018 "Generations").
+    pub fn command_generation(&self) -> u64 {
+        let bridge = self.lock_bridge();
+        bridge.unwrap_or_else(|| self.shared.generations.load(Ordering::Relaxed) + 1)
+    }
+
     /// Queues the call checked against bridge `generation` and waits for its answer. The bridge
     /// may stop between that check and this queue; the call then fails here at once, and a
     /// later bridge drops it unrun (`BridgeGuard::accept`).
@@ -329,8 +338,11 @@ impl DesktopSession {
     /// The KWin worker serves a new bridge generation until the guard is dropped. Dropping it
     /// fails every call still waiting in the queue.
     pub(crate) fn bridge_serving(&self) -> BridgeGuard {
+        // Under the lock, so `command_generation` never sees the new count without the bridge.
+        let mut bridge = self.lock_bridge();
         let generation = self.shared.generations.fetch_add(1, Ordering::Relaxed) + 1;
-        *self.lock_bridge() = Some(generation);
+        *bridge = Some(generation);
+        drop(bridge);
         BridgeGuard {
             shared: Arc::clone(&self.shared),
             generation,
@@ -392,9 +404,18 @@ pub(crate) struct BridgeGuard {
 }
 
 impl BridgeGuard {
+    /// This bridge's generation. A queued KWin command runs only when it carries this one.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// The call when it was checked against this bridge. A call from an earlier generation is
-    /// answered with a failure and never runs (ADR-018 "Generations").
+    /// answered with a failure and never runs (ADR-018 "Generations"). A call whose caller
+    /// has gone (its deadline passed) is dropped.
     pub(crate) fn accept(&self, call: ActivateCall) -> Option<ActivateCall> {
+        if call.reply.is_closed() {
+            return None;
+        }
         if call.generation == self.generation {
             return Some(call);
         }
@@ -599,6 +620,24 @@ mod tests {
             futures_lite::future::block_on(session.activate_window(id)),
             Err(ActionError::Unsupported)
         );
+    }
+
+    /// q4x76.12, ADR-018 rule 4: a KWin command is queued for the bridge that serves, or while
+    /// none serves, for the next one. Once a bridge stops, nothing queued for it matches again.
+    #[test]
+    fn command_generation_follows_the_bridge() {
+        let session = DesktopSession::new(DesktopSource::Process);
+        // Before the first bridge: queued for the first one.
+        assert_eq!(session.command_generation(), 1);
+        let first = session.bridge_serving();
+        assert_eq!(first.generation(), 1);
+        assert_eq!(session.command_generation(), 1);
+        drop(first);
+        // Between bridges: queued for the next one, never the one that stopped.
+        assert_eq!(session.command_generation(), 2);
+        let next = session.bridge_serving();
+        assert_eq!(next.generation(), 2);
+        assert_eq!(session.command_generation(), 2);
     }
 
     /// q4x76.12, ADR-018 rule 4: the bridge shuts down between the check and the enqueue. The

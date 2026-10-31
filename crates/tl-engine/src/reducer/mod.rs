@@ -53,6 +53,7 @@ use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
 use crate::client_session::{ClientSession, ClientSessions, background_demand};
+use crate::desktop::{DesktopSession, DesktopSource};
 use crate::source::WorkerControl;
 use crate::update::{DeviceHistories, EngineMsg};
 use crate::workers::history::HistorySink;
@@ -191,6 +192,9 @@ pub struct Reducer {
     pub metric_sink: Option<MetricSink>,
     /// `None` until E11-A1 installs one.
     pub action_gate: Option<Box<dyn ActionGate>>,
+    /// The host's desktop session. KWin commands are queued with its bridge generation
+    /// (`WorkerCommand::KWin`). The engine's `EngineConfig::desktop`, set by the session.
+    pub desktop: DesktopSession,
     pub events_tx: async_channel::Sender<ActionEvent>,
     /// `None` until E29-020 (qfx.23) sets it (R-148 item 1).
     pub helper_tx: Option<mpsc::Sender<HelperCommand>>,
@@ -286,6 +290,7 @@ impl Reducer {
             history_cmd: None,
             metric_sink: None,
             action_gate: None,
+            desktop: DesktopSession::new(DesktopSource::Process),
             events_tx,
             helper_tx: None,
             settings_rx: None,

@@ -180,10 +180,13 @@ pub enum WorkerCommand {
     Reprobe,
     /// `app_id` is the app id the sending session announced as a window on this host. Keep
     /// above and frame geometry act only on that pid's window with this app id (q4x76.12).
-    /// `None` from the local session and from sessions with no own windows.
+    /// `None` from the local session and from sessions with no own windows. `bridge` is the
+    /// KWin bridge generation the command was queued for (`DesktopSession::command_generation`);
+    /// any other bridge drops it unrun (ADR-018 "Generations").
     KWin {
         cmd: KWinCommand,
         app_id: Option<Arc<str>>,
+        bridge: u64,
     },
     DetailRefresh {
         target: DetailTarget,

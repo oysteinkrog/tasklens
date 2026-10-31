@@ -104,6 +104,9 @@ const IDLE_WAKE: Duration = Duration::from_secs(60);
 const UNLOAD_TIMEOUT: Duration = Duration::from_millis(500);
 /// Accepted updates waiting for the worker loop.
 const UPDATE_QUEUE: usize = 8;
+/// Switch to window calls a bridge holds while it waits for its first window list. One more
+/// fails at once.
+const ACTIVATIONS_WAITING: usize = 8;
 
 /// The health text when KDE or KWin is missing (R-155 item 4).
 const NOT_AVAILABLE: &str = "KWin bridge not available";
@@ -602,7 +605,8 @@ async fn serve(
     let mut current: Option<Arc<[WindowEntry]>> = None;
     // The last published list, so a pick result can go out with it.
     let mut shown: Option<(Arc<[WindowEntry]>, Validity)> = None;
-    // Switch to window calls waiting, like queued commands, for the first `Update`.
+    // Switch to window calls waiting, like queued commands, for the first `Update`. At most
+    // `ACTIVATIONS_WAITING`; a call whose caller has gone is dropped unrun.
     let mut activations: Vec<ActivateCall> = Vec::new();
     loop {
         let wait = picker
@@ -645,7 +649,11 @@ async fn serve(
             Ok(Some(event @ (Event::PickReply { .. } | Event::Picked { .. }))) => {
                 picked = picker.handle(cx, &host, dir, files, event).await;
             }
-            Ok(Some(Event::Activate(call))) => activations.extend(serving.accept(call)),
+            Ok(Some(Event::Activate(call))) => {
+                if let Some(call) = serving.accept(call) {
+                    wait_activation(&mut activations, call);
+                }
+            }
             Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
             Err(e) => return Err(e.into()),
         }
@@ -661,9 +669,14 @@ async fn serve(
                 windows,
                 files,
                 &mut picker,
+                serving.generation(),
             )
             .await;
             for call in activations.drain(..) {
+                // The caller's deadline passed while the call waited: it must not run now.
+                if call.reply.is_closed() {
+                    continue;
+                }
                 let result = activate(cx, &host, dir, commands, windows, files, &call).await;
                 // The caller may have timed out and gone.
                 let _ = call.reply.try_send(result);
@@ -677,6 +690,19 @@ async fn serve(
             }
         }
     }
+}
+
+/// Adds `call` to the Switch to window calls waiting for the first `Update`. Calls whose caller
+/// has gone are dropped first. When `ACTIVATIONS_WAITING` still wait, `call` fails at once.
+fn wait_activation(activations: &mut Vec<ActivateCall>, call: ActivateCall) {
+    activations.retain(|waiting| !waiting.reply.is_closed());
+    if activations.len() >= ACTIVATIONS_WAITING {
+        let _ = call.reply.try_send(Err(ActionError::Internal(Arc::from(
+            "too many window switches waiting",
+        ))));
+        return;
+    }
+    activations.push(call);
 }
 
 /// One `Event::Control` per change of the control watch. The stream never ends, so a dropped
@@ -869,14 +895,22 @@ struct Queue {
 impl Queue {
     /// The KWin commands queued after `last_seq`, oldest first. Moves `last_seq` to the newest
     /// queued seq.
-    /// The new commands, each with the app id its session announced (`WorkerCommand::KWin`).
-    fn take(&mut self, control: &WorkerControl) -> Vec<(u64, KWinCommand, Option<Arc<str>>)> {
+    fn take(&mut self, control: &WorkerControl) -> Vec<Queued> {
         let new = control
             .commands
             .iter()
             .filter(|c| c.seq > self.last_seq && c.target == SourceId::KWin)
             .filter_map(|c| match &c.command {
-                WorkerCommand::KWin { cmd, app_id } => Some((c.seq, cmd.clone(), app_id.clone())),
+                WorkerCommand::KWin {
+                    cmd,
+                    app_id,
+                    bridge,
+                } => Some(Queued {
+                    seq: c.seq,
+                    cmd: cmd.clone(),
+                    app_id: app_id.clone(),
+                    bridge: *bridge,
+                }),
                 _ => None,
             })
             .collect();
@@ -888,11 +922,21 @@ impl Queue {
 
     /// Takes the queued commands and counts them as done without running them.
     fn drop_all(&mut self, control: &WorkerControl) {
-        if let Some(&(seq, ..)) = self.take(control).last() {
+        if let Some(seq) = self.take(control).last().map(|q| q.seq) {
             self.progress.set_started(SourceId::KWin, seq);
             self.progress.set_done(SourceId::KWin, seq);
         }
     }
+}
+
+/// One queued KWin command (`WorkerCommand::KWin`).
+struct Queued {
+    seq: u64,
+    cmd: KWinCommand,
+    /// The app id the sending session announced.
+    app_id: Option<Arc<str>>,
+    /// The bridge generation it was queued for.
+    bridge: u64,
 }
 
 /// Starts after the last command an earlier generation started (R-276). When that command never
@@ -1309,6 +1353,15 @@ impl Picker {
         }
     }
 
+    /// A pick that never starts: it ends at once as `Cancelled`. Returns true.
+    fn refuse(&mut self, seq: u64) -> bool {
+        self.last = Some(PickResult {
+            seq,
+            outcome: PickOutcome::Cancelled,
+        });
+        true
+    }
+
     /// `CancelPick { seq }`: ends the running pick when `seq` is its seq.
     fn cancel(&mut self, seq: u64) -> bool {
         if self.pending.as_ref().is_some_and(|p| p.seq == seq) {
@@ -1484,7 +1537,9 @@ impl Drop for CmdFiles {
 }
 
 /// Runs the newly queued commands one at a time, in arrival order. `Pick` and `CancelPick` go to
-/// `picker`. Returns true when the pick result changed.
+/// `picker`. Returns true when the pick result changed. `bridge` is the generation of the
+/// bridge that runs them: a command queued for another bridge is dropped unrun, and a pick
+/// among them ends as `Cancelled` (ADR-018 "Generations").
 #[allow(clippy::too_many_arguments)]
 async fn run_commands(
     cx: &Cx,
@@ -1496,20 +1551,28 @@ async fn run_commands(
     windows: &[WindowEntry],
     files: &mut CmdFiles,
     picker: &mut Picker,
+    bridge: u64,
 ) -> bool {
     let mut picked = false;
     let new = queue.take(&io.control.borrow_and_clone());
-    for (seq, cmd, app_id) in new {
+    for queued in new {
         if cx.checkpoint().is_err() {
             break;
         }
+        let seq = queued.seq;
         queue.progress.set_started(SourceId::KWin, seq);
-        match cmd {
+        match queued.cmd {
+            cmd if queued.bridge != bridge => {
+                tracing::debug!(target: "tasklens::engine", queued = queued.bridge, bridge, "kwin command from another bridge dropped");
+                if let KWinCommand::Pick { seq: pick } = cmd {
+                    picked |= picker.refuse(pick);
+                }
+            }
             KWinCommand::Pick { seq: pick } => picked |= picker.start(cx, host, pick),
             KWinCommand::CancelPick { seq: pick } => picked |= picker.cancel(pick),
             cmd => {
                 if let Some((plugin, script)) =
-                    commands.prepare_from(&cmd, app_id.as_ref(), windows)
+                    commands.prepare_from(&cmd, queued.app_id.as_ref(), windows)
                 {
                     let _ = run_script(cx, host, dir, &plugin, script, files).await;
                 }
@@ -2655,6 +2718,9 @@ mod tests {
         map
     }
 
+    /// The bridge generation a `PickRig` runs commands for.
+    const RIG_BRIDGE: u64 = 2;
+
     /// One picker test: the picker, its event channel, a fake KWin and the command plumbing.
     struct PickRig {
         picker: Picker,
@@ -2701,6 +2767,12 @@ mod tests {
 
         /// Queues `cmds` as the reducer does and runs them. Returns true when the result changed.
         async fn command(&mut self, cx: &Cx, cmds: &[KWinCommand]) -> bool {
+            self.command_for(cx, cmds, RIG_BRIDGE).await
+        }
+
+        /// `command`, with `cmds` queued for bridge generation `bridge`. The rig's bridge is
+        /// `RIG_BRIDGE`.
+        async fn command_for(&mut self, cx: &Cx, cmds: &[KWinCommand], bridge: u64) -> bool {
             let mut all: Vec<QueuedCommand> = self.io.control.borrow_and_clone().commands.to_vec();
             for cmd in cmds {
                 self.next_seq += 1;
@@ -2710,6 +2782,7 @@ mod tests {
                     command: WorkerCommand::KWin {
                         cmd: cmd.clone(),
                         app_id: None,
+                        bridge,
                     },
                 });
             }
@@ -2729,6 +2802,7 @@ mod tests {
                 &windows,
                 &mut self.files,
                 &mut self.picker,
+                RIG_BRIDGE,
             )
             .await
         }
@@ -2771,6 +2845,90 @@ mod tests {
         });
         assert!(*done.lock().expect("lock"), "the test body did not finish");
         let _ = std::fs::remove_dir_all(scratch_dir);
+    }
+
+    /// q4x76.12, ADR-018 rule 4: a KWin command queued for an earlier bridge never runs on the
+    /// next one. A pick among them ends as `Cancelled`.
+    #[test]
+    fn commands_from_another_bridge_never_run() {
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(Some(1234), 0))));
+        pick_test("other-bridge", host, |cx, mut rig| async move {
+            let activate = KWinCommand::Activate {
+                internal_id: ID_A.into(),
+            };
+            let earlier = RIG_BRIDGE - 1;
+            let keep = KWinCommand::KeepAbove {
+                pid: 42,
+                caption: None,
+                on: true,
+            };
+            let stale = [activate.clone(), keep, KWinCommand::Pick { seq: 9 }];
+            assert!(rig.command_for(&cx, &stale, earlier).await);
+            assert!(
+                rig.host.seen.lock().expect("lock").is_empty(),
+                "nothing ran"
+            );
+            assert!(rig.host.queries.lock().expect("lock").is_empty());
+            assert_eq!(rig.last(), result(9, PickOutcome::Cancelled));
+            // Every one counts as done, so a restart does not report it.
+            assert_eq!(rig.queue.progress.done(SourceId::KWin), 3);
+            // A later bridge's command is dropped too; this bridge's own runs.
+            assert!(
+                !rig.command_for(&cx, &[activate.clone()], RIG_BRIDGE + 1)
+                    .await
+            );
+            assert!(rig.host.seen.lock().expect("lock").is_empty());
+            assert!(!rig.command(&cx, &[activate]).await);
+            assert_eq!(rig.host.seen.lock().expect("lock").len(), 1);
+        });
+    }
+
+    /// q4x76.12: Switch to window calls wait for the first window list in a bounded list. A
+    /// call whose caller gave up is dropped, so it never switches windows later.
+    #[test]
+    fn waiting_activations_are_bounded_and_drop_callers_that_left() {
+        let call = |n: usize| {
+            let (reply, answer) = async_channel::bounded(1);
+            let call = ActivateCall {
+                internal_id: Arc::from(format!("{{0a1b2c3d-0000-4000-8000-{n:012}}}")),
+                generation: 1,
+                reply,
+            };
+            (call, answer)
+        };
+        let mut waiting = Vec::new();
+        let mut answers = Vec::new();
+        for n in 0..ACTIVATIONS_WAITING {
+            let (c, answer) = call(n);
+            wait_activation(&mut waiting, c);
+            answers.push(answer);
+        }
+        assert_eq!(waiting.len(), ACTIVATIONS_WAITING);
+        // One more fails at once.
+        let (extra, extra_answer) = call(99);
+        wait_activation(&mut waiting, extra);
+        assert_eq!(waiting.len(), ACTIVATIONS_WAITING);
+        assert!(matches!(
+            extra_answer.try_recv(),
+            Ok(Err(ActionError::Internal(_)))
+        ));
+        // Two callers time out. Their calls leave the list on the next add.
+        drop(answers.remove(0));
+        drop(answers.remove(0));
+        let (late, _late_answer) = call(100);
+        wait_activation(&mut waiting, late);
+        assert_eq!(waiting.len(), ACTIVATIONS_WAITING - 1);
+        assert!(waiting.iter().all(|c| !c.reply.is_closed()));
+        // A bridge never accepts a call whose caller has gone.
+        let session = DesktopSession::new(DesktopSource::UserManager);
+        let serving = session.bridge_serving();
+        let (gone, gone_answer) = call(101);
+        let gone = ActivateCall {
+            generation: serving.generation(),
+            ..gone
+        };
+        drop(gone_answer);
+        assert!(serving.accept(gone).is_none());
     }
 
     #[test]

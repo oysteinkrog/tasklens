@@ -877,7 +877,13 @@ impl Reducer {
             Command::ReprobeSource(id) => self.forward(id, WorkerCommand::Reprobe),
             Command::KWin(cmd) => {
                 let app_id = self.clients.get(id).and_then(|s| s.own_app_id()).cloned();
-                self.forward(SourceId::KWin, WorkerCommand::KWin { cmd, app_id });
+                let bridge = self.desktop.command_generation();
+                let command = WorkerCommand::KWin {
+                    cmd,
+                    app_id,
+                    bridge,
+                };
+                self.forward(SourceId::KWin, command);
             }
             Command::DetailRefresh { target, tab } => self.forward(
                 SourceId::ProcessDetail,
