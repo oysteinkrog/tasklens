@@ -26,15 +26,20 @@
 //!   `JournalError::Overflow` and its `journalctl` stops; the session goes on.
 //! - `Ack`: one waits for the writer at most, since one frame is in flight at most. A second
 //!   `Ack` before the writer applied the first closes the session.
-//! - A write blocked for `WRITE_TIMEOUT`, or a frame with no `Ack` for `ACK_TIMEOUT`, closes the
-//!   session. The writer applies `Ack`s and checks that deadline before each message it writes,
-//!   so a steady flow of other messages cannot put it off.
+//! - A message not written within `WRITE_TIMEOUT` of the start of its write, or a frame with no
+//!   `Ack` within `ACK_TIMEOUT` of its write, closes the session. Both are one deadline per
+//!   message on the monotonic clock: a client that keeps taking a few bytes cannot put the write
+//!   deadline off, and the writer applies `Ack`s and checks the ack deadline before each message,
+//!   so a steady flow of other messages cannot put that one off.
 //!
 //! A command the engine refuses with `Busy` cannot be refused to the client any more, since the
 //! client's `send` already returned. A request (action, scan, handle search, eject, history
 //! query) ends with `RequestEnd::Busy`; an action gets a `Rejected(Busy)` summary first. The
-//! newest table query and the newest query per system table are sent again with each later
-//! message until the engine takes them. Any other refused command is dropped and counted.
+//! newest table query and the newest query per system table are kept and offered again before
+//! each later client message and on each pass of the pump, which passes at least every `TICK`,
+//! until the engine takes them. A quiet client's query so gets in at most `TICK` after the
+//! engine has room. Demand needs no retry: the port keeps the newest and never refuses it. Any
+//! other refused command is dropped and counted.
 //!
 //! When the session ends, for any reason, the socket is shut down, the threads stop and the port
 //! is dropped, which closes the engine's session and frees its slot.
@@ -42,7 +47,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
-use std::io::{self, Write};
 use std::ops::Bound;
 use std::os::unix::net::UnixStream;
 use std::pin::Pin;
@@ -53,6 +57,9 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::Errno;
+use rustix::net::{SendFlags, send};
 use tl_model::actions::{ActionEvent, ActionId, ActionState, RejectReason};
 use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
@@ -70,7 +77,7 @@ use crate::envelope::{EnvelopeError, FrameReader, FrameWriter};
 /// dependency of its own.
 pub use async_channel::Receiver;
 
-/// A write blocked this long closes the session.
+/// A message not written this long after its write started closes the session.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A snapshot frame with no `Ack` for this long closes the session.
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -87,7 +94,8 @@ pub const JOURNAL_STREAMS_MAX: usize = 4;
 /// Journal events queued per stream, by count and in bytes.
 pub const JOURNAL_BATCHES_MAX: usize = 64;
 pub const JOURNAL_BYTES_MAX: usize = 1024 * 1024;
-/// The writer looks at least this often whether the engine ended the session.
+/// The writer looks at least this often whether the engine ended the session, and the pump
+/// offers refused table queries to the engine again at least this often.
 const TICK: Duration = Duration::from_secs(1);
 
 /// The engine's side of one session, as the wire side uses it. tl-server implements it over
@@ -145,7 +153,7 @@ pub enum SessionEnd {
     BadMessage(Arc<str>),
     /// The engine ended the session or stopped.
     EngineEnded,
-    /// A write was blocked for the write timeout.
+    /// A message was not written within the write timeout.
     WriteTimeout,
     /// Frame `frame` had no `Ack` within the ack timeout.
     AckTimeout { frame: u64 },
@@ -163,7 +171,7 @@ impl fmt::Display for SessionEnd {
             Self::ClientClosed => write!(f, "the client closed the connection"),
             Self::BadMessage(what) => write!(f, "bad message from the client: {what}"),
             Self::EngineEnded => write!(f, "the engine ended the session"),
-            Self::WriteTimeout => write!(f, "a write was blocked for the write timeout"),
+            Self::WriteTimeout => write!(f, "a message was not written within the write timeout"),
             Self::AckTimeout { frame } => write!(f, "snapshot frame {frame} was not acknowledged"),
             Self::ActionOverflow => write!(f, "the action event queue overflowed"),
             Self::ReplyOverflow => write!(f, "the reply queue overflowed"),
@@ -263,6 +271,9 @@ struct Shared<P> {
     stream: UnixStream,
     config: SessionConfig,
     queues: Mutex<Queues>,
+    /// Table queries the engine refused with `Busy`, the newest per table. Held across each
+    /// send of a table query, so a retry cannot overtake a newer query.
+    refused: Mutex<Vec<Command>>,
     writer_bell: mpsc::SyncSender<()>,
     /// Rung when the journal streams change. Closed when the session ends.
     pump_bell: async_channel::Sender<()>,
@@ -415,12 +426,39 @@ impl<P: Port> Shared<P> {
         })
     }
 
-    /// The write, with a blocked write reported as `WriteTimeout`.
+    /// Writes `bytes` within one write timeout from the start. Each send takes what fits and
+    /// never blocks; between sends the writer waits for room at most the time left. A socket
+    /// send timeout would not do: the kernel starts it again for each buffer within one write,
+    /// so a client that keeps reading a little could hold one write for ever.
     fn write(&self, bytes: &[u8]) -> Result<(), SessionEnd> {
-        (&self.stream).write_all(bytes).map_err(|e| match e.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => SessionEnd::WriteTimeout,
-            _ => SessionEnd::Failed(Arc::from(format!("write: {e}"))),
-        })
+        let started = Instant::now();
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let left = self.config.write_timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Err(SessionEnd::WriteTimeout);
+            }
+            match send(
+                &self.stream,
+                rest,
+                SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+            ) {
+                Ok(n) => rest = &rest[n..],
+                Err(Errno::INTR) => {}
+                Err(Errno::AGAIN) => {
+                    let left = Timespec::try_from(left)
+                        .map_err(|_| SessionEnd::Failed(Arc::from("write timeout too long")))?;
+                    let mut fds = [PollFd::new(&self.stream, PollFlags::OUT)];
+                    match poll(&mut fds, Some(&left)) {
+                        Ok(0) => return Err(SessionEnd::WriteTimeout),
+                        Ok(_) | Err(Errno::INTR) => {}
+                        Err(e) => return Err(SessionEnd::Failed(Arc::from(format!("poll: {e}")))),
+                    }
+                }
+                Err(e) => return Err(SessionEnd::Failed(Arc::from(format!("write: {e}")))),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -436,7 +474,8 @@ fn journal_error(text: &str) -> JournalError {
 /// two more, which have stopped when it returns. The port is dropped before it returns.
 pub fn serve_session<P: Port>(stream: UnixStream, port: P, config: SessionConfig) -> SessionReport {
     let _ = stream.set_read_timeout(None);
-    let _ = stream.set_write_timeout(Some(config.write_timeout));
+    // The writer keeps its own deadline (`Shared::write`).
+    let _ = stream.set_write_timeout(None);
     let (writer_bell, writer_rx) = mpsc::sync_channel(1);
     let (pump_bell, pump_rx) = async_channel::bounded(1);
     let shared = Arc::new(Shared {
@@ -444,6 +483,7 @@ pub fn serve_session<P: Port>(stream: UnixStream, port: P, config: SessionConfig
         stream,
         config,
         queues: Mutex::new(Queues::default()),
+        refused: Mutex::new(Vec::new()),
         writer_bell,
         pump_bell,
         stopping: AtomicBool::new(false),
@@ -496,7 +536,6 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
         (Ok(r), Ok(w)) => (r, w),
         _ => return SessionEnd::Failed(Arc::from("zstd context")),
     };
-    let mut retry = Vec::new();
     loop {
         let raw = match frames.read_frame(&mut &sh.stream) {
             Ok(raw) => raw,
@@ -512,7 +551,7 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
         if sh.stopping() {
             return SessionEnd::ClientClosed;
         }
-        if !retry_state(sh, &mut retry) {
+        if !retry_refused(sh) {
             return SessionEnd::EngineEnded;
         }
         let going = match msg {
@@ -529,7 +568,7 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
                 sh.port.set_demand(demand);
                 true
             }
-            ClientMsg::Command(cmd) => command(sh, &mut out, &mut retry, cmd),
+            ClientMsg::Command(cmd) => command(sh, &mut out, cmd),
             ClientMsg::JournalOpen { stream, query } => journal_open(sh, &mut out, stream, query),
             ClientMsg::JournalCtl { stream, control } => {
                 let q = lock(&sh.queues);
@@ -596,13 +635,16 @@ fn same_state(a: &Command, b: &Command) -> bool {
     }
 }
 
-/// Sends the table queries the engine refused before. False when the engine stopped.
-fn retry_state<P: Port>(sh: &Shared<P>, retry: &mut Vec<Command>) -> bool {
-    for cmd in std::mem::take(retry) {
+/// Offers the table queries the engine refused before to it again. Called by the reader before
+/// each client message and by the pump on each pass. False when the engine stopped.
+fn retry_refused<P: Port>(sh: &Shared<P>) -> bool {
+    let mut refused = lock(&sh.refused);
+    for cmd in std::mem::take(&mut *refused) {
         match sh.port.send(cmd.clone()) {
             Ok(()) => {}
-            Err(CommandError::Busy) => retry.push(cmd),
+            Err(CommandError::Busy) => refused.push(cmd),
             Err(CommandError::EngineStopped) => {
+                drop(refused);
                 sh.finish(SessionEnd::EngineEnded);
                 return false;
             }
@@ -612,37 +654,40 @@ fn retry_state<P: Port>(sh: &Shared<P>, retry: &mut Vec<Command>) -> bool {
 }
 
 /// Passes a command to the port. False when the session is closing.
-fn command<P: Port>(
-    sh: &Shared<P>,
-    frames: &mut FrameWriter,
-    retry: &mut Vec<Command>,
-    cmd: Command,
-) -> bool {
+fn command<P: Port>(sh: &Shared<P>, frames: &mut FrameWriter, cmd: Command) -> bool {
+    if is_state(&cmd) {
+        return table_query(sh, cmd);
+    }
     let request = request_id(&cmd);
-    let state = is_state(&cmd).then(|| cmd.clone());
     match sh.port.send(cmd) {
-        Ok(()) => {
-            if let Some(state) = &state {
-                retry.retain(|old| !same_state(old, state));
+        Ok(()) => true,
+        Err(CommandError::Busy) => match request {
+            Some((kind, id)) => queue_busy(sh, frames, kind, id),
+            None => {
+                sh.commands_dropped.fetch_add(1, Ordering::Relaxed);
+                true
             }
-            true
+        },
+        Err(CommandError::EngineStopped) => {
+            sh.finish(SessionEnd::EngineEnded);
+            false
         }
+    }
+}
+
+/// Passes a table query to the port. It replaces the refused query of its table, if any, and
+/// is kept in its place when the engine refuses it too. False when the session is closing.
+fn table_query<P: Port>(sh: &Shared<P>, cmd: Command) -> bool {
+    let mut refused = lock(&sh.refused);
+    refused.retain(|old| !same_state(old, &cmd));
+    match sh.port.send(cmd.clone()) {
+        Ok(()) => true,
         Err(CommandError::Busy) => {
-            if let Some((kind, id)) = request {
-                return queue_busy(sh, frames, kind, id);
-            }
-            match state {
-                Some(state) => {
-                    retry.retain(|old| !same_state(old, &state));
-                    retry.push(state);
-                }
-                None => {
-                    sh.commands_dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            refused.push(cmd);
             true
         }
         Err(CommandError::EngineStopped) => {
+            drop(refused);
             sh.finish(SessionEnd::EngineEnded);
             false
         }
@@ -722,6 +767,8 @@ enum Got {
     Stop,
     /// The journal streams changed.
     Bell,
+    /// `TICK` passed with nothing new.
+    Tick,
     Wake,
     Event(ActionEvent),
     End(RequestEvent),
@@ -746,22 +793,30 @@ impl Wake for Unpark {
 }
 
 /// Polls `futures` in order until one is ready and returns its output, parking the thread in
-/// between. A wake between a poll and the park leaves the park token set, so none is lost.
+/// between. `None` once `wait` passed with none ready. A wake between a poll and the park leaves
+/// the park token set, so none is lost.
 fn first_ready<T>(
     futures: &mut [Pin<Box<dyn Future<Output = T> + '_>>],
     cx: &mut Context<'_>,
-) -> T {
+    wait: Duration,
+) -> Option<T> {
+    let deadline = Instant::now() + wait;
     loop {
         for f in futures.iter_mut() {
             if let Poll::Ready(v) = f.as_mut().poll(cx) {
-                return v;
+                return Some(v);
             }
         }
-        thread::park();
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        thread::park_timeout(left);
     }
 }
 
-/// Moves what the engine sends into the session's queues until the session closes.
+/// Moves what the engine sends into the session's queues until the session closes, and offers
+/// refused table queries to the engine again on each pass, at least every `TICK`.
 fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
     let Ok(mut frames) = FrameWriter::new() else {
         sh.finish(SessionEnd::Failed(Arc::from("zstd context")));
@@ -773,6 +828,11 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
     let waker = Waker::from(Arc::new(Unpark(thread::current())));
     let mut cx = Context::from_waker(&waker);
     while !sh.stopping() {
+        // On each pass, so a refused table query gets in once the engine has room, even when
+        // the client sends nothing more.
+        if !retry_refused(sh) {
+            return;
+        }
         let journals: Vec<(StreamId, async_channel::Receiver<JournalEvent>)> = lock(&sh.queues)
             .streams
             .iter()
@@ -801,14 +861,14 @@ fn pump_loop<P: Port>(sh: &Shared<P>, bell: &async_channel::Receiver<()>) {
                         .map_or(Got::JournalDone(id), |ev| Got::Journal(id, ev))
                 }));
             }
-            first_ready(&mut futures, &mut cx)
+            first_ready(&mut futures, &mut cx, TICK).unwrap_or(Got::Tick)
         };
         let mut ends = Vec::new();
         let mut first_event = None;
         let mut port_ended = false;
         match got {
             Got::Stop => return,
-            Got::Bell => {}
+            Got::Bell | Got::Tick => {}
             Got::Wake => sh.ring_writer(),
             Got::Event(ev) => first_event = Some(ev),
             Got::End(end) => ends.push(end),
