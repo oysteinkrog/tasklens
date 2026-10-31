@@ -26,14 +26,18 @@
 //! its display name. Outside the top 20 it gets no samples, so its points are gaps.
 //!
 //! Read path: the worker answers each wanted range (ADR-018): the local window's
-//! `Demand.device_history_range`, then the distinct ranges of the other client sessions, which the
-//! sink sends as `MetricMsg::Ranges`. A session that shows no range is the key `None`. Two sessions
-//! on one range share one read and one answer.
+//! `Demand.device_history_range`, then the distinct ranges of the other client sessions. The sink
+//! sends every session's range as one numbered `RangeList` (level-triggered, as the history
+//! worker's session list): each list is the whole truth, so a list the full queue refused only
+//! delays the change until the next one gets through. A session that shows no range is the key
+//! `None`. Two sessions on one range share one read and one answer.
 //! For each range the worker reads its tier once per tier point (1 s, 10 s or 60 s) and whenever
 //! the range becomes wanted, and publishes at most 1,024 min/max-decimated points per series. A
 //! series whose points did not change keeps its `Arc`, and a read that changed nothing is not
 //! sent. All answers go to the reducer together as `DeviceHistories`, which also holds the key
-//! `None` when a session shows no range: one empty `DeviceHistory` that frees the points.
+//! `None` when a session shows no range: one empty `DeviceHistory` that frees the points. A new
+//! worker generation has sent nothing, so its first read answers every key, `None` included: the
+//! reducer may still hold the answers of the generation before it.
 //!
 //! Timeline (UI-PRF-057): while `Demand.device_timeline` is true, the same component carries a
 //! `DeviceTimeline`: the last 24 hours of the 1 min tier for CPU total, memory in use, the
@@ -80,6 +84,7 @@ use tl_model::snapshot::{
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
 use super::event_detector::{EventDetector, JournalEnv, JournalEvents, JournalFetch, Reading};
+use crate::client_session::ClientSessionId;
 use crate::source::WorkerIo;
 use crate::update::{DeviceHistories, EngineMsg, SourceUpdate, WorkerError};
 
@@ -116,9 +121,18 @@ pub enum MetricMsg {
     Reading(Box<Reading>),
     /// Logind `PrepareForSleep`.
     Sleep { entering: bool, t_ns: TimeNs },
-    /// The distinct ranges of the client sessions other than the local one (ADR-018); `None`
-    /// for a session that shows no range.
-    Ranges(Arc<[Option<DeviceHistoryRequest>]>),
+    /// The device history range of every client session (ADR-018).
+    Ranges(RangeList),
+}
+
+/// Each client session and its `Demand.device_history_range`, `None` for a session that shows no
+/// range, in connect order with the local session first. The sink numbers the lists from 1; list
+/// 0 is the empty one each worker starts with. The worker keeps the newest list it got and drops
+/// an older one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RangeList {
+    pub seq: u64,
+    pub ranges: Arc<[(ClientSessionId, Option<DeviceHistoryRequest>)]>,
 }
 
 /// The sender of one open store. `generation` tells the sink that a new store needs the catalog.
@@ -151,11 +165,9 @@ pub struct MetricSink {
     reading_sec: Option<u64>,
     /// The `HELD` series the sink repeats.
     held: Vec<Held>,
-    /// The other client sessions' ranges, the sender generation that has them, and the last
-    /// generation that received a non-empty list. A new generation starts with none.
-    ranges: Arc<[Option<DeviceHistoryRequest>]>,
+    /// The client sessions' ranges and the sender generation that has them.
+    ranges: RangeList,
     ranges_sent_to: Option<u64>,
-    ranges_held_by: Option<u64>,
 }
 
 impl MetricSink {
@@ -166,19 +178,21 @@ impl MetricSink {
             catalog_sent_to: None,
             reading_sec: None,
             held: Vec::new(),
-            ranges: Arc::from([]),
+            ranges: RangeList::default(),
             ranges_sent_to: None,
-            ranges_held_by: None,
         }
     }
 
-    /// The distinct ranges of the client sessions other than the local one, in connect order,
-    /// `None` for a session that shows no range. They go to the open store's worker now and to
-    /// each new one; a send the full queue refused is tried again at the next call or system
-    /// sample.
-    pub fn set_ranges(&mut self, ranges: &[Option<DeviceHistoryRequest>]) {
-        if *self.ranges != *ranges {
-            self.ranges = Arc::from(ranges);
+    /// Each client session's range, in connect order with the local session first, called after
+    /// each reducer turn. A changed list gets the next number. The list goes to the open store's
+    /// worker now and to each new one; a send the full queue refused is tried again at the next
+    /// call or system sample.
+    pub fn set_ranges(&mut self, ranges: &[(ClientSessionId, Option<DeviceHistoryRequest>)]) {
+        if *self.ranges.ranges != *ranges {
+            self.ranges = RangeList {
+                seq: self.ranges.seq + 1,
+                ranges: Arc::from(ranges),
+            };
             self.ranges_sent_to = None;
         }
         let guard = self.slot.load();
@@ -187,21 +201,17 @@ impl MetricSink {
         }
     }
 
+    /// Sends the list to `tx` when it does not have it. List 0 is the one a new worker starts with.
     fn sync_ranges(&mut self, tx: &MetricTx) {
-        if self.ranges_sent_to == Some(tx.generation) {
-            return;
-        }
-        if self.ranges.is_empty() && self.ranges_held_by != Some(tx.generation) {
-            self.ranges_sent_to = Some(tx.generation);
+        if self.ranges_sent_to == Some(tx.generation) || self.ranges.seq == 0 {
             return;
         }
         if tx
             .tx
-            .try_send(MetricMsg::Ranges(Arc::clone(&self.ranges)))
+            .try_send(MetricMsg::Ranges(self.ranges.clone()))
             .is_ok()
         {
             self.ranges_sent_to = Some(tx.generation);
-            self.ranges_held_by = (!self.ranges.is_empty()).then_some(tx.generation);
         }
     }
 
@@ -382,11 +392,11 @@ pub struct State {
     slots: FxHashMap<SeriesId, Option<MetricSlot>>,
     /// The last read of each wanted range.
     published: Vec<Published>,
-    /// The answers sent last, one per wanted key in `wanted` order. It starts with the key
-    /// `None` and the empty answer, which the reducer's component already is.
+    /// The answers sent last, one per wanted key in `wanted` order. It starts empty: the
+    /// reducer may hold another generation's answers, so the first read answers every key.
     sent: Vec<(Option<DeviceHistoryRequest>, Arc<DeviceHistory>)>,
-    /// The other client sessions' ranges (`MetricMsg::Ranges`).
-    ranges: Arc<[Option<DeviceHistoryRequest>]>,
+    /// The client sessions' ranges (`MetricMsg::Ranges`).
+    ranges: RangeList,
     /// Store reads for ranges, for tests.
     range_reads: u64,
     detector: EventDetector,
@@ -414,8 +424,8 @@ impl State {
             by_key: FxHashMap::default(),
             slots: FxHashMap::default(),
             published: Vec::new(),
-            sent: vec![(None, Arc::new(DeviceHistory::default()))],
-            ranges: Arc::from([]),
+            sent: Vec::new(),
+            ranges: RangeList::default(),
             range_reads: 0,
             detector: EventDetector::new(),
             opens: 0,
@@ -533,15 +543,21 @@ impl State {
                 let span = self.detector.sleep(entering, t_ns);
                 self.queue_events(span);
             }
-            MetricMsg::Ranges(ranges) => self.ranges = ranges,
+            MetricMsg::Ranges(list) => {
+                if list.seq > self.ranges.seq {
+                    self.ranges = list;
+                }
+            }
         }
     }
 
-    /// The keys to answer: `local`, the local window's range, then each other session's range
-    /// that is not in the list yet. `None` is the empty answer for a session that shows no range.
+    /// The keys to answer: `local`, the local window's range from the demand watch, which is
+    /// never older than the list's, then each other session's range that is not in the list yet.
+    /// `None` is the empty answer for a session that shows no range.
     pub fn wanted(&self, local: Option<DeviceHistoryRequest>) -> Vec<Option<DeviceHistoryRequest>> {
         let mut wanted = vec![local];
-        for &r in self.ranges.iter() {
+        let others = self.ranges.ranges.iter();
+        for &(_, r) in others.filter(|(id, _)| *id != ClientSessionId::LOCAL) {
             if !wanted.contains(&r) {
                 wanted.push(r);
             }
@@ -1433,6 +1449,15 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// List `seq` of the sessions other than the local one, numbered from 1 in `ranges` order.
+    fn others(seq: u64, ranges: &[Option<DeviceHistoryRequest>]) -> MetricMsg {
+        let ranges = (1..)
+            .map(ClientSessionId)
+            .zip(ranges.iter().copied())
+            .collect();
+        MetricMsg::Ranges(RangeList { seq, ranges })
+    }
+
     fn live(range: DeviceRange) -> Option<DeviceHistoryRequest> {
         Some(DeviceHistoryRequest {
             range,
@@ -1966,9 +1991,18 @@ mod tests {
             vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
         ));
         let (day, hour) = (live(DeviceRange::H24), live(DeviceRange::H1));
-        st.apply(MetricMsg::Ranges(Arc::from([day, hour, day])));
+        st.apply(others(1, &[day, hour, day]));
         assert_eq!(st.wanted(day), [day, hour]);
         assert_eq!(st.wanted(None), [None, day, hour]);
+        // An older list is dropped; the local session's entry yields to the demand watch.
+        st.apply(others(0, &[]));
+        assert_eq!(st.wanted(None), [None, day, hour]);
+        st.apply(MetricMsg::Ranges(RangeList {
+            seq: 2,
+            ranges: Arc::from([(ClientSessionId::LOCAL, hour), (ClientSessionId(1), day)]),
+        }));
+        assert_eq!(st.wanted(None), [None, day]);
+        st.apply(others(3, &[day, hour, day]));
 
         let now = t0 + 2 * SEC;
         let all = st
@@ -2011,7 +2045,7 @@ mod tests {
             vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
         ));
         let (day, week) = (live(DeviceRange::H24), live(DeviceRange::D7));
-        st.apply(MetricMsg::Ranges(Arc::from([week])));
+        st.apply(others(1, &[week]));
         let now = t0 + 2 * SEC;
         let wanted = st.wanted(day);
         let all = st
@@ -2020,7 +2054,7 @@ mod tests {
             .expect("sent");
         assert_eq!(all.len(), 2);
 
-        st.apply(MetricMsg::Ranges(Arc::from([None])));
+        st.apply(others(2, &[None]));
         assert_eq!(st.wanted(day), [day, None]);
         let wanted = st.wanted(day);
         let all = st
@@ -2424,9 +2458,11 @@ mod tests {
     }
 
     /// ADR-018, level-triggered range list: 2000 random steps in which sessions open, change
-    /// their range, clear it and close, through a queue of 2 that the worker drains at random,
-    /// so range lists are dropped. After each settled step every open session finds the answer
-    /// for its own range, and the worker keeps no read for a range no open session shows.
+    /// their range, clear it and close, and the worker restarts, through a queue of 2 that the
+    /// worker drains at random, so range lists are dropped. The reducer keeps the answers of the
+    /// generation before a restart. After each settled step every open session finds the answer
+    /// for its own range, the worker's list holds no closed session, and the worker keeps no read
+    /// for a range no open session shows.
     #[test]
     fn range_list_model() {
         let mut rng: u64 = 0x2545_f491_4f6c_dd1d;
@@ -2444,29 +2480,23 @@ mod tests {
         ];
         let dir = tempdir();
         let t0 = 1_000 * SEC;
-        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let mut now = t0;
+        let mut st = open(dir.path(), 1, OFFSET, now);
         let slot: MetricHistorySlot = Arc::new(ArcSwapOption::empty());
+        let mut generation = 1;
         let (tx, mut rx) = mpsc::channel::<MetricMsg>(2);
         // Empty sample batches stand in for the other traffic that fills the queue.
-        let samples = tx.clone();
-        slot.store(Some(Arc::new(MetricTx { generation: 1, tx })));
+        let mut samples = tx.clone();
+        slot.store(Some(Arc::new(MetricTx { generation, tx })));
         let mut sink = MetricSink::new(Arc::clone(&slot));
-        // The local session first, as in `ClientSessions`.
-        let mut ranges: Vec<Option<DeviceHistoryRequest>> = vec![None];
+        // The open sessions and their ranges, the local session first, as in `ClientSessions`.
+        let mut sessions: Vec<(ClientSessionId, Option<DeviceHistoryRequest>)> =
+            vec![(ClientSessionId::LOCAL, None)];
+        let mut next_session = 1;
+        // The reducer's `device_histories`; a restart keeps it.
         let mut shown: DeviceHistories = Arc::from([]);
-        let (mut refused, mut settled) = (0, 0);
-        let mut now = t0;
+        let (mut refused, mut settled, mut restarts) = (0, 0, 0);
 
-        // `ClientSessions::linked_ranges`: the distinct ranges of the other sessions.
-        let linked = |ranges: &[Option<DeviceHistoryRequest>]| {
-            let mut out = Vec::new();
-            for r in &ranges[1..] {
-                if !out.contains(r) {
-                    out.push(*r);
-                }
-            }
-            out
-        };
         // One worker turn: up to `n` messages, then the answers.
         let turn = |st: &mut State,
                     rx: &mut mpsc::Receiver<MetricMsg>,
@@ -2486,19 +2516,33 @@ mod tests {
         for _ in 0..2000 {
             now += SEC;
             let pick = choices[below(choices.len() as u64) as usize];
-            match below(8) {
-                0..=1 => ranges.push(pick),
-                2..=4 => {
-                    let i = below(ranges.len() as u64) as usize;
-                    ranges[i] = pick;
+            match below(20) {
+                0..=4 => {
+                    sessions.push((ClientSessionId(next_session), pick));
+                    next_session += 1;
                 }
-                5 => {
-                    let i = below(ranges.len() as u64) as usize;
-                    ranges[i] = None;
+                5..=10 => {
+                    let i = below(sessions.len() as u64) as usize;
+                    sessions[i].1 = pick;
                 }
-                6..=7 if ranges.len() > 1 => {
-                    let i = 1 + below(ranges.len() as u64 - 1) as usize;
-                    ranges.remove(i);
+                11..=12 => {
+                    let i = below(sessions.len() as u64) as usize;
+                    sessions[i].1 = None;
+                }
+                13..=17 if sessions.len() > 1 => {
+                    let i = 1 + below(sessions.len() as u64 - 1) as usize;
+                    sessions.remove(i);
+                }
+                18 => {
+                    // The worker restarts: a new generation with a new channel and state.
+                    drop(std::mem::take(&mut st));
+                    st = open(dir.path(), 1, OFFSET, now);
+                    generation += 1;
+                    let (tx, new_rx) = mpsc::channel::<MetricMsg>(2);
+                    rx = new_rx;
+                    samples = tx.clone();
+                    slot.store(Some(Arc::new(MetricTx { generation, tx })));
+                    restarts += 1;
                 }
                 _ => {}
             }
@@ -2506,29 +2550,35 @@ mod tests {
                 let _ = samples.try_send(MetricMsg::System(Box::new([])));
             }
             // The end of the reducer turn.
-            sink.set_ranges(&linked(&ranges));
-            if sink.ranges_sent_to != Some(1) {
+            sink.set_ranges(&sessions);
+            if sink.ranges_sent_to != Some(generation) {
                 refused += 1;
             }
             let n = below(3) as usize;
-            turn(&mut st, &mut rx, &mut shown, ranges[0], now, n);
+            turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, n);
 
             if below(4) == 0 {
                 // Settle: the worker catches up and the next turn sends the list again.
-                turn(&mut st, &mut rx, &mut shown, ranges[0], now, usize::MAX);
-                sink.set_ranges(&linked(&ranges));
-                turn(&mut st, &mut rx, &mut shown, ranges[0], now, usize::MAX);
+                turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, usize::MAX);
+                sink.set_ranges(&sessions);
+                turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, usize::MAX);
                 settled += 1;
-                for key in &ranges {
+                for (id, key) in &sessions {
                     let found = shown.iter().find(|(k, _)| k == key);
                     let Some((_, answer)) = found else {
-                        panic!("no answer for {key:?} in {:?}", shown.len());
+                        panic!("no answer for session {id:?} on {key:?}");
                     };
                     assert_eq!(answer.request, *key);
                 }
+                for (id, _) in st.ranges.ranges.iter() {
+                    assert!(
+                        sessions.iter().any(|(open, _)| open == id),
+                        "the worker holds closed session {id:?}"
+                    );
+                }
                 for p in &st.published {
                     assert!(
-                        ranges.contains(&Some(p.request)),
+                        sessions.iter().any(|(_, r)| *r == Some(p.request)),
                         "the worker keeps a read of {:?}",
                         p.request
                     );
@@ -2537,6 +2587,26 @@ mod tests {
         }
         assert!(refused > 50, "the queue refused {refused} range lists");
         assert!(settled > 400, "{settled} settled steps");
+        assert!(restarts > 50, "{restarts} restarts");
+    }
+
+    /// A new worker generation answers the key `None` at its first read, though nothing was read:
+    /// the reducer may still hold the points of the generation before it.
+    #[test]
+    fn a_new_worker_answers_no_range_at_once() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        let first = st.answer_all(&[None], false, t0).expect("read");
+        let first = first.expect("the first read answers every key");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, None);
+        assert!(first[0].1.series.is_empty());
+        assert!(
+            st.answer_all(&[None], false, t0 + SEC)
+                .expect("read")
+                .is_none()
+        );
     }
 
     #[test]

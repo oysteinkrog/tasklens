@@ -1046,7 +1046,7 @@ fn cpu_rank(cpu: CpuDemand) -> u8 {
 /// Field-wise union of `parts`, which come in fill order: bools OR, `cpu` maximum, column sets
 /// union, lists filled round robin up to their caps (`fill`). `device_history_range` is the
 /// first part's: the `MetricHistory` worker answers it from the demand watch, and the other
-/// sessions' ranges through `ClientSessions::linked_ranges`.
+/// sessions' ranges through `ClientSessions::device_history_ranges`.
 pub fn combine(parts: &[&Demand]) -> Demand {
     let mut m = Demand::default();
     for p in parts {
@@ -1418,21 +1418,15 @@ impl ClientSessions {
         self.sessions[0].demand = demand;
     }
 
-    /// The distinct device history ranges of the sessions other than the local one, in connect
-    /// order. `None` stands for a session that shows no range: it needs the empty answer, so a
-    /// session that clears its range stops showing its old points. The `MetricHistory` worker
-    /// answers them after the local one (ADR-018).
-    pub fn linked_ranges(&self) -> Vec<Option<DeviceHistoryRequest>> {
-        let mut out = Vec::new();
-        for r in self.sessions[1..]
+    /// Each session's device history range, in connect order with the local session first.
+    /// `None` stands for a session that shows no range: it needs the empty answer, so a session
+    /// that clears its range stops showing its old points. The `MetricHistory` worker answers
+    /// the distinct ranges once each (ADR-018).
+    pub fn device_history_ranges(&self) -> Vec<(ClientSessionId, Option<DeviceHistoryRequest>)> {
+        self.sessions
             .iter()
-            .map(|s| s.demand.device_history_range)
-        {
-            if !out.contains(&r) {
-                out.push(r);
-            }
-        }
-        out
+            .map(|s| (s.id, s.demand.device_history_range))
+            .collect()
     }
 
     /// The demand the workers collect for (ADR-018): `local`, the local window's current demand,

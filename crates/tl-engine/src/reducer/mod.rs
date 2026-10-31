@@ -352,7 +352,7 @@ impl Reducer {
                 }
             }
             if let Some(sink) = self.metric_sink.as_mut() {
-                sink.set_ranges(&self.clients.linked_ranges());
+                sink.set_ranges(&self.clients.device_history_ranges());
             }
             tracing::debug!(target: "tasklens::engine", applied, "reducer publish");
             // No await between the store and the wake (ADR-005).
