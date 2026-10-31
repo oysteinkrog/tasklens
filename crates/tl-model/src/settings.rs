@@ -1516,7 +1516,7 @@ pub enum HostError {
 }
 
 impl HostError {
-    /// The reason in one short line, for the log and the Settings page.
+    /// The reason in one short line, for the log.
     pub fn reason(&self) -> &'static str {
         match self {
             Self::EmptyName => "the name is empty",
@@ -1528,6 +1528,22 @@ impl HostError {
         }
     }
 }
+
+/// The sentence the Settings page shows next to the field.
+impl std::fmt::Display for HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::EmptyName => "The host needs a name.",
+            Self::EmptyTarget => "The host needs an ssh destination, such as user@host.",
+            Self::ControlChar => "The name and the ssh destination cannot hold control characters.",
+            Self::TargetIsOption => "The ssh destination cannot start with a dash.",
+            Self::TargetHasSpace => "The ssh destination cannot hold a space.",
+            Self::DuplicateName => "Another host already has this name.",
+        })
+    }
+}
+
+impl std::error::Error for HostError {}
 
 impl HostEntry {
     /// Checks this entry alone. `DuplicateName` comes from [`check_hosts`].
@@ -2840,6 +2856,23 @@ mod tests {
         // `enabled` defaults to true when the key is missing.
         let (s, _) = load_toml("[[hosts]]\nname = \"a\"\ntarget = \"b\"\n");
         assert_eq!(s.hosts, vec![host("a", "b")]);
+    }
+
+    /// q4x76.28: a host error reads as a plain sentence, not as Debug text.
+    #[test]
+    fn host_error_display_is_plain() {
+        assert_eq!(HostError::EmptyName.to_string(), "The host needs a name.");
+        for e in [
+            HostError::EmptyName,
+            HostError::EmptyTarget,
+            HostError::ControlChar,
+            HostError::TargetIsOption,
+            HostError::TargetHasSpace,
+            HostError::DuplicateName,
+        ] {
+            let text = e.to_string();
+            assert!(text.ends_with('.') && !text.contains("Error"), "{text}");
+        }
     }
 
     /// q4x76.25: each invalid entry is rejected with its own reason.

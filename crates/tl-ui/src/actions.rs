@@ -80,6 +80,27 @@ pub const HOSTS_CONTEXT: &str = "Hosts";
 #[action(namespace = tasklens, no_json)]
 pub struct SelectHost(pub usize);
 
+/// Opens a fresh connection to the named remote host (host tab context menu, UI-SHL-008).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct ReconnectHost(pub String);
+
+/// Turns the named host off: its tab goes and its connection stops. The entry stays in
+/// Settings > Hosts, switched off.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct DisconnectHost(pub String);
+
+/// Opens Settings > Hosts for the named host.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct EditHost(pub String);
+
+/// Deletes the named host from the `[[hosts]]` list.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct RemoveHost(pub String);
+
 /// A top-level menu of the menu bar.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MenuId {

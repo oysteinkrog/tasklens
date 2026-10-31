@@ -346,4 +346,39 @@ impl HostRegistry {
         reg.made = made;
         changed
     }
+
+    /// Replaces the named remote host's client with a fresh connection and gives the tab a new
+    /// context on it (the tab context menu, UI-SHL-008). The old context's windows keep their
+    /// old client. Returns false when there is no such remote host or the manager refuses.
+    pub fn reconnect(name: &str, cx: &mut App) -> bool {
+        let Some(reconnect) = cx
+            .try_global::<AppEnv>()
+            .and_then(|env| env.hosts.as_ref())
+            .map(|h| Arc::clone(&h.reconnect))
+        else {
+            return false;
+        };
+        let Some(ix) = cx
+            .default_global::<HostRegistry>()
+            .remote
+            .iter()
+            .position(|t| &*t.name == name)
+        else {
+            return false;
+        };
+        let client = match reconnect(name) {
+            Ok(client) => client,
+            Err(why) => {
+                warn!(target: "tasklens::ui", host = %name, "reconnect refused: {why}");
+                return false;
+            }
+        };
+        let reg = cx.global_mut::<HostRegistry>();
+        reg.made += 1;
+        let made = reg.made;
+        let name: Arc<str> = Arc::clone(&reg.remote[ix].name);
+        let host = HostContext::remote(Arc::clone(&name), client, first_action_id(made), cx);
+        cx.global_mut::<HostRegistry>().remote[ix] = HostTab { name, host };
+        true
+    }
 }

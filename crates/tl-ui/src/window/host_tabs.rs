@@ -14,14 +14,15 @@ use std::sync::Arc;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
-    App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    App, Context, FocusHandle, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 
-use crate::actions::SelectHost;
+use crate::actions::{DisconnectHost, EditHost, ReconnectHost, RemoveHost, SelectHost};
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hosts_api::HostLinkStatus;
-use crate::i18n::tr_args;
+use crate::i18n::{tr, tr_args};
 use crate::text::style::numeric_style;
 use crate::theme::{current, metrics};
 
@@ -64,6 +65,8 @@ pub struct HostTabs {
     selected: usize,
     /// The on half of the connecting dot's pulse.
     pulse_on: bool,
+    /// Where the context menu sends its actions: the tab row, which sits inside the window.
+    focus: Option<FocusHandle>,
     #[cfg(any(test, feature = "test-hooks"))]
     drawn: Vec<DrawnHostTab>,
 }
@@ -127,6 +130,39 @@ impl HostTabs {
         &self.drawn
     }
 
+    /// Opens the context menu of the remote host `name` at `at`: Reconnect, Disconnect, Edit and
+    /// Remove (UI-SHL-008). Each item acts on the host by name.
+    pub fn open_menu(
+        &mut self,
+        name: &Arc<str>,
+        at: gpui_kit::Point<gpui_kit::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+        let name = name.to_string();
+        let menu = TlMenu::build(window, cx, focus, move |menu, _, cx| {
+            menu.item(
+                tr(cx, "shell-host-menu-reconnect"),
+                Box::new(ReconnectHost(name.clone())),
+            )
+            .item(
+                tr(cx, "shell-host-menu-disconnect"),
+                Box::new(DisconnectHost(name.clone())),
+            )
+            .item(
+                tr(cx, "shell-host-menu-edit"),
+                Box::new(EditHost(name.clone())),
+            )
+            .separator()
+            .item(
+                tr(cx, "shell-host-menu-remove"),
+                Box::new(RemoveHost(name.clone())),
+            )
+        });
+        open_context_menu_at(at, window, cx, menu);
+    }
+
     /// "home · 23%", or the name alone before the first CPU value.
     fn label(info: &HostTabInfo) -> (SharedString, Option<SharedString>) {
         let cpu = info.cpu.map(|pct| SharedString::from(format!("· {pct}%")));
@@ -153,8 +189,11 @@ impl Render for HostTabs {
         let theme = current(cx).clone();
         #[cfg(any(test, feature = "test-hooks"))]
         self.drawn.clear();
+        let view = cx.weak_entity();
+        let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         let mut row = div()
             .debug_selector(|| "HostTabs".into())
+            .track_focus(&focus)
             .flex()
             .flex_none()
             .items_center()
@@ -207,6 +246,17 @@ impl Render for HostTabs {
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     window.dispatch_action(Box::new(SelectHost(i)), cx);
+                })
+                .when(i > 0, |el| {
+                    let host = info.name.clone();
+                    let view = view.clone();
+                    el.on_mouse_down(MouseButton::Right, move |ev, window, cx| {
+                        cx.stop_propagation();
+                        view.update(cx, |tabs, cx| {
+                            tabs.open_menu(&host, ev.position, window, cx);
+                        })
+                        .ok();
+                    })
                 })
                 .child(
                     div()

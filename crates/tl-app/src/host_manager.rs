@@ -106,7 +106,7 @@ impl HostManager {
             .into_iter()
             .find(|(i, _)| *i == last)
         {
-            Some((_, why)) => Err(format!("invalid host entry: {why:?}")),
+            Some((_, why)) => Err(why.to_string()),
             None => Ok(()),
         }
     }

@@ -20,6 +20,7 @@ mod advanced;
 mod appearance;
 mod general;
 mod graphs;
+pub mod hosts;
 mod motion;
 mod performance;
 mod privileges;
@@ -40,7 +41,7 @@ use gpui_kit::base::slider::SliderState;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
-    NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
+    NumberFieldOptions, SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings as KitSettings,
 };
 use gpui_kit::component::switch::Switch;
@@ -98,6 +99,19 @@ pub fn init(cx: &mut App) {
     });
 }
 
+/// The page the next Settings window opens on (the host tab menu's "Edit").
+struct StartPage(PageId);
+
+impl Global for StartPage {}
+
+/// Like [`open_settings`], and a window that opens now starts on `page`. A window that is
+/// already open is only focused: the kit keeps its page.
+pub fn open_settings_on(host: &HostContext, page: PageId, cx: &mut App) {
+    cx.set_global(StartPage(page));
+    open_settings(host, cx);
+    cx.remove_global::<StartPage>();
+}
+
 /// Focuses the open Settings window, or opens it on `host`. Without a window registry (tests) it
 /// always opens one.
 pub fn open_settings(host: &HostContext, cx: &mut App) {
@@ -144,11 +158,12 @@ pub enum PageId {
     Services,
     StartupWindow,
     Privileges,
+    Hosts,
     Advanced,
 }
 
 impl PageId {
-    pub const ALL: [PageId; 11] = [
+    pub const ALL: [PageId; 12] = [
         Self::General,
         Self::Appearance,
         Self::Motion,
@@ -159,6 +174,7 @@ impl PageId {
         Self::Services,
         Self::StartupWindow,
         Self::Privileges,
+        Self::Hosts,
         Self::Advanced,
     ];
 
@@ -174,6 +190,7 @@ impl PageId {
             Self::Services => "shell-settings-page-services",
             Self::StartupWindow => "shell-settings-page-startup-window",
             Self::Privileges => "shell-settings-page-privileges",
+            Self::Hosts => "shell-settings-page-hosts",
             Self::Advanced => "shell-settings-page-advanced",
         }
     }
@@ -191,6 +208,7 @@ impl PageId {
             Self::Services => IconName::Server,
             Self::StartupWindow => IconName::AppWindow,
             Self::Privileges => IconName::Shield,
+            Self::Hosts => IconName::Network,
             Self::Advanced => IconName::SlidersHorizontal,
         }
     }
@@ -200,7 +218,7 @@ impl PageId {
 /// `mod` line above and one call here. Host settings and host state come from `host`.
 pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
     // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
-    // Services, Startup and window, Privileges, Advanced.
+    // Services, Startup and window, Privileges, Hosts, Advanced.
     #[allow(unused_mut, reason = "test-hooks appends the test pages")]
     let mut pages: Vec<PageBuilder> = vec![
         general::page(host, cx),
@@ -213,6 +231,7 @@ pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
         services::page(host, cx),
         startup_window::page(host, cx),
         privileges::page(host, cx),
+        hosts::page(host, cx),
         advanced::page(host, cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
@@ -923,6 +942,22 @@ impl PageBuilder {
         self
     }
 
+    /// A full-width block (a list editor) that binds no key. `label` is the search text.
+    pub fn block(
+        &mut self,
+        group: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> &mut Self {
+        let render: CustomRender = Rc::new(render);
+        let label: SharedString = label.into();
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.customs.push((label.clone(), render.clone()));
+        let item = SettingItem::render(move |_, window, cx| render(window, cx)).keywords([label]);
+        self.push_item(group, item);
+        self
+    }
+
     /// A button that dispatches `action`. Binds no key.
     pub fn button(
         &mut self,
@@ -1589,6 +1624,8 @@ pub struct SettingsWindow {
     _slider_subs: Vec<Subscription>,
     _settings_sub: Subscription,
     _hub_sub: Option<Subscription>,
+    /// The page to show first.
+    start_page: Option<PageId>,
 }
 
 impl SettingsWindow {
@@ -1659,6 +1696,7 @@ impl SettingsWindow {
             _slider_subs: slider_subs,
             _settings_sub: settings_sub,
             _hub_sub: hub_sub,
+            start_page: cx.try_global::<StartPage>().map(|p| p.0),
         }
     }
 
@@ -1760,6 +1798,10 @@ impl Render for SettingsWindow {
             .collect();
         let query = self.query(cx);
         let no_match = !query.is_empty() && !builders.iter().any(|p| p.matches_search(&query));
+        let start = self
+            .start_page
+            .and_then(|id| builders.iter().position(|p| p.id() == id))
+            .unwrap_or(0);
         let pages: Vec<SettingPage> = builders.into_iter().map(|p| p.into_page(cx)).collect();
         let theme = current(cx).clone();
         let m = *metrics(cx);
@@ -1770,6 +1812,10 @@ impl Render for SettingsWindow {
             .child(
                 KitSettings::new("settings")
                     .sidebar_width(px(SIDEBAR_W * s))
+                    .default_selected_index(SelectIndex {
+                        page_ix: start,
+                        group_ix: None,
+                    })
                     .pages(pages),
             )
             .when(no_match, |d| {

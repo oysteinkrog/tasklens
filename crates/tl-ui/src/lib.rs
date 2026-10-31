@@ -13,6 +13,7 @@ pub mod helper_flow;
 pub mod host;
 pub mod host_settings;
 pub mod hosts_api;
+pub mod hosts_edit;
 pub mod hub;
 pub mod i18n;
 pub mod net_totals;

@@ -26,6 +26,7 @@ mod gpu_page;
 mod handle_search;
 mod helper_flow;
 mod history;
+mod host_manage;
 mod host_settings;
 mod host_tabs;
 mod hub;

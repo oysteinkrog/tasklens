@@ -59,6 +59,7 @@ use tracing::{debug, error, info, warn};
 use super::filter::{FilterBox, ReturnFocus, shown_on};
 use super::host_tabs::{HostTabInfo, HostTabs, cpu_percent};
 use super::registry::{GlobalRegistry, WindowKey};
+use super::settings;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::{TabStrip, tween_progress};
 #[cfg(any(test, feature = "test-hooks"))]
@@ -68,11 +69,11 @@ use super::titlebar::{
 };
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
-    CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
-    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab, Quit, RefreshCurrentTab,
-    SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectHost, SelectTab, SetViewMode,
-    ShowMainWindow, ShowSystemInformation, StartWindowPick, ToggleHideSystem, ToggleHistoryMode,
-    ToggleMainWindow, ZoomWindow,
+    CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, DisconnectHost, EditHost,
+    EscapeChain, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab,
+    Quit, ReconnectHost, RefreshCurrentTab, RemoveHost, SHELL_FILTER_CONTEXT, ScaleDown,
+    ScaleReset, ScaleUp, SelectHost, SelectTab, SetViewMode, ShowMainWindow, ShowSystemInformation,
+    StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
@@ -85,6 +86,7 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::host::{HostContext, HostRegistry, HostTab};
+use crate::hosts_edit;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
@@ -1918,6 +1920,46 @@ impl MainWindow {
         self.select_host(a.0, window, cx);
     }
 
+    /// Host tab menu, Reconnect: the host gets a fresh client and context, and its pages are
+    /// built again. A host that was shown stays shown.
+    fn on_reconnect_host(
+        &mut self,
+        a: &ReconnectHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_shown = self.hosts.get(self.shown).is_some_and(|s| *s.name == *a.0);
+        if !HostRegistry::reconnect(&a.0, cx) {
+            return;
+        }
+        self.rebuild_hosts(window, cx);
+        if was_shown && let Some(ix) = self.hosts.iter().position(|s| *s.name == *a.0) {
+            self.select_host(ix, window, cx);
+        }
+    }
+
+    /// Host tab menu, Disconnect: the entry is switched off, so its tab goes and its
+    /// connection stops. Settings > Hosts switches it on again.
+    fn on_disconnect_host(&mut self, a: &DisconnectHost, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = hosts_edit::position(&a.0, cx) {
+            hosts_edit::set_enabled(ix, false, cx);
+        }
+    }
+
+    /// Host tab menu, Edit: opens Settings > Hosts.
+    fn on_edit_host(&mut self, _: &EditHost, _: &mut Window, cx: &mut Context<Self>) {
+        let host = HostContext::shown(cx);
+        // Deferred: the menu is closing and the window is mid-update.
+        cx.defer(move |cx| settings::open_settings_on(&host, settings::PageId::Hosts, cx));
+    }
+
+    /// Host tab menu, Remove: deletes the entry from `[[hosts]]`.
+    fn on_remove_host(&mut self, a: &RemoveHost, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = hosts_edit::position(&a.0, cx) {
+            hosts_edit::remove(ix, cx);
+        }
+    }
+
     /// The shell filter box. E20-A2 routes type-to-filter through it.
     pub fn filter_box(&self) -> &Entity<FilterBox> {
         &self.filter
@@ -2963,6 +3005,10 @@ impl Render for MainWindow {
             .track_focus(&self.root_focus)
             .on_action(cx.listener(Self::on_select_tab))
             .on_action(cx.listener(Self::on_select_host))
+            .on_action(cx.listener(Self::on_reconnect_host))
+            .on_action(cx.listener(Self::on_disconnect_host))
+            .on_action(cx.listener(Self::on_edit_host))
+            .on_action(cx.listener(Self::on_remove_host))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_refresh))
