@@ -228,22 +228,23 @@ pub fn accept_peer(listener: &UnixListener, uid: u32) -> Result<UnixStream, Endp
     }
 }
 
-/// Reads from a stream until one fixed `deadline` (a monotonic `Instant`). Before every read it
-/// checks the clock and sets the stream's read timeout to the time left; a read at or after the
-/// deadline fails with `TimedOut`.
-pub struct DeadlineReader<'a> {
+/// Reads from and writes to a stream until one fixed `deadline` (a monotonic `Instant`). Before
+/// every read or write it checks the clock and sets the stream's timeout for it to the time
+/// left; a read or write at or after the deadline fails with `TimedOut`. A handshake uses one
+/// for its reads and one for its answer, so neither a slow `Hello` nor a client that does not
+/// read its answer keeps the handshake past the deadline.
+pub struct DeadlineStream<'a> {
     stream: &'a UnixStream,
     deadline: Instant,
 }
 
-impl<'a> DeadlineReader<'a> {
+impl<'a> DeadlineStream<'a> {
     pub fn new(stream: &'a UnixStream, deadline: Instant) -> Self {
         Self { stream, deadline }
     }
-}
 
-impl Read for DeadlineReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    /// The time left, or `TimedOut` when there is none.
+    fn left(&self) -> io::Result<Duration> {
         let left = self.deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(io::Error::new(
@@ -251,9 +252,28 @@ impl Read for DeadlineReader<'_> {
                 "the handshake deadline passed",
             ));
         }
-        self.stream.set_read_timeout(Some(left))?;
+        Ok(left)
+    }
+}
+
+impl Read for DeadlineStream<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
         let mut stream = self.stream;
         stream.read(buf)
+    }
+}
+
+impl Write for DeadlineStream<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        let mut stream = self.stream;
+        stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut stream = self.stream;
+        stream.flush()
     }
 }
 
@@ -654,7 +674,7 @@ mod tests {
             }
         });
         let begin = Instant::now();
-        let mut reader = DeadlineReader::new(&server, begin + Duration::from_millis(300));
+        let mut reader = DeadlineStream::new(&server, begin + Duration::from_millis(300));
         let frames = FrameReader::new().unwrap();
         let mut out = Vec::new();
         let err = handshake(&mut reader, &mut out, &frames, |_| Ok((identity(), ()))).unwrap_err();
@@ -667,5 +687,53 @@ mod tests {
         );
         drop(server);
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn an_answer_ready_after_the_deadline_is_not_sent() {
+        let (server, client) = UnixStream::pair().unwrap();
+        (&client)
+            .write_all(&hello_bytes(BootPrefix::ours().proto))
+            .unwrap();
+        let begin = Instant::now();
+        let deadline = begin + Duration::from_millis(200);
+        let mut reader = DeadlineStream::new(&server, deadline);
+        let mut writer = DeadlineStream::new(&server, deadline);
+        let frames = FrameReader::new().unwrap();
+        // The Hello arrives in time, but the session is admitted only after the deadline.
+        let err = handshake(&mut reader, &mut writer, &frames, |_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok((identity(), ()))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, HandshakeError::Write(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{err}"
+        );
+        drop(server);
+        let mut sent = Vec::new();
+        (&client).read_to_end(&mut sent).unwrap();
+        assert!(sent.is_empty(), "no Welcome after the deadline");
+    }
+
+    #[test]
+    fn a_write_to_a_client_that_does_not_read_ends_at_the_deadline() {
+        let (server, _client) = UnixStream::pair().unwrap();
+        let begin = Instant::now();
+        let mut writer = DeadlineStream::new(&server, begin + Duration::from_millis(300));
+        // Far more than the socket buffer holds, so the write blocks once it is full.
+        let err = writer.write_all(&vec![0u8; 64 << 20]).unwrap_err();
+        let elapsed = begin.elapsed();
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ),
+            "{err}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(2),
+            "{elapsed:?}"
+        );
     }
 }
