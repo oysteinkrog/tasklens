@@ -158,6 +158,9 @@ pub struct AppEnv {
     pub list_adapters: Arc<dyn Fn() -> async_channel::Receiver<Vec<AdapterInfo>>>,
     /// `None` in tests.
     pub run_history: Option<Box<dyn RunHistoryStore>>,
+    /// Where the engine runs and the switch to the engine service (ADR-018). `None` for the
+    /// rescue window and in tests.
+    pub engine_link: Option<crate::engine_link::EngineLinkApi>,
 }
 
 impl Global for AppEnv {}
@@ -191,6 +194,7 @@ impl AppEnv {
                 rx
             }),
             run_history: None,
+            engine_link: None,
         }
     }
 }
@@ -378,6 +382,7 @@ impl TasklensUi {
         crate::window::share_theme::init(cx);
         crate::window::theme_editor::init(cx);
         crate::window::collector_health::init(cx);
+        crate::engine_link::install(cx);
         crate::window::setup::init(cx);
         crate::window::shortcuts::init(cx);
         crate::window::about::init(cx);

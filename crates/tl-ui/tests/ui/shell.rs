@@ -2222,6 +2222,68 @@ mod status {
         assert_eq!(r.admin.get(), 1);
     }
 
+    /// ADR-018 Window fallback (tasklens-q4x76.8): the engine segment shows on any tab, after
+    /// the page text, and its link dispatches `SwitchToEngineService`.
+    #[gpui_kit::test]
+    fn status_chip_engine_segment(cx: &mut TestAppContext) {
+        use tl_ui::engine_link::{EngineLinkState, SwitchToEngineService, set_state};
+
+        let mut r = rig(cx, 100, None, false);
+        let switches = Rc::new(Cell::new(0));
+        let count = switches.clone();
+        r.cx.update(|_, cx| {
+            cx.on_action(move |_: &SwitchToEngineService, _| count.set(count.get() + 1));
+        });
+        assert!(
+            !read(&mut r, |c| c.is_visible()),
+            "nothing while on the service"
+        );
+
+        r.cx.update(|_, cx| set_state(EngineLinkState::Fallback { can_switch: true }, cx));
+        draw(r.cx);
+        set_text(&mut r, "296 Processes");
+        let warning = r.cx.update(|_, cx| current(cx).status.warning);
+        let sep = " \u{b7} ".to_owned();
+        let parts = drawn(&mut r);
+        assert_eq!(
+            parts[1..],
+            [
+                (sep.clone(), warning),
+                ("Engine service not running".to_owned(), warning),
+                (sep.clone(), warning),
+                ("Switch to engine service".to_owned(), warning),
+            ]
+        );
+        let link = bounds(r.cx, "StatusChip-engine-1");
+        assert!(link.left() > bounds(r.cx, "StatusChip-engine-0").right());
+        r.cx.simulate_click(link.center(), Modifiers::none());
+        assert_eq!(switches.get(), 1, "one dispatch per click");
+        // The text before the link is not clickable.
+        let text = bounds(r.cx, "StatusChip-engine-0");
+        r.cx.simulate_click(text.center(), Modifiers::none());
+        assert_eq!(switches.get(), 1);
+
+        // Without a unit to start (an --app-id instance) the switch is not offered.
+        r.cx.update(|_, cx| set_state(EngineLinkState::Fallback { can_switch: false }, cx));
+        draw(r.cx);
+        assert_eq!(
+            read(&mut r, |c| c.drawn_text()),
+            "296 Processes \u{b7} Engine service not running"
+        );
+
+        r.cx.update(|_, cx| set_state(EngineLinkState::NoEngine, cx));
+        set_text(&mut r, "");
+        assert_eq!(
+            read(&mut r, |c| c.drawn_text()),
+            " \u{b7} Can't start the engine"
+        );
+        assert!(read(&mut r, |c| c.is_visible()));
+
+        r.cx.update(|_, cx| set_state(EngineLinkState::Service, cx));
+        draw(r.cx);
+        assert!(!read(&mut r, |c| c.is_visible()));
+    }
+
     mod health {
         use std::sync::Arc;
         use std::time::Duration;

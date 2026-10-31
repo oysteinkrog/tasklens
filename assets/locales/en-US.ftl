@@ -1481,6 +1481,15 @@ shell-health-source-history = History
 shell-health-source-journal = Journal
 shell-health-source-device-history = Device history
 
+## Status chip engine segment (ADR-018 Window fallback, tasklens-q4x76.8)
+
+shell-engine-fallback = Engine service not running
+shell-engine-fallback-tip = The engine service did not answer at start, so this window runs its own engine.
+shell-engine-switch = Switch to engine service
+shell-engine-switch-tip = Stop this window's engine and connect to the engine service
+shell-engine-none = Can't start the engine
+shell-engine-none-tip = Another tasklens engine holds the engine lock and the engine service does not answer. tasklens keeps trying.
+
 ## tl-app (E33)
 
 app-114-tasklens-stopped-after-an-unrecoverable = tasklens stopped after an unrecoverable error.

@@ -7,6 +7,7 @@ pub mod app;
 pub mod chart;
 pub mod components;
 pub mod demand;
+pub mod engine_link;
 pub mod focus;
 pub mod helper_flow;
 pub mod hub;

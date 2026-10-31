@@ -19,6 +19,12 @@
 //! [`StatusChip::set_health`]. A source of the active tab ([`tab_sources`]) that is Stale, Failed
 //! or Disabled gives one item; collection errors show here and never as toasts (ADR-015). A click
 //! or Enter on an item dispatches `OpenCollectorHealth`.
+//!
+//! Engine segment (ADR-018 Window fallback and Lifetime, tasklens-q4x76.8): after the health
+//! items, on every tab, styled like them. While the window runs its own engine it shows "Engine
+//! service not running" and the link "Switch to engine service", which dispatches
+//! `SwitchToEngineService`. With no engine at all it shows "Can't start the engine". The chip
+//! reads the state from `EngineLinkGlobal`.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -40,6 +46,7 @@ use crate::actions::OpenCollectorHealth;
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::focus::TlFocusRing;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::engine_link::{self, EngineLinkGlobal, EngineLinkState, SwitchToEngineService};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::text::style::numeric_style;
@@ -153,6 +160,12 @@ struct HealthWords {
     unknown_error: SharedString,
     restarting: SharedString,
     open: SharedString,
+    engine_fallback: SharedString,
+    engine_fallback_tip: SharedString,
+    engine_switch: SharedString,
+    engine_switch_tip: SharedString,
+    engine_none: SharedString,
+    engine_none_tip: SharedString,
 }
 
 impl HealthWords {
@@ -168,6 +181,12 @@ impl HealthWords {
             unknown_error: tr(cx, "shell-health-unknown-error"),
             restarting: tr(cx, "shell-health-restarting"),
             open: tr(cx, "shell-health-open"),
+            engine_fallback: tr(cx, "shell-engine-fallback"),
+            engine_fallback_tip: tr(cx, "shell-engine-fallback-tip"),
+            engine_switch: tr(cx, "shell-engine-switch"),
+            engine_switch_tip: tr(cx, "shell-engine-switch-tip"),
+            engine_none: tr(cx, "shell-engine-none"),
+            engine_none_tip: tr(cx, "shell-engine-none-tip"),
         }
     }
 }
@@ -288,10 +307,14 @@ pub struct StatusChip {
     restricted_task: Option<Task<()>>,
     /// One focus handle per health part: two items, "+N more" and the restricted item.
     health_focus: [FocusHandle; MAX_ITEMS + 2],
+    /// Where the window's engine runs, from `EngineLinkGlobal`.
+    engine: EngineLinkState,
+    /// The "Switch to engine service" link.
+    engine_focus: FocusHandle,
     words: HealthWords,
     strings_version: u64,
     style_version: u64,
-    _subs: SmallVec<[Subscription; 2]>,
+    _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     renders: u32,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -328,6 +351,13 @@ impl StatusChip {
                 cx.notify();
             }
         }));
+        subs.push(cx.observe_global::<EngineLinkGlobal>(|this, cx| {
+            let state = engine_link::state(cx);
+            if state != this.engine {
+                this.engine = state;
+                cx.notify();
+            }
+        }));
         Self {
             page_text: SharedString::default(),
             page_actions: SmallVec::new(),
@@ -346,6 +376,8 @@ impl StatusChip {
             restricted_text: SharedString::default(),
             restricted_task: None,
             health_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            engine: engine_link::state(cx),
+            engine_focus: cx.focus_handle().tab_stop(true),
             words: HealthWords::new(cx),
             strings_version: strings_version(cx),
             style_version: metrics(cx).style_version,
@@ -453,6 +485,12 @@ impl StatusChip {
             || self.paused
             || !self.items.is_empty()
             || self.restricted_shown()
+            || self.engine != EngineLinkState::Service
+    }
+
+    /// Where the window's engine runs, as the chip shows it.
+    pub fn engine_state(&self) -> EngineLinkState {
+        self.engine
     }
 
     /// The restricted item shows on every tab but Processes, whose tab text has the count.
@@ -561,6 +599,69 @@ impl StatusChip {
         let tooltip_id = ElementId::NamedChild(Arc::new(id), "tooltip".into());
         let state = HoverTooltip::state(tooltip_id, window, cx);
         let build = TlTooltip::text(tooltip.clone()).build();
+        let part = HoverTooltip::attach(&state, part, DELAY_CONTROL, build, window, cx);
+        [lead, div().flex_none().child(part)]
+    }
+
+    /// The engine segment's parts in draw order: (text, tooltip, is the switch link).
+    fn engine_parts(&self) -> SmallVec<[(&SharedString, &SharedString, bool); 2]> {
+        let w = &self.words;
+        let mut parts = SmallVec::new();
+        match self.engine {
+            EngineLinkState::Service => {}
+            EngineLinkState::Fallback { can_switch } => {
+                parts.push((&w.engine_fallback, &w.engine_fallback_tip, false));
+                if can_switch {
+                    parts.push((&w.engine_switch, &w.engine_switch_tip, true));
+                }
+            }
+            EngineLinkState::NoEngine => parts.push((&w.engine_none, &w.engine_none_tip, false)),
+        }
+        parts
+    }
+
+    /// One engine part: the leading " · " and the text, both in `status.warning`. The switch
+    /// link is a Tab stop and dispatches `SwitchToEngineService` on click, Enter or Space.
+    fn engine_part(
+        &self,
+        ix: usize,
+        (text, tooltip, link): (SharedString, SharedString, bool),
+        theme: &TlTheme,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> [Div; 2] {
+        let warning = theme.status.warning;
+        let lead = plain(SharedString::new_static(HEALTH_SEP)).text_color(warning);
+        let id = ElementId::NamedInteger("StatusChipEngine".into(), ix as u64);
+        let mut part = div()
+            .id(id.clone())
+            .debug_selector(move || format!("StatusChip-engine-{ix}"))
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .whitespace_nowrap()
+            .text_color(warning)
+            .child(text.clone());
+        if link {
+            let focus = self.engine_focus.clone();
+            part = part
+                .role(Role::Link)
+                .aria_label(text)
+                .track_focus(&focus)
+                .hover(|s| s.underline())
+                .on_click(|_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(Box::new(SwitchToEngineService), cx);
+                });
+            if TlFocusRing::show(focus.is_focused(window), window) {
+                part = TlFocusRing::ring(part, m.radius_small, theme);
+            }
+        }
+        let tooltip_id = ElementId::NamedChild(Arc::new(id), "tooltip".into());
+        let state = HoverTooltip::state(tooltip_id, window, cx);
+        let build = TlTooltip::text(tooltip).build();
         let part = HoverTooltip::attach(&state, part, DELAY_CONTROL, build, window, cx);
         [lead, div().flex_none().child(part)]
     }
@@ -732,6 +833,10 @@ impl StatusChip {
             drawn.push((HEALTH_SEP.into(), theme.status.warning));
             drawn.push((text.clone(), theme.status.warning));
         }
+        for (text, _, _) in self.engine_parts() {
+            drawn.push((HEALTH_SEP.into(), theme.status.warning));
+            drawn.push((text.clone(), theme.status.warning));
+        }
         self.drawn = drawn;
     }
 }
@@ -798,6 +903,16 @@ impl Render for StatusChip {
             .enumerate()
             .flat_map(|(ix, part)| self.health_part(ix, part, &theme, &m, window, cx))
             .collect();
+        let engine_parts: SmallVec<[(SharedString, SharedString, bool); 2]> = self
+            .engine_parts()
+            .into_iter()
+            .map(|(t, tip, link)| (t.clone(), tip.clone(), link))
+            .collect();
+        let engine: SmallVec<[Div; 4]> = engine_parts
+            .into_iter()
+            .enumerate()
+            .flat_map(|(ix, part)| self.engine_part(ix, part, &theme, &m, window, cx))
+            .collect();
 
         // The text style first: `text_color` below adds to it.
         let mut chip = div();
@@ -827,5 +942,6 @@ impl Render for StatusChip {
             .children(actions)
             .when_some(paused_tail, |chip, tail| chip.children(tail))
             .children(health)
+            .children(engine)
     }
 }
