@@ -9,28 +9,33 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px,
+    AnyWindowHandle, AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext,
+    WindowHandle, point, px,
 };
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, Tab};
+use tl_model::command::{Command, KWinCommand, Tab};
+use tl_model::ids::NodeId;
 use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
-use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
+use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
 use tl_ui::action_tracker::ToastTexts;
+use tl_ui::actions::{CancelWindowPick, StartWindowPick};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::DEMAND_COALESCE;
 use tl_ui::host::HostContext;
 use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
 use tl_ui::pages::processes::ProcessesPage;
+use tl_ui::pages::processes::delegate::ProcRowId;
 use tl_ui::pages::services::ServicesPage;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{MainWindow, main_window_title, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::windows::props::{PropsWindow, open_process_properties};
 
-use super::common::{key, record};
+use super::common::{key, record, toasts};
 
 type Statuses = Arc<Mutex<HashMap<String, HostLinkStatus>>>;
 
@@ -530,25 +535,45 @@ fn host_tabs_properties_window_stays_on_its_host(cx: &mut TestAppContext) {
     );
 }
 
+/// One process row for `pid`: its record and the table row that shows it.
+fn with_process_row(s: &mut Snapshot, pid: u32) {
+    let header = ComponentHeader {
+        version: s.processes.header.version + 1,
+        validity: Validity::Valid,
+        ..ComponentHeader::default()
+    };
+    s.processes = Arc::new(ProcessSnapshot {
+        header: header.clone(),
+        records: vec![record(pid)].into(),
+        ..ProcessSnapshot::default()
+    });
+    s.table = Arc::new(ProcessTableView {
+        header,
+        rows: vec![TableRow {
+            node: NodeId::Process(key(pid)),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(0),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        }]
+        .into(),
+        ..ProcessTableView::default()
+    });
+}
+
 /// UI-SHL-008, ADR-018 Reconnect: when home's connection drops, its pages keep the last data at
-/// 60% opacity under "Reconnecting to home", take no clicks and send no action until the first
-/// snapshot of the next session. An action sent in the lost session ends as outcome unknown.
-/// The local host and office stay live.
+/// 60% opacity under "Reconnecting to home" and every action is off until the first snapshot of
+/// the next session. A mouse click on the page does not reach it, Delete on the focused table
+/// is refused with a toast, and a direct command (window picking) is not sent. An action sent
+/// in the lost session ends as outcome unknown. The local host and office stay live.
 #[gpui_kit::test]
 fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     let mut rig = boot(cx, &["home", "office"]);
     let pid = 4321;
-    rig.remotes["home"].publish_with(|s| {
-        s.processes = Arc::new(ProcessSnapshot {
-            header: ComponentHeader {
-                version: 1,
-                validity: Validity::Valid,
-                ..ComponentHeader::default()
-            },
-            records: vec![record(pid)].into(),
-            ..ProcessSnapshot::default()
-        });
-    });
+    rig.remotes["home"].publish_with(|s| with_process_row(s, pid));
     rig.select_host(1);
     let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
     let local = rig.vcx.update(|_, cx| HostContext::local(cx));
@@ -560,10 +585,53 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
             .host
     });
     assert_eq!(rig.banner(), None);
+    assert_eq!(
+        rig.vcx.read_entity(&rig.main, |m, _| m.reconnect_cover()),
+        None
+    );
     assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
 
-    // Live: an action reaches home and waits for its result.
-    rig.end_task(&home, pid).expect("sent while live");
+    let page = rig
+        .page::<ProcessesPage>(Tab::Processes)
+        .expect("home's Processes page");
+    let table = rig.vcx.read_entity(&page, |p, _| p.table().clone());
+    let row = ProcRowId::Process(key(pid));
+    let body = rig
+        .vcx
+        .debug_bounds("TlTreeTable-body")
+        .expect("table body");
+    // Below the only row: a press there clears the selection and focuses the table.
+    let below = point(body.origin.x + px(40.), body.bottom() - px(8.));
+    let select = |rig: &mut Rig| {
+        rig.vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.selection.click(row);
+                cx.notify();
+            });
+            page.update(cx, |p, cx| p.focus_table(window, cx));
+        });
+        rig.draw();
+    };
+    let selected = |rig: &mut Rig| rig.vcx.read_entity(&table, |t, _| t.selection.len());
+    let picks = |engine: &FakeEngine| {
+        engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::KWin(KWinCommand::Pick { .. })))
+            .count()
+    };
+
+    // Live: a click below the row reaches the page and clears the selection.
+    select(&mut rig);
+    assert_eq!(selected(&mut rig), 1);
+    rig.vcx.simulate_click(below, Modifiers::none());
+    rig.draw();
+    assert_eq!(selected(&mut rig), 0, "live, the click reaches the table");
+
+    // Live: Delete on the focused table sends End task to home, which waits for its result.
+    select(&mut rig);
+    rig.vcx.simulate_keystrokes("delete");
+    rig.draw();
     assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
     let tracker = home.tracker().expect("tracker").clone();
     assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
@@ -576,9 +644,20 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     rig.remotes["home"].bump_generation();
     rig.tick();
     assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
-    let page = rig.vcx.debug_bounds("MainWindowPage").expect("page");
+    let page_bounds = rig.vcx.debug_bounds("MainWindowPage").expect("page");
     let cover = rig.vcx.debug_bounds("MainWindowReconnect").expect("cover");
-    assert_eq!(cover, page, "the cover takes every click on the page");
+    assert_eq!(cover, page_bounds, "the cover lies over the whole page");
+    // The page is dimmed: the cover is the window background at 40% alpha, so the page shows
+    // through at 60%.
+    let (dim, window_bg) = rig
+        .vcx
+        .read_entity(&rig.main, |m, _| m.reconnect_cover())
+        .expect("the cover is drawn");
+    assert_eq!(
+        (dim.h, dim.s, dim.l),
+        (window_bg.h, window_bg.s, window_bg.l)
+    );
+    assert!((dim.a - window_bg.a * 0.4).abs() < 1e-4, "{dim:?}");
     // The last data is still there.
     let rows = rig.vcx.update(|_, cx| {
         let hub = home.hub().expect("hub").read(cx);
@@ -587,22 +666,49 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     assert_eq!(rows, 1);
     // The action from the lost session ended once, as outcome unknown.
     assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 0);
-    // Every action is refused on home, and says why.
+    let pushed = |rig: &mut Rig| {
+        rig.vcx.read_entity(&tracker, |t, _| {
+            t.pushed()
+                .iter()
+                .map(|p| p.text.to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    let lost = pushed(&mut rig);
+    assert!(
+        lost.iter().any(|t| t == "Outcome unknown"),
+        "the lost action: {lost:?}"
+    );
+
+    // A mouse click on the page stops at the cover: the selection stays.
+    select(&mut rig);
+    assert!(cover.contains(&below));
+    rig.vcx.simulate_click(below, Modifiers::none());
+    rig.draw();
+    assert_eq!(selected(&mut rig), 1, "the click did not reach the table");
+
+    // Delete on the focused table is refused on home, and says why.
+    rig.vcx.simulate_keystrokes("delete");
+    rig.draw();
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
+    assert_eq!(
+        pushed(&mut rig).last().map(String::as_str),
+        Some("Not sent while reconnecting to home.")
+    );
+    // So is an action from code outside the page.
     assert_eq!(rig.end_task(&home, pid), None);
     assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
-    let pushed = rig.vcx.read_entity(&tracker, |t, _| {
-        t.pushed()
-            .iter()
-            .map(|p| p.text.to_string())
-            .collect::<Vec<_>>()
-    });
+
+    // A command sent without the tracker is not sent either: window picking.
+    rig.vcx.dispatch_action(StartWindowPick);
+    rig.draw();
+    assert_eq!(picks(&rig.remotes["home"]), 0);
     assert!(
-        pushed.iter().any(|t| t == "Outcome unknown"),
-        "the lost action: {pushed:?}"
-    );
-    assert_eq!(
-        pushed.last().map(String::as_str),
-        Some("Not sent while reconnecting to home.")
+        toasts(&mut rig.vcx)
+            .iter()
+            .any(|t| t == "Not sent while reconnecting to home."),
+        "{:?}",
+        toasts(&mut rig.vcx)
     );
 
     // The other hosts are live: their actions go out.
@@ -614,12 +720,19 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     assert_eq!(rig.banner(), None);
     rig.select_host(2);
     assert_eq!(rig.banner(), None);
+    assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
+    rig.vcx.dispatch_action(StartWindowPick);
+    rig.draw();
+    assert_eq!(picks(&rig.remotes["office"]), 1, "office still picks");
+    rig.vcx.dispatch_action(CancelWindowPick);
+    rig.draw();
 
     // Back on home: still reconnecting. The first snapshot of the next session ends it.
     rig.select_host(1);
     assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
     let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
     fresh.sequence = 1;
+    with_process_row(&mut fresh, pid);
     rig.statuses
         .lock()
         .expect("statuses")
@@ -627,7 +740,18 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     rig.remotes["home"].restart(fresh);
     rig.draw();
     assert_eq!(rig.banner(), None);
+    assert_eq!(
+        rig.vcx.read_entity(&rig.main, |m, _| m.reconnect_cover()),
+        None
+    );
     assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
-    assert!(rig.end_task(&home, pid).is_some());
+    // Clicks and keys reach the page again.
+    select(&mut rig);
+    rig.vcx.simulate_click(below, Modifiers::none());
+    rig.draw();
+    assert_eq!(selected(&mut rig), 0, "the click reaches the table again");
+    select(&mut rig);
+    rig.vcx.simulate_keystrokes("delete");
+    rig.draw();
     assert_eq!(Rig::actions(&rig.remotes["home"]), 2);
 }

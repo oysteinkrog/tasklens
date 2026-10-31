@@ -62,10 +62,42 @@ use tracing::{debug, warn};
 
 use crate::components::dialog::TlDialog;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::host::HostRegistry;
+use crate::host::{HostContext, HostRegistry};
 use crate::hub::{LinkChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
+use crate::window::main::push_main_toast;
+
+/// The Warning text "Not sent while reconnecting to <host>." while `host`'s session has ended
+/// and the first snapshot of the next one is not installed (ADR-018 Reconnect); `None` while a
+/// command may be sent. For commands sent without the tracker (KWin, devices, setup), whose
+/// owner pushes the toast on its own queue.
+pub fn reconnecting_refusal(host: &HostContext, cx: &mut App) -> Option<SharedString> {
+    if host.hub().is_none_or(|hub| hub.read(cx).session_current()) {
+        return None;
+    }
+    let name = host
+        .remote_name()
+        .cloned()
+        .unwrap_or_else(|| HostRegistry::local_name(cx));
+    Some(tr_args(
+        cx,
+        "fnd-action-send-reconnecting",
+        &[("host", name.to_string().into())],
+    ))
+}
+
+/// [`reconnecting_refusal`] for code outside the main window: false, after the Warning toast
+/// on the main window, while `host` is reconnecting. Never call it while the main window's
+/// view is being updated.
+pub fn host_send_allowed(host: &HostContext, cx: &mut App) -> bool {
+    let Some(text) = reconnecting_refusal(host, cx) else {
+        return true;
+    };
+    debug!(target: "tasklens::ui", host = ?host.remote_name(), "command not sent: the host is reconnecting");
+    push_main_toast(cx, ToastKind::Warning, text, None, None);
+    false
+}
 
 /// Added to a request's deadline before it becomes "Outcome unknown" (ADR-005).
 pub const DEADLINE_GRACE: Duration = Duration::from_secs(5);

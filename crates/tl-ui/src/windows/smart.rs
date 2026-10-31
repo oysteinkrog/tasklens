@@ -38,6 +38,7 @@ use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData, SmartKind, Snapshot}
 use tl_model::units::{short_age, uptime};
 use tl_model::validity::Validity;
 
+use crate::action_tracker::host_send_allowed;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
@@ -958,6 +959,10 @@ impl SmartWindow {
             return false;
         };
         let clicked = !matches!(cmd, DeviceCommand::SmartRead { update: false, .. });
+        // A click on a reconnecting host is refused; the read on open goes to the next session.
+        if clicked && !host_send_allowed(&self.host, cx) {
+            return false;
+        }
         match engine.send(Command::Device(cmd)) {
             Ok(()) => true,
             Err(CommandError::Busy) => {

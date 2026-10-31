@@ -55,6 +55,7 @@ use super::confirm::{ResetSettings, confirm_passwordless};
 use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
+use crate::action_tracker::host_send_allowed;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
 use crate::app::{AdapterInfo, AppEnv};
 use crate::components::menu::{TlMenu, TlMenuPopup};
@@ -750,6 +751,9 @@ impl PasswordlessFlow {
             warn!(target: "tasklens::ui", "no engine, polkit rule step not sent");
             return;
         };
+        if !host_send_allowed(&self.host, cx) {
+            return;
+        }
         let step = SetupStep::PolkitRule { on };
         if let Err(err) = engine.send(Command::RunSetup { step }) {
             warn!(target: "tasklens::ui", ?err, "polkit rule step not sent");

@@ -68,6 +68,7 @@ use super::titlebar::{
     TitleBarView, bar_height_of, is_client, keep_above_supported, minimize_main, zoom,
 };
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
+use crate::action_tracker::reconnecting_refusal;
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, DisconnectHost, EditHost,
     EscapeChain, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PICKER_CONTEXT, PrevTab,
@@ -1353,6 +1354,9 @@ pub struct MainWindow {
     /// The reconnect banner text at the last render.
     #[cfg(any(test, feature = "test-hooks"))]
     reconnect_banner: Option<SharedString>,
+    /// The reconnect cover's color and the window background at the last render.
+    #[cfg(any(test, feature = "test-hooks"))]
+    reconnect_cover: Option<(gpui_kit::Hsla, gpui_kit::Hsla)>,
     /// Animation frames the fade asked for.
     #[cfg(any(test, feature = "test-hooks"))]
     fade_frames: u32,
@@ -1579,6 +1583,8 @@ impl MainWindow {
             #[cfg(any(test, feature = "test-hooks"))]
             reconnect_banner: None,
             #[cfg(any(test, feature = "test-hooks"))]
+            reconnect_cover: None,
+            #[cfg(any(test, feature = "test-hooks"))]
             fade_frames: 0,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
@@ -1645,6 +1651,13 @@ impl MainWindow {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn reconnect_banner(&self) -> Option<&SharedString> {
         self.reconnect_banner.as_ref()
+    }
+
+    /// The reconnect cover's color and the window background at the last render; `None` while
+    /// the shown host is live.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn reconnect_cover(&self) -> Option<(gpui_kit::Hsla, gpui_kit::Hsla)> {
+        self.reconnect_cover
     }
 
     /// Animation frames the page fade asked for.
@@ -2155,6 +2168,11 @@ impl MainWindow {
         let Some(engine) = self.host.client().cloned() else {
             return;
         };
+        if let Some(text) = reconnecting_refusal(&self.host, cx) {
+            self.toasts
+                .update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
+            return;
+        }
         let seq = self.pick_seq + 1;
         match engine.send(Command::KWin(KWinCommand::Pick { seq })) {
             Ok(()) => {
@@ -3032,6 +3050,11 @@ impl Render for MainWindow {
         // Over the page: the window background at 40% alpha, which shows the page as at 60%
         // opacity without drawing it again (a cached page keeps its cache). It blocks clicks,
         // hover and drags, and lets the wheel scroll the last data.
+        let cover = bg.opacity(1.0 - RECONNECT_OPACITY);
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.reconnect_cover = reconnect.as_ref().map(|_| (cover, bg));
+        }
         let reconnect = reconnect.map(|text| {
             div()
                 .debug_selector(|| "MainWindowReconnect".into())
@@ -3039,7 +3062,7 @@ impl Render for MainWindow {
                 .top_0()
                 .left_0()
                 .size_full()
-                .bg(bg.opacity(1.0 - RECONNECT_OPACITY))
+                .bg(cover)
                 .block_mouse_except_scroll()
                 .child(TlBanner::new(TlBannerKind::Warning, text))
         });

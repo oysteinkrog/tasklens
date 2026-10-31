@@ -45,7 +45,7 @@ use super::{
     group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
     topmost_window,
 };
-use crate::action_tracker::ActionTrackerEvent;
+use crate::action_tracker::{ActionTrackerEvent, reconnecting_refusal};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
@@ -717,6 +717,10 @@ impl Run {
             self.toast(ToastKind::Warning, tr(cx, "prc-055-no-window-found"), cx);
             return;
         };
+        if let Some(text) = reconnecting_refusal(&self.host, cx) {
+            self.toast(ToastKind::Warning, text, cx);
+            return;
+        }
         if let Err(err) = client.send(Command::KWin(KWinCommand::Activate { internal_id })) {
             warn!(target: "tasklens::ui", ?err, "KWin activate not sent");
             return;

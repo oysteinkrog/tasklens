@@ -40,7 +40,7 @@ use tl_model::snapshot::{Blocker, DiskDetails, EjectState, Snapshot};
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use crate::action_tracker::{ActionTrackerEvent, action_words};
+use crate::action_tracker::{ActionTrackerEvent, action_words, host_send_allowed};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::toast::ToastKind;
 use crate::components::tooltip::TlTooltip;
@@ -278,6 +278,9 @@ pub fn start_eject(
         warn!(target: "tasklens::ui", "eject: no engine");
         return;
     };
+    if !host_send_allowed(&host, cx) {
+        return;
+    }
     let seq = EJECT_SEQ.fetch_add(1, Ordering::Relaxed);
     match engine.send(Command::Device(DeviceCommand::Eject { seq, disk })) {
         Ok(()) => {}

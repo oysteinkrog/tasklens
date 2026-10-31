@@ -28,6 +28,7 @@ use tl_model::health::SourceId;
 use tracing::warn;
 
 use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use crate::action_tracker::host_send_allowed;
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -353,11 +354,14 @@ pub fn confirm_step(host: &HostContext, step: SetupStep, window: &mut Window, cx
 }
 
 /// Sends `Command::RunSetup` for `step` to `host`. A full queue or a stopped engine changes
-/// nothing.
-pub fn send_step(host: &HostContext, step: SetupStep, _cx: &App) {
+/// nothing. While the host is reconnecting nothing is sent and a toast says why.
+pub fn send_step(host: &HostContext, step: SetupStep, cx: &mut App) {
     let Some(engine) = host.client() else {
         return;
     };
+    if !host_send_allowed(host, cx) {
+        return;
+    }
     if let Err(err) = engine.send(Command::RunSetup { step }) {
         warn!(target: "tasklens::ui", ?err, "setup step not sent");
     }

@@ -55,6 +55,7 @@ use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
 use self::run::{RunOptions, run_process_action_with};
+use crate::action_tracker::host_send_allowed;
 use crate::components::toast::ToastKind;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
@@ -653,6 +654,9 @@ impl ProcessesPage {
     /// "Process window shown." The bridge does not answer an activation (ADR-005), so the toast
     /// follows the send. A window gone from the live windows snapshot gets "No window found".
     fn on_activate_window(&mut self, a: &ActivateWindow, _: &mut Window, cx: &mut Context<Self>) {
+        if !host_send_allowed(&self.host, cx) {
+            return;
+        }
         let internal_id = self.host.hub().and_then(|hub| {
             hub.read(cx)
                 .current()

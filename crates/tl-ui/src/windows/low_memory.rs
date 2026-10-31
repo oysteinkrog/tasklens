@@ -41,7 +41,7 @@ use tl_model::time::TimeNs;
 use tl_model::validity::{ProcessField, Validity};
 use tracing::{debug, warn};
 
-use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
+use crate::action_tracker::{ActionTrackerEvent, ToastTexts, reconnecting_refusal};
 use crate::app::{
     AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, UiExit, UiInit, request_exit,
 };
@@ -951,11 +951,21 @@ impl LowMemoryWindow {
         (!self.needle.is_empty() && self.rows.is_empty()).then(|| words.filter_empty.clone())
     }
 
-    fn open_full(&mut self, _: &OpenFullTasklens, _: &mut Window, cx: &mut Context<Self>) {
-        self.send_open_full(cx);
+    fn open_full(&mut self, _: &OpenFullTasklens, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_open_full(window, cx);
     }
 
-    fn send_open_full(&self, cx: &App) {
+    /// Launches the full tasklens on this window's host. While the host is reconnecting nothing
+    /// is sent and this window's toast says why (ADR-018 Reconnect).
+    fn send_open_full(&self, window: &mut Window, cx: &mut App) {
+        if let Some(text) = reconnecting_refusal(&self.host, cx) {
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| {
+                    q.push(toast::ToastKind::Warning, text, None, None, cx)
+                });
+            }
+            return;
+        }
         // Ids come from the tracker when there is one, so an End Task id is never reused.
         let id = self
             .host
@@ -1230,8 +1240,8 @@ impl Render for LowMemoryWindow {
         let this = cx.entity().downgrade();
         let open_full = TlButton::new("LowMemOpenFull", TlButtonKind::Primary)
             .label(words.open_full.clone())
-            .on_click(move |_, _, cx| {
-                let _ = this.update(cx, |this, cx| this.send_open_full(cx));
+            .on_click(move |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.send_open_full(window, cx));
             });
 
         div()
