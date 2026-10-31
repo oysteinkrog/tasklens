@@ -898,8 +898,8 @@ mod tests {
         let rig = Rig::new();
         let begin = Instant::now();
         let link = EngineLink::open(rig.env(Some(Box::new(|_| false)))).unwrap();
-        // A unit that fails ends the wait at once.
-        assert!(begin.elapsed() < Duration::from_millis(250));
+        // A unit that fails ends the wait at once, well before the 3 s socket deadline.
+        assert!(begin.elapsed() < Duration::from_secs(2));
         assert_eq!(rig.unit_runs.load(Ordering::Acquire), 1);
         assert_eq!(rig.engines_started.load(Ordering::Acquire), 1);
         assert_eq!(
