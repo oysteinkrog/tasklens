@@ -161,6 +161,9 @@ pub struct AppEnv {
     /// Where the engine runs and the switch to the engine service (ADR-018). `None` for the
     /// rescue window and in tests.
     pub engine_link: Option<crate::engine_link::EngineLinkApi>,
+    /// One engine client per enabled `[[hosts]]` entry (ADR-018). `None` for the rescue window
+    /// and in tests.
+    pub hosts: Option<crate::hosts_api::HostsApi>,
 }
 
 impl Global for AppEnv {}
@@ -195,6 +198,7 @@ impl AppEnv {
             }),
             run_history: None,
             engine_link: None,
+            hosts: None,
         }
     }
 }

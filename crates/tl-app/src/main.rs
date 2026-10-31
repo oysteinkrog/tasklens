@@ -19,6 +19,7 @@ mod engine_link;
 #[cfg(feature = "bench")]
 mod gallery_main;
 mod host_file;
+mod host_manager;
 mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
@@ -271,6 +272,24 @@ fn main() -> ExitCode {
         list_adapters: Arc::new(adapters::list_adapters),
         run_history: None,
         engine_link: link_api,
+        // The rescue window has one engine and no host tabs (ADR-004).
+        hosts: (!args.low_memory).then(|| {
+            Arc::new(host_manager::HostManager::new(
+                host_manager::ssh_connector_factory(),
+                HelloTail {
+                    pid: std::process::id(),
+                    app_id: Arc::from(
+                        args.app_id
+                            .as_deref()
+                            .unwrap_or(tl_ui::window::main::APP_ID),
+                    ),
+                    bridge: false,
+                    want: Want { snapshots: true },
+                },
+                host_manager::backoff(),
+            ))
+            .api()
+        }),
     };
     let persist = lowmem_unit::wrap_persist(
         store.persist_callback(),
