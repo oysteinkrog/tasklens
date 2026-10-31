@@ -485,6 +485,7 @@ mod row_builders {
             sys,
             devices: &devices,
             words: &words,
+            net_kinds: [true; 5],
         };
         let mut out = Vec::new();
         build(&inputs, &mut out);
@@ -1049,8 +1050,9 @@ mod names_and_tips {
 /// Memory, Memory modules, Disk drives, Graphics and Network adapters rows (tasklens-9o0.23).
 mod hardware_builders {
     use super::*;
-    use tl_model::devices::DeviceCatalog;
+    use tl_model::devices::{DeviceCatalog, NetKind};
     use tl_model::ids::DeviceIdx;
+    use tl_model::settings::PerformanceSettings;
     use tl_model::snapshot::{
         DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
         MemoryModule, NetworkAdapter, PublicIpState, SystemSnapshot,
@@ -1060,7 +1062,7 @@ mod hardware_builders {
     use tl_ui::pages::information::sections::{
         BLOCK_FIRST_LABELS, InfoInputs, InfoWords, build_bios, build_disks, build_graphics,
         build_memory, build_modules, build_motherboard, build_network, build_os, build_processor,
-        build_system,
+        build_system, net_kinds_of,
     };
 
     const GIB: u64 = 1 << 30;
@@ -1156,6 +1158,7 @@ mod hardware_builders {
         .into();
         inv.network = vec![NetworkAdapter {
             device: Some(DeviceIdx(9)),
+            kind: Some(NetKind::Wired),
             connection: s("enp6s0 (Ethernet)"),
             adapter_name: s("Intel Ethernet Controller I225-V"),
             driver: s("igc"),
@@ -1236,6 +1239,7 @@ mod hardware_builders {
             sys,
             devices: &devices,
             words: &words,
+            net_kinds: [true; 5],
         };
         let mut out = Vec::new();
         build(&inputs, &mut out);
@@ -1457,6 +1461,45 @@ mod hardware_builders {
         assert_eq!(
             got,
             want.map(|(l, v)| (l.to_owned(), v.to_owned())).to_vec()
+        );
+    }
+
+    /// The engine lists every adapter with its kind; the window shows only the kinds its
+    /// `show_network_*` settings show, virtual adapters hidden by default (tasklens-q4x76.22).
+    #[test]
+    fn info_net_lists_only_shown_kinds() {
+        let mut inv = inventory();
+        let mut list = inv.network.to_vec();
+        list.push(NetworkAdapter {
+            kind: Some(NetKind::Virtual),
+            connection: s("docker0 (Virtual)"),
+            ..NetworkAdapter::default()
+        });
+        inv.network = list.into();
+        let connections = |net_kinds: [bool; 5]| -> Vec<String> {
+            let words = InfoWords::default();
+            let devices = DeviceCatalog::default();
+            let sys = system();
+            let inputs = InfoInputs {
+                inv: &inv,
+                sys: &sys,
+                devices: &devices,
+                words: &words,
+                net_kinds,
+            };
+            let mut out = Vec::new();
+            build_network(&inputs, &mut out);
+            shown(&out)
+                .into_iter()
+                .filter(|(_, l, _)| l == "Connection")
+                .map(|(_, _, v)| v)
+                .collect()
+        };
+        let default = net_kinds_of(&PerformanceSettings::default());
+        assert_eq!(connections(default), ["enp6s0 (Ethernet)"]);
+        assert_eq!(
+            connections([true; 5]),
+            ["enp6s0 (Ethernet)", "docker0 (Virtual)"]
         );
     }
 
@@ -2320,6 +2363,7 @@ mod copy_text {
             sys,
             devices: &devices,
             words: &words,
+            net_kinds: [true; 5],
         };
         InfoSectionId::ALL.map(|id| {
             let build: fn(&InfoInputs, &mut Vec<InfoRow>) = match id {

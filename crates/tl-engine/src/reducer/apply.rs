@@ -26,7 +26,9 @@ use tl_model::snapshot::{
     DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
     ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
-use tl_model::system::{GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, SensorKind};
+use tl_model::system::{
+    GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, NetTotals, SensorKind,
+};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
@@ -210,6 +212,39 @@ fn readable(v: Validity) -> bool {
     matches!(v, Validity::Valid | Validity::Stale)
 }
 
+/// One network total: the sums of the valid download and upload rates, and whether any was valid.
+#[derive(Clone, Copy, Default)]
+struct NetTotal {
+    rx: f64,
+    tx: f64,
+    rx_ok: bool,
+    tx_ok: bool,
+}
+
+impl NetTotal {
+    fn add(&mut self, n: &NetTotals) {
+        if n.rx_bps.validity.is_valid() {
+            self.rx += n.rx_bps.value;
+            self.rx_ok = true;
+        }
+        if n.tx_bps.validity.is_valid() {
+            self.tx += n.tx_bps.value;
+            self.tx_ok = true;
+        }
+    }
+}
+
+/// The slot of `kind` in `NetKind::ALL`.
+fn kind_slot(kind: NetKind) -> usize {
+    match kind {
+        NetKind::Wired => 0,
+        NetKind::Wireless => 1,
+        NetKind::VpnTunnel => 2,
+        NetKind::Virtual => 3,
+        NetKind::Other => 4,
+    }
+}
+
 fn sid(device: DeviceIdx, metric: MetricId) -> SeriesId {
     SeriesId { device, metric }
 }
@@ -239,6 +274,10 @@ fn fallback_name_key(id: &DeviceIdentity) -> (String, String) {
             AggregateKind::Disks => ("Disk".into(), "aggregate:disk".into()),
             AggregateKind::Nets => ("Network".into(), "aggregate:net".into()),
             AggregateKind::Gpus => ("GPU".into(), "aggregate:gpu".into()),
+            AggregateKind::NetsOf(kind) => (
+                format!("Network ({})", kind.key()),
+                format!("aggregate:net:{}", kind.key()),
+            ),
         },
         DeviceIdentity::MemGroup { key } => (key.to_string(), format!("{DEVICE_KEY_PREFIX}{key}")),
     }
@@ -282,17 +321,6 @@ fn metrics_of(kind: DeviceKind) -> &'static [MetricId] {
         DeviceKind::Battery => &[MetricId::BATTERY_PCT, MetricId::BATTERY_POWER],
         DeviceKind::Aggregate => &[],
         DeviceKind::MemGroup => &[MetricId::MEM_GROUP],
-    }
-}
-
-/// Whether `settings` shows interfaces of `kind`. An interface with no kind counts as `Other`.
-fn net_shown(kind: Option<NetKind>, settings: &EngineSettings) -> bool {
-    match kind.unwrap_or(NetKind::Other) {
-        NetKind::Wired => settings.show_network_wired,
-        NetKind::Wireless => settings.show_network_wireless,
-        NetKind::VpnTunnel => settings.show_network_vpn,
-        NetKind::Virtual => settings.show_network_virtual,
-        NetKind::Other => settings.show_network_other,
     }
 }
 
@@ -513,7 +541,7 @@ impl Reducer {
             SourceUpdate::Cpu(s) => self.record_system(s.t_ns, |r| r.apply_cpu(s))?,
             SourceUpdate::Memory(s) => self.record_system(s.t_ns, |r| r.apply_memory(s))?,
             SourceUpdate::Disks(s) => self.record_system(s.t_ns, |r| r.apply_disks(s))?,
-            SourceUpdate::Nets(s) => self.record_system(s.t_ns, |r| r.apply_nets(s, settings))?,
+            SourceUpdate::Nets(s) => self.record_system(s.t_ns, |r| r.apply_nets(s))?,
             SourceUpdate::Sensors(s) => self.record_system(s.t_ns, |r| r.apply_sensors(s))?,
             SourceUpdate::Devices(mut list) => {
                 if list.kinds.contains(DeviceKinds::GPUS) {
@@ -1767,16 +1795,16 @@ impl Reducer {
         Ok(())
     }
 
-    fn apply_nets(
-        &mut self,
-        s: NetSample,
-        settings: &EngineSettings,
-    ) -> Result<(), InvariantViolation> {
+    /// Per-interface series, then the totals: `aggregate:net` over every interface and
+    /// `aggregate:net:<kind>` over the interfaces of each kind present in `s`. An interface
+    /// with no kind counts as `Other`. The engine counts every kind whatever a window shows, so
+    /// two windows and the history all read the same totals (ADR-018, tasklens-q4x76.22).
+    fn apply_nets(&mut self, s: NetSample) -> Result<(), InvariantViolation> {
         let t = s.t_ns;
         let period = self.apply_state.period(SourceId::Net, t, SLOW_NS);
         let mut rows = Vec::with_capacity(s.nets.len());
-        let (mut rx, mut tx) = (0.0f64, 0.0f64);
-        let (mut rx_ok, mut tx_ok) = (false, false);
+        let mut all = NetTotal::default();
+        let mut by_kind = [None::<NetTotal>; NetKind::ALL.len()];
         for (identity, mut n) in s.nets {
             let (idx, present) = self.sample_device(&identity)?;
             n.device = idx;
@@ -1803,27 +1831,52 @@ impl Reducer {
                 n.tx_bps.validity.is_valid(),
                 period,
             );
-            let kind = self.devices.entry(idx).and_then(|e| e.net_kind);
-            if net_shown(kind, settings) {
-                if n.rx_bps.validity.is_valid() {
-                    rx += n.rx_bps.value;
-                    rx_ok = true;
-                }
-                if n.tx_bps.validity.is_valid() {
-                    tx += n.tx_bps.value;
-                    tx_ok = true;
-                }
-            }
+            let kind = self
+                .devices
+                .entry(idx)
+                .and_then(|e| e.net_kind)
+                .unwrap_or(NetKind::Other);
+            all.add(&n);
+            by_kind[kind_slot(kind)]
+                .get_or_insert_with(NetTotal::default)
+                .add(&n);
             rows.push((idx, n));
         }
         let agg = self.fixed_device(&DeviceIdentity::Aggregate(AggregateKind::Nets))?;
-        self.push(agg, MetricId::NET_RX, t, rx as f32, rx_ok, period);
-        self.push(agg, MetricId::NET_TX, t, tx as f32, tx_ok, period);
+        self.push_net_total(agg, t, all, period);
+        for (kind, total) in NetKind::ALL.into_iter().zip(by_kind) {
+            let Some(total) = total else {
+                continue;
+            };
+            let (idx, _) =
+                self.sample_device(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind)))?;
+            self.push_net_total(idx, t, total, period);
+        }
         rows.sort_unstable_by_key(|(idx, _)| *idx);
         self.system_mut(t).nets = rows.into();
         self.sample_ok(SourceId::Net, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
+    }
+
+    /// The download and upload samples of one network total.
+    fn push_net_total(&mut self, idx: DeviceIdx, t: TimeNs, total: NetTotal, period: u64) {
+        self.push(
+            idx,
+            MetricId::NET_RX,
+            t,
+            total.rx as f32,
+            total.rx_ok,
+            period,
+        );
+        self.push(
+            idx,
+            MetricId::NET_TX,
+            t,
+            total.tx as f32,
+            total.tx_ok,
+            period,
+        );
     }
 
     fn apply_sensors(&mut self, s: SensorSample) -> Result<(), InvariantViolation> {
@@ -2303,19 +2356,6 @@ impl Reducer {
         let processes = Arc::clone(&self.components.processes);
         let system = Arc::clone(&self.components.system);
         let devices = Arc::clone(&self.components.devices);
-        let input = TableInput {
-            records: &processes.records,
-            extras: &processes.extras,
-            app_stats: &processes.apps,
-            unit_stats: self.processes.unit_stats(),
-            system: &system,
-            devices: &devices,
-            settings,
-            unit_names: &self.unit_names,
-            unit_users: &self.unit_users,
-            pseudo: Some(&self.apply_state.pseudo),
-            mem_groups: &self.apply_state.mem_groups.keys,
-        };
         let totals = table::totals(
             &system,
             &devices,
@@ -2333,6 +2373,20 @@ impl Reducer {
             .iter_mut()
             .filter(|s| only.is_none_or(|id| s.id() == id))
         {
+            // The table settings are the session's own (ADR-018, tasklens-q4x76.22).
+            let input = TableInput {
+                records: &processes.records,
+                extras: &processes.extras,
+                app_stats: &processes.apps,
+                unit_stats: self.processes.unit_stats(),
+                system: &system,
+                devices: &devices,
+                settings: &session.query.settings,
+                unit_names: &self.unit_names,
+                unit_users: &self.unit_users,
+                pseudo: Some(&self.apply_state.pseudo),
+                mem_groups: &self.apply_state.mem_groups.keys,
+            };
             let mut view = table::build(&input, &session.query);
             view.totals = totals.clone();
             view.header = header;

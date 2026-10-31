@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::actions::DumpMode;
 use crate::command::Tab;
 use crate::demand::DeviceRange;
-use crate::table::{ServiceStateFilter, TableMode, UnitType};
+use crate::devices::NetKind;
+use crate::table::{ServiceStateFilter, TableMode, TableSettings, UnitType};
 
 /// First line of `settings.toml` and `state.toml`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -1953,41 +1954,22 @@ impl Default for UiState {
 
 /// The settings the engine uses, sent with `EngineClient::set_settings`. Derived from
 /// `Settings`, never persisted.
+///
+/// The network unit, `subtree_totals` and `hide_system` travel per session in
+/// [`TableQuery::settings`](crate::table::TableQuery), and the engine counts every network
+/// adapter kind, so two windows on one engine can differ there (ADR-018, tasklens-q4x76.22).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineSettings {
     /// `processes.interval_ms`.
     pub interval_ms: u32,
-    /// `units.network`.
-    pub network: NetworkUnit,
-    /// `units.network_auto_scale`: the process table sorts network rates at the shown step.
-    pub network_auto_scale: bool,
-    pub show_network_wired: bool,
-    pub show_network_wireless: bool,
-    pub show_network_vpn: bool,
-    pub show_network_virtual: bool,
-    pub show_network_other: bool,
     pub history: HistorySettings,
-    /// `processes.subtree_totals`.
-    pub subtree_totals: bool,
-    /// `processes.hide_system`.
-    pub hide_system: bool,
 }
 
 impl From<&Settings> for EngineSettings {
     fn from(s: &Settings) -> Self {
-        let p = &s.performance;
         Self {
             interval_ms: s.processes.interval_ms,
-            network: s.units.network,
-            network_auto_scale: s.units.network_auto_scale,
-            show_network_wired: p.show_network_wired,
-            show_network_wireless: p.show_network_wireless,
-            show_network_vpn: p.show_network_vpn,
-            show_network_virtual: p.show_network_virtual,
-            show_network_other: p.show_network_other,
             history: s.history.clone(),
-            subtree_totals: s.processes.subtree_totals,
-            hide_system: s.processes.hide_system,
         }
     }
 }
@@ -1995,6 +1977,17 @@ impl From<&Settings> for EngineSettings {
 impl Default for EngineSettings {
     fn default() -> Self {
         Self::from(&Settings::default())
+    }
+}
+
+impl From<&Settings> for TableSettings {
+    fn from(s: &Settings) -> Self {
+        Self {
+            network: s.units.network,
+            network_auto_scale: s.units.network_auto_scale,
+            subtree_totals: s.processes.subtree_totals,
+            hide_system: s.processes.hide_system,
+        }
     }
 }
 
@@ -2120,6 +2113,19 @@ impl Settings {
 }
 
 impl PerformanceSettings {
+    /// Whether the window shows and counts interfaces of `kind`
+    /// (`show_network_{wired,wireless,vpn,virtual,other}`). An interface with no kind counts as
+    /// `Other`.
+    pub fn shows_net_kind(&self, kind: Option<NetKind>) -> bool {
+        match kind.unwrap_or(NetKind::Other) {
+            NetKind::Wired => self.show_network_wired,
+            NetKind::Wireless => self.show_network_wireless,
+            NetKind::VpnTunnel => self.show_network_vpn,
+            NetKind::Virtual => self.show_network_virtual,
+            NetKind::Other => self.show_network_other,
+        }
+    }
+
     /// A profile with `overview_top_processes = true` and no `overview` gets the default grid
     /// plus a Top processes band; the old key is then cleared and never written. A UI-PRF-018
     /// row layout converts to the grid once (UI-PRF-056). An invalid part of `overview` is
@@ -2733,16 +2739,38 @@ mod tests {
         let e = EngineSettings::from(&s);
 
         assert_eq!(e.interval_ms, 2000);
-        assert_eq!(e.network, NetworkUnit::Bytes);
         assert_eq!(e.history, HistorySettings::default());
-        assert!(e.show_network_wired);
-        assert!(e.show_network_wireless);
-        assert!(e.show_network_vpn);
-        assert!(!e.show_network_virtual);
-        assert!(e.show_network_other);
-        assert!(!e.subtree_totals);
-        assert!(!e.hide_system);
         assert_eq!(EngineSettings::default().interval_ms, 1000);
+    }
+
+    #[test]
+    fn table_settings_from_settings() {
+        let mut s = Settings::default();
+        let t = TableSettings::from(&s);
+        assert_eq!(t, TableSettings::default());
+        assert_eq!(t.network, NetworkUnit::Bits);
+        assert!(!t.subtree_totals);
+        assert!(!t.hide_system);
+
+        s.units.network = NetworkUnit::Bytes;
+        s.units.network_auto_scale = true;
+        s.processes.subtree_totals = true;
+        s.processes.hide_system = true;
+        let t = TableSettings::from(&s);
+        assert_eq!(t.network, NetworkUnit::Bytes);
+        assert!(t.network_auto_scale);
+        assert!(t.subtree_totals);
+        assert!(t.hide_system);
+    }
+
+    #[test]
+    fn shows_net_kind_follows_the_flags() {
+        let mut p = PerformanceSettings::default();
+        assert!(p.shows_net_kind(Some(NetKind::Wired)));
+        assert!(!p.shows_net_kind(Some(NetKind::Virtual)));
+        assert!(p.shows_net_kind(None), "no kind counts as Other");
+        p.show_network_other = false;
+        assert!(!p.shows_net_kind(None));
     }
 
     /// Loads `text` as `settings.toml` the way load steps 3 and 4 do.

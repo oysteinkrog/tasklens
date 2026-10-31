@@ -432,8 +432,8 @@ impl ProcessesPage {
         }
     }
 
-    /// `processes.mode` sends a query; `appearance`, `units` and `tables` start a new style
-    /// version, which clears the cell text caches.
+    /// `processes` and `units` send a query when the table's settings changed; `appearance`,
+    /// `units` and `tables` start a new style version, which clears the cell text caches.
     fn on_settings(&mut self, cx: &mut Context<Self>) {
         let Some(tl) = cx.try_global::<TlSettings>() else {
             return;
@@ -444,6 +444,8 @@ impl ProcessesPage {
         }
         let old = std::mem::replace(&mut self.section_versions, versions);
         let processes = versions[0] != old[0];
+        // `units` holds the network unit the engine sorts the table by (tasklens-q4x76.22).
+        let query = processes || versions[2] != old[2];
         let restyle = versions[1..] != old[1..];
         let settings = TlSettings::settings(cx).clone();
         let client = &*self.client;
@@ -451,7 +453,7 @@ impl ProcessesPage {
             t.delegate.set_settings(&settings);
             t.set_resize_mode(settings.tables.column_resize);
             t.set_column_separators(settings.tables.column_separators);
-            if processes {
+            if query {
                 t.delegate.query_mut().sync_settings(&settings, client);
             }
             if restyle {

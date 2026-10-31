@@ -174,13 +174,13 @@ fn run(signals: &libc::sigset_t) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The engine's settings: the host settings, and defaults for the keys each window sets for
-/// itself (tasklens-q4x76.22 moves those into the session's table query and demand).
+/// The engine's settings are the host settings. The keys each window sets for itself travel in
+/// the session's table query, and the engine counts every network adapter kind
+/// (tasklens-q4x76.22).
 fn engine_settings(values: &HostSettingsValues) -> EngineSettings {
     EngineSettings {
         interval_ms: values.interval_ms,
         history: values.history.clone(),
-        ..EngineSettings::default()
     }
 }
 

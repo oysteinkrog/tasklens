@@ -449,8 +449,9 @@ fn general_language_options_and_desc(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn units_network_dropdown_sends_engine_settings(cx: &mut TestAppContext) {
+fn units_network_dropdown_stays_in_window(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
+    let before = engine.settings().len();
     let units = page(cx, PageId::Units);
     assert_eq!(
         units.dropdown_labels(SettingKey::UnitsNetwork),
@@ -462,11 +463,8 @@ fn units_network_dropdown_sends_engine_settings(cx: &mut TestAppContext) {
         cx.update(|cx| TlSettings::settings(cx).units.network),
         NetworkUnit::Bytes
     );
-    assert_eq!(
-        engine.settings().last().map(|s| s.network),
-        Some(NetworkUnit::Bytes),
-        "the engine gets the bytes unit"
-    );
+    // A window setting: it travels in the table query (ADR-018, tasklens-q4x76.22).
+    assert_eq!(engine.settings().len(), before, "no engine settings sent");
 }
 
 #[gpui_kit::test]
@@ -630,7 +628,7 @@ fn keep_detached_switch(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn processes_hide_system_engine_settings(cx: &mut TestAppContext) {
+fn processes_hide_system_stays_in_window(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
     cx.update(|cx| {
         TlSettings::set(
@@ -639,15 +637,13 @@ fn processes_hide_system_engine_settings(cx: &mut TestAppContext) {
             SettingValue::Bool(false),
         )
     });
+    let before = engine.settings().len();
     let processes = page(cx, PageId::Processes);
     cx.update(|cx| processes.set_bool(SettingKey::ProcessesHideSystem, true, cx));
     cx.run_until_parked();
     assert!(cx.update(|cx| TlSettings::settings(cx).processes.hide_system));
-    assert_eq!(
-        engine.settings().last().map(|s| s.hide_system),
-        Some(true),
-        "the engine gets hide_system"
-    );
+    // A window setting: it travels in the table query (ADR-018, tasklens-q4x76.22).
+    assert_eq!(engine.settings().len(), before, "no engine settings sent");
 }
 
 #[gpui_kit::test]
@@ -850,18 +846,17 @@ fn performance_no_gpu_text(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn performance_network_switch_engine_settings(cx: &mut TestAppContext) {
+fn performance_network_switch_stays_in_window(cx: &mut TestAppContext) {
     let (engine, _) = setup(cx);
+    let before = engine.settings().len();
     assert!(!cx.update(|cx| TlSettings::settings(cx).performance.show_network_virtual));
     let perf = page(cx, PageId::Performance);
     cx.update(|cx| perf.set_bool(SettingKey::PerformanceShowNetworkVirtual, true, cx));
     cx.run_until_parked();
     assert!(cx.update(|cx| TlSettings::settings(cx).performance.show_network_virtual));
-    assert_eq!(
-        engine.settings().last().map(|s| s.show_network_virtual),
-        Some(true),
-        "the engine gets show_network_virtual"
-    );
+    // The engine counts every kind; the window takes away the kinds it hides
+    // (ADR-018, tasklens-q4x76.22).
+    assert_eq!(engine.settings().len(), before, "no engine settings sent");
 }
 
 #[gpui_kit::test]

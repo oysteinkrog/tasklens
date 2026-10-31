@@ -4,7 +4,8 @@
 //! (tasklens-o55.54). The busiest interface's name is on the title line.
 //!
 //! The rates and totals sum the present interfaces other than `lo` whose class the
-//! `show_network_*` settings show, the set the engine's aggregate counts. The box formats its
+//! `show_network_*` settings show. The charts and peaks read the engine's total of every class
+//! minus the per-class totals of the hidden classes (`NetTotal`, tasklens-q4x76.22). The box formats its
 //! text only when the inputs' hash changes and notifies only then. Pointer movement never
 //! notifies.
 //!
@@ -21,6 +22,7 @@ use std::cell::Cell;
 use std::cell::Cell as StdCell;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
@@ -30,7 +32,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
-use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
+use tl_model::devices::{DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::snapshot::Snapshot;
@@ -59,6 +61,7 @@ use crate::chart::{
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::net_totals::NetTotal;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::derived::blend_over;
@@ -250,32 +253,63 @@ fn section_versions(cx: &gpui_kit::App) -> [u64; 4] {
     [a, b, c, TlSettings::get(cx).version(Section::Units)]
 }
 
-/// The aggregate net device's idx in `catalog`, `DeviceIdx(u16::MAX)` when it has none.
-pub(super) fn aggregate(catalog: &DeviceCatalog) -> DeviceIdx {
-    catalog
-        .find(&DeviceIdentity::Aggregate(AggregateKind::Nets))
-        .map_or(DeviceIdx(u16::MAX), |e| e.idx)
+/// The window's network total in `catalog` for the classes `s` shows.
+fn net_total(catalog: &DeviceCatalog, s: &Settings) -> NetTotal {
+    NetTotal::of(catalog, &s.performance)
+}
+
+/// A chart's device and the per-class totals it takes away: the window's total, or one
+/// interface with nothing taken away.
+#[derive(Clone, Copy)]
+struct Drawn<'a> {
+    device: DeviceIdx,
+    minus: &'a [DeviceIdx],
+}
+
+impl<'a> Drawn<'a> {
+    /// The window's total; `DeviceIdx(u16::MAX)` when the catalog has none yet.
+    fn total(t: &'a NetTotal) -> Self {
+        Self {
+            device: t.total.unwrap_or(DeviceIdx(u16::MAX)),
+            minus: &t.hidden,
+        }
+    }
+
+    fn interface(device: DeviceIdx) -> Self {
+        Self { device, minus: &[] }
+    }
+
+    fn series(self, metric: MetricId) -> (SeriesId, Arc<[SeriesId]>) {
+        let id = SeriesId {
+            device: self.device,
+            metric,
+        };
+        let minus = self
+            .minus
+            .iter()
+            .map(|&device| SeriesId { device, metric })
+            .collect();
+        (id, minus)
+    }
 }
 
 /// One direction's series: download filled, upload as a lighter line.
-fn direction_series(device: DeviceIdx, upload: bool, theme: &TlTheme) -> ChartSeries {
+fn direction_series(drawn: Drawn<'_>, upload: bool, theme: &TlTheme) -> ChartSeries {
     let g = &theme.graph;
     if upload {
+        let (id, minus) = drawn.series(MetricId::NET_TX);
         ChartSeries {
-            id: SeriesId {
-                device,
-                metric: MetricId::NET_TX,
-            },
+            id,
+            minus,
             fill: None,
             line: blend_over(g.net_line, white().opacity(UPLOAD_TINT)),
             ..ChartSeries::default()
         }
     } else {
+        let (id, minus) = drawn.series(MetricId::NET_RX);
         ChartSeries {
-            id: SeriesId {
-                device,
-                metric: MetricId::NET_RX,
-            },
+            id,
+            minus,
             fill: Some(g.net_fill),
             line: g.net_line,
             ..ChartSeries::default()
@@ -306,26 +340,21 @@ fn spec_of(series: SmallVec<[ChartSeries; 4]>, unit: NetworkUnit, s: &ChartSetti
 
 /// One direction's chart.
 fn chart_spec(
-    device: DeviceIdx,
+    drawn: Drawn<'_>,
     upload: bool,
     unit: NetworkUnit,
     s: &ChartSettings,
     theme: &TlTheme,
 ) -> ChartSpec {
-    spec_of(smallvec![direction_series(device, upload, theme)], unit, s)
+    spec_of(smallvec![direction_series(drawn, upload, theme)], unit, s)
 }
 
 /// Download and upload as two lines in one chart, for `combined` and the adapter cells.
-fn pair_spec(
-    device: DeviceIdx,
-    unit: NetworkUnit,
-    s: &ChartSettings,
-    theme: &TlTheme,
-) -> ChartSpec {
+fn pair_spec(drawn: Drawn<'_>, unit: NetworkUnit, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     spec_of(
         smallvec![
-            direction_series(device, false, theme),
-            direction_series(device, true, theme)
+            direction_series(drawn, false, theme),
+            direction_series(drawn, true, theme)
         ],
         unit,
         s,
@@ -429,9 +458,11 @@ fn adapter_name(snap: &Snapshot, idx: DeviceIdx) -> Option<&str> {
     })
 }
 
-/// The highest valid sample of `id` within the last [`PEAK_WINDOW_NS`] before its newest sample.
-fn peak(snap: &Snapshot, id: SeriesId) -> Option<f32> {
-    let samples = &snap.series.get(id)?.samples;
+/// The highest valid sample of the window's total of `metric` within the last
+/// [`PEAK_WINDOW_NS`] before its newest sample.
+fn peak(snap: &Snapshot, total: &NetTotal, metric: MetricId) -> Option<f32> {
+    let view = total.view(snap, metric)?;
+    let samples = &view.samples;
     let from = samples.last()?.t_ns.saturating_sub(PEAK_WINDOW_NS);
     samples
         .iter()
@@ -440,9 +471,17 @@ fn peak(snap: &Snapshot, id: SeriesId) -> Option<f32> {
         .reduce(f32::max)
 }
 
-/// The version of series `id`, 0 when it has none.
-fn series_version(snap: &Snapshot, id: SeriesId) -> u64 {
-    snap.series.get(id).map_or(0, |v| v.version)
+/// The versions of the window's total of `metric` and of the per-class totals it takes away,
+/// mixed into one number; 0 for an absent series.
+fn total_version(snap: &Snapshot, total: &NetTotal, metric: MetricId) -> u64 {
+    let version = |device: Option<DeviceIdx>| {
+        device
+            .and_then(|device| snap.series.get(SeriesId { device, metric }))
+            .map_or(0, |v| v.version)
+    };
+    total.hidden.iter().fold(version(total.total), |acc, &d| {
+        acc.wrapping_mul(0x0100_0000_01b3) ^ version(Some(d))
+    })
 }
 
 /// One `adapter_charts` cell: an interface, its name, its rates and its chart.
@@ -499,7 +538,8 @@ pub struct NetBox {
     title: SharedString,
     down_word: SharedString,
     up_word: SharedString,
-    aggregate: DeviceIdx,
+    /// The engine's total and the hidden classes' totals the charts and peaks take away.
+    total: NetTotal,
     /// The first visible network card, which the title opens (crw.44).
     target: Option<DeviceKey>,
     catalog_version: u64,
@@ -532,16 +572,16 @@ impl NetBox {
         let settings = ChartSettings::read(cx);
         let net = NetSettings::from(TlSettings::settings(cx));
         let snap = box_snapshot(hub, cx);
-        let aggregate = aggregate(&snap.devices);
+        let total = net_total(&snap.devices, TlSettings::settings(cx));
         let range = tr(cx, KEY_RANGE);
         let chart = |upload: bool, cx: &mut Context<Self>| {
-            let spec = chart_spec(aggregate, upload, net.unit, &settings, &theme);
+            let spec = chart_spec(Drawn::total(&total), upload, net.unit, &settings, &theme);
             let labels = chart_labels(range.clone());
             box_chart(spec, labels, hub, cx)
         };
         let (down, up) = (chart(false, cx), chart(true, cx));
         let combined = box_chart(
-            pair_spec(aggregate, net.unit, &settings, &theme),
+            pair_spec(Drawn::total(&total), net.unit, &settings, &theme),
             chart_labels(range.clone()),
             hub,
             cx,
@@ -586,7 +626,7 @@ impl NetBox {
             title: tr(cx, KEY_TITLE),
             down_word: tr(cx, KEY_DOWNLOAD),
             up_word: tr(cx, KEY_UPLOAD),
-            aggregate,
+            total,
             target: None,
             catalog_version: snap.devices.version,
             text_bits: 0,
@@ -758,17 +798,16 @@ impl NetBox {
     /// Reads the 60 s peaks when an aggregate series changed, or always with `force`. True when
     /// a peak value changed.
     fn sync_peaks(&mut self, snap: &Snapshot, force: bool) -> bool {
-        let id = |metric| SeriesId {
-            device: self.aggregate,
-            metric,
-        };
-        let (rx, tx) = (id(MetricId::NET_RX), id(MetricId::NET_TX));
-        let versions = [series_version(snap, rx), series_version(snap, tx)];
+        let (rx, tx) = (MetricId::NET_RX, MetricId::NET_TX);
+        let versions = [
+            total_version(snap, &self.total, rx),
+            total_version(snap, &self.total, tx),
+        ];
         if !force && versions == self.peak_versions {
             return false;
         }
         self.peak_versions = versions;
-        let (down, up) = (peak(snap, rx), peak(snap, tx));
+        let (down, up) = (peak(snap, &self.total, rx), peak(snap, &self.total, tx));
         let changed = down.map(f32::to_bits) != self.down_peak.map(f32::to_bits)
             || up.map(f32::to_bits) != self.up_peak.map(f32::to_bits);
         self.down_peak = down;
@@ -818,7 +857,12 @@ impl NetBox {
                 }
                 None => {
                     changed = true;
-                    let spec = pair_spec(*idx, self.net.unit, &self.settings, &theme);
+                    let spec = pair_spec(
+                        Drawn::interface(*idx),
+                        self.net.unit,
+                        &self.settings,
+                        &theme,
+                    );
                     AdapterCell {
                         idx: *idx,
                         name,
@@ -868,10 +912,11 @@ impl NetBox {
         let snap = box_snapshot(&hub, cx);
         if devices && snap.devices.version != self.catalog_version {
             self.catalog_version = snap.devices.version;
-            let aggregate = aggregate(&snap.devices);
-            if aggregate != self.aggregate {
-                self.aggregate = aggregate;
+            let total = net_total(&snap.devices, TlSettings::settings(cx));
+            if total != self.total {
+                self.total = total;
                 self.rebuild_specs(cx);
+                self.sync_peaks(&snap, true);
             }
         }
         let peaks = mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
@@ -994,13 +1039,19 @@ impl NetBox {
         if settings == self.settings && net == self.net {
             return;
         }
-        let respec = settings != self.settings || net.unit != self.net.unit;
+        let snap = box_snapshot(&self.hub, cx);
+        let total = net_total(&snap.devices, TlSettings::settings(cx));
+        let new_total = total != self.total;
+        let respec = settings != self.settings || net.unit != self.net.unit || new_total;
         self.settings = settings;
         self.net = net;
+        self.total = total;
         if respec {
             self.rebuild_specs(cx);
         }
-        let snap = box_snapshot(&self.hub, cx);
+        if new_total {
+            self.sync_peaks(&snap, true);
+        }
         let text = self.sync_text(&snap, false);
         if self.sync_adapters(&snap, cx) || text {
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1048,15 +1099,25 @@ impl NetBox {
 
     fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        let pair = pair_spec(self.aggregate, self.net.unit, &self.settings, &theme);
+        let pair = pair_spec(
+            Drawn::total(&self.total),
+            self.net.unit,
+            &self.settings,
+            &theme,
+        );
         self.combined.update(cx, |v, cx| v.set_spec(pair, cx));
         for a in &self.adapters {
-            let spec = pair_spec(a.idx, self.net.unit, &self.settings, &theme);
+            let spec = pair_spec(
+                Drawn::interface(a.idx),
+                self.net.unit,
+                &self.settings,
+                &theme,
+            );
             a.chart.update(cx, |v, cx| v.set_spec(spec, cx));
         }
         for (view, upload) in [(self.down.clone(), false), (self.up.clone(), true)] {
             let spec = chart_spec(
-                self.aggregate,
+                Drawn::total(&self.total),
                 upload,
                 self.net.unit,
                 &self.settings,

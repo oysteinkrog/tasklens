@@ -22,6 +22,7 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, DeviceKind};
 use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
 use tl_model::validity::Validity;
 use unicode_segmentation::UnicodeSegmentation as _;
@@ -44,8 +45,9 @@ use crate::components::tooltip::TlTooltip;
 use crate::components::validity::{GlyphContent, glyph_parts};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
+use crate::net_totals::NetTotal;
 use crate::pages::performance::DeviceKey;
-use crate::settings_global::TlSettings;
+use crate::settings_global::{Section, TlSettings};
 use crate::text::ellipsis::ELLIPSIS;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::TNUM;
@@ -114,6 +116,11 @@ pub struct MinigraphCard {
     state: CardState,
     /// The series device, `None` when the catalog has no device for the source.
     device: Option<DeviceIdx>,
+    /// Network cards: the per-class totals of the classes the window hides, which the chart and
+    /// the value take away from the engine's total (tasklens-q4x76.22). Empty otherwise.
+    net_minus: SmallVec<[DeviceIdx; 5]>,
+    /// The `performance` settings version `net_minus` was read at.
+    perf_version: u64,
     hover: bool,
     /// The pointer is on the CPU card's label row, which blocks the card under it.
     row_hover: bool,
@@ -149,6 +156,7 @@ impl MinigraphCard {
         cx: &mut Context<Self>,
     ) -> Self {
         let device = device_for(&entry.source, catalog, sidebar_gpu_order);
+        let net_minus = net_minus_for(&entry.source, catalog, cx);
         let theme = current(cx).clone();
         let smooth = cx.has_global::<TlSettings>() && TlSettings::settings(cx).motion.smooth_graphs;
         let snap = std::sync::Arc::clone(hub.read(cx).current());
@@ -159,6 +167,7 @@ impl MinigraphCard {
             None => chart_spec_for(
                 &entry.source,
                 device.unwrap_or(DeviceIdx(u16::MAX)),
+                &net_minus,
                 &snap.system,
                 entry.color,
                 entry.range_s,
@@ -182,6 +191,8 @@ impl MinigraphCard {
             tip: None,
             state: CardState::Live,
             device,
+            net_minus,
+            perf_version: perf_version(cx),
             hover: false,
             row_hover: false,
             dragging: false,
@@ -450,10 +461,24 @@ impl MinigraphCard {
         // first sample). A card built without one binds it here.
         if self.device.is_none() && ev.mask.contains(ComponentMask::DEVICES) {
             self.bind_device(&hub, cx);
+        } else if matches!(self.entry.source, MinigraphSource::Network)
+            && (ev.mask.contains(ComponentMask::DEVICES) || perf_version(cx) != self.perf_version)
+        {
+            // A hidden class's total entered the catalog, or the classes shown changed.
+            self.perf_version = perf_version(cx);
+            let snap = std::sync::Arc::clone(hub.read(cx).current());
+            if net_minus_for(&self.entry.source, &snap.devices, cx) != self.net_minus {
+                self.bind_device(&hub, cx);
+            }
         }
         let series = ev.mask.contains(ComponentMask::SERIES) && {
             let changed = ChangedRuns::new(&ev.changed_series);
             self.value_series().iter().any(|id| changed.contains(*id))
+                || self.net_minus.iter().any(|&device| {
+                    [MetricId::NET_RX, MetricId::NET_TX]
+                        .into_iter()
+                        .any(|metric| changed.contains(SeriesId { device, metric }))
+                })
         };
         let totals = ev.mask.contains(ComponentMask::SYSTEM)
             && matches!(
@@ -475,11 +500,13 @@ impl MinigraphCard {
             return;
         };
         self.device = Some(device);
+        self.net_minus = net_minus_for(&self.entry.source, &snap.devices, cx);
         let theme = current(cx).clone();
         let smooth = cx.has_global::<TlSettings>() && TlSettings::settings(cx).motion.smooth_graphs;
         let spec = chart_spec_for(
             &self.entry.source,
             device,
+            &self.net_minus,
             &snap.system,
             self.entry.color,
             self.entry.range_s,
@@ -579,7 +606,15 @@ impl MinigraphCard {
     /// Re-formats the value when its inputs changed and notifies only then.
     fn update_value(&mut self, snap: &Snapshot, first: bool, cx: &mut Context<Self>) {
         let ids = self.value_series();
-        let newest: SmallVec<[Option<f32>; 2]> = ids.iter().map(|id| newest(snap, *id)).collect();
+        let newest: SmallVec<[Option<f32>; 2]> = if self.net_minus.is_empty() {
+            ids.iter().map(|id| newest(snap, *id)).collect()
+        } else {
+            let total = NetTotal {
+                total: self.device,
+                hidden: self.net_minus.clone(),
+            };
+            ids.iter().map(|id| total.newest(snap, id.metric)).collect()
+        };
         let unit = NetFormat::of(cx);
         let total = self.total(&snap.system);
         let mut h = FxHasher::default();
@@ -928,9 +963,11 @@ pub fn resolve_colors(
 }
 
 /// The chart of a system card (UI-PRF-041 series table).
+#[allow(clippy::too_many_arguments)]
 pub fn chart_spec_for(
     source: &MinigraphSource,
     idx: DeviceIdx,
+    net_minus: &[DeviceIdx],
     totals: &SystemSnapshot,
     color: GraphColor,
     range_s: u16,
@@ -947,6 +984,13 @@ pub fn chart_spec_for(
         fill,
         line,
         ..ChartSeries::default()
+    };
+    // Network: the hidden classes' totals, taken away from the engine's total.
+    let minus = |metric| -> std::sync::Arc<[SeriesId]> {
+        net_minus
+            .iter()
+            .map(|&device| SeriesId { device, metric })
+            .collect()
     };
     let percent = YScale::Fixed {
         min: 0.0,
@@ -972,9 +1016,13 @@ pub fn chart_spec_for(
         // The aggregate has no link speed, so the dynamic rule of the net page applies.
         MinigraphSource::Network => (
             smallvec![
-                main(MetricId::NET_RX),
+                ChartSeries {
+                    minus: minus(MetricId::NET_RX),
+                    ..main(MetricId::NET_RX)
+                },
                 ChartSeries {
                     id: id(MetricId::NET_TX),
+                    minus: minus(MetricId::NET_TX),
                     line,
                     dashed: true,
                     ..ChartSeries::default()
@@ -1156,6 +1204,32 @@ pub fn cut_middle(
     out.push(ELLIPSIS);
     out.push_str(&text[tail..]);
     out.into()
+}
+
+/// The version of the `performance` settings section, 0 without settings.
+fn perf_version(cx: &App) -> u64 {
+    if cx.has_global::<TlSettings>() {
+        TlSettings::get(cx).version(Section::Performance)
+    } else {
+        0
+    }
+}
+
+/// Network cards: the per-class totals of the classes the window hides that `catalog` has.
+/// Empty for the other sources.
+fn net_minus_for(
+    source: &MinigraphSource,
+    catalog: &DeviceCatalog,
+    cx: &App,
+) -> SmallVec<[DeviceIdx; 5]> {
+    if !matches!(source, MinigraphSource::Network) {
+        return SmallVec::new();
+    }
+    if cx.has_global::<TlSettings>() {
+        NetTotal::of(catalog, &TlSettings::settings(cx).performance).hidden
+    } else {
+        NetTotal::of(catalog, &PerformanceSettings::default()).hidden
+    }
 }
 
 /// The newest valid sample of `id`.

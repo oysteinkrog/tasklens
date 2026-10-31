@@ -984,7 +984,7 @@ mod tests {
     use crate::system::CpuSet;
     use crate::table::{
         Manager, ServiceFilter, StartupRef, StartupSource, SysColumnId, SysNodeId, SysSortSpec,
-        SysTable, SysTableQuery, TableQuery, UnitRef,
+        SysTable, SysTableQuery, TableQuery, TableSettings, UnitRef,
     };
 
     fn key(pid: u32) -> ProcessKey {
@@ -1044,6 +1044,12 @@ mod tests {
                     NodeId::Unit(unit("a.service")),
                 ]),
                 mem_group: Some(Arc::from("exe:claude")),
+                settings: TableSettings {
+                    network: crate::settings::NetworkUnit::Bytes,
+                    network_auto_scale: true,
+                    subtree_totals: true,
+                    hide_system: true,
+                },
                 ..TableQuery::default()
             }),
             Command::SetSysTableQuery(SysTableQuery {

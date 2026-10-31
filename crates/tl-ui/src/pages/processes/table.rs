@@ -18,7 +18,7 @@ use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId};
 use tl_model::process::GroupKind;
 use tl_model::settings::{Settings, SortState, UiState};
-use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery};
+use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery, TableSettings};
 use tracing::{debug, warn};
 
 use super::cells::ProcColumnKind;
@@ -63,6 +63,9 @@ pub struct ProcessQuery {
     filter: Arc<str>,
     /// `processes.filter_include_children`.
     include_children: bool,
+    /// The window settings the engine builds this window's table with (ADR-018,
+    /// tasklens-q4x76.22).
+    settings: TableSettings,
     /// Memory group key from a chart legend click (D-036). Session only: `save` ignores it.
     mem_group: Option<Arc<str>>,
     /// Session state per identity.
@@ -113,6 +116,7 @@ impl ProcessQuery {
             sort,
             filter: Arc::from(""),
             include_children: settings.processes.filter_include_children,
+            settings: TableSettings::from(settings),
             mem_group: None,
             expanded,
             collapsed_by_user,
@@ -167,6 +171,7 @@ impl ProcessQuery {
             expanded: self.expanded.iter().cloned().collect(),
             include_children: self.include_children,
             mem_group: self.mem_group.clone(),
+            settings: self.settings,
         }
     }
 
@@ -215,15 +220,21 @@ impl ProcessQuery {
         self.mode = m;
     }
 
-    /// Follows `processes.mode` and `processes.filter_include_children`. Sends one query and
-    /// returns true when either changed.
+    /// Follows `processes.mode`, `processes.filter_include_children` and the table settings
+    /// (network unit, `subtree_totals`, `hide_system`). Sends one query and returns true when
+    /// one of them changed.
     pub fn sync_settings(&mut self, settings: &Settings, client: &dyn EngineClient) -> bool {
         let p = &settings.processes;
-        if p.mode == self.mode && p.filter_include_children == self.include_children {
+        let table = TableSettings::from(settings);
+        if p.mode == self.mode
+            && p.filter_include_children == self.include_children
+            && table == self.settings
+        {
             return false;
         }
         self.set_mode(p.mode);
         self.include_children = p.filter_include_children;
+        self.settings = table;
         self.bump_and_send(client);
         true
     }

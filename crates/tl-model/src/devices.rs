@@ -59,13 +59,20 @@ pub enum DeviceIdentity {
     },
 }
 
-/// Aggregate devices, created at session start with `present = true`. Persistent keys
-/// `aggregate:disk`, `aggregate:net`, `aggregate:gpu` (PERF-005, R-154).
+/// Aggregate devices. `Disks`, `Nets` and `Gpus` are created at session start with
+/// `present = true`, with persistent keys `aggregate:disk`, `aggregate:net` and `aggregate:gpu`
+/// (PERF-005, R-154).
+///
+/// `Nets` counts the interfaces of every [`NetKind`]. `NetsOf(kind)` counts only the interfaces
+/// of `kind`, under the key `aggregate:net:<kind>` ([`NetKind::key`]); the reducer creates it
+/// with the first sample that has an interface of that kind (ADR-018, tasklens-q4x76.22). A
+/// window that hides some kinds shows `Nets` minus the `NetsOf` series of the hidden kinds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum AggregateKind {
     Disks,
     Nets,
     Gpus,
+    NetsOf(NetKind),
 }
 
 /// Device class without the identity data, so pages can filter the catalog.
@@ -159,7 +166,8 @@ impl DeviceCatalog {
 /// - `tailscale0` is `VpnTunnel` and shown.
 /// - `docker0`, `veth*`, `br-*`, `virbr*` and `vnet*` are `Virtual` and hidden by default.
 /// - Settings `performance.show_network_{wired,wireless,vpn,virtual,other}` control each
-///   class. Only `virtual` defaults to false.
+///   class in the window. Only `virtual` defaults to false. The engine counts every class
+///   (ADR-018): the window filters and sums by the classes it shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum NetKind {
     Wired,
@@ -167,6 +175,27 @@ pub enum NetKind {
     VpnTunnel,
     Virtual,
     Other,
+}
+
+impl NetKind {
+    pub const ALL: [NetKind; 5] = [
+        NetKind::Wired,
+        NetKind::Wireless,
+        NetKind::VpnTunnel,
+        NetKind::Virtual,
+        NetKind::Other,
+    ];
+
+    /// The last part of the per-kind aggregate's persistent key `aggregate:net:<key>`.
+    pub fn key(self) -> &'static str {
+        match self {
+            NetKind::Wired => "wired",
+            NetKind::Wireless => "wireless",
+            NetKind::VpnTunnel => "vpn",
+            NetKind::Virtual => "virtual",
+            NetKind::Other => "other",
+        }
+    }
 }
 
 #[cfg(test)]

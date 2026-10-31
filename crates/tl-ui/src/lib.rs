@@ -12,6 +12,7 @@ pub mod focus;
 pub mod helper_flow;
 pub mod hub;
 pub mod i18n;
+pub mod net_totals;
 pub mod pages;
 pub mod request_ends;
 pub mod settings_global;

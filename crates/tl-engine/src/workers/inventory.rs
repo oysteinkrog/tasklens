@@ -62,9 +62,7 @@ use tl_collect::sysroot::{read_file, read_trimmed, read_u64};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::command::DeviceCommand;
 use tl_model::demand::CpuDemand;
-use tl_model::devices::NetKind;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     BoardInfo, DiskDrive, DisplayConnector, DisplayMode, FirmwareInfo, FirmwareType,
     GraphicsAdapter, InvField, InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo,
@@ -162,14 +160,12 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
     } else {
         None
     };
-    let settings = io.settings.clone();
     let proc_root = root.proc.clone();
     let scan = move |bus: SystemBus| {
         let raw = read_inventory(&paths);
         let mut snap = from_raw(&raw, &root);
         let outputs = if host { kscreen::read(&env) } else { None };
-        let settings = settings.borrow_and_clone();
-        add_devices(&mut snap, &raw, &root, &settings, host, outputs.as_deref());
+        add_devices(&mut snap, &raw, &root, host, outputs.as_deref());
         let version = shell.get_or_init(|| desktop_shell_version(&env)).clone();
         let user = user_name(&paths.etc.join("passwd"));
         snap.system = build_system(&env, &bus, &raw.kernel, user, version);
@@ -406,29 +402,12 @@ async fn send(cx: &Cx, io: &WorkerIo, update: SourceUpdate) -> Option<Outcome<()
     }
 }
 
-/// Blocking part of one scan with the default settings. A function of the files under `paths`,
-/// plus `uname` and the page size. On the host root it also calls `statvfs` and runs one
-/// address dump.
+/// Blocking part of one scan. A function of the files under `paths`, plus `uname` and the page
+/// size. On the host root it also calls `statvfs` and runs one address dump.
 pub fn scan_files(paths: &InventoryPaths, root: &SysRoot) -> InventorySnapshot {
-    scan_with(paths, root, &EngineSettings::default())
-}
-
-/// `scan_files` with `settings` choosing the visible network adapters.
-pub fn scan_with(
-    paths: &InventoryPaths,
-    root: &SysRoot,
-    settings: &EngineSettings,
-) -> InventorySnapshot {
     let raw = read_inventory(paths);
     let mut snap = from_raw(&raw, root);
-    add_devices(
-        &mut snap,
-        &raw,
-        root,
-        settings,
-        *root == SysRoot::host(),
-        None,
-    );
+    add_devices(&mut snap, &raw, root, *root == SysRoot::host(), None);
     snap
 }
 
@@ -456,7 +435,6 @@ pub fn add_devices(
     snap: &mut InventorySnapshot,
     raw: &InventoryRaw,
     root: &SysRoot,
-    settings: &EngineSettings,
     host: bool,
     kscreen: Option<&[KScreenOutput]>,
 ) {
@@ -466,7 +444,7 @@ pub fn add_devices(
     if host {
         host_addrs(&mut addrs);
     }
-    snap.network = network(root, settings, &addrs);
+    snap.network = network(root, &addrs);
 }
 
 /// PERF-100: one row per disk from `enumerate_disks`. No disk list gives no rows.
@@ -753,9 +731,9 @@ fn host_addrs(out: &mut Vec<IfAddr>) {
     }
 }
 
-/// PERF-104: one adapter per interface whose kind `settings` shows. No interface list gives no
-/// rows.
-fn network(root: &SysRoot, settings: &EngineSettings, addrs: &[IfAddr]) -> Arc<[NetworkAdapter]> {
+/// PERF-104: one adapter per interface, every kind, with its kind. The window shows those whose
+/// kind its settings show (ADR-018, tasklens-q4x76.22). No interface list gives no rows.
+fn network(root: &SysRoot, addrs: &[IfAddr]) -> Arc<[NetworkAdapter]> {
     let mut ifaces = Vec::new();
     if netif::enumerate(root, &mut ifaces).is_err() {
         return Arc::from([]);
@@ -764,11 +742,8 @@ fn network(root: &SysRoot, settings: &EngineSettings, addrs: &[IfAddr]) -> Arc<[
     let mut props = UdevProps::default();
     ifaces
         .iter()
-        .filter_map(|iface| {
+        .map(|iface| {
             let (kind, label) = net_kind(iface.kind);
-            if !kind_shown(kind, settings) {
-                return None;
-            }
             let details = netif::read_details(root, &iface.name, &mut buf);
             let path = root.run_path(&format!("udev/data/{}", net_entry(iface.ifindex)));
             let adapter_name = match read_udev_props(&path, &NET_UDEV_KEYS, &mut props) {
@@ -779,8 +754,9 @@ fn network(root: &SysRoot, settings: &EngineSettings, addrs: &[IfAddr]) -> Arc<[
                 Validity::Valid => opt(details.mac.value),
                 validity => with(validity),
             };
-            Some(NetworkAdapter {
+            NetworkAdapter {
                 device: None,
+                kind: Some(kind),
                 connection: valid(Arc::from(format!("{} ({label})", iface.name))),
                 adapter_name,
                 driver: opt(details.driver),
@@ -790,20 +766,9 @@ fn network(root: &SysRoot, settings: &EngineSettings, addrs: &[IfAddr]) -> Arc<[
                 },
                 ip_addresses: adapter_addrs(addrs, iface.ifindex),
                 mac,
-            })
+            }
         })
         .collect()
-}
-
-/// The `EngineSettings.show_network_*` flag of `kind`.
-fn kind_shown(kind: NetKind, s: &EngineSettings) -> bool {
-    match kind {
-        NetKind::Wired => s.show_network_wired,
-        NetKind::Wireless => s.show_network_wireless,
-        NetKind::VpnTunnel => s.show_network_vpn,
-        NetKind::Virtual => s.show_network_virtual,
-        NetKind::Other => s.show_network_other,
-    }
 }
 
 /// "<vendor> <model>" from the udev hwdb, either alone when the other is missing (E12-014).

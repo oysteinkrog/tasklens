@@ -3375,6 +3375,7 @@ fn inventory_displays_connected_only() {
 
 #[test]
 fn inventory_network_adapters_visibility() {
+    // The engine lists every kind with its kind; the window filters (tasklens-q4x76.22).
     let dir = fixture_copy("netif-kinds", None);
     let snap = inventory_scan(&dir);
     let names: Vec<&str> = snap
@@ -3382,10 +3383,20 @@ fn inventory_network_adapters_visibility() {
         .iter()
         .map(|a| a.connection.value.split(' ').next().unwrap_or(""))
         .collect();
-    for hidden in ["docker0", "veth12ab", "virbr0", "br0", "lo"] {
-        assert!(!names.contains(&hidden), "{hidden} listed: {names:?}");
+    assert!(!names.contains(&"lo"), "lo listed: {names:?}");
+    for listed in ["docker0", "veth12ab", "virbr0", "br0", "wlan0", "eth0"] {
+        assert!(names.contains(&listed), "{listed} missing: {names:?}");
     }
-    assert!(names.contains(&"wlan0"), "{names:?}");
+    let kind_of = |name: &str| {
+        snap.network
+            .iter()
+            .find(|a| a.connection.value.split(' ').next() == Some(name))
+            .and_then(|a| a.kind)
+    };
+    assert_eq!(kind_of("eth0"), Some(NetKind::Wired));
+    assert_eq!(kind_of("wlan0"), Some(NetKind::Wireless));
+    assert_eq!(kind_of("docker0"), Some(NetKind::Virtual));
+    assert_eq!(kind_of("veth12ab"), Some(NetKind::Virtual));
     let eth0 = snap
         .network
         .iter()
@@ -3398,16 +3409,6 @@ fn inventory_network_adapters_visibility() {
     // A fixture root runs no address dump.
     assert!(eth0.ip_addresses.is_empty());
     assert!(snap.network.iter().all(|a| a.device.is_none()));
-
-    let all = EngineSettings {
-        show_network_virtual: true,
-        ..EngineSettings::default()
-    };
-    let snap = tl_engine::workers::inventory::scan_with(
-        &InventoryPaths::under(&dir),
-        &SysRoot::at(&dir),
-        &all,
-    );
     assert!(
         snap.network
             .iter()
@@ -4057,14 +4058,7 @@ fn displays_with(dir: &Path, outputs: Option<&[KScreenOutput]>) -> Vec<DisplayMo
     let root = SysRoot::at(dir);
     let raw = read_inventory(&InventoryPaths::under(dir));
     let mut snap = from_raw(&raw, &root);
-    add_devices(
-        &mut snap,
-        &raw,
-        &root,
-        &EngineSettings::default(),
-        false,
-        outputs,
-    );
+    add_devices(&mut snap, &raw, &root, false, outputs);
     assert_eq!(snap.graphics.len(), 1);
     snap.graphics[0].displays.to_vec()
 }

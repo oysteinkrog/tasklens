@@ -42,7 +42,7 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop};
 use tl_model::journal::JournalAccess;
-use tl_model::settings::{OverviewRange, TimelineClick};
+use tl_model::settings::{OverviewRange, PerformanceSettings, TimelineClick};
 use tl_model::snapshot::{
     DeviceTimeline, HistPoint, TimelineBand, TimelineEvent, TimelineEventKind,
 };
@@ -56,6 +56,7 @@ use crate::components::toast::ToastKind;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::net_totals;
 use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_xs;
@@ -532,10 +533,28 @@ struct HistoryAsk {
     window: AnyWindowHandle,
 }
 
+/// The Network band of `data` for the window's `show_network_*` settings; empty without data.
+fn shown_net_band(data: Option<&Arc<DeviceTimeline>>, cx: &App) -> Arc<[HistPoint]> {
+    let Some(d) = data else {
+        return Arc::from([]);
+    };
+    let band = TimelineBand::ALL
+        .iter()
+        .position(|b| *b == TimelineBand::Network)
+        .unwrap_or(3);
+    if cx.has_global::<TlSettings>() {
+        net_totals::timeline_band(d, band, &TlSettings::settings(cx).performance)
+    } else {
+        net_totals::timeline_band(d, band, &PerformanceSettings::default())
+    }
+}
+
 /// The 24-hour timeline box.
 pub struct TimelineBox {
     hub: Entity<SnapshotHub>,
     data: Option<Arc<DeviceTimeline>>,
+    /// The Network band without the interface classes the window hides (tasklens-q4x76.22).
+    net_band: Arc<[HistPoint]>,
     /// The memory total for the Memory band, bytes.
     mem_total: f32,
     words: Words,
@@ -572,9 +591,11 @@ pub struct TimelineBox {
 impl TimelineBox {
     pub fn new(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
         let snap = Arc::clone(hub.read(cx).current());
+        let data = snap.device_history.timeline.clone();
         Self {
             hub: hub.clone(),
-            data: snap.device_history.timeline.clone(),
+            net_band: shown_net_band(data.as_ref(), cx),
+            data,
             mem_total: snap.system.memory.total as f32,
             words: Words::new(cx),
             shown: (paused(cx), range::current_range(cx)),
@@ -660,14 +681,19 @@ impl TimelineBox {
             return;
         }
         self.data = snap.device_history.timeline.clone();
+        self.net_band = shown_net_band(self.data.as_ref(), cx);
         self.mem_total = snap.system.memory.total as f32;
         cx.notify();
     }
 
-    /// The pause or the range changed: the bracket moves.
+    /// The pause or the range changed: the bracket moves. A change of the interface classes
+    /// shown redraws the Network band.
     fn sync_shown(&mut self, cx: &mut Context<Self>) {
         let now = (paused(cx), range::current_range(cx));
-        if now != self.shown {
+        let net_band = shown_net_band(self.data.as_ref(), cx);
+        let band_changed = !Arc::ptr_eq(&net_band, &self.net_band) && net_band != self.net_band;
+        self.net_band = net_band;
+        if now != self.shown || band_changed {
             self.shown = now;
             cx.notify();
         }
@@ -987,6 +1013,7 @@ impl TimelineBox {
     /// The band canvas: one quad per run, a line per boot, and the pointer listeners.
     fn bands(&self, theme: &TlTheme, this: WeakEntity<Self>) -> AnyElement {
         let data = self.data.clone();
+        let net_band = Arc::clone(&self.net_band);
         let mem_total = self.mem_total;
         let colors = TimelineBand::ALL.map(|b| theme.graph.device_accent(band_accent(b)));
         let boot_color = theme.text_secondary;
@@ -1005,7 +1032,11 @@ impl TimelineBox {
                 cx.defer(move |cx| measured.update(cx, |b, cx| b.measured(w, cx)));
                 if let Some(d) = &data {
                     for (i, band) in TimelineBand::ALL.into_iter().enumerate() {
-                        let points = &d.bands[i];
+                        let points = if band == TimelineBand::Network {
+                            &net_band
+                        } else {
+                            &d.bands[i]
+                        };
                         let full = band_full(band, points, mem_total);
                         let cells = band_cells(points, d.step_ns, d.end_realtime_ns, w, full);
                         let top = bounds.top() + px(i as f32 * (BAND_H + BAND_GAP) * s);

@@ -1175,6 +1175,10 @@ pub struct GraphicsAdapter {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct NetworkAdapter {
     pub device: Option<DeviceIdx>,
+    /// The interface class. The engine lists every adapter; the window shows those whose class
+    /// its `show_network_*` settings show (ADR-018, tasklens-q4x76.22). `None` counts as
+    /// `Other`.
+    pub kind: Option<NetKind>,
     /// Connection name and type.
     pub connection: InvField<Arc<str>>,
     pub adapter_name: InvField<Arc<str>>,
@@ -1635,6 +1639,11 @@ pub struct DeviceTimeline {
     pub step_ns: u64,
     /// One band per [`TimelineBand`], in that order. A NaN mean is a gap.
     pub bands: [Arc<[HistPoint]>; 4],
+    /// Download plus upload of each interface class that has a stored total
+    /// (`aggregate:net:<kind>`), on the Network band's times. The Network band counts every
+    /// class; a window that hides some classes takes theirs away (tasklens-q4x76.22). History
+    /// written before the per-class totals has none here.
+    pub net_kinds: Arc<[(NetKind, Arc<[HistPoint]>)]>,
     /// Oldest first.
     pub events: Arc<[TimelineEvent]>,
     /// CLOCK_REALTIME start of every boot inside the 24 hours, oldest first.

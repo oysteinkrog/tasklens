@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 
 use crate::ids::{ColumnId, NodeId, ProcessKey};
 use crate::process::GroupRow;
+use crate::settings::NetworkUnit;
 use crate::snapshot::ComponentHeader;
 use crate::validity::Validity;
 
@@ -51,6 +52,23 @@ pub struct TableQuery {
     /// shows only when its process is in that group, and the text filter still applies. Grouped
     /// and tree parents show as they do for the text filter. Pseudo rows are hidden.
     pub mem_group: Option<Arc<str>>,
+    /// The window settings the table uses. Per session, so two windows on one engine can
+    /// differ (ADR-018, tasklens-q4x76.22).
+    pub settings: TableSettings,
+}
+
+/// The window settings the process table reads, sent in every [`TableQuery`]. Built from the
+/// window's `Settings` with `TableSettings::from`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub struct TableSettings {
+    /// `units.network`.
+    pub network: NetworkUnit,
+    /// `units.network_auto_scale`: the table sorts network rates at the shown step.
+    pub network_auto_scale: bool,
+    /// `processes.subtree_totals`.
+    pub subtree_totals: bool,
+    /// `processes.hide_system`.
+    pub hide_system: bool,
 }
 
 impl Default for TableQuery {
@@ -67,6 +85,7 @@ impl Default for TableQuery {
             expanded: Arc::from([]),
             include_children: false,
             mem_group: None,
+            settings: TableSettings::default(),
         }
     }
 }

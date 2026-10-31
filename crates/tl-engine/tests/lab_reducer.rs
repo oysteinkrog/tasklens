@@ -27,6 +27,7 @@ use tl_engine::update::{
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::history::{HistoryMsg, HistorySink, HistoryTx};
+use tl_engine::workers::metric_history::{MetricMsg, MetricSink, MetricTx};
 use tl_engine::workers::sensors::SensorsSource;
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
@@ -1275,31 +1276,94 @@ fn net_desc(id: DeviceIdentity, kind: NetKind) -> DeviceDesc {
     }
 }
 
+/// The engine counts every adapter kind whatever a window shows: `aggregate:net` is the total of
+/// all kinds and `aggregate:net:<kind>` the total of each kind present. With no window open the
+/// history sink gets every one of them, under its persistent key (tasklens-q4x76.22).
 #[test]
-fn aggregate_net_respects_visibility() {
+fn aggregate_net_counts_every_kind_with_no_window() {
     let mut rig = Rig::new();
-    let (eno1, docker0) = (net_id("eno1", 2), net_id("docker0", 3));
+    let (tx, mut metric_rx) = mpsc::channel(64);
+    let slot = Arc::new(ArcSwapOption::from_pointee(MetricTx { generation: 1, tx }));
+    rig.reducer().metric_sink = Some(MetricSink::new(slot));
+    let (eno1, wlan0, docker0) = (net_id("eno1", 2), net_id("wlan0", 3), net_id("docker0", 4));
     rig.run(vec![
         src(SourceUpdate::Devices(DeviceList {
             t_ns: SEC,
             kinds: DeviceKinds::NETS,
             entries: vec![
                 net_desc(eno1.clone(), NetKind::Wired),
+                net_desc(wlan0.clone(), NetKind::Wireless),
                 net_desc(docker0.clone(), NetKind::Virtual),
             ],
         })),
         src(SourceUpdate::Nets(NetSample {
             t_ns: SEC,
-            nets: vec![(eno1, net_totals(5000.0)), (docker0, net_totals(700.0))],
+            nets: vec![
+                (eno1, net_totals(5000.0)),
+                (wlan0, net_totals(300.0)),
+                (docker0, net_totals(700.0)),
+            ],
         })),
     ])
     .expect("no invariant violation");
-    let agg = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::Nets));
-    let rx = rig.last_sample(SeriesId {
-        device: agg,
-        metric: MetricId::NET_RX,
-    });
-    assert_eq!(rx.value, 5000.0);
+    let rx_of = |rig: &Rig, kind: AggregateKind| {
+        let device = rig.idx(&DeviceIdentity::Aggregate(kind));
+        rig.last_sample(SeriesId {
+            device,
+            metric: MetricId::NET_RX,
+        })
+        .value
+    };
+    assert_eq!(rx_of(&rig, AggregateKind::Nets), 6000.0);
+    assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Wired)), 5000.0);
+    assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Wireless)), 300.0);
+    assert_eq!(rx_of(&rig, AggregateKind::NetsOf(NetKind::Virtual)), 700.0);
+    // A kind with no adapter has no total.
+    let latest = rig.latest();
+    for kind in [NetKind::VpnTunnel, NetKind::Other] {
+        let id = DeviceIdentity::Aggregate(AggregateKind::NetsOf(kind));
+        assert!(latest.devices.find(&id).is_none(), "{kind:?}");
+    }
+
+    // What the history worker would store: the catalog keys and the samples.
+    let mut keys = Vec::new();
+    let mut stored: Vec<(SeriesId, f32)> = Vec::new();
+    while let Ok(msg) = metric_rx.try_recv() {
+        match msg {
+            MetricMsg::Catalog(c) => {
+                keys = c
+                    .entries
+                    .iter()
+                    .map(|e| e.persistent_key.to_string())
+                    .collect();
+            }
+            MetricMsg::System(batch) => {
+                stored.extend(batch.iter().map(|(id, s)| (*id, s.value)));
+            }
+            _ => {}
+        }
+    }
+    for key in [
+        "aggregate:net",
+        "aggregate:net:wired",
+        "aggregate:net:wireless",
+        "aggregate:net:virtual",
+    ] {
+        assert!(keys.iter().any(|k| k == key), "{key} not in {keys:?}");
+    }
+    let virt = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::NetsOf(
+        NetKind::Virtual,
+    )));
+    assert!(
+        stored.contains(&(
+            SeriesId {
+                device: virt,
+                metric: MetricId::NET_RX,
+            },
+            700.0
+        )),
+        "{stored:?}"
+    );
 }
 
 #[test]

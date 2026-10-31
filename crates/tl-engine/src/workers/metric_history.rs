@@ -77,7 +77,7 @@ use tl_history::metrics::{
     self, EventKind, HistEvent, MetricConfig, MetricHistory, MetricSlot, MetricSpan, Tier,
 };
 use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
-use tl_model::devices::DeviceCatalog;
+use tl_model::devices::{DeviceCatalog, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::journal::JournalAccess;
@@ -967,7 +967,8 @@ impl State {
 
 /// The timeline of a 1 min tier `span` that ends at `to`: CPU total, memory in use, the
 /// aggregate disk's active time (the busiest disk) and the aggregate network's download plus
-/// upload, keyed as the reducer stores them.
+/// upload, keyed as the reducer stores them. `net_kinds` holds the same sum for each
+/// `aggregate:net:<kind>` total that is stored.
 fn timeline_of(
     span: &MetricSpan,
     to: i64,
@@ -996,13 +997,14 @@ fn timeline_of(
             },
         )
     };
-    let net: Arc<[HistPoint]> = match (
-        find("aggregate:net", MetricId::NET_RX),
-        find("aggregate:net", MetricId::NET_TX),
-    ) {
-        (None, None) => Arc::from([]),
-        (rx, tx) => {
-            let len = rx.map_or(0, |p| p.len()).max(tx.map_or(0, |p| p.len()));
+    // Download plus upload of one network total; `None` when neither direction is stored.
+    let net_of = |key: &str| -> Option<Arc<[HistPoint]>> {
+        let (rx, tx) = (find(key, MetricId::NET_RX), find(key, MetricId::NET_TX));
+        if rx.is_none() && tx.is_none() {
+            return None;
+        }
+        let len = rx.map_or(0, |p| p.len()).max(tx.map_or(0, |p| p.len()));
+        Some(
             (0..len)
                 .map(|i| {
                     let (a, b) = (rx.and_then(|p| p.get(i)), tx.and_then(|p| p.get(i)));
@@ -1022,9 +1024,17 @@ fn timeline_of(
                         max: mean,
                     }
                 })
-                .collect()
-        }
+                .collect(),
+        )
     };
+    let net = net_of("aggregate:net").unwrap_or_else(|| Arc::from([]));
+    // Per-kind totals (tasklens-q4x76.22), so a window can take away the kinds it hides.
+    let net_kinds: Arc<[(NetKind, Arc<[HistPoint]>)]> = NetKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            net_of(&format!("aggregate:net:{}", kind.key())).map(|points| (kind, points))
+        })
+        .collect();
     let events: Arc<[TimelineEvent]> = span
         .events
         .iter()
@@ -1045,6 +1055,7 @@ fn timeline_of(
             band("aggregate:disk", MetricId::DISK_ACTIVE),
             net,
         ],
+        net_kinds,
         events,
         boots: boots.into(),
         journal,
@@ -2205,6 +2216,12 @@ mod tests {
                     "aggregate:net",
                     true,
                 ),
+                entry(
+                    4,
+                    DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Virtual)),
+                    "aggregate:net:virtual",
+                    true,
+                ),
             ],
         ));
         for i in 0..180 {
@@ -2215,6 +2232,8 @@ mod tests {
                 (sid(2, MetricId::DISK_ACTIVE), sample(t, 25.0)),
                 (sid(3, MetricId::NET_RX), sample(t, 100.0)),
                 (sid(3, MetricId::NET_TX), sample(t, 50.0)),
+                (sid(4, MetricId::NET_RX), sample(t, 30.0)),
+                (sid(4, MetricId::NET_TX), sample(t, 10.0)),
             ]);
         }
         st.queue_events([HistEvent {
@@ -2253,6 +2272,18 @@ mod tests {
             assert!(!means.is_empty(), "band {band} has points");
             assert!(means.iter().all(|&m| m == want), "band {band}: {means:?}");
         }
+        // One per-kind band per stored per-kind total (tasklens-q4x76.22), on the band's times.
+        assert_eq!(tl.net_kinds.len(), 1, "{:?}", tl.net_kinds);
+        let (kind, virt) = &tl.net_kinds[0];
+        assert_eq!(*kind, NetKind::Virtual);
+        assert_eq!(virt.len(), tl.bands[3].len());
+        let virt_means: Vec<f32> = virt
+            .iter()
+            .filter(|p| !p.is_gap())
+            .map(|p| p.mean)
+            .collect();
+        assert!(!virt_means.is_empty());
+        assert!(virt_means.iter().all(|&m| m == 40.0), "{virt_means:?}");
         assert_eq!(tl.events.len(), 1);
         let e = &tl.events[0];
         assert_eq!(e.kind, TimelineEventKind::Heat);

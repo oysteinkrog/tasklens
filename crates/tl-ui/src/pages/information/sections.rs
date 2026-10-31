@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use gpui_kit::{App, SharedString};
 use smallvec::SmallVec;
-use tl_model::devices::DeviceCatalog;
+use tl_model::devices::{DeviceCatalog, NetKind};
 use tl_model::ids::DeviceIdx;
+use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::{
     DisplayMode, FirmwareType, InvField, InventorySnapshot, NetworkAdapter, PublicIpState,
     SystemSnapshot,
@@ -40,6 +41,14 @@ pub struct InfoInputs<'a> {
     pub devices: &'a DeviceCatalog,
     /// The labels and words, translated once per strings version.
     pub words: &'a InfoWords,
+    /// Whether the window shows adapters of each `NetKind::ALL` kind (`show_network_*`). The
+    /// engine lists every adapter (tasklens-q4x76.22).
+    pub net_kinds: [bool; 5],
+}
+
+/// The window's `show_network_*` flags in `NetKind::ALL` order.
+pub fn net_kinds_of(p: &PerformanceSettings) -> [bool; 5] {
+    NetKind::ALL.map(|kind| p.shows_net_kind(Some(kind)))
 }
 
 /// One label or word of [`InfoWords`]. The order matches [`KEYS`].
@@ -1019,12 +1028,19 @@ pub fn build_graphics(i: &InfoInputs, out: &mut Vec<InfoRow>) {
     }
 }
 
-/// Network adapters rows (UI-SYS-095): one block per interface the worker kept by the Performance
-/// sidebar rules (PERF-004), then the unindented Public IP row with its Fetch button. IP address
-/// has one line per address, in snapshot order.
+/// Network adapters rows (UI-SYS-095): one block per interface whose kind the window shows, by
+/// the Performance sidebar rules (PERF-004), then the unindented Public IP row with its Fetch
+/// button. IP address has one line per address, in snapshot order.
 pub fn build_network(i: &InfoInputs, out: &mut Vec<InfoRow>) {
     let w = i.words;
-    for (n, a) in i.inv.network.iter().enumerate() {
+    let shown = |a: &&NetworkAdapter| {
+        let kind = a.kind.unwrap_or(NetKind::Other);
+        NetKind::ALL
+            .iter()
+            .position(|k| *k == kind)
+            .is_some_and(|slot| i.net_kinds[slot])
+    };
+    for (n, a) in i.inv.network.iter().filter(shown).enumerate() {
         let block = block_number(n);
         let connection = if absent(a.connection.validity, &a.connection.value) {
             TlValue::new(w.get(W::NetUnknown).clone())

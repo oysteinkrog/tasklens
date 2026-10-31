@@ -34,11 +34,11 @@ use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras,
     ProcessMeta, ProcessRecord, is_row_member,
 };
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ServiceBackend, ServiceStatus, Snapshot, StartupType, SystemSnapshot, UnitRecord,
 };
 use tl_model::system::CpuSet;
+use tl_model::table::TableSettings;
 use tl_model::table::{
     Manager, ProcessTableView, SortSpec, TableMode, TableQuery, Total, UnitRef, UnitType,
 };
@@ -204,7 +204,7 @@ fn extras(r: &ProcessRecord) -> ProcessExtras {
     }
 }
 
-fn build(records: &[ProcessRecord], q: &TableQuery, settings: &EngineSettings) -> ProcessTableView {
+fn build(records: &[ProcessRecord], q: &TableQuery, settings: &TableSettings) -> ProcessTableView {
     build_with(records, &[], q, settings)
 }
 
@@ -213,7 +213,7 @@ fn build_with(
     records: &[ProcessRecord],
     app_stats: &[AppCgroupSample],
     q: &TableQuery,
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     build_full(records, app_stats, &[], None, q, settings)
 }
@@ -223,7 +223,7 @@ fn build_pseudo(
     records: &[ProcessRecord],
     pseudo: &PseudoInput,
     q: &TableQuery,
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     build_full(records, &[], &[], Some(pseudo), q, settings)
 }
@@ -233,7 +233,7 @@ fn build_units(
     records: &[ProcessRecord],
     unit_stats: &[CgroupStats],
     q: &TableQuery,
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     build_full(records, &[], unit_stats, None, q, settings)
 }
@@ -244,7 +244,7 @@ fn build_full(
     unit_stats: &[CgroupStats],
     pseudo: Option<&PseudoInput>,
     q: &TableQuery,
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     let mem_groups = FxHashMap::default();
     build_mem(
@@ -266,7 +266,7 @@ fn build_mem(
     pseudo: Option<&PseudoInput>,
     mem_groups: &FxHashMap<ProcessKey, Arc<str>>,
     q: &TableQuery,
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     assert!(
         records.is_sorted_by_key(|r| r.key),
@@ -318,8 +318,8 @@ fn pids(view: &ProcessTableView, records: &[ProcessRecord]) -> Vec<u32> {
         .collect()
 }
 
-fn settings() -> EngineSettings {
-    EngineSettings::default()
+fn settings() -> TableSettings {
+    TableSettings::default()
 }
 
 fn node(records: &[ProcessRecord], pid: u32) -> NodeId {
@@ -1234,10 +1234,10 @@ fn counts_sum_to_visible_records() {
 
 // Hide system processes (E09-012, PROC-046).
 
-fn hide_system() -> EngineSettings {
-    EngineSettings {
+fn hide_system() -> TableSettings {
+    TableSettings {
         hide_system: true,
-        ..EngineSettings::default()
+        ..TableSettings::default()
     }
 }
 
@@ -1477,10 +1477,10 @@ fn abc_cpu() -> Vec<ProcessRecord> {
     ]
 }
 
-fn subtree_on() -> EngineSettings {
-    EngineSettings {
+fn subtree_on() -> TableSettings {
+    TableSettings {
         subtree_totals: true,
-        ..EngineSettings::default()
+        ..TableSettings::default()
     }
 }
 
@@ -1489,7 +1489,7 @@ fn tree_view(
     records: &[ProcessRecord],
     filter: &str,
     expanded: &[u32],
-    settings: &EngineSettings,
+    settings: &TableSettings,
 ) -> ProcessTableView {
     let q = query(
         TableMode::Tree,

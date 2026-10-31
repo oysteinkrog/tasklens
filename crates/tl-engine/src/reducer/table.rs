@@ -17,12 +17,12 @@ use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, ProcessKey, PseudoKin
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessExtras, ProcessRecord,
 };
-use tl_model::settings::{EngineSettings, NetworkUnit};
+use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::SystemSnapshot;
 use tl_model::system::{GpuTotals, Metric};
 use tl_model::table::{
-    Manager, ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableTotals, Total,
-    UnitRef,
+    Manager, ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableSettings,
+    TableTotals, Total, UnitRef,
 };
 use tl_model::units;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
@@ -40,7 +40,8 @@ pub struct TableInput<'a> {
     pub unit_stats: &'a [CgroupStats],
     pub system: &'a SystemSnapshot,
     pub devices: &'a DeviceCatalog,
-    pub settings: &'a EngineSettings,
+    /// The session's `TableQuery::settings`.
+    pub settings: &'a TableSettings,
     /// Unit Description by unit (E09-025). Empty in P1.
     pub unit_names: &'a FxHashMap<UnitRef, Arc<str>>,
     /// `UnitRecord.user` by unit, for the User column of unit rows.
@@ -143,7 +144,7 @@ const MIB: f64 = 1024.0 * 1024.0;
 /// step by 0.1, memory columns by the shown IEC unit's 0.01, rate columns by the shown unit's
 /// 0.1 (`units::percent`, `units::bytes`, `units::rate_mib_fixed`, `units::net_rate`). Other
 /// keys pass through. `sort_key` itself stays raw, because the process graphs read it.
-fn shown_key(key: SortKey, col: ColumnId, settings: &EngineSettings) -> SortKey {
+fn shown_key(key: SortKey, col: ColumnId, settings: &TableSettings) -> SortKey {
     use ColumnId as C;
     match (col, key) {
         (C::Cpu | C::CpuKernel | C::CpuUser | C::CpuRelative | C::Gpu, SortKey::Float(v)) => {
@@ -201,7 +202,7 @@ fn iec_shown(n: i128) -> i128 {
 
 /// A network rate at the step `units::net_rate` prints with `units.network` and
 /// `units.network_auto_scale`.
-fn net_shown(bytes_per_s: f64, settings: &EngineSettings) -> i128 {
+fn net_shown(bytes_per_s: f64, settings: &TableSettings) -> i128 {
     match (settings.network, settings.network_auto_scale) {
         (NetworkUnit::Bits, false) => tenths(bytes_per_s * 8.0 / 1e6),
         (NetworkUnit::Bytes, false) => tenths(bytes_per_s / MIB),
@@ -2387,7 +2388,7 @@ mod tests {
         let extras: Vec<ProcessExtras> = records.iter().map(|_| extras()).collect();
         let system = SystemSnapshot::default();
         let devices = DeviceCatalog::default();
-        let settings = EngineSettings::default();
+        let settings = TableSettings::default();
         let unit_names = FxHashMap::default();
         let input = TableInput {
             records: &records,
@@ -2594,9 +2595,9 @@ mod tests {
         assert!(iec_shown(1023 * KIB_U + 1013) < iec_shown(MIB_U));
         assert!(iec_shown(1023) < iec_shown(KIB_U));
 
-        let mut settings = EngineSettings {
+        let mut settings = TableSettings {
             network: NetworkUnit::Bits,
-            ..EngineSettings::default()
+            ..TableSettings::default()
         };
         // 0.1 Mbps is 12 500 bytes per second.
         assert_eq!(
@@ -2716,9 +2717,9 @@ mod tests {
         fn build(&self, filter: &str, expanded: &[NodeId], sort: SortSpec) -> ProcessTableView {
             let system = SystemSnapshot::default();
             let devices = DeviceCatalog::default();
-            let settings = EngineSettings {
+            let settings = TableSettings {
                 hide_system: self.hide_system,
-                ..EngineSettings::default()
+                ..TableSettings::default()
             };
             let unit_names = FxHashMap::default();
             let input = TableInput {

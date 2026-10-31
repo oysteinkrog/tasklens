@@ -22,7 +22,7 @@ use tl_model::demand::{Demand, TrayDemand};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{NetworkUnit, TrayGraphState as TrayGraphEntry};
+use tl_model::settings::{NetworkUnit, PerformanceSettings, TrayGraphState as TrayGraphEntry};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
 use tl_model::tray::{
@@ -34,11 +34,12 @@ use tl_model::units;
 use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
 use crate::app::EngineGlobal;
 use crate::chart::scale::{self, ScaleState};
-use crate::chart::view::{find_process_tiered, find_tiered};
+use crate::chart::view::{derived_view, find_process_tiered, find_tiered};
 use crate::chart::{ValueFormat, YScale, format_value};
 use crate::components::toast::ToastKind;
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::i18n::tr;
+use crate::net_totals::NetTotal;
 use crate::pages::minigraph::GraphColor;
 use crate::pages::minigraph::card::CardState;
 use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
@@ -448,6 +449,12 @@ impl TrayBridge {
         self.active = true;
         let show_main_icon = self.show_main_icon(always_show);
         let snap = self.client.latest();
+        // The window's network total: every class minus the classes it hides (tasklens-q4x76.22).
+        let net = if cx.has_global::<TlSettings>() {
+            NetTotal::of(&snap.devices, &TlSettings::settings(cx).performance)
+        } else {
+            NetTotal::of(&snap.devices, &PerformanceSettings::default())
+        };
         let gpu_order = gpu_order(cx);
         let theme = current(cx).clone();
         let mut demand = TrayDemand {
@@ -471,6 +478,7 @@ impl TrayBridge {
                 theme: &theme,
                 unit,
                 auto_scale,
+                net: &net,
                 app: &*cx,
             };
             let frame = build_frame(graph, &ctx, &mut demand, &mut targets);
@@ -485,7 +493,7 @@ impl TrayBridge {
             demand.disks = true;
             demand.nets = true;
             demand.gpus = true;
-            main_description(&snap, &gpu_order, unit, auto_scale)
+            main_description(&snap, &gpu_order, &net, unit, auto_scale)
         } else {
             String::new()
         };
@@ -554,6 +562,8 @@ struct Ctx<'a> {
     theme: &'a crate::theme::TlTheme,
     unit: NetworkUnit,
     auto_scale: bool,
+    /// The window's network total.
+    net: &'a NetTotal,
     app: &'a App,
 }
 
@@ -655,21 +665,10 @@ fn net_text(rate: Option<f32>, unit: NetworkUnit, auto_scale: bool) -> String {
 }
 
 /// The newest valid total rate, rx plus tx; `None` while neither has a valid sample.
-fn net_total(snap: &Snapshot, dev: DeviceIdx) -> Option<f32> {
-    let rx = newest(
-        snap,
-        SeriesId {
-            device: dev,
-            metric: MetricId::NET_RX,
-        },
-    );
-    let tx = newest(
-        snap,
-        SeriesId {
-            device: dev,
-            metric: MetricId::NET_TX,
-        },
-    );
+/// The newest download plus upload of the window's network total.
+fn net_total(snap: &Snapshot, net: &NetTotal) -> Option<f32> {
+    let rx = net.newest(snap, MetricId::NET_RX);
+    let tx = net.newest(snap, MetricId::NET_TX);
     match (rx, tx) {
         (None, None) => None,
         (rx, tx) => Some(rx.unwrap_or(0.0) + tx.unwrap_or(0.0)),
@@ -704,7 +703,7 @@ fn page_description(source: &MinigraphSource, dev: DeviceIdx, ctx: &Ctx<'_>) -> 
         MinigraphSource::Cpu => percent_text(at(MetricId::CPU_TOTAL)),
         MinigraphSource::Memory => percent_text(mem_percent(snap, dev)),
         MinigraphSource::Disk => percent_text(at(MetricId::DISK_ACTIVE)),
-        MinigraphSource::Network => net_text(net_total(snap, dev), ctx.unit, ctx.auto_scale),
+        MinigraphSource::Network => net_text(net_total(snap, ctx.net), ctx.unit, ctx.auto_scale),
         MinigraphSource::Gpu(_) => percent_text(at(MetricId::GPU_UTIL)),
         MinigraphSource::Vram(_) => at(MetricId::GPU_MEM).map_or_else(
             || WARMING_UP_TEXT.to_owned(),
@@ -795,13 +794,24 @@ fn build_frame(
         metric,
     };
     let (view, _) = find_tiered(&snap.series, id, frame.range_ns);
-    frame.series = view.cloned();
+    frame.series = if matches!(source, MinigraphSource::Network) && !ctx.net.hidden.is_empty() {
+        // The window's total: the hidden classes' totals are taken away.
+        let minus = ctx.net.hidden.iter().map(|&device| {
+            find_tiered(&snap.series, SeriesId { device, metric }, frame.range_ns)
+                .0
+                .map(|v| &**v)
+        });
+        view.map(|a| Arc::new(derived_view(a, minus)))
+    } else {
+        view.cloned()
+    };
     frame.tooltip_description = Arc::from(page_description(&source, dev, ctx).as_str());
 
     // The scale ceiling: the rule of the matching card, with this graph's own memory.
     let spec = chart_spec_for(
         &source,
         dev,
+        &ctx.net.hidden,
         &snap.system,
         GraphColor::Accent,
         range_s.min(u32::from(u16::MAX)) as u16,
@@ -965,6 +975,7 @@ fn rgb_of(color: gpui_kit::Hsla) -> [u8; 3] {
 fn main_description(
     snap: &Snapshot,
     gpu_order: &[DeviceKey],
+    net: &NetTotal,
     unit: NetworkUnit,
     auto_scale: bool,
 ) -> String {
@@ -976,7 +987,6 @@ fn main_description(
     let cpu = fixed(DeviceIdentity::CpuPackage);
     let mem = fixed(DeviceIdentity::Memory);
     let disk = fixed(DeviceIdentity::Aggregate(AggregateKind::Disks));
-    let net = fixed(DeviceIdentity::Aggregate(AggregateKind::Nets));
     let gpu = device_for(&MinigraphSource::Gpu(None), &snap.devices, gpu_order);
     let gpu_text = if gpu.is_some() {
         percent_text(at(gpu, MetricId::GPU_UTIL))
@@ -989,6 +999,6 @@ fn main_description(
         percent_text(mem.and_then(|d| mem_percent(snap, d))),
         gpu_text,
         percent_text(at(disk, MetricId::DISK_ACTIVE)),
-        net_text(net.and_then(|d| net_total(snap, d)), unit, auto_scale),
+        net_text(net_total(snap, net), unit, auto_scale),
     )
 }

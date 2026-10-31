@@ -143,7 +143,7 @@ impl DeviceKey {
             DeviceIdentity::Battery { native_path } => format!("bat:{native_path}"),
             DeviceIdentity::Aggregate(AggregateKind::Disks) => Self::AGGREGATE_DISK.into(),
             DeviceIdentity::Aggregate(AggregateKind::Gpus) => Self::AGGREGATE_GPU.into(),
-            DeviceIdentity::Aggregate(AggregateKind::Nets)
+            DeviceIdentity::Aggregate(AggregateKind::Nets | AggregateKind::NetsOf(_))
             | DeviceIdentity::CpuLogical { .. }
             | DeviceIdentity::Sensor { .. }
             | DeviceIdentity::MemGroup { .. } => return None,

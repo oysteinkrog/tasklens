@@ -91,6 +91,7 @@ use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
+use crate::net_totals::NetTotal;
 use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
@@ -648,8 +649,7 @@ impl OverviewPage {
     /// Works out each device box's min, avg and peak text for the range, and hands it to the
     /// boxes, which notify only when theirs changed (UI-PRF-055). The main metric is CPU total,
     /// memory in use, the first GPU's utilization, the active time of the busiest disk and the
-    /// total throughput of the engine's aggregate of the counted interfaces, the set the Network
-    /// box charts.
+    /// total throughput of the interface classes the window shows, as the Network box charts.
     fn sync_range(&mut self, cx: &mut Context<Self>) {
         let snap = std::sync::Arc::clone(self.hub.read(cx).current());
         let range = self.range;
@@ -695,8 +695,22 @@ impl OverviewPage {
         } else {
             range::busiest(&snap, &disks, range)
         };
-        let net = net_box::aggregate(&snap.devices);
-        let net = figures(&[id(net, MetricId::NET_RX), id(net, MetricId::NET_TX)]);
+        // The window's total: every class minus the classes it hides (tasklens-q4x76.22).
+        let total = NetTotal::of(&snap.devices, &TlSettings::settings(cx).performance);
+        let net = total.total.and_then(|d| {
+            let (rx, tx) = (total.minus(MetricId::NET_RX), total.minus(MetricId::NET_TX));
+            if waiting {
+                return None;
+            }
+            range::figures_minus(
+                &snap,
+                &[
+                    (id(d, MetricId::NET_RX), &rx[..]),
+                    (id(d, MetricId::NET_TX), &tx[..]),
+                ],
+                range,
+            )
+        });
         let unit = NetFormat::of(cx);
         let net = range::figures_text(words, net, |v, out| {
             format_value(ValueFormat::RateNetwork, v, unit, out);

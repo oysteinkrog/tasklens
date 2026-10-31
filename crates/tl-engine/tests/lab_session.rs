@@ -437,17 +437,18 @@ fn net_msg(t_ns: TimeNs, nets: Vec<(DeviceIdentity, f64)>) -> EngineMsg {
     }))
 }
 
+/// The network totals count every adapter kind, and a settings change does not filter them:
+/// the window takes away the kinds it hides (ADR-018, tasklens-q4x76.22).
 #[test]
-fn settings_change_reaches_reducer() {
+fn net_totals_count_every_kind_across_settings_changes() {
     let mut rig = Rig::new(Vec::new(), 0);
-    let with_virtual = |show: bool| EngineSettings {
-        show_network_virtual: show,
-        show_network_wired: true,
+    let with_interval = |interval_ms: u32| EngineSettings {
+        interval_ms,
         ..EngineSettings::default()
     };
     rig.ui
         .settings_tx
-        .send(with_virtual(false))
+        .send(with_interval(1000))
         .expect("the root holds a receiver");
     rig.start();
     let (eno1, docker0) = (net_id("eno1", 2), net_id("docker0", 3));
@@ -459,11 +460,11 @@ fn settings_change_reaches_reducer() {
             net_desc(docker0.clone(), NetKind::Virtual),
         ],
     })));
-    let agg_rx = |rig: &Rig| {
+    let rx_of = |rig: &Rig, kind: AggregateKind| {
         let snap = rig.latest();
         let agg = snap
             .devices
-            .find(&DeviceIdentity::Aggregate(AggregateKind::Nets))
+            .find(&DeviceIdentity::Aggregate(kind))
             .expect("the net aggregate exists")
             .idx;
         snap.series
@@ -477,19 +478,26 @@ fn settings_change_reaches_reducer() {
             .expect("a sample")
             .value
     };
+    let virtual_ = AggregateKind::NetsOf(NetKind::Virtual);
 
     rig.send(net_msg(
         200 * MS,
         vec![(eno1.clone(), 5000.0), (docker0.clone(), 700.0)],
     ));
-    assert_eq!(agg_rx(&rig), 5000.0, "virtual interfaces hidden");
+    assert_eq!(
+        rx_of(&rig, AggregateKind::Nets),
+        5700.0,
+        "every kind counts"
+    );
+    assert_eq!(rx_of(&rig, virtual_), 700.0);
 
     rig.ui
         .settings_tx
-        .send(with_virtual(true))
+        .send(with_interval(2000))
         .expect("the root holds a receiver");
-    rig.send(net_msg(300 * MS, vec![(eno1, 5000.0), (docker0, 700.0)]));
-    assert_eq!(agg_rx(&rig), 5700.0, "the new settings reached the reducer");
+    rig.send(net_msg(300 * MS, vec![(eno1, 5000.0), (docker0, 400.0)]));
+    assert_eq!(rx_of(&rig, AggregateKind::Nets), 5400.0);
+    assert_eq!(rx_of(&rig, virtual_), 400.0);
     rig.finish();
 }
 

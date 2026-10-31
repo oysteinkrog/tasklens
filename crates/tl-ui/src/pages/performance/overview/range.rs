@@ -15,20 +15,25 @@
 //! in its title line ([`figures`]). The page works it out and hands each box its text, so a box
 //! notifies only when its own text changes.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use gpui_kit::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, div,
 };
+use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
 use tl_model::ids::SeriesId;
-use tl_model::series::Sample;
+use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::OverviewRange;
 use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 
 use super::timeline::{self, Paused};
-use crate::chart::view::find_tiered;
+use crate::chart::view::{derived_view, find_tiered};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::i18n::tr;
+use crate::net_totals::hist_minus;
 use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
 
@@ -225,22 +230,45 @@ impl Acc {
 /// moment, so their sums are only bounds of the total; there the min, avg and peak of the sum
 /// are taken from the sum of the two means of each point. Gaps are left out.
 pub fn figures(snap: &Snapshot, ids: &[SeriesId], range: OverviewRange) -> Option<Figures> {
+    let terms: SmallVec<[(SeriesId, &[SeriesId]); 2]> =
+        ids.iter().map(|&id| (id, &[][..])).collect();
+    figures_minus(snap, &terms, range)
+}
+
+/// [`figures`] of the sum of `terms`, each one series minus the sum of its `minus` series at
+/// the same time (the window's network total, tasklens-q4x76.22). A `minus` series that is
+/// absent or has no valid value at a time counts as 0 there.
+pub fn figures_minus(
+    snap: &Snapshot,
+    terms: &[(SeriesId, &[SeriesId])],
+    range: OverviewRange,
+) -> Option<Figures> {
     let mut acc = Acc::default();
     let paused = snap
         .device_history
         .request
         .is_some_and(|r| r.end_realtime_ns.is_some());
     if range.from_history() || paused {
-        history_figures(&snap.device_history, ids, range, &mut acc)?;
+        history_figures(&snap.device_history, terms, range, &mut acc)?;
     } else {
         let span = range.span_ns();
-        let mut views = ids.iter().map(|&id| find_tiered(&snap.series, id, span).0);
+        let view = |&(id, minus): &(SeriesId, &[SeriesId])| -> Option<Arc<SeriesView>> {
+            let a = find_tiered(&snap.series, id, span).0?;
+            if minus.is_empty() {
+                return Some(Arc::clone(a));
+            }
+            let minus = minus
+                .iter()
+                .map(|&b| find_tiered(&snap.series, b, span).0.map(|v| &**v));
+            Some(Arc::new(derived_view(a, minus)))
+        };
+        let mut views = terms.iter().map(view);
         let a = views.next()??;
         let b = match views.next() {
             Some(v) => Some(v?),
             None => None,
         };
-        let newest = [Some(a), b]
+        let newest = [Some(&a), b.as_ref()]
             .iter()
             .flatten()
             .filter_map(|v| v.samples.last())
@@ -248,7 +276,7 @@ pub fn figures(snap: &Snapshot, ids: &[SeriesId], range: OverviewRange) -> Optio
             .max()?;
         let from = newest.saturating_sub(span);
         let a = tail(&a.samples, from);
-        match b {
+        match &b {
             None => a
                 .iter()
                 .filter(|s| s.is_valid())
@@ -274,28 +302,40 @@ fn tail(s: &[Sample], from: u64) -> &[Sample] {
     &s[s.partition_point(|x| x.t_ns < from)..]
 }
 
-/// Adds the points of `ids` in `hist` to `acc`. `None` when the history answers another range
-/// or the first series is absent.
+/// Adds the points of `terms` in `hist` to `acc`, each term's points minus its `minus` points
+/// ([`hist_minus`]). `None` when the history answers another range or the first series is
+/// absent.
 fn history_figures(
     hist: &DeviceHistory,
-    ids: &[SeriesId],
+    terms: &[(SeriesId, &[SeriesId])],
     range: OverviewRange,
     acc: &mut Acc,
 ) -> Option<()> {
     if hist.request.map(|r| r.range) != Some(range.device_range()) {
         return None;
     }
-    let a = hist.get(*ids.first()?)?;
-    match ids.get(1) {
+    let points = |&(id, minus): &(SeriesId, &[SeriesId])| -> Option<Cow<'_, [HistPoint]>> {
+        let a = hist.get(id)?;
+        if minus.is_empty() {
+            return Some(Cow::Borrowed(&a[..]));
+        }
+        let minus: SmallVec<[&[HistPoint]; 5]> = minus
+            .iter()
+            .filter_map(|&b| hist.get(b).map(|p| &p[..]))
+            .collect();
+        Some(Cow::Owned(hist_minus(a, &minus)))
+    };
+    let a = points(terms.first()?)?;
+    match terms.get(1) {
         None => a
             .iter()
             .filter(|p| !p.is_gap())
             .for_each(|p| acc.push(p.min, p.mean, p.max)),
-        Some(&id) => {
-            let b = hist.get(id)?;
+        Some(term) => {
+            let b = points(term)?;
             merge(
-                a,
-                b,
+                &a,
+                &b,
                 |p: &HistPoint| p.t_realtime_ns,
                 |x, y| {
                     if !x.is_gap() && !y.is_gap() {

@@ -50,6 +50,7 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, Tab};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::{HelperState, SourceId};
+use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::ComponentMask;
 use tl_model::validity::Validity;
 use tracing::debug;
@@ -70,6 +71,7 @@ use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
+use crate::settings_global::TlSettings;
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
@@ -166,8 +168,19 @@ pub struct InformationPage {
     words: InfoWords,
     /// The helper is installed, so Restricted tooltips point to the shield.
     shield: bool,
+    /// The `show_network_*` flags the Network adapters section was built with.
+    net_kinds: [bool; 5],
     page_words: PageWords,
     _subs: SmallVec<[Subscription; 4]>,
+}
+
+/// The window's `show_network_*` flags; the defaults without settings.
+fn net_kinds(cx: &App) -> [bool; 5] {
+    if cx.has_global::<TlSettings>() {
+        sections::net_kinds_of(&TlSettings::settings(cx).performance)
+    } else {
+        sections::net_kinds_of(&PerformanceSettings::default())
+    }
 }
 
 impl InformationPage {
@@ -192,6 +205,7 @@ impl InformationPage {
             this.on_snapshot(ev.mask, cx);
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
+        subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
             subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Information {
@@ -221,6 +235,7 @@ impl InformationPage {
             width: Rc::new(Cell::new(Pixels::ZERO)),
             words,
             shield,
+            net_kinds: net_kinds(cx),
             page_words: PageWords::new(cx),
             _subs: subs,
         };
@@ -408,6 +423,15 @@ impl InformationPage {
         }
     }
 
+    /// The adapter kinds shown changed: the Network adapters section is built again.
+    fn on_settings(&mut self, cx: &mut Context<Self>) {
+        let kinds = net_kinds(cx);
+        if kinds != self.net_kinds {
+            self.net_kinds = kinds;
+            self.rebuild(&[InfoSectionId::NetworkAdapters], cx);
+        }
+    }
+
     fn on_strings(&mut self, cx: &mut Context<Self>) {
         let version = cx.try_global::<Strings>().map(|s| s.strings_version);
         if self.page_words.version != version {
@@ -428,6 +452,7 @@ impl InformationPage {
             sys: &snap.system,
             devices: &snap.devices,
             words: &self.words,
+            net_kinds: self.net_kinds,
         };
         for &id in ids {
             let mut rows: Vec<InfoRow> = Vec::new();

@@ -1531,6 +1531,7 @@ impl Host {
             network: (0..real::INVENTORY_NETS as u16)
                 .map(|n| NetworkAdapter {
                     device: Some(DeviceIdx(39 + n)),
+                    kind: Some(tl_model::devices::NetKind::Wired),
                     connection: known(text(format!("Wired connection {}", n + 1))),
                     adapter_name: known(text("Example 2.5GbE Controller")),
                     driver: known(text("igc")),

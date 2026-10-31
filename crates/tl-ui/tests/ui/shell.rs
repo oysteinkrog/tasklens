@@ -91,13 +91,26 @@ fn settings_update_bumps_only_changed_section(cx: &mut TestAppContext) {
 fn settings_engine_fields_sent(cx: &mut TestAppContext) {
     let (engine, persisted) = install(cx, Settings::default());
 
-    cx.update(|cx| TlSettings::update(cx, |d| d.settings.processes.hide_system = true));
+    cx.update(|cx| TlSettings::update(cx, |d| d.settings.processes.interval_ms = 2000));
 
     assert_eq!(bumped(cx), vec![Section::Processes]);
     assert_eq!(persisted.get(), 1);
     let sent = engine.settings();
     assert_eq!(sent.len(), 1);
-    assert!(sent[0].hide_system);
+    assert_eq!(sent[0].interval_ms, 2000);
+}
+
+/// `hide_system` is a window setting: it travels in the table query, not in the engine
+/// settings (ADR-018, tasklens-q4x76.22).
+#[gpui_kit::test]
+fn settings_window_fields_not_sent_to_engine(cx: &mut TestAppContext) {
+    let (engine, persisted) = install(cx, Settings::default());
+
+    cx.update(|cx| TlSettings::update(cx, |d| d.settings.processes.hide_system = true));
+
+    assert_eq!(bumped(cx), vec![Section::Processes]);
+    assert_eq!(persisted.get(), 1);
+    assert!(engine.settings().is_empty());
 }
 
 #[gpui_kit::test]
@@ -4532,6 +4545,18 @@ mod main_window {
             vcx.update(|_, cx| TlSettings::settings(cx).processes.hide_system)
         }
 
+        /// `hide_system` of each table query sent, in order (tasklens-q4x76.22).
+        fn sent_hide_system(engine: &FakeEngine) -> Vec<bool> {
+            engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    tl_model::command::Command::SetTableQuery(q) => Some(q.settings.hide_system),
+                    _ => None,
+                })
+                .collect()
+        }
+
         #[gpui_kit::test]
         fn hide_system_toggle_toast(cx: &mut TestAppContext) {
             let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, false);
@@ -4539,16 +4564,13 @@ mod main_window {
 
             act(&mut vcx, ToggleHideSystem);
             assert!(hide_system(&mut vcx));
-            let sent = engine.settings();
-            assert_eq!(sent.len(), 1);
-            assert!(sent[0].hide_system);
+            assert!(engine.settings().is_empty());
+            assert_eq!(sent_hide_system(&engine).last(), Some(&true));
             assert_eq!(toasts(&mut vcx), ["Hiding system processes"]);
 
             act(&mut vcx, ToggleHideSystem);
             assert!(!hide_system(&mut vcx));
-            let sent = engine.settings();
-            assert_eq!(sent.len(), 2);
-            assert!(!sent[1].hide_system);
+            assert_eq!(sent_hide_system(&engine).last(), Some(&false));
             assert_eq!(
                 toasts(&mut vcx),
                 ["Hiding system processes", "Showing system processes"]
@@ -4560,7 +4582,7 @@ mod main_window {
             let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, true);
             act(&mut vcx, ToggleHideSystem);
             assert!(hide_system(&mut vcx));
-            assert_eq!(engine.settings().len(), 1);
+            assert!(engine.settings().is_empty(), "a window setting");
             assert_eq!(toasts(&mut vcx), ["Hiding system processes"]);
         }
 
