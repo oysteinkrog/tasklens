@@ -299,6 +299,7 @@ fn sweep(t_ns: u64, pids: &[u32]) -> EngineMsg {
         extras: pids.iter().map(|_| proc_extras()).collect(),
         extras_p2: Vec::new(),
         app_stats: Vec::new(),
+        app_names: Vec::new(),
         unit_stats: Vec::new(),
         system_threads: 0,
         file_nr: None,

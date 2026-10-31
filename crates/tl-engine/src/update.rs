@@ -344,6 +344,10 @@ pub struct ProcessSweep {
     pub extras_p2: Vec<ProcessExtrasP2>,
     /// R-141 item 2.
     pub app_stats: Vec<AppCgroupSample>,
+    /// The desktop entry Name of each app group whose app unit resolved one (PROC-008). The
+    /// table names the app row and matches the filter with it. Engine only: it never goes on the
+    /// wire.
+    pub app_names: Vec<(GroupKey, Arc<str>)>,
     pub unit_stats: Vec<CgroupStats>,
     pub system_threads: u32,
     /// `/proc/sys/fs/file-nr`. The reducer copies it into `TableTotals.handles` (R-166 B3-7).
@@ -568,6 +572,7 @@ mod tests {
             extras: Vec::new(),
             extras_p2: Vec::new(),
             app_stats: Vec::new(),
+            app_names: Vec::new(),
             unit_stats: Vec::new(),
             system_threads: 0,
             file_nr: None,

@@ -658,6 +658,7 @@ impl Source for FakeSweep {
             extras: pids.map(|_| sweep_extras()).collect(),
             extras_p2: Vec::new(),
             app_stats: Vec::new(),
+            app_names: Vec::new(),
             unit_stats: Vec::new(),
             system_threads: 0,
             file_nr: None,

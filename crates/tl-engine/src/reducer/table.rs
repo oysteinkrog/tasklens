@@ -37,6 +37,9 @@ pub struct TableInput<'a> {
     pub extras: &'a [ProcessExtras],
     /// App cgroup samples (R-141 item 2).
     pub app_stats: &'a [AppCgroupSample],
+    /// The desktop entry Name of each app group whose desktop entry resolved (PROC-008). When a
+    /// group has one, it is the app row's name and the app name the filter matches.
+    pub app_names: &'a FxHashMap<GroupKey, Arc<str>>,
     pub unit_stats: &'a [CgroupStats],
     pub system: &'a SystemSnapshot,
     pub devices: &'a DeviceCatalog,
@@ -1750,16 +1753,20 @@ fn grouped_rows(
     let is_kthread = |i: usize| records[i].flags.contains(ProcFlags::KERNEL_THREAD);
     let unit_of = |i: usize| input.extras.get(i).and_then(|x| x.unit.as_ref());
 
-    // Lowercase app names for the filter, by the same rule as the row name (`name_rank`): a
-    // member named with the desktop Name, else a primary (an app id, parent outside the app's
-    // own pids), else the first record. The pid set is per group, so an app started from
-    // another app still has a primary.
+    // Lowercase app names for the filter, by the same rule as the row name: the group's desktop
+    // Name from `input.app_names`, else by `name_rank` a member named with the desktop Name,
+    // else a primary (an app id, parent outside the app's own pids), else the first record. The
+    // pid set is per group, so an app started from another app still has a primary.
     let app_pids: FxHashSet<(GroupKey, u32)> = records
         .iter()
         .filter(|r| r.meta.app_id.is_some())
         .map(|r| (r.group, r.key.pid))
         .collect();
-    let mut app_names: FxHashMap<GroupKey, (u8, String)> = FxHashMap::default();
+    let mut app_names: FxHashMap<GroupKey, (u8, String)> = input
+        .app_names
+        .iter()
+        .map(|(g, name)| (*g, (u8::MAX, name.to_lowercase())))
+        .collect();
     for (i, r) in records.iter().enumerate() {
         if class[i] != GroupClass::Apps {
             continue;
@@ -1868,6 +1875,11 @@ fn grouped_rows(
         g.node = NodeId::Group(*key);
         g.key = *key;
         g.kind = GroupRowKind::App;
+        // The desktop Name wins over any member's name, so a group whose main process sits in
+        // another group is not named after a helper such as `cat` (PROC-008).
+        if let Some(name) = input.app_names.get(key) {
+            g.name = name.clone();
+        }
         groups.push(g);
     }
     for (c, unit, members) in &units {
@@ -2429,6 +2441,7 @@ mod tests {
             records: &records,
             extras: &extras,
             app_stats: &[],
+            app_names: &FxHashMap::default(),
             unit_stats: &[],
             system: &system,
             devices: &devices,
@@ -2724,6 +2737,8 @@ mod tests {
         records: Vec<ProcessRecord>,
         extras: Vec<ProcessExtras>,
         app_stats: Vec<AppCgroupSample>,
+        /// The collector's desktop Name per app group (`TableInput::app_names`).
+        app_names: FxHashMap<GroupKey, Arc<str>>,
         /// Grouped unless a test sets it.
         mode: TableMode,
         hide_system: bool,
@@ -2743,6 +2758,7 @@ mod tests {
                 records,
                 extras,
                 app_stats: Vec::new(),
+                app_names: FxHashMap::default(),
                 mode: TableMode::Grouped,
                 hide_system: false,
                 include_children: false,
@@ -2761,6 +2777,7 @@ mod tests {
                 records: &self.records,
                 extras: &self.extras,
                 app_stats: &self.app_stats,
+                app_names: &self.app_names,
                 unit_stats: &[],
                 system: &system,
                 devices: &devices,
@@ -2957,6 +2974,51 @@ mod tests {
             (member(60, 900, "chrome"), None),
             (crash, None),
         ])
+    }
+
+    /// The home tree without crashpad: every member's parent is Chrome's main process in the
+    /// other scope, so the collector has no primary in this group and no member carries
+    /// `APP_NAME`. Only the collector's group name (`app_names`) holds the desktop Name.
+    fn home_fixture_no_primary(desktop: bool) -> Fixture {
+        let mut f = home_fixture(desktop);
+        let crash = f.records.iter().position(|r| r.key.pid == 70);
+        if let Some(i) = crash {
+            f.records.remove(i);
+            f.extras.remove(i);
+        }
+        if desktop {
+            f.app_names.insert(
+                GroupKind::App {
+                    app_id: "chrome-personal".into(),
+                }
+                .key(),
+                "Google Chrome".into(),
+            );
+        }
+        f
+    }
+
+    #[test]
+    fn app_row_uses_group_desktop_name_without_collector_primary() {
+        let f = home_fixture_no_primary(true);
+        assert!(
+            f.records
+                .iter()
+                .all(|r| !r.flags.contains(ProcFlags::APP_NAME))
+        );
+        let view = f.build("", &headers(), CPU_DESC);
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(&*view.groups[0].name, "Google Chrome");
+        // The filter matches the desktop Name for every member.
+        let view = home_fixture_no_primary(true).build("google", &headers(), CPU_DESC);
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(&*view.groups[0].name, "Google Chrome");
+        assert_eq!(view.groups[0].members, 3);
+        // Without a desktop entry the primary rule names the row: the first member, `cat`.
+        let view = home_fixture_no_primary(false).build("", &headers(), CPU_DESC);
+        assert_eq!(&*view.groups[0].name, "cat");
+        let view = home_fixture_no_primary(false).build("google", &headers(), CPU_DESC);
+        assert!(view.groups.is_empty());
     }
 
     #[test]

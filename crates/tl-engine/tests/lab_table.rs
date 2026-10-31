@@ -280,6 +280,7 @@ fn build_mem(
         records,
         extras: &extras,
         app_stats,
+        app_names: &FxHashMap::default(),
         unit_stats,
         system: &system,
         devices: &devices,
@@ -1923,6 +1924,11 @@ fn grouped_query() -> EngineMsg {
 }
 
 fn sweep_of(records: Vec<ProcessRecord>) -> EngineMsg {
+    sweep_named(records, Vec::new())
+}
+
+/// `sweep_of` with the collector's desktop Name per app group.
+fn sweep_named(records: Vec<ProcessRecord>, app_names: Vec<(GroupKey, Arc<str>)>) -> EngineMsg {
     let extras = records.iter().map(extras).collect();
     EngineMsg::Source(SourceUpdate::Processes(ProcessSweep {
         observed_start: 1,
@@ -1931,6 +1937,7 @@ fn sweep_of(records: Vec<ProcessRecord>) -> EngineMsg {
         extras,
         extras_p2: Vec::new(),
         app_stats: Vec::new(),
+        app_names,
         unit_stats: Vec::new(),
         system_threads: 0,
         file_nr: None,
@@ -2001,6 +2008,48 @@ fn unit_row_name(snap: &Snapshot, unit: &UnitRef) -> String {
         .find(|g| g.kind == GroupRowKind::Unit && g.node == NodeId::Unit(unit.clone()))
         .map(|g| g.name.to_string())
         .expect("the unit has a row")
+}
+
+/// Chrome on the home machine with no collector primary in the group (tasklens-q4x76.36): the
+/// main process (pid 900) sits in its own scope, and every member's parent is it, so no member
+/// carries `APP_NAME` and the lowest pid is a `cat` helper.
+fn chrome_children() -> Vec<ProcessRecord> {
+    [(50, "cat"), (51, "cat"), (60, "chrome")]
+        .into_iter()
+        .map(|(pid, name)| in_app(rec(pid, 900, name, 1.0), "chrome-personal"))
+        .collect()
+}
+
+/// The name of the app row of `app_id`.
+fn app_row_name(snap: &Snapshot, app_id: &str) -> String {
+    let key = GroupKind::App {
+        app_id: app_id.into(),
+    }
+    .key();
+    snap.table
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::App && g.key == key)
+        .map(|g| g.name.to_string())
+        .expect("the app has a row")
+}
+
+#[test]
+fn app_row_name_from_collector_desktop_name() {
+    let key = GroupKind::App {
+        app_id: "chrome-personal".into(),
+    }
+    .key();
+    let mut engine = Engine::new();
+    let snap = engine.run(vec![
+        grouped_query(),
+        sweep_named(chrome_children(), vec![(key, "Google Chrome".into())]),
+    ]);
+    assert_eq!(app_row_name(&snap, "chrome-personal"), "Google Chrome");
+    // A sweep with no desktop Name (the low-memory sweep reads no desktop file) falls back to
+    // the primary rule, and the reducer keeps no stale name from the sweep before.
+    let snap = engine.run(vec![sweep_of(chrome_children())]);
+    assert_eq!(app_row_name(&snap, "chrome-personal"), "cat");
 }
 
 #[test]
@@ -2173,6 +2222,7 @@ fn group_rows_sum_extras_columns() {
             records: &records,
             extras,
             app_stats: &[],
+            app_names: &FxHashMap::default(),
             unit_stats: &[],
             system: &system,
             devices: &devices,

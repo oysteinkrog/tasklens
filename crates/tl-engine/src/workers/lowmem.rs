@@ -192,6 +192,9 @@ impl LowMemSource {
         };
         for r in &mut s.records {
             let kernel_thread = r.flags.contains(ProcFlags::KERNEL_THREAD);
+            // APP_NAME is a naming mark set where the record is built, as in the full sweep.
+            // This mode reads no desktop file, so it never sets it today; keep it anyway so the
+            // flag pass cannot drop it.
             r.flags = flags_for(
                 r.key.pid,
                 kernel_thread,
@@ -199,7 +202,7 @@ impl LowMemSource {
                 self.self_uid,
                 &set,
                 &self.protect,
-            );
+            ) | (r.flags & ProcFlags::APP_NAME);
         }
     }
 
@@ -336,6 +339,7 @@ impl Source for LowMemSource {
             extras: Vec::new(),
             extras_p2: Vec::new(),
             app_stats: Vec::new(),
+            app_names: Vec::new(),
             unit_stats: Vec::new(),
             system_threads,
             file_nr: None,
@@ -791,6 +795,15 @@ mod tests {
         assert!(sweep.records.is_sorted_by_key(|r| r.key));
         assert!(sweep.extras.is_empty() && sweep.extras_p2.is_empty());
         assert!(sweep.app_stats.is_empty());
+        // No desktop file is read, so no app group has a desktop Name and the table names an
+        // app row by the primary rule (tasklens-q4x76.36).
+        assert!(sweep.app_names.is_empty());
+        assert!(
+            sweep
+                .records
+                .iter()
+                .all(|r| !r.flags.contains(ProcFlags::APP_NAME))
+        );
 
         let info = sweep.low_memory.as_ref().expect("low memory info");
         assert_eq!(info.groups.len(), 1);

@@ -22,7 +22,7 @@ use tl_collect::net::NetRate;
 use tl_model::devices::DeviceIdentity;
 use tl_model::gpu_proto::{GpuProcessSample, Reading};
 use tl_model::history::RecordSink;
-use tl_model::ids::ProcessKey;
+use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     AppCgroupSample, Coverage, GpuVram, LowMemoryInfo, ProcFlags, ProcessExtras, ProcessExtrasP2,
     ProcessRecord, linger_ms,
@@ -89,6 +89,8 @@ pub struct ProcessState {
     extras_p2: FxHashMap<ProcessKey, ProcessExtrasP2>,
     /// Sorted by `GroupKey` (R-141 item 2).
     app_stats: Vec<AppCgroupSample>,
+    /// From `ProcessSweep.app_names`: the desktop entry Name per app group (PROC-008).
+    app_names: FxHashMap<GroupKey, Arc<str>>,
     unit_stats: Vec<CgroupStats>,
     /// From `ProcessSweep.low_memory` (R-150 item 2).
     low_memory: Option<Arc<LowMemoryInfo>>,
@@ -142,6 +144,7 @@ impl ProcessState {
             extras: FxHashMap::default(),
             extras_p2: FxHashMap::default(),
             app_stats: Vec::new(),
+            app_names: FxHashMap::default(),
             unit_stats: Vec::new(),
             low_memory: None,
             gpu: FxHashMap::default(),
@@ -251,6 +254,7 @@ impl ProcessState {
         let mut app_stats = sweep.app_stats;
         app_stats.sort_unstable_by_key(|a| a.group);
         self.app_stats = app_stats;
+        self.app_names = sweep.app_names.into_iter().collect();
         self.unit_stats = sweep.unit_stats;
         self.low_memory = sweep.low_memory;
         self.system_threads = sweep.system_threads;
@@ -617,6 +621,11 @@ impl ProcessState {
         &self.unit_stats
     }
 
+    /// The desktop entry Name of each app group in the last sweep whose desktop entry resolved.
+    pub fn app_names(&self) -> &FxHashMap<GroupKey, Arc<str>> {
+        &self.app_names
+    }
+
     /// App cgroup samples of the last sweep, sorted by `GroupKey`.
     pub fn app_stats(&self) -> &[AppCgroupSample] {
         &self.app_stats
@@ -837,6 +846,7 @@ mod tests {
             extras: keys.iter().map(|&k| extras(k)).collect(),
             extras_p2: keys.iter().map(|_| ProcessExtrasP2::default()).collect(),
             app_stats: Vec::new(),
+            app_names: Vec::new(),
             unit_stats: Vec::new(),
             system_threads: 0,
             file_nr: None,

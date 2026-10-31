@@ -2395,6 +2395,7 @@ impl Reducer {
                 records: &processes.records,
                 extras: &processes.extras,
                 app_stats: &processes.apps,
+                app_names: self.processes.app_names(),
                 unit_stats: self.processes.unit_stats(),
                 system: &system,
                 devices: &devices,

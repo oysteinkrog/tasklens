@@ -371,6 +371,11 @@ impl Source for ProcessesSource {
             // values.
             extras_p2,
             app_stats: out.apps.iter().map(|a| a.to_model()).collect(),
+            app_names: out
+                .apps
+                .iter()
+                .filter_map(|a| Some((a.group_key, a.app_name.clone()?)))
+                .collect(),
             // Unit resource columns are P2.
             unit_stats: Vec::new(),
             system_threads,
