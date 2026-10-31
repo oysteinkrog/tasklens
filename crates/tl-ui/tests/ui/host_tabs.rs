@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext, px};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, VisualTestContext, px};
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
