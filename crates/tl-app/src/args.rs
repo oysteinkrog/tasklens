@@ -39,6 +39,8 @@ pub struct Args {
         help = "Run a separate instance with its own settings, state, cache and bus name (development builds)"
     )]
     pub app_id: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<Cmd>,
     #[cfg(feature = "bench")]
     #[arg(long, value_enum, value_name = "SCENE", help = "Run a benchmark scene")]
     pub bench: Option<BenchScene>,
@@ -54,6 +56,13 @@ pub struct Args {
     #[cfg(feature = "bench")]
     #[arg(long, conflicts_with = "bench", help = "Open the component gallery")]
     pub gallery: bool,
+}
+
+/// Subcommands.
+#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmd {
+    /// Connect stdin and stdout to this user's engine service (the far end of ssh, ADR-018)
+    Bridge,
 }
 
 /// Values of `--tab`.
@@ -166,8 +175,17 @@ mod tests {
         assert_eq!(args.tab, None);
         assert_eq!(args.select_pid, None);
         assert_eq!(args.app_id, None);
+        assert_eq!(args.command, None);
         #[cfg(feature = "bench")]
         assert!(!args.gallery);
+    }
+
+    #[test]
+    fn bridge_subcommand() {
+        assert_eq!(parse_from(&["bridge"]).unwrap().command, Some(Cmd::Bridge));
+        let args = parse_from(&["--app-id", "dev", "bridge"]).unwrap();
+        assert_eq!(args.command, Some(Cmd::Bridge));
+        assert_eq!(args.app_id.as_deref(), Some("dev"));
     }
 
     #[test]

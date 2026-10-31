@@ -11,6 +11,7 @@ mod atomic;
 mod autostart;
 #[cfg(feature = "bench")]
 mod bench_main;
+mod bridge;
 mod build_info;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
@@ -94,6 +95,11 @@ fn main() -> ExitCode {
     // and logging, so the watcher starts with no file logger and no writer thread (R-152 OI-4).
     if args.watch_memory {
         return exec_watcher();
+    }
+    // `tasklens bridge` runs over ssh: no display, and stdout carries only protocol bytes, so
+    // it starts before paths and logging (ADR-018 Remote transport).
+    if args.command == Some(args::Cmd::Bridge) {
+        return bridge::main(args.app_id.as_deref());
     }
 
     // Step 1: paths, panic hook, logging.

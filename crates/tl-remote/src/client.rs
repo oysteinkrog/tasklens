@@ -43,8 +43,8 @@ use tl_model::command::{Command, CommandError, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalControl, JournalEvent, JournalHandle, JournalQuery};
 use tl_model::remote_proto::{
-    BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, PROTO, ServerBootstrap, ServerMsg,
-    StreamId, Welcome, decode_server_bootstrap, encode_hello,
+    BootPrefix, ClientMsg, Hello, HelloTail, HostIdentity, PROTO, ProtoError, ServerBootstrap,
+    ServerMsg, StreamId, Welcome, decode_server_bootstrap, encode_hello,
 };
 use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::settings::EngineSettings;
@@ -53,7 +53,7 @@ use tl_model::table::{SysTableQuery, TableQuery};
 use tl_model::time::BootId;
 
 use crate::delta;
-use crate::envelope::{FrameReader, FrameWriter};
+use crate::envelope::{EnvelopeError, FrameReader, FrameWriter};
 
 /// Commands queued for the writer at most. One more is `Err(Busy)`.
 pub const COMMAND_QUEUE: usize = 64;
@@ -658,9 +658,12 @@ fn handshake(
         .write_all(&out)
         .and_then(|()| writer.flush())
         .map_err(|e| Arc::from(e.to_string()))?;
-    let frame = frames
-        .read_frame(reader)
-        .map_err(|e| Arc::from(e.to_string()))?;
+    // A transport names its own read failures (the ssh connector says "ssh needs a key for
+    // home"), so an i/o error is shown as its own text.
+    let frame = frames.read_frame(reader).map_err(|e| match e {
+        EnvelopeError::Proto(ProtoError::Io(e)) => Arc::from(e.to_string()),
+        e => Arc::from(e.to_string()),
+    })?;
     match decode_server_bootstrap(&frame).map_err(|e| Arc::from(e.to_string()))? {
         ServerBootstrap::Welcome(Welcome {
             tail: Some(identity),

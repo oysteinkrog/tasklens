@@ -430,7 +430,7 @@ fn time_left(deadline: Instant) -> io::Result<Duration> {
 /// A non-blocking connect. A Unix socket whose backlog is full refuses with `EAGAIN` and does
 /// not queue the attempt, so it is tried again every `POLL` until `deadline`. The stream it
 /// returns blocks.
-fn connect_by(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub(crate) fn connect_by(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let addr = SocketAddrUnix::new(path)?;
     let fd = loop {
         let fd = rustix::net::socket_with(
