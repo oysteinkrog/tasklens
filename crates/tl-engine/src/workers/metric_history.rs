@@ -38,6 +38,10 @@
 //! `None` when a session shows no range: one empty `DeviceHistory` that frees the points. A new
 //! worker generation has sent nothing, so its first read answers every key, `None` included: the
 //! reducer may still hold the answers of the generation before it.
+//! The answer for the key `None` needs no store read. While the store is not open, so before
+//! each open and while it fails to open, and after a failed read, the worker sends that answer
+//! alone, so a session that shows no range never keeps old points. The ranged sessions keep what
+//! they show until the next good read. A store that closes keeps the newest range list.
 //!
 //! Timeline (UI-PRF-057): while `Demand.device_timeline` is true, the same component carries a
 //! `DeviceTimeline`: the last 24 hours of the 1 min tier for CPU total, memory in use, the
@@ -551,6 +555,16 @@ impl State {
         }
     }
 
+    /// Applies the range lists among `msgs` and drops the rest, for a store that closes. The sink
+    /// does not send a list again to the same sender generation, so the next open needs it.
+    pub fn keep_ranges(&mut self, msgs: impl IntoIterator<Item = MetricMsg>) {
+        for msg in msgs {
+            if let MetricMsg::Ranges(_) = msg {
+                self.apply(msg);
+            }
+        }
+    }
+
     /// The keys to answer: `local`, the local window's range from the demand watch, which is
     /// never older than the list's, then each other session's range that is not in the list yet.
     /// `None` is the empty answer for a session that shows no range.
@@ -647,7 +661,8 @@ impl State {
     /// `now_t_ns`, or `None` when nothing needs sending: the keys, the data and the timeline are
     /// unchanged, or the last reads are too recent. Equal keys are answered once. A key that is
     /// newly wanted gets an answer even when it is empty, so a cleared range and timeline send
-    /// one empty `DeviceHistory`. After a failed read every key is answered again next time.
+    /// one empty `DeviceHistory`. After a failed read every key is answered again next time,
+    /// except the key `None` while its sent answer still holds the current timeline.
     pub fn answer_all(
         &mut self,
         wanted: &[Option<DeviceHistoryRequest>],
@@ -656,9 +671,38 @@ impl State {
     ) -> Result<Option<DeviceHistories>, tl_history::HistoryError> {
         let answer = self.answer_keys(wanted, timeline, now_t_ns);
         if answer.is_err() {
-            self.sent.clear();
+            let held = self.no_range_held();
+            self.sent.retain(|(key, _)| held && key.is_none());
         }
         answer
+    }
+
+    /// The answer for the key `None` alone, for when the store cannot answer: before it opens,
+    /// when it fails to open and after a failed read (ADR-018). It needs no store read, so a
+    /// session that shows no range stops showing old points even while the store fails. The
+    /// range list does not reach a closed store, so the key `None` is answered whether or not a
+    /// session shows no range. The ranged keys keep what they show until the next good read.
+    /// `None` when the reducer holds this answer already.
+    pub fn answer_no_range(&mut self) -> Option<DeviceHistories> {
+        if self.no_range_held() {
+            return None;
+        }
+        let answer = Arc::new(self.current(None));
+        self.sent = vec![(None, Arc::clone(&answer))];
+        Some(Arc::from([(None, answer)]))
+    }
+
+    /// True when the key `None` was sent last with the current timeline.
+    fn no_range_held(&self) -> bool {
+        let timeline = self.timeline.as_ref().map(|t| &t.data);
+        self.sent.iter().any(|(key, h)| {
+            key.is_none()
+                && match (&h.timeline, timeline) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    _ => false,
+                }
+        })
     }
 
     fn answer_keys(
@@ -1127,11 +1171,14 @@ pub async fn run_metric_history(
 
         if open && !want {
             guard.close();
-            msgs.clear();
-            while rx.try_recv().is_ok() {}
+            let mut dropped = std::mem::take(&mut msgs);
+            while let Ok(msg) = rx.try_recv() {
+                dropped.push(msg);
+            }
             let job_state = Arc::clone(&state);
             let job = spawn(&cx, move || {
                 let mut st = lock(&job_state);
+                st.keep_ranges(dropped);
                 if let Err(e) = st.close(now_boot_ns()) {
                     tracing::debug!("device history close failed: {e}");
                 }
@@ -1172,6 +1219,13 @@ pub async fn run_metric_history(
             continue;
         }
         if !lock(&state).is_open() {
+            // The empty answer needs no store: it goes out before the open and while it fails.
+            let empty = lock(&state).answer_no_range();
+            if let Some(empty) = empty
+                && let Some(outcome) = send(&cx, &io, SourceUpdate::DeviceHistory(empty)).await
+            {
+                stop!(outcome);
+            }
             if retry_at.is_some_and(|t| now < t) {
                 continue;
             }
@@ -1293,7 +1347,7 @@ pub async fn run_metric_history(
                 Ok(answer) => answer,
                 Err(e) => {
                     tracing::debug!("device history read failed: {e}");
-                    None
+                    st.answer_no_range()
                 }
             };
             (batch, answer, error)
@@ -2458,11 +2512,13 @@ mod tests {
     }
 
     /// ADR-018, level-triggered range list: 2000 random steps in which sessions open, change
-    /// their range, clear it and close, and the worker restarts, through a queue of 2 that the
-    /// worker drains at random, so range lists are dropped. The reducer keeps the answers of the
-    /// generation before a restart. After each settled step every open session finds the answer
-    /// for its own range, the worker's list holds no closed session, and the worker keeps no read
-    /// for a range no open session shows.
+    /// their range, clear it and close, the worker restarts, and the store fails to open, closes
+    /// and opens again, through a queue of 2 that the worker drains at random, so range lists are
+    /// dropped. The reducer keeps the answers of the generation before a restart. After each
+    /// settled step with the store open every open session finds the answer for its own range,
+    /// the worker's list holds no closed session, and the worker keeps no read for a range no
+    /// open session shows. With the store not open every session that shows no range finds the
+    /// empty answer.
     #[test]
     fn range_list_model() {
         let mut rng: u64 = 0x2545_f491_4f6c_dd1d;
@@ -2496,14 +2552,22 @@ mod tests {
         // The reducer's `device_histories`; a restart keeps it.
         let mut shown: DeviceHistories = Arc::from([]);
         let (mut refused, mut settled, mut restarts) = (0, 0, 0);
+        let (mut failed_opens, mut closes, mut settled_closed) = (0, 0, 0);
 
-        // One worker turn: up to `n` messages, then the answers.
+        // One worker turn: up to `n` messages, then the answers. Without a store the slot is
+        // empty, so no message comes, and the worker answers the key `None` alone.
         let turn = |st: &mut State,
                     rx: &mut mpsc::Receiver<MetricMsg>,
                     shown: &mut DeviceHistories,
                     local: Option<DeviceHistoryRequest>,
                     now: TimeNs,
                     n: usize| {
+            if !st.is_open() {
+                if let Some(answer) = st.answer_no_range() {
+                    *shown = answer;
+                }
+                return;
+            }
             for msg in std::iter::from_fn(|| rx.try_recv().ok()).take(n) {
                 st.apply(msg);
             }
@@ -2534,20 +2598,47 @@ mod tests {
                     sessions.remove(i);
                 }
                 18 => {
-                    // The worker restarts: a new generation with a new channel and state.
+                    // The worker restarts: a new generation with a new channel and state. Its
+                    // store fails to open half the time, and then the slot stays empty.
                     drop(std::mem::take(&mut st));
-                    st = open(dir.path(), 1, OFFSET, now);
                     generation += 1;
                     let (tx, new_rx) = mpsc::channel::<MetricMsg>(2);
                     rx = new_rx;
                     samples = tx.clone();
-                    slot.store(Some(Arc::new(MetricTx { generation, tx })));
+                    if below(2) == 0 {
+                        slot.store(None);
+                        failed_opens += 1;
+                    } else {
+                        st = open(dir.path(), 1, OFFSET, now);
+                        slot.store(Some(Arc::new(MetricTx { generation, tx })));
+                    }
                     restarts += 1;
+                }
+                19 if st.is_open() => {
+                    // The store closes, as when no window shows device history, and fails to
+                    // open again. The worker keeps the range lists still in the queue.
+                    slot.store(None);
+                    st.keep_ranges(std::iter::from_fn(|| rx.try_recv().ok()));
+                    st.close(now).expect("close");
+                    if let Some(answer) = st.answer_closed() {
+                        shown = answer;
+                    }
+                    failed_opens += 1;
+                    closes += 1;
+                }
+                19 => {
+                    // The store opens at last, for the same generation and channel.
+                    let opened = open(dir.path(), 1, OFFSET, now);
+                    st.install(opened.store.expect("store"), OFFSET);
+                    let tx = samples.clone();
+                    slot.store(Some(Arc::new(MetricTx { generation, tx })));
                 }
                 _ => {}
             }
-            for _ in 0..below(3) {
-                let _ = samples.try_send(MetricMsg::System(Box::new([])));
+            if slot.load().is_some() {
+                for _ in 0..below(3) {
+                    let _ = samples.try_send(MetricMsg::System(Box::new([])));
+                }
             }
             // The end of the reducer turn.
             sink.set_ranges(&sessions);
@@ -2563,6 +2654,17 @@ mod tests {
                 sink.set_ranges(&sessions);
                 turn(&mut st, &mut rx, &mut shown, sessions[0].1, now, usize::MAX);
                 settled += 1;
+                if !st.is_open() {
+                    settled_closed += 1;
+                    for (id, _) in sessions.iter().filter(|(_, key)| key.is_none()) {
+                        let found = shown.iter().find(|(k, _)| k.is_none());
+                        let Some((_, answer)) = found else {
+                            panic!("no empty answer for session {id:?} while the store is closed");
+                        };
+                        assert!(answer.request.is_none() && answer.series.is_empty());
+                    }
+                    continue;
+                }
                 for (id, key) in &sessions {
                     let found = shown.iter().find(|(k, _)| k == key);
                     let Some((_, answer)) = found else {
@@ -2588,6 +2690,12 @@ mod tests {
         assert!(refused > 50, "the queue refused {refused} range lists");
         assert!(settled > 400, "{settled} settled steps");
         assert!(restarts > 50, "{restarts} restarts");
+        assert!(failed_opens > 50, "{failed_opens} failed opens");
+        assert!(closes > 20, "{closes} closes");
+        assert!(
+            settled_closed > 50,
+            "{settled_closed} settled steps with the store closed"
+        );
     }
 
     /// A new worker generation answers the key `None` at its first read, though nothing was read:
@@ -2607,6 +2715,18 @@ mod tests {
                 .expect("read")
                 .is_none()
         );
+    }
+
+    /// A worker whose store does not open answers the key `None` once, with no store read.
+    #[test]
+    fn a_store_that_fails_to_open_answers_no_range() {
+        let mut st = State::new();
+        let first = st.answer_no_range().expect("the first call answers");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, None);
+        assert!(first[0].1.series.is_empty() && first[0].1.request.is_none());
+        assert!(st.answer_no_range().is_none());
+        assert_eq!(st.range_reads(), 0);
     }
 
     #[test]
