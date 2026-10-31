@@ -1456,7 +1456,7 @@ impl ClientSessions {
     }
 
     /// In connect order, the local session first.
-    pub fn iter(&self) -> impl Iterator<Item = &ClientSession> {
+    pub fn iter(&self) -> impl Iterator<Item = &ClientSession> + Clone {
         self.sessions.iter()
     }
 

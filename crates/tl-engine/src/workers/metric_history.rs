@@ -2467,11 +2467,11 @@ mod tests {
         };
         // One worker turn: up to `n` messages, then the answers.
         let turn = |st: &mut State,
-                        rx: &mut mpsc::Receiver<MetricMsg>,
-                        shown: &mut DeviceHistories,
-                        local: Option<DeviceHistoryRequest>,
-                        now: TimeNs,
-                        n: usize| {
+                    rx: &mut mpsc::Receiver<MetricMsg>,
+                    shown: &mut DeviceHistories,
+                    local: Option<DeviceHistoryRequest>,
+                    now: TimeNs,
+                    n: usize| {
             for msg in std::iter::from_fn(|| rx.try_recv().ok()).take(n) {
                 st.apply(msg);
             }
