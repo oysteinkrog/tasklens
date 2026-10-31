@@ -1039,3 +1039,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.15 held: session snapshots carry only what that session's Demand asks for; hidden host = system part + tray flags; full table resync when demand returns; sweep every snapshot field for its Demand gate. Requeued.
 - 2026-10-31 q4x76.15 held again: gate each snapshot part by the narrowest Demand field naming it; window visibility only for parts no field names; one table-driven test over every Demand field. Requeued.
 - 2026-10-31 q4x76.20 held again: cached streams keyed by (id, generation); events or Done from an older generation are dropped; sweep every cached receiver in session.rs. Requeued.
+- 2026-10-31 q4x76.15 round 6: delivery gate = any Demand field whose page reads the part (inventory: inventory or window; services: services, unit fields or process_table); collectors unchanged; sweep tl-ui readers. Requeued.
