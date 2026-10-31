@@ -1043,3 +1043,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.15: option B confirmed; budget fixture must fill every delivered part. Runner: review prompt keeps Leader decisions whole (bead_brief). Requeued.
 - 2026-10-31 q4x76.7 (held 04:56): observer events are reported before the push/store/send they describe; sweep every observer call in client.rs. Requeued.
 - 2026-10-31 q4x76.6 prep: C (READY=1 before the lock-held exit 0, plus RestartPreventExitStatus=0); prep plan accepted; model:sonnet. Requeued.
+- 2026-10-31 q4x76.14 prep: ActionState::Progress, PROTO stays 1 (nothing released), host engine chooses every path on that host, toast split to tasklens-q4x76.21 after q4x76.11. Requeued.
