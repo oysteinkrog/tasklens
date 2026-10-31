@@ -136,15 +136,16 @@ impl SnapshotHub {
         &self.live_sensors
     }
 
-    /// Installs `snap` if its sequence is newer, then emits `SnapshotChanged` when any component
-    /// version differs from the installed snapshot. A new `generation` (a reconnect or another
-    /// engine instance, ADR-018) installs `snap` even at the same sequence and reports every
-    /// component and every series as changed, since versions from two generations cannot be
-    /// compared. Never notifies views.
+    /// Installs `snap` if it is newer by `(generation, sequence)`, then emits `SnapshotChanged`
+    /// when any component version differs from the installed snapshot. A higher `generation` (a
+    /// reconnect, another engine instance or a switch to another engine, ADR-018) starts the
+    /// sequence over: `snap` is installed whatever its sequence, and every component and every
+    /// series counts as changed, since versions from two generations cannot be compared. A
+    /// snapshot from a lower generation is never installed. Never notifies views.
     pub fn install(&mut self, generation: u64, snap: Arc<Snapshot>, cx: &mut Context<Self>) {
-        let new_generation = generation != self.generation;
-        if snap.sequence < self.current.sequence
-            || (snap.sequence == self.current.sequence && !new_generation)
+        let new_generation = generation > self.generation;
+        if generation < self.generation
+            || (!new_generation && snap.sequence <= self.current.sequence)
         {
             return;
         }
@@ -319,11 +320,51 @@ mod tests {
         let generation = engine.generation();
         hub.update(cx, |hub, cx| hub.install(generation, Arc::new(same), cx));
         assert_eq!(*masks.lock().unwrap(), [ComponentMask::ALL]);
-        // An older sequence is never installed, whatever the generation.
-        engine.bump_generation();
-        let generation = engine.generation();
+        // Within one generation an older sequence is never installed.
         hub.update(cx, |hub, cx| hub.install(generation, snap, cx));
         assert_eq!(masks.lock().unwrap().len(), 1);
+    }
+
+    /// A switch from the in-process engine to the engine service (ADR-018 Lifetime): the
+    /// service's snapshots number from 1 on a higher generation and are shown, and a late
+    /// snapshot of the old engine is dropped.
+    #[gpui_kit::test]
+    fn higher_generation_starts_sequence_over(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        let masks = watch(&hub, cx);
+        let with = |sequence: u64, boot_time_s: i64| {
+            let mut snap = empty_snapshot();
+            snap.sequence = sequence;
+            Arc::make_mut(&mut snap.system).header.version = 1;
+            Arc::make_mut(&mut snap.system).boot_time_s = boot_time_s;
+            Arc::new(snap)
+        };
+        hub.update(cx, |hub, cx| hub.install(0, with(500, 100), cx));
+        assert_eq!(masks.lock().unwrap().len(), 1);
+
+        hub.update(cx, |hub, cx| hub.install(1, with(1, 200), cx));
+        assert_eq!(masks.lock().unwrap().last(), Some(&ComponentMask::ALL));
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().sequence, 1);
+            assert_eq!(hub.current().system.boot_time_s, 200);
+        });
+
+        // The old engine's last snapshot arrives late: dropped, though its sequence is higher.
+        hub.update(cx, |hub, cx| hub.install(0, with(501, 100), cx));
+        assert_eq!(masks.lock().unwrap().len(), 2);
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().system.boot_time_s, 200);
+        });
+
+        // The new generation goes on by sequence.
+        hub.update(cx, |hub, cx| hub.install(1, with(1, 300), cx));
+        assert_eq!(masks.lock().unwrap().len(), 2);
+        hub.update(cx, |hub, cx| hub.install(1, with(2, 300), cx));
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().sequence, 2);
+        });
     }
 
     #[gpui_kit::test]
