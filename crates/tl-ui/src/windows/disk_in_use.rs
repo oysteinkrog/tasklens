@@ -278,7 +278,7 @@ pub fn start_eject(
         warn!(target: "tasklens::ui", "eject: no engine");
         return;
     };
-    if !host_send_allowed(&host, cx) {
+    if !host_send_allowed(host, cx) {
         return;
     }
     let seq = EJECT_SEQ.fetch_add(1, Ordering::Relaxed);
