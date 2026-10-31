@@ -1444,8 +1444,11 @@ impl EngineRig {
         (EngineRig { fake, ui, root }, link)
     }
 
-    fn set_demand(&self, demand: Demand) {
+    /// Sends `demand` and lets the reducer pass it on to the workers (ADR-018) before time
+    /// moves, so a sample due in the next step already sees it.
+    fn set_demand(&mut self, demand: Demand) {
         self.ui.demand_tx.send(demand).expect("demand sends");
+        self.fake.lab.run_until_idle();
     }
 
     /// Runs `total` of virtual time in 100 ms steps.
