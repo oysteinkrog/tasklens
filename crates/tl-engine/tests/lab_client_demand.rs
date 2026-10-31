@@ -297,8 +297,8 @@ fn closed_session_releases_its_demand() {
 #[test]
 fn combine_dedups_and_keeps_a_lone_list() {
     let a = windows(100, 10);
-    // Starts with the same five processes as `a`, then five of its own.
-    let b = windows(105, 10);
+    // Starts with the same five processes as `a`, then seven of its own.
+    let b = windows(105, 12);
     let combined = combine(&[&a, &b]);
     assert_eq!(combined.details.len(), DETAILS_MAX);
     // `a` has 100 to 109, `b` adds 110 to 115 before the list is full.
