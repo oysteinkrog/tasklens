@@ -517,8 +517,8 @@ fn lost_history_queries_end_and_free_their_slot() {
     assert_eq!(session.active(IdKind::History), 0);
 }
 
-/// After a session that queried history closes, the history worker gets the list of open
-/// sessions without it, so it drops that session's queries.
+/// A history query carries the list of open sessions, and after a session that queried history
+/// closes, the history worker gets the list without it, so it drops that session's queries.
 #[test]
 fn closing_a_session_forgets_its_history() {
     let mut rig = Rig::new();
@@ -527,7 +527,9 @@ fn closing_a_session_forgets_its_history() {
     let lists = |rig: &mut Rig| -> Vec<Vec<ClientSessionId>> {
         std::iter::from_fn(|| rig.history_rx.try_recv().ok())
             .filter_map(|msg| match msg {
-                HistoryMsg::Sessions(list) => Some(list.ids.to_vec()),
+                HistoryMsg::Sessions(list) | HistoryMsg::Query { sessions: list, .. } => {
+                    Some(list.ids.to_vec())
+                }
                 _ => None,
             })
             .collect()
