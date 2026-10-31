@@ -246,6 +246,10 @@ struct Wire {
     complete: usize,
     /// Uncompressed postcard bytes per part, summed over the delta frames.
     parts: Vec<(&'static str, usize)>,
+    /// Delta frames that carry each part, in the order of `parts`.
+    carried: Vec<usize>,
+    /// Uncompressed postcard bytes of each part in the complete frame.
+    whole: Vec<(&'static str, usize)>,
 }
 
 /// The uncompressed bytes of each part of `frame`: the frame with only that part set, less the
@@ -316,14 +320,17 @@ fn session_bytes(port: &SessionPort) -> (Wire, Arc<Snapshot>) {
             .unwrap();
         if frame.base == 0 {
             wire.complete += bytes.len();
+            wire.whole = part_sizes(&frame);
         } else {
             let sizes = part_sizes(&frame);
             if wire.parts.is_empty() {
-                wire.parts = sizes;
-            } else {
-                for (sum, (_, n)) in wire.parts.iter_mut().zip(sizes) {
-                    sum.1 += n;
-                }
+                wire.carried = sizes.iter().map(|_| 0).collect();
+                wire.parts = sizes.iter().map(|(name, _)| (*name, 0)).collect();
+            }
+            for ((sum, carried), (_, n)) in wire.parts.iter_mut().zip(&mut wire.carried).zip(sizes)
+            {
+                sum.1 += n;
+                *carried += usize::from(n > 0);
             }
         }
         wire.server += bytes.len();
@@ -358,10 +365,26 @@ fn report(name: &str, wire: &Wire, last: &Snapshot) {
         last.series.series.len(),
         last.series.slow.len()
     );
+    println!(
+        "  {} units, {} windows, {} catalog devices, {} inventory disks, {} inventory network adapters",
+        last.services.units.len(),
+        last.windows.windows.len(),
+        last.devices.entries.len(),
+        last.inventory.disks.len(),
+        last.inventory.network.len()
+    );
     let deltas = (wire.frames - 1).max(1);
-    for (part, n) in &wire.parts {
-        if *n > 0 {
-            println!("  {part}: {} B per delta frame, uncompressed", n / deltas);
+    for ((part, n), carried) in wire.parts.iter().zip(&wire.carried) {
+        let whole = wire
+            .whole
+            .iter()
+            .find(|(name, _)| name == part)
+            .map_or(0, |(_, w)| *w);
+        if *n > 0 || whole > 0 {
+            println!(
+                "  {part}: {whole} B in the complete frame; in {carried} of {deltas} delta frames, {} B per delta frame, uncompressed",
+                n / deltas
+            );
         }
     }
 }
