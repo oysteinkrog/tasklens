@@ -46,7 +46,6 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{FilterChanged, NO_MATCH, PropsFilter, SYNC_MAX_ROWS, lowercase};
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::icons::{TlIcon, icon};
@@ -54,6 +53,7 @@ use crate::components::menu::TlMenu;
 use crate::components::progress::{TlProgress, TlProgressSize};
 use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::table::actions::CopyRow;
@@ -774,6 +774,8 @@ impl Render for StringsStatus {
 // ---- The tab ----
 
 pub struct StringsTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     table: Entity<TlTreeTable<StringsDelegate>>,
     filter: Entity<PropsFilter>,
@@ -812,10 +814,10 @@ fn toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: SharedString)
     }
 }
 
-fn send(cmd: Command, cx: &App) {
-    match cx.try_global::<EngineGlobal>() {
+fn send(host: &HostContext, cmd: Command, _cx: &App) {
+    match host.client() {
         Some(engine) => {
-            if let Err(err) = engine.0.send(cmd) {
+            if let Err(err) = engine.send(cmd) {
                 warn!(target: "tasklens::ui", ?err, "strings command not sent");
             }
         }
@@ -825,6 +827,7 @@ fn send(cmd: Command, cx: &App) {
 
 impl StringsTab {
     pub fn new(
+        host: &HostContext,
         key: ProcessKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
@@ -866,11 +869,12 @@ impl StringsTab {
         // Closing the window drops the tab: a running scan is cancelled.
         cx.on_release(|this, cx| {
             if let (true, Some(scan)) = (this.scan_running(), this.scan) {
-                send(Command::CancelStringScan(scan), cx);
+                send(&this.host, Command::CancelStringScan(scan), cx);
             }
         })
         .detach();
         Self {
+            host: host.clone(),
             key,
             table,
             filter,
@@ -1067,6 +1071,7 @@ impl StringsTab {
         self.set_phase(ScanPhase::Scanning, cx);
         self.update_status(cx);
         send(
+            &self.host,
             Command::StringScan {
                 scan,
                 key: self.key,
@@ -1083,7 +1088,7 @@ impl StringsTab {
             return false;
         }
         if let Some(scan) = self.scan {
-            send(Command::CancelStringScan(scan), cx);
+            send(&self.host, Command::CancelStringScan(scan), cx);
         }
         // At once, so the next Esc goes on to the filter.
         self.set_phase(ScanPhase::Cancelled, cx);

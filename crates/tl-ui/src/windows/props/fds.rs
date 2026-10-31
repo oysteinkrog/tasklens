@@ -33,7 +33,7 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::components::checkbox::TlCheckbox;
 use crate::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
@@ -41,6 +41,7 @@ use crate::components::kv_grid::{
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::connections::actions::GoToConnection;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -901,6 +902,8 @@ pub struct FdsCountChanged(pub u32);
 /// The File descriptors tab view. `PropsWindow` builds it with the process key and the tab's
 /// filter.
 pub struct FdsTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     table: Entity<TlTreeTable<FdsDelegate>>,
     pane: Entity<FdDetailsPane>,
@@ -925,6 +928,7 @@ fn toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: SharedString)
 
 impl FdsTab {
     pub fn new(
+        host: &HostContext,
         key: ProcessKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
@@ -978,6 +982,7 @@ impl FdsTab {
             }
         }));
         Self {
+            host: host.clone(),
             key,
             table,
             pane,
@@ -1196,7 +1201,7 @@ impl FdsTab {
         let Some(path) = path else {
             return;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker, file location not opened");
             return;
         };

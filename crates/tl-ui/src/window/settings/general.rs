@@ -5,13 +5,14 @@ use gpui_kit::{App, SharedString};
 use tl_model::command::Tab;
 
 use super::{PageBuilder, PageId};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue};
 use crate::window::main::ShellState;
 use crate::window::menus_settings::SHIPPED_LANGUAGES;
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::General);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::General);
     let startup = tr(cx, "shell-settings-group-startup");
     let language = tr(cx, "shell-settings-group-language");
 

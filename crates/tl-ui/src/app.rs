@@ -249,7 +249,8 @@ fn request_name(req: &AppRequest) -> &'static str {
     }
 }
 
-/// The engine client, for code that has no hub at hand.
+/// The local host's engine client, set once by `TasklensUi::init`. Read only through
+/// [`crate::host::HostContext`].
 pub struct EngineGlobal(pub Arc<dyn EngineClient>);
 
 impl Global for EngineGlobal {}
@@ -310,7 +311,7 @@ impl TasklensUi {
         // 7. Hub and demand.
         let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        cx.set_global(GlobalHub(hub));
+        cx.set_global(GlobalHub(hub.clone()));
         cx.set_global(GlobalDemand(demand));
         crate::window::registry::GlobalRegistry::init(cx);
 
@@ -324,8 +325,8 @@ impl TasklensUi {
         settings_global::TlSettings::init(cx);
         cx.set_global(env);
 
-        // Follow system light and dark (E17-007). Follow-system switches show no toast.
-        let hub = cx.global::<GlobalHub>().0.clone();
+        // Follow system light and dark (E17-007), from the local host's snapshot. Follow-system
+        // switches show no toast.
         cx.subscribe(&hub, |hub, ev: &SnapshotChanged, cx| {
             if !ev.mask.contains(ComponentMask::SYSTEM) {
                 return;
@@ -373,7 +374,7 @@ impl TasklensUi {
         toast::init(cx);
 
         // ActionTracker
-        crate::action_tracker::install(hub.read(cx).client().clone(), cx);
+        crate::action_tracker::install(hub.read(cx).client().clone(), Some(hub.clone()), cx);
         crate::request_ends::install(hub.read(cx).client().clone(), cx);
         crate::helper_flow::install(cx);
 

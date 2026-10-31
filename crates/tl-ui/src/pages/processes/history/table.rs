@@ -33,7 +33,7 @@ use super::actions::{DeleteFromHistory, HistoryShowInLiveTable};
 use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
 use crate::components::validity::copy_text;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
@@ -116,11 +116,10 @@ impl HistoryTableWords {
     }
 }
 
-/// True when `key` is in the current live process list and has not exited.
-pub fn is_live(key: ProcessKey, cx: &App) -> bool {
-    cx.try_global::<GlobalHub>().is_some_and(|hub| {
-        hub.0
-            .read(cx)
+/// True when `key` is in `host`'s current live process list and has not exited.
+pub fn is_live(host: &HostContext, key: ProcessKey, cx: &App) -> bool {
+    host.hub().is_some_and(|hub| {
+        hub.read(cx)
             .current()
             .processes
             .get(key)
@@ -194,6 +193,8 @@ struct PeakTips {
 /// The History table delegate. The page installs each history view with [`Self::install`] and
 /// calls `TlTreeTable::on_new_version` when it returns true.
 pub struct HistoryTableDelegate {
+    /// The host this table shows. Set when it opens; never changes.
+    host: HostContext,
     view: Arc<HistoryView>,
     /// Indices into `view.rows`, filtered and in display order.
     order: Vec<u32>,
@@ -234,7 +235,7 @@ pub type CapturedRows = (SmallVec<[ProcessKey; 8]>, Option<ColumnId>);
 impl HistoryTableDelegate {
     /// Translates the words and labels once, reads the sort from `[sort.history]` (an unknown
     /// column falls back to CPU descending) and the layout from `[columns.history]`.
-    pub fn new(settings: &Settings, state: &UiState, cx: &App) -> Self {
+    pub fn new(host: &HostContext, settings: &Settings, state: &UiState, cx: &App) -> Self {
         let words = HistoryTableWords::new(cx);
         let specs = build_specs(settings, &words, cx);
         let saved = &state.sort.history;
@@ -254,6 +255,7 @@ impl HistoryTableDelegate {
         let mut layout = ColumnLayout::from_state(TableId::History, &state.columns.history, &specs);
         layout.rebuild(ui_scale(cx));
         Self {
+            host: host.clone(),
             view: Arc::new(HistoryView::default()),
             order: Vec::new(),
             index: FxHashMap::default(),
@@ -819,7 +821,7 @@ impl TreeTableDelegate for HistoryTableDelegate {
         if keys.is_empty() {
             return menu;
         }
-        let any_live = keys.iter().any(|&k| is_live(k, cx));
+        let any_live = keys.iter().any(|&k| is_live(&self.host, k, cx));
         self.captured = Some((keys, clicked_col));
         let mut menu = menu;
         if let Some(col) = clicked_col {

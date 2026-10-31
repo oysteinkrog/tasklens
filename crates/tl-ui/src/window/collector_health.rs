@@ -22,7 +22,8 @@ use super::registry::{GlobalRegistry, WindowKey};
 use crate::actions::OpenCollectorHealth;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::text::style::{numeric_style, t_sm};
@@ -131,11 +132,19 @@ impl StateLook {
 /// Registers the `OpenCollectorHealth` handler. `TasklensUi::init` calls it.
 pub fn init(cx: &mut App) {
     // Deferred: from a menu or the status chip the main window is mid-update.
-    cx.on_action(|_: &OpenCollectorHealth, cx| cx.defer(open_collector_health));
+    cx.on_action(|_: &OpenCollectorHealth, cx| {
+        cx.defer(|cx| {
+            // App-level: the window shows the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_collector_health(&host, cx);
+        })
+    });
 }
 
-/// Focuses the open window, or opens it. Without a window registry (tests) it always opens one.
-pub fn open_collector_health(cx: &mut App) {
+/// Focuses the open window, or opens it on `host`. Without a window registry (tests) it always
+/// opens one.
+pub fn open_collector_health(host: &HostContext, cx: &mut App) {
+    let host = host.clone();
     let s = metrics(cx).ui_scale;
     let spec = TlWindowSpec::new(
         TlWindowKind::Tool { resizable: true },
@@ -144,8 +153,10 @@ pub fn open_collector_health(cx: &mut App) {
     )
     .key(WindowKey::CollectorHealth);
     let open = move |cx: &mut App| {
-        TlSecondaryWindow::open(cx, spec, |_, cx| cx.new(CollectorHealthWindow::new))
-            .map(Into::into)
+        TlSecondaryWindow::open(cx, spec, |_, cx| {
+            cx.new(|cx| CollectorHealthWindow::new(&host, cx))
+        })
+        .map(Into::into)
     };
     match cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
         Some(registry) => {
@@ -283,6 +294,8 @@ impl HealthRow {
 
 /// The content of the Collector Health window.
 pub struct CollectorHealthWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     rows: Vec<HealthRow>,
     words: HealthWords,
     strings_version: u64,
@@ -299,7 +312,7 @@ pub struct CollectorHealthWindow {
 }
 
 impl CollectorHealthWindow {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, cx: &mut Context<Self>) -> Self {
         let strings = cx.observe_global::<Strings>(|this: &mut Self, cx| {
             let version = strings_version(cx);
             if version != this.strings_version {
@@ -313,20 +326,17 @@ impl CollectorHealthWindow {
                 cx.notify();
             }
         });
-        let hub_sub = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.clone())
-            .map(|hub| {
-                cx.subscribe(&hub, |this: &mut Self, hub, ev: &SnapshotChanged, cx| {
-                    if ev.mask.contains(ComponentMask::HEALTH) {
-                        let health = hub.read(cx).current().health.clone();
-                        let clock = cx.background_executor().now();
-                        if this.set_health(&health, clock) {
-                            cx.notify();
-                        }
+        let hub_sub = host.hub().cloned().map(|hub| {
+            cx.subscribe(&hub, |this: &mut Self, hub, ev: &SnapshotChanged, cx| {
+                if ev.mask.contains(ComponentMask::HEALTH) {
+                    let health = hub.read(cx).current().health.clone();
+                    let clock = cx.background_executor().now();
+                    if this.set_health(&health, clock) {
+                        cx.notify();
                     }
-                })
-            });
+                }
+            })
+        });
         let tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
@@ -342,6 +352,7 @@ impl CollectorHealthWindow {
             }
         });
         let mut this = Self {
+            host: host.clone(),
             rows: SourceId::ALL.into_iter().map(HealthRow::new).collect(),
             words: HealthWords::new(cx),
             strings_version: strings_version(cx),
@@ -353,7 +364,7 @@ impl CollectorHealthWindow {
             _hub_sub: hub_sub,
             _tick: tick,
         };
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        if let Some(hub) = this.host.hub().cloned() {
             let health = hub.read(cx).current().health.clone();
             this.set_health(&health, this.clock_anchor);
         }

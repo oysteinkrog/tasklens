@@ -30,9 +30,7 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionRequest, ActionState, ActionTarget, SchedPolicy};
 use tracing::warn;
 
-use crate::action_tracker::{
-    ActionTrackerEvent, GlobalActionTracker, SummaryTexts, ToastTexts, short_reason,
-};
+use crate::action_tracker::{ActionTrackerEvent, SummaryTexts, ToastTexts, short_reason};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::icons::TlIcon;
 use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
@@ -41,6 +39,7 @@ use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
+use crate::host::HostContext;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
@@ -246,6 +245,8 @@ impl PriorityWords {
 // ---- The dialog ----
 
 pub struct PriorityDialog {
+    /// The host this dialog shows. Set when it opens; never changes.
+    host: HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     policy: Entity<TlSelectState>,
     nice: Entity<SliderState>,
@@ -271,20 +272,22 @@ pub struct PriorityDialog {
 /// Opens the Set Priority dialog for `targets`, modal to `parent`. `subtitle` has the Set
 /// Affinity forms (`firefox (PID 4321)`, `4 processes`, ...). `initial` is the policy, nice and
 /// realtime priority of the right-clicked target. Returns the open error and opens nothing on
-/// failure.
+/// failure. The dialog acts on `host` and stays on it.
 pub fn open(
+    host: &HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     subtitle: SharedString,
     initial: (SchedPolicy, i8, u8),
     parent: AnyWindowHandle,
     cx: &mut App,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
-    open_with(targets, subtitle, initial, false, parent, cx)
+    open_with(host, targets, subtitle, initial, false, parent, cx)
 }
 
 /// [`open`] for an app row: `app` gives the policy select the tooltip "Applies to the app's
 /// current processes".
 pub fn open_with(
+    host: &HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     subtitle: SharedString,
     initial: (SchedPolicy, i8, u8),
@@ -307,6 +310,7 @@ pub fn open_with(
         move |window, cx| {
             cx.new(|cx| {
                 PriorityDialog::new(
+                    host,
                     targets,
                     subtitle,
                     initial,
@@ -329,6 +333,7 @@ impl PriorityDialog {
 
     #[allow(clippy::too_many_arguments)]
     fn new(
+        host: &HostContext,
         targets: SmallVec<[ActionTarget; 1]>,
         subtitle: SharedString,
         initial: (SchedPolicy, i8, u8),
@@ -365,6 +370,7 @@ impl PriorityDialog {
         );
         policy.read(cx).focus_handle(cx).focus(window, cx);
         Self {
+            host: host.clone(),
             targets,
             policy,
             nice,
@@ -533,7 +539,7 @@ impl PriorityDialog {
             .parent_toasts
             .clone()
             .or_else(|| ToastQueue::of_window(window, cx).map(|q| q.downgrade()));
-        let tracker = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone());
+        let tracker = self.host.tracker().cloned();
         let (Some(tracker), Some(queue)) = (tracker, queue) else {
             warn!(target: "tasklens::ui", "priority not sent: no action tracker or toasts");
             window.remove_window();

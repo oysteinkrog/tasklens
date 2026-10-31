@@ -6,12 +6,13 @@ use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
 use crate::components::button::TlButtonKind;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::minigraph::actions::ResetMinigraphLayout;
 use crate::settings_global::SettingKey;
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Graphs);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Graphs);
     // One untitled group: the page title already says "Graphs".
     let group = "";
     for (key, label) in [

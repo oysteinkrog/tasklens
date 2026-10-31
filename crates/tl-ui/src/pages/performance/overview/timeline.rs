@@ -231,11 +231,15 @@ pub fn servable_range(range: OverviewRange, age_ns: i64) -> OverviewRange {
 }
 
 /// `performance.timeline_click`, with `history` read as `pause` while `history.enabled` is off.
-pub fn click_mode(cx: &App) -> TimelineClick {
+/// `hub` is the hub of the page's host.
+pub fn click_mode(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> TimelineClick {
     if !cx.has_global::<TlSettings>() {
         return TimelineClick::default();
     }
-    let recording = crate::host_settings::current(cx).values.history.enabled;
+    let recording = crate::host_settings::current_of(hub, cx)
+        .values
+        .history
+        .enabled;
     match TlSettings::settings(cx).performance.timeline_click {
         TimelineClick::History if !recording => TimelineClick::Pause,
         click => click,
@@ -243,8 +247,12 @@ pub fn click_mode(cx: &App) -> TimelineClick {
 }
 
 /// The click choices offered now: `history` only while `history.enabled` is on.
-pub fn click_choices(cx: &App) -> SmallVec<[TimelineClick; 3]> {
-    let recording = crate::host_settings::current(cx).values.history.enabled;
+/// `hub` is the hub of the page's host.
+pub fn click_choices(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> SmallVec<[TimelineClick; 3]> {
+    let recording = crate::host_settings::current_of(hub, cx)
+        .values
+        .history
+        .enabled;
     let mut choices: SmallVec<[TimelineClick; 3]> =
         SmallVec::from_slice(&[TimelineClick::Pause, TimelineClick::Preview]);
     if recording {
@@ -775,7 +783,7 @@ impl TimelineBox {
             );
             range::set_range(smallest_range((b - a) as u64), cx);
             // A span is held as a click holds a time; `history` has no span to open.
-            let mode = match click_mode(cx) {
+            let mode = match click_mode(Some(&self.hub), cx) {
                 TimelineClick::Preview => TimelineClick::Preview,
                 TimelineClick::Pause | TimelineClick::History => TimelineClick::Pause,
             };
@@ -788,7 +796,7 @@ impl TimelineBox {
 
     /// A click at `t` acts by `performance.timeline_click`.
     pub fn pick(&mut self, t: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.pick_as(t, click_mode(cx), window, cx);
+        self.pick_as(t, click_mode(Some(&self.hub), cx), window, cx);
     }
 
     fn pick_as(
@@ -1019,6 +1027,7 @@ impl TimelineBox {
         let boot_color = theme.text_secondary;
         let area = Rc::clone(&self.area);
         let end = self.end();
+        let hub = self.hub.clone();
         canvas(
             move |bounds, _, _| bounds,
             move |bounds, _, window, cx| {
@@ -1067,13 +1076,14 @@ impl TimelineBox {
                     }
                 }
                 let e = entity.clone();
+                let hub = hub.clone();
                 window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
                     if phase.bubble()
                         && ev.button == MouseButton::Left
                         && bounds.contains(&ev.position)
                     {
                         let x = f32::from(ev.position.x - bounds.left());
-                        let kind = click_mode(cx);
+                        let kind = click_mode(Some(&hub), cx);
                         e.update(cx, |b, cx| b.down(x, kind, cx));
                         cx.stop_propagation();
                     }

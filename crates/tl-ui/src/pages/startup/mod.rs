@@ -20,7 +20,6 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionTarget};
-use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::SourceId;
 use tl_model::snapshot::{StartupCounts, StartupSnapshot};
@@ -29,12 +28,11 @@ use tl_model::units;
 
 use self::delegate::StartupDelegate;
 use self::menu::StartupMenuTargets;
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
+use crate::action_tracker::ActionTrackerEvent;
 use crate::actions::ClearFilter;
-use crate::app::EngineGlobal;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
-use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::sys_copy::CopyTexts;
 use crate::pages::sys_table::{
@@ -43,7 +41,7 @@ use crate::pages::sys_table::{
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::OpenProperties;
 use crate::table::tree_table::TreeTableEvent;
-use crate::window::main::{FilterChanged, GlobalShellEvents, ShellPage};
+use crate::window::main::{FilterChanged, ShellPage};
 use crate::window::status::StatusChanged;
 use crate::windows::startup_properties::open_startup_properties_all;
 
@@ -64,19 +62,15 @@ pub struct StartupPage {
     copy_texts: CopyTexts,
     copy_prepared: copy::PreparedCopy,
     open_requests: SmallVec<[ActionId; 2]>,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: SmallVec<[Subscription; 4]>,
 }
 
 impl EventEmitter<StatusChanged> for StartupPage {}
 
 impl StartupPage {
-    pub fn new(
-        hub: &Entity<SnapshotHub>,
-        _demand: &Entity<DemandAggregator>,
-        _client: Arc<dyn EngineClient>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut delegate = StartupDelegate::new(StartupDelegate::env_home(), cx);
         delegate.set_page(cx.weak_entity());
         let sort = SysSortSpec {
@@ -84,6 +78,7 @@ impl StartupPage {
             ascending: true,
         };
         let frame = SysTableFrame::new(
+            host,
             Tab::Startup,
             "StartupTable",
             &[SourceId::Startup],
@@ -96,22 +91,24 @@ impl StartupPage {
         let focus = frame.table.read(cx).focus_handle().clone();
         let table = frame.table.clone();
         let mut subs = SmallVec::new();
-        subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
-            let snap = Arc::clone(hub.read(cx).current());
-            let changed = this.frame.on_snapshot(&snap, ev.mask, cx);
-            let accepted = this.frame.query.accepts(snap.startup.query_generation);
-            if ev.mask.contains(tl_model::snapshot::ComponentMask::STARTUP) {
-                this.finish_refresh_if_new(snap.startup.header.version, cx);
-            }
-            if changed {
-                if accepted {
-                    this.refresh_status(&snap.startup, cx);
+        if let Some(hub) = host.hub() {
+            subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
+                let snap = Arc::clone(hub.read(cx).current());
+                let changed = this.frame.on_snapshot(&snap, ev.mask, cx);
+                let accepted = this.frame.query.accepts(snap.startup.query_generation);
+                if ev.mask.contains(tl_model::snapshot::ComponentMask::STARTUP) {
+                    this.finish_refresh_if_new(snap.startup.header.version, cx);
                 }
-                cx.notify();
-            }
-        }));
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
-            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+                if changed {
+                    if accepted {
+                        this.refresh_status(&snap.startup, cx);
+                    }
+                    cx.notify();
+                }
+            }));
+        }
+        if let Some(events) = host.events() {
+            subs.push(cx.subscribe(events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Startup {
                     this.frame.on_filter_changed(&ev.text, cx);
                 }
@@ -136,9 +133,9 @@ impl StartupPage {
             let SysActionsEvent::PendingChanged { target } = ev;
             this.on_pending_changed(target, cx);
         }));
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|g| g.0.clone()) {
+        if let Some(tracker) = host.tracker() {
             subs.push(
-                cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
+                cx.subscribe(tracker, |this, _, ev: &ActionTrackerEvent, cx| {
                     if let ActionTrackerEvent::Finished { id, failed, .. } = *ev {
                         this.on_open_location_finished(id, failed, cx);
                     }
@@ -156,6 +153,7 @@ impl StartupPage {
             copy_texts: Self::copy_texts(cx),
             copy_prepared: copy::PreparedCopy::default(),
             open_requests: SmallVec::new(),
+            host: host.clone(),
             _subs: subs,
         }
     }
@@ -177,9 +175,10 @@ impl StartupPage {
     /// Sends `RefreshNow(Startup)` and arms the one-shot completion toast.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.frame.refresh(cx);
-        let version = cx
-            .try_global::<GlobalHub>()
-            .map_or(0, |h| h.0.read(cx).current().startup.header.version);
+        let version = self
+            .host
+            .hub()
+            .map_or(0, |h| h.read(cx).current().startup.header.version);
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
             let _ = this.update(cx, |this, cx| {
@@ -255,7 +254,7 @@ impl StartupPage {
             let first = refs.remove(pos);
             refs.insert(0, first);
         }
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         open_startup_properties_all(refs, &hub, cx);
@@ -297,7 +296,7 @@ impl StartupPage {
             .table
             .update(cx, |table, _| table.delegate.take_sort_request());
         if let Some(sort) = sort
-            && let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0))
+            && let Some(client) = self.host.client().cloned()
         {
             self.frame.query.set_sort(sort, &*client);
         }

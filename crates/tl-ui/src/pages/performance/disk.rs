@@ -55,6 +55,7 @@ use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings};
@@ -1201,6 +1202,8 @@ impl TreeTableDelegate for PartitionsDelegate {
 
 /// The Disk device page.
 pub struct DiskPage {
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     key: DeviceKey,
     row: DeviceRow,
     active: Entity<ChartView>,
@@ -1242,7 +1245,9 @@ pub struct DiskPage {
 }
 
 impl DiskPage {
+    /// `hub` and `demand` are `host`'s. Eject goes to `host`'s engine.
     pub fn new(
+        host: &HostContext,
         key: DeviceKey,
         row: DeviceRow,
         hub: Entity<SnapshotHub>,
@@ -1290,6 +1295,7 @@ impl DiskPage {
             .detach();
 
         let mut this = Self {
+            host: host.clone(),
             key,
             row,
             active,
@@ -1631,7 +1637,7 @@ impl DiskPage {
             return;
         }
         let (key, hub, label) = (self.key.clone(), self.hub.clone(), self.header.0.clone());
-        start_eject(key, self.row.idx, hub, label, cx);
+        start_eject(&self.host, key, self.row.idx, hub, label, cx);
     }
 
     /// `chart` in a full-width box of `height`.
@@ -1646,6 +1652,10 @@ impl DiskPage {
 }
 
 impl DevicePage for DiskPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }

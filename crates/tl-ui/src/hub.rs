@@ -218,7 +218,8 @@ impl SnapshotHub {
     }
 }
 
-/// The app's hub, set once by `TasklensUi::init`.
+/// The local host's hub, set once by `TasklensUi::init`. Read only through
+/// [`crate::host::HostContext`].
 pub struct GlobalHub(pub Entity<SnapshotHub>);
 
 impl Global for GlobalHub {}

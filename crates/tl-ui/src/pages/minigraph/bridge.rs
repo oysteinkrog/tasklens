@@ -2,6 +2,9 @@
 //! On each `WINDOWS` change it matches the detached graph windows and the mini window in
 //! `WindowsSnapshot` by pid and caption, pins them above, restores a saved position, and saves
 //! the position the user moves a detached window to, 500 ms after the last move.
+//!
+//! The windows are this PC's own, so the bridge always uses the local host's hub and engine,
+//! whatever host the main window shows.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -12,8 +15,8 @@ use tl_model::command::{Command, KWinCommand};
 use tl_model::snapshot::FrameGeometry;
 
 use super::panel::MinigraphPanel;
-use crate::app::EngineGlobal;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::window::registry::{GlobalRegistry, WindowKey};
 use crate::window::titlebar::keep_above_supported;
 use crate::windows::mini::{MINI_WINDOW_TITLE, MiniWindow};
@@ -60,7 +63,8 @@ impl OwnWindowBridge {
         if cx.has_global::<GlobalOwnWindowBridge>() {
             return;
         }
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        // This PC's own windows: the local host.
+        let Some(hub) = HostContext::local_hub(cx).cloned() else {
             return;
         };
         let bridge = cx.new(|cx| {
@@ -93,7 +97,8 @@ impl OwnWindowBridge {
         if !keep_above_supported(cx) {
             return;
         }
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        // This PC's own windows: the local host.
+        let Some(hub) = HostContext::local_hub(cx).cloned() else {
             return;
         };
         let snapshot = Arc::clone(&hub.read(cx).current().windows);
@@ -171,7 +176,8 @@ fn is_open(own: OwnWindow, cx: &App) -> bool {
 /// Pins a window the first time it is listed and restores a saved detached position. True when
 /// every command was accepted, so a busy engine gets another try on the next change.
 fn first_match(own: OwnWindow, frame: FrameGeometry, caption: &Arc<str>, cx: &App) -> bool {
-    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| Arc::clone(&e.0)) else {
+    // This PC's own windows: the local host's engine.
+    let Some(engine) = HostContext::local_client(cx).cloned() else {
         return false;
     };
     let pid = std::process::id();

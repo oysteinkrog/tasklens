@@ -66,6 +66,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::settings_global::{TlSettings, animations_on};
@@ -435,6 +436,8 @@ pub struct PerformancePage {
     split_width: Pixels,
     /// The tab is the active tab (`set_active`).
     active: bool,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     /// Key context "Performance".
@@ -456,11 +459,15 @@ pub struct PerformancePage {
 
 impl PerformancePage {
     /// Builds the sidebar and the page of the device the sidebar selected first.
-    pub fn new(
-        hub: Entity<SnapshotHub>,
-        demand: Entity<DemandAggregator>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(host: &HostContext, cx: &mut Context<Self>) -> Self {
+        let hub = host
+            .hub()
+            .cloned()
+            .expect("the Performance page needs the host's hub");
+        let demand = host
+            .demand()
+            .cloned()
+            .expect("the Performance page needs the host's demand aggregator");
         let sidebar = cx.new(|cx| sidebar::DeviceSidebar::new(hub.clone(), demand.clone(), cx));
         cx.set_global(page::PerfSidebar(sidebar.downgrade()));
         let sidebar_focus = sidebar.read(cx).focus.clone();
@@ -488,6 +495,7 @@ impl PerformancePage {
             split: cx.new(|_| ResizableState::default()),
             split_width: Pixels::ZERO,
             active: true,
+            host: host.clone(),
             hub,
             demand,
             focus: cx.focus_handle(),
@@ -743,7 +751,7 @@ impl PerformancePage {
             cx.new(|cx| overview::OverviewPage::new(key.clone(), hub, demand, sidebar, cx))
                 .into()
         } else {
-            page::build_page(key, &row, &self.hub, &self.demand, cx)
+            page::build_page(&self.host, key, &row, &self.hub, &self.demand, cx)
         };
         self.pages.insert(key.clone(), view.clone());
         Some(view)
@@ -894,6 +902,7 @@ impl PerformancePage {
         let focus = page_focus(&view, cx).unwrap_or_else(|| self.focus.clone());
         let summary_on = self.summary.is_some();
         let sidebar = self.sidebar.clone();
+        let hub = self.hub.clone();
         // Taken, so a later menu opened another way does not see an old value.
         self.clicked_value = cx
             .has_global::<ClickedValue>()
@@ -918,7 +927,7 @@ impl PerformancePage {
                 ..page_menu_ctx(summary_on, cx)
             };
             let menu = match clicked_box {
-                Some(target) => box_menu(menu, target, window, cx),
+                Some(target) => box_menu(menu, target, &hub, window, cx),
                 None => menu,
             };
             let mut slot = Some(menu);

@@ -61,13 +61,11 @@ use super::table::{GroupHeader, ProcessQuery};
 use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
 use super::{ProcessesPage, capture_row};
 use crate::anim::AnimationDriver;
-use crate::app::EngineGlobal;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
 use crate::components::validity::{GlyphCtx, tooltip_text};
-use crate::demand::GlobalDemand;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::table::cells::CellOut;
@@ -269,6 +267,8 @@ struct NameEntry {
 /// The process table delegate. The page installs each snapshot with [`Self::install`] and calls
 /// `TlTreeTable::on_new_version` when it returns true.
 pub struct ProcessDelegate {
+    /// The host this table shows. Set when it opens; never changes.
+    host: HostContext,
     query: ProcessQuery,
     /// The snapshot the rows came from (or the paused one, E22-024).
     snapshot: Arc<Snapshot>,
@@ -344,6 +344,7 @@ impl ProcessDelegate {
     /// `[columns.processes]`. `snapshot` is the first one shown; it is installed when its view
     /// matches the query.
     pub fn new(
+        host: &HostContext,
         snapshot: Arc<Snapshot>,
         settings: &Settings,
         state: &UiState,
@@ -355,6 +356,7 @@ impl ProcessDelegate {
         let headers = GroupHeader::ALL
             .map(|h| ProcRowId::fixed(&h.node()).unwrap_or(ProcRowId::KernelThreads));
         let mut this = Self {
+            host: host.clone(),
             query: ProcessQuery::new(settings, state),
             snapshot: Arc::clone(&snapshot),
             built_for: None,
@@ -451,7 +453,7 @@ impl ProcessDelegate {
         self.active = active;
         if active {
             self.send_demand(cx);
-        } else if let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) {
+        } else if let Some(agg) = self.host.demand().cloned() {
             let source = cx.entity_id();
             agg.update(cx, |a, cx| a.remove(source, cx));
         }
@@ -482,7 +484,7 @@ impl ProcessDelegate {
         if !self.active {
             return;
         }
-        let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) else {
+        let Some(agg) = self.host.demand().cloned() else {
             return;
         };
         let (source, window, part) = (cx.entity_id(), self.window, self.demand_part());
@@ -566,7 +568,7 @@ impl ProcessDelegate {
     /// page tells the table about the new version on the next hub change at the latest.
     pub fn release_menu_hold(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
         if std::mem::take(&mut self.menu_hold)
-            && let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone())
+            && let Some(hub) = self.host.hub().cloned()
         {
             let snapshot = Arc::clone(hub.read(cx).current());
             self.install(&snapshot);
@@ -931,9 +933,9 @@ impl ProcessDelegate {
         }
     }
 
-    fn client_send(&mut self, cx: &App) {
-        if let Some(engine) = cx.try_global::<EngineGlobal>() {
-            let client = Arc::clone(&engine.0);
+    fn client_send(&mut self) {
+        if let Some(client) = self.host.client() {
+            let client = Arc::clone(client);
             self.query.bump_and_send(&*client);
         }
     }
@@ -1023,7 +1025,7 @@ impl ProcessDelegate {
     /// Expands or collapses `node`, whichever row has the focus (the group header menu).
     pub fn toggle_node(&mut self, node: NodeId, cx: &mut App) {
         self.query.toggle(node);
-        self.client_send(cx);
+        self.client_send();
         self.persist(cx);
     }
 }
@@ -1438,7 +1440,7 @@ impl TreeTableDelegate for ProcessDelegate {
             file_manager1: engine_caps.contains(EngineCaps::FILE_MANAGER1),
             ..MenuCaps::default()
         };
-        row_menu(menu, &captured, &caps, window, cx)
+        row_menu(&self.host, menu, &captured, &caps, window, cx)
     }
 
     fn on_menu_closed(&mut self, cx: &mut Context<TlTreeTable<Self>>) {
@@ -1458,7 +1460,7 @@ impl TreeTableDelegate for ProcessDelegate {
             return;
         }
         self.query.set_sort(col, spec.kind);
-        self.client_send(cx);
+        self.client_send();
         self.persist(cx);
     }
 

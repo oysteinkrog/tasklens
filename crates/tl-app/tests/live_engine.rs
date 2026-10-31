@@ -404,10 +404,8 @@ fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
 
 /// The Startup arm of the page match, until tasklens-9o0.13 registers it in `app.rs`.
 fn startup_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
-    let hub = cx.global::<GlobalHub>().0.clone();
-    let demand = cx.global::<GlobalDemand>().0.clone();
-    let client = Arc::clone(&cx.global::<tl_ui::app::EngineGlobal>().0);
-    let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+    let host = tl_ui::host::HostContext::local(cx);
+    let page = cx.new(|cx| StartupPage::new(&host, window, cx));
     PageSlot::new(page, cx)
 }
 

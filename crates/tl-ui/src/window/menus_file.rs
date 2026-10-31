@@ -18,10 +18,11 @@ use gpui_kit::{App, AppContext as _, AsyncApp, Entity, FocusHandle, Global, Wind
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, LaunchSpec, LaunchWhat};
 
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::actions::{OpenHandleSearch, OpenRunDialog, Quit};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::ToastQueue;
+use crate::host::HostContext;
 use crate::i18n::tr;
 
 gpui_kit::actions!(
@@ -82,7 +83,8 @@ fn open_system_monitor(cx: &mut App) {
     };
     cx.defer(move |cx| {
         let _ = handle.update(cx, |_, window, cx| {
-            let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+            // The monitor was found on this PC's `PATH` and opens on this desktop: the local host.
+            let Some(tracker) = HostContext::local(cx).tracker().cloned() else {
                 return;
             };
             let Some(queue) = ToastQueue::of_window(window, cx) else {

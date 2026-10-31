@@ -47,9 +47,8 @@ use super::page::{
     page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::actions::SetSetting;
-use crate::app::EngineGlobal;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
@@ -59,6 +58,7 @@ use crate::components::link::TlLink;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::ToastQueue;
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
@@ -1071,6 +1071,8 @@ pub struct NetPage {
     settings_desktop: Option<SettingsDesktop>,
     /// The Network settings link's focus handle, after `unit_focus` in `focus_order`.
     settings_focus: FocusHandle,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -1078,6 +1080,7 @@ pub struct NetPage {
 
 impl NetPage {
     pub fn new(
+        host: &HostContext,
         key: DeviceKey,
         row: DeviceRow,
         hub: Entity<SnapshotHub>,
@@ -1153,6 +1156,7 @@ impl NetPage {
                     let _ = page.update(cx, |p, cx| p.on_details_link(n, bounds, window, cx));
                 })
             },
+            host: host.clone(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -1172,7 +1176,7 @@ impl NetPage {
         let Some(what) = self.settings_launch() else {
             return;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             return;
         };
         let Some(queue) = ToastQueue::of_window(window, cx) else {
@@ -1345,8 +1349,9 @@ impl NetPage {
             cx.propagate();
             return;
         }
-        request_public_ip_fetch(window, cx, |_, cx| {
-            let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        let engine = self.host.client().cloned();
+        request_public_ip_fetch(window, cx, move |_, _| {
+            let Some(engine) = engine else {
                 return;
             };
             match engine.send(Command::Device(DeviceCommand::FetchPublicIp)) {
@@ -1518,6 +1523,10 @@ impl NetPage {
 }
 
 impl DevicePage for NetPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }

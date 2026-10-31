@@ -61,8 +61,7 @@ use tl_model::validity::{ProcessField, Validity};
 use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
-use crate::app::EngineGlobal;
+use crate::action_tracker::ToastTexts;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
@@ -71,7 +70,7 @@ use crate::components::kv_grid::{
 };
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
@@ -1601,6 +1600,8 @@ type CopyTexts = Rc<[(usize, SharedString)]>;
 
 /// The General tab view. `PropsWindow` builds it with the process key and the tab's filter.
 pub struct GeneralTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     payload: Option<Arc<GeneralDetail>>,
     live: Option<Live>,
@@ -1653,7 +1654,12 @@ pub struct GeneralTab {
 }
 
 impl GeneralTab {
-    pub fn new(key: ProcessKey, filter: Entity<PropsFilter>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        host: &HostContext,
+        key: ProcessKey,
+        filter: Entity<PropsFilter>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sub = cx.subscribe(&filter, |this, filter, event: &FilterChanged, cx| {
             if filter.update(cx, |f, _| f.accept(event.generation)) {
                 this.needle = event.needle.clone();
@@ -1667,6 +1673,7 @@ impl GeneralTab {
             UnitsSettings::default()
         };
         let mut tab = Self {
+            host: host.clone(),
             key,
             payload: None,
             live: None,
@@ -1813,11 +1820,11 @@ impl GeneralTab {
         if button.disabled || button.loading {
             return;
         }
-        let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        let Some(engine) = self.host.client() else {
             warn!(target: "tasklens::ui", "no engine, verify not sent");
             return;
         };
-        if let Err(err) = engine.0.send(Command::VerifyPackage(self.key)) {
+        if let Err(err) = engine.send(Command::VerifyPackage(self.key)) {
             warn!(target: "tasklens::ui", ?err, "verify against package not sent");
             return;
         }
@@ -2143,9 +2150,8 @@ impl GeneralTab {
         let Some(ppid) = self.live.as_ref().map(|l| l.ppid).filter(|p| *p != 0) else {
             return;
         };
-        let parent = cx.try_global::<GlobalHub>().and_then(|hub| {
-            hub.0
-                .read(cx)
+        let parent = self.host.hub().and_then(|hub| {
+            hub.read(cx)
                 .current()
                 .processes
                 .records
@@ -2187,7 +2193,7 @@ impl GeneralTab {
         else {
             return;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker, file location not opened");
             return;
         };
@@ -2229,9 +2235,13 @@ impl GeneralTab {
             ],
         );
         let targets = smallvec![ActionTarget::Process(self.key)];
-        if let Err(err) =
-            crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
-        {
+        if let Err(err) = crate::windows::affinity::open(
+            &self.host,
+            targets,
+            subtitle,
+            window.window_handle(),
+            cx,
+        ) {
             warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
         }
     }

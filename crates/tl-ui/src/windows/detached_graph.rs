@@ -22,8 +22,8 @@ use crate::components::menu::{
     TlMenu, context_menu_layer, context_menu_open, open_context_menu_at,
 };
 use crate::components::toast::ToastKind;
-use crate::demand::{DemandAggregator, GlobalDemand};
-use crate::hub::{GlobalHub, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::pages::minigraph::actions::{
     MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphHide,
@@ -93,8 +93,9 @@ pub struct DetachedGraphWindow {
     panel: WeakEntity<MinigraphPanel>,
     /// The window caption. Never translated: the KWin bridge matches it (R-086).
     title: SharedString,
-    /// The demand aggregator, when the app has one.
-    demand: Option<Entity<DemandAggregator>>,
+    /// The host this window shows: its hub feeds the cards and its demand aggregator gets the
+    /// window's part. Set when it opens; never changes.
+    host: HostContext,
     window: AnyWindowHandle,
     /// The part last sent, to send only a change.
     part: Option<Demand>,
@@ -102,6 +103,7 @@ pub struct DetachedGraphWindow {
 
 impl DetachedGraphWindow {
     fn new(
+        host: &HostContext,
         window_id: u32,
         entries: Vec<MinigraphEntry>,
         window: &mut Window,
@@ -109,11 +111,7 @@ impl DetachedGraphWindow {
     ) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
-        let hub = cx
-            .try_global::<GlobalHub>()
-            .expect("open_detached checked the hub")
-            .0
-            .clone();
+        let hub = host.hub().expect("open_detached checked the hub").clone();
         let cards: Vec<_> = entries
             .into_iter()
             .map(|entry| {
@@ -128,8 +126,7 @@ impl DetachedGraphWindow {
             .unwrap_or_else(WeakEntity::new_invalid);
         let title: SharedString = format!("tasklens Graph {window_id}").into();
         window.set_window_title(&title);
-        let demand = cx.try_global::<GlobalDemand>().map(|d| d.0.clone());
-        if let Some(demand) = demand.clone() {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             cx.on_release(move |_, cx| demand.update(cx, |d, cx| d.remove(id, cx)))
                 .detach();
@@ -141,7 +138,7 @@ impl DetachedGraphWindow {
             focus: cx.focus_handle(),
             panel,
             title,
-            demand,
+            host: host.clone(),
             window: window.window_handle(),
             part: None,
         };
@@ -157,7 +154,7 @@ impl DetachedGraphWindow {
 
     /// Sends this window's part: the sum of its cards. Sends only a change.
     fn send_demand(&mut self, cx: &mut Context<Self>) {
-        let Some(demand) = self.demand.clone() else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         let part = cards_demand(self.cards.iter().map(|(_, c)| c), cx);
@@ -178,10 +175,10 @@ impl DetachedGraphWindow {
     /// Shows `entries`, in this order: a card that is already here stays, a missing one is
     /// created, the others are dropped.
     pub fn set_cards(&mut self, entries: Vec<MinigraphEntry>, cx: &mut Context<Self>) {
-        let hub = cx
-            .try_global::<GlobalHub>()
+        let hub = self
+            .host
+            .hub()
             .expect("open_detached checked the hub")
-            .0
             .clone();
         let mut old = std::mem::take(&mut self.cards);
         for entry in entries {
@@ -335,8 +332,9 @@ fn make_card(
 
 /// Opens detached window `window_id` with `cards`, or focuses it when it is open. `saved` gives
 /// the size of a window restored from `[[detached_windows]]`. Failure shows a toast and returns
-/// the error.
+/// the error. The window shows `host`, the host of the page the cards came from, and stays on it.
 pub fn open_detached(
+    host: &HostContext,
     window_id: u32,
     cards: Vec<MinigraphEntry>,
     saved: Option<&DetachedWindowState>,
@@ -348,7 +346,7 @@ pub fn open_detached(
         push_main_toast(cx, ToastKind::Error, text, None, None);
     };
     // `WindowKey::DetachedGraph` holds a `u8`, so ids above 255 are refused.
-    let (Ok(key_id), true) = (u8::try_from(window_id), cx.has_global::<GlobalHub>()) else {
+    let (Ok(key_id), true) = (u8::try_from(window_id), host.hub().is_some()) else {
         toast_failed(cx);
         return Err(gpui_kit::gpui::private::anyhow::anyhow!(
             "detached graph window id {window_id} refused"
@@ -363,7 +361,7 @@ pub fn open_detached(
     let open = |cx: &mut App| {
         let options = detached_window_options(window_size, cx);
         let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
-            let this = cx.new(|cx| DetachedGraphWindow::new(window_id, cards, window, cx));
+            let this = cx.new(|cx| DetachedGraphWindow::new(host, window_id, cards, window, cx));
             let focus = this.read(cx).focus.clone();
             window.focus(&focus, cx);
             this

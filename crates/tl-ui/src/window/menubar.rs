@@ -49,6 +49,7 @@ use crate::actions::{MenuId, OpenMenu};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::slider::{TlSliderEvent, set_from_elsewhere};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::minigraph::GraphColor;
 use crate::settings_global::TlSettings;
@@ -106,9 +107,10 @@ pub fn has_menu(id: MenuId, cx: &App) -> bool {
     }
 }
 
-/// The menu registry: builds the menu `id` with its item actions going to `return_focus`, or
-/// `None` when it has no items now. Slider rows use the bar's `sliders`.
+/// The menu registry: builds the menu `id` for `host` with its item actions going to
+/// `return_focus`, or `None` when it has no items now. Slider rows use the bar's `sliders`.
 fn build_menu(
+    host: &HostContext,
     id: MenuId,
     window: &mut Window,
     cx: &mut App,
@@ -117,8 +119,14 @@ fn build_menu(
 ) -> Option<Entity<TlMenuPopup>> {
     match id {
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
-        MenuId::View => Some(menus_view::build(window, cx, return_focus, sliders)),
-        MenuId::Settings => Some(menus_settings::build(window, cx, return_focus, sliders)),
+        MenuId::View => Some(menus_view::build(host, window, cx, return_focus, sliders)),
+        MenuId::Settings => Some(menus_settings::build(
+            host,
+            window,
+            cx,
+            return_focus,
+            sliders,
+        )),
         MenuId::Help => Some(menus_help::build(window, cx, return_focus)),
         MenuId::Debug => menus_debug::build(window, cx, return_focus),
     }
@@ -451,7 +459,9 @@ impl MenuBar {
         self.popup = None;
         self.sliders.sync(cx);
         let sliders = self.sliders.clone();
-        let Some(popup) = build_menu(id, window, cx, &context, &sliders) else {
+        // The menu shows the host the main window shows when it opens.
+        let host = HostContext::shown(cx);
+        let Some(popup) = build_menu(&host, id, window, cx, &context, &sliders) else {
             self.close(window, cx);
             return;
         };

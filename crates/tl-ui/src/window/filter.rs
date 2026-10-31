@@ -3,7 +3,7 @@
 //!
 //! One input whose text is kept per tab for the session. A tab switch swaps the text in with
 //! `set_value`, which emits no `Change`. Typing restarts a 100 ms debounce; when it fires,
-//! `FilterChanged { tab, text }` goes out on `GlobalShellEvents`. Esc, `ClearFilter` and the
+//! `FilterChanged { tab, text }` goes out on the host's shell event bus. Esc, `ClearFilter` and the
 //! clear button send the empty text at once.
 //!
 //! The box draws the `TlFilterBox` look itself: the kit `TlFilterBox` always draws the input's
@@ -46,7 +46,7 @@ use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::table::TableMode;
 
-use super::main::{FilterChanged, GlobalShellEvents, MemGroupCleared};
+use super::main::{FilterChanged, MemGroupCleared, ShellEvents};
 use crate::actions::{FilterAccept, FilterEscape, SHELL_FILTER_CONTEXT, ToggleSetting};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::icons::{TlIcon, icon};
@@ -163,6 +163,9 @@ pub struct FilterBox {
     /// The input's drawn width at the last prepaint. Differs from `input_target` only while the
     /// width animates.
     input_drawn: Rc<Cell<Pixels>>,
+    /// The shell event bus of the main window's host (`HostContext::events`). The filter text
+    /// and the memory group chip belong to that host.
+    events: Option<Entity<ShellEvents>>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
@@ -171,7 +174,13 @@ pub struct FilterBox {
 impl EventEmitter<ReturnFocus> for FilterBox {}
 
 impl FilterBox {
-    pub fn new(tab: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// A box for `tab` that sends its text on `events`, the host's shell event bus.
+    pub fn new(
+        tab: Tab,
+        events: Option<Entity<ShellEvents>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe_in(
@@ -220,6 +229,7 @@ impl FilterBox {
             outline_inset: Rc::new(Cell::new(px(0.))),
             input_target: px(0.),
             input_drawn: Rc::new(Cell::new(px(0.))),
+            events,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             outline: gpui_kit::Hsla::default(),
@@ -346,7 +356,7 @@ impl FilterBox {
 
     /// Sends `FilterChanged` with `tab`'s stored text.
     fn emit(&self, tab: Tab, cx: &mut App) {
-        let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) else {
+        let Some(events) = self.events.clone() else {
             return;
         };
         let text = self.per_tab[tab as usize].clone();
@@ -367,7 +377,7 @@ impl FilterBox {
         if self.group_chip.take().is_none() {
             return;
         }
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+        if let Some(events) = self.events.clone() {
             events.update(cx, |_, cx| cx.emit(MemGroupCleared));
         }
         cx.notify();

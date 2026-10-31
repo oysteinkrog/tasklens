@@ -40,7 +40,7 @@ use crate::components::input::TlTextInput;
 use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::validity::copy_text;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::performance::card::{CardWords, card_words};
 use crate::pages::performance::gpu::device_engines;
@@ -53,8 +53,8 @@ use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Performance);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Performance);
     let graphs = tr(cx, "shell-settings-perf-group-graphs");
     let cpu = tr(cx, "shell-settings-perf-group-cpu");
     let memory = tr(cx, "shell-settings-perf-group-memory");
@@ -180,7 +180,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
         &range,
     );
     // UI-PRF-057: `history` is listed only while recording is on.
-    let clicks: Vec<(SharedString, SettingValue)> = timeline::click_choices(cx)
+    let clicks: Vec<(SharedString, SettingValue)> = timeline::click_choices(host.hub(), cx)
         .into_iter()
         .map(|c| {
             (
@@ -234,7 +234,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
         false,
         SharedString::default(),
     );
-    let engines = engine_sections(cx);
+    let engines = engine_sections(host, cx);
     page.checklist(
         gpu,
         SettingKey::PerformanceHiddenGpuEngines,
@@ -304,7 +304,10 @@ pub fn page(cx: &mut App) -> PageBuilder {
             SettingKey::PerformanceDeviceOverrides,
         ],
         tr(cx, "shell-settings-device-order"),
-        move |window, cx| device_list(&words, window, cx),
+        {
+            let host = host.clone();
+            move |window, cx| device_list(&host, &words, window, cx)
+        },
     );
 
     let fan_words = Rc::new(FanWords {
@@ -316,7 +319,10 @@ pub fn page(cx: &mut App) -> PageBuilder {
         tr(cx, "shell-settings-perf-group-fans"),
         &[SettingKey::Fans],
         tr(cx, "shell-settings-perf-group-fans"),
-        move |window, cx| fans_group(&fan_words, window, cx),
+        {
+            let host = host.clone();
+            move |window, cx| fans_group(&host, &fan_words, window, cx)
+        },
     );
     page
 }
@@ -342,12 +348,9 @@ pub struct DeviceListRow {
 }
 
 /// The rows in sidebar order: `device_order` first, then the other present devices by kind and
-/// catalog order. Empty without a hub.
-pub fn device_list_rows(cx: &mut App) -> Vec<DeviceListRow> {
-    let Some(snap) = cx
-        .try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(hub.0.read(cx).current()))
-    else {
+/// catalog order, from `host`'s snapshot. Empty without a hub.
+pub fn device_list_rows(host: &HostContext, cx: &mut App) -> Vec<DeviceListRow> {
+    let Some(snap) = host.hub().map(|hub| Arc::clone(hub.read(cx).current())) else {
         return Vec::new();
     };
     let p = TlSettings::settings(cx).performance.clone();
@@ -484,10 +487,15 @@ impl Render for DraggedDevice {
 const ROW_H: f32 = 28.;
 
 /// The list rows, then "Reset order" and "Show all".
-fn device_list(words: &Rc<ListWords>, window: &mut Window, cx: &mut App) -> AnyElement {
+fn device_list(
+    host: &HostContext,
+    words: &Rc<ListWords>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let t = current(cx).clone();
     let m = *metrics(cx);
-    let rows = device_list_rows(cx);
+    let rows = device_list_rows(host, cx);
     let keys: Rc<[Arc<str>]> = rows.iter().map(|r| r.key.clone()).collect();
     let hover = t.row_hover;
     let mut list = div()
@@ -642,11 +650,8 @@ fn segments(key: &Arc<str>, current: Option<DeviceVisibility>, words: &ListWords
 }
 
 /// One section per present GPU of the device catalog: its name, then its engines.
-fn engine_sections(cx: &App) -> Vec<CheckSection> {
-    let Some(snap) = cx
-        .try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(hub.0.read(cx).current()))
-    else {
+fn engine_sections(host: &HostContext, cx: &App) -> Vec<CheckSection> {
+    let Some(snap) = host.hub().map(|hub| Arc::clone(hub.read(cx).current())) else {
         return Vec::new();
     };
     gpu_sections(&snap)
@@ -691,8 +696,8 @@ pub struct FanRowData {
 }
 
 /// One present fan per row, in sidebar order. Empty without a hub or without a fan.
-pub fn fan_rows(cx: &mut App) -> Vec<FanRowData> {
-    device_list_rows(cx)
+pub fn fan_rows(host: &HostContext, cx: &mut App) -> Vec<FanRowData> {
+    device_list_rows(host, cx)
         .into_iter()
         .filter(|row| DeviceKey(row.key.clone()).kind() == PerfKind::Fan)
         .map(|row| FanRowData {
@@ -711,11 +716,8 @@ pub struct SensorOption {
 }
 
 /// Every present hwmon temperature sensor in catalog order. Empty without a hub.
-pub fn sensor_options(cx: &mut App) -> Vec<SensorOption> {
-    let Some(snap) = cx
-        .try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(hub.0.read(cx).current()))
-    else {
+pub fn sensor_options(host: &HostContext, cx: &mut App) -> Vec<SensorOption> {
+    let Some(snap) = host.hub().map(|hub| Arc::clone(hub.read(cx).current())) else {
         return Vec::new();
     };
     sensor_options_of(&snap)
@@ -807,8 +809,13 @@ fn temp_items(
 
 /// The fan rows: the fan's default name, a Label input, then a Temperature sensor dropdown.
 /// Nothing when the catalog has no fan.
-fn fans_group(words: &Rc<FanWords>, window: &mut Window, cx: &mut App) -> AnyElement {
-    let rows = fan_rows(cx);
+fn fans_group(
+    host: &HostContext,
+    words: &Rc<FanWords>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let rows = fan_rows(host, cx);
     let t = current(cx).clone();
     let m = *metrics(cx);
     let mut list = div()
@@ -820,7 +827,7 @@ fn fans_group(words: &Rc<FanWords>, window: &mut Window, cx: &mut App) -> AnyEle
     if rows.is_empty() {
         return list.into_any_element();
     }
-    let options = sensor_options(cx);
+    let options = sensor_options(host, cx);
     let fans = TlSettings::settings(cx).fans.clone();
     for row in rows {
         let stored = fans.get(&*row.key);

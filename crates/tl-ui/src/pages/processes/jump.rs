@@ -29,7 +29,7 @@ use super::delegate::ProcRowId;
 use super::table::GroupHeader;
 use crate::actions::{ClearFilter, SelectTab};
 use crate::components::toast::{ToastAction, ToastKind};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::window::main::{ShellState, main_window_view, push_main_toast};
@@ -138,7 +138,7 @@ impl ProcessesPage {
         );
         set_group_chip(Some(chip), cx);
 
-        let processes = live_processes(cx);
+        let processes = live_processes(&self.host, cx);
         let client = &*self.client;
         let (generation, app) = self.table.update(cx, |t, cx| {
             let q = t.delegate.query_mut();
@@ -171,7 +171,7 @@ impl ProcessesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = live_processes(cx)
+        let key = live_processes(&self.host, cx)
             .records
             .iter()
             .find(|r| r.key.pid == pid && !r.flags.contains(ProcFlags::EXITED))
@@ -185,7 +185,7 @@ impl ProcessesPage {
     /// Steps 2 and 4: a missing or exited record is not found; else one query expands its path
     /// and the jump waits for that generation.
     fn expand_and_wait(&mut self, mut job: PendingJump, cx: &mut Context<Self>) {
-        let processes = live_processes(cx);
+        let processes = live_processes(&self.host, cx);
         let Some(record) = processes
             .get(job.key)
             .filter(|r| !r.flags.contains(ProcFlags::EXITED))
@@ -241,7 +241,7 @@ impl ProcessesPage {
             }
             return;
         }
-        let live = live_processes(cx)
+        let live = live_processes(&self.host, cx)
             .get(job.key)
             .is_some_and(|r| !r.flags.contains(ProcFlags::EXITED));
         if !live || job.after_show || !self.hides_rows(cx) {
@@ -365,8 +365,9 @@ fn set_group_chip(text: Option<SharedString>, cx: &mut App) {
 }
 
 /// The hub's current processes: the freshest identities, whatever the table shows.
-fn live_processes(cx: &App) -> std::sync::Arc<ProcessSnapshot> {
-    std::sync::Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().processes)
+fn live_processes(host: &HostContext, cx: &App) -> std::sync::Arc<ProcessSnapshot> {
+    let hub = host.hub().expect("the jump target needs the host's hub");
+    std::sync::Arc::clone(&hub.read(cx).current().processes)
 }
 
 /// The rows to expand so `record`'s row is in the view (step 4). Ids that are not rows in this

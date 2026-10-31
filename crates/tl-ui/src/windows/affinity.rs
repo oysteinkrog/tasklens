@@ -36,7 +36,7 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::system::{CoreKind, CpuSet, CpuTopology};
 use tracing::warn;
 
-use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, short_reason};
+use crate::action_tracker::{SummaryTexts, ToastTexts, short_reason};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::checkbox::{CheckboxLabelStyle, TlCheckbox};
 use crate::components::focus::TlFocusRing;
@@ -45,8 +45,8 @@ use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::TlSecondaryWindow;
-use crate::demand::GlobalDemand;
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::text::style::{label_style, t_sm, t_xs};
@@ -725,6 +725,8 @@ enum CpuBlock {
 }
 
 pub struct AffinityDialog {
+    /// The host this dialog shows. Set when it opens; never changes.
+    host: HostContext,
     /// Captured when the menu opened, at most [`MAX_TARGETS`].
     targets: SmallVec<[ActionTarget; 1]>,
     /// The mask of each target, once `DetailsSnapshot.affinity` has it.
@@ -758,20 +760,23 @@ pub struct AffinityDialog {
 }
 
 /// Opens the Set Affinity dialog for `targets`, modal to `parent`. `subtitle` is
-/// `{name} (PID {pid})`. Returns the open error and opens nothing on failure.
+/// `{name} (PID {pid})`. Returns the open error and opens nothing on failure. The dialog acts on
+/// `host` and stays on it.
 pub fn open(
+    host: &HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     subtitle: SharedString,
     parent: AnyWindowHandle,
     cx: &mut App,
 ) -> gpui_kit::Result<WindowHandle<Root>> {
-    open_with_masks(targets, subtitle, None, parent, cx)
+    open_with_masks(host, targets, subtitle, None, parent, cx)
 }
 
 /// [`open`] with the current mask of each target given by the caller, one per target in order:
 /// thread targets pass `ThreadRow.cpus`. The cpuset limit still comes from the process's
 /// `AffinityInfo`.
 pub fn open_with_masks(
+    host: &HostContext,
     mut targets: SmallVec<[ActionTarget; 1]>,
     subtitle: SharedString,
     mut given: Option<Vec<CpuSet>>,
@@ -794,7 +799,9 @@ pub fn open_with_masks(
         title,
         Some(parent),
         move |window, cx| {
-            cx.new(|cx| AffinityDialog::new(targets, subtitle, given, parent_toasts, window, cx))
+            cx.new(|cx| {
+                AffinityDialog::new(host, targets, subtitle, given, parent_toasts, window, cx)
+            })
         },
     )
 }
@@ -806,6 +813,7 @@ impl AffinityDialog {
     }
 
     fn new(
+        host: &HostContext,
         targets: SmallVec<[ActionTarget; 1]>,
         subtitle: SharedString,
         given: Option<Vec<CpuSet>>,
@@ -824,7 +832,7 @@ impl AffinityDialog {
                 _ => {}
             },
         ));
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         if let Some(hub) = &hub {
             subs.push(cx.subscribe_in(
                 hub,
@@ -844,7 +852,7 @@ impl AffinityDialog {
         }
 
         // Demand: the engine reads the targets' masks while the dialog is open (ADR-008).
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             let part = Demand {
                 any_surface_visible: true,
@@ -869,6 +877,7 @@ impl AffinityDialog {
         let all_focus = cx.focus_handle();
         all_focus.focus(window, cx);
         let mut this = Self {
+            host: host.clone(),
             targets,
             initial: Vec::new(),
             given,
@@ -1211,10 +1220,7 @@ impl AffinityDialog {
             .parent_toasts
             .clone()
             .or_else(|| ToastQueue::of_window(window, cx).map(|q| q.downgrade()));
-        match (
-            cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()),
-            queue,
-        ) {
+        match (self.host.tracker().cloned(), queue) {
             (Some(tracker), Some(queue)) => {
                 tracker.update(cx, |t, cx| {
                     let mut key = None;

@@ -23,7 +23,7 @@ use super::confirm::{ConfirmKind, ConfirmResult, confirm};
 use super::jump::JumpTexts;
 use super::{ProcessesPage, record_target};
 use crate::components::toast::ToastKind;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::window::main::{MainWindow, PICK_NONE_TEXT, PICK_TOAST};
 
@@ -85,8 +85,9 @@ impl PickModifier {
 }
 
 /// Handles one new pick result in the main window: ends picking, then the toast or the page's
-/// handler (PROC-055 steps 1 to 4).
+/// handler (PROC-055 steps 1 to 4). `host` is the host the main window shows.
 pub fn on_pick_result(
+    host: &HostContext,
     shell: &mut MainWindow,
     result: PickResult,
     window: &mut Window,
@@ -105,7 +106,7 @@ pub fn on_pick_result(
         PickOutcome::Cancelled => return pick_toast(shell, PICK_NONE_TEXT, cx),
         PickOutcome::Picked { pid } => pid,
     };
-    let Some(target) = live_target(cx, |r| r.key.pid == pid) else {
+    let Some(target) = live_target(host, cx, |r| r.key.pid == pid) else {
         return pick_toast(shell, UNKNOWN_TEXT, cx);
     };
     let modifier = PickModifier::of(window);
@@ -127,8 +128,12 @@ fn pick_toast(shell: &MainWindow, key: &str, cx: &mut Context<MainWindow>) {
 
 /// The first non-exited record of the hub's live snapshot that `pred` accepts, as a process
 /// row target. The page may be paused (Ctrl-pause), so its own snapshot can be old.
-fn live_target(cx: &App, pred: impl Fn(&ProcessRecord) -> bool) -> Option<CapturedTarget> {
-    let hub = cx.try_global::<GlobalHub>()?.0.read(cx);
+fn live_target(
+    host: &HostContext,
+    cx: &App,
+    pred: impl Fn(&ProcessRecord) -> bool,
+) -> Option<CapturedTarget> {
+    let hub = host.hub()?.read(cx);
     hub.current()
         .processes
         .records
@@ -192,10 +197,11 @@ impl ProcessesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = live_target(cx, |r| r.key == key).unwrap_or_else(|| CapturedTarget {
-            flags: picked.flags | ProcFlags::EXITED,
-            ..picked
-        });
+        let target =
+            live_target(&self.host, cx, |r| r.key == key).unwrap_or_else(|| CapturedTarget {
+                flags: picked.flags | ProcFlags::EXITED,
+                ..picked
+            });
         self.run_action(&EndTask, CapturedTargets::new([target], None), window, cx);
     }
 }

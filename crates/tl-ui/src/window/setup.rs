@@ -28,7 +28,6 @@ use tl_model::health::SourceId;
 use tracing::warn;
 
 use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::app::EngineGlobal;
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -37,7 +36,8 @@ use crate::components::progress::TlSpinner;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::text::fonts::MONO_FAMILY;
 use crate::text::style::{t_md, t_sm};
@@ -230,13 +230,18 @@ pub fn init(cx: &mut App) {
     // Deferred: from a menu or a link the host window is mid-update.
     cx.on_action(|a: &OpenAdditionalSetup, cx| {
         let focus_row = a.focus_row;
-        cx.defer(move |cx| open_additional_setup(focus_row, cx));
+        cx.defer(move |cx| {
+            // App-level: the window shows the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_additional_setup(&host, focus_row, cx);
+        });
     });
 }
 
-/// Focuses the open window, or opens it, and asks the engine for the status once. Without a
-/// window registry (tests) it always opens one.
-pub fn open_additional_setup(focus_row: Option<SetupRow>, cx: &mut App) {
+/// Focuses the open window, or opens it on `host`, and asks `host`'s engine for the status once.
+/// Without a window registry (tests) it always opens one.
+pub fn open_additional_setup(host: &HostContext, focus_row: Option<SetupRow>, cx: &mut App) {
+    let window_host = host.clone();
     let s = metrics(cx).ui_scale;
     let spec = TlWindowSpec::new(
         TlWindowKind::Tool { resizable: true },
@@ -247,7 +252,7 @@ pub fn open_additional_setup(focus_row: Option<SetupRow>, cx: &mut App) {
     .key(WindowKey::AdditionalSetup);
     let open = move |cx: &mut App| {
         TlSecondaryWindow::open(cx, spec, move |_, cx| {
-            cx.new(|cx| SetupWindow::new(focus_row, cx))
+            cx.new(|cx| SetupWindow::new(&window_host, focus_row, cx))
         })
         .map(Into::into)
     };
@@ -266,7 +271,7 @@ pub fn open_additional_setup(focus_row: Option<SetupRow>, cx: &mut App) {
             let _ = open(cx);
         }
     }
-    request_status(cx);
+    request_status(host);
 }
 
 fn focus_open_window(row: SetupRow, cx: &mut App) {
@@ -284,11 +289,11 @@ fn focus_open_window(row: SetupRow, cx: &mut App) {
     content.update(cx, |w, cx| w.focus(row, cx));
 }
 
-fn request_status(cx: &App) {
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+fn request_status(host: &HostContext) {
+    let Some(engine) = host.client() else {
         return;
     };
-    if let Err(err) = engine.0.send(Command::SetupStatus) {
+    if let Err(err) = engine.send(Command::SetupStatus) {
         warn!(target: "tasklens::ui", ?err, "setup status not requested");
     }
 }
@@ -326,9 +331,10 @@ pub fn confirm_words(step: SetupStep, cx: &App) -> ConfirmWords {
     }
 }
 
-/// Opens the confirmation of `step`. Confirm sends `Command::RunSetup`. Focus starts on Cancel
-/// for a destructive dialog and on the action button otherwise (R-104).
-pub fn confirm_step(step: SetupStep, window: &mut Window, cx: &mut App) {
+/// Opens the confirmation of `step`. Confirm sends `Command::RunSetup` to `host`. Focus starts on
+/// Cancel for a destructive dialog and on the action button otherwise (R-104).
+pub fn confirm_step(host: &HostContext, step: SetupStep, window: &mut Window, cx: &mut App) {
+    let host = host.clone();
     let words = confirm_words(step, cx);
     let mut dialog = TlDialog::confirm(words.text, words.action)
         .heading(words.heading)
@@ -338,7 +344,7 @@ pub fn confirm_step(step: SetupStep, window: &mut Window, cx: &mut App) {
     }
     let opened = dialog.open(window, cx, move |result, _, cx| {
         if let DialogResult::Confirmed { .. } = result {
-            send_step(step, cx);
+            send_step(&host, step, cx);
         }
     });
     if opened.is_err() {
@@ -346,21 +352,22 @@ pub fn confirm_step(step: SetupStep, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Sends `Command::RunSetup` for `step`. A full queue or a stopped engine changes nothing.
-pub fn send_step(step: SetupStep, cx: &App) {
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+/// Sends `Command::RunSetup` for `step` to `host`. A full queue or a stopped engine changes
+/// nothing.
+pub fn send_step(host: &HostContext, step: SetupStep, _cx: &App) {
+    let Some(engine) = host.client() else {
         return;
     };
-    if let Err(err) = engine.0.send(Command::RunSetup { step }) {
+    if let Err(err) = engine.send(Command::RunSetup { step }) {
         warn!(target: "tasklens::ui", ?err, "setup step not sent");
     }
 }
 
-fn send_reprobe(source: SourceId, cx: &App) {
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+fn send_reprobe(host: &HostContext, source: SourceId) {
+    let Some(engine) = host.client() else {
         return;
     };
-    if let Err(err) = engine.0.send(Command::ReprobeSource(source)) {
+    if let Err(err) = engine.send(Command::ReprobeSource(source)) {
         warn!(target: "tasklens::ui", ?err, ?source, "reprobe not sent");
     }
 }
@@ -642,6 +649,8 @@ pub struct CardView {
 
 /// The content of the Additional Setup window.
 pub struct SetupWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     scroll: ScrollHandle,
     status: Option<SetupStatus>,
     /// The step that runs now.
@@ -658,7 +667,7 @@ pub struct SetupWindow {
 }
 
 impl SetupWindow {
-    fn new(focus_row: Option<SetupRow>, cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, focus_row: Option<SetupRow>, cx: &mut Context<Self>) -> Self {
         let strings = cx.observe_global::<Strings>(|this: &mut Self, cx| {
             let version = strings_version(cx);
             if version != this.strings_version {
@@ -667,20 +676,17 @@ impl SetupWindow {
                 cx.notify();
             }
         });
-        let hub_sub = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.clone())
-            .map(|hub| {
-                cx.subscribe(&hub, |this: &mut Self, hub, ev: &SnapshotChanged, cx| {
-                    if ev.mask.contains(ComponentMask::HEALTH) {
-                        let setup = hub.read(cx).current().health.setup.clone();
-                        this.apply_setup(&setup, cx);
-                    }
-                })
-            });
-        let setup = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.read(cx).current().health.setup.clone())
+        let hub_sub = host.hub().cloned().map(|hub| {
+            cx.subscribe(&hub, |this: &mut Self, hub, ev: &SnapshotChanged, cx| {
+                if ev.mask.contains(ComponentMask::HEALTH) {
+                    let setup = hub.read(cx).current().health.setup.clone();
+                    this.apply_setup(&setup, cx);
+                }
+            })
+        });
+        let setup = host
+            .hub()
+            .map(|h| h.read(cx).current().health.setup.clone())
             .unwrap_or_default();
         // A finished run from before the window opened shows nothing and sends nothing.
         let handled_seq = match &setup.run {
@@ -688,6 +694,7 @@ impl SetupWindow {
             _ => 0,
         };
         let mut this = Self {
+            host: host.clone(),
             scroll: ScrollHandle::new(),
             status: setup.status,
             running: match &setup.run {
@@ -733,8 +740,10 @@ impl SetupWindow {
                     self.outcome = match phase {
                         SetupPhase::Succeeded => {
                             match step_row(run.step) {
-                                Some(SetupRow::CpuPower) => send_reprobe(SourceId::Cpu, cx),
-                                Some(SetupRow::FanSensors) => send_reprobe(SourceId::Sensors, cx),
+                                Some(SetupRow::CpuPower) => send_reprobe(&self.host, SourceId::Cpu),
+                                Some(SetupRow::FanSensors) => {
+                                    send_reprobe(&self.host, SourceId::Sensors)
+                                }
                                 _ => {}
                             }
                             Some(Outcome::Done { step: run.step })
@@ -760,23 +769,23 @@ impl SetupWindow {
 
     /// The Enable button of the CPU card.
     pub fn press_enable(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        confirm_step(SetupStep::RaplEnable, window, cx);
+        confirm_step(&self.host, SetupStep::RaplEnable, window, cx);
     }
 
     /// The Revert button of the CPU card.
     pub fn press_revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        confirm_step(SetupStep::RaplRevert, window, cx);
+        confirm_step(&self.host, SetupStep::RaplRevert, window, cx);
     }
 
     /// The Run sensor detection and Revert buttons of the Fan sensors card. No confirmation.
     pub fn press_run(&mut self, step: SetupStep, cx: &mut Context<Self>) {
-        send_step(step, cx);
+        send_step(&self.host, step, cx);
     }
 
     /// The Retry button of a failure block.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         if let Some(Outcome::Failed { step, .. }) = &self.outcome {
-            send_step(*step, cx);
+            send_step(&self.host, *step, cx);
         }
     }
 
@@ -960,8 +969,8 @@ impl gpui_kit::Render for SetupWindow {
             .size_full()
             .bg(theme.window_bg)
             .text_color(theme.text_primary)
-            .on_action(cx.listener(|_, a: &SetupConfirmStep, window, cx| {
-                confirm_step(a.step, window, cx);
+            .on_action(cx.listener(|this, a: &SetupConfirmStep, window, cx| {
+                confirm_step(&this.host, a.step, window, cx);
             }))
             .on_action(cx.listener(|_, a: &SetupViewScript, _, cx| open_script_window(a.step, cx)))
             .on_action(cx.listener(|this, a: &SetupCopyCommand, window, cx| {
@@ -973,7 +982,9 @@ impl gpui_kit::Render for SetupWindow {
             .on_action(cx.listener(|this, a: &SetupRunStep, _, cx| {
                 this.press_run(a.step, cx);
             }))
-            .on_action(cx.listener(|_, a: &SetupRetryStep, _, cx| send_step(a.step, cx)))
+            .on_action(
+                cx.listener(|this, a: &SetupRetryStep, _, cx| send_step(&this.host, a.step, cx)),
+            )
             .on_action(cx.listener(|this, _: &SetupCopyOutput, window, cx| {
                 this.copy_output(window, cx);
             }))

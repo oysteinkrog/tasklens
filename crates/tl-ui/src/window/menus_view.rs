@@ -38,7 +38,7 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{MenuSuffixAction, TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::ResetMinigraphLayout;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -248,8 +248,10 @@ fn toast_text(kind: ToastKind, text: SharedString, cx: &mut App) {
     });
 }
 
-/// Builds the View menu. Item actions go to `return_focus`; the slider rows use `sliders`.
+/// Builds the View menu for `host`. Item actions go to `return_focus`; the slider rows use
+/// `sliders`.
 pub fn build(
+    host: &HostContext,
     window: &mut Window,
     cx: &mut App,
     return_focus: &FocusHandle,
@@ -257,6 +259,7 @@ pub fn build(
 ) -> Entity<TlMenuPopup> {
     let table = active_table(cx);
     let sliders = sliders.clone();
+    let host = host.clone();
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let columns = tr(cx, "shell-menu-view-columns");
         let menu = match table {
@@ -279,7 +282,12 @@ pub fn build(
             move |menu, _, cx| appearance_submenu(menu, &sliders, cx),
         )
         .submenu(tr(cx, "shell-menu-view-theme"), window, cx, theme_submenu)
-        .submenu(tr(cx, "shell-menu-view-graphs"), window, cx, graphs_submenu)
+        .submenu(
+            tr(cx, "shell-menu-view-graphs"),
+            window,
+            cx,
+            move |menu, window, cx| graphs_submenu(&host, menu, window, cx),
+        )
     })
 }
 
@@ -550,11 +558,11 @@ pub fn graphs_marks(cx: &App) -> [bool; 7] {
     ]
 }
 
-/// Whether the device catalog of the installed snapshot holds a present GPU. False without a hub.
-pub fn has_gpu(cx: &App) -> bool {
-    cx.try_global::<GlobalHub>().is_some_and(|hub| {
-        hub.0
-            .read(cx)
+/// Whether the device catalog of `host`'s installed snapshot holds a present GPU. False without
+/// a hub.
+pub fn has_gpu(host: &HostContext, cx: &App) -> bool {
+    host.hub().is_some_and(|hub| {
+        hub.read(cx)
             .current()
             .devices
             .present_of(DeviceKind::Gpu)
@@ -571,8 +579,8 @@ const GRAPHS_MENU_MAX_W: f32 = 480.;
 /// Temperature checks are disabled with "No GPU found" when [`has_gpu`] is false. The
 /// separator is followed by "Keep detached graphs open when closing main window" (E21-034) and
 /// Reset.
-fn graphs_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
-    let gpu = has_gpu(cx);
+fn graphs_submenu(host: &HostContext, mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let gpu = has_gpu(host, cx);
     let marks = graphs_marks(cx);
     for ((label, key, needs_gpu), checked) in GRAPHS.into_iter().zip(marks) {
         menu = if needs_gpu && !gpu {

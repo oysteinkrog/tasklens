@@ -20,7 +20,7 @@ use super::actions::{
     ConnectionJumpToProcess,
 };
 use crate::components::menu::TlMenu;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
@@ -115,13 +115,12 @@ pub fn close_item(
     }
 }
 
-/// The helper state and the session's destroy support, from the hub's current snapshot.
-fn close_inputs(cx: &App) -> (HelperState, Option<bool>) {
-    cx.try_global::<GlobalHub>()
-        .map_or((HelperState::Missing, None), |hub| {
-            let snap = hub.0.read(cx).current();
-            (snap.health.helper, snap.connections.destroy_supported)
-        })
+/// The helper state and the session's destroy support, from `host`'s current snapshot.
+fn close_inputs(host: &HostContext, cx: &App) -> (HelperState, Option<bool>) {
+    host.hub().map_or((HelperState::Missing, None), |hub| {
+        let snap = hub.read(cx).current();
+        (snap.health.helper, snap.connections.destroy_supported)
+    })
 }
 
 /// Connections rows and optional pointer cell captured when a row menu opens.
@@ -140,8 +139,9 @@ impl ConnMenuTargets {
 }
 
 /// Builds the Connections row menu in UI-SYS-063 order. `closing` holds the cookies with a
-/// close in flight.
+/// close in flight. The Close item reads `host`'s helper state.
 pub fn row_menu(
+    host: &HostContext,
     mut menu: TlMenu,
     targets: &ConnMenuTargets,
     closing: &FxHashSet<u64>,
@@ -182,7 +182,7 @@ pub fn row_menu(
     );
     menu = menu.separator();
 
-    let (helper, destroy_supported) = close_inputs(cx);
+    let (helper, destroy_supported) = close_inputs(host, cx);
     let close = close_item(targets, helper, destroy_supported, closing);
     if close != CloseItem::Hidden {
         let tooltip = match close {

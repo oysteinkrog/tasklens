@@ -14,6 +14,7 @@ use tracing::warn;
 use super::{LocalSwitch, PageBuilder, PageId};
 use crate::app::AppEnv;
 use crate::components::window_frame::ToggleAlwaysOnTop;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, TlSettings};
 use crate::window::main::WINDOW_TITLE;
@@ -29,8 +30,8 @@ const CTRL_ESC: &str = "Ctrl+Esc";
 /// "Start minimized" sits under "Start at login", indented by 16 before the UI scale.
 const START_MINIMIZED_INDENT: f32 = 16.;
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::StartupWindow);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::StartupWindow);
     let window = tr(cx, "shell-settings-group-window");
     let tray = tr(cx, "shell-settings-group-tray");
     let login = tr(cx, "shell-settings-group-login");

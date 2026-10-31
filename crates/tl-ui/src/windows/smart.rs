@@ -38,7 +38,6 @@ use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData, SmartKind, Snapshot}
 use tl_model::units::{short_age, uptime};
 use tl_model::validity::Validity;
 
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
@@ -46,7 +45,8 @@ use crate::components::kv_grid::{
 use crate::components::menu::TlMenu;
 use crate::components::toast::ToastKind;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
@@ -113,7 +113,11 @@ pub fn init(cx: &mut App) {
     // Deferred: the action can come from a menu while the page is mid-update.
     cx.on_action(|a: &PerfShowSmart, cx| {
         let key = a.key.clone();
-        cx.defer(move |cx| show_smart(key, cx));
+        cx.defer(move |cx| {
+            // App-level: the disk is on the host the main window shows now.
+            let host = HostContext::shown(cx);
+            show_smart(&host, key, cx);
+        });
     });
     cx.on_action(|a: &PerfSmartRefresh, cx| {
         let key = a.key.clone();
@@ -125,9 +129,9 @@ pub fn init(cx: &mut App) {
     });
 }
 
-/// Finds the disk of `key` in the catalog and opens its window.
-fn show_smart(key: DeviceKey, cx: &mut App) {
-    let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+/// Finds the disk of `key` in `host`'s catalog and opens its window.
+fn show_smart(host: &HostContext, key: DeviceKey, cx: &mut App) {
+    let Some(hub) = host.hub().cloned() else {
         return;
     };
     let found = hub
@@ -139,16 +143,17 @@ fn show_smart(key: DeviceKey, cx: &mut App) {
         .find(|e| DeviceKey::from_identity(&e.identity).as_ref() == Some(&key))
         .map(|e| e.idx);
     if let Some(idx) = found {
-        open_smart(key, idx, cx);
+        open_smart(host, key, idx, cx);
     }
 }
 
 /// Opens the window of disk `idx`, or focuses the open one. A tool window "tasklens SMART Data"
-/// keyed `WindowKey::Smart(idx)`.
-pub fn open_smart(key: DeviceKey, idx: DeviceIdx, cx: &mut App) {
-    let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+/// keyed `WindowKey::Smart(idx)`. The window shows `host`.
+pub fn open_smart(host: &HostContext, key: DeviceKey, idx: DeviceIdx, cx: &mut App) {
+    let Some(hub) = host.hub().cloned() else {
         return;
     };
+    let host = host.clone();
     let s = metrics(cx).ui_scale;
     let spec = TlWindowSpec::new(
         TlWindowKind::Tool { resizable: true },
@@ -159,7 +164,7 @@ pub fn open_smart(key: DeviceKey, idx: DeviceIdx, cx: &mut App) {
     .key(WindowKey::Smart(idx));
     let open = move |cx: &mut App| {
         let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
-            cx.new(|cx| SmartWindow::new(key, idx, hub, window, cx))
+            cx.new(|cx| SmartWindow::new(&host, key, idx, hub, window, cx))
         })?;
         if let Some(frame) = TlSecondaryWindow::<SmartWindow>::find(handle, cx) {
             // The title follows a language change.
@@ -725,6 +730,8 @@ impl TreeTableDelegate for SmartAtaDelegate {
 
 /// The window content. The frame around it is `TlSecondaryWindow`.
 pub struct SmartWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     idx: DeviceIdx,
     key: DeviceKey,
     /// The kernel name, as the engine addresses the disk.
@@ -754,6 +761,7 @@ pub struct SmartWindow {
 
 impl SmartWindow {
     fn new(
+        host: &HostContext,
         key: DeviceKey,
         idx: DeviceIdx,
         hub: Entity<SnapshotHub>,
@@ -790,6 +798,7 @@ impl SmartWindow {
         tick.detach();
         let disk = kernel_name(hub.read(cx).current(), idx).unwrap_or_else(|| Arc::from(""));
         let mut this = Self {
+            host: host.clone(),
             idx,
             key,
             disk,
@@ -945,7 +954,7 @@ impl SmartWindow {
     /// Sends a SMART command. Returns false when it was not accepted. A full queue toasts for a
     /// click, not for the read on open.
     fn send(&mut self, cmd: DeviceCommand, cx: &mut Context<Self>) -> bool {
-        let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        let Some(engine) = self.host.client().cloned() else {
             return false;
         };
         let clicked = !matches!(cmd, DeviceCommand::SmartRead { update: false, .. });

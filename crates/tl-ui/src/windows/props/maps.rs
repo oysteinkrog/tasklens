@@ -35,12 +35,13 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::components::checkbox::TlCheckbox;
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::components::validity::copy_text;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -881,6 +882,8 @@ pub struct MapsCountChanged(pub u32);
 
 /// The Memory maps tab view. `PropsWindow` builds it with the process key and the tab's filter.
 pub struct MapsTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     table: Entity<TlTreeTable<MapsDelegate>>,
     filter: Entity<PropsFilter>,
@@ -909,6 +912,7 @@ fn tip_views(words: &MapsWords, cx: &mut App) -> (AnyView, AnyView) {
 
 impl MapsTab {
     pub fn new(
+        host: &HostContext,
         key: ProcessKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
@@ -953,6 +957,7 @@ impl MapsTab {
             }
         }));
         Self {
+            host: host.clone(),
             key,
             table,
             filter,
@@ -1182,7 +1187,7 @@ impl MapsTab {
         let Some(path) = self.menu_path(cx) else {
             return;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker, file location not opened");
             return;
         };

@@ -41,7 +41,7 @@ use tl_model::time::TimeNs;
 use tl_model::validity::{ProcessField, Validity};
 use tracing::{debug, warn};
 
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
+use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
 use crate::app::{
     AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, UiExit, UiInit, request_exit,
 };
@@ -50,6 +50,7 @@ use crate::components::input::{TlFilterBox, TlInputSize, TlTextInput};
 use crate::components::toast::{self, ToastQueue};
 use crate::components::validity::glyph;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use crate::host::HostContext;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{self, Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
@@ -164,7 +165,7 @@ pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit
 
     // 7. Hub. No demand: the low-memory engine runs a fixed sweep.
     let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
-    cx.set_global(GlobalHub(hub));
+    cx.set_global(GlobalHub(hub.clone()));
 
     // 8. Boot settings and the tl-app environment.
     cx.set_global(BootSettings {
@@ -192,7 +193,7 @@ pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit
     toast::init(cx);
 
     // ActionTracker
-    crate::action_tracker::install(client.clone(), cx);
+    crate::action_tracker::install(client.clone(), Some(hub), cx);
 
     cx.default_global::<OpenHooks>().low_memory = Some(Box::new(move |cx| {
         if let Err(err) = open_first_rescue(cx, client.clone()) {
@@ -557,6 +558,8 @@ fn send_keep_above(engine: &dyn EngineClient, caption: &SharedString, on: bool) 
 
 /// The rescue window content. The frame around it is `TlSecondaryWindow`.
 pub struct LowMemoryWindow {
+    /// The host this window shows: the local host. Set when it opens; never changes.
+    host: HostContext,
     engine: Arc<dyn EngineClient>,
     filter: Entity<InputState>,
     /// The list is one focus stop.
@@ -600,8 +603,10 @@ impl LowMemoryWindow {
         )
         .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)));
         let content_engine = engine.clone();
+        // The rescue window is not opened from a host: it shows the local host.
+        let host = HostContext::local(cx);
         let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
-            cx.new(|cx| Self::new(content_engine, window, cx))
+            cx.new(|cx| Self::new(&host, content_engine, window, cx))
         })?;
         // Closing the window ends the `--low-memory` process.
         let id = handle.window_id();
@@ -647,7 +652,12 @@ impl LowMemoryWindow {
         TlSecondaryWindow::<Self>::find(handle, cx).map(|frame| frame.read(cx).content().clone())
     }
 
-    fn new(engine: Arc<dyn EngineClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        host: &HostContext,
+        engine: Arc<dyn EngineClient>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let filter = cx.new(|cx| InputState::new(window, cx));
         filter.update(cx, |s, cx| s.focus(window, cx));
         let list_focus = cx.focus_handle().tab_stop(true);
@@ -659,7 +669,7 @@ impl LowMemoryWindow {
                 cx.notify();
             }
         }));
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         if let Some(hub) = &hub {
             subscriptions.push(cx.subscribe_in(
                 hub,
@@ -676,7 +686,7 @@ impl LowMemoryWindow {
                 },
             ));
         }
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subscriptions.push(
                 cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
                     if let ActionTrackerEvent::Finished { id, .. } = *ev {
@@ -708,6 +718,7 @@ impl LowMemoryWindow {
             cx.notify();
         }));
         let mut this = Self {
+            host: host.clone(),
             engine,
             filter,
             list_focus,
@@ -946,9 +957,10 @@ impl LowMemoryWindow {
 
     fn send_open_full(&self, cx: &App) {
         // Ids come from the tracker when there is one, so an End Task id is never reused.
-        let id = cx
-            .try_global::<GlobalActionTracker>()
-            .map_or_else(next_action_id, |t| t.0.read(cx).next_id());
+        let id = self
+            .host
+            .tracker()
+            .map_or_else(next_action_id, |t| t.read(cx).next_id());
         let request = ActionRequest {
             id,
             kind: ActionKind::Launch(LaunchSpec {
@@ -974,7 +986,7 @@ impl LowMemoryWindow {
         if row.other_user || self.is_ending(id) {
             return;
         }
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker; End Task was not sent");
             return;
         };

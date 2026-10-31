@@ -38,7 +38,7 @@ use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::demand::GlobalDemand;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::cells::{
@@ -731,10 +731,12 @@ pub struct ServicesDelegate {
     proc_tip_words: RowTipWords,
     /// The page that builds the row menu and keeps its captured targets.
     page: Option<WeakEntity<super::ServicesPage>>,
+    /// The host this table shows. Set when it opens; never changes.
+    host: HostContext,
 }
 
 impl ServicesDelegate {
-    pub fn new(state: &UiState) -> Self {
+    pub fn new(host: &HostContext, state: &UiState) -> Self {
         let specs = column_specs();
         let mut expanded = FxHashSet::default();
         if state.services.group_expanded.system {
@@ -776,6 +778,7 @@ impl ServicesDelegate {
             proc_tip_view: None,
             proc_tip_words: RowTipWords::from_fn(|key| tr_en(key, &[])),
             page: None,
+            host: host.clone(),
         }
     }
 
@@ -1116,7 +1119,7 @@ impl ServicesDelegate {
         self.active = active;
         if active {
             self.send_demand(cx);
-        } else if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        } else if let Some(demand) = self.host.demand().cloned() {
             let source = cx.entity_id();
             demand.update(cx, |demand, cx| demand.remove(source, cx));
         }
@@ -1151,7 +1154,7 @@ impl ServicesDelegate {
         if !self.active {
             return;
         }
-        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         let (source, window, part) = (cx.entity_id(), self.window, self.demand_part());

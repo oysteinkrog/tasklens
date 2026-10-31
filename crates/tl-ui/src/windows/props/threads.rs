@@ -31,10 +31,10 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH_THREADS, PropsFilter, lowercase};
-use crate::action_tracker::{GlobalActionTracker, SummaryTexts, ToastTexts, action_words};
+use crate::action_tracker::{SummaryTexts, ToastTexts, action_words};
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
@@ -864,6 +864,8 @@ impl TreeTableDelegate for ThreadsDelegate {
 
 /// The Threads tab view. `PropsWindow` builds it with the process key and the tab's filter.
 pub struct ThreadsTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     table: Entity<TlTreeTable<ThreadsDelegate>>,
     filter: Entity<PropsFilter>,
@@ -878,6 +880,7 @@ pub struct ThreadsTab {
 
 impl ThreadsTab {
     pub fn new(
+        host: &HostContext,
         key: ProcessKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
@@ -910,6 +913,7 @@ impl ThreadsTab {
             }
         }));
         Self {
+            host: host.clone(),
             key,
             table,
             filter,
@@ -1092,12 +1096,13 @@ impl ThreadsTab {
         if action.policy == crate::windows::actions::SchedPolicyWire::Rr {
             let targets = self.captured(cx).map(|c| c.targets);
             let parent = window.window_handle();
+            let host = self.host.clone();
             cx.defer(move |cx| {
                 confirm(ConfirmKind::Realtime, parent, cx, move |result, cx| {
                     if result == ConfirmResult::Confirmed
                         && let Some(targets) = targets
                     {
-                        track_request(targets, kind, priority_toasts(cx), parent, cx);
+                        track_request(&host, targets, kind, priority_toasts(cx), parent, cx);
                     }
                 });
             });
@@ -1120,6 +1125,7 @@ impl ThreadsTab {
         };
         let subtitle = thread_subtitle(&captured.rows, self.process_name(cx), self.key.pid, cx);
         let _ = priority::open(
+            &self.host,
             captured.targets,
             subtitle,
             (first.policy, first.nice, first.rt_prio),
@@ -1139,6 +1145,7 @@ impl ThreadsTab {
             .collect();
         let subtitle = thread_subtitle(&captured.rows, self.process_name(cx), self.key.pid, cx);
         let _ = affinity::open_with_masks(
+            &self.host,
             captured.targets,
             subtitle,
             Some(masks),
@@ -1154,7 +1161,7 @@ impl ThreadsTab {
         let Some(kind) = signal_kind(action.signo) else {
             return;
         };
-        if let Some(text) = signal_refusal(self.key, cx) {
+        if let Some(text) = signal_refusal(&self.host, self.key, cx) {
             if let Some(queue) = ToastQueue::of_window(window, cx) {
                 queue.update(cx, |queue, cx| {
                     queue.push(ToastKind::Warning, text, None, None, cx)
@@ -1162,15 +1169,22 @@ impl ThreadsTab {
             }
             return;
         }
-        let ask = signal_confirmation(action.signo, captured.targets.len(), self.key, cx);
+        let ask = signal_confirmation(
+            &self.host,
+            action.signo,
+            captured.targets.len(),
+            self.key,
+            cx,
+        );
         if let Some(ask) = ask {
             let parent = window.window_handle();
             let targets = captured.targets;
             let texts = signal_toasts(action.signo, &captured.rows, cx);
+            let host = self.host.clone();
             cx.defer(move |cx| {
                 confirm(ask, parent, cx, move |result, cx| {
                     if result == ConfirmResult::Confirmed {
-                        track_request(targets, kind, texts, parent, cx);
+                        track_request(&host, targets, kind, texts, parent, cx);
                     }
                 });
             });
@@ -1185,10 +1199,10 @@ impl ThreadsTab {
     }
 
     fn process_name(&self, cx: &App) -> SharedString {
-        cx.try_global::<GlobalHub>()
+        self.host
+            .hub()
             .and_then(|hub| {
-                hub.0
-                    .read(cx)
+                hub.read(cx)
                     .current()
                     .processes
                     .get(self.key)
@@ -1208,7 +1222,14 @@ impl ThreadsTab {
 
     fn track(&self, kind: ActionKind, texts: ToastTexts, window: &Window, cx: &mut App) {
         if let Some(captured) = self.captured(cx) {
-            track_request(captured.targets, kind, texts, window.window_handle(), cx);
+            track_request(
+                &self.host,
+                captured.targets,
+                kind,
+                texts,
+                window.window_handle(),
+                cx,
+            );
         }
     }
 }
@@ -1414,10 +1435,16 @@ fn signal_kind(signo: i32) -> Option<ActionKind> {
     }))
 }
 
-fn signal_confirmation(signo: i32, count: usize, key: ProcessKey, cx: &App) -> Option<ConfirmKind> {
-    let record = cx
-        .try_global::<GlobalHub>()
-        .and_then(|hub| hub.0.read(cx).current().processes.get(key).cloned());
+fn signal_confirmation(
+    host: &HostContext,
+    signo: i32,
+    count: usize,
+    key: ProcessKey,
+    cx: &App,
+) -> Option<ConfirmKind> {
+    let record = host
+        .hub()
+        .and_then(|hub| hub.read(cx).current().processes.get(key).cloned());
     let action = tr(cx, "pwn-signal-send");
     if let Some(record) = record {
         if record
@@ -1450,10 +1477,10 @@ fn signal_confirmation(signo: i32, count: usize, key: ProcessKey, cx: &App) -> O
     })
 }
 
-fn signal_refusal(key: ProcessKey, cx: &App) -> Option<SharedString> {
-    let record = cx
-        .try_global::<GlobalHub>()
-        .and_then(|hub| hub.0.read(cx).current().processes.get(key).cloned());
+fn signal_refusal(host: &HostContext, key: ProcessKey, cx: &App) -> Option<SharedString> {
+    let record = host
+        .hub()
+        .and_then(|hub| hub.read(cx).current().processes.get(key).cloned());
     if key.pid == std::process::id()
         || record
             .as_ref()
@@ -1474,13 +1501,14 @@ fn signal_refusal(key: ProcessKey, cx: &App) -> Option<SharedString> {
 }
 
 fn track_request(
+    host: &HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     kind: ActionKind,
     texts: ToastTexts,
     parent: gpui_kit::AnyWindowHandle,
     cx: &mut App,
 ) {
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = host.tracker().cloned() else {
         return;
     };
     let Some(queue) = parent

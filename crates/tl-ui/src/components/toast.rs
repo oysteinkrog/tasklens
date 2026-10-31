@@ -45,7 +45,7 @@ use super::icons::{TlIcon, icon};
 use super::motion::{M_BASE, ease_out_cubic};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::tr_args;
 use crate::settings_global::animations_on;
 use crate::text::fonts::UI_FAMILY;
@@ -834,10 +834,10 @@ fn disarm(entry: &mut ToastEntry, now: Instant) {
     entry.timer = None;
 }
 
-/// Whether the hub reports the main window hidden (ADR-010).
+/// Whether the hub reports the main window hidden (ADR-010). The main window is this PC's own
+/// window, so the local host's hub.
 fn main_window_hidden(cx: &App) -> bool {
-    cx.try_global::<GlobalHub>()
-        .is_some_and(|hub| hub.0.read(cx).is_hidden())
+    HostContext::local_hub(cx).is_some_and(|hub| hub.read(cx).is_hidden())
 }
 
 /// The leading icon of `kind`.

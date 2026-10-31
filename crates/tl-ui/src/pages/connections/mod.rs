@@ -26,7 +26,6 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionState, ActionTarget};
-use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::demand::Demand;
 use tl_model::health::{HelperState, SourceId};
@@ -35,16 +34,15 @@ use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
 use self::menu::ConnMenuTargets;
-use crate::action_tracker::GlobalActionTracker;
 use crate::actions::ClearFilter;
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, TlMenuPopup, open_context_menu_at};
 use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
@@ -54,9 +52,7 @@ use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{
-    FilterChanged, GlobalShellEvents, HelperInstalled, PauseChanged, ShellPage, ShellState,
-};
+use crate::window::main::{FilterChanged, HelperInstalled, PauseChanged, ShellPage, ShellState};
 use crate::window::status::StatusChanged;
 use crate::windows::connection_properties::open_connection_properties;
 
@@ -102,23 +98,23 @@ pub struct ConnectionsPage {
     netns_start_after: Option<u64>,
     netns_focus: FocusHandle,
     netns_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: SmallVec<[Subscription; 3]>,
 }
 
 impl EventEmitter<StatusChanged> for ConnectionsPage {}
 
 impl ConnectionsPage {
-    pub fn new(
-        hub: &Entity<SnapshotHub>,
-        demand: &Entity<DemandAggregator>,
-        _client: Arc<dyn EngineClient>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut delegate = ConnectionsDelegate::new(cx);
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let demand = host
+            .demand()
+            .cloned()
+            .expect("the Connections page needs the host's demand aggregator");
+        let mut delegate = ConnectionsDelegate::new(host, cx);
         delegate.set_page(cx.weak_entity());
-        delegate.set_demand(demand.clone());
         let frame = SysTableFrame::new(
+            host,
             Tab::Connections,
             "ConnectionTable",
             &[SourceId::Connections],
@@ -131,39 +127,41 @@ impl ConnectionsPage {
         let table = frame.table.clone();
         let focus = table.read(cx).focus_handle().clone();
         let mut subs = SmallVec::new();
-        subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
-            let snap = Arc::clone(hub.read(cx).current());
-            if ev.mask.contains(ComponentMask::HEALTH) {
-                this.on_health(&snap.health, cx);
-            }
-            let changed = this.frame.on_snapshot(&snap, ev.mask, cx);
-            let accepted = this.frame.query.accepts(snap.connections.query_generation);
-            if ev
-                .mask
-                .contains(tl_model::snapshot::ComponentMask::CONNECTIONS)
-            {
-                this.finish_refresh_if_new(snap.connections.header.version, cx);
-            }
-            if accepted && !this.frame.is_paused() {
-                this.copy_connections = Arc::clone(&snap.connections);
-                this.copy_processes = Arc::clone(&snap.processes);
-            }
-            if changed {
-                if accepted && !this.frame.is_paused() {
-                    this.refresh_status(&snap.connections, cx);
+        if let Some(hub) = host.hub() {
+            subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
+                let snap = Arc::clone(hub.read(cx).current());
+                if ev.mask.contains(ComponentMask::HEALTH) {
+                    this.on_health(&snap.health, cx);
                 }
-                cx.notify();
-            }
-        }));
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
-            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+                let changed = this.frame.on_snapshot(&snap, ev.mask, cx);
+                let accepted = this.frame.query.accepts(snap.connections.query_generation);
+                if ev
+                    .mask
+                    .contains(tl_model::snapshot::ComponentMask::CONNECTIONS)
+                {
+                    this.finish_refresh_if_new(snap.connections.header.version, cx);
+                }
+                if accepted && !this.frame.is_paused() {
+                    this.copy_connections = Arc::clone(&snap.connections);
+                    this.copy_processes = Arc::clone(&snap.processes);
+                }
+                if changed {
+                    if accepted && !this.frame.is_paused() {
+                        this.refresh_status(&snap.connections, cx);
+                    }
+                    cx.notify();
+                }
+            }));
+        }
+        if let Some(events) = host.events() {
+            subs.push(cx.subscribe(events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Connections {
                     this.frame.on_filter_changed(&ev.text, cx);
                 }
             }));
-            subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
+            subs.push(cx.subscribe(events, |this, _, ev: &PauseChanged, cx| {
                 if this.frame.set_paused(ev.0, cx) {
-                    if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+                    if let Some(hub) = this.host.hub().cloned() {
                         let snap = Arc::clone(hub.read(cx).current());
                         this.refresh_status(&snap.connections, cx);
                         if !ev.0 {
@@ -216,12 +214,13 @@ impl ConnectionsPage {
             copy_connections: Arc::new(ConnectionsSnapshot::default()),
             copy_processes: Arc::new(ProcessSnapshot::default()),
             close_requests: FxHashMap::default(),
-            demand: demand.clone(),
+            demand,
             active: false,
             netns_all: false,
             netns_start_after: None,
             netns_focus: cx.focus_handle(),
             netns_bounds: Rc::default(),
+            host: host.clone(),
             _subs: subs,
         }
     }
@@ -321,7 +320,7 @@ impl ConnectionsPage {
             return;
         }
         self.set_netns_all(true, cx);
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         let snap = Arc::clone(hub.read(cx).current());
@@ -417,9 +416,10 @@ impl ConnectionsPage {
     /// Sends `RefreshNow(Connections)` and arms the one-shot completion toast.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.frame.refresh(cx);
-        let version = cx
-            .try_global::<GlobalHub>()
-            .map_or(0, |h| h.0.read(cx).current().connections.header.version);
+        let version = self
+            .host
+            .hub()
+            .map_or(0, |h| h.read(cx).current().connections.header.version);
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
             let _ = this.update(cx, |this, cx| {
@@ -511,10 +511,10 @@ impl ConnectionsPage {
         let Some((id, index)) = self.close_requests.remove(&cookie) else {
             return false;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>() else {
+        let Some(tracker) = self.host.tracker() else {
             return false;
         };
-        tracker.0.read(cx).results(id).is_some_and(|results| {
+        tracker.read(cx).results(id).is_some_and(|results| {
             results
                 .iter()
                 .rev()
@@ -529,7 +529,7 @@ impl ConnectionsPage {
             .table
             .update(cx, |table, _| table.delegate.take_sort_request());
         if let Some(sort) = sort
-            && let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0))
+            && let Some(client) = self.host.client().cloned()
         {
             self.frame.query.set_sort(sort, &*client);
         }
@@ -746,7 +746,7 @@ impl ConnectionsPage {
     fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
         let targets = self.take_targets(cx);
         for cookie in targets.cookies.iter().take(MAX_PROPERTIES_WINDOWS) {
-            open_connection_properties(*cookie, cx);
+            open_connection_properties(&self.host, *cookie, cx);
         }
     }
 

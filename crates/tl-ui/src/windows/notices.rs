@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global,
-    Pixels, SharedString, Subscription, Task, WeakEntity, Window, px,
+    Action, AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Context, Entity,
+    EntityId, Global, Pixels, SharedString, Subscription, Task, WeakEntity, Window, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{
@@ -44,14 +44,12 @@ use tl_model::units;
 use tracing::warn;
 
 use crate::action_tracker::{
-    ActionTracker, ActionTrackerEvent, GlobalActionTracker, RetryActionAsAdmin, ToastTexts,
-    action_words,
+    ActionTracker, ActionTrackerEvent, RetryActionAsAdmin, ToastTexts, action_words,
 };
-use crate::app::EngineGlobal;
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::toast::{self, ToastAction, ToastClosed, ToastKey, ToastKind, ToastQueue};
-use crate::demand::GlobalDemand;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::confirm::{self, ConfirmKind};
 use crate::pages::startup::delegate::home_tilde;
@@ -90,20 +88,22 @@ impl From<VtToast> for ToastKey {
     }
 }
 
-/// Opens `key`'s executable on VirusTotal by its SHA-256, after the one-time notice. `window` is
-/// the caller's window: the notice is modal to it and the toasts show in it.
-pub fn open_virustotal(key: ProcessKey, window: &mut Window, cx: &mut App) {
+/// Opens `key`'s executable on VirusTotal by its SHA-256, after the one-time notice. `key` is a
+/// process of `host`, whose engine hashes it. `window` is the caller's window: the notice is
+/// modal to it and the toasts show in it.
+pub fn open_virustotal(host: &HostContext, key: ProcessKey, window: &mut Window, cx: &mut App) {
     if TlSettings::state(cx).processes.virustotal_notice_accepted {
-        start(key, window, cx);
+        start(host, key, window, cx);
         return;
     }
+    let host = host.clone();
     let dialog = TlDialog::confirm(tr(cx, TEXT), tr(cx, OPEN))
         .heading(tr(cx, TITLE))
         .cancel_label(tr(cx, CANCEL));
     let opened = dialog.open(window, cx, move |result, window, cx| {
         if let DialogResult::Confirmed { .. } = result {
             TlSettings::update(cx, |d| d.state.processes.virustotal_notice_accepted = true);
-            start(key, window, cx);
+            start(&host, key, window, cx);
         }
     });
     if opened.is_err() {
@@ -120,7 +120,7 @@ struct VtRequests {
 
 impl Global for VtRequests {}
 
-fn start(key: ProcessKey, window: &mut Window, cx: &mut App) {
+fn start(host: &HostContext, key: ProcessKey, window: &mut Window, cx: &mut App) {
     let Some(queue) = ToastQueue::of_window(window, cx) else {
         warn!(target: "tasklens::ui", "no toast queue; VirusTotal was not opened");
         return;
@@ -129,7 +129,7 @@ fn start(key: ProcessKey, window: &mut Window, cx: &mut App) {
     requests.next += 1;
     let toast = VtToast(requests.next);
     let handle = window.window_handle();
-    let request = cx.new(|cx| VtRequest::new(key, toast, queue.downgrade(), handle, cx));
+    let request = cx.new(|cx| VtRequest::new(host, key, toast, queue.downgrade(), handle, cx));
     cx.default_global::<VtRequests>().live.push(request.clone());
     // The hash may already be in the snapshot (an open Properties window computed it).
     request.update(cx, |r, cx| r.check(cx));
@@ -137,6 +137,8 @@ fn start(key: ProcessKey, window: &mut Window, cx: &mut App) {
 
 /// One VirusTotal request, from `ComputeHashes` to the browser open or an error.
 pub struct VtRequest {
+    /// The host of the process. Set when the request starts; never changes.
+    host: HostContext,
     key: ProcessKey,
     toast: VtToast,
     queue: WeakEntity<ToastQueue>,
@@ -148,18 +150,19 @@ pub struct VtRequest {
 
 impl VtRequest {
     fn new(
+        host: &HostContext,
         key: ProcessKey,
         toast: VtToast,
         queue: WeakEntity<ToastQueue>,
         window: gpui_kit::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Self {
-        if let Some(engine) = cx.try_global::<EngineGlobal>()
-            && let Err(err) = engine.0.send(Command::ComputeHashes(key))
+        if let Some(engine) = host.client()
+            && let Err(err) = engine.send(Command::ComputeHashes(key))
         {
             warn!(target: "tasklens::ui", ?err, "ComputeHashes not sent");
         }
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let part = Demand {
                 details: Arc::from([DetailDemand {
                     target: DetailTarget::Process(key),
@@ -170,21 +173,19 @@ impl VtRequest {
             let id = cx.entity_id();
             demand.update(cx, |d, cx| d.set(id, Some(window), part, cx));
         }
-        let hub = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.clone())
-            .map(|hub| {
-                cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
-                    if ev.mask.intersects(ComponentMask::DETAILS) {
-                        this.check(cx);
-                    }
-                })
-            });
+        let hub = host.hub().cloned().map(|hub| {
+            cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
+                if ev.mask.intersects(ComponentMask::DETAILS) {
+                    this.check(cx);
+                }
+            })
+        });
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_DELAY).await;
             let _ = this.update(cx, |this, cx| this.show_toast(cx));
         });
         Self {
+            host: host.clone(),
             key,
             toast,
             queue,
@@ -217,7 +218,7 @@ impl VtRequest {
         if self.done {
             return;
         }
-        let Some(state) = hash_state(self.key, cx) else {
+        let Some(state) = hash_state(&self.host, self.key, cx) else {
             return;
         };
         match state {
@@ -244,7 +245,7 @@ impl VtRequest {
     }
 
     fn open_url(&self, sha256: &[u8; 32], cx: &mut Context<Self>) {
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker; VirusTotal was not opened");
             return;
         };
@@ -268,7 +269,7 @@ impl VtRequest {
         self._timer = None;
         self._hub = None;
         let id = cx.entity_id();
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = self.host.demand().cloned() {
             demand.update(cx, |d, cx| d.remove(id, cx));
         }
         cx.defer(move |cx| {
@@ -281,9 +282,9 @@ impl VtRequest {
     }
 }
 
-/// The hash state of `key`'s General payload in the current snapshot.
-fn hash_state(key: ProcessKey, cx: &App) -> Option<HashState> {
-    let hub = cx.try_global::<GlobalHub>()?.0.read(cx);
+/// The hash state of `key`'s General payload in `host`'s current snapshot.
+fn hash_state(host: &HostContext, key: ProcessKey, cx: &App) -> Option<HashState> {
+    let hub = host.hub()?.read(cx);
     let detail = hub
         .current()
         .details
@@ -347,14 +348,16 @@ impl From<DumpToast> for ToastKey {
 #[action(namespace = tasklens, no_json)]
 pub struct CopyDumpPath(pub u64);
 
-/// Creates a core dump of `key` (PROC-075). Asks first when VmRSS is over 2 GiB. `window` is
-/// the caller's window: the confirmation is modal to it and the toasts show in it.
-pub fn start_dump(key: ProcessKey, window: &mut Window, cx: &mut App) {
-    let (name, rss) = name_and_rss(key, cx);
+/// Creates a core dump of `key` (PROC-075), a process of `host`, whose engine writes the file.
+/// Asks first when VmRSS is over 2 GiB. `window` is the caller's window: the confirmation is
+/// modal to it and the toasts show in it.
+pub fn start_dump(host: &HostContext, key: ProcessKey, window: &mut Window, cx: &mut App) {
+    let (name, rss) = name_and_rss(host, key, cx);
     if rss <= LARGE_DUMP_BYTES {
-        send_dump(key, &name, window, cx);
+        send_dump(host, key, &name, window, cx);
         return;
     }
+    let host = host.clone();
     let mut size = String::new();
     units::bytes(&mut size, rss);
     let kind = ConfirmKind::LargeDump {
@@ -364,7 +367,7 @@ pub fn start_dump(key: ProcessKey, window: &mut Window, cx: &mut App) {
     let dialog = confirm::dialog(confirm::texts(&kind, cx));
     let opened = dialog.open(window, cx, move |result, window, cx| {
         if let DialogResult::Confirmed { .. } = result {
-            send_dump(key, &name, window, cx);
+            send_dump(&host, key, &name, window, cx);
         }
     });
     if opened.is_err() {
@@ -372,12 +375,12 @@ pub fn start_dump(key: ProcessKey, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// The display name and VmRSS of `key` in the current snapshot. A process that is gone has an
-/// empty name and 0 bytes; the engine then reports that it has exited.
-fn name_and_rss(key: ProcessKey, cx: &App) -> (SharedString, u64) {
-    cx.try_global::<GlobalHub>()
+/// The display name and VmRSS of `key` in `host`'s current snapshot. A process that is gone has
+/// an empty name and 0 bytes; the engine then reports that it has exited.
+fn name_and_rss(host: &HostContext, key: ProcessKey, cx: &App) -> (SharedString, u64) {
+    host.hub()
         .and_then(|hub| {
-            let record = hub.0.read(cx).current().processes.get(key)?;
+            let record = hub.read(cx).current().processes.get(key)?;
             Some((
                 SharedString::from(record.meta.name.to_string()),
                 record.rss_bytes,
@@ -435,8 +438,10 @@ struct DumpFlows {
     live: Vec<Entity<DumpRequest>>,
     done: Vec<DoneDump>,
     retry: Vec<RetryDump>,
-    /// The action handlers and the tracker subscription are set up with the first dump.
-    tracker_sub: Option<Subscription>,
+    /// The action handlers are set up with the first dump.
+    handlers: bool,
+    /// One subscription per host's tracker, set up with that host's first dump.
+    tracker_subs: Vec<(EntityId, Subscription)>,
 }
 
 impl DumpFlows {
@@ -468,6 +473,8 @@ fn toast_up(queue: &WeakEntity<ToastQueue>, toast: DumpToast, cx: &App) -> bool 
 
 #[derive(Clone)]
 struct DoneDump {
+    /// The host that wrote the file.
+    host: HostContext,
     toast: DumpToast,
     path: Arc<str>,
     queue: WeakEntity<ToastQueue>,
@@ -475,6 +482,8 @@ struct DoneDump {
 
 /// A dump refused for privileges whose toast offers "Retry as administrator".
 struct RetryDump {
+    /// The host of the refused request.
+    host: HostContext,
     /// The refused request.
     id: ActionId,
     toast: DumpToast,
@@ -482,12 +491,12 @@ struct RetryDump {
     window: AnyWindowHandle,
 }
 
-fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
+fn send_dump(host: &HostContext, key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
     let Some(queue) = ToastQueue::of_window(window, cx) else {
         warn!(target: "tasklens::ui", "no toast queue; the dump was not started");
         return;
     };
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the dump was not started");
         return;
     };
@@ -512,19 +521,30 @@ fn send_dump(key: ProcessKey, name: &str, window: &mut Window, cx: &mut App) {
     if sent.is_none() {
         return;
     }
-    if cx.default_global::<DumpFlows>().tracker_sub.is_none() {
+    if !cx.default_global::<DumpFlows>().handlers {
         App::on_action(cx, open_dump_folder);
         App::on_action(cx, copy_dump_path);
+        cx.global_mut::<DumpFlows>().handlers = true;
+    }
+    let tracker_id = tracker.entity_id();
+    if !cx
+        .global::<DumpFlows>()
+        .tracker_subs
+        .iter()
+        .any(|(id, _)| *id == tracker_id)
+    {
         let retried = cx.subscribe(&tracker, |tracker, ev: &ActionTrackerEvent, cx| {
             if let ActionTrackerEvent::Retried { from, to } = *ev {
                 on_retried(from, to, &tracker, cx);
             }
         });
-        cx.global_mut::<DumpFlows>().tracker_sub = Some(retried);
+        cx.global_mut::<DumpFlows>()
+            .tracker_subs
+            .push((tracker_id, retried));
     }
     let handle = window.window_handle();
     let queue = queue.downgrade();
-    let dump = cx.new(|cx| DumpRequest::new(id, toast, queue, handle, &tracker, cx));
+    let dump = cx.new(|cx| DumpRequest::new(host, id, toast, queue, handle, &tracker, cx));
     cx.global_mut::<DumpFlows>().live.push(dump);
 }
 
@@ -535,11 +555,15 @@ fn on_retried(from: ActionId, to: ActionId, tracker: &Entity<ActionTracker>, cx:
         return;
     }
     let flows = cx.global_mut::<DumpFlows>();
-    let Some(ix) = flows.retry.iter().position(|r| r.id == from) else {
+    let Some(ix) = flows
+        .retry
+        .iter()
+        .position(|r| r.id == from && r.host.tracker() == Some(tracker))
+    else {
         return;
     };
     let r = flows.retry.swap_remove(ix);
-    let dump = cx.new(|cx| DumpRequest::new(to, r.toast, r.queue, r.window, tracker, cx));
+    let dump = cx.new(|cx| DumpRequest::new(&r.host, to, r.toast, r.queue, r.window, tracker, cx));
     cx.global_mut::<DumpFlows>().live.push(dump);
 }
 
@@ -549,7 +573,7 @@ fn open_dump_folder(action: &OpenDumpFolder, cx: &mut App) {
     let Some(done) = DumpFlows::done(cx, action.0) else {
         return;
     };
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = done.host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the dump folder was not opened");
         return;
     };
@@ -592,6 +616,8 @@ fn copy_dump_path(action: &CopyDumpPath, cx: &mut App) {
 /// `Progress` events; its refresh task pushes the progress toast again every 500 ms and ends
 /// with the action.
 pub struct DumpRequest {
+    /// The host that writes the dump. Set when the request starts; never changes.
+    host: HostContext,
     id: ActionId,
     toast: DumpToast,
     queue: WeakEntity<ToastQueue>,
@@ -608,6 +634,7 @@ pub struct DumpRequest {
 
 impl DumpRequest {
     fn new(
+        host: &HostContext,
         id: ActionId,
         toast: DumpToast,
         queue: WeakEntity<ToastQueue>,
@@ -649,6 +676,7 @@ impl DumpRequest {
             }
         });
         let this = Self {
+            host: host.clone(),
             id,
             toast,
             queue,
@@ -771,6 +799,7 @@ impl DumpRequest {
         };
         DumpFlows::prune(cx);
         cx.default_global::<DumpFlows>().done.push(DoneDump {
+            host: self.host.clone(),
             toast: self.toast,
             path,
             queue: self.queue.clone(),
@@ -794,9 +823,10 @@ impl DumpRequest {
         } else {
             tr(cx, DUMP_NEEDS_ADMIN)
         };
-        let retry = cx
-            .try_global::<GlobalActionTracker>()
-            .is_some_and(|t| t.0.read(cx).can_retry(self.id));
+        let retry = self
+            .host
+            .tracker()
+            .is_some_and(|t| t.read(cx).can_retry(self.id));
         let button = retry.then(|| ToastAction {
             label: action_words(cx).retry_admin.clone(),
             action: Box::new(RetryActionAsAdmin(self.id.0)),
@@ -804,6 +834,7 @@ impl DumpRequest {
         if retry {
             DumpFlows::prune(cx);
             cx.default_global::<DumpFlows>().retry.push(RetryDump {
+                host: self.host.clone(),
                 id: self.id,
                 toast: self.toast,
                 queue: self.queue.clone(),

@@ -934,7 +934,7 @@ impl Render for StatusBar {
         };
         // The Overview range switch at the right end while the bar is on the Overview.
         let switch = (self.shown_range.0 == StatusBarPlacement::Overview)
-            .then(|| range_switch(STATUS_SWITCH, cx));
+            .then(|| range_switch(STATUS_SWITCH, Some(&self.hub), cx));
         let row = || div().flex().flex_row().items_center().gap(m.sp[3]).w_full();
         let bar = div()
             .id(BAR_ID)

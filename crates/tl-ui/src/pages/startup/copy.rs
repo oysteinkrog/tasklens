@@ -19,7 +19,7 @@ use super::StartupPage;
 use super::actions::{StartupCopyCommand, StartupOpenFileLocation};
 use super::delegate::{StartupWords, home_tilde};
 use super::menu::StartupMenuTargets;
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
@@ -198,7 +198,7 @@ impl StartupPage {
             push_toast(window, cx, ToastKind::Warning, text, None);
             return;
         }
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             return;
         };
         let Some(queue) = ToastQueue::of_window(window, cx) else {

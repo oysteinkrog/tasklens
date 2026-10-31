@@ -36,13 +36,13 @@ use tl_model::settings::Decorations;
 
 use crate::actions::{ShowMainWindow, ToggleMiniWindow};
 use crate::anim::AnimationDriver;
-use crate::app::EngineGlobal;
 use crate::chart::ChartView;
 use crate::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
 use crate::components::toast::ToastKind;
 use crate::components::window_frame::client_frame_extra;
-use crate::demand::{DemandAggregator, GlobalDemand};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::demand::DemandAggregator;
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
 use crate::pages::minigraph::bridge::OwnWindowBridge;
@@ -458,13 +458,14 @@ impl MiniWindow {
             return;
         }
         self.always_on_top = !self.always_on_top;
-        if let Some(engine) = cx.try_global::<EngineGlobal>() {
+        // Keep-above acts on this PC's own window: the local engine.
+        if let Some(engine) = HostContext::local_client(cx) {
             let cmd = Command::KWin(KWinCommand::KeepAbove {
                 pid: std::process::id(),
                 caption: Some(Arc::from(MINI_WINDOW_TITLE)),
                 on: self.always_on_top,
             });
-            if engine.0.send(cmd).is_err() {
+            if engine.send(cmd).is_err() {
                 tracing::warn!(target: "tasklens::ui", "keep above not sent");
             }
         }
@@ -504,11 +505,10 @@ pub fn open_mini(cx: &mut App) -> OpenOutcome {
         let text = tr(cx, "mini-window-toast-open-failed");
         push_main_toast(cx, ToastKind::Error, text, None, None);
     };
-    let globals = cx
-        .try_global::<GlobalHub>()
-        .map(|h| h.0.clone())
-        .zip(cx.try_global::<GlobalDemand>().map(|d| d.0.clone()));
-    let Some((hub, demand)) = globals else {
+    // The mini window is not opened from a host: it shows the local host.
+    let host = HostContext::local(cx);
+    let parts = host.hub().cloned().zip(host.demand().cloned());
+    let Some((hub, demand)) = parts else {
         toast_failed(cx);
         return OpenOutcome::Failed;
     };

@@ -57,7 +57,8 @@ use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::toast::{ToastAction, ToastKind};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
@@ -68,7 +69,7 @@ use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view, push_main_toast};
+use crate::window::main::{FilterChanged, main_window_view, push_main_toast};
 
 use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};
@@ -494,14 +495,14 @@ pub fn open_at(t: TimeNs, window: &mut Window, cx: &mut App) {
 
 /// True while `history.enabled`, a host setting, is off. Before the engine gives it (and
 /// without a hub, in tests) recording does not count as off.
-fn recording_off(cx: &App) -> bool {
-    let host = crate::host_settings::current(cx);
-    host.rev > 0 && !host.values.history.enabled
+fn recording_off(host: &HostContext, cx: &App) -> bool {
+    let settings = crate::host_settings::current(host, cx);
+    settings.rev > 0 && !settings.values.history.enabled
 }
 
 /// Turns recording on in the host settings, which makes the engine switch to the store.
-fn enable_recording(cx: &mut App) {
-    crate::host_settings::change(cx, |v| v.history.enabled = true);
+fn enable_recording(host: &HostContext, cx: &mut App) {
+    crate::host_settings::change(host, cx, |v| v.history.enabled = true);
 }
 
 fn problem_index(p: HistoryLoadProblem) -> usize {
@@ -570,6 +571,8 @@ pub const LIVE_DOT_ID: &str = "history-live-dot";
 
 /// The History mode page. Built when History mode turns on.
 pub struct HistoryPage {
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     pub(crate) state: HistoryUiState,
     /// The last installed `Snapshot.history`.
     pub(crate) view: Option<Arc<HistoryView>>,
@@ -620,9 +623,12 @@ pub struct HistoryPage {
 
 impl HistoryPage {
     /// Reads the hub's current history view, builds the table, subscribes to the hub, sends the
-    /// mode entry query and starts the live loop. Needs `GlobalHub`.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let hub = cx.global::<GlobalHub>().0.clone();
+    /// mode entry query and starts the live loop. Needs the host's hub.
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let hub = host
+            .hub()
+            .expect("the History page needs the host's hub")
+            .clone();
         let (history, processes, client) = {
             let hub = hub.read(cx);
             let s = hub.current();
@@ -639,7 +645,7 @@ impl HistoryPage {
             ),
             None => (Settings::default(), UiState::default()),
         };
-        let mut delegate = HistoryTableDelegate::new(&settings, &state, cx);
+        let mut delegate = HistoryTableDelegate::new(host, &settings, &state, cx);
         delegate.install(&history, &processes);
         let defaults = delegate.default_layout();
         let table = cx.new(|cx| {
@@ -678,7 +684,7 @@ impl HistoryPage {
                 TreeTableEvent::CopyFailed | TreeTableEvent::PressReleased => {}
             },
         ));
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
+        if let Some(events) = host.events().cloned() {
             subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Processes {
                     this.set_filter(&ev.text, cx);
@@ -711,6 +717,7 @@ impl HistoryPage {
             None => (HistoryWords::default(), LegendWords::default(), 0),
         };
         let mut page = Self {
+            host: host.clone(),
             state: HistoryUiState::default(),
             view: None,
             words,
@@ -770,7 +777,11 @@ impl HistoryPage {
 
     /// Takes the hub's current history view.
     fn on_hub_history(&mut self, cx: &mut Context<Self>) {
-        let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
+        let hub = self
+            .host
+            .hub()
+            .expect("the History page needs the host's hub");
+        let history = Arc::clone(&hub.read(cx).current().history);
         if self.paused {
             self.drive(cx, |q, c| q.on_view(&history, c));
             return;
@@ -797,7 +808,7 @@ impl HistoryPage {
     /// With recording off, tells the user once per session, with an Enable button. Entering
     /// History mode again shows no second toast.
     pub fn note_recording_off(&mut self, cx: &mut Context<Self>) {
-        if cx.default_global::<HistorySession>().off_toast_shown || !recording_off(cx) {
+        if cx.default_global::<HistorySession>().off_toast_shown || !recording_off(&self.host, cx) {
             return;
         }
         cx.default_global::<HistorySession>().off_toast_shown = true;
@@ -1214,7 +1225,11 @@ impl HistoryPage {
         let Some(view) = self.view.clone() else {
             return;
         };
-        let processes = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().processes);
+        let hub = self
+            .host
+            .hub()
+            .expect("the History page needs the host's hub");
+        let processes = Arc::clone(&hub.read(cx).current().processes);
         self.table.update(cx, |t, cx| {
             if t.delegate.install(&view, &processes) {
                 t.on_new_version(cx);
@@ -1379,7 +1394,7 @@ impl HistoryPage {
         cx: &mut Context<Self>,
     ) {
         let (keys, _) = self.targets(cx);
-        if let Some(key) = keys.into_iter().find(|&k| is_live(k, cx)) {
+        if let Some(key) = keys.into_iter().find(|&k| is_live(&self.host, k, cx)) {
             self.jump(key, window, cx);
         }
     }
@@ -1400,7 +1415,7 @@ impl HistoryPage {
     /// Double-click and Enter: a running process is selected in the live table, which leaves
     /// History mode (UI-PRC-022); any other row shows "Process not running".
     fn jump(&mut self, key: ProcessKey, window: &mut Window, cx: &mut Context<Self>) {
-        if is_live(key, cx) {
+        if is_live(&self.host, key, cx) {
             let page = main_window_view(cx)
                 .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
             if let Some(page) = page {
@@ -1529,7 +1544,10 @@ impl HistoryPage {
                 TlButton::new("history-off-enable", TlButtonKind::Secondary)
                     .size(TlButtonSize::Sm)
                     .label(self.words.enable.clone())
-                    .on_click(|_, _, cx| enable_recording(cx)),
+                    .on_click({
+                        let host = self.host.clone();
+                        move |_, _, cx| enable_recording(&host, cx)
+                    }),
             )
             .child(
                 TlButton::new("history-off-close", TlButtonKind::Icon)
@@ -1574,7 +1592,7 @@ impl Render for HistoryPage {
             cx,
         );
         let live_button = self.render_live_button(window, cx);
-        let banner = (recording_off(cx) && !self.state.banner_hidden)
+        let banner = (recording_off(&self.host, cx) && !self.state.banner_hidden)
             .then(|| self.render_banner(cx).into_any_element());
         let m = metrics(cx);
         let theme = current(cx);

@@ -34,12 +34,12 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
 use crate::table::actions::{CopyRow, CopyRowsAsTable, ToggleExpand};
@@ -625,6 +625,8 @@ impl TreeTableDelegate for EnvDelegate {
 pub struct EnvCountChanged(pub u32);
 
 pub struct EnvironTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     table: Entity<TlTreeTable<EnvDelegate>>,
     filter: Entity<PropsFilter>,
@@ -651,6 +653,7 @@ fn toast(window: &mut Window, cx: &mut App, text: SharedString) {
 
 impl EnvironTab {
     pub fn new(
+        host: &HostContext,
         key: ProcessKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
@@ -716,6 +719,7 @@ impl EnvironTab {
             }));
         }
         Self {
+            host: host.clone(),
             key,
             table,
             filter,
@@ -886,9 +890,9 @@ impl EnvironTab {
             target: DetailTarget::Process(self.key),
             tab: DetailTab::Environment,
         };
-        match cx.try_global::<EngineGlobal>() {
+        match self.host.client() {
             Some(engine) => {
-                if let Err(err) = engine.0.send(cmd) {
+                if let Err(err) = engine.send(cmd) {
                     warn!(target: "tasklens::ui", ?err, "environment refresh not sent");
                 }
             }

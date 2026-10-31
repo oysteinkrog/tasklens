@@ -38,7 +38,7 @@ use tl_model::units::{self, LocalDateTime};
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
+use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
 use crate::actions::OpenAdditionalSetup;
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -47,7 +47,7 @@ use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_ROW_NAME, HoverTooltip, TlTooltip};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::{
     JOURNAL_LIST_CONTEXT, ServiceLogsBottom, ServiceLogsCopySelected, ServiceLogsSelectAll,
@@ -285,6 +285,8 @@ struct PendingLaunch {
 }
 
 pub struct LogsView {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     unit: UnitRef,
     /// Formatted once on arrival.
     lines: VecDeque<LogLine>,
@@ -329,7 +331,12 @@ pub struct LogsView {
 }
 
 impl LogsView {
-    pub(super) fn new(unit: UnitRef, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        host: &HostContext,
+        unit: UnitRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let filter_input = cx.new(|cx| InputState::new(window, cx));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&filter_input, |this, _, ev: &InputEvent, cx| {
@@ -337,7 +344,7 @@ impl LogsView {
                 this.on_filter_change(cx);
             }
         }));
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subs.push(cx.subscribe_in(
                 &tracker,
                 window,
@@ -349,6 +356,7 @@ impl LogsView {
             ));
         }
         let mut this = Self {
+            host: host.clone(),
             unit,
             lines: VecDeque::new(),
             filtered: Vec::new(),
@@ -379,10 +387,7 @@ impl LogsView {
     /// Opens a journal handle and starts reading its events. The engine sends the last 200
     /// entries first.
     fn open_journal(&mut self, follow: bool, cx: &mut Context<Self>) {
-        let Some(client) = cx
-            .try_global::<GlobalHub>()
-            .map(|hub| hub.0.read(cx).client().clone())
-        else {
+        let Some(client) = self.host.hub().map(|hub| hub.read(cx).client().clone()) else {
             return;
         };
         let handle = client.journal(JournalQuery {
@@ -691,7 +696,7 @@ impl LogsView {
 
     /// Opens the journal in a terminal with `TERMINALS[attempt]`.
     fn open_terminal(&mut self, attempt: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker; the terminal was not opened");
             return;
         };

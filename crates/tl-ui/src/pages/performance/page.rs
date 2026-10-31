@@ -47,6 +47,7 @@ use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
@@ -265,6 +266,8 @@ pub fn page_words(cx: &mut App) -> &PageWords {
 /// them out. Every method runs inside the page's own render.
 pub trait DevicePage: 'static {
     fn key(&self) -> &DeviceKey;
+    /// The hub of the page's host. The range switch reads that host's settings from it.
+    fn hub(&self) -> Option<&Entity<SnapshotHub>>;
     /// (type word, model text), from [`header_text`].
     fn header(&self) -> (SharedString, SharedString);
     /// Header buttons, right-aligned. Each is a `TlButton` with a tooltip.
@@ -512,7 +515,7 @@ impl DevicePageFrame<'_> {
                 div()
                     .debug_selector(|| RANGE_ID.into())
                     .flex_none()
-                    .child(page_range_switch(PAGE_SWITCH, &range_words, cx)),
+                    .child(page_range_switch(PAGE_SWITCH, &range_words, page.hub(), cx)),
             );
 
         let graph_area = div()
@@ -728,8 +731,10 @@ fn model_text(
 }
 
 /// The page view for `row`. Each device kind adds its arm as a chain edit (R-262); a kind
-/// without a page yet gets [`PlaceholderPage`].
+/// without a page yet gets [`PlaceholderPage`]. `hub` and `demand` are `host`'s; the pages
+/// that send commands of their own keep `host`.
 pub fn build_page(
+    host: &HostContext,
     key: &DeviceKey,
     row: &DeviceRow,
     hub: &Entity<SnapshotHub>,
@@ -744,10 +749,28 @@ pub fn build_page(
             .new(|cx| MemoryPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
             .into(),
         DeviceKind::Disk => cx
-            .new(|cx| DiskPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .new(|cx| {
+                DiskPage::new(
+                    host,
+                    key.clone(),
+                    row.clone(),
+                    hub.clone(),
+                    demand.clone(),
+                    cx,
+                )
+            })
             .into(),
         DeviceKind::Net => cx
-            .new(|cx| NetPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .new(|cx| {
+                NetPage::new(
+                    host,
+                    key.clone(),
+                    row.clone(),
+                    hub.clone(),
+                    demand.clone(),
+                    cx,
+                )
+            })
             .into(),
         DeviceKind::Gpu => cx
             .new(|cx| GpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
@@ -756,7 +779,16 @@ pub fn build_page(
             .new(|cx| FanPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
             .into(),
         DeviceKind::Battery => cx
-            .new(|cx| BatteryPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .new(|cx| {
+                BatteryPage::new(
+                    host,
+                    key.clone(),
+                    row.clone(),
+                    hub.clone(),
+                    demand.clone(),
+                    cx,
+                )
+            })
             .into(),
         // An aggregate page needs two or more devices of its type (PERF-009).
         DeviceKind::AggregateDisk
@@ -775,7 +807,9 @@ pub fn build_page(
             })
             .into()
         }
-        _ => cx.new(|cx| PlaceholderPage::new(key.clone(), cx)).into(),
+        _ => cx
+            .new(|cx| PlaceholderPage::new(key.clone(), hub.clone(), cx))
+            .into(),
     }
 }
 
@@ -792,14 +826,16 @@ fn aggregate_has_members(
 /// built yet.
 pub struct PlaceholderPage {
     key: DeviceKey,
+    hub: Entity<SnapshotHub>,
     details: KeyValueModel,
     focus: FocusHandle,
 }
 
 impl PlaceholderPage {
-    pub fn new(key: DeviceKey, cx: &mut Context<Self>) -> Self {
+    pub fn new(key: DeviceKey, hub: Entity<SnapshotHub>, cx: &mut Context<Self>) -> Self {
         Self {
             key,
+            hub,
             details: KeyValueModel::default(),
             focus: cx.focus_handle(),
         }
@@ -809,6 +845,10 @@ impl PlaceholderPage {
 impl DevicePage for PlaceholderPage {
     fn key(&self) -> &DeviceKey {
         &self.key
+    }
+
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
     }
 
     fn header(&self) -> (SharedString, SharedString) {

@@ -15,9 +15,10 @@ use tl_model::table::TableMode;
 
 use super::{ProcessesPage, toast};
 use crate::components::toast::ToastKind;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::window::main::{FilterChanged, GlobalShellEvents, MemGroupCleared};
+use crate::window::main::{FilterChanged, MemGroupCleared};
 
 /// "Include children" shows while the filter has text or the mode is Tree (UI-SHL-025). The
 /// shell's checkbox applies the same rule.
@@ -32,10 +33,11 @@ pub struct FilterBinding {
 }
 
 impl FilterBinding {
-    /// Subscribes to the shell's `FilterChanged` and follows the include-children setting.
-    pub fn new(cx: &mut Context<ProcessesPage>) -> Self {
+    /// Subscribes to the shell's `FilterChanged` on `host`'s event bus and follows the
+    /// include-children setting.
+    pub fn new(host: &HostContext, cx: &mut Context<ProcessesPage>) -> Self {
         let mut subs = SmallVec::new();
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
+        if let Some(events) = host.events().cloned() {
             subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Processes {
                     this.apply_filter(&ev.text, cx);

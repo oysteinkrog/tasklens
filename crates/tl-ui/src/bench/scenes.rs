@@ -44,8 +44,7 @@ use crate::chart::{
     ChartLabels, ChartSeries, ChartSpec, GridStyle, ValueAlign, ValueFormat, YScale,
 };
 use crate::components::icons::TlAssets;
-use crate::demand::GlobalDemand;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::pages::performance::cpu::CpuPage;
 use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::pages::processes::ProcessesPage;
@@ -239,8 +238,10 @@ impl SceneView {
     fn new(scene: BenchScene, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
+        // The bench installed the app globals: the scene shows the local host.
+        let host = HostContext::local(cx);
         if scene == BenchScene::Table2000 {
-            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            let page = cx.new(|cx| ProcessesPage::new(&host, window, cx));
             page.update(cx, |page, cx| page.focus_table(window, cx));
             return Self {
                 content: SceneContent::Processes(page),
@@ -248,12 +249,15 @@ impl SceneView {
                 paints: Rc::default(),
             };
         }
-        let hub = cx.global::<GlobalHub>().0.clone();
-        let demand = cx.global::<GlobalDemand>().0.clone();
+        assert!(host.hub().is_some(), "the bench scene needs the host's hub");
+        let demand = host
+            .demand()
+            .cloned()
+            .expect("the bench scene needs the host's demand");
         // Hidden-state demand follows this window as it follows the main window.
         let handle = window.window_handle();
         demand.update(cx, |d, _| d.set_main_window(handle));
-        let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        let page = cx.new(|cx| PerformancePage::new(&host, cx));
         // In perf-overview the CPU page is not built, so `bench_show_both` stays off.
         let cpu = page
             .read(cx)
@@ -329,7 +333,10 @@ impl SoakGraphView {
     fn new(graph: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
-        let hub = cx.global::<GlobalHub>().0.clone();
+        // The bench installed the app globals: the graph shows the local host.
+        let hub = HostContext::local_hub(cx)
+            .cloned()
+            .expect("the soak graph needs the host's hub");
         let theme = current(cx).clone();
         let (device, metric, fill, line, y, value_fmt) = if graph == 0 {
             (

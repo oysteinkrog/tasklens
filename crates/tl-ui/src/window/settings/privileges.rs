@@ -12,13 +12,13 @@ use tl_model::health::HelperState;
 use super::{PageBuilder, PageId};
 use crate::actions::OpenAdditionalSetup;
 use crate::components::button::TlButtonKind;
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::SettingKey;
 use crate::window::menus_settings::{TogglePasswordless, passwordless_running};
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Privileges);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Privileges);
     let unlock = tr(cx, "shell-settings-group-unlock");
     let prompts = tr(cx, "shell-settings-group-password-prompts");
     let helper = tr(cx, "shell-settings-group-helper");
@@ -42,9 +42,9 @@ pub fn page(cx: &mut App) -> PageBuilder {
         TlButtonKind::Secondary,
     );
     // Helper status line (E29, tasklens-qfx.29). The window re-renders on `HEALTH`.
-    let installed = cx
-        .try_global::<GlobalHub>()
-        .map(|hub| Arc::clone(hub.0.read(cx).current()))
+    let installed = host
+        .hub()
+        .map(|hub| Arc::clone(hub.read(cx).current()))
         .is_some_and(|snap| snap.health.helper != HelperState::Missing);
     let key = if installed {
         "settings-privileges-helper-installed"

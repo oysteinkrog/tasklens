@@ -19,7 +19,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Styled as _, div,
 };
 use smallvec::SmallVec;
@@ -32,6 +32,7 @@ use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 use super::timeline::{self, Paused};
 use crate::chart::view::{derived_view, find_tiered};
 use crate::components::button::{TlButton, TlButtonKind};
+use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::net_totals::hist_minus;
 use crate::pages::performance::details::Template;
@@ -103,8 +104,8 @@ pub fn history_request(
 
 /// `history.device_metrics`, a host setting, on before the engine gives it. 24 h and 7 d read
 /// only the stored history, so with it off their segments are disabled (UI-PRF-060).
-pub fn history_kept(cx: &App) -> bool {
-    crate::host_settings::current(cx)
+pub fn history_kept(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> bool {
+    crate::host_settings::current_of(hub, cx)
         .values
         .history
         .device_metrics
@@ -114,16 +115,25 @@ pub fn history_kept(cx: &App) -> bool {
 /// While paused, a range the history cannot serve at the picked time is disabled with "Not kept
 /// at this resolution" (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are
 /// disabled with "Device history is off" (UI-PRF-060).
-pub fn range_switch(prefix: &'static str, cx: &App) -> AnyElement {
+pub fn range_switch(
+    prefix: &'static str,
+    hub: Option<&Entity<SnapshotHub>>,
+    cx: &App,
+) -> AnyElement {
     let words = SwitchWords::build(|key| tr(cx, key));
-    switch(prefix, timeline::paused(cx), &words, cx)
+    switch(prefix, timeline::paused(cx), &words, hub, cx)
 }
 
 /// The switch in a device page header: the same segments, but the Overview's pause does not
 /// apply, since the device pages always draw up to now. `words` come translated from the
 /// shared page words, so a frame does no lookups.
-pub fn page_range_switch(prefix: &'static str, words: &SwitchWords, cx: &App) -> AnyElement {
-    switch(prefix, None, words, cx)
+pub fn page_range_switch(
+    prefix: &'static str,
+    words: &SwitchWords,
+    hub: Option<&Entity<SnapshotHub>>,
+    cx: &App,
+) -> AnyElement {
+    switch(prefix, None, words, hub, cx)
 }
 
 /// The switch words: the segment labels in [`OverviewRange::ALL`] order and the two tooltips of
@@ -150,11 +160,12 @@ fn switch(
     prefix: &'static str,
     paused: Option<Paused>,
     words: &SwitchWords,
+    hub: Option<&Entity<SnapshotHub>>,
     cx: &App,
 ) -> AnyElement {
     let current = current_range(cx);
     let now = timeline::now_realtime_ns();
-    let kept = history_kept(cx);
+    let kept = history_kept(hub, cx);
     let mut row = div().flex().flex_row().flex_none();
     for (range, label) in OverviewRange::ALL.into_iter().zip(&words.labels) {
         let id = segment_id(prefix, range);

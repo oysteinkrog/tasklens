@@ -57,7 +57,6 @@ use self::maps::{MapsCountChanged, MapsTab};
 use self::security::SecurityTab;
 use self::strings::StringsTab;
 use self::threads::ThreadsTab;
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::menu::{close_context_menu, context_menu_open};
 use crate::components::progress::TlSpinner;
@@ -65,8 +64,8 @@ use crate::components::shield::StartHelperSession;
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
-use crate::demand::GlobalDemand;
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::text::style::{t_base, t_sm};
@@ -419,15 +418,16 @@ fn access_text(tab: DetailTab) -> Option<&'static str> {
 /// Opens the Properties window for `key`, or activates the one already open for it (its active
 /// tab is kept). A ninth window is refused with a Warning toast in the source window; a key that
 /// is missing or exited gets the Error toast "Could not open properties." in the main window.
-pub fn open_process_properties(key: ProcessKey, cx: &mut App) {
+/// The window shows `host` and stays on it.
+pub fn open_process_properties(host: &HostContext, key: ProcessKey, cx: &mut App) {
     let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
         warn!(target: "tasklens::ui", "no window registry, properties not opened");
         return;
     };
     let words = props_words(cx);
-    let record = cx
-        .try_global::<GlobalHub>()
-        .and_then(|hub| hub.0.read(cx).current().processes.get(key).cloned())
+    let record = host
+        .hub()
+        .and_then(|hub| hub.read(cx).current().processes.get(key).cloned())
         .filter(|r| !r.flags.contains(ProcFlags::EXITED));
     let source = cx.active_window();
     let mut opened = None;
@@ -444,7 +444,7 @@ pub fn open_process_properties(key: ProcessKey, cx: &mut App) {
             let spec = pwn_window_spec(cx, PwnWindow::ProcessProperties, title, None)
                 .key(WindowKey::Properties(key));
             let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
-                cx.new(|cx| PropsWindow::new(key, Some(record), window, cx))
+                cx.new(|cx| PropsWindow::new(host, key, Some(record), window, cx))
             })?;
             opened = Some(handle);
             Ok(handle.into())
@@ -510,6 +510,8 @@ pub struct PropsTabs {
 
 /// The root view of a Process Properties window.
 pub struct PropsWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     key: ProcessKey,
     active: DetailTab,
     tabs: PropsTabs,
@@ -541,6 +543,7 @@ pub struct PropsWindow {
 
 impl PropsWindow {
     fn new(
+        host: &HostContext,
         key: ProcessKey,
         record: Option<ProcessRecord>,
         window: &mut Window,
@@ -552,7 +555,7 @@ impl PropsWindow {
             cx.new(|cx| PropsFilter::new(label, window, cx))
         });
         let mut subs = Vec::new();
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         if let Some(hub) = &hub {
             subs.push(cx.subscribe_in(
                 hub,
@@ -567,6 +570,7 @@ impl PropsWindow {
             .as_ref()
             .map_or_else(SharedString::default, |r| r.meta.name.to_string().into());
         let mut this = Self {
+            host: host.clone(),
             key,
             active: DetailTab::General,
             tabs: PropsTabs::default(),
@@ -591,7 +595,7 @@ impl PropsWindow {
         this.ensure_tab(DetailTab::General, window, cx);
 
         // Demand (UI-PWN-002): removed on release.
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             this.demand = Some(id);
             this.register_demand(window, cx);
@@ -763,13 +767,14 @@ impl PropsWindow {
 
     fn ensure_tab(&mut self, tab: DetailTab, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key;
+        let host = self.host.clone();
         if tab == DetailTab::General && self.tabs.general.is_none() {
             let filter = self.filter[0].clone();
-            self.tabs.general = Some(cx.new(|cx| GeneralTab::new(key, filter, cx)));
+            self.tabs.general = Some(cx.new(|cx| GeneralTab::new(&host, key, filter, cx)));
         }
         if tab == DetailTab::Threads && self.tabs.threads.is_none() {
             let filter = self.filter[strip_index(DetailTab::Threads)].clone();
-            let threads = cx.new(|cx| ThreadsTab::new(key, filter, window, cx));
+            let threads = cx.new(|cx| ThreadsTab::new(&host, key, filter, window, cx));
             let online = self.online;
             threads.update(cx, |t, cx| t.set_online_cpus(online, cx));
             if let Some(detail) = &self.last_detail {
@@ -780,7 +785,7 @@ impl PropsWindow {
         }
         if tab == DetailTab::Fds && self.tabs.fds.is_none() {
             let filter = self.filter[strip_index(DetailTab::Fds)].clone();
-            let fds = cx.new(|cx| FdsTab::new(key, filter, window, cx));
+            let fds = cx.new(|cx| FdsTab::new(&host, key, filter, window, cx));
             // The hide switch lives in the filter bar, so a change re-renders the window too.
             self._subs
                 .push(cx.subscribe(&fds, |this, _, ev: &FdsCountChanged, cx| {
@@ -798,7 +803,7 @@ impl PropsWindow {
         }
         if tab == DetailTab::Maps && self.tabs.maps.is_none() {
             let filter = self.filter[strip_index(DetailTab::Maps)].clone();
-            let maps = cx.new(|cx| MapsTab::new(key, filter, window, cx));
+            let maps = cx.new(|cx| MapsTab::new(&host, key, filter, window, cx));
             // The switch lives in the filter bar, so a change re-renders the window too.
             self._subs
                 .push(cx.subscribe(&maps, |this, _, ev: &MapsCountChanged, cx| {
@@ -828,7 +833,7 @@ impl PropsWindow {
         }
         if tab == DetailTab::Environment && self.tabs.environ.is_none() {
             let filter = self.filter[strip_index(DetailTab::Environment)].clone();
-            let environ = cx.new(|cx| EnvironTab::new(key, filter, window, cx));
+            let environ = cx.new(|cx| EnvironTab::new(&host, key, filter, window, cx));
             // Refresh lives in the filter bar, so a new payload re-renders the window too.
             self._subs
                 .push(cx.subscribe(&environ, |this, _, ev: &EnvCountChanged, cx| {
@@ -846,7 +851,7 @@ impl PropsWindow {
         }
         if tab == DetailTab::Strings && self.tabs.strings.is_none() {
             let filter = self.filter[strip_index(DetailTab::Strings)].clone();
-            let strings = cx.new(|cx| StringsTab::new(key, filter, window, cx));
+            let strings = cx.new(|cx| StringsTab::new(&host, key, filter, window, cx));
             let kernel_thread = self
                 .last_record
                 .as_ref()
@@ -863,7 +868,7 @@ impl PropsWindow {
         let Some(id) = self.demand.filter(|_| !self.exited) else {
             return;
         };
-        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         let part = Demand {
@@ -884,16 +889,16 @@ impl PropsWindow {
         let Some(id) = self.demand.take() else {
             return;
         };
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = self.host.demand().cloned() {
             demand.update(cx, |d, cx| d.remove(id, cx));
         }
     }
 
-    fn send(&self, cmd: Command, cx: &App) {
-        let Some(engine) = cx.try_global::<EngineGlobal>() else {
+    fn send(&self, cmd: Command, _cx: &App) {
+        let Some(engine) = self.host.client() else {
             return;
         };
-        if let Err(err) = engine.0.send(cmd) {
+        if let Err(err) = engine.send(cmd) {
             warn!(target: "tasklens::ui", ?err, "properties command not sent");
         }
     }

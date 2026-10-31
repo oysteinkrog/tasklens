@@ -28,7 +28,7 @@ use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
 use crate::pages::sys_table::SysDelegate;
@@ -397,7 +397,9 @@ pub struct ConnectionsDelegate {
     /// Cookies whose State cell shows "Closing…": a close is pending, or it succeeded and the
     /// row has not left the snapshot yet.
     closing: FxHashSet<u64>,
-    demand: Option<Entity<DemandAggregator>>,
+    /// The host this table shows. Set when it opens; never changes. The Remote host cookies
+    /// go to its demand aggregator.
+    host: HostContext,
     active: bool,
     /// The last ids of `on_visible_range`: visible rows plus one viewport above and below.
     visible_ids: Arc<[u64]>,
@@ -411,7 +413,7 @@ fn remote_host_source() -> EntityId {
 }
 
 impl ConnectionsDelegate {
-    pub fn new(cx: &App) -> Self {
+    pub fn new(host: &HostContext, cx: &App) -> Self {
         let words = ConnectionWords::new(cx);
         let specs = connection_specs(&words);
         let order = CONNECTION_COLUMNS.map(id);
@@ -440,7 +442,7 @@ impl ConnectionsDelegate {
             tip_view: None,
             page: None,
             closing: FxHashSet::default(),
-            demand: None,
+            host: host.clone(),
             active: false,
             visible_ids: Arc::from([]),
             sent_cookies: Arc::from([]),
@@ -475,11 +477,6 @@ impl ConnectionsDelegate {
         cx.notify();
     }
 
-    /// The page's aggregator, where the Remote host cookies go.
-    pub fn set_demand(&mut self, demand: Entity<DemandAggregator>) {
-        self.demand = Some(demand);
-    }
-
     /// The tab became active or was left. Leaving withdraws the Remote host demand.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<TlTreeTable<Self>>) {
         if self.active != active {
@@ -504,7 +501,7 @@ impl ConnectionsDelegate {
         if cookies == self.sent_cookies {
             return;
         }
-        let Some(demand) = self.demand.clone() else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         self.sent_cookies = Arc::clone(&cookies);
@@ -955,7 +952,7 @@ impl TreeTableDelegate for ConnectionsDelegate {
             let stored = captured.clone();
             page.update(cx, |page, _| page.set_menu_targets(stored));
         }
-        row_menu(menu, &captured, &self.closing, window, cx)
+        row_menu(&self.host, menu, &captured, &self.closing, window, cx)
     }
 
     fn on_toggle_expand(&mut self, _: u64, _: &mut Context<TlTreeTable<Self>>) {}

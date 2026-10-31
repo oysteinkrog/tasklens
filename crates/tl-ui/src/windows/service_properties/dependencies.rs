@@ -28,7 +28,8 @@ use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::ServicePropsOk;
 use crate::pages::services::delegate::service_sys_status;
@@ -125,6 +126,8 @@ fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: Shared
 }
 
 pub struct DependenciesTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     entity_id: EntityId,
     details: Option<Arc<UnitDetails>>,
     units: Arc<[UnitRecord]>,
@@ -151,8 +154,8 @@ pub struct DependenciesTab {
 }
 
 impl DependenciesTab {
-    pub(super) fn new(cx: &mut Context<Self>) -> Self {
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+    pub(super) fn new(host: &HostContext, cx: &mut Context<Self>) -> Self {
+        let hub = host.hub().cloned();
         let units = hub
             .as_ref()
             .map(|hub| hub.read(cx).current().services.units.clone())
@@ -166,6 +169,7 @@ impl DependenciesTab {
             })
         });
         let mut this = Self {
+            host: host.clone(),
             entity_id: cx.entity_id(),
             details: None,
             units,
@@ -374,9 +378,10 @@ impl DependenciesTab {
         match item {
             Item::Row(i) => {
                 let unit = self.rows[i].unit.clone();
+                let host = self.host.clone();
                 // Defer: opening or focusing a window must not run inside this window's update.
                 cx.defer(move |cx| {
-                    ServicePropertiesWindow::open(unit, ServicePropsTab::General, cx)
+                    ServicePropertiesWindow::open(&host, unit, ServicePropsTab::General, cx)
                 });
             }
             Item::OrderingHeader => self.toggle_ordering(cx),

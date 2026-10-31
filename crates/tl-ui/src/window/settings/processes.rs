@@ -14,19 +14,20 @@ use tl_model::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
 
 use super::{PageBuilder, PageId};
 use crate::components::banner::TlBannerKind;
+use crate::host::HostContext;
 use crate::host_settings;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue};
 use crate::window::menus_settings::{HISTORY_STORAGE_KEYS, REFRESH_KEYS};
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Processes);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Processes);
     let refresh = tr(cx, "shell-settings-group-refresh");
     let view = tr(cx, "shell-settings-group-view");
     let tables = tr(cx, "shell-settings-group-tables");
     let properties = tr(cx, "shell-settings-group-properties");
-    let host = host_settings::current(cx);
-    let known = host.rev > 0;
+    let current = host_settings::current(host, cx);
+    let known = current.rev > 0;
     let waiting = (!known).then(|| tr(cx, "shell-settings-host-waiting"));
 
     let intervals: Vec<(SharedString, SettingValue)> = REFRESH_KEYS
@@ -34,7 +35,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
         .zip(PROCESS_INTERVAL_MENU_MS)
         .map(|(key, ms)| (tr(cx, key), SettingValue::Int(i64::from(ms))))
         .collect();
-    if host.read_only {
+    if current.read_only {
         page.banner(
             refresh.clone(),
             TlBannerKind::Warning,
@@ -141,7 +142,7 @@ pub fn page(cx: &mut App) -> PageBuilder {
     );
 
     let history = tr(cx, "shell-settings-group-history");
-    let recording = host.values.history.enabled;
+    let recording = current.values.history.enabled;
     let storage: Vec<(SharedString, SettingValue)> = HISTORY_STORAGE_KEYS
         .into_iter()
         .zip(HISTORY_RETENTION_MENU_H)

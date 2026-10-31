@@ -34,8 +34,8 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::demand::GlobalDemand;
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::connections::actions::ConnectionJumpToProcess;
 use crate::pages::connections::jump_to_owner;
@@ -380,15 +380,14 @@ pub struct ConnectionPropertiesView {
 }
 
 /// Opens or focuses the window for `cookie`. A full cap shows a Warning toast in the main
-/// window.
-pub fn open_connection_properties(cookie: u64, cx: &mut App) {
+/// window. The window shows `host` and stays on it.
+pub fn open_connection_properties(host: &HostContext, cookie: u64, cx: &mut App) {
     let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
         warn!(target: "tasklens::ui", "no window registry, connection properties not opened");
         return;
     };
-    let Some(record) = cx.try_global::<GlobalHub>().and_then(|hub| {
-        hub.0
-            .read(cx)
+    let Some(record) = host.hub().and_then(|hub| {
+        hub.read(cx)
             .current()
             .connections
             .records
@@ -407,10 +406,11 @@ pub fn open_connection_properties(cookie: u64, cx: &mut App) {
     )
     .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)))
     .key(key.clone());
+    let host = host.clone();
     let outcome = registry.update(cx, |registry, cx| {
         registry.open_or_focus(key, cx, move |cx| {
             let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
-                cx.new(|cx| ConnectionPropertiesView::new(record, window, cx))
+                cx.new(|cx| ConnectionPropertiesView::new(&host, record, window, cx))
             })?;
             Ok(handle.into())
         })
@@ -428,12 +428,17 @@ pub fn open_connection_properties(cookie: u64, cx: &mut App) {
 }
 
 impl ConnectionPropertiesView {
-    fn new(record: ConnRecord, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        host: &HostContext,
+        record: ConnRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut subs = Vec::new();
         let mut processes = Arc::new(ProcessSnapshot::default());
         let mut helper = HelperState::Missing;
         let mut destroy_supported = None;
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        if let Some(hub) = host.hub().cloned() {
             let current = hub.read(cx).current();
             processes = Arc::clone(&current.processes);
             helper = current.health.helper;
@@ -453,7 +458,7 @@ impl ConnectionPropertiesView {
                 },
             ));
         }
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             let part = Demand {
                 any_surface_visible: true,

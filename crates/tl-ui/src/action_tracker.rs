@@ -53,7 +53,7 @@ use tracing::{debug, warn};
 
 use crate::components::dialog::TlDialog;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::hub::GlobalHub;
+use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 
@@ -276,6 +276,8 @@ pub struct PushedToast {
 
 pub struct ActionTracker {
     client: Arc<dyn EngineClient>,
+    /// The same host's hub, for its tl-helper state.
+    hub: Option<Entity<SnapshotHub>>,
     pending: FxHashMap<ActionId, PendingAction>,
     next_id: AtomicU64,
     retries: VecDeque<(ActionId, RetryRecord)>,
@@ -297,23 +299,30 @@ pub struct ActionTracker {
 /// Final states by target index.
 type FinalStates = SmallVec<[(u16, ActionState); 4]>;
 
-/// The app's tracker, set by `TasklensUi::init`.
+/// The local host's tracker, set by `TasklensUi::init`. Read only through
+/// [`crate::host::HostContext`].
 pub struct GlobalActionTracker(pub Entity<ActionTracker>);
 
 impl Global for GlobalActionTracker {}
 
 impl EventEmitter<ActionTrackerEvent> for ActionTracker {}
 
-/// Creates the tracker and sets [`GlobalActionTracker`].
-pub fn install(client: Arc<dyn EngineClient>, cx: &mut App) {
-    let tracker = cx.new(|cx| ActionTracker::new(client, cx));
+/// Creates the local host's tracker and sets [`GlobalActionTracker`]. `hub` is the same host's
+/// hub.
+pub fn install(client: Arc<dyn EngineClient>, hub: Option<Entity<SnapshotHub>>, cx: &mut App) {
+    let tracker = cx.new(|cx| ActionTracker::new(client, hub, cx));
     cx.set_global(GlobalActionTracker(tracker));
 }
 
 impl ActionTracker {
     /// Starts the event loop and registers the toast button handlers. The deadline sweep starts
-    /// with the first tracked request.
-    pub fn new(client: Arc<dyn EngineClient>, cx: &mut Context<Self>) -> Self {
+    /// with the first tracked request. `hub` is the same host's hub; it tells whether that host
+    /// has tl-helper. Without it the helper reads as missing.
+    pub fn new(
+        client: Arc<dyn EngineClient>,
+        hub: Option<Entity<SnapshotHub>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let events = client.action_events();
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while let Ok(ev) = events.recv().await {
@@ -335,6 +344,7 @@ impl ActionTracker {
 
         Self {
             client,
+            hub,
             pending: FxHashMap::default(),
             next_id: AtomicU64::new(1),
             retries: VecDeque::new(),
@@ -456,7 +466,7 @@ impl ActionTracker {
                 if entry.texts.owner_toasts {
                     cx.emit(ActionTrackerEvent::TargetFinished { id: ev.id, index });
                 } else if entry.mode() == Mode::PerTarget {
-                    let helper = helper_state(cx);
+                    let helper = helper_state(self.hub.as_ref(), cx);
                     self.push_target(ev.id, index, &state, helper, cx);
                 }
             }
@@ -508,7 +518,7 @@ impl ActionTracker {
             return;
         };
         let words = action_words(cx);
-        let helper = helper_state(cx);
+        let helper = helper_state(self.hub.as_ref(), cx);
         let states = entry.effective(&summary);
         let total = entry.total();
         let ok = states.iter().filter(|s| s.is_success()).count() as u16;
@@ -826,11 +836,11 @@ impl ActionTracker {
     }
 }
 
-fn helper_state(cx: &App) -> HelperState {
-    cx.try_global::<GlobalHub>()
-        .map_or(HelperState::Missing, |hub| {
-            hub.0.read(cx).current().health.helper
-        })
+/// The tl-helper state of the tracker's host. Missing without a hub.
+fn helper_state(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> HelperState {
+    hub.map_or(HelperState::Missing, |hub| {
+        hub.read(cx).current().health.helper
+    })
 }
 
 fn is_eperm(state: &ActionState) -> bool {

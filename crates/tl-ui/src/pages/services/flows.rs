@@ -21,6 +21,7 @@ use tracing::warn;
 
 use super::actions::StartupChoice;
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
@@ -75,7 +76,9 @@ fn ensure_view_logs_handler(cx: &mut App) {
     }
     cx.set_global(ViewLogsHandler);
     cx.on_action(|a: &ServiceOpenLogs, cx| {
-        ServicePropertiesWindow::open(a.0.clone(), ServicePropsTab::Logs, cx);
+        // A toast button with no host at hand: the host the main window shows.
+        let host = HostContext::shown(cx);
+        ServicePropertiesWindow::open(&host, a.0.clone(), ServicePropsTab::Logs, cx);
     });
 }
 

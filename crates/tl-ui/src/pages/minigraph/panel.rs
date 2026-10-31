@@ -47,6 +47,7 @@ use super::sources::{
 use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::components::toast::ToastKind;
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::{DeviceKey, DeviceKind};
@@ -116,6 +117,9 @@ pub struct MinigraphPanel {
     /// The `[[detached_windows]]` entries: one per window that holds cards.
     windows: Vec<DetachedWindowState>,
     next_id: u32,
+    /// The host this panel shows. Set when it opens; never changes. Its detached graph windows
+    /// are bound to it.
+    host: HostContext,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     /// The Processes tab is shown; only then is the demand part sent (ADR-008).
@@ -177,8 +181,9 @@ pub fn cards_demand<'a>(
 impl MinigraphPanel {
     /// Loads `UiState.minigraphs` (the defaults when empty), drops the system cards whose
     /// setting is off, adds the ones whose setting is on and are missing, and creates the
-    /// attached cards.
+    /// attached cards. `hub` and `demand` are `host`'s; detached graph windows open on `host`.
     pub fn new(
+        host: &HostContext,
         hub: &Entity<SnapshotHub>,
         demand: &Entity<DemandAggregator>,
         cx: &mut Context<Self>,
@@ -211,6 +216,7 @@ impl MinigraphPanel {
             entries,
             windows,
             next_id,
+            host: host.clone(),
             hub: hub.clone(),
             demand: demand.clone(),
             active: false,
@@ -570,6 +576,7 @@ impl MinigraphPanel {
             return;
         }
         let panel = cx.weak_entity();
+        let host = self.host.clone();
         cx.defer(move |cx| {
             let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
                 return;
@@ -587,7 +594,7 @@ impl MinigraphPanel {
                         view.update(cx, |v, cx| v.set_cards(cards, cx));
                     }
                     let _ = handle.update(cx, |_, window, _| window.resize(size));
-                } else if open_detached(id, cards.clone(), saved.as_ref(), cx).is_err() {
+                } else if open_detached(&host, id, cards.clone(), saved.as_ref(), cx).is_err() {
                     // open_detached toasted. Put the cards back so none is lost.
                     let ids: Vec<MinigraphId> = cards.iter().map(|e| e.id).collect();
                     let _ = panel.update(cx, |p, cx| p.reattach_all(&ids, cx));

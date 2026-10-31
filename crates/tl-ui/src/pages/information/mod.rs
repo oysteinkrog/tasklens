@@ -64,18 +64,18 @@ use self::filter::filter_section;
 use self::section::{InfoRow, InfoSection, InfoSectionId};
 use self::sections::{InfoInputs, InfoWords};
 use crate::actions::{ClearFilter, RefreshCurrentTab};
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::empty::TlEmptyState;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::settings_global::TlSettings;
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, GlobalShellEvents, ShellPage};
+use crate::window::main::{FilterChanged, ShellPage};
 use crate::window::status::StatusChanged;
 
 /// Content width from which the sections sit in two columns, × ui_scale.
@@ -171,6 +171,8 @@ pub struct InformationPage {
     /// The `show_network_*` flags the Network adapters section was built with.
     net_kinds: [bool; 5],
     page_words: PageWords,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: SmallVec<[Subscription; 4]>,
 }
 
@@ -184,12 +186,13 @@ fn net_kinds(cx: &App) -> [bool; 5] {
 }
 
 impl InformationPage {
-    pub fn new(
-        hub: &Entity<SnapshotHub>,
-        demand: &Entity<DemandAggregator>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let hub = host
+            .hub()
+            .expect("the Information page needs the host's hub");
+        let demand = host
+            .demand()
+            .expect("the Information page needs the host's demand aggregator");
         let owner = cx.entity_id();
         let sections = InfoSectionId::ALL.map(|id| {
             cx.new(|cx| {
@@ -206,8 +209,8 @@ impl InformationPage {
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
-            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+        if let Some(events) = host.events() {
+            subs.push(cx.subscribe(events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Information {
                     this.apply_filter(Arc::from(ev.text.as_ref()), cx);
                 }
@@ -237,6 +240,7 @@ impl InformationPage {
             shield,
             net_kinds: net_kinds(cx),
             page_words: PageWords::new(cx),
+            host: host.clone(),
             _subs: subs,
         };
         page.rebuild(&InfoSectionId::ALL, cx);
@@ -261,7 +265,7 @@ impl InformationPage {
             .update(cx, |d, cx| d.set(source, window, demand_part(), cx));
         if !self.first_visit_done {
             self.first_visit_done = true;
-            send_refresh(cx);
+            send_refresh(&self.host);
         }
     }
 
@@ -305,6 +309,16 @@ impl InformationPage {
     /// Ctrl+C and the tab copy icon: a text selection when there is one, else every section.
     fn on_copy_all(&mut self, _: &CopyInformationAll, window: &mut Window, cx: &mut Context<Self>) {
         self.copy_all(window, cx);
+    }
+
+    /// The Network adapters Fetch button: asks this page's host for the public IP.
+    fn on_fetch_public_ip(
+        &mut self,
+        _: &FetchInformationPublicIp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        section::fetch_public_ip(&self.host, window, cx);
     }
 
     /// The copy behind Ctrl+C and the tab strip's icon. The main window calls it when the icon
@@ -386,7 +400,7 @@ impl InformationPage {
     /// F5: asks for a new scan and shows "Information refreshed." on the next inventory version,
     /// or after 2 s.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        send_refresh(cx);
+        send_refresh(&self.host);
         let version = self.hub.read(cx).current().inventory.header.version;
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
@@ -625,8 +639,8 @@ fn demand_part() -> Demand {
     }
 }
 
-fn send_refresh(cx: &App) {
-    let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) else {
+fn send_refresh(host: &HostContext) {
+    let Some(client) = host.client() else {
         return;
     };
     if let Err(e) = client.send(Command::RefreshNow(SourceId::Inventory)) {
@@ -723,9 +737,7 @@ impl Render for InformationPage {
                     .on_action(cx.listener(Self::on_bottom))
                     .on_action(cx.listener(Self::on_copy_section))
                     .on_action(cx.listener(Self::on_copy_all))
-                    .on_action(|_: &FetchInformationPublicIp, window, cx| {
-                        section::fetch_public_ip(window, cx);
-                    })
+                    .on_action(cx.listener(Self::on_fetch_public_ip))
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)

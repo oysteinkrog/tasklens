@@ -65,10 +65,10 @@ pub fn power_saving(cx: &App) -> bool {
     cx.try_global::<PowerSaving>().is_some_and(|p| p.0)
 }
 
-/// `history.device_metrics`, a host setting from the newest snapshot. It counts as on (its
-/// default) before the engine gives it.
-fn device_metrics_now(cx: &App) -> bool {
-    crate::host_settings::current(cx)
+/// `history.device_metrics`, a host setting from the newest snapshot of the aggregator's own
+/// hub. It counts as on (its default) before the engine gives it.
+fn device_metrics_now(hub: &Entity<SnapshotHub>, cx: &App) -> bool {
+    crate::host_settings::installed(hub.read(cx))
         .values
         .history
         .device_metrics
@@ -132,7 +132,7 @@ impl DemandAggregator {
             flush_scheduled: false,
             hidden: hub.read(cx).is_hidden(),
             power_saving,
-            device_metrics: device_metrics_now(cx),
+            device_metrics: device_metrics_now(hub, cx),
         }
     }
 
@@ -254,7 +254,8 @@ impl DemandAggregator {
     }
 }
 
-/// The app's aggregator, set once by `TasklensUi::init`.
+/// The local host's aggregator, set once by `TasklensUi::init`. Read only through
+/// [`crate::host::HostContext`].
 pub struct GlobalDemand(pub Entity<DemandAggregator>);
 
 impl Global for GlobalDemand {}

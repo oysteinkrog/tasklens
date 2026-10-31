@@ -30,7 +30,7 @@ use tl_model::units;
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
+use crate::action_tracker::ActionTrackerEvent;
 use crate::actions::OpenAdditionalSetup;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -40,7 +40,8 @@ use crate::components::link::TlLink;
 use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::stepper::TlStepper;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::tr;
 use crate::pages::services::flows::startup_texts;
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
@@ -516,6 +517,7 @@ pub struct RecoveryTab {
 
 impl RecoveryTab {
     pub(super) fn new(
+        host: &HostContext,
         unit: UnitRef,
         actions: Entity<SysActions>,
         parent: EntityId,
@@ -535,7 +537,7 @@ impl RecoveryTab {
                 this.on_failure_typed(cx);
             }
         })];
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subs.push(
                 cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
                     if let ActionTrackerEvent::Finished { id, failed, .. } = *ev {
@@ -545,7 +547,7 @@ impl RecoveryTab {
             );
         }
         let mut helper = HelperState::default();
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        if let Some(hub) = host.hub().cloned() {
             helper = hub.read(cx).current().health.helper;
             subs.push(cx.subscribe(&hub, |this, hub, ev: &SnapshotChanged, cx| {
                 if !ev.mask.intersects(ComponentMask::HEALTH) {

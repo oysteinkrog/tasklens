@@ -63,8 +63,9 @@ use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::slider::{TlSlider, TlSliderEvent};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use crate::host::HostContext;
 use crate::host_settings;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::text::style::t_sm;
@@ -88,12 +89,19 @@ const RESTART_NOTE: &str = "shell-settings-restart-note";
 pub fn init(cx: &mut App) {
     advanced::init(cx);
     // Deferred: from a menu the main window is mid-update.
-    cx.on_action(|_: &OpenSettings, cx| cx.defer(open_settings));
+    cx.on_action(|_: &OpenSettings, cx| {
+        cx.defer(|cx| {
+            // App-level: the window shows the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_settings(&host, cx);
+        })
+    });
 }
 
-/// Focuses the open Settings window, or opens it. Without a window registry (tests) it always
-/// opens one.
-pub fn open_settings(cx: &mut App) {
+/// Focuses the open Settings window, or opens it on `host`. Without a window registry (tests) it
+/// always opens one.
+pub fn open_settings(host: &HostContext, cx: &mut App) {
+    let host = host.clone();
     let s = metrics(cx).ui_scale;
     let mut spec = TlWindowSpec::new(
         TlWindowKind::Tool { resizable: true },
@@ -107,7 +115,7 @@ pub fn open_settings(cx: &mut App) {
     }
     let open = move |cx: &mut App| {
         TlSecondaryWindow::open(cx, spec, |window, cx| {
-            cx.new(|cx| SettingsWindow::new(window, cx))
+            cx.new(|cx| SettingsWindow::new(&host, window, cx))
         })
         .map(Into::into)
     };
@@ -188,24 +196,24 @@ impl PageId {
     }
 }
 
-/// Every page in page order, each from its page module's `page(cx)`. A page bead adds one
-/// `mod` line above and one call here.
-pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
+/// Every page in page order, each from its page module's `page(host, cx)`. A page bead adds one
+/// `mod` line above and one call here. Host settings and host state come from `host`.
+pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
     // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
     // Services, Startup and window, Privileges, Advanced.
     #[allow(unused_mut, reason = "test-hooks appends the test pages")]
     let mut pages: Vec<PageBuilder> = vec![
-        general::page(cx),
-        appearance::page(cx),
-        motion::page(cx),
-        units::page(cx),
-        processes::page(cx),
-        performance::page(cx),
-        graphs::page(cx),
-        services::page(cx),
-        startup_window::page(cx),
-        privileges::page(cx),
-        advanced::page(cx),
+        general::page(host, cx),
+        appearance::page(host, cx),
+        motion::page(host, cx),
+        units::page(host, cx),
+        processes::page(host, cx),
+        performance::page(host, cx),
+        graphs::page(host, cx),
+        services::page(host, cx),
+        startup_window::page(host, cx),
+        privileges::page(host, cx),
+        advanced::page(host, cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
@@ -268,6 +276,8 @@ type CheckRow = (SharedString, Vec<(SharedString, SharedString, BoolSetter)>);
 /// Builds one page: groups of items, each control bound to one setting. `keys` records every
 /// key a control binds, in order.
 pub struct PageBuilder {
+    /// The host the page shows. Set when it is built; never changes.
+    host: HostContext,
     id: PageId,
     groups: Vec<(SharedString, Vec<SettingItem>)>,
     keys: Vec<SettingKey>,
@@ -347,8 +357,9 @@ pub struct CheckSection {
 }
 
 impl PageBuilder {
-    pub fn new(id: PageId) -> Self {
+    pub fn new(host: &HostContext, id: PageId) -> Self {
         Self {
+            host: host.clone(),
             id,
             groups: Vec::new(),
             keys: Vec::new(),
@@ -480,8 +491,10 @@ impl PageBuilder {
         empty: SharedString,
     ) -> &mut Self {
         let restart = self.take_restart();
+        let host = self.host.clone();
         let setter = |value: SharedString| -> BoolSetter {
-            Rc::new(move |on, cx| set_member(cx, key, &value, on != inverted))
+            let host = host.clone();
+            Rc::new(move |on, cx| set_member(&host, cx, key, &value, on != inverted))
         };
         let sections: Rc<[CheckRow]> = sections
             .into_iter()
@@ -516,7 +529,7 @@ impl PageBuilder {
                 *text.text_style() = t_sm(&m);
                 return text.into_any_element();
             }
-            let members = read_list(cx, key);
+            let members = read_list(&host, cx, key);
             let mut list = div().flex().flex_col().gap(m.sp[2]);
             for (i, (heading, options)) in sections.iter().enumerate() {
                 if !heading.is_empty() {
@@ -560,6 +573,7 @@ impl PageBuilder {
         keep_one: Option<SharedString>,
     ) -> &mut Self {
         let restart = self.take_restart();
+        let host = self.host.clone();
         let order: Rc<[SharedString]> = columns
             .iter()
             .flatten()
@@ -572,8 +586,9 @@ impl PageBuilder {
                     .into_iter()
                     .map(|(label, value)| {
                         let (order, keep_one, v) = (order.clone(), keep_one.clone(), value.clone());
+                        let host = host.clone();
                         let set: BoolSetter = Rc::new(move |on, cx| {
-                            set_member_ordered(cx, key, &v, on, &order, keep_one.as_ref())
+                            set_member_ordered(&host, cx, key, &v, on, &order, keep_one.as_ref())
                         });
                         (label, value, set)
                     })
@@ -586,7 +601,7 @@ impl PageBuilder {
         }
         let field = SettingField::render(move |_, _, cx| {
             let m = *metrics(cx);
-            let members = read_list(cx, key);
+            let members = read_list(&host, cx, key);
             let mut row = div().flex().flex_row().gap(m.sp[6]);
             for (i, options) in columns.iter().enumerate() {
                 let mut column = div().flex().flex_col().gap(m.sp[2]);
@@ -642,7 +657,8 @@ impl PageBuilder {
     ) -> &mut Self {
         let restart = self.take_restart();
         let setter = self.bool_setter(key, restart.clone());
-        let get: BoolGetter = Rc::new(move |cx| read_bool(cx, key));
+        let host = self.host.clone();
+        let get: BoolGetter = Rc::new(move |cx| read_bool(&host, cx, key));
         self.push_switch(group, key, label, description, restart, get, setter)
     }
 
@@ -657,14 +673,16 @@ impl PageBuilder {
         action: fn() -> Box<dyn Action>,
     ) -> &mut Self {
         let restart = self.take_restart();
+        let host = self.host.clone();
         let setter: BoolSetter = Rc::new(move |on, cx| {
-            if on != read_bool(cx, key) {
+            if on != read_bool(&host, cx, key) {
                 dispatch_deferred(action(), cx);
             }
         });
         #[cfg(any(test, feature = "test-hooks"))]
         self.bool_setters.push((key, setter.clone()));
-        let get: BoolGetter = Rc::new(move |cx| read_bool(cx, key));
+        let host = self.host.clone();
+        let get: BoolGetter = Rc::new(move |cx| read_bool(&host, cx, key));
         self.push_switch(group, key, label, None, restart, get, setter)
     }
 
@@ -689,7 +707,8 @@ impl PageBuilder {
         });
         #[cfg(any(test, feature = "test-hooks"))]
         self.bool_setters.push((key, setter.clone()));
-        let get: BoolGetter = Rc::new(move |cx| read(cx, key).as_str() == Some(on));
+        let host = self.host.clone();
+        let get: BoolGetter = Rc::new(move |cx| read(&host, cx, key).as_str() == Some(on));
         self.push_switch(group, key, label, None, restart, get, setter)
     }
 
@@ -702,8 +721,11 @@ impl PageBuilder {
     ) -> &mut Self {
         let restart = self.take_restart();
         let setter = self.bool_setter(key, restart.clone());
-        let field =
-            SettingField::checkbox(move |cx| read_bool(cx, key), move |on, cx| setter(on, cx));
+        let host = self.host.clone();
+        let field = SettingField::checkbox(
+            move |cx| read_bool(&host, cx, key),
+            move |on, cx| setter(on, cx),
+        );
         self.push(group, key, label, description, restart, field)
     }
 
@@ -775,11 +797,12 @@ impl PageBuilder {
         ));
         // A `TlSelect`, not the kit dropdown: its popup is opaque over its whole box.
         let id = SharedString::from(format!("settings-select-{}", key.as_str()));
+        let host = self.host.clone();
         let field = SettingField::render(move |_, window, cx| {
             let state = window.use_keyed_state(ElementId::Name(id.clone()), cx, |_, cx| {
                 TlSelectState::new(items.clone(), None, cx)
             });
-            let now = read(cx, key);
+            let now = read(&host, cx, key);
             let selected = read_values
                 .iter()
                 .position(|v| value_matches(v, &now))
@@ -827,8 +850,9 @@ impl PageBuilder {
             on_commit: self.commit_next.take(),
         });
         let (min, max) = (*range.start() as f32, *range.end() as f32);
+        let host = self.host.clone();
         let field = SettingField::render(move |_, _, cx| {
-            let value = read(cx, key).as_i64().unwrap_or(*range.start());
+            let value = read(&host, cx, key).as_i64().unwrap_or(*range.start());
             match cx.try_global::<SliderStates>().and_then(|s| s.get(key)) {
                 Some(state) => TlSlider::new(state)
                     .range(min, max, step as f32)
@@ -868,9 +892,10 @@ impl PageBuilder {
         });
         #[cfg(any(test, feature = "test-hooks"))]
         self.numbers.push((key, setter.clone()));
+        let host = self.host.clone();
         let field = SettingField::number_input(
             options,
-            move |cx| read(cx, key).as_f64().unwrap_or_default(),
+            move |cx| read(&host, cx, key).as_f64().unwrap_or_default(),
             move |v: f64, cx| setter(v, cx),
         );
         let description = (!suffix.is_empty()).then_some(suffix);
@@ -1404,15 +1429,15 @@ impl PageBuilder {
 
 /// The current value of `key`, read from the settings as their serialized form. `Null` when
 /// there are no settings or the key is not found. A host key reads the host settings in the
-/// newest snapshot (ADR-018 Settings).
-fn read(cx: &App, key: SettingKey) -> serde_json::Value {
+/// newest snapshot of `host` (ADR-018 Settings).
+fn read(host: &HostContext, cx: &App, key: SettingKey) -> serde_json::Value {
     // A saved `history` click acts as `pause` while the host's recording is off (UI-PRF-057),
     // and `history` is not in the list then.
     if key == SettingKey::PerformanceTimelineClick && cx.has_global::<TlSettings>() {
         use crate::pages::performance::overview::timeline;
-        return serde_json::Value::from(timeline::click_key(timeline::click_mode(cx)));
+        return serde_json::Value::from(timeline::click_key(timeline::click_mode(host.hub(), cx)));
     }
-    if let Some(value) = host_settings::read_key(&host_settings::current(cx).values, key) {
+    if let Some(value) = host_settings::read_key(&host_settings::current(host, cx).values, key) {
         return match value {
             SettingValue::Bool(b) => serde_json::Value::from(b),
             SettingValue::Int(i) => serde_json::Value::from(i),
@@ -1432,8 +1457,8 @@ fn read(cx: &App, key: SettingKey) -> serde_json::Value {
 }
 
 /// The members of the StrList `key`.
-fn read_list(cx: &App, key: SettingKey) -> Vec<String> {
-    match read(cx, key) {
+fn read_list(host: &HostContext, cx: &App, key: SettingKey) -> Vec<String> {
+    match read(host, cx, key) {
         serde_json::Value::Array(items) => items
             .into_iter()
             .filter_map(|v| v.as_str().map(str::to_owned))
@@ -1443,8 +1468,8 @@ fn read_list(cx: &App, key: SettingKey) -> Vec<String> {
 }
 
 /// Adds `value` to the StrList `key` when `present`, else removes it. Writes only on a change.
-fn set_member(cx: &mut App, key: SettingKey, value: &str, present: bool) {
-    let mut members = read_list(cx, key);
+fn set_member(host: &HostContext, cx: &mut App, key: SettingKey, value: &str, present: bool) {
+    let mut members = read_list(host, cx, key);
     let has = members.iter().any(|v| v == value);
     if has == present {
         return;
@@ -1462,6 +1487,7 @@ fn set_member(cx: &mut App, key: SettingKey, value: &str, present: bool) {
 /// stay at the end), and with `keep_one` a removal that would leave no value of `order` is
 /// refused with `keep_one` as an Info toast.
 fn set_member_ordered(
+    host: &HostContext,
     cx: &mut App,
     key: SettingKey,
     value: &str,
@@ -1469,7 +1495,7 @@ fn set_member_ordered(
     order: &[SharedString],
     keep_one: Option<&SharedString>,
 ) {
-    let mut members = read_list(cx, key);
+    let mut members = read_list(host, cx, key);
     let has = members.iter().any(|v| v == value);
     if has == present {
         return;
@@ -1497,8 +1523,8 @@ fn set_member_ordered(
     TlSettings::set(cx, key, SettingValue::StrList(list));
 }
 
-fn read_bool(cx: &App, key: SettingKey) -> bool {
-    read(cx, key).as_bool().unwrap_or_default()
+fn read_bool(host: &HostContext, cx: &App, key: SettingKey) -> bool {
+    read(host, cx, key).as_bool().unwrap_or_default()
 }
 
 /// True when the stored setting `now` equals the option value `v`.
@@ -1547,6 +1573,8 @@ fn kind_toast(kind: ToastKind, text: SharedString, cx: &mut App) {
 
 /// The Settings window content.
 pub struct SettingsWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     sliders: Vec<(SettingKey, Entity<SliderState>)>,
     /// The kit's search field. The kit keeps it private; it is the first `InputState` its
     /// `Settings` creates after this window is built, so an observer on new `InputState`s picks it
@@ -1564,16 +1592,18 @@ pub struct SettingsWindow {
 }
 
 impl SettingsWindow {
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
-        let specs: Vec<SliderSpec> = all_pages(cx)
+        let specs: Vec<SliderSpec> = all_pages(host, cx)
             .into_iter()
             .flat_map(|page| page.sliders)
             .collect();
         let mut sliders = Vec::with_capacity(specs.len());
         let mut slider_subs = Vec::with_capacity(specs.len());
         for spec in specs {
-            let value = read(cx, spec.key).as_i64().unwrap_or(*spec.range.start());
+            let value = read(host, cx, spec.key)
+                .as_i64()
+                .unwrap_or(*spec.range.start());
             let state = cx.new(|_| {
                 SliderState::new()
                     .min(*spec.range.start() as f32)
@@ -1609,21 +1639,17 @@ impl SettingsWindow {
         .detach();
 
         let settings_sub = cx.observe_global::<TlSettings>(|_, cx| cx.notify());
-        let hub_sub = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.clone())
-            .map(|hub| {
-                cx.subscribe(&hub, |_, _, ev: &SnapshotChanged, cx| {
-                    if ev.mask.intersects(
-                        ComponentMask::DEVICES
-                            | ComponentMask::HEALTH
-                            | ComponentMask::HOST_SETTINGS,
-                    ) {
-                        cx.notify();
-                    }
-                })
-            });
+        let hub_sub = host.hub().cloned().map(|hub| {
+            cx.subscribe(&hub, |_, _, ev: &SnapshotChanged, cx| {
+                if ev.mask.intersects(
+                    ComponentMask::DEVICES | ComponentMask::HEALTH | ComponentMask::HOST_SETTINGS,
+                ) {
+                    cx.notify();
+                }
+            })
+        });
         Self {
+            host: host.clone(),
             sliders,
             search,
             _search_capture: None,
@@ -1728,7 +1754,7 @@ impl Render for SettingsWindow {
             cx.defer_in(window, |this, _, cx| this.attach_search(cx));
         }
         let s = metrics(cx).ui_scale;
-        let builders: Vec<PageBuilder> = all_pages(cx)
+        let builders: Vec<PageBuilder> = all_pages(&self.host, cx)
             .into_iter()
             .filter(|p| !p.is_empty())
             .collect();

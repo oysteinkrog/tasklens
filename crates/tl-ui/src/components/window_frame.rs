@@ -42,7 +42,8 @@ use super::icons::{TlIcon, icon};
 use super::menu::context_menu_layer;
 use super::toast::ToastQueue;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, current, metrics};
@@ -345,11 +346,11 @@ pub fn pin_look(pinned: bool, supported: bool) -> PinLook {
 }
 
 /// Keep-above works unless the windows component is `Unsupported` (no KWin bridge, R-073). With
-/// no hub there is no engine, so no bridge either.
+/// no hub there is no engine, so no bridge either. The pin acts on this PC's own window, so the
+/// local host's hub.
 fn pin_supported(cx: &App) -> bool {
-    cx.try_global::<GlobalHub>().is_some_and(|hub| {
-        hub.0.read(cx).current().windows.header.validity != Validity::Unsupported
-    })
+    HostContext::local_hub(cx)
+        .is_some_and(|hub| hub.read(cx).current().windows.header.validity != Validity::Unsupported)
 }
 
 /// The `appearance.decorations` setting; client decorations when settings are not loaded.
@@ -460,7 +461,8 @@ impl<V: Render> TlSecondaryWindow<V> {
         if window.focused(cx).is_none() {
             focus.focus(window, cx);
         }
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        // The pin acts on this PC's own window: watch the local host's window list.
+        let hub = HostContext::local_hub(cx).cloned();
         let _hub = hub.map(|hub| {
             cx.subscribe(&hub, |_, _, ev: &SnapshotChanged, cx| {
                 if ev.mask.intersects(ComponentMask::WINDOWS) {

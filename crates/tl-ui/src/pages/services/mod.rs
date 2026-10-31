@@ -57,12 +57,12 @@ use self::filter_strip::{
 use self::flows::UnitVerb;
 use self::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
 use crate::actions::ClearFilter;
-use crate::app::EngineGlobal;
 use crate::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
 use crate::components::toast::{
     SERVICES_LOADING_TOAST, ToastAction, ToastKey, ToastKind, ToastQueue,
 };
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::processes::actions::{
@@ -81,7 +81,7 @@ use crate::table::actions::{CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, Ope
 use crate::table::tree_table::{TlTreeTable, TreeTableEvent};
 use crate::theme::metrics;
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, GlobalShellEvents, PauseChanged, ShellPage};
+use crate::window::main::{FilterChanged, PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::StatusChanged;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
@@ -139,13 +139,15 @@ pub struct ServicesPage {
     window: AnyWindowHandle,
     /// Where the strip was drawn last frame, for the Unit types menu anchor.
     strip_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<StatusChanged> for ServicesPage {}
 
 impl ServicesPage {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (state, strip) = match cx.try_global::<TlSettings>() {
             Some(_) => (
                 TlSettings::state(cx).clone(),
@@ -153,7 +155,7 @@ impl ServicesPage {
             ),
             None => (UiState::default(), ServiceFilterState::default()),
         };
-        let mut delegate = ServicesDelegate::new(&state);
+        let mut delegate = ServicesDelegate::new(host, &state);
         delegate.set_page(cx.weak_entity());
         delegate.set_window(Some(window.window_handle()));
         let sort = delegate.sort();
@@ -161,6 +163,7 @@ impl ServicesPage {
         // groups in the query's expanded set (UI-SYS-004).
         let expanded: Arc<[SysNodeId]> = delegate.expanded().iter().cloned().collect();
         let mut frame = SysTableFrame::new(
+            host,
             Tab::Services,
             SERVICE_TABLE_CONTEXT,
             &[SourceId::SystemdSystem, SourceId::SystemdUser],
@@ -174,19 +177,19 @@ impl ServicesPage {
         let focus = frame.table.read(cx).focus_handle().clone();
         let table = frame.table.clone();
         let mut subs = Vec::with_capacity(6);
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
-            subs.push(cx.subscribe(&hub, |this, hub, ev: &SnapshotChanged, cx| {
+        if let Some(hub) = host.hub() {
+            subs.push(cx.subscribe(hub, |this, hub, ev: &SnapshotChanged, cx| {
                 let snap = Arc::clone(hub.read(cx).current());
                 this.on_snapshot(&snap, ev.mask, cx);
             }));
         }
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
-            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+        if let Some(events) = host.events() {
+            subs.push(cx.subscribe(events, |this, _, ev: &FilterChanged, cx| {
                 if ev.tab == Tab::Services {
                     this.frame.on_filter_changed(&ev.text, cx);
                 }
             }));
-            subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
+            subs.push(cx.subscribe(events, |this, _, ev: &PauseChanged, cx| {
                 if this.frame.set_paused(ev.0, cx) {
                     cx.notify();
                 }
@@ -228,8 +231,14 @@ impl ServicesPage {
             focus,
             window: window.window_handle(),
             strip_bounds: Rc::default(),
+            host: host.clone(),
             _subs: subs,
         }
+    }
+
+    /// The host's engine client, absent only in tests that install none.
+    fn engine(&self) -> Option<Arc<dyn EngineClient>> {
+        self.host.client().cloned()
     }
 
     /// Writes the cached status text without allocating in the render path (UI-SYS-022).
@@ -279,9 +288,10 @@ impl ServicesPage {
     /// services version or after 2 s, whichever comes first.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.frame.refresh(cx);
-        let version = cx
-            .try_global::<GlobalHub>()
-            .map_or(0, |h| h.0.read(cx).current().services.header.version);
+        let version = self
+            .host
+            .hub()
+            .map_or(0, |h| h.read(cx).current().services.header.version);
         let timer = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_TOAST_AFTER).await;
             let _ = this.update(cx, |this, cx| {
@@ -309,7 +319,8 @@ impl ServicesPage {
     ) {
         self.jump = None;
         self.jump_hidden = None;
-        let snapshot = Arc::clone(cx.global::<GlobalHub>().0.read(cx).current());
+        let hub = self.host.hub().expect("Go to service needs the host's hub");
+        let snapshot = Arc::clone(hub.read(cx).current());
         let Some(record) = snapshot.services.units.iter().find(|u| u.unit == unit) else {
             let text = tr(cx, "services-sys021-service-not-found");
             self.defer_toast(ToastKind::Warning, text, None, cx);
@@ -317,7 +328,7 @@ impl ServicesPage {
         };
         let text = tr(cx, "services-sys021-switched-to-services-tab");
         self.defer_toast(ToastKind::Info, text, None, cx);
-        if let Some(client) = engine(cx) {
+        if let Some(client) = self.engine() {
             apply_reveal(&mut self.strip, record, &mut self.frame.query, &*client, cx);
             let expanded = self.frame.table.update(cx, |table, cx| {
                 table.delegate.expand_group(unit.manager, cx)
@@ -391,7 +402,7 @@ impl ServicesPage {
                 window.dispatch_action(ClearFilter.boxed_clone(), cx);
             });
         });
-        if let Some(client) = engine(cx) {
+        if let Some(client) = self.engine() {
             self.frame.query.set_filter("", &*client);
         }
         job.after_show = true;
@@ -459,7 +470,7 @@ impl ServicesPage {
     /// While every unit row is collapsed nothing changes and nothing renders; with a unit
     /// expanded only the table redraws, so its child rows show the new process records.
     fn on_processes(&mut self, snap: &Arc<Snapshot>, cx: &mut Context<Self>) {
-        if let Some(client) = engine(cx) {
+        if let Some(client) = self.engine() {
             self.frame.query.on_snapshot(&*client);
         }
         if self.frame.is_paused() {
@@ -482,7 +493,7 @@ impl ServicesPage {
             )
         });
         if (sort.is_some() || expanded.is_some())
-            && let Some(client) = engine(cx)
+            && let Some(client) = self.engine()
         {
             if let Some(sort) = sort {
                 self.frame.query.set_sort(sort, &*client);
@@ -636,7 +647,7 @@ impl ServicesPage {
             return;
         }
         let targets = self.take_process_targets(cx);
-        run_process_action(&EndTask, targets, window, cx);
+        run_process_action(&self.host, &EndTask, targets, window, cx);
     }
 
     fn on_restart(&mut self, _: &ServiceRestart, window: &mut Window, cx: &mut Context<Self>) {
@@ -721,10 +732,7 @@ impl ServicesPage {
         let Some(record) = targets.records.first() else {
             return;
         };
-        let Some(snap) = cx
-            .try_global::<GlobalHub>()
-            .map(|h| Arc::clone(h.0.read(cx).current()))
-        else {
+        let Some(snap) = self.host.hub().map(|h| Arc::clone(h.read(cx).current())) else {
             return;
         };
         flows::run_jump_to_process(record, &snap, window, cx);
@@ -733,7 +741,7 @@ impl ServicesPage {
     fn on_view_logs(&mut self, _: &ServiceViewLogs, _: &mut Window, cx: &mut Context<Self>) {
         let targets = self.take_unit_targets(cx);
         if let Some(unit) = targets.units.first() {
-            ServicePropertiesWindow::open(unit.clone(), ServicePropsTab::Logs, cx);
+            ServicePropertiesWindow::open(&self.host, unit.clone(), ServicePropsTab::Logs, cx);
         }
     }
 
@@ -768,7 +776,7 @@ impl ServicesPage {
                 }
             };
         for unit in units.into_iter().take(MAX_PROPERTIES_WINDOWS) {
-            ServicePropertiesWindow::open(unit, ServicePropsTab::General, cx);
+            ServicePropertiesWindow::open(&self.host, unit, ServicePropsTab::General, cx);
         }
         let mut cap_notified = false;
         for key in keys {
@@ -778,7 +786,7 @@ impl ServicesPage {
                 &mut cap_notified,
                 cx,
             ) {
-                open_process_properties(key, cx);
+                open_process_properties(&self.host, key, cx);
             }
         }
     }
@@ -788,7 +796,7 @@ impl ServicesPage {
     /// A process row command on child rows: the menu-open targets, else the selected child rows.
     fn on_process_action<A: Action>(&mut self, a: &A, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.take_process_targets(cx);
-        run_process_action(a, targets, window, cx);
+        run_process_action(&self.host, a, targets, window, cx);
     }
 
     // ---- Copy and expansion ----
@@ -895,7 +903,7 @@ impl ServicesPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = engine(cx) else {
+        let Some(client) = self.engine() else {
             return;
         };
         apply_toggle_state(
@@ -914,7 +922,7 @@ impl ServicesPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = engine(cx) else {
+        let Some(client) = self.engine() else {
             return;
         };
         apply_toggle_manager(
@@ -932,7 +940,7 @@ impl ServicesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = engine(cx) else {
+        let Some(client) = self.engine() else {
             return;
         };
         if apply_toggle_unit_type(
@@ -953,7 +961,7 @@ impl ServicesPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = engine(cx) else {
+        let Some(client) = self.engine() else {
             return;
         };
         apply_reset_unit_types(&mut self.strip, &mut self.frame.query, &*client, cx);
@@ -966,7 +974,7 @@ impl ServicesPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(client) = engine(cx) else {
+        let Some(client) = self.engine() else {
             return;
         };
         apply_remove_filters(&mut self.strip, &mut self.frame.query, &*client, cx);
@@ -1046,11 +1054,6 @@ fn register_show_hidden(cx: &mut Context<ServicesPage>) {
     app.on_action(move |_: &ServicesShowHidden, cx| {
         let _ = page.update(cx, |p, cx| p.show_hidden(cx));
     });
-}
-
-/// The engine client, absent only in tests that install none.
-fn engine(cx: &App) -> Option<Arc<dyn EngineClient>> {
-    cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0))
 }
 
 /// Writes the UI-SYS-022 status text for `counts` and `selected` rows to `out`.
@@ -1133,9 +1136,11 @@ pub(super) fn row_menu(
             if targets.items.is_empty() {
                 return no_menu(&page, menu, window, cx);
             }
-            let engine_caps = cx
-                .try_global::<GlobalHub>()
-                .map(|h| h.0.read(cx).current().health.caps)
+            let engine_caps = page
+                .read(cx)
+                .host
+                .hub()
+                .map(|h| h.read(cx).current().health.caps)
                 .unwrap_or_default();
             let caps = MenuCaps {
                 gdb: engine_caps.contains(EngineCaps::GDB),
@@ -1147,7 +1152,8 @@ pub(super) fn row_menu(
                 page.menu_targets = Some(stored);
                 page.menu_rows = Some(rows);
             });
-            process_row_menu(menu, &targets, &caps, window, cx)
+            let host = page.read(cx).host.clone();
+            process_row_menu(&host, menu, &targets, &caps, window, cx)
         }
         MenuChoice::None => no_menu(&page, menu, window, cx),
     }

@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::{PageBuilder, PageId};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue};
 use crate::theme::ActivateTheme;
@@ -23,8 +24,8 @@ fn pct(v: i64) -> SharedString {
     format!("{v}%").into()
 }
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Appearance);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Appearance);
     let theme = tr(cx, "shell-settings-group-theme");
     let size = tr(cx, "shell-settings-group-size");
     let look = tr(cx, "shell-settings-group-look");

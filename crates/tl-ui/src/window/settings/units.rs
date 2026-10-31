@@ -4,11 +4,12 @@
 use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue};
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Units);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Units);
     // One untitled group: the page title already says "Units".
     let group = "";
     page.dropdown(

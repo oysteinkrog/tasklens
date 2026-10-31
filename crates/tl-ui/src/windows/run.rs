@@ -33,7 +33,7 @@ use super::actions::{
 };
 use super::frame::{PwnWindow, TITLE_RUN, pwn_window_spec};
 use super::run_history;
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, ToastTexts};
+use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
 use crate::actions::OpenRunDialog;
 use crate::app::{AppEnv, RunHistoryEntry, RunHistoryStore};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -43,6 +43,7 @@ use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::text::style::{t_base, t_xs};
 use crate::theme::{current, metrics};
@@ -165,16 +166,23 @@ fn strings_version(cx: &App) -> Option<u64> {
 /// Registers the `OpenRunDialog` handler (File > Run..., Ctrl+N). `TasklensUi::init` calls it.
 pub fn init(cx: &mut App) {
     // Deferred: from a menu the main window is mid-update.
-    cx.on_action(|_: &OpenRunDialog, cx| cx.defer(open_run_window));
+    cx.on_action(|_: &OpenRunDialog, cx| {
+        cx.defer(|cx| {
+            // App-level: the command runs on the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_run_window(&host, cx);
+        })
+    });
 }
 
-/// Activates the open Run window, or opens one. Without a window registry (tests) it always
-/// opens one.
-pub fn open_run_window(cx: &mut App) {
-    let open = |cx: &mut App| {
+/// Activates the open Run window, or opens one on `host`. Without a window registry (tests) it
+/// always opens one.
+pub fn open_run_window(host: &HostContext, cx: &mut App) {
+    let host = host.clone();
+    let open = move |cx: &mut App| {
         let spec = pwn_window_spec(cx, PwnWindow::Run, TITLE_RUN.into(), None).key(WindowKey::Run);
         let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
-            cx.new(|cx| RunWindow::new(window, cx))
+            cx.new(|cx| RunWindow::new(&host, window, cx))
         })?;
         Ok(handle.into())
     };
@@ -236,6 +244,8 @@ struct Pending {
 
 /// The content of the Run window.
 pub struct RunWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     input: Entity<InputState>,
     history: Arc<[RunHistoryEntry]>,
     /// "Run as administrator".
@@ -258,7 +268,7 @@ impl RunWindow {
         TlSecondaryWindow::<Self>::find(handle, cx).map(|frame| frame.read(cx).content().clone())
     }
 
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let words = Rc::new(RunWords::new(cx));
         let history = run_history::load(store(cx));
         let input = cx.new(|cx| InputState::new(window, cx));
@@ -277,7 +287,7 @@ impl RunWindow {
                 this.refilter(cx);
             }
         }));
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subs.push(cx.subscribe_in(
                 &tracker,
                 window,
@@ -300,6 +310,7 @@ impl RunWindow {
             }
         }));
         Self {
+            host: host.clone(),
             input,
             history,
             elevated: false,
@@ -460,7 +471,7 @@ impl RunWindow {
             }
             CommandCheck::Ok => {}
         }
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             warn!(target: "tasklens::ui", "no action tracker; the command was not sent");
             return;
         };

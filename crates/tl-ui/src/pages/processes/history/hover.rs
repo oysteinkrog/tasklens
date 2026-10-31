@@ -32,7 +32,7 @@ use tl_model::units::{self, NetUnit};
 
 use super::{HistoryPage, NS_PER_SEC, QUERY_TIMEOUT, clock};
 use crate::chart::labels::{CachedLine, LineStyle, paint_line};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::settings_global::{Section, TlSettings};
@@ -521,6 +521,7 @@ impl CardCache {
     #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
+        host: &HostContext,
         view: &HistoryView,
         top: Option<&Arc<HistoryTop>>,
         stale_t: Option<TimeNs>,
@@ -553,7 +554,7 @@ impl CardCache {
         };
         if self.key != Some(key) {
             self.key = Some(key);
-            self.build(view, top.map(|t| &**t), stale_t, net, cx);
+            self.build(host, view, top.map(|t| &**t), stale_t, net, cx);
             #[cfg(any(test, feature = "test-hooks"))]
             {
                 self.builds += 1;
@@ -593,6 +594,7 @@ impl CardCache {
     /// The texts for the answer `top`, or for the hovered second `stale_t` with "…" rows.
     fn build(
         &mut self,
+        host: &HostContext,
         view: &HistoryView,
         top: Option<&HistoryTop>,
         stale_t: Option<TimeNs>,
@@ -619,9 +621,9 @@ impl CardCache {
                 words
                     .total
                     .write_each(&mut texts.total, |_, out| units::percent(out, pct));
-                let processes = cx
-                    .try_global::<GlobalHub>()
-                    .map(|hub| Arc::clone(&hub.0.read(cx).current().processes));
+                let processes = host
+                    .hub()
+                    .map(|hub| Arc::clone(&hub.read(cx).current().processes));
                 let icon_of = |app: &str| {
                     let records = processes.as_ref()?.records.iter();
                     records
@@ -786,6 +788,7 @@ pub(super) fn defer_card(
     };
     let placed = page.update(cx, |p, cx| {
         let HistoryPage {
+            host,
             view,
             scrubber,
             top,
@@ -809,6 +812,7 @@ pub(super) fn defer_card(
         }
         let shown = top.shown.as_ref();
         card.sync(
+            host,
             view,
             shown,
             stale_t,

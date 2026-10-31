@@ -19,14 +19,15 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{App, AsyncApp};
+use gpui_kit::{App, AsyncApp, Entity};
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::{
     HostSettings, HostSettingsChanges, HostSettingsValues, SetHostSettingsReply,
 };
 use tracing::{debug, info, warn};
 
-use crate::hub::{GlobalHub, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::SnapshotHub;
 use crate::settings_global::{SettingKey, SettingValue};
 
 /// The `SettingKey`s whose values are host settings.
@@ -43,19 +44,22 @@ pub fn is_host_key(key: SettingKey) -> bool {
     HOST_KEYS.contains(&key)
 }
 
-/// The host settings in the newest snapshot. Revision 0 with the default values before the
-/// engine gave them, and without a hub. Revision 0 with the last values shown while the hub's
-/// snapshot is from an older generation than its client, so nothing enables or writes from a
-/// session that has ended.
-pub fn current(cx: &App) -> Arc<HostSettings> {
-    cx.try_global::<GlobalHub>()
-        .map(|hub| installed(hub.0.read(cx)))
-        .unwrap_or_default()
+/// The host settings in the newest snapshot of `host`. Revision 0 with the default values
+/// before the engine gave them, and without a hub. Revision 0 with the last values shown while
+/// the hub's snapshot is from an older generation than its client, so nothing enables or writes
+/// from a session that has ended.
+pub fn current(host: &HostContext, cx: &App) -> Arc<HostSettings> {
+    current_of(host.hub(), cx)
+}
+
+/// As [`current`], for code that holds only the host's hub.
+pub fn current_of(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> Arc<HostSettings> {
+    hub.map(|hub| installed(hub.read(cx))).unwrap_or_default()
 }
 
 /// The host settings of `hub`'s snapshot, with revision 0 while that snapshot's generation is
 /// not the client's current one (ADR-018 Generations).
-fn installed(hub: &SnapshotHub) -> Arc<HostSettings> {
+pub fn installed(hub: &SnapshotHub) -> Arc<HostSettings> {
     let host = &hub.current().host_settings;
     if host.rev == 0 || hub.generation() == hub.client().generation() {
         return Arc::clone(host);
@@ -67,21 +71,24 @@ fn installed(hub: &SnapshotHub) -> Arc<HostSettings> {
 }
 
 /// The hub's client, its generation and the host settings in its snapshot, from one read.
-fn hub_state(cx: &App) -> Option<(Arc<dyn EngineClient>, u64, Arc<HostSettings>)> {
-    cx.try_global::<GlobalHub>().map(|hub| {
-        let hub = hub.0.read(cx);
+fn hub_state(
+    host: &HostContext,
+    cx: &App,
+) -> Option<(Arc<dyn EngineClient>, u64, Arc<HostSettings>)> {
+    host.hub().map(|hub| {
+        let hub = hub.read(cx);
         (Arc::clone(hub.client()), hub.generation(), installed(hub))
     })
 }
 
 /// The values to show and use. The defaults until the engine gave them.
-pub fn values(cx: &App) -> HostSettingsValues {
-    current(cx).values.clone()
+pub fn values(host: &HostContext, cx: &App) -> HostSettingsValues {
+    current(host, cx).values.clone()
 }
 
 /// The engine gave the host settings, so the controls that change them are enabled.
-pub fn known(cx: &App) -> bool {
-    current(cx).rev > 0
+pub fn known(host: &HostContext, cx: &App) -> bool {
+    current(host, cx).rev > 0
 }
 
 /// The value of a host key, as `TlSettings` would hold it. `None` for any other key.
@@ -99,12 +106,13 @@ pub fn read_key(values: &HostSettingsValues, key: SettingKey) -> Option<SettingV
 
 /// Writes `value` to the host key `key`. A kind mismatch, an integer that does not fit or a key
 /// that is not a host key logs a warning and sends nothing.
-pub fn set(cx: &mut App, key: SettingKey, value: &SettingValue) {
-    set_then(cx, key, value, |_| {});
+pub fn set(host: &HostContext, cx: &mut App, key: SettingKey, value: &SettingValue) {
+    set_then(host, cx, key, value, |_| {});
 }
 
 /// As `set`, and calls `on_ack` once the engine applied the change (see `change_then`).
 pub fn set_then(
+    host: &HostContext,
     cx: &mut App,
     key: SettingKey,
     value: &SettingValue,
@@ -112,6 +120,7 @@ pub fn set_then(
 ) {
     let mut rejected = None;
     change_then(
+        host,
         cx,
         |v| {
             if let Err(why) = assign(v, key, value) {
@@ -126,28 +135,29 @@ pub fn set_then(
 }
 
 /// Flips the Bool host key `key`.
-pub fn toggle(cx: &mut App, key: SettingKey) {
-    if let Some(SettingValue::Bool(on)) = read_key(&current(cx).values, key) {
-        set(cx, key, &SettingValue::Bool(!on));
+pub fn toggle(host: &HostContext, cx: &mut App, key: SettingKey) {
+    if let Some(SettingValue::Bool(on)) = read_key(&current(host, cx).values, key) {
+        set(host, cx, key, &SettingValue::Bool(!on));
     }
 }
 
 /// Applies `f` to the current values and sends what changed to the host's engine, with the
 /// revision they came from. Sends nothing before the engine gave them, or when nothing changed.
-pub fn change(cx: &mut App, f: impl FnOnce(&mut HostSettingsValues)) {
-    change_then(cx, f, |_| {});
+pub fn change(host: &HostContext, cx: &mut App, f: impl FnOnce(&mut HostSettingsValues)) {
+    change_then(host, cx, f, |_| {});
 }
 
 /// As `change`, and calls `on_ack` once the engine replied that it applied the change. It is
 /// not called when nothing was sent (not read yet, no change, a full queue, no engine), on a
 /// conflict, or when the connection dropped before the reply.
 pub fn change_then(
+    host: &HostContext,
     cx: &mut App,
     f: impl FnOnce(&mut HostSettingsValues),
     on_ack: impl FnOnce(&mut App) + 'static,
 ) {
     // Without a hub nothing was read, so there is nothing to change from.
-    let Some((client, generation, current)) = hub_state(cx) else {
+    let Some((client, generation, current)) = hub_state(host, cx) else {
         return;
     };
     if current.rev == 0 {

@@ -40,13 +40,13 @@ use tl_model::snapshot::{
 use tl_model::table::UnitRef;
 use tracing::warn;
 
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
+use crate::action_tracker::ActionTrackerEvent;
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::ToastKind;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::demand::GlobalDemand;
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::{
     SERVICE_PROPS_CONTEXT, ServicePropsNextTab, ServicePropsOk, ServicePropsPrevTab,
@@ -191,6 +191,8 @@ type TabViews = [Option<TabSlot>; 5];
 
 /// What a tab view is built with.
 struct TabInput {
+    /// The window's host.
+    host: HostContext,
     unit: UnitRef,
     /// The window's action layer.
     actions: Entity<SysActions>,
@@ -207,8 +209,16 @@ fn create_tab(
 ) -> Option<TabSlot> {
     match tab {
         ServicePropsTab::General => {
-            let view =
-                cx.new(|cx| GeneralTab::new(input.unit, input.actions, input.parent, window, cx));
+            let view = cx.new(|cx| {
+                GeneralTab::new(
+                    &input.host,
+                    input.unit,
+                    input.actions,
+                    input.parent,
+                    window,
+                    cx,
+                )
+            });
             Some(TabSlot::new(view))
         }
         ServicePropsTab::LogOn => {
@@ -216,16 +226,24 @@ fn create_tab(
             Some(TabSlot::new(view))
         }
         ServicePropsTab::Recovery => {
-            let view =
-                cx.new(|cx| RecoveryTab::new(input.unit, input.actions, input.parent, window, cx));
+            let view = cx.new(|cx| {
+                RecoveryTab::new(
+                    &input.host,
+                    input.unit,
+                    input.actions,
+                    input.parent,
+                    window,
+                    cx,
+                )
+            });
             Some(TabSlot::new(view))
         }
         ServicePropsTab::Dependencies => {
-            let view = cx.new(DependenciesTab::new);
+            let view = cx.new(|cx| DependenciesTab::new(&input.host, cx));
             Some(TabSlot::new(view))
         }
         ServicePropsTab::Logs => {
-            let view = cx.new(|cx| LogsView::new(input.unit, window, cx));
+            let view = cx.new(|cx| LogsView::new(&input.host, input.unit, window, cx));
             Some(TabSlot::new(view))
         }
     }
@@ -248,6 +266,8 @@ fn title_for(unit: &UnitRef, not_loaded: bool, cx: &App) -> SharedString {
 }
 
 pub struct ServicePropertiesWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     unit: UnitRef,
     /// Pointer-compared on every SERVICES change.
     details: Option<Arc<UnitDetails>>,
@@ -270,15 +290,16 @@ pub struct ServicePropertiesWindow {
 }
 
 impl ServicePropertiesWindow {
-    /// Opens or focuses the window for `unit`, on `tab`.
-    pub fn open(unit: UnitRef, tab: ServicePropsTab, cx: &mut App) {
+    /// Opens or focuses the window for `unit`, on `tab`. The window shows `host` and stays on
+    /// it.
+    pub fn open(host: &HostContext, unit: UnitRef, tab: ServicePropsTab, cx: &mut App) {
         let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
             warn!(target: "tasklens::ui", "no window registry, service properties not opened");
             return;
         };
-        let not_loaded = cx
-            .try_global::<GlobalHub>()
-            .is_some_and(|hub| unit_not_loaded(&hub.0.read(cx).current().services.units, &unit));
+        let not_loaded = host
+            .hub()
+            .is_some_and(|hub| unit_not_loaded(&hub.read(cx).current().services.units, &unit));
         let s = metrics(cx).ui_scale;
         let key = WindowKey::Service(unit.clone());
         let spec = TlWindowSpec::new(
@@ -289,10 +310,11 @@ impl ServicePropertiesWindow {
         .min_size(size(px(MIN_SIZE.0 * s), px(MIN_SIZE.1 * s)))
         .key(key.clone());
         let open_unit = unit.clone();
+        let open_host = host.clone();
         let outcome = registry.update(cx, |registry, cx| {
             registry.open_or_focus(key.clone(), cx, move |cx| {
                 let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
-                    cx.new(|cx| Self::new(open_unit, tab, window, cx))
+                    cx.new(|cx| Self::new(&open_host, open_unit, tab, window, cx))
                 })?;
                 Ok(handle.into())
             })
@@ -325,12 +347,16 @@ impl ServicePropertiesWindow {
     }
 
     fn new(
+        host: &HostContext,
         unit: UnitRef,
         tab: ServicePropsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tracker = cx.global::<GlobalActionTracker>().0.clone();
+        let tracker = host
+            .tracker()
+            .expect("service properties need the host's action tracker")
+            .clone();
         let actions = cx.new(|cx| SysActions::new(&tracker, cx));
         let mut subs = vec![cx.subscribe_in(
             &tracker,
@@ -341,7 +367,7 @@ impl ServicePropertiesWindow {
                 }
             },
         )];
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         let mut units: Arc<[UnitRecord]> = Arc::from([]);
         let mut backend = ServiceBackend::Systemd;
         let mut details = None;
@@ -362,7 +388,7 @@ impl ServicePropertiesWindow {
             details = services.details.get(&unit).cloned();
         }
         let not_loaded = unit_not_loaded(&units, &unit);
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             let part = Demand {
                 any_surface_visible: true,
@@ -376,6 +402,7 @@ impl ServicePropertiesWindow {
                 .detach();
         }
         let mut this = Self {
+            host: host.clone(),
             unit,
             details,
             units,
@@ -489,6 +516,7 @@ impl ServicePropertiesWindow {
             }
         } else {
             let input = TabInput {
+                host: self.host.clone(),
                 unit: self.unit.clone(),
                 actions: self.actions.clone(),
                 parent: cx.entity_id(),

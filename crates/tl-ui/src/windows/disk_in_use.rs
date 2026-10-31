@@ -40,12 +40,12 @@ use tl_model::snapshot::{Blocker, DiskDetails, EjectState, Snapshot};
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker, action_words};
-use crate::app::EngineGlobal;
+use crate::action_tracker::{ActionTrackerEvent, action_words};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::toast::ToastKind;
 use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
@@ -252,8 +252,9 @@ fn notify_window(idx: DeviceIdx, cx: &mut App) {
 /// Sends the eject of disk `idx` with a new sequence number and follows its state. `disk_label`
 /// is the page header word ("Disk 1"). A busy engine shows the tracker's busy warning. While an
 /// eject of `idx` is in flight nothing is sent and its watch stays; its open window comes to the
-/// front.
+/// front. The eject goes to `host`'s engine.
 pub fn start_eject(
+    host: &HostContext,
     key: DeviceKey,
     idx: DeviceIdx,
     hub: Entity<SnapshotHub>,
@@ -273,7 +274,7 @@ pub fn start_eject(
         warn!(target: "tasklens::ui", ?idx, "eject: the disk is not in the catalog");
         return;
     };
-    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+    let Some(engine) = host.client().cloned() else {
         warn!(target: "tasklens::ui", "eject: no engine");
         return;
     };
@@ -290,13 +291,15 @@ pub fn start_eject(
             return;
         }
     }
-    let watch = cx.new(|cx| EjectWatch::new(key, idx, seq, hub, disk_label, cx));
+    let watch = cx.new(|cx| EjectWatch::new(host, key, idx, seq, hub, disk_label, cx));
     cx.default_global::<EjectWatches>().0.insert(idx, watch);
     cx.defer(move |cx| notify_window(idx, cx));
 }
 
 /// Follows the `eject` state of one disk for one sequence number.
 pub struct EjectWatch {
+    /// The host of the disk. Set when the eject starts; never changes.
+    host: HostContext,
     key: DeviceKey,
     idx: DeviceIdx,
     seq: u64,
@@ -309,6 +312,7 @@ pub struct EjectWatch {
 
 impl EjectWatch {
     fn new(
+        host: &HostContext,
         key: DeviceKey,
         idx: DeviceIdx,
         seq: u64,
@@ -323,6 +327,7 @@ impl EjectWatch {
             }
         });
         Self {
+            host: host.clone(),
             key,
             idx,
             seq,
@@ -354,10 +359,14 @@ impl EjectWatch {
         match state {
             EjectState::Running => {}
             EjectState::Blocked { .. } => {
-                let (key, hub, label) =
-                    (self.key.clone(), self.hub.clone(), self.disk_label.clone());
+                let (host, key, hub, label) = (
+                    self.host.clone(),
+                    self.key.clone(),
+                    self.hub.clone(),
+                    self.disk_label.clone(),
+                );
                 cx.defer(move |cx| {
-                    open_disk_in_use(key, idx, hub, label, cx);
+                    open_disk_in_use(&host, key, idx, hub, label, cx);
                     // Retry is allowed again.
                     notify_window(idx, cx);
                 });
@@ -388,8 +397,9 @@ impl EjectWatch {
 
 /// Opens the window of disk `idx`, or brings the open one to the front; it follows the hub
 /// itself. A tool window "tasklens Disk is in use", 520 × 400 × ui_scale, keyed
-/// `WindowKey::DiskInUse(idx)`.
+/// `WindowKey::DiskInUse(idx)`. The window shows `host`.
 pub fn open_disk_in_use(
+    host: &HostContext,
     key: DeviceKey,
     idx: DeviceIdx,
     hub: Entity<SnapshotHub>,
@@ -409,9 +419,10 @@ pub fn open_disk_in_use(
         window_size,
     )
     .key(WindowKey::DiskInUse(idx));
+    let host = host.clone();
     let open = move |cx: &mut App| {
         let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
-            cx.new(|cx| DiskInUseWindow::new(key, idx, hub, disk_label, window, cx))
+            cx.new(|cx| DiskInUseWindow::new(&host, key, idx, hub, disk_label, window, cx))
         })?;
         if let Some(frame) = TlSecondaryWindow::<DiskInUseWindow>::find(handle, cx) {
             // The title follows a language change.
@@ -469,6 +480,8 @@ impl Words {
 
 /// The window content. The frame around it is `TlSecondaryWindow`.
 pub struct DiskInUseWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     idx: DeviceIdx,
     key: DeviceKey,
     hub: Entity<SnapshotHub>,
@@ -492,6 +505,7 @@ pub struct DiskInUseWindow {
 
 impl DiskInUseWindow {
     fn new(
+        host: &HostContext,
         key: DeviceKey,
         idx: DeviceIdx,
         hub: Entity<SnapshotHub>,
@@ -510,7 +524,7 @@ impl DiskInUseWindow {
                 }
             }
         }));
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subs.push(
                 cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
                     if let ActionTrackerEvent::Finished { id, .. } = *ev {
@@ -526,6 +540,7 @@ impl DiskInUseWindow {
             cx.notify();
         }));
         let mut this = Self {
+            host: host.clone(),
             idx,
             key,
             hub: hub.clone(),
@@ -651,7 +666,8 @@ impl DiskInUseWindow {
             on_sent: Some(on_sent),
         };
         let action: &dyn Action = if kill { &EndProcess } else { &EndTask };
-        run_process_action_with(action, targets, options, window, cx);
+        let host = self.host.clone();
+        run_process_action_with(&host, action, targets, options, window, cx);
     }
 
     /// An end action finished: retry the eject 500 ms later, once.
@@ -678,6 +694,7 @@ impl DiskInUseWindow {
             return;
         }
         start_eject(
+            &self.host,
             self.key.clone(),
             self.idx,
             self.hub.clone(),

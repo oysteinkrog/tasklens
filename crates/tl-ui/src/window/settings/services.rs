@@ -5,6 +5,7 @@
 use gpui_kit::{App, SharedString};
 
 use super::{PageBuilder, PageId};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::SettingKey;
 
@@ -30,8 +31,8 @@ const STATES: [(&str, &str); 4] = [
     ("shell-settings-services-state-disabled", "disabled"),
 ];
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Services);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Services);
     // One untitled group: the page title already says "Services".
     let group = "";
     let options = |cx: &App, pairs: &[(&str, &'static str)]| -> Vec<(SharedString, SharedString)> {

@@ -32,12 +32,12 @@ use tl_model::tray::{
 use tl_model::units;
 
 use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
-use crate::app::EngineGlobal;
 use crate::chart::scale::{self, ScaleState};
 use crate::chart::view::{derived_view, find_process_tiered, find_tiered};
 use crate::chart::{ValueFormat, YScale, format_value};
 use crate::components::toast::ToastKind;
-use crate::demand::{DemandAggregator, GlobalDemand};
+use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::net_totals::NetTotal;
 use crate::pages::minigraph::GraphColor;
@@ -110,6 +110,8 @@ pub struct TrayGraph {
 /// The tray's one entity per app.
 pub struct TrayBridge {
     end: TrayUiEnd,
+    /// The host the tray shows: the local host. Set at install; never changes.
+    host: HostContext,
     client: Arc<dyn EngineClient>,
     graphs: Vec<TrayGraph>,
     next_id: u32,
@@ -123,7 +125,8 @@ pub struct TrayBridge {
 /// Loads the graphs, sets [`TrayStatus`] and starts the 1 Hz timer. Called once by tl-app after
 /// `TasklensUi::init` (E31-008).
 pub fn install(cx: &mut App, end: TrayUiEnd) {
-    let client = Arc::clone(&cx.global::<EngineGlobal>().0);
+    // The tray is not opened from a host: it shows the local host.
+    let host = HostContext::local(cx);
     let entries: Vec<TrayGraphEntry> = if cx.has_global::<TlSettings>() {
         TlSettings::state(cx).tray_graphs.clone()
     } else {
@@ -134,7 +137,7 @@ pub fn install(cx: &mut App, end: TrayUiEnd) {
         running: true,
     });
     let events = end.events.clone();
-    let bridge = cx.new(|cx| TrayBridge::new(end, client, &entries, cx));
+    let bridge = cx.new(|cx| TrayBridge::new(end, host, &entries, cx));
     cx.set_global(GlobalTrayBridge(bridge));
     cx.on_action(
         |a: &PerfAddTrayGraph, cx| match tray_source_of_card(&a.source) {
@@ -271,10 +274,14 @@ fn handle_event(cx: &mut App, event: TrayEvent) {
 impl TrayBridge {
     fn new(
         end: TrayUiEnd,
-        client: Arc<dyn EngineClient>,
+        host: HostContext,
         entries: &[TrayGraphEntry],
         cx: &mut Context<Self>,
     ) -> Self {
+        let client = Arc::clone(
+            host.client()
+                .expect("the tray needs the host's engine client"),
+        );
         let graphs: Vec<TrayGraph> = entries
             .iter()
             .zip(1u32..)
@@ -301,6 +308,7 @@ impl TrayBridge {
         .detach();
         Self {
             end,
+            host,
             client,
             graphs,
             next_id,
@@ -528,7 +536,7 @@ impl TrayBridge {
             return;
         }
         self.demand_sent = part.clone();
-        let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) else {
+        let Some(agg) = self.host.demand().cloned() else {
             return;
         };
         let id = cx.entity_id();

@@ -29,14 +29,14 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::registry::{GlobalRegistry, WindowKey};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::action_tracker::ToastTexts;
 use crate::app::{AppEnv, BuildInfo};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::icons::AppIcon;
 use crate::components::link::TlLink;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_sm, t_xl};
@@ -98,11 +98,19 @@ const FIELDS: [&str; 9] = [
 /// Registers the `OpenAbout` handler. `TasklensUi::init` calls it.
 pub fn init(cx: &mut App) {
     // Deferred: from a menu the main window is mid-update.
-    cx.on_action(|_: &OpenAbout, cx| cx.defer(open_about));
+    cx.on_action(|_: &OpenAbout, cx| {
+        cx.defer(|cx| {
+            // App-level: the window shows the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_about(&host, cx);
+        })
+    });
 }
 
-/// Focuses the open window, or opens it. Without a window registry (tests) it always opens one.
-pub fn open_about(cx: &mut App) {
+/// Focuses the open window, or opens it on `host`. Without a window registry (tests) it always
+/// opens one.
+pub fn open_about(host: &HostContext, cx: &mut App) {
+    let host = host.clone();
     let s = metrics(cx).ui_scale;
     let window_size = size(px(SIZE.0 * s), px(SIZE.1 * s));
     let spec = TlWindowSpec::new(
@@ -114,7 +122,7 @@ pub fn open_about(cx: &mut App) {
     .key(WindowKey::About);
     let open = move |cx: &mut App| {
         let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
-            cx.new(|cx| AboutWindow::new(window, cx))
+            cx.new(|cx| AboutWindow::new(&host, window, cx))
         })?;
         follow_title(handle, cx);
         Ok(handle.into())
@@ -270,6 +278,8 @@ pub enum AboutView {
 
 /// The content of the About window.
 pub struct AboutWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     view: AboutView,
     /// Built on the first switch to the licence list.
     licenses: Option<Rc<[LicenseRow]>>,
@@ -283,7 +293,7 @@ pub struct AboutWindow {
 }
 
 impl AboutWindow {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let copy_focus = cx.focus_handle();
         copy_focus.focus(window, cx);
         let _strings = cx.observe_global::<Strings>(|this: &mut Self, cx| {
@@ -295,6 +305,7 @@ impl AboutWindow {
             }
         });
         Self {
+            host: host.clone(),
             view: AboutView::Main,
             licenses: None,
             words: AboutWords::new(cx),
@@ -359,7 +370,7 @@ impl AboutWindow {
             or_unknown(Some(build.build_date.to_owned())),
             or_unknown(Some(build.gpui_rev.to_owned())),
             or_unknown(kernel_release()),
-            or_unknown(nvidia_driver(cx)),
+            or_unknown(nvidia_driver(&self.host, cx)),
             or_unknown(std::env::var("XDG_CURRENT_DESKTOP").ok()),
             or_unknown(std::env::var("XDG_SESSION_TYPE").ok()),
             Some(format!("{scale}%")),
@@ -530,9 +541,9 @@ fn kernel_release() -> Option<String> {
         .map(|s| s.trim().to_owned())
 }
 
-/// The driver version of the first NVIDIA adapter in the snapshot's graphics rows.
-fn nvidia_driver(cx: &App) -> Option<String> {
-    let hub = cx.try_global::<GlobalHub>()?.0.read(cx);
+/// The driver version of the first NVIDIA adapter in `host`'s graphics rows.
+fn nvidia_driver(host: &HostContext, cx: &App) -> Option<String> {
+    let hub = host.hub()?.read(cx);
     let inventory = &hub.current().inventory;
     inventory
         .graphics
@@ -545,10 +556,10 @@ fn nvidia_driver(cx: &App) -> Option<String> {
         .map(|g| g.driver_version.value.to_string())
 }
 
-/// Sends `OpenUri(uri)` through the app's `ActionTracker`. Only a failure shows a toast, in this
-/// window.
+/// Sends `OpenUri(uri)` through the local host's `ActionTracker`: the link or folder opens on
+/// this PC's desktop. Only a failure shows a toast, in this window.
 pub(crate) fn send_open_uri(uri: String, texts: ToastTexts, window: &mut Window, cx: &mut App) {
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = HostContext::local(cx).tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the link was not opened");
         return;
     };

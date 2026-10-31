@@ -56,11 +56,12 @@ use super::main::ShellState;
 use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
-use crate::app::{AdapterInfo, AppEnv, EngineGlobal};
+use crate::app::{AdapterInfo, AppEnv};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::host_settings;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::window::main::push_main_toast;
@@ -142,12 +143,14 @@ pub fn init(cx: &mut App) {
         }
     });
     cx.on_action(|_: &ToggleRecordHistory, cx| {
+        // App-level: acts on the host the main window shows now.
+        let host = HostContext::shown(cx);
         // A host setting: nothing to flip before the engine gave it.
-        let host = host_settings::current(cx);
-        if host.rev == 0 {
+        let current = host_settings::current(&host, cx);
+        if current.rev == 0 {
             return;
         }
-        let on = !host.values.history.enabled;
+        let on = !current.values.history.enabled;
         let key = if on {
             "shell-toast-history-on"
         } else {
@@ -157,6 +160,7 @@ pub fn init(cx: &mut App) {
         // leave recording as it was, so they show no toast.
         let window = cx.active_window();
         host_settings::set_then(
+            &host,
             cx,
             SettingKey::HistoryEnabled,
             &SettingValue::Bool(on),
@@ -175,7 +179,9 @@ pub fn init(cx: &mut App) {
         info_toast(cx, "shell-toast-gpu-restart");
     });
     cx.on_action(|_: &TogglePasswordless, cx| {
-        let Some(flow) = PasswordlessFlow::get(cx) else {
+        // App-level: the setup step runs on the host the main window shows now.
+        let host = HostContext::shown(cx);
+        let Some(flow) = PasswordlessFlow::get(&host, cx) else {
             warn!(target: "tasklens::ui", "no hub, skip password prompts not changed");
             return;
         };
@@ -218,28 +224,33 @@ pub fn init(cx: &mut App) {
     });
 }
 
-/// Builds the Settings menu. Item actions go to `return_focus`; the Tab Switch row uses the
-/// bar's `sliders`.
+/// Builds the Settings menu for `host`. Item actions go to `return_focus`; the Tab Switch row
+/// uses the bar's `sliders`.
 pub fn build(
+    host: &HostContext,
     window: &mut Window,
     cx: &mut App,
     return_focus: &FocusHandle,
     sliders: &MenuSliders,
 ) -> Entity<TlMenuPopup> {
     let tab_switch = sliders.tab_switch.clone();
+    let host = host.clone();
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let s = settings_now(cx);
         // The refresh interval and History are host settings, disabled until the engine gave
         // them (ADR-018 Settings).
-        let host = host_settings::current(cx);
-        let waiting = (host.rev == 0).then(|| tr(cx, "shell-settings-host-waiting"));
-        let history = &host.values.history;
+        let current = host_settings::current(&host, cx);
+        let waiting = (current.rev == 0).then(|| tr(cx, "shell-settings-host-waiting"));
+        let history = &current.values.history;
         let refresh = tr(cx, "shell-menu-settings-refresh");
         let menu = menu.header(tr(cx, "shell-menu-settings-monitoring"));
         let menu = if waiting.is_some() {
             menu.item_disabled(refresh, waiting.clone())
         } else {
-            menu.submenu(refresh, window, cx, refresh_submenu)
+            let host = host.clone();
+            menu.submenu(refresh, window, cx, move |menu, window, cx| {
+                refresh_submenu(&host, menu, window, cx)
+            })
         };
         let menu = menu
             .submenu(
@@ -263,7 +274,10 @@ pub fn build(
         } else {
             let menu = menu
                 .check_item(record, history.enabled, Box::new(ToggleRecordHistory))
-                .submenu(storage, window, cx, history_storage_submenu);
+                .submenu(storage, window, cx, {
+                    let host = host.clone();
+                    move |menu, window, cx| history_storage_submenu(&host, menu, window, cx)
+                });
             if history.enabled {
                 menu.check_item(persist, history.persist, toggle(SettingKey::HistoryPersist))
             } else {
@@ -451,8 +465,8 @@ fn set_str(key: SettingKey, value: &'static str) -> Box<SetSetting> {
 }
 
 /// "0.25s" to "10.0s". A stored value that is none of the six (hand-edited) marks nothing.
-fn refresh_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
-    let marks = refresh_marks(cx);
+fn refresh_submenu(host: &HostContext, mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let marks = refresh_marks(host, cx);
     for ((key, ms), on) in REFRESH_KEYS
         .into_iter()
         .zip(PROCESS_INTERVAL_MENU_MS)
@@ -485,8 +499,13 @@ fn network_unit_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
 }
 
 /// "1 hour" to "12 hours". A stored value that is none of the seven marks nothing.
-fn history_storage_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
-    let current = host_settings::current(cx).values.history.retention_h;
+fn history_storage_submenu(
+    host: &HostContext,
+    mut menu: TlMenu,
+    _: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let current = host_settings::current(host, cx).values.history.retention_h;
     for (key, hours) in HISTORY_STORAGE_KEYS
         .into_iter()
         .zip(HISTORY_RETENTION_MENU_H)
@@ -645,9 +664,9 @@ pub(crate) fn probe_adapters(cx: &App) -> impl Future<Output = Vec<AdapterInfo>>
     }
 }
 
-/// The radio marks of the Refresh items, in menu order. The interval is a host setting.
-pub fn refresh_marks(cx: &App) -> [bool; 6] {
-    let current = host_settings::current(cx).values.interval_ms;
+/// The radio marks of the Refresh items, in menu order. The interval is a setting of `host`.
+pub fn refresh_marks(host: &HostContext, cx: &App) -> [bool; 6] {
+    let current = host_settings::current(host, cx).values.interval_ms;
     PROCESS_INTERVAL_MENU_MS.map(|ms| ms == current)
 }
 
@@ -673,6 +692,8 @@ fn language_current(cx: &App) -> SharedString {
 /// Sends the `polkit-rule on|off` setup step for "Skip password prompts" and writes
 /// `privilege.passwordless` from its result (E21-042, R-222). One step runs at a time.
 pub struct PasswordlessFlow {
+    /// The host the step runs on. Set when the flow is made; never changes.
+    host: HostContext,
     hub: Entity<SnapshotHub>,
     /// The value asked for while its step runs.
     pending: Option<bool>,
@@ -688,12 +709,20 @@ struct GlobalPasswordlessFlow(Entity<PasswordlessFlow>);
 impl Global for GlobalPasswordlessFlow {}
 
 impl PasswordlessFlow {
-    /// The app's flow, created on first use. `None` without the hub: no result could arrive.
-    fn get(cx: &mut App) -> Option<Entity<Self>> {
-        if let Some(flow) = cx.try_global::<GlobalPasswordlessFlow>() {
-            return Some(flow.0.clone());
+    /// The app's flow for `host`, created on first use. A flow made for another host is replaced
+    /// unless its step runs. `None` without the hub: no result could arrive.
+    fn get(host: &HostContext, cx: &mut App) -> Option<Entity<Self>> {
+        if let Some(flow) = cx
+            .try_global::<GlobalPasswordlessFlow>()
+            .map(|f| f.0.clone())
+        {
+            let current = flow.read(cx);
+            if current.pending.is_some() || host.hub().is_none_or(|hub| *hub == current.hub) {
+                return Some(flow);
+            }
         }
-        let hub = cx.try_global::<GlobalHub>()?.0.clone();
+        let hub = host.hub()?.clone();
+        let host = host.clone();
         let flow = cx.new(|cx| {
             let _health = cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
                 if ev.mask.contains(ComponentMask::HEALTH) {
@@ -701,6 +730,7 @@ impl PasswordlessFlow {
                 }
             });
             Self {
+                host,
                 hub,
                 pending: None,
                 requester: None,
@@ -716,12 +746,12 @@ impl PasswordlessFlow {
         if self.pending.is_some() {
             return;
         }
-        let Some(engine) = cx.try_global::<EngineGlobal>() else {
+        let Some(engine) = self.host.client() else {
             warn!(target: "tasklens::ui", "no engine, polkit rule step not sent");
             return;
         };
         let step = SetupStep::PolkitRule { on };
-        if let Err(err) = engine.0.send(Command::RunSetup { step }) {
+        if let Err(err) = engine.send(Command::RunSetup { step }) {
             warn!(target: "tasklens::ui", ?err, "polkit rule step not sent");
             return;
         }

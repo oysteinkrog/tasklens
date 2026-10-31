@@ -29,7 +29,7 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
+use crate::action_tracker::ActionTrackerEvent;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::kv_grid::{
     KEY_CONTEXT, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
@@ -40,7 +40,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::StartupChoice;
 use crate::pages::services::copy::status_word;
@@ -504,6 +504,8 @@ fn window_toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: Shared
 }
 
 pub struct GeneralTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     unit: UnitRef,
     actions: Entity<SysActions>,
     /// The window view: notified when the tab's dirty state changes, for the footer.
@@ -531,6 +533,7 @@ pub struct GeneralTab {
 
 impl GeneralTab {
     pub(super) fn new(
+        host: &HostContext,
         unit: UnitRef,
         actions: Entity<SysActions>,
         parent: EntityId,
@@ -546,7 +549,7 @@ impl GeneralTab {
                 cx.notify();
             }
         })];
-        if let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) {
+        if let Some(tracker) = host.tracker().cloned() {
             subs.push(
                 cx.subscribe(&tracker, |this, _, ev: &ActionTrackerEvent, cx| {
                     if let ActionTrackerEvent::Finished { id, failed, .. } = *ev {
@@ -556,6 +559,7 @@ impl GeneralTab {
             );
         }
         let this = Self {
+            host: host.clone(),
             unit,
             actions,
             parent,
@@ -764,7 +768,7 @@ impl GeneralTab {
     /// Main PID: the main window comes to the front and the Processes page selects the process
     /// (UI-SYS-021).
     fn on_jump(&mut self, _: &ServiceGeneralJumpToProcess, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         let snap = hub.read(cx).current().clone();

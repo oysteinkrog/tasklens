@@ -14,7 +14,7 @@
 //! new arrangement or the default, the box views follow, and the layout is saved.
 
 use gpui_kit::{
-    AnyElement, App, Context, Global, InteractiveElement as _, IntoElement, MouseButton,
+    AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
 
@@ -28,6 +28,7 @@ use super::timeline;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
     PerfOverviewResetBox, PerfOverviewSetBoxArrange, PerfOverviewSetBoxClocks,
@@ -290,12 +291,18 @@ fn arrange_items(
 
 /// The timeline's "Click" submenu (UI-PRF-057): one radio item per click choice, `history`
 /// only while recording is on.
-fn click_items(menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
-    let current = timeline::click_mode(cx);
-    let choices: SmallVec<[(TimelineClick, SharedString); 3]> = timeline::click_choices(cx)
-        .into_iter()
-        .map(|c| (c, tr(cx, timeline::click_label(c))))
-        .collect();
+fn click_items(
+    menu: TlMenu,
+    hub: &Entity<SnapshotHub>,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let current = timeline::click_mode(Some(hub), cx);
+    let choices: SmallVec<[(TimelineClick, SharedString); 3]> =
+        timeline::click_choices(Some(hub), cx)
+            .into_iter()
+            .map(|c| (c, tr(cx, timeline::click_label(c))))
+            .collect();
     menu.submenu(
         tr(cx, "perf-overview-timeline-click"),
         window,
@@ -316,11 +323,18 @@ fn click_items(menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
 }
 
 /// "Layout" with the mode items, "Reset Box" and a separator: the start of the page menu when
-/// the right-click landed on `target`'s title line. The timeline adds its "Click" submenu.
-pub fn box_menu(menu: TlMenu, target: BoxMenuTarget, window: &mut Window, cx: &mut App) -> TlMenu {
+/// the right-click landed on `target`'s title line. The timeline adds its "Click" submenu, from
+/// the settings of `hub`'s host.
+pub fn box_menu(
+    menu: TlMenu,
+    target: BoxMenuTarget,
+    hub: &Entity<SnapshotHub>,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
     let kind = target.kind.key().into();
     let menu = if target.kind == BoxKind::Timeline {
-        click_items(menu, window, cx)
+        click_items(menu, hub, window, cx)
     } else {
         menu
     };

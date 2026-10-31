@@ -2,8 +2,9 @@
 //! ADR-005, UI-FND-020).
 //!
 //! The page builds an [`ActionToastTexts`] with [`texts_for`] when it submits an
-//! `ActionRequest`, and [`submit`] or [`submit_to`] hands both to the app's `ActionTracker`. Every state of one
-//! request replaces one toast, keyed `ToastKey(id.0)`. Two or more targets get one summary toast
+//! `ActionRequest`, and [`submit`] or [`submit_to`] hands both to the host's `ActionTracker`.
+//! Every state of one request replaces one toast, keyed `ToastKey(id.0)`. Two or more targets
+//! get one summary toast
 //! that counts the results and names the reasons, such as "Ended 4 of 5 processes (1 permission
 //! denied)". Identity, permission and "Outcome unknown" texts are the tracker's own.
 //!
@@ -21,10 +22,9 @@ use tracing::warn;
 
 use super::ProcessesPage;
 use super::actions::{CapturedTarget, CapturedTargets};
-use crate::action_tracker::{
-    ActionWords, GlobalActionTracker, SummaryTexts, ToastTexts, action_words,
-};
+use crate::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::table::tree_table::RowKind;
@@ -139,27 +139,29 @@ pub fn refuse(t: &CapturedTargets, cx: &mut App) -> bool {
     true
 }
 
-/// Sends `req` through the app's `ActionTracker` with `texts`, so every state of the request
-/// replaces one toast keyed `ToastKey(req.id.0)` on the main window. `None` when the request
-/// was not sent; a busy engine shows its own Warning.
+/// Sends `req` through the page host's `ActionTracker` with `texts`, so every state of the
+/// request replaces one toast keyed `ToastKey(req.id.0)` on the main window. `None` when the
+/// request was not sent; a busy engine shows its own Warning.
 pub fn submit(
-    _page: &mut ProcessesPage,
+    page: &mut ProcessesPage,
     req: ActionRequest,
     texts: ActionToastTexts,
     cx: &mut Context<ProcessesPage>,
 ) -> Option<ActionId> {
     let queue = main_queue(cx);
-    submit_to(req, texts, queue, cx)
+    submit_to(&page.host, req, texts, queue, cx)
 }
 
-/// As [`submit`], with the toasts on `queue`. `None` when there is no tracker or no queue.
+/// As [`submit`], through `host`'s tracker with the toasts on `queue`. `None` when there is no
+/// tracker or no queue.
 pub fn submit_to(
+    host: &HostContext,
     req: ActionRequest,
     texts: ActionToastTexts,
     queue: Option<WeakEntity<ToastQueue>>,
     cx: &mut App,
 ) -> Option<ActionId> {
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the action was not sent");
         return None;
     };

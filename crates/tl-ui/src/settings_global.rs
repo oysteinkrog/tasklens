@@ -23,6 +23,7 @@ use tl_model::settings::{Settings, UiState};
 use tracing::{debug, warn};
 
 use crate::app::{BootSettings, PersistFn};
+use crate::host::HostContext;
 use crate::{host_settings, i18n};
 
 /// The parsed settings and state.
@@ -216,7 +217,9 @@ impl TlSettings {
     /// the host's engine (`host_settings::toggle`).
     pub fn toggle(cx: &mut App, key: SettingKey) {
         if host_settings::is_host_key(key) {
-            host_settings::toggle(cx, key);
+            // The main window's host. A window bound to another host writes through
+            // `host_settings` with its own host.
+            host_settings::toggle(&HostContext::shown(cx), cx, key);
             return;
         }
         if key.kind() != SettingKind::Bool {
@@ -235,7 +238,9 @@ impl TlSettings {
     /// the host's engine (`host_settings::set`).
     pub fn set(cx: &mut App, key: SettingKey, value: SettingValue) {
         if host_settings::is_host_key(key) {
-            host_settings::set(cx, key, &value);
+            // The main window's host. A window bound to another host writes through
+            // `host_settings` with its own host.
+            host_settings::set(&HostContext::shown(cx), cx, key, &value);
             return;
         }
         let mut rejected = None;

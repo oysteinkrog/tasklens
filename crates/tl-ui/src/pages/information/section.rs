@@ -29,10 +29,10 @@ use gpui_kit::{
     px,
 };
 use serde::Deserialize;
+use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, DeviceCommand};
 
 use super::actions::{CopyInformationSection, FetchInformationPublicIp};
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
@@ -40,6 +40,7 @@ use crate::components::kv_grid::{
     value_copy_form,
 };
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::text::style::t_md;
 use crate::theme::{current, metrics};
@@ -509,13 +510,14 @@ impl Render for InfoSection {
 /// The Fetch button's action, handled by the page (a click leaves focus in the page, so the
 /// action reaches the page and not the section). The notice comes first (PERF-060); the
 /// Inventory worker runs the fetch and the page reads `snapshot.inventory.public_ip`. This page
-/// makes no request of its own.
-pub fn fetch_public_ip(window: &mut Window, cx: &mut App) {
-    request_public_ip_fetch(window, cx, send_public_ip_fetch);
+/// makes no request of its own. The fetch goes to `host`'s engine.
+pub fn fetch_public_ip(host: &HostContext, window: &mut Window, cx: &mut App) {
+    let engine = host.client().cloned();
+    request_public_ip_fetch(window, cx, move |_, _| send_public_ip_fetch(engine));
 }
 
-fn send_public_ip_fetch(_: &mut Window, cx: &mut App) {
-    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+fn send_public_ip_fetch(engine: Option<Arc<dyn EngineClient>>) {
+    let Some(engine) = engine else {
         return;
     };
     match engine.send(Command::Device(DeviceCommand::FetchPublicIp)) {

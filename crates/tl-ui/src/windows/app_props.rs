@@ -48,8 +48,7 @@ use super::props::filter::{
     FilterChanged, NO_MATCH, PropsFilter, filter_bar, lowercase, matches, on_clear,
 };
 use super::props::general::{escape_controls, go_to_service};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts};
-use crate::app::EngineGlobal;
+use crate::action_tracker::ToastTexts;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
@@ -62,8 +61,8 @@ use crate::components::menu::{
 use crate::components::tabs::{TlTabSpec, TlTabs};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::TlSecondaryWindow;
-use crate::demand::GlobalDemand;
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
@@ -177,16 +176,16 @@ impl AppWords {
     }
 }
 
-/// Opens App Properties, focuses an existing window, or refuses a ninth app window.
-pub fn open_app_properties(group: GroupKey, cx: &mut App) {
+/// Opens App Properties, focuses an existing window, or refuses a ninth app window. The window
+/// shows `host` and stays on it.
+pub fn open_app_properties(host: &HostContext, group: GroupKey, cx: &mut App) {
     let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
         warn!(target: "tasklens::ui", "no window registry, app properties not opened");
         return;
     };
     let words = AppWords::new(cx);
-    let row = cx.try_global::<GlobalHub>().and_then(|hub| {
-        hub.0
-            .read(cx)
+    let row = host.hub().and_then(|hub| {
+        hub.read(cx)
             .current()
             .table
             .groups
@@ -208,7 +207,7 @@ pub fn open_app_properties(group: GroupKey, cx: &mut App) {
             let spec = pwn_window_spec(cx, PwnWindow::AppProperties, title, None)
                 .key(WindowKey::AppProperties(group));
             let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
-                cx.new(|cx| AppPropsWindow::new(group, row, window, cx))
+                cx.new(|cx| AppPropsWindow::new(host, group, row, window, cx))
             })?;
             opened = Some(handle);
             Ok(handle.into())
@@ -304,6 +303,8 @@ fn section(rows: Vec<TlKvRow>) -> Rc<[TlKvSection]> {
 
 /// The General child view. It is public so the UI tests can feed payloads without an engine.
 pub struct AppGeneralTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     group: GroupKey,
     payload: Option<Arc<AppGeneralDetail>>,
     live: Option<LiveUsage>,
@@ -326,7 +327,12 @@ pub struct AppGeneralTab {
 }
 
 impl AppGeneralTab {
-    pub fn new(group: GroupKey, filter: Entity<PropsFilter>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        host: &HostContext,
+        group: GroupKey,
+        filter: Entity<PropsFilter>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let sub = cx.subscribe(&filter, |this, filter, event: &FilterChanged, cx| {
             if filter.update(cx, |f, _| f.accept(event.generation)) {
                 this.needle = event.needle.clone();
@@ -343,6 +349,7 @@ impl AppGeneralTab {
             NetUnit::Bits
         };
         let mut this = Self {
+            host: host.clone(),
             group,
             payload: None,
             live: None,
@@ -811,7 +818,7 @@ impl AppGeneralTab {
         let Some(path) = self.payload.as_ref().and_then(|d| d.desktop_file.clone()) else {
             return;
         };
-        let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+        let Some(tracker) = self.host.tracker().cloned() else {
             return;
         };
         let Some(queue) = ToastQueue::of_window(window, cx) else {
@@ -1364,6 +1371,8 @@ struct CapturedProcs {
 /// The member table's rows, columns and sort. Rows are positions in `members`, which are
 /// indexes into the process records of `procs`.
 pub struct AppProcsDelegate {
+    /// The host this table shows. Set when it opens; never changes.
+    host: HostContext,
     procs: Arc<ProcessSnapshot>,
     members: Arc<[u32]>,
     /// Positions in `members`, in sort order.
@@ -1384,7 +1393,7 @@ pub struct AppProcsDelegate {
 }
 
 impl AppProcsDelegate {
-    fn new(words: Rc<AppProcWords>) -> Self {
+    fn new(host: &HostContext, words: Rc<AppProcWords>) -> Self {
         let specs = app_proc_specs(&words);
         let layout = ColumnLayout::defaults(
             TableId::Processes,
@@ -1393,6 +1402,7 @@ impl AppProcsDelegate {
             &AppProcColumn::ALL,
         );
         Self {
+            host: host.clone(),
             procs: Arc::new(ProcessSnapshot::default()),
             members: Arc::from([]),
             order: Vec::new(),
@@ -1688,7 +1698,7 @@ impl TreeTableDelegate for AppProcsDelegate {
 
     /// Enter, Alt+Enter, Ctrl+I and double-click open the row's Process Properties (D-008).
     fn on_activate(&mut self, id: ProcessKey, cx: &mut Context<TlTreeTable<Self>>) {
-        crate::windows::props::open_process_properties(id, cx);
+        crate::windows::props::open_process_properties(&self.host, id, cx);
     }
 
     fn row_tooltip(&self, _: usize) -> Option<AnyView> {
@@ -1738,6 +1748,8 @@ fn count_members(procs: &ProcessSnapshot, group: GroupKey) -> u32 {
 /// The Processes child view. It lists the member processes of the window's row while it is the
 /// active tab, and does no work while it is not.
 pub struct AppProcessesTab {
+    /// The host this tab shows. Set when it opens; never changes.
+    host: HostContext,
     group: GroupKey,
     table: Entity<TlTreeTable<AppProcsDelegate>>,
     filter: Entity<PropsFilter>,
@@ -1757,13 +1769,15 @@ pub struct AppProcessesTab {
 
 impl AppProcessesTab {
     pub fn new(
+        host: &HostContext,
         group: GroupKey,
         filter: Entity<PropsFilter>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let words = Rc::new(AppProcWords::new(cx));
-        let table = cx.new(|cx| TlTreeTable::new(AppProcsDelegate::new(words.clone()), window, cx));
+        let delegate = AppProcsDelegate::new(host, words.clone());
+        let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&filter, |this, _, ev: &FilterChanged, cx| {
             this.run_filter(ev.generation, cx);
@@ -1789,6 +1803,7 @@ impl AppProcessesTab {
             }
         }));
         Self {
+            host: host.clone(),
             group,
             table,
             filter,
@@ -1946,7 +1961,7 @@ impl AppProcessesTab {
             return;
         };
         for key in captured.keys {
-            super::props::open_process_properties(key, cx);
+            super::props::open_process_properties(&self.host, key, cx);
         }
     }
 
@@ -2001,6 +2016,8 @@ impl Render for AppProcessesTab {
 
 /// Root entity of one App Properties window.
 pub struct AppPropsWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     group: GroupKey,
     active: DetailTab,
     general: Entity<AppGeneralTab>,
@@ -2016,17 +2033,24 @@ pub struct AppPropsWindow {
 }
 
 impl AppPropsWindow {
-    fn new(group: GroupKey, row: GroupRow, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        host: &HostContext,
+        group: GroupKey,
+        row: GroupRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let words = AppWords::new(cx);
         let filters = [
             cx.new(|cx| PropsFilter::new(words.general.clone(), window, cx)),
             cx.new(|cx| PropsFilter::new(words.processes.clone(), window, cx)),
         ];
-        let general = cx.new(|cx| AppGeneralTab::new(group, filters[0].clone(), cx));
+        let general = cx.new(|cx| AppGeneralTab::new(host, group, filters[0].clone(), cx));
         general.update(cx, |g, cx| g.set_group(Some(&row), cx));
-        let processes = cx.new(|cx| AppProcessesTab::new(group, filters[1].clone(), window, cx));
+        let processes =
+            cx.new(|cx| AppProcessesTab::new(host, group, filters[1].clone(), window, cx));
         let mut subs = Vec::new();
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         if let Some(hub) = &hub {
             subs.push(cx.subscribe_in(
                 hub,
@@ -2037,6 +2061,7 @@ impl AppPropsWindow {
             ));
         }
         let mut this = Self {
+            host: host.clone(),
             group,
             active: DetailTab::AppGeneral,
             general,
@@ -2050,7 +2075,7 @@ impl AppPropsWindow {
             demand: None,
             _subs: subs,
         };
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let id = cx.entity_id();
             this.demand = Some(id);
             this.register_demand(window, cx);
@@ -2128,9 +2153,7 @@ impl AppPropsWindow {
     /// the current snapshot. Then takes the label count from the right source.
     fn sync_processes_tab(&mut self, cx: &mut Context<Self>) {
         let active = self.active == DetailTab::AppProcesses;
-        let snapshot = cx
-            .try_global::<GlobalHub>()
-            .map(|hub| hub.0.read(cx).current().clone());
+        let snapshot = self.host.hub().map(|hub| hub.read(cx).current().clone());
         self.processes.update(cx, |tab, cx| {
             tab.set_active(active, snapshot.as_deref(), cx)
         });
@@ -2154,7 +2177,7 @@ impl AppPropsWindow {
         let Some(id) = self.demand.filter(|_| !self.exited) else {
             return;
         };
-        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         let part = Demand {
@@ -2174,7 +2197,7 @@ impl AppPropsWindow {
         let Some(id) = self.demand.take() else {
             return;
         };
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = self.host.demand().cloned() {
             demand.update(cx, |d, cx| d.remove(id, cx));
         }
     }
@@ -2287,16 +2310,16 @@ impl AppPropsWindow {
         self.on_next_tab(&PropsNextTab, window, cx);
     }
 
-    fn on_refresh(&mut self, _: &PropsRefreshNow, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_refresh(&mut self, _: &PropsRefreshNow, _: &mut Window, _: &mut Context<Self>) {
         if self.exited {
             return;
         }
-        if let Some(engine) = cx.try_global::<EngineGlobal>() {
+        if let Some(engine) = self.host.client() {
             let command = tl_model::command::Command::DetailRefresh {
                 target: DetailTarget::App(self.group),
                 tab: self.active,
             };
-            if let Err(error) = engine.0.send(command) {
+            if let Err(error) = engine.send(command) {
                 warn!(target: "tasklens::ui", ?error, "app properties refresh not sent");
             }
         }

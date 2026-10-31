@@ -45,7 +45,6 @@ use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
 };
-use crate::app::EngineGlobal;
 use crate::chart::view::{find_series, find_tiered};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, LegendStyle,
@@ -54,6 +53,7 @@ use crate::chart::{
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
 use crate::i18n::tr;
 use crate::settings_global::{Section, TlSettings};
@@ -1133,6 +1133,10 @@ impl FanPage {
 }
 
 impl DevicePage for FanPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }
@@ -1804,6 +1808,8 @@ pub struct BatteryPage {
     settings_versions: [u64; 4],
     style_version: u64,
     words: BatWords,
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -1811,6 +1817,7 @@ pub struct BatteryPage {
 
 impl BatteryPage {
     pub fn new(
+        host: &HostContext,
         key: DeviceKey,
         row: DeviceRow,
         hub: Entity<SnapshotHub>,
@@ -1866,6 +1873,7 @@ impl BatteryPage {
             settings_versions: section_versions(cx),
             style_version: metrics(cx).style_version,
             words,
+            host: host.clone(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -1940,7 +1948,7 @@ impl BatteryPage {
             let history = record.and_then(|b| b.history.clone());
             // The worker drops the history when it reconnects: ask again.
             if self.active && self.history_seen && history.is_none() {
-                self.request_history(cx);
+                self.request_history();
             }
             self.history_seen = history.is_some();
             changed |= self.sync_history(history, cx);
@@ -1958,11 +1966,11 @@ impl BatteryPage {
     }
 
     /// Sends the history fetch for this battery. Only a system battery shows the history.
-    fn request_history(&self, cx: &mut App) {
+    fn request_history(&self) {
         let (true, Some(native_path)) = (self.is_system, self.native_path.clone()) else {
             return;
         };
-        let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        let Some(engine) = self.host.client() else {
             return;
         };
         match engine.send(Command::Device(DeviceCommand::BatteryHistory {
@@ -2100,6 +2108,10 @@ impl BatteryPage {
 }
 
 impl DevicePage for BatteryPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }
@@ -2204,15 +2216,12 @@ impl DevicePage for BatteryPage {
         self.active = active;
         if active {
             self.send_demand(cx);
-            self.request_history(cx);
+            self.request_history();
             let this = self.this.clone();
             self.refresh = Some(cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor().timer(HISTORY_REFRESH).await;
-                    if this
-                        .update(cx, |page, cx| page.request_history(cx))
-                        .is_err()
-                    {
+                    if this.update(cx, |page, _| page.request_history()).is_err() {
                         break;
                     }
                 }

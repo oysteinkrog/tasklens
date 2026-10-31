@@ -56,8 +56,8 @@ use self::filter::FilterBinding;
 use self::history::HistoryPage;
 use self::run::{RunOptions, run_process_action_with};
 use crate::components::toast::ToastKind;
-use crate::demand::GlobalDemand;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
@@ -66,7 +66,7 @@ use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
+use crate::window::main::{PauseChanged, ShellPage};
 use crate::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::window::status::{StatusAction, StatusChanged};
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
@@ -112,6 +112,8 @@ const SECTIONS: [Section; 4] = [
 
 /// The entity behind the Processes tab. Built on the first visit and kept (ADR-009).
 pub struct ProcessesPage {
+    /// The host this page shows. Set when it opens; never changes.
+    host: HostContext,
     table: Entity<TlTreeTable<ProcessDelegate>>,
     /// Created in `new`, never in render.
     _hub_sub: Subscription,
@@ -158,9 +160,12 @@ impl EventEmitter<StatusChanged> for ProcessesPage {}
 
 impl ProcessesPage {
     /// Builds the table over the hub's current snapshot, sends the first table query
-    /// (generation 1) and subscribes to the hub. Needs `GlobalHub`.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let hub = cx.global::<GlobalHub>().0.clone();
+    /// (generation 1) and subscribes to the hub. Needs the host's hub.
+    pub fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let hub = host
+            .hub()
+            .expect("the Processes page needs the host's hub")
+            .clone();
         let (snapshot, client) = {
             let hub = hub.read(cx);
             (Arc::clone(hub.current()), Arc::clone(hub.client()))
@@ -173,7 +178,7 @@ impl ProcessesPage {
         } else {
             (Settings::default(), UiState::default())
         };
-        let mut delegate = ProcessDelegate::new(snapshot, &settings, &state, window, cx);
+        let mut delegate = ProcessDelegate::new(host, snapshot, &settings, &state, window, cx);
         delegate.set_window(Some(window.window_handle()));
         delegate.set_page(cx.weak_entity());
         delegate.query_mut().bump_and_send(&*client);
@@ -213,7 +218,7 @@ impl ProcessesPage {
         // Snapshot installs and selection changes both notify the table.
         subs.push(cx.observe(&table, |this, _, cx| this.refresh_status(false, cx)));
         // The shell owns the Ctrl rule and the chip's paused tag (E20-012).
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+        if let Some(events) = host.events().cloned() {
             subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
                 this.set_paused(ev.0, cx);
             }));
@@ -222,16 +227,13 @@ impl ProcessesPage {
             .try_global::<TlSettings>()
             .map_or([0; 4], |tl| SECTIONS.map(|s| tl.version(s)));
         jump::register_show_hidden(cx);
-        let minigraphs = cx
-            .try_global::<GlobalDemand>()
-            .map(|d| d.0.clone())
-            .map(|demand| {
-                cx.new(|cx| {
-                    let mut panel = MinigraphPanel::new(&hub, &demand, cx);
-                    panel.set_own_space(true);
-                    panel
-                })
-            });
+        let minigraphs = host.demand().cloned().map(|demand| {
+            cx.new(|cx| {
+                let mut panel = MinigraphPanel::new(host, &hub, &demand, cx);
+                panel.set_own_space(true);
+                panel
+            })
+        });
         let history_mode = state.processes.history_mode;
         let state_version = cx
             .try_global::<TlSettings>()
@@ -239,11 +241,12 @@ impl ProcessesPage {
         let mut history = None;
         let mut history_focus = None;
         if history_mode {
-            let page = cx.new(|cx| HistoryPage::new(window, cx));
+            let page = cx.new(|cx| HistoryPage::new(host, window, cx));
             history_focus = Some(page.read(cx).table().read(cx).focus_handle().clone());
             history = Some(page);
         }
         Self {
+            host: host.clone(),
             table,
             _hub_sub: hub_sub,
             focus,
@@ -254,7 +257,7 @@ impl ProcessesPage {
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             menu_targets: None,
             jump: jump::JumpState::default(),
-            filter: FilterBinding::new(cx),
+            filter: FilterBinding::new(host, cx),
             paused: None,
             minigraphs,
             status_counts: StatusCounts::default(),
@@ -283,7 +286,8 @@ impl ProcessesPage {
             return;
         }
         if want {
-            let page = cx.new(|cx| HistoryPage::new(window, cx));
+            let host = &self.host;
+            let page = cx.new(|cx| HistoryPage::new(host, window, cx));
             let focus = page.read(cx).table().read(cx).focus_handle().clone();
             if self.paused.is_some() {
                 page.update(cx, |p, cx| p.set_paused(true, cx));
@@ -327,7 +331,14 @@ impl ProcessesPage {
         let Some(view) = d.query().shown() else {
             return;
         };
-        let helper = cx.global::<GlobalHub>().0.read(cx).current().health.helper;
+        let helper = self
+            .host
+            .hub()
+            .expect("the Processes page needs the host's hub")
+            .read(cx)
+            .current()
+            .health
+            .helper;
         let counts = if view.query_generation == d.query().generation() {
             StatusCounts {
                 helper,
@@ -408,7 +419,11 @@ impl ProcessesPage {
             self.refresh_status(false, cx);
         }
         let paused = self.paused.is_some();
-        let hub = cx.global::<GlobalHub>().0.clone();
+        let hub = self
+            .host
+            .hub()
+            .expect("the Processes page needs the host's hub")
+            .clone();
         let snapshot = Arc::clone(hub.read(cx).current());
         let client = &*self.client;
         self.table.update(cx, |t, cx| {
@@ -560,6 +575,7 @@ impl ProcessesPage {
             .collect();
         let mut process_cap_notified = false;
         let mut app_cap_notified = false;
+        let host = self.host.clone();
         for target in targets.items {
             match (target.kind, target.node) {
                 (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
@@ -569,7 +585,7 @@ impl ProcessesPage {
                         &mut process_cap_notified,
                         cx,
                     ) {
-                        crate::windows::props::open_process_properties(key, cx);
+                        crate::windows::props::open_process_properties(&host, key, cx);
                     }
                 }
                 (RowKind::App, NodeId::Group(group)) => {
@@ -579,7 +595,7 @@ impl ProcessesPage {
                         &mut app_cap_notified,
                         cx,
                     ) {
-                        crate::windows::app_props::open_app_properties(group, cx);
+                        crate::windows::app_props::open_app_properties(&host, group, cx);
                     }
                 }
                 (RowKind::Unit, node @ NodeId::Unit(_)) => {
@@ -591,7 +607,7 @@ impl ProcessesPage {
                             cx,
                         )
                     {
-                        crate::windows::app_props::open_app_properties(*group, cx);
+                        crate::windows::app_props::open_app_properties(&host, *group, cx);
                     }
                 }
                 _ => {}
@@ -618,7 +634,7 @@ impl ProcessesPage {
             snapshot: Some(Arc::clone(self.table.read(cx).delegate.snapshot())),
             on_sent: None,
         };
-        run_process_action_with(action, targets, options, window, cx);
+        run_process_action_with(&self.host, action, targets, options, window, cx);
     }
 
     fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -637,9 +653,8 @@ impl ProcessesPage {
     /// "Process window shown." The bridge does not answer an activation (ADR-005), so the toast
     /// follows the send. A window gone from the live windows snapshot gets "No window found".
     fn on_activate_window(&mut self, a: &ActivateWindow, _: &mut Window, cx: &mut Context<Self>) {
-        let internal_id = cx.try_global::<GlobalHub>().and_then(|hub| {
-            hub.0
-                .read(cx)
+        let internal_id = self.host.hub().and_then(|hub| {
+            hub.read(cx)
                 .current()
                 .windows
                 .windows

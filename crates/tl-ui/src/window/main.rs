@@ -75,17 +75,16 @@ use crate::actions::{
 };
 use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{
-    AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, StartOptions, ToastKindTag, UiExit,
-    request_exit,
+    AppRequestHandler, BootSettings, OpenHooks, StartOptions, ToastKindTag, UiExit, request_exit,
 };
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
 use crate::pages::connections::actions::GoToConnection;
@@ -264,23 +263,47 @@ impl PageSlot {
     }
 }
 
-/// Builds one page on its first visit.
+/// Builds one page of the main window's host on its first visit.
+pub type PageBuilder = fn(&HostContext, &mut Window, &mut Context<MainWindow>) -> PageSlot;
+
+/// Builds a fake page for shell tests. A fake page needs no host.
 pub type PageFactory = fn(&mut Window, &mut Context<MainWindow>) -> PageSlot;
 
+/// Where a tab's page comes from: its page arm, or a test page.
+#[derive(Clone, Copy)]
+enum PageSource {
+    Page(PageBuilder),
+    #[cfg(any(test, feature = "test-hooks"))]
+    Test(PageFactory),
+}
+
+impl PageSource {
+    fn build(
+        self,
+        host: &HostContext,
+        window: &mut Window,
+        cx: &mut Context<MainWindow>,
+    ) -> PageSlot {
+        match self {
+            Self::Page(build) => build(host, window, cx),
+            #[cfg(any(test, feature = "test-hooks"))]
+            Self::Test(build) => build(window, cx),
+        }
+    }
+}
+
 /// The page match. A tab with no arm is not built and not shown (ADR-009, R-023).
-fn page_factory(tab: Tab) -> Option<PageFactory> {
+fn page_factory(tab: Tab) -> Option<PageBuilder> {
     match tab {
         // page arms (chain edits, one per page epic): Processes E22, Performance E24, Services E27,
         // Startup, Connections, Information E28. Form:
-        // Tab::Services => Some(|window, cx| { let page = cx.new(|cx| ServicesPage::new(window, cx)); PageSlot::new(page, cx) }),
-        Tab::Processes => Some(|window, cx| {
-            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+        // Tab::Services => Some(|host, window, cx| { let page = cx.new(|cx| ServicesPage::new(host, window, cx)); PageSlot::new(page, cx) }),
+        Tab::Processes => Some(|host, window, cx| {
+            let page = cx.new(|cx| ProcessesPage::new(host, window, cx));
             PageSlot::new(page, cx)
         }),
-        Tab::Performance => Some(|_, cx| {
-            let hub = cx.global::<GlobalHub>().0.clone();
-            let demand = cx.global::<GlobalDemand>().0.clone();
-            let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        Tab::Performance => Some(|host, _, cx| {
+            let page = cx.new(|cx| PerformancePage::new(host, cx));
             // Graph summary mode replaces the tab strip and the page (UI-PRF-016).
             cx.subscribe(&page, |this, page, _: &SummaryToggled, cx| {
                 let hidden = page.read(cx).summary().is_some();
@@ -291,28 +314,20 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
             .detach();
             PageSlot::new(page, cx)
         }),
-        Tab::Services => Some(|window, cx| {
-            let page = cx.new(|cx| ServicesPage::new(window, cx));
+        Tab::Services => Some(|host, window, cx| {
+            let page = cx.new(|cx| ServicesPage::new(host, window, cx));
             PageSlot::new(page, cx)
         }),
-        Tab::Startup => Some(|window, cx| {
-            let hub = cx.global::<GlobalHub>().0.clone();
-            let demand = cx.global::<GlobalDemand>().0.clone();
-            let client = cx.global::<EngineGlobal>().0.clone();
-            let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+        Tab::Startup => Some(|host, window, cx| {
+            let page = cx.new(|cx| StartupPage::new(host, window, cx));
             PageSlot::new(page, cx)
         }),
-        Tab::Connections => Some(|window, cx| {
-            let hub = cx.global::<GlobalHub>().0.clone();
-            let demand = cx.global::<GlobalDemand>().0.clone();
-            let client = cx.global::<EngineGlobal>().0.clone();
-            let page = cx.new(|cx| ConnectionsPage::new(&hub, &demand, client, window, cx));
+        Tab::Connections => Some(|host, window, cx| {
+            let page = cx.new(|cx| ConnectionsPage::new(host, window, cx));
             PageSlot::new(page, cx)
         }),
-        Tab::Information => Some(|window, cx| {
-            let hub = cx.global::<GlobalHub>().0.clone();
-            let demand = cx.global::<GlobalDemand>().0.clone();
-            let page = cx.new(|cx| InformationPage::new(&hub, &demand, window, cx));
+        Tab::Information => Some(|host, window, cx| {
+            let page = cx.new(|cx| InformationPage::new(host, window, cx));
             PageSlot::new(page, cx)
         }),
     }
@@ -341,17 +356,17 @@ pub fn set_test_page(cx: &mut App, tab: Tab, factory: PageFactory) {
     cx.default_global::<TestPages>().0[tab as usize] = Some(factory);
 }
 
-/// The factory for `tab`: a test page if one is set, else the page match.
-fn factory_for(tab: Tab, cx: &App) -> Option<PageFactory> {
+/// The source for `tab`: a test page if one is set, else the page match.
+fn factory_for(tab: Tab, cx: &App) -> Option<PageSource> {
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(factory) = cx
         .try_global::<TestPages>()
         .and_then(|pages| pages.0[tab as usize])
     {
-        return Some(factory);
+        return Some(PageSource::Test(factory));
     }
     let _ = cx;
-    page_factory(tab)
+    page_factory(tab).map(PageSource::Page)
 }
 
 /// `Tab::ALL` filtered by the page match, in R-023 order.
@@ -385,6 +400,7 @@ impl EventEmitter<FilterChanged> for ShellEvents {}
 impl EventEmitter<PauseChanged> for ShellEvents {}
 impl EventEmitter<MemGroupCleared> for ShellEvents {}
 
+/// The local host's shell event bus. Read only through [`crate::host::HostContext`].
 pub struct GlobalShellEvents(pub Entity<ShellEvents>);
 
 impl Global for GlobalShellEvents {}
@@ -407,6 +423,9 @@ pub struct ShellState {
     /// Keep-above of the open secondary windows, in memory only (E20-029, R-073). A key is
     /// dropped when its window leaves the registry.
     pub secondary_pins: FxHashMap<WindowKey, bool>,
+    /// The host the main window shows, set when it opens. Read through
+    /// [`HostContext::shown`].
+    pub shown_host: Option<HostContext>,
 }
 
 impl Global for ShellState {}
@@ -421,6 +440,7 @@ impl Default for ShellState {
             history_mode: false,
             paused: false,
             secondary_pins: FxHashMap::default(),
+            shown_host: None,
         }
     }
 }
@@ -470,7 +490,8 @@ fn auto_fetch_public_ip(cx: &mut App) {
     if !(network.auto_fetch_public_ip && network.public_ip_notice_accepted) {
         return;
     }
-    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+    // Startup step of this PC's window: the local host.
+    let Some(engine) = HostContext::local_client(cx).cloned() else {
         return;
     };
     let fetch = || Command::Device(DeviceCommand::FetchPublicIp);
@@ -553,7 +574,8 @@ pub fn init(cx: &mut App) {
         .detach();
     }
     cx.set_global(KeepAboveState::default());
-    if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+    // Keep-above acts on this PC's own windows: the local host's KWin bridge.
+    if let Some(hub) = HostContext::local_hub(cx).cloned() {
         cx.subscribe(&hub, |_, ev: &SnapshotChanged, cx| {
             if ev.mask.intersects(ComponentMask::WINDOWS) {
                 on_windows_changed(cx);
@@ -596,7 +618,7 @@ fn toggle_secondary_pin(key: WindowKey, caption: &SharedString, cx: &mut App) {
     let pins = &mut cx.default_global::<ShellState>().secondary_pins;
     let on = !pins.get(&key).copied().unwrap_or(false);
     pins.insert(key, on);
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+    let Some(engine) = HostContext::local_client(cx) else {
         return;
     };
     let cmd = Command::KWin(KWinCommand::KeepAbove {
@@ -604,7 +626,7 @@ fn toggle_secondary_pin(key: WindowKey, caption: &SharedString, cx: &mut App) {
         caption: Some(Arc::from(caption.as_ref())),
         on,
     });
-    if engine.0.send(cmd).is_err() {
+    if engine.send(cmd).is_err() {
         warn!(target: "tasklens::ui", "keep above not sent");
     }
 }
@@ -620,10 +642,10 @@ fn keep_above_main(on: bool, cx: &mut App) {
 }
 
 fn send_keep_above(on: bool, cx: &App) -> Result<(), CommandError> {
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+    let Some(engine) = HostContext::local_client(cx) else {
         return Err(CommandError::EngineStopped);
     };
-    engine.0.send(Command::KWin(KWinCommand::KeepAbove {
+    engine.send(Command::KWin(KWinCommand::KeepAbove {
         pid: std::process::id(),
         caption: None,
         on,
@@ -866,8 +888,8 @@ fn activate_main(cx: &mut App) {
 /// Sends `KWin(Activate)` for this process's window titled [`WINDOW_TITLE`]. Nothing when the
 /// windows snapshot has no such window.
 fn kwin_activate_main(cx: &mut App) {
-    let Some(internal_id) = cx.try_global::<GlobalHub>().and_then(|hub| {
-        let windows = &hub.0.read(cx).current().windows;
+    let Some(internal_id) = HostContext::local_hub(cx).and_then(|hub| {
+        let windows = &hub.read(cx).current().windows;
         windows
             .for_pid(std::process::id())
             .iter()
@@ -876,7 +898,7 @@ fn kwin_activate_main(cx: &mut App) {
     }) else {
         return;
     };
-    let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+    let Some(engine) = HostContext::local_client(cx).cloned() else {
         return;
     };
     if let Err(err) = engine.send(Command::KWin(KWinCommand::Activate { internal_id })) {
@@ -1205,6 +1227,9 @@ pub fn first_frame_ms_from(stat: &str, uptime: &str) -> Option<u64> {
 
 /// The main window's root view.
 pub struct MainWindow {
+    /// The host this window shows (ADR-018 "Hosts"). Its pages, menus and the dialogs opened
+    /// from them are built with it. With one host it is the local host.
+    host: HostContext,
     /// Key context "Global".
     root_focus: FocusHandle,
     titlebar: Entity<TitleBarView>,
@@ -1300,9 +1325,11 @@ impl MainWindow {
         let built = cx
             .try_global::<ShellState>()
             .map_or_else(|| built_tabs(cx), |state| state.built_tabs.clone());
+        let host = HostContext::local(cx);
+        cx.default_global::<ShellState>().shown_host = Some(host.clone());
         let titlebar = cx.new(|cx| TitleBarView::new(window, cx));
         let tabstrip = cx.new(|cx| TabStrip::new(built, start, window, cx));
-        let filter = cx.new(|cx| FilterBox::new(start, window, cx));
+        let filter = cx.new(|cx| FilterBox::new(start, host.events().cloned(), window, cx));
         let status = cx.new(StatusChip::new);
         let client = is_client(window, cx);
         let top = toast_top(client, s);
@@ -1310,16 +1337,16 @@ impl MainWindow {
         let anim = cx.new(AnimationDriver::new);
         AnimationDriver::register(&anim, window, cx);
         crate::theme::store::set_anim_window(window.window_handle(), cx);
-        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+        if let Some(demand) = host.demand().cloned() {
             let handle = window.window_handle();
             demand.update(cx, |demand, _| demand.set_main_window(handle));
         }
 
         let fps = cx.new(FpsOverlay::new);
-        let machine_status = cx
-            .try_global::<GlobalHub>()
-            .map(|h| h.0.clone())
-            .zip(cx.try_global::<GlobalDemand>().map(|d| d.0.clone()))
+        let machine_status = host
+            .hub()
+            .cloned()
+            .zip(host.demand().cloned())
             .map(|(hub, demand)| machine_status::status_bar(&hub, &demand, cx));
 
         let mut subs = SmallVec::new();
@@ -1411,7 +1438,7 @@ impl MainWindow {
             |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
         ));
         // Health items in the status chip (E20-016), and the frame note for hidden detection.
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        if let Some(hub) = host.hub().cloned() {
             subs.push(cx.subscribe_in(
                 &hub,
                 window,
@@ -1428,7 +1455,8 @@ impl MainWindow {
                         // A new pick result, read from the live snapshot (E22-045, PROC-055).
                         let windows = Arc::clone(&hub.read(cx).current().windows);
                         if let Some(result) = this.pick_watch.take(&windows) {
-                            pick::on_pick_result(this, result, window, cx);
+                            let host = this.host.clone();
+                            pick::on_pick_result(&host, this, result, window, cx);
                         }
                         if this.picking && !keep_above_supported(cx) {
                             this.end_window_pick(cx);
@@ -1452,12 +1480,13 @@ impl MainWindow {
         });
         // A pick result already in the hub belongs to an earlier main window; picks from this
         // one continue its sequence.
-        let pick_watch = cx
-            .try_global::<GlobalHub>()
-            .map(|hub| PickWatch::new(&hub.0.read(cx).current().windows))
+        let pick_watch = host
+            .hub()
+            .map(|hub| PickWatch::new(&hub.read(cx).current().windows))
             .unwrap_or_default();
 
         let mut this = Self {
+            host,
             root_focus,
             titlebar,
             tabstrip,
@@ -1581,6 +1610,11 @@ impl MainWindow {
 
     pub fn toasts(&self) -> &Entity<ToastQueue> {
         &self.toasts
+    }
+
+    /// The host this window shows.
+    pub fn host(&self) -> &HostContext {
+        &self.host
     }
 
     /// The shell filter box. E20-A2 routes type-to-filter through it.
@@ -1726,7 +1760,7 @@ impl MainWindow {
         if self.picking {
             return;
         }
-        let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) else {
+        let Some(engine) = self.host.client().cloned() else {
             return;
         };
         let seq = self.pick_seq + 1;
@@ -1755,7 +1789,7 @@ impl MainWindow {
         if !self.picking {
             return;
         }
-        if let Some(engine) = cx.try_global::<EngineGlobal>().map(|e| e.0.clone()) {
+        if let Some(engine) = self.host.client().cloned() {
             let cmd = Command::KWin(KWinCommand::CancelPick { seq: self.pick_seq });
             if let Err(err) = engine.send(cmd) {
                 warn!(target: "tasklens::ui", ?err, "window pick cancel not sent");
@@ -1842,7 +1876,7 @@ impl MainWindow {
         if self.try_select_pid(pid, window, cx) {
             return;
         }
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         let sub = cx.subscribe_in(
@@ -1881,8 +1915,8 @@ impl MainWindow {
 
     /// Jumps to `pid` when the hub's current snapshot has a non-exited record with it.
     fn try_select_pid(&mut self, pid: u32, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let live = cx.try_global::<GlobalHub>().is_some_and(|hub| {
-            hub.0.read(cx).current().processes.records.iter().any(|r| {
+        let live = self.host.hub().is_some_and(|hub| {
+            hub.read(cx).current().processes.records.iter().any(|r| {
                 r.key.pid == pid && !r.flags.contains(tl_model::process::ProcFlags::EXITED)
             })
         });
@@ -1935,7 +1969,7 @@ impl MainWindow {
         state.paused = paused;
         self.status
             .update(cx, |chip, cx| chip.set_paused(paused, cx));
-        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+        if let Some(events) = self.host.events().cloned() {
             events.update(cx, |_, cx| cx.emit(PauseChanged(paused)));
         }
     }
@@ -2091,7 +2125,7 @@ impl MainWindow {
         if self.pages[tab as usize].is_none()
             && let Some(factory) = factory_for(tab, cx)
         {
-            self.pages[tab as usize] = Some(factory(window, cx));
+            self.pages[tab as usize] = Some(factory.build(&self.host.clone(), window, cx));
         }
         self.active = tab;
         if let Some(page) = &self.pages[tab as usize] {
@@ -2152,8 +2186,8 @@ impl MainWindow {
         model.helper_installed = cx.try_global::<HelperInstalled>().is_some_and(|h| h.0);
         model.picker_available = keep_above_supported(cx);
         model.picking = self.picking;
-        if let Some(hub) = cx.try_global::<GlobalHub>() {
-            model.helper = hub.0.read(cx).current().health.helper;
+        if let Some(hub) = self.host.hub() {
+            model.helper = hub.read(cx).current().health.helper;
         }
         model
     }
@@ -2219,7 +2253,7 @@ impl MainWindow {
     /// Passes the hub's health snapshot and the active tab to the chip. While the chip shows a
     /// Stale item, a 1 s timer calls this again so the tooltip age moves.
     fn sync_health(&mut self, cx: &mut Context<Self>) {
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         let health = hub.read(cx).current().health.clone();
@@ -2545,7 +2579,7 @@ impl Render for FpsOverlay {
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        if let Some(hub) = self.host.hub().cloned() {
             hub.update(cx, |hub, cx| hub.note_render(cx));
         }
         let bg = current(cx).window_bg;

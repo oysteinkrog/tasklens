@@ -39,17 +39,14 @@ use tracing::{debug, warn};
 
 #[cfg(any(test, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
-use crate::action_tracker::{
-    ActionTracker, ActionTrackerEvent, GlobalActionTracker, ToastTexts, action_words, message,
-};
+use crate::action_tracker::{ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message};
 use crate::actions::RefreshCurrentTab;
-use crate::app::EngineGlobal;
 use crate::components::dialog::TlDialog;
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
 use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::demand::{DemandAggregator, GlobalDemand};
-use crate::hub::GlobalHub;
+use crate::demand::DemandAggregator;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args, tr_en};
 use crate::table::TreeTableDelegate;
 use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
@@ -175,9 +172,10 @@ impl SysPageState {
     }
 
     /// The tab became active: turns the page's demand on. The first call of the session also
-    /// sends `RefreshNow` for each source and the query.
+    /// sends `RefreshNow` for each source and the query to `host`'s engine.
     pub fn on_activated(
         &mut self,
+        host: &HostContext,
         query: &mut SysQuery,
         demand: &Entity<DemandAggregator>,
         cx: &mut App,
@@ -188,7 +186,7 @@ impl SysPageState {
             return;
         }
         self.first_visit_done = true;
-        let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) else {
+        let Some(client) = host.client() else {
             return;
         };
         for id in &self.source_ids {
@@ -196,7 +194,7 @@ impl SysPageState {
                 debug!(target: "tasklens::ui", source = ?id, error = ?e, "refresh not sent");
             }
         }
-        query.resend(&*client);
+        query.resend(&**client);
     }
 
     /// The tab was left: withdraws the page's demand.
@@ -997,6 +995,8 @@ pub fn loading_status_text(cx: &App) -> SharedString {
 /// `SnapshotChanged`, the shell's `FilterChanged` and `PauseChanged` and its activation to it,
 /// and notifies itself when a method returns true. The frame never notifies the page.
 pub struct SysTableFrame<D: SysDelegate> {
+    /// The host this table shows. Set when it opens; never changes.
+    host: HostContext,
     pub table: Entity<TlTreeTable<D>>,
     pub query: SysQuery,
     pub state: SysPageState,
@@ -1024,6 +1024,7 @@ impl<D: SysDelegate> SysTableFrame<D> {
     /// Builds the table around `delegate`. Nothing is sent until the first `on_activated`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        host: &HostContext,
         tab: Tab,
         key_context: &'static str,
         sources: &[SourceId],
@@ -1034,12 +1035,13 @@ impl<D: SysDelegate> SysTableFrame<D> {
         cx: &mut App,
     ) -> Self {
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
-        let tracker = cx
-            .try_global::<GlobalActionTracker>()
-            .map(|t| t.0.clone())
-            .expect("TasklensUi::init installs the action tracker");
+        let tracker = host
+            .tracker()
+            .cloned()
+            .expect("a system table needs the host's action tracker");
         let actions = cx.new(|cx| SysActions::new(&tracker, cx));
         Self {
+            host: host.clone(),
             table,
             query: SysQuery::new(sys_table_of(tab), sort, services),
             state: SysPageState::new(tab, sources),
@@ -1060,8 +1062,8 @@ impl<D: SysDelegate> SysTableFrame<D> {
         if !mask.intersects(table_mask) {
             return false;
         }
-        if let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) {
-            self.query.on_snapshot(&*client);
+        if let Some(client) = self.host.client() {
+            self.query.on_snapshot(&**client);
         }
         self.apply(snap, cx)
     }
@@ -1126,41 +1128,39 @@ impl<D: SysDelegate> SysTableFrame<D> {
         if paused {
             return false;
         }
-        let Some(snap) = cx
-            .try_global::<GlobalHub>()
-            .map(|h| Arc::clone(h.0.read(cx).current()))
-        else {
+        let Some(snap) = self.host.hub().map(|h| Arc::clone(h.read(cx).current())) else {
             return false;
         };
         self.apply(&snap, cx)
     }
 
     /// The shell's debounced filter text for this tab.
-    pub fn on_filter_changed(&mut self, text: &str, cx: &mut App) {
-        if let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) {
-            self.query.set_filter(text, &*client);
+    pub fn on_filter_changed(&mut self, text: &str, _cx: &mut App) {
+        if let Some(client) = self.host.client() {
+            self.query.set_filter(text, &**client);
         }
     }
 
     /// The tab became active: demand on, and on the first visit a refresh and the query.
     pub fn on_activated(&mut self, cx: &mut App) {
-        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
-        self.state.on_activated(&mut self.query, &demand, cx);
+        self.state
+            .on_activated(&self.host, &mut self.query, &demand, cx);
     }
 
     /// The tab was left: demand off.
     pub fn on_deactivated(&mut self, cx: &mut App) {
-        let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) else {
+        let Some(demand) = self.host.demand().cloned() else {
             return;
         };
         self.state.on_deactivated(&demand, cx);
     }
 
     /// F5 (`RefreshCurrentTab`): `RefreshNow` for each source. Services adds its own toast.
-    pub fn refresh(&mut self, cx: &mut App) {
-        let Some(client) = cx.try_global::<EngineGlobal>().map(|g| Arc::clone(&g.0)) else {
+    pub fn refresh(&mut self, _cx: &mut App) {
+        let Some(client) = self.host.client() else {
             return;
         };
         for id in &self.state.source_ids {

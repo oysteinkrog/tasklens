@@ -46,9 +46,8 @@ use super::actions::{
     StartHandleSearch, StopHandleSearch,
 };
 use super::frame::{PwnWindow, TITLE_HANDLE_SEARCH, pwn_window_spec};
-use crate::action_tracker::{GlobalActionTracker, ToastTexts, action_words};
+use crate::action_tracker::{ToastTexts, action_words};
 use crate::actions::OpenHandleSearch;
-use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::input::{TlInputSize, TlTextInput};
@@ -58,7 +57,8 @@ use crate::components::shield::StartHelperSession;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
-use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::SnapshotChanged;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
@@ -236,10 +236,10 @@ fn strings_version(cx: &App) -> Option<u64> {
     cx.try_global::<Strings>().map(|s| s.strings_version)
 }
 
-fn send(cmd: Command, cx: &App) {
-    match cx.try_global::<EngineGlobal>() {
+fn send(host: &HostContext, cmd: Command) {
+    match host.client() {
         Some(engine) => {
-            if let Err(err) = engine.0.send(cmd) {
+            if let Err(err) = engine.send(cmd) {
                 warn!(target: "tasklens::ui", ?err, "handle search command not sent");
             }
         }
@@ -853,14 +853,15 @@ fn confirm_kind(targets: &[CapturedTarget], kill: bool, cx: &App) -> Option<Conf
     })
 }
 
-/// Sends `request` through the app's `ActionTracker`; its toasts go to `queue`.
+/// Sends `request` through `host`'s `ActionTracker`; its toasts go to `queue`.
 fn submit(
+    host: &HostContext,
     request: ActionRequest,
     queue: WeakEntity<ToastQueue>,
     texts: ToastTexts,
     cx: &mut App,
 ) -> Option<ActionId> {
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "no action tracker; the handle search action was not sent");
         return None;
     };
@@ -888,13 +889,20 @@ fn go_to_process(key: ProcessKey, cx: &mut App) {
 /// `TasklensUi::init` calls it.
 pub fn init(cx: &mut App) {
     // Deferred: from a menu the main window is mid-update.
-    cx.on_action(|_: &OpenHandleSearch, cx| cx.defer(open_handle_search));
+    cx.on_action(|_: &OpenHandleSearch, cx| {
+        cx.defer(|cx| {
+            // App-level: the search runs on the host the main window shows now.
+            let host = HostContext::shown(cx);
+            open_handle_search(&host, cx);
+        })
+    });
 }
 
-/// Activates the open Handle Search window, or opens one. Without a window registry (tests) it
-/// always opens one.
-pub fn open_handle_search(cx: &mut App) {
-    let open = |cx: &mut App| {
+/// Activates the open Handle Search window, or opens one on `host`. Without a window registry
+/// (tests) it always opens one.
+pub fn open_handle_search(host: &HostContext, cx: &mut App) {
+    let host = host.clone();
+    let open = move |cx: &mut App| {
         let spec = pwn_window_spec(
             cx,
             PwnWindow::HandleSearch,
@@ -903,7 +911,7 @@ pub fn open_handle_search(cx: &mut App) {
         )
         .key(WindowKey::HandleSearch);
         let handle = TlSecondaryWindow::open(cx, spec, |window, cx| {
-            cx.new(|cx| HandleSearchWindow::new(window, cx))
+            cx.new(|cx| HandleSearchWindow::new(&host, window, cx))
         })?;
         Ok(handle.into())
     };
@@ -921,6 +929,8 @@ pub fn open_handle_search(cx: &mut App) {
 
 /// The content of the Handle Search window.
 pub struct HandleSearchWindow {
+    /// The host this window shows. Set when it opens; never changes.
+    host: HostContext,
     pattern: Entity<InputState>,
     include_maps: bool,
     /// The current search; payloads of any other id are dropped.
@@ -953,7 +963,7 @@ impl HandleSearchWindow {
         TlSecondaryWindow::<Self>::find(handle, cx).map(|frame| frame.read(cx).content().clone())
     }
 
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(host: &HostContext, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let words = Rc::new(HandleSearchWords::new(cx));
         let pattern = cx.new(|cx| InputState::new(window, cx));
         pattern.update(cx, |s, cx| s.focus(window, cx));
@@ -963,7 +973,7 @@ impl HandleSearchWindow {
                 cx.notify();
             }
         }));
-        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        let hub = host.hub().cloned();
         if let Some(hub) = &hub {
             subs.push(cx.subscribe_in(
                 hub,
@@ -989,9 +999,9 @@ impl HandleSearchWindow {
             }
         }));
         // Closing the window while searching stops the search.
-        cx.on_release(|this, cx| {
+        cx.on_release(|this, _| {
             if let (SearchStatus::Searching, Some(id)) = (this.state, this.search) {
-                send(Command::CancelHandleSearch(id), cx);
+                send(&this.host, Command::CancelHandleSearch(id));
             }
         })
         .detach();
@@ -1002,6 +1012,7 @@ impl HandleSearchWindow {
         let delegate = HandleHitsDelegate::new(words.clone(), procs.clone());
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         let mut this = Self {
+            host: host.clone(),
             pattern,
             include_maps: true,
             search: None,
@@ -1133,13 +1144,13 @@ impl HandleSearchWindow {
         self.failed_toast = false;
         self.state = SearchStatus::Searching;
         send(
+            &self.host,
             Command::HandleSearch {
                 search: id,
                 pattern: text.as_str().into(),
                 include_maps: self.include_maps,
                 privileged,
             },
-            cx,
         );
         cx.notify();
     }
@@ -1147,7 +1158,7 @@ impl HandleSearchWindow {
     /// Stops a running search and keeps its results.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let (SearchStatus::Searching, Some(id)) = (self.state, self.search) {
-            send(Command::CancelHandleSearch(id), cx);
+            send(&self.host, Command::CancelHandleSearch(id));
             self.state = SearchStatus::Stopped;
             cx.notify();
         }
@@ -1261,7 +1272,7 @@ impl HandleSearchWindow {
         // At the cap the search stops and the status says so.
         if self.state == SearchStatus::Searching && self.hits >= HANDLE_HIT_CAP {
             if let Some(id) = self.search {
-                send(Command::CancelHandleSearch(id), cx);
+                send(&self.host, Command::CancelHandleSearch(id));
             }
             self.state = SearchStatus::Done;
         }
@@ -1372,15 +1383,16 @@ impl HandleSearchWindow {
             privileged: false,
         };
         let Some(ask) = ask else {
-            submit(request, queue, texts, cx);
+            submit(&self.host, request, queue, texts, cx);
             return;
         };
         let parent = window.window_handle();
+        let host = self.host.clone();
         // The dialog opens modal to this window, which is being updated now.
         cx.defer(move |cx| {
             confirm(ask, parent, cx, move |result, cx| {
                 if result == ConfirmResult::Confirmed {
-                    submit(request, queue, texts, cx);
+                    submit(&host, request, queue, texts, cx);
                 }
             });
         });
@@ -1493,7 +1505,7 @@ impl HandleSearchWindow {
             privileged: false,
         };
         let texts = ToastTexts::new(SharedString::default(), self.words.open_failed.clone());
-        if submit(request, queue, texts, cx).is_some() {
+        if submit(&self.host, request, queue, texts, cx).is_some() {
             toast(window, cx, ToastKind::Info, self.words.opening.clone());
         }
     }

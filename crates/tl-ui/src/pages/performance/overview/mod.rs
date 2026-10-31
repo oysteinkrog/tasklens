@@ -357,6 +357,7 @@ impl OverviewPage {
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
             .detach();
+        let history_kept = range::history_kept(Some(&hub), cx);
 
         let mut this = Self {
             key,
@@ -394,7 +395,7 @@ impl OverviewPage {
             status,
             range: range::current_range(cx),
             bar_on_overview: status_bar::placement(cx) == StatusBarPlacement::Overview,
-            history_kept: range::history_kept(cx),
+            history_kept,
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
             _subs: subs,
             _activation: None,
@@ -576,7 +577,7 @@ impl OverviewPage {
             self.bar_on_overview = bar_on_overview;
             self.notify(cx);
         }
-        let history_kept = range::history_kept(cx);
+        let history_kept = range::history_kept(Some(&self.hub), cx);
         if history_kept != self.history_kept {
             // Both range switches draw 24 h and 7 d enabled or disabled.
             self.history_kept = history_kept;
@@ -623,7 +624,7 @@ impl OverviewPage {
         let Some(click) = timeline::click_from_key(&a.click) else {
             return;
         };
-        if !timeline::click_choices(cx).contains(&click) {
+        if !timeline::click_choices(Some(&self.hub), cx).contains(&click) {
             return;
         }
         TlSettings::update(cx, |d| d.settings.performance.timeline_click = click);
@@ -1044,7 +1045,8 @@ impl OverviewPage {
     /// The page has no title row: the sidebar names the page (tasklens-o55.54). `None` when the
     /// row would be empty, so the boxes start right under the top strip.
     fn range_header(&self, cx: &App) -> Option<AnyElement> {
-        let switch = (!self.bar_on_overview).then(|| range::range_switch(range::HEADER_SWITCH, cx));
+        let switch = (!self.bar_on_overview)
+            .then(|| range::range_switch(range::HEADER_SWITCH, Some(&self.hub), cx));
         let live = self.paused.is_some().then(|| {
             div()
                 .debug_selector(|| timeline::BACK_TO_LIVE_ID.into())
@@ -1096,6 +1098,10 @@ impl OverviewPage {
 }
 
 impl DevicePage for OverviewPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }

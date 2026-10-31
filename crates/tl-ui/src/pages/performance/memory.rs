@@ -2394,6 +2394,10 @@ impl MemoryPage {
 }
 
 impl DevicePage for MemoryPage {
+    fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+        Some(&self.hub)
+    }
+
     fn key(&self) -> &DeviceKey {
         &self.key
     }

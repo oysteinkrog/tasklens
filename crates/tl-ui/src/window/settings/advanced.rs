@@ -20,6 +20,7 @@ use crate::action_tracker::ToastTexts;
 use crate::app::{AdapterInfo, AppEnv};
 use crate::components::button::TlButtonKind;
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::theme::ThemeStore;
@@ -82,8 +83,8 @@ pub(super) fn init(cx: &mut App) {
     });
 }
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Advanced);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Advanced);
     let rendering = tr(cx, "shell-settings-group-rendering");
     let network = tr(cx, "shell-settings-group-network");
     let debug = tr(cx, "shell-settings-group-debug");
@@ -91,8 +92,9 @@ pub fn page(cx: &mut App) -> PageBuilder {
     let toast = tr(cx, "shell-toast-gpu-restart");
     let key = SettingKey::RenderingGpu;
     // Only a change of value toasts: picking the GPU already in use needs no restart.
+    let reader = host.clone();
     let write: PickValue = Rc::new(move |value, cx| {
-        let changed = !value_matches(value, &read(cx, key));
+        let changed = !value_matches(value, &read(&reader, cx, key));
         TlSettings::set(cx, key, value.clone());
         if changed {
             info_toast(toast.clone(), cx);

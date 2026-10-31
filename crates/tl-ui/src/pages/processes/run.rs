@@ -45,9 +45,9 @@ use super::{
     group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
     topmost_window,
 };
-use crate::action_tracker::{ActionTrackerEvent, GlobalActionTracker};
+use crate::action_tracker::ActionTrackerEvent;
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::hub::GlobalHub;
+use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
@@ -70,19 +70,21 @@ pub struct RunOptions {
     pub on_sent: Option<OnSent>,
 }
 
-/// Runs the process command `action` on `targets`, with the hub's current snapshot. Returns
-/// false when `action` is not a process command; nothing happens then.
+/// Runs the process command `action` on `targets` of `host`, with the hub's current snapshot.
+/// Returns false when `action` is not a process command; nothing happens then.
 pub fn run_process_action(
+    host: &HostContext,
     action: &dyn Action,
     targets: CapturedTargets,
     window: &mut Window,
     cx: &mut App,
 ) -> bool {
-    run_process_action_with(action, targets, RunOptions::default(), window, cx)
+    run_process_action_with(host, action, targets, RunOptions::default(), window, cx)
 }
 
 /// [`run_process_action`] with the surface's snapshot and a callback for the sent request ids.
 pub fn run_process_action_with(
+    host: &HostContext,
     action: &dyn Action,
     targets: CapturedTargets,
     options: RunOptions,
@@ -117,15 +119,15 @@ pub fn run_process_action_with(
     if !handled {
         return false;
     }
-    let snapshot = options.snapshot.or_else(|| {
-        cx.try_global::<GlobalHub>()
-            .map(|hub| Arc::clone(hub.0.read(cx).current()))
-    });
+    let snapshot = options
+        .snapshot
+        .or_else(|| host.hub().map(|hub| Arc::clone(hub.read(cx).current())));
     let Some(snapshot) = snapshot else {
         warn!(target: "tasklens::ui", "no snapshot; the process action did not run");
         return true;
     };
     let run = Run {
+        host: host.clone(),
         snapshot,
         queue: toast_queue(window, cx),
         on_sent: options.on_sent,
@@ -169,11 +171,11 @@ pub fn run_process_action_with(
         run.show_window(targets, cx);
     } else if a.is::<OpenVirusTotal>() {
         if let Some(key) = one_process(&targets) {
-            crate::windows::notices::open_virustotal(key, window, cx);
+            crate::windows::notices::open_virustotal(&run.host, key, window, cx);
         }
     } else if a.is::<CreateDump>() {
         if let Some(key) = one_process(&targets) {
-            crate::windows::notices::start_dump(key, window, cx);
+            crate::windows::notices::start_dump(&run.host, key, window, cx);
         }
     } else if let Some(r) = a.downcast_ref::<RestartUnit>() {
         run.restart_unit(r.unit.clone(), cx);
@@ -208,6 +210,8 @@ fn one_process(targets: &CapturedTargets) -> Option<ProcessKey> {
 
 /// One command run: where its toasts go and what its confirmation opens over.
 struct Run {
+    /// The host the command acts on. Set when it runs; never changes.
+    host: HostContext,
     snapshot: Arc<Snapshot>,
     queue: Option<WeakEntity<ToastQueue>>,
     on_sent: Option<OnSent>,
@@ -260,11 +264,11 @@ impl Run {
             ),
             partial: None,
         };
-        let Some(id) = submit_to(req, texts, self.queue.clone(), cx) else {
+        let Some(id) = submit_to(&self.host, req, texts, self.queue.clone(), cx) else {
             return;
         };
         if plasma {
-            plasma_restart_started(id, cx);
+            plasma_restart_started(&self.host, id, cx);
         }
         if let Some(on_sent) = self.on_sent.clone() {
             cx.defer(move |cx| on_sent(id, cx));
@@ -514,7 +518,9 @@ impl Run {
         };
         let subtitle = subtitle(&subject, cx);
         let targets = keys.into_iter().map(ActionTarget::Process).collect();
-        if let Err(err) = crate::windows::affinity::open(targets, subtitle, self.parent, cx) {
+        if let Err(err) =
+            crate::windows::affinity::open(&self.host, targets, subtitle, self.parent, cx)
+        {
             warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
         }
     }
@@ -544,9 +550,15 @@ impl Run {
         let app = matches!(subject, AffinitySubject::App { .. });
         let subtitle = subtitle(&subject, cx);
         let targets = keys.into_iter().map(ActionTarget::Process).collect();
-        if let Err(err) =
-            crate::windows::priority::open_with(targets, subtitle, initial, app, self.parent, cx)
-        {
+        if let Err(err) = crate::windows::priority::open_with(
+            &self.host,
+            targets,
+            subtitle,
+            initial,
+            app,
+            self.parent,
+            cx,
+        ) {
             warn!(target: "tasklens::ui", %err, "the Custom priority dialog did not open");
         }
     }
@@ -560,7 +572,7 @@ impl Run {
         let Some((targets, names)) = signal_targets(&rows, &self.snapshot.processes) else {
             return;
         };
-        send_signal(signo, targets, names, window, cx);
+        send_signal(&self.host, signo, targets, names, window, cx);
     }
 
     /// Real-time signal… uses the same targets and subtitle subject as Send Signal, then opens
@@ -572,7 +584,7 @@ impl Run {
         let Some((targets, names)) = signal_targets(&rows, &self.snapshot.processes) else {
             return;
         };
-        if let Err(err) = open_rt_signal(targets, names, self.parent, cx) {
+        if let Err(err) = open_rt_signal(&self.host, targets, names, self.parent, cx) {
             warn!(target: "tasklens::ui", %err, "the real-time signal dialog did not open");
         }
     }
@@ -588,9 +600,8 @@ impl Run {
             return;
         }
         let not_found = tr(cx, "processes-toast-parent-not-found");
-        let parent = cx.try_global::<GlobalHub>().and_then(|hub| {
-            hub.0
-                .read(cx)
+        let parent = self.host.hub().and_then(|hub| {
+            hub.read(cx)
                 .current()
                 .processes
                 .records
@@ -694,7 +705,7 @@ impl Run {
         let [t] = &targets.items[..] else {
             return;
         };
-        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+        let Some(hub) = self.host.hub().cloned() else {
             return;
         };
         let (internal_id, client) = {
@@ -797,31 +808,44 @@ impl Run {
             self.submit(req, texts, cx);
             return;
         };
-        let (queue, on_sent, parent) = (self.queue.clone(), self.on_sent.clone(), self.parent);
+        let (host, queue, on_sent, parent) = (
+            self.host.clone(),
+            self.queue.clone(),
+            self.on_sent.clone(),
+            self.parent,
+        );
         // The dialog opens modal to the parent window, which is being updated now.
         cx.defer(move |cx| {
             confirm(ask, parent, cx, move |result, cx| {
                 if result == ConfirmResult::Confirmed {
-                    submit(req, texts, queue, on_sent, cx);
+                    submit(&host, req, texts, queue, on_sent, cx);
                 }
             });
         });
     }
 
     fn submit(&self, req: ActionRequest, texts: ActionToastTexts, cx: &mut App) {
-        submit(req, texts, self.queue.clone(), self.on_sent.clone(), cx);
+        submit(
+            &self.host,
+            req,
+            texts,
+            self.queue.clone(),
+            self.on_sent.clone(),
+            cx,
+        );
     }
 }
 
 /// Hands `req` to the action tracker and passes the id it got to `on_sent`.
 fn submit(
+    host: &HostContext,
     req: ActionRequest,
     texts: ActionToastTexts,
     queue: Option<WeakEntity<ToastQueue>>,
     on_sent: Option<OnSent>,
     cx: &mut App,
 ) {
-    if let Some(id) = submit_to(req, texts, queue, cx)
+    if let Some(id) = submit_to(host, req, texts, queue, cx)
         && let Some(on_sent) = on_sent
     {
         cx.defer(move |cx| on_sent(id, cx));
@@ -842,10 +866,11 @@ fn plasma_restart_running(cx: &App) -> bool {
         .is_some_and(|p| p.id.is_some())
 }
 
-/// Records `id` as the Plasma Shell restart in flight. The first call subscribes to the tracker.
-fn plasma_restart_started(id: ActionId, cx: &mut App) {
+/// Records `id` as the Plasma Shell restart in flight. The first call subscribes to `host`'s
+/// tracker.
+fn plasma_restart_started(host: &HostContext, id: ActionId, cx: &mut App) {
     if !cx.has_global::<PlasmaRestart>() {
-        let tracker = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone());
+        let tracker = host.tracker().cloned();
         let finished = tracker.map(|tracker| {
             cx.subscribe(&tracker, |_, ev: &ActionTrackerEvent, cx| {
                 if let ActionTrackerEvent::Finished { id, .. } = ev {

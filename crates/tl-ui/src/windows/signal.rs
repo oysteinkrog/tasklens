@@ -15,14 +15,13 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionRequest, ActionTarget, SIGRTMAX, SIGRTMIN, Signal};
 use tracing::warn;
 
-use crate::action_tracker::{
-    ActionWords, GlobalActionTracker, SummaryTexts, ToastTexts, action_words,
-};
+use crate::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::menu::TlMenu;
 use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
@@ -553,6 +552,7 @@ fn push_warning(text: SharedString, window: &Window, cx: &mut App) {
 }
 
 fn track_signal(
+    host: &HostContext,
     signo: i32,
     targets: SmallVec<[ActionTarget; 1]>,
     names: TargetNames,
@@ -563,7 +563,7 @@ fn track_signal(
         warn!(target: "tasklens::ui", signo, "invalid signal number");
         return;
     };
-    let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
+    let Some(tracker) = host.tracker().cloned() else {
         warn!(target: "tasklens::ui", "signal not sent: no action tracker");
         return;
     };
@@ -584,8 +584,9 @@ fn track_signal(
     });
 }
 
-/// Applies the protection rules, optionally confirms, then sends one signal request.
+/// Applies the protection rules, optionally confirms, then sends one signal request to `host`.
 pub fn send_signal(
+    host: &HostContext,
     signo: i32,
     targets: SmallVec<[ActionTarget; 1]>,
     names: TargetNames,
@@ -646,14 +647,15 @@ pub fn send_signal(
         None
     };
     let Some(ask) = ask else {
-        track_signal(signo, targets, names, queue, cx);
+        track_signal(host, signo, targets, names, queue, cx);
         return;
     };
     let parent = window.window_handle();
+    let host = host.clone();
     cx.defer(move |cx| {
         confirm(ask, parent, cx, move |result, cx| {
             if result == ConfirmResult::Confirmed {
-                track_signal(signo, targets, names, queue, cx);
+                track_signal(&host, signo, targets, names, queue, cx);
             }
         });
     });
@@ -669,6 +671,8 @@ const FOOTER_H: f32 = 52.;
 
 /// The real-time signal picker.
 pub struct RtSignalDialog {
+    /// The host this dialog shows. Set when it opens; never changes.
+    host: HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     names: TargetNames,
     value: i32,
@@ -682,6 +686,7 @@ pub struct RtSignalDialog {
 
 impl RtSignalDialog {
     fn new(
+        host: &HostContext,
         targets: SmallVec<[ActionTarget; 1]>,
         names: TargetNames,
         parent: AnyWindowHandle,
@@ -737,6 +742,7 @@ impl RtSignalDialog {
         let send_focus = cx.focus_handle();
         send_focus.focus(window, cx);
         Self {
+            host: host.clone(),
             targets,
             names,
             value,
@@ -780,10 +786,11 @@ impl RtSignalDialog {
         let names = self.names.clone();
         let signo = self.value;
         let parent = self.parent;
+        let host = self.host.clone();
         cx.defer(move |cx| {
             if parent
                 .update(cx, |_, window, cx| {
-                    send_signal(signo, targets, names, window, cx)
+                    send_signal(&host, signo, targets, names, window, cx)
                 })
                 .is_err()
             {
@@ -802,8 +809,10 @@ impl RtSignalDialog {
     }
 }
 
-/// Opens the real-time signal dialog modal to `parent`.
+/// Opens the real-time signal dialog modal to `parent`. The dialog acts on `host` and stays
+/// on it.
 pub fn open_rt_signal(
+    host: &HostContext,
     targets: SmallVec<[ActionTarget; 1]>,
     names: TargetNames,
     parent: AnyWindowHandle,
@@ -814,7 +823,9 @@ pub fn open_rt_signal(
         PwnWindow::RealtimeSignal,
         tr(cx, "pwn-signal-title"),
         Some(parent),
-        move |window, cx| cx.new(|cx| RtSignalDialog::new(targets, names, parent, window, cx)),
+        move |window, cx| {
+            cx.new(|cx| RtSignalDialog::new(host, targets, names, parent, window, cx))
+        },
     )
 }
 

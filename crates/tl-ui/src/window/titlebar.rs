@@ -41,7 +41,8 @@ use crate::components::icons::{AppIcon, TlIcon};
 use crate::components::shield::TlShield;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::ToggleAlwaysOnTop;
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::host::HostContext;
+use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -254,11 +255,11 @@ fn window_menu(window: &Window, position: Point<Pixels>, cx: &mut App) {
 }
 
 /// True when the pin can work: `Snapshot.windows.header.validity` is Valid or Stale (KWin bridge
-/// up). False without a hub.
+/// up). False without a hub. The pin acts on this PC's own windows, so the local host's hub.
 pub fn keep_above_supported(cx: &App) -> bool {
-    cx.try_global::<GlobalHub>().is_some_and(|hub| {
+    HostContext::local_hub(cx).is_some_and(|hub| {
         matches!(
-            hub.0.read(cx).current().windows.header.validity,
+            hub.read(cx).current().windows.header.validity,
             Validity::Valid | Validity::Stale
         )
     })
@@ -400,7 +401,8 @@ impl TitleBarView {
                 cx.notify();
             }
         }));
-        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+        // The pin acts on this PC's own windows: watch the local host's window list.
+        if let Some(hub) = HostContext::local_hub(cx).cloned() {
             subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
                 if !ev.mask.intersects(ComponentMask::WINDOWS) {
                     return;

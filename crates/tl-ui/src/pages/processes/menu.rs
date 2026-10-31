@@ -30,8 +30,8 @@ use super::{
     SuspendLabel, group_frozen, group_targets, plasma_restart_unit, suspend_or_resume,
     topmost_window,
 };
-use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
+use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
@@ -117,9 +117,10 @@ impl Shape {
     }
 }
 
-/// The row menu for `targets` (UI-PRC-013). Pseudo rows get only Copy, Copy details and Copy
-/// all metrics.
+/// The row menu for `targets` of `host` (UI-PRC-013). Pseudo rows get only Copy, Copy details
+/// and Copy all metrics.
 pub fn row_menu(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     caps: &MenuCaps,
@@ -134,16 +135,16 @@ pub fn row_menu(
         return add_copy_all_metrics(menu, cx);
     }
     menu = add_end_task(menu, shape, cx);
-    menu = add_end_process(menu, targets, shape, cx);
+    menu = add_end_process(host, menu, targets, shape, cx);
     menu = add_end_process_tree(menu, shape, cx);
     menu = menu.separator();
-    menu = add_suspend(menu, targets, shape, cx);
+    menu = add_suspend(host, menu, targets, shape, cx);
     menu = add_send_signal(menu, targets, shape, window, cx);
-    menu = add_set_priority(menu, targets, shape, window, cx);
+    menu = add_set_priority(host, menu, targets, shape, window, cx);
     menu = add_set_affinity(menu, shape, cx);
-    menu = add_set_io_priority(menu, targets, caps, shape, window, cx);
+    menu = add_set_io_priority(host, menu, targets, caps, shape, window, cx);
     menu = menu.separator();
-    menu = add_show_window(menu, targets, caps, shape, cx);
+    menu = add_show_window(host, menu, targets, caps, shape, cx);
     menu = add_restart_unit(menu, targets, shape, cx);
     menu = menu.separator();
     menu = add_copy(menu, targets, cx);
@@ -151,8 +152,8 @@ pub fn row_menu(
     menu = add_copy_all_metrics(menu, cx);
     menu = add_copy_rows_as_table(menu, cx);
     menu = menu.separator();
-    menu = add_graph_menus(menu, targets, shape, window, cx);
-    menu = add_tray_graph(menu, targets, shape, window, cx);
+    menu = add_graph_menus(host, menu, targets, shape, window, cx);
+    menu = add_tray_graph(host, menu, targets, shape, window, cx);
     menu = menu.separator();
     menu = add_properties(menu, shape, cx);
     menu = add_file_properties(menu, targets, caps, shape, cx);
@@ -208,12 +209,13 @@ const PRIORITY_MENU_MAX_W: f32 = 520.0;
 /// when every one shares it (PROC-066, PROC-069). The scheduler policy comes from the latest
 /// snapshot's extras, as in the Priority column.
 pub fn priority_submenu(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     _window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    let snapshot = cx.try_global::<EngineGlobal>().map(|e| e.0.latest());
+    let snapshot = host.client().map(|c| c.latest());
     let current = snapshot
         .as_deref()
         .and_then(|s| current_class(targets, &s.processes));
@@ -268,12 +270,13 @@ fn target_class(t: &CapturedTarget, p: &ProcessSnapshot) -> Option<PriorityClass
 /// current class has a check mark; with several targets only when every one shares it
 /// (PROC-069).
 pub fn ioprio_submenu(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     caps: &MenuCaps,
     cx: &mut App,
 ) -> TlMenu {
-    let snapshot = cx.try_global::<EngineGlobal>().map(|e| e.0.latest());
+    let snapshot = host.client().map(|c| c.latest());
     let helper = snapshot
         .as_ref()
         .map_or(HelperState::Missing, |s| s.health.helper);
@@ -374,18 +377,19 @@ fn add_end_task(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
 
 /// Whether the one app or unit row of `targets` has something to act on: a unit row always,
 /// an app row when it has an app.slice cgroup. With no engine there is none.
-fn group_has_target(targets: &CapturedTargets, cx: &App) -> bool {
+fn group_has_target(host: &HostContext, targets: &CapturedTargets) -> bool {
     let [target] = targets.items.as_slice() else {
         return false;
     };
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+    let Some(client) = host.client() else {
         return false;
     };
-    !group_targets(&engine.0.latest(), target).is_empty()
+    !group_targets(&client.latest(), target).is_empty()
 }
 
 /// An app or unit row item that needs a target: disabled with a tooltip when there is none.
 fn group_item(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     shape: Shape,
@@ -393,7 +397,7 @@ fn group_item(
     action: Box<dyn gpui_kit::Action>,
     cx: &App,
 ) -> TlMenu {
-    if !shape.exited && !group_has_target(targets, cx) {
+    if !shape.exited && !group_has_target(host, targets) {
         return menu.item_disabled(label, Some(tr(cx, "processes-menu-no-app-cgroup")));
     }
     exitable(menu, shape, label, action, cx)
@@ -401,10 +405,16 @@ fn group_item(
 
 /// Item 2: End Process or End Selected Processes. On an app or unit row it is Kill App (all
 /// processes).
-fn add_end_process(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
+fn add_end_process(
+    host: &HostContext,
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    cx: &App,
+) -> TlMenu {
     if shape.group {
         let label = tr(cx, "processes-menu-kill-app");
-        return group_item(menu, targets, shape, label, Box::new(KillApp), cx);
+        return group_item(host, menu, targets, shape, label, Box::new(KillApp), cx);
     }
     let key = if shape.multi {
         "processes-menu-end-selected-processes"
@@ -441,18 +451,24 @@ fn add_properties(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
 
 /// Item 4: Suspend or Resume, by State T. On an app or unit row it is Freeze App, or Thaw App
 /// when the row reads as frozen.
-fn add_suspend(menu: TlMenu, targets: &CapturedTargets, shape: Shape, cx: &App) -> TlMenu {
+fn add_suspend(
+    host: &HostContext,
+    menu: TlMenu,
+    targets: &CapturedTargets,
+    shape: Shape,
+    cx: &App,
+) -> TlMenu {
     if shape.group {
-        let frozen = match (targets.items.as_slice(), cx.try_global::<EngineGlobal>()) {
-            ([target], Some(engine)) => group_frozen(&engine.0.latest(), &target.node),
+        let frozen = match (targets.items.as_slice(), host.client()) {
+            ([target], Some(client)) => group_frozen(&client.latest(), &target.node),
             _ => false,
         };
         return if frozen {
             let label = tr(cx, "processes-menu-thaw-app");
-            group_item(menu, targets, shape, label, Box::new(ThawApp), cx)
+            group_item(host, menu, targets, shape, label, Box::new(ThawApp), cx)
         } else {
             let label = tr(cx, "processes-menu-freeze-app");
-            group_item(menu, targets, shape, label, Box::new(FreezeApp), cx)
+            group_item(host, menu, targets, shape, label, Box::new(FreezeApp), cx)
         };
     }
     let resume = suspend_or_resume(targets) == SuspendLabel::Resume;
@@ -500,6 +516,7 @@ fn add_send_signal(
 /// Item 6: the Set Priority submenu. On an app or unit row it says it applies to the app's
 /// current processes.
 fn add_set_priority(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     shape: Shape,
@@ -511,8 +528,9 @@ fn add_set_priority(
         return menu.item_disabled(label, Some(tr(cx, "processes-menu-process-exited")));
     }
     let targets = targets.clone();
+    let host = host.clone();
     let menu = menu.submenu(label, window, cx, move |sub, window, cx| {
-        priority_submenu(sub, &targets, window, cx)
+        priority_submenu(&host, sub, &targets, window, cx)
     });
     if shape.group {
         menu.tooltip(tr(cx, "processes-menu-set-priority-app-tip"))
@@ -533,6 +551,7 @@ fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
 /// Item 8: the Set I/O Priority submenu, on process, app and unit rows and on several rows.
 /// App and unit rows apply to their current processes (the handler expands them).
 fn add_set_io_priority(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     caps: &MenuCaps,
@@ -546,8 +565,9 @@ fn add_set_io_priority(
     }
     let targets = targets.clone();
     let caps = *caps;
+    let host = host.clone();
     menu.submenu(label, window, cx, move |sub, _window, cx| {
-        ioprio_submenu(sub, &targets, &caps, cx)
+        ioprio_submenu(&host, sub, &targets, &caps, cx)
     })
 }
 
@@ -616,6 +636,7 @@ pub fn graph_source(
 /// process, app or unit row. Each lists the six columns; one whose card exists is checked and
 /// disabled with "Already added". An exited row disables the three items.
 fn add_graph_menus(
+    host: &HostContext,
     mut menu: TlMenu,
     targets: &CapturedTargets,
     shape: Shape,
@@ -628,10 +649,10 @@ fn add_graph_menus(
     if shape.multi || shape.pseudo {
         return menu;
     }
-    let Some(engine) = cx.try_global::<EngineGlobal>() else {
+    let Some(client) = host.client() else {
         return menu;
     };
-    let snapshot = engine.0.latest();
+    let snapshot = client.latest();
     let items = [
         (GraphKind::Minigraph, "processes-menu-add-minigraph"),
         (GraphKind::Name, "processes-menu-add-name-graph"),
@@ -684,7 +705,7 @@ const TRAY_COLUMNS: [(&str, &str); 6] = [
 
 /// The tray source string of the one captured target (R-100): a process row, an app row or a
 /// unit row. `None` for anything else, which leaves the item out.
-fn tray_source(targets: &CapturedTargets, cx: &App) -> Option<SharedString> {
+fn tray_source(host: &HostContext, targets: &CapturedTargets) -> Option<SharedString> {
     let [target] = targets.items.as_slice() else {
         return None;
     };
@@ -694,8 +715,7 @@ fn tray_source(targets: &CapturedTargets, cx: &App) -> Option<SharedString> {
         }
         (NodeId::Unit(unit), RowKind::Unit) => MinigraphSource::App(unit.name.clone()),
         (node, RowKind::App) => {
-            let engine = cx.try_global::<EngineGlobal>()?;
-            let snapshot = engine.0.latest();
+            let snapshot = host.client()?.latest();
             let group = snapshot.table.groups.iter().find(|g| &g.node == node)?;
             match &group.class {
                 GroupKind::App { app_id } if group.kind == GroupRowKind::App => {
@@ -713,6 +733,7 @@ fn tray_source(targets: &CapturedTargets, cx: &App) -> Option<SharedString> {
 /// (UI-PRC-013, PROC-094, PERF-088). One process, app or unit row only. Add has no "Already
 /// added" state: any graph with the source turns the item into Remove.
 fn add_tray_graph(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     shape: Shape,
@@ -722,7 +743,7 @@ fn add_tray_graph(
     if shape.multi || shape.pseudo {
         return menu;
     }
-    let Some(source) = tray_source(targets, cx) else {
+    let Some(source) = tray_source(host, targets) else {
         return menu;
     };
     let available = tray_available(cx);
@@ -798,6 +819,7 @@ fn add_copy_rows_as_table(menu: TlMenu, cx: &App) -> TlMenu {
 /// Item 9: Show Window, on one process, kernel-thread, app or unit row (PROC-054). Hidden
 /// without the KWin bridge. Disabled with "No window" when the row owns no window.
 fn add_show_window(
+    host: &HostContext,
     menu: TlMenu,
     targets: &CapturedTargets,
     caps: &MenuCaps,
@@ -812,9 +834,9 @@ fn add_show_window(
     }
     let label = tr(cx, "processes-menu-show-window");
     if !shape.exited {
-        let has_window = cx
-            .try_global::<EngineGlobal>()
-            .is_some_and(|g| topmost_window(&g.0.latest(), target).is_some());
+        let has_window = host
+            .client()
+            .is_some_and(|c| topmost_window(&c.latest(), target).is_some());
         if !has_window {
             return menu.item_disabled(label, Some(tr(cx, "processes-menu-no-window")));
         }

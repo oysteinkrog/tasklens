@@ -5,11 +5,12 @@ use gpui_kit::App;
 
 use super::{PageBuilder, PageId};
 use crate::components::banner::TlBannerKind;
+use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, TlSettings, system_reduce_motion};
 
-pub fn page(cx: &mut App) -> PageBuilder {
-    let mut page = PageBuilder::new(PageId::Motion);
+pub fn page(host: &HostContext, cx: &mut App) -> PageBuilder {
+    let mut page = PageBuilder::new(host, PageId::Motion);
     page.page_description(tr(cx, "shell-settings-motion-desc"));
     // One untitled group: the page title already says "Motion".
     let group = "";
