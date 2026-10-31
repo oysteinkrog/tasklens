@@ -51,3 +51,5 @@ pub mod request;
 pub mod tray;
 
 pub mod remote_proto;
+
+pub mod layout;

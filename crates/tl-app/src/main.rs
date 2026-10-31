@@ -230,6 +230,9 @@ fn main() -> ExitCode {
         loaded_state.read_only,
         (loaded_settings.value.clone(), loaded_state.value.clone()),
     ));
+    if loaded_settings.layouts_converted {
+        store.keep_pre_layouts_copy();
+    }
     let startup_toasts = queued_toasts(&loaded_settings.notices, &loaded_state.notices)
         .into_iter()
         .map(|text| (ToastKindTag::Warning, text.into()))

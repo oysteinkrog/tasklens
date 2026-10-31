@@ -50,6 +50,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "smallvec",
             "rustix",
             "rustc-hash",
+            // ADR-019: `LayoutEntry::Kept` keeps a layout entry as read.
+            "toml",
         ],
     ),
     (

@@ -843,3 +843,68 @@ fn taskslinger_import_bad_file_changes_nothing() {
     assert!(!paths.settings_file().exists());
     assert!(!paths.state_file().exists());
 }
+
+/// A settings file whose GPU box has an old mode, which loading converts (ADR-019).
+const OLD_GPU_BOX: &str = "schema_version = 1\n\n[performance.overview]\ngrid = [\n  { kind = \"gpu\", col = 0, row = 0, cols = 6, rows = 4, mode = \"chart\" },\n]\n";
+
+#[test]
+fn pre_layouts_copy_kept_once() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.settings_file(), OLD_GPU_BOX).unwrap();
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+
+    let loaded = load_settings(&paths.settings_file(), NOW);
+    assert!(loaded.layouts_converted);
+    assert!(
+        loaded
+            .value
+            .performance
+            .layouts
+            .known("overview.gpu")
+            .is_some()
+    );
+    let store = Store::new(&paths, false, false, (loaded.value, UiState::default()));
+    store.keep_pre_layouts_copy();
+    // Loading alone writes nothing.
+    assert!(!copy.exists());
+
+    let mut changed = load_settings(&paths.settings_file(), NOW).value;
+    changed.processes.interval_ms = 3000;
+    store.persist_callback()(&changed, &UiState::default());
+    std::thread::sleep(SETTLE);
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), OLD_GPU_BOX);
+    let mode = std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let saved = std::fs::read_to_string(paths.settings_file()).unwrap();
+    assert!(saved.contains("overview.gpu"), "{saved}");
+
+    // A later save does not change the copy.
+    changed.processes.interval_ms = 4000;
+    store.persist_callback()(&changed, &UiState::default());
+    store.flush();
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), OLD_GPU_BOX);
+
+    // A second start finds the entry, converts nothing and keeps the copy as it is.
+    let again = load_settings(&paths.settings_file(), NOW);
+    assert!(!again.layouts_converted);
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), OLD_GPU_BOX);
+}
+
+#[test]
+fn pre_layouts_copy_not_replaced() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.settings_file(), OLD_GPU_BOX).unwrap();
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+    std::fs::write(&copy, "earlier copy\n").unwrap();
+
+    let loaded = load_settings(&paths.settings_file(), NOW);
+    let store = Store::new(&paths, false, false, (loaded.value, UiState::default()));
+    store.keep_pre_layouts_copy();
+    store.persist_callback()(&settings_with(3000), &UiState::default());
+    store.flush();
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "earlier copy\n");
+}

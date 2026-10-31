@@ -22,7 +22,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tl_model::ids::ColumnId;
 use tl_model::settings::{
-    ColumnState, OVERVIEW_KEY, SCHEMA_VERSION, Settings, StartupSettings, UiState,
+    ColumnState, LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, OVERVIEW_KEY, SCHEMA_VERSION, Settings,
+    StartupSettings, UiState,
 };
 use tl_model::table::{SysColumnId, SysTable};
 use tl_ui::theme::user_store::serialize_user_themes;
@@ -55,6 +56,9 @@ pub struct Loaded<T> {
     pub value: T,
     pub read_only: bool,
     pub notices: Vec<LoadNotice>,
+    /// Loading converted old settings to a widget layout (ADR-019). The caller then calls
+    /// [`Store::keep_pre_layouts_copy`], so the file is copied before the first save.
+    pub layouts_converted: bool,
 }
 
 /// Something the user is told after the first frame.
@@ -171,6 +175,7 @@ fn load<T: Stored>(kind: FileKind, path: &Path, now_unix: u64) -> Loaded<T> {
                 value: T::default(),
                 read_only: false,
                 notices,
+                layouts_converted: false,
             };
         }
         LoadStep::Table {
@@ -182,8 +187,18 @@ fn load<T: Stored>(kind: FileKind, path: &Path, now_unix: u64) -> Loaded<T> {
     };
     let mut value: T = deserialize_by_section(kind, table);
     value.set_version(version);
+    let mut layouts_converted = false;
     for key in value.clamp() {
-        if key == OVERVIEW_KEY {
+        if key == LAYOUTS_CONVERTED_KEY {
+            layouts_converted = true;
+            info!(
+                target: "tasklens::settings",
+                "{}: converted old box settings to widget layouts",
+                kind.label()
+            );
+            continue;
+        }
+        if key == OVERVIEW_KEY || key == LAYOUTS_KEY {
             warn!(
                 target: "tasklens::settings",
                 "{}: {key} had invalid parts; they have been dropped or clamped",
@@ -202,6 +217,7 @@ fn load<T: Stored>(kind: FileKind, path: &Path, now_unix: u64) -> Loaded<T> {
         value,
         read_only,
         notices,
+        layouts_converted,
     }
 }
 
@@ -315,6 +331,10 @@ fn deserialize_by_section<T: Stored>(kind: FileKind, mut table: toml::Table) -> 
     })
 }
 
+/// The suffix of the copy of `settings.toml` kept before the first save after a load that
+/// converted old settings to widget layouts (ADR-019).
+pub const PRE_LAYOUTS_SUFFIX: &str = ".pre-layouts-v1";
+
 /// How long the store waits after the last change before it saves (ADR-011 Save).
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -359,6 +379,9 @@ struct Written {
     /// The `[startup]` values the autostart entry last followed. Starts as the loaded values,
     /// so the entry is only touched once the user changes them.
     startup: StartupSettings,
+    /// Set by [`Store::keep_pre_layouts_copy`]: the next settings write first copies the file
+    /// on disk to `settings.toml.pre-layouts-v1`. Cleared by that write.
+    pre_layouts_copy: bool,
 }
 
 /// What the callbacks hand to the saver thread.
@@ -409,6 +432,7 @@ impl Store {
                 settings: serialize_settings(&initial.0),
                 state: serialize_state(&initial.1),
                 startup: initial.0.startup.clone(),
+                pre_layouts_copy: false,
             }),
         });
         // The saver thread logs through the subscriber of the thread that made the store.
@@ -458,6 +482,13 @@ impl Store {
         })
     }
 
+    /// Makes the first settings write copy the file on disk to `settings.toml.pre-layouts-v1`
+    /// (mode 0600) before it writes, unless that copy already exists. Called when loading
+    /// converted old settings to widget layouts (ADR-019).
+    pub fn keep_pre_layouts_copy(&self) {
+        lock(&self.inner.written).pre_layouts_copy = true;
+    }
+
     /// Writes `settings.toml` now, on the calling thread, for Reset settings
     /// (`AppEnv.write_settings_now`). The error text is shown to the user.
     pub fn write_settings_now(&self, s: &Settings) -> Result<(), String> {
@@ -466,7 +497,7 @@ impl Store {
             return Err(LoadNotice::Newer.toast_text());
         }
         let mut written = lock(&self.inner.written);
-        save_file(target, serialize_settings(s), &mut written.settings)
+        save_settings_file(target, serialize_settings(s), &mut written)
     }
 
     /// Writes any pending change now, on the calling thread, and stops the saver thread. Called
@@ -505,12 +536,8 @@ impl Inner {
     /// Writes each file whose text changed. Returns false when a write failed.
     fn save(&self, settings: &Settings, state: &UiState) -> bool {
         let mut written = lock(&self.written);
-        let settings_ok = save_file(
-            &self.settings,
-            serialize_settings(settings),
-            &mut written.settings,
-        )
-        .is_ok();
+        let settings_ok =
+            save_settings_file(&self.settings, serialize_settings(settings), &mut written).is_ok();
         let state_ok = save_file(&self.state, serialize_state(state), &mut written.state).is_ok();
         // A read-only settings file does not block this; the entry is not the settings file.
         self.apply_autostart(&settings.startup, &mut written.startup);
@@ -605,6 +632,59 @@ fn run_saver(inner: &Inner) {
         if !ok && shared.pending.is_none() {
             shared.failed = Some((settings, state));
         }
+    }
+}
+
+/// `save_file` for `settings.toml`, which first keeps the pre-layouts copy when it is due and
+/// the file is about to be written.
+fn save_settings_file(target: &Target, text: String, written: &mut Written) -> Result<(), String> {
+    if written.pre_layouts_copy && !target.read_only && text != written.settings {
+        keep_pre_layouts(&target.path);
+        written.pre_layouts_copy = false;
+    }
+    save_file(target, text, &mut written.settings)
+}
+
+/// Copies `path` to `<path>.pre-layouts-v1` in the same directory with mode 0600, unless that
+/// file exists. A failure is a warning only; the save goes on.
+fn keep_pre_layouts(path: &Path) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(PRE_LAYOUTS_SUFFIX);
+    let to = path.with_file_name(name);
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!(
+                target: "tasklens::settings",
+                "could not read settings.toml to keep its pre-layouts copy: {}",
+                e.kind()
+            );
+            return;
+        }
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(&to);
+    let result = match file {
+        Ok(mut f) => f.write_all(&bytes).and_then(|()| f.sync_all()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => return,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(()) => info!(
+            target: "tasklens::settings",
+            "kept settings.toml as settings.toml{PRE_LAYOUTS_SUFFIX} before its first save with widget layouts"
+        ),
+        Err(e) => warn!(
+            target: "tasklens::settings",
+            "could not keep settings.toml{PRE_LAYOUTS_SUFFIX}: {}",
+            e.kind()
+        ),
     }
 }
 

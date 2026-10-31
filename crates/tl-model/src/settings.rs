@@ -13,6 +13,7 @@ use crate::actions::DumpMode;
 use crate::command::Tab;
 use crate::demand::DeviceRange;
 use crate::devices::NetKind;
+use crate::layout::{self, LayoutsSetting};
 use crate::table::{ServiceStateFilter, TableMode, TableSettings, UnitType};
 
 /// First line of `settings.toml` and `state.toml`.
@@ -518,7 +519,20 @@ pub struct PerformanceSettings {
         deserialize_with = "loose_some"
     )]
     pub overview: Option<OverviewLayoutSetting>,
+    /// `[[performance.layouts]]`: the widget layouts of the containers (ADR-019, D-041). Written
+    /// only when it has an entry.
+    #[serde(skip_serializing_if = "LayoutsSetting::is_empty")]
+    pub layouts: LayoutsSetting,
 }
+
+/// The key [`Settings::clamp`] returns when it dropped invalid parts of `[[performance.layouts]]`.
+/// The load step logs it with `warn!`, as [`OVERVIEW_KEY`], not as a clamped value.
+pub const LAYOUTS_KEY: &str = "performance.layouts";
+
+/// The key [`Settings::clamp`] returns when it converted a container's old settings to a layout
+/// (ADR-019). The load step logs it with `info!` and keeps a copy of the file before the next
+/// save; it is not a clamped value.
+pub const LAYOUTS_CONVERTED_KEY: &str = "performance.layouts.converted";
 
 /// The key [`Settings::clamp`] returns when it dropped invalid parts of `[performance.overview]`.
 /// The load step logs it with `warn!` (UI-PRF-018), not as a clamped value.
@@ -1311,6 +1325,7 @@ impl Default for PerformanceSettings {
             memory_view: MemoryView::default(),
             memory_by_app: MemoryByAppSettings::default(),
             overview: None,
+            layouts: LayoutsSetting::default(),
         }
     }
 }
@@ -2138,7 +2153,8 @@ pub(crate) fn clamp_key<T>(
 impl Settings {
     /// Load step 4: clamp out-of-range values, return the dotted keys that changed (the caller
     /// logs them). Valid values are left alone. Also migrates `overview_top_processes = true`
-    /// once and drops the invalid parts of `[performance.overview]` (UI-PRF-018).
+    /// once, drops the invalid parts of `[performance.overview]` (UI-PRF-018) and of
+    /// `[[performance.layouts]]`, and converts the GPU box's old keys to a layout (ADR-019).
     pub fn clamp(&mut self) -> Vec<&'static str> {
         let mut changed = Vec::new();
         let c = &mut changed;
@@ -2228,6 +2244,14 @@ impl Settings {
             c.push("performance.memory_by_app.colors");
         }
         self.performance.migrate_overview(c);
+        // ADR-019: read the layouts, then convert the GPU box's old keys once. Runs after the
+        // overview, so conversion reads its validated grid entry.
+        if self.performance.layouts.load() {
+            c.push(LAYOUTS_KEY);
+        }
+        if layout::convert_old_settings(&mut self.performance) {
+            c.push(LAYOUTS_CONVERTED_KEY);
+        }
         // `[[hosts]]`: an invalid entry is dropped, the others keep their order. The local
         // host's name is not known here, so a clash with it is the host manager's check.
         let bad = check_hosts(&self.hosts, None);
