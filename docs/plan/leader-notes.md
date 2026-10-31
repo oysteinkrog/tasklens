@@ -1066,3 +1066,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31: q4x76.35 closed by the leader: last finding (suspend anchor in Collector Health) fixed in 0663adb0.
 - 2026-10-31: 1.1.0 released without the Chrome name fix; q4x76.36 reopened: App row name is the .desktop Name (PROC-008), process name only as fallback.
 - 2026-10-31: epic q4x76 closed; the Chrome name fix (q4x76.36) and core rows filling their part (D-040, 4df24ff8) wait for the next release.
+- 2026-10-31: D-041 widget layout: design docs/plan/layout-system.md (Astra-reviewed), phase 1 epic tasklens-lhliq (.1 ADR to .8 gates), GPU box first.
