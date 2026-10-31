@@ -1110,12 +1110,29 @@ pub fn aggregate(
     let (mut swap, mut gpu_mem, mut threads) = (0u64, 0u64, 0u32);
     let mut disk_restricted = false;
     let mut first: Option<&ProcessRecord> = None;
+    let mut first_rank = 0u8;
+    // The app's own pids: a member with an app id whose parent is outside this set is the
+    // primary process, the one the app name belongs to (PROC-008).
+    let app_pids: FxHashSet<u32> = members
+        .iter()
+        .filter_map(|&i| records.get(i as usize))
+        .filter(|r| r.meta.app_id.is_some())
+        .map(|r| r.key.pid)
+        .collect();
     for &i in members {
         let Some(r) = records.get(i as usize) else {
             continue;
         };
-        if first.is_none_or(|f| f.meta.app_id.is_none() && r.meta.app_id.is_some()) {
+        // 0: no app id, 1: app id, 2: app id and primary. The first of the best rank wins, so
+        // a child that sorts before its parent (a `cat` helper) never names the group.
+        let rank = match &r.meta.app_id {
+            None => 0,
+            Some(_) if app_pids.contains(&r.ppid) => 1,
+            Some(_) => 2,
+        };
+        if first.is_none() || rank > first_rank {
             first = Some(r);
+            first_rank = rank;
         }
         cpu += r.cpu_pct;
         io_read += r.io_read_bps;
@@ -1724,12 +1741,17 @@ fn grouped_rows(
 
     // Lowercase app names for the filter: the name of the app's first record with an app id,
     // else of its first record.
+    let app_pids: FxHashSet<u32> = records
+        .iter()
+        .filter(|r| r.meta.app_id.is_some())
+        .map(|r| r.key.pid)
+        .collect();
     let mut app_names: FxHashMap<GroupKey, (bool, String)> = FxHashMap::default();
     for (i, r) in records.iter().enumerate() {
         if class[i] != GroupClass::Apps {
             continue;
         }
-        let primary = r.meta.app_id.is_some();
+        let primary = r.meta.app_id.is_some() && !app_pids.contains(&r.ppid);
         match app_names.get_mut(&r.group) {
             None => {
                 app_names.insert(r.group, (primary, r.meta.name.to_lowercase()));
@@ -2874,6 +2896,23 @@ mod tests {
             app_id: "firefox".into(),
         }
         .key()
+    }
+
+    /// Every process of the app cgroup carries the app id, and a helper (`cat`) with a lower pid
+    /// than the primary sorts first. The row is still named after the primary.
+    #[test]
+    fn app_row_named_after_primary_not_first_member() {
+        let mut cat = in_app(rec(50, 100, "cat", 0.0), "chrome", true);
+        Arc::make_mut(&mut cat.meta).app_id = Some("chrome".into());
+        let mut main = in_app(rec(100, 1, "Google Chrome", 3.0), "chrome", true);
+        Arc::make_mut(&mut main.meta).app_id = Some("chrome".into());
+        let mut child = in_app(rec(101, 100, "chrome", 1.0), "chrome", true);
+        Arc::make_mut(&mut child.meta).app_id = Some("chrome".into());
+        let fx = Fixture::new(vec![(cat, None), (main, None), (child, None)]);
+        let view = fx.build("", &headers(), CPU_DESC);
+        assert_eq!(view.groups.len(), 1);
+        assert_eq!(&*view.groups[0].name, "Google Chrome");
+        assert_eq!(view.groups[0].members, 3);
     }
 
     #[test]
