@@ -1237,11 +1237,13 @@ impl Model {
                 targets: Default::default(),
                 privileged: false,
             }),
+            // A user unit: these sessions have no port, so they count as remote, and a
+            // system unit would be refused with `RemoteAdminOff` before it starts (q4x76.13).
             Slot::Action => Command::Action(ActionRequest {
                 id: ActionId(client),
                 kind: ActionKind::UnitResetFailed,
                 targets: [ActionTarget::Unit(UnitRef {
-                    manager: Manager::System,
+                    manager: Manager::User,
                     name: uri(i),
                 })]
                 .into_iter()
