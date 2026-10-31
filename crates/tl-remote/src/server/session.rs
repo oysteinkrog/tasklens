@@ -29,8 +29,10 @@
 //! - A message not written within `WRITE_TIMEOUT` of the start of its write, or a frame with no
 //!   `Ack` within `ACK_TIMEOUT` of its write, closes the session. Both are one deadline per
 //!   message on the monotonic clock: a client that keeps taking a few bytes cannot put the write
-//!   deadline off, and the writer applies `Ack`s and checks the ack deadline before each message,
-//!   so a steady flow of other messages cannot put that one off.
+//!   deadline off. The writer checks the ack deadline before each message and cuts a write short
+//!   at it, so neither a steady flow of other messages nor one slow write can put it off. The
+//!   reader notes when it read each `Ack`, and an `Ack` read after the deadline closes the
+//!   session even when the writer gets to it only later.
 //!
 //! A command the engine refuses with `Busy` cannot be refused to the client any more, since the
 //! client's `send` already returned. A request (action, scan, handle search, eject, history
@@ -256,8 +258,8 @@ struct Stream {
 
 #[derive(Default)]
 struct Queues {
-    /// The `Ack` read and not yet applied by the writer.
-    ack: Option<u64>,
+    /// The `Ack` read and not yet applied by the writer, and when the reader read it.
+    ack: Option<(u64, Instant)>,
     actions: VecDeque<Entry>,
     replies: VecDeque<Vec<u8>>,
     reply_bytes: usize,
@@ -430,14 +432,28 @@ impl<P: Port> Shared<P> {
     /// never blocks; between sends the writer waits for room at most the time left. A socket
     /// send timeout would not do: the kernel starts it again for each buffer within one write,
     /// so a client that keeps reading a little could hold one write for ever.
-    fn write(&self, bytes: &[u8]) -> Result<(), SessionEnd> {
-        let started = Instant::now();
+    ///
+    /// `ack_due` is the frame in flight and its ack deadline. The write also stops there, unless
+    /// an `Ack` read before the deadline is waiting for the writer by then.
+    fn write(&self, bytes: &[u8], mut ack_due: Option<(u64, Instant)>) -> Result<(), SessionEnd> {
+        let deadline = Instant::now() + self.config.write_timeout;
         let mut rest = bytes;
         while !rest.is_empty() {
-            let left = self.config.write_timeout.saturating_sub(started.elapsed());
-            if left.is_zero() {
+            let now = Instant::now();
+            if let Some((frame, due)) = ack_due
+                && now >= due
+            {
+                if !lock(&self.queues).ack.is_some_and(|(_, read)| read < due) {
+                    return Err(SessionEnd::AckTimeout { frame });
+                }
+                // The Ack came in time. The writer applies it after this write.
+                ack_due = None;
+            }
+            if now >= deadline {
                 return Err(SessionEnd::WriteTimeout);
             }
+            let until = ack_due.map_or(deadline, |(_, due)| due.min(deadline));
+            let left = until.saturating_duration_since(now);
             match send(
                 &self.stream,
                 rest,
@@ -449,8 +465,8 @@ impl<P: Port> Shared<P> {
                     let left = Timespec::try_from(left)
                         .map_err(|_| SessionEnd::Failed(Arc::from("write timeout too long")))?;
                     let mut fds = [PollFd::new(&self.stream, PollFlags::OUT)];
+                    // On a timeout the next pass finds which deadline passed.
                     match poll(&mut fds, Some(&left)) {
-                        Ok(0) => return Err(SessionEnd::WriteTimeout),
                         Ok(_) | Err(Errno::INTR) => {}
                         Err(e) => return Err(SessionEnd::Failed(Arc::from(format!("poll: {e}")))),
                     }
@@ -556,7 +572,11 @@ fn read_loop<P: Port>(sh: &Shared<P>) -> SessionEnd {
         }
         let going = match msg {
             ClientMsg::Ack { frame } => {
-                if lock(&sh.queues).ack.replace(frame).is_some() {
+                if lock(&sh.queues)
+                    .ack
+                    .replace((frame, Instant::now()))
+                    .is_some()
+                {
                     return SessionEnd::BadMessage(Arc::from(
                         "a second Ack before the writer applied the first",
                     ));
@@ -960,13 +980,20 @@ fn pick(q: &mut Queues, snapshot_due: bool, floor_passed: bool) -> Next {
     Next::Nothing
 }
 
-/// Applies the waiting `Ack`, then checks the in-flight frame's deadline.
+/// Applies the waiting `Ack`, then checks the in-flight frame's deadline. An `Ack` the reader
+/// read after the deadline is late, even when the writer gets to it only now.
 fn take_ack<P: Port>(
     sh: &Shared<P>,
     encoder: &mut DeltaEncoder,
     sent_at: &mut Option<Instant>,
 ) -> Result<(), SessionEnd> {
-    if let Some(frame) = lock(&sh.queues).ack.take() {
+    let waiting = lock(&sh.queues).ack.take();
+    if let Some((frame, read)) = waiting {
+        if let (Some(in_flight), Some(at)) = (encoder.in_flight(), *sent_at)
+            && read.saturating_duration_since(at) >= sh.config.ack_timeout
+        {
+            return Err(SessionEnd::AckTimeout { frame: in_flight });
+        }
         encoder
             .on_ack(frame)
             .map_err(|e| SessionEnd::BadMessage(Arc::from(e.to_string())))?;
@@ -1009,6 +1036,12 @@ fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
                 sh.finish(end);
                 return;
             }
+            // `take_ack` applied any waiting Ack, so the next write stops at the in-flight
+            // frame's deadline unless an Ack comes in time.
+            let ack_due = encoder
+                .in_flight()
+                .zip(sent_at)
+                .map(|(frame, at)| (frame, at + sh.config.ack_timeout));
             let latest = sh.port.latest();
             // Nothing before the first publish: the client keeps its last data until then.
             let snapshot_due = sh.config.snapshots
@@ -1021,7 +1054,7 @@ fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
                 Next::Nothing => break,
                 Next::Bytes(bytes, _what) => {
                     observe!(sh, Step::Writing(_what));
-                    sh.write(&bytes)
+                    sh.write(&bytes, ack_due)
                 }
                 Next::Snapshot => {
                     let now_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -1045,7 +1078,8 @@ fn write_loop<P: Port>(sh: &Shared<P>, bell: &mpsc::Receiver<()>) {
                         return;
                     }
                     observe!(sh, Step::Writing(Item::Snapshot { frame: _frame }));
-                    let written = sh.write(&out);
+                    // No frame is in flight before this one, so only the write deadline holds.
+                    let written = sh.write(&out, None);
                     let now = Instant::now();
                     sent_at = Some(now);
                     last_snapshot = now;

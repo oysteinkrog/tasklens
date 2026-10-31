@@ -723,7 +723,6 @@ fn the_ack_deadline_holds_while_other_messages_keep_coming() {
     let mut rig = Rig::new(|c| c.ack_timeout = Duration::from_millis(300));
     rig.engine.publish(1);
     let first = rig.frame();
-    let sent = Instant::now();
     block_writer(&rig);
     for id in 100..300 {
         rig.engine.event(id, ActionState::Started);
@@ -734,9 +733,62 @@ fn the_ack_deadline_holds_while_other_messages_keep_coming() {
             progress: true,
         })
     });
-    std::thread::sleep(Duration::from_millis(400).saturating_sub(sent.elapsed()));
 
-    // The writer finishes the big write, finds the deadline passed and writes nothing more.
+    // The writer stops the big write at the deadline and writes nothing more, though the write
+    // timeout is 10 s away.
+    let report = rig.join();
+    assert_eq!(report.end, SessionEnd::AckTimeout { frame: first.frame });
+    assert!(
+        rig.reader.read_frame(&mut &rig.client).is_err(),
+        "the big event is cut short and no queued event goes out after the deadline"
+    );
+}
+
+#[test]
+fn an_ack_read_after_the_deadline_is_late_though_the_writer_was_busy() {
+    let mut rig = Rig::new(|c| c.ack_timeout = Duration::from_millis(300));
+    rig.engine.publish(1);
+    let first = rig.frame();
+    let sent = Instant::now();
+    block_writer(&rig);
+    std::thread::sleep(Duration::from_millis(500).saturating_sub(sent.elapsed()));
+    // The Ack comes after the deadline. The session may have closed already, so the send may
+    // fail.
+    let mut out = Vec::new();
+    rig.writer
+        .encode_client(&ClientMsg::Ack { frame: first.frame }, &mut out)
+        .unwrap();
+    let _ = std::io::Write::write_all(&mut &rig.client, &out);
+    let report = rig.join();
+    assert_eq!(report.end, SessionEnd::AckTimeout { frame: first.frame });
+    assert!(
+        sent.elapsed() < WRITE_TIMEOUT,
+        "closed at the ack deadline, not at the end of the blocked write"
+    );
+    assert!(
+        rig.engine.dropped.load(Ordering::SeqCst),
+        "the slot is free"
+    );
+}
+
+#[test]
+fn an_ack_read_in_time_holds_while_a_write_runs_past_the_deadline() {
+    let mut rig = Rig::new(|c| {
+        c.ack_timeout = Duration::from_millis(300);
+        c.snapshot_floor = Duration::from_secs(3600);
+    });
+    rig.engine.publish(1);
+    let first = rig.frame();
+    let sent = Instant::now();
+    block_writer(&rig);
+    // Read while the writer is still in the big write, so the writer applies it only later.
+    rig.send(&ClientMsg::Ack { frame: first.frame });
+    std::thread::sleep(Duration::from_millis(500).saturating_sub(sent.elapsed()));
+    assert!(
+        rig.server.as_ref().is_some_and(|s| !s.is_finished()),
+        "the session is still open past the deadline"
+    );
+
     assert!(matches!(
         rig.recv(),
         ServerMsg::Action(ActionEvent {
@@ -744,12 +796,10 @@ fn the_ack_deadline_holds_while_other_messages_keep_coming() {
             ..
         })
     ));
-    assert!(
-        rig.reader.read_frame(&mut &rig.client).is_err(),
-        "no queued event goes out after the deadline"
-    );
-    let report = rig.join();
-    assert_eq!(report.end, SessionEnd::AckTimeout { frame: first.frame });
+    rig.wait_step("the Ack applied", |s| *s == Step::Acked(first.frame));
+    rig.engine.publish(2);
+    let next = rig.frame();
+    assert_eq!(next.base, first.frame);
 }
 
 #[test]
