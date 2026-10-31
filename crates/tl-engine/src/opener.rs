@@ -789,7 +789,8 @@ mod tests {
         assert!(spawner.calls().is_empty());
 
         // The production entry point checks before it can spawn anything.
-        let result = run(async move { show_in_file_manager(&cx(), None, "a/b", false).await });
+        let result =
+            run(async move { show_in_file_manager(&cx(), None, None, "a/b", false).await });
         assert_eq!(result, Err(internal("not an absolute path")));
     }
 
@@ -1057,7 +1058,7 @@ mod tests {
         let result = run(async move {
             let cx = cx();
             let conn = zbus::Connection::session().await.expect("session bus");
-            open_uri(&cx, Some(Arc::new(conn)), "https://example.org").await
+            open_uri(&cx, Some(Arc::new(conn)), None, "https://example.org").await
         });
         assert_eq!(result, Ok(()));
     }

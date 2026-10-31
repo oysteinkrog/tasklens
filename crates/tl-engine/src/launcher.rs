@@ -39,7 +39,7 @@ use tl_ops::launch::{
 use zbus::message::Type;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-use crate::desktop::{DesktopSession, DesktopSource, SESSION_KEYS};
+use crate::desktop::{DesktopSession, SESSION_KEYS};
 use crate::opener;
 
 /// The deadline for each D-Bus call (ADR-006).
@@ -807,6 +807,8 @@ mod tests {
 
     use asupersync::runtime::Runtime;
     use tl_model::table::UnitRef;
+
+    use crate::desktop::DesktopSource;
     use zbus::object_server::SignalEmitter;
     use zbus::zvariant::ObjectPath;
 
@@ -1147,7 +1149,7 @@ mod tests {
     fn real_entry_point_rejects_controls() {
         let result = run(async move {
             let cx = Cx::current().expect("task has a Cx");
-            launch(&cx, None, &command("echo\u{0}x", false)).await
+            launch(&cx, None, &local_desktop(), &command("echo\u{0}x", false)).await
         });
         assert_eq!(result, Err(ActionError::Unsupported));
     }
@@ -1661,9 +1663,13 @@ mod tests {
         assert_ne!(a, rand_suffix(), "two suffixes differ");
     }
 
+    fn local_desktop() -> DesktopSession {
+        DesktopSession::new(DesktopSource::Process)
+    }
+
     fn real_host() -> RealHost {
         RealHost {
-            desktop: DesktopSession::new(DesktopSource::Process),
+            desktop: local_desktop(),
         }
     }
 
@@ -1779,7 +1785,10 @@ mod real_tests {
             run(async move {
                 let cx = Cx::current().expect("task has a Cx");
                 let result = match zbus::Connection::session().await {
-                    Ok(conn) => launch(&cx, Some(Arc::new(conn)), &spec).await,
+                    Ok(conn) => {
+                        let desktop = DesktopSession::new(crate::desktop::DesktopSource::Process);
+                        launch(&cx, Some(Arc::new(conn)), &desktop, &spec).await
+                    }
                     Err(_) => Err(internal("no session bus")),
                 };
                 let _ = tx.send(result);

@@ -2915,7 +2915,7 @@ mod tests {
         let no_session = (SourceState::Unsupported, Some(NO_SESSION.to_owned()));
         assert!(!desktop.is_present(), "nobody logged in yet");
         assert_eq!(bridges.load(Ordering::Relaxed), 0);
-        assert_eq!(health_states(&mut rx), [no_session.clone()]);
+        assert_eq!(health_states(&mut rx), std::slice::from_ref(&no_session));
 
         steps_tx.try_send(BusStep::KWinUp).expect("send");
         lab.run_until_idle();
