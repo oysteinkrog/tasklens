@@ -133,7 +133,8 @@ const GLOBAL_WITH_HOSTS: &str = "Global Hosts";
 
 /// How often the host tabs read the link status and flip the connecting pulse (1 Hz pulse).
 const HOST_TICK: Duration = Duration::from_millis(500);
-/// The page's opacity while its host reconnects (UI-SHL-008).
+/// How opaque the page looks while its host reconnects (UI-SHL-008): a cover of the window
+/// background at `1 - RECONNECT_OPACITY` alpha.
 const RECONNECT_OPACITY: f32 = 0.6;
 
 /// The window's smallest size in logical px (ADR-010).
@@ -3019,28 +3020,18 @@ impl Render for MainWindow {
             self.reconnect_banner = reconnect.clone();
         }
         let page = self.pages[self.active as usize].as_ref().map(|slot| {
-            // A cached view replays its last paint, so a dimmed page is drawn uncached for the
-            // container's opacity to reach it.
-            let page =
-                if opacity.is_some() || reconnect.is_some() || self.active == Tab::Performance {
-                    slot.view.clone().into_any_element()
-                } else {
-                    slot.view
-                        .clone()
-                        .cached(StyleRefinement::default().size_full())
-                        .into_any_element()
-                };
-            if reconnect.is_some() {
-                div()
-                    .size_full()
-                    .opacity(RECONNECT_OPACITY)
-                    .child(page)
-                    .into_any_element()
+            if opacity.is_some() || self.active == Tab::Performance {
+                slot.view.clone().into_any_element()
             } else {
-                page
+                slot.view
+                    .clone()
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
             }
         });
-        // Over the page: blocks clicks, hover and drags, lets the wheel scroll the last data.
+        // Over the page: the window background at 40% alpha, which shows the page as at 60%
+        // opacity without drawing it again (a cached page keeps its cache). It blocks clicks,
+        // hover and drags, and lets the wheel scroll the last data.
         let reconnect = reconnect.map(|text| {
             div()
                 .debug_selector(|| "MainWindowReconnect".into())
@@ -3048,6 +3039,7 @@ impl Render for MainWindow {
                 .top_0()
                 .left_0()
                 .size_full()
+                .bg(bg.opacity(1.0 - RECONNECT_OPACITY))
                 .block_mouse_except_scroll()
                 .child(TlBanner::new(TlBannerKind::Warning, text))
         });
