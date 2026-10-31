@@ -762,7 +762,7 @@ impl TreeTableDelegate for StartupDelegate {
         if captured.entries.is_empty() {
             return menu;
         }
-        let mut host = HostContext::local(cx);
+        let mut host = crate::host::HostContext::local(cx);
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             let stored = captured.clone();
             host = page.read(cx).host.clone();
