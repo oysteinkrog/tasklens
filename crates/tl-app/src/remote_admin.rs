@@ -1637,7 +1637,10 @@ polkit.addRule(function(action, subject) {{
     /// sockets stay apart.
     #[test]
     fn one_lock_for_every_app_id() {
+        use std::os::unix::fs::PermissionsExt;
         let runtime = tempfile::tempdir().expect("tempdir");
+        // The runtime directory must be 0700, as `$XDG_RUNTIME_DIR` is.
+        fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
         let dir = Some(runtime.path().as_os_str());
         let (socket, lock) = endpoints(dir, None).expect("default");
         let (socket_a, lock_a) = endpoints(dir, Some("a")).expect("a");
