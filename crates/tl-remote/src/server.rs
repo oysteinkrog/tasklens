@@ -30,8 +30,8 @@ mod session;
 pub use session::Step;
 pub use session::{
     ACK_TIMEOUT, ACTION_QUEUE, Item, JOURNAL_BATCHES_MAX, JOURNAL_BYTES_MAX, JOURNAL_STREAMS_MAX,
-    Port, REPLIES_MAX, REPLY_BYTES_MAX, SNAPSHOT_FLOOR, SessionConfig, SessionEnd, SessionReport,
-    WRITE_TIMEOUT, serve_session,
+    Port, REPLIES_MAX, REPLY_BYTES_MAX, Receiver, SNAPSHOT_FLOOR, SessionConfig, SessionEnd,
+    SessionReport, WRITE_TIMEOUT, serve_session,
 };
 
 /// The socket's file name in the socket directory.

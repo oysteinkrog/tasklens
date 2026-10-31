@@ -61,7 +61,11 @@ use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 use tl_model::snapshot::Snapshot;
 
 use crate::delta::DeltaEncoder;
+
 use crate::envelope::{EnvelopeError, FrameReader, FrameWriter};
+/// The receiver type of the `Port` channels, so an implementer needs no async-channel
+/// dependency of its own.
+pub use async_channel::Receiver;
 
 /// A write blocked this long closes the session.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -89,9 +93,9 @@ pub trait Port: Send + Sync + 'static {
     /// The session's newest snapshot; sequence 0 until the engine first publishes for it.
     fn latest(&self) -> Arc<Snapshot>;
     /// One token after each publish. Closed once the session ended.
-    fn wake(&self) -> async_channel::Receiver<()>;
-    fn action_events(&self) -> async_channel::Receiver<ActionEvent>;
-    fn request_events(&self) -> async_channel::Receiver<RequestEvent>;
+    fn wake(&self) -> Receiver<()>;
+    fn action_events(&self) -> Receiver<ActionEvent>;
+    fn request_events(&self) -> Receiver<RequestEvent>;
     fn set_demand(&self, demand: Demand);
     /// Never blocks: a full engine queue is `Err(Busy)`.
     fn send(&self, cmd: Command) -> Result<(), CommandError>;
