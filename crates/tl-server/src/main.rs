@@ -46,7 +46,8 @@ const READY_POLL: Duration = Duration::from_millis(50);
 /// How often a connection checks whether the engine ended its session.
 const SESSION_POLL: Duration = Duration::from_secs(1);
 /// Connections in their handshake at once. Each has `server::HELLO_TIMEOUT` from accept for its
-/// whole handshake, then it is closed and its place frees. A connection beyond this is closed at
+/// whole handshake (reads, the engine's admission and the answer), then it is closed and its
+/// place frees. A connection beyond this is closed at
 /// once, before a thread starts for it; with the 8 sessions that bounds the connection threads
 /// to 12.
 const HANDSHAKES_MAX: usize = 4;
@@ -298,8 +299,8 @@ fn session_id(next_id: &AtomicU32) -> ClientSessionId {
     }
 }
 
-/// One connection: the handshake, which holds `slot` and must end by `deadline`, then the
-/// session's port until the client goes or the engine ends the session.
+/// One connection: the handshake, which holds `slot` and ends by `deadline` (reads, admission
+/// and answer), then the session's port until the client goes or the engine ends the session.
 fn serve(
     stream: UnixStream,
     slot: HandshakeSlot,
@@ -308,12 +309,15 @@ fn serve(
     identity: &HostIdentity,
     next_id: &AtomicU32,
 ) {
-    let (Ok(mut writer), Ok(frames)) = (stream.try_clone(), FrameReader::new()) else {
+    let Ok(frames) = FrameReader::new() else {
         return;
     };
-    let mut timed = server::DeadlineReader::new(&stream, deadline);
-    let welcomed = server::handshake(&mut timed, &mut writer, &frames, |_| {
-        match engine.open_session(session_id(next_id)) {
+    // The reads, the engine's admission and the answer all end by `deadline`, so the slot
+    // frees by then.
+    let mut reader = server::DeadlineStream::new(&stream, deadline);
+    let mut writer = server::DeadlineStream::new(&stream, deadline);
+    let welcomed = server::handshake(&mut reader, &mut writer, &frames, |_| {
+        match engine.open_session_until(session_id(next_id), deadline) {
             Ok(port) => Ok((identity.clone(), port)),
             Err(OpenError::Full) => Err(server::refused(
                 RefuseReason::TooManySessions,
@@ -344,6 +348,7 @@ fn serve(
         "client connected",
     );
     let _ = stream.set_read_timeout(Some(SESSION_POLL));
+    let _ = stream.set_write_timeout(None);
     let mut reader = &stream;
     let mut buf = [0u8; 4096];
     while !port.is_ended() {
