@@ -12,7 +12,6 @@
 //! client drops the manager's handle; the session ends when the last handle is gone, so the
 //! UI must drop its own clone of a removed host's client.
 
-use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -107,7 +106,7 @@ impl HostManager {
             .into_iter()
             .find(|(i, _)| *i == last)
         {
-            Some((_, why)) => Err(why.to_string()),
+            Some((_, why)) => Err(format!("invalid host entry: {why:?}")),
             None => Ok(()),
         }
     }
@@ -231,7 +230,7 @@ impl HostManager {
             })
             .map(|_| ());
         if let Err(e) = spawned {
-            let _ = tx.try_send(Err(io::Error::from(e).to_string()));
+            let _ = tx.try_send(Err(e.to_string()));
         }
         rx
     }
@@ -242,6 +241,8 @@ impl HostManager {
         let connect =
             Arc::new(move |e: &HostEntry| m.connect(e).map(|c| c as Arc<dyn EngineClient>));
         let m = Arc::clone(self);
+        let sync = Arc::new(move |e: &[HostEntry]| m.sync(e));
+        let m = Arc::clone(self);
         let remove = Arc::new(move |n: &str| m.remove(n));
         let m = Arc::clone(self);
         let reconnect = Arc::new(move |n: &str| m.reconnect(n).map(|c| c as Arc<dyn EngineClient>));
@@ -251,6 +252,7 @@ impl HostManager {
         let status = Arc::new(move |n: &str| m.status(n));
         HostsApi {
             connect,
+            sync,
             remove,
             reconnect,
             test,
@@ -267,6 +269,7 @@ pub fn backoff() -> Vec<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
@@ -429,6 +432,9 @@ mod tests {
         m.connect(&entry("a", "a")).expect("ok");
         assert!(m.connect(&entry("A", "other")).is_err());
         assert_eq!(m.names(), ["a"]);
+        wait_until("a connects", || {
+            m.status("a") == Some(HostLinkStatus::Connected)
+        });
         assert_eq!(n.load(Ordering::SeqCst), 1, "refused entries never connect");
     }
 
