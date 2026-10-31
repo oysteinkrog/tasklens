@@ -1,6 +1,7 @@
 //! ADR-018 Budgets: bytes on the wire for a host with 1500 processes at a 1 s refresh.
 //!
-//! - A session on the Processes tab sends at most 64 KiB/s.
+//! - A session on the Processes tab sends at most 64 KiB/s. Measured: 44,342 B/s (43.3 KiB/s),
+//!   2026-10-31.
 //! - A hidden host sends at most 2 KiB/s.
 //!
 //! Bytes are counted as the session sends them (leader decision on tasklens-q4x76.15, Q2 A):
@@ -10,7 +11,12 @@
 //!
 //! The host is a seeded synthetic one, `Host` below (leader decision, Q1 C): no recording of a
 //! real machine, so no real process names or paths. Its shape and churn come from one
-//! measurement on the office desktop (`MEASURED`).
+//! measurement on the office desktop (`measured`).
+//!
+//! A Processes tab session gets every part its demand gates on (`ClientSession::snapshot` in
+//! tl-engine): besides the process view and the series, the services (`process_table`), and
+//! with a visible window the inventory, windows, devices, health and device details. Their
+//! sizes and how often each changes come from the real engine (`real`).
 
 #![allow(clippy::unwrap_used)]
 // The measured numbers are part of the result; `--nocapture` shows them.
@@ -20,6 +26,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tl_model::actions::CgroupRef;
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+use tl_model::health::HealthSnapshot;
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, NodeId, ProcessKey, SeriesId};
 use tl_model::process::{
     AppCgroupSample, Coverage, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState,
@@ -27,12 +35,19 @@ use tl_model::process::{
 };
 use tl_model::remote_proto::{ClientMsg, Part, ServerMsg, SnapshotFrame, encode_message};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet, Snapshot, SystemSnapshot};
+use tl_model::snapshot::{
+    BoardInfo, ComponentHeader, CpuStaticInfo, DeviceDetailsSnapshot, DiskDetails, DiskDrive,
+    DisplayConnector, DisplayMode, FirmwareInfo, FirmwareType, FrameGeometry, GraphicsAdapter,
+    InventorySnapshot, MemoryDetails, MemoryInfo, MemoryModule, NetDetails, NetworkAdapter, OsInfo,
+    PartitionRow, PartitionTable, ProcessSnapshot, ProcessorInfo, SeriesSet, ServiceStatus,
+    ServicesSnapshot, Snapshot, StartupType, SwapDevice, SwapKindModel, SystemInfo, SystemSnapshot,
+    UnitRecord, WindowEntry, WindowsSnapshot, ZramDetail,
+};
 use tl_model::system::{
     CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, DiskTotals, LinkState, MemGroupBand,
     MemoryTotals, Metric, NetTotals, SensorKind, SensorReading,
 };
-use tl_model::table::{Manager, ProcessTableView, TableRow, TableTotals, Total, UnitRef};
+use tl_model::table::{Manager, ProcessTableView, TableRow, TableTotals, Total, UnitRef, UnitType};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
 use tl_remote::delta::{DeltaEncoder, apply};
@@ -77,6 +92,30 @@ mod measured {
     pub const EXITS: usize = 5;
 }
 use measured as m;
+
+/// One run of `wire_bytes_of_the_real_engine_on_this_host` (tl-server/tests/budgets.rs) on the
+/// office desktop, 2026-10-31, a Processes tab session at 1166 processes after 610 s, load
+/// average 6.2 at the end. Per part: its uncompressed size in the complete frame, and how many
+/// of the 59 delta frames carried it whole. The fixture builds each part at about that size and
+/// changes it as often. These parts do not grow with the process count, so they are not scaled.
+/// The fixture's sizes: services 201,301 B, devices 8,202 B, windows 2,440 B, device details
+/// 2,046 B, inventory 2,146 B and health 94 B (the empty one, with its version bumped).
+mod real {
+    /// Systemd units of both managers: 198,057 B, about 219 B a unit. In 5 of 59 delta frames:
+    /// a signal batch from systemd rebuilds the part.
+    pub const UNITS: usize = 904;
+    pub const SERVICES_PERIOD_S: u64 = 12;
+    /// KWin windows: 2,360 B. In every delta frame: the worker publishes a new `Arc` each
+    /// second.
+    pub const WINDOWS: usize = 22;
+    /// Device catalog entries: 8,066 B. In 23 of 59 delta frames.
+    pub const DEVICES: usize = 136;
+    /// Device details: 2,330 B. In 19 of 59 delta frames, every third second.
+    pub const DEVICE_DETAILS_PERIOD_S: u64 = 3;
+    /// Inventory: 2,571 B, only in the complete frame. Health: 144 B, in every delta frame.
+    pub const INVENTORY_DISKS: usize = 3;
+    pub const INVENTORY_NETS: usize = 7;
+}
 
 /// Device series the background demand samples at 1 s (ADR-018 Background demand, ADR-017): the
 /// real engine on the office desktop had 292 after 10 minutes, 2026-10-31
@@ -164,6 +203,45 @@ fn valid<T: Copy + Default>(v: T) -> Metric<T> {
     Metric::valid(v)
 }
 
+/// A known inventory value.
+fn known<T>(value: T) -> Total<T> {
+    Total {
+        value,
+        validity: Validity::Valid,
+    }
+}
+
+fn text(s: impl AsRef<str>) -> Arc<str> {
+    Arc::from(s.as_ref())
+}
+
+/// Partition `n` of disk `d`, for its device details.
+fn partition(
+    d: u16,
+    n: u16,
+    start_bytes: u64,
+    size_bytes: u64,
+    mount: &str,
+    fs_type: &str,
+    type_name: &str,
+) -> PartitionRow {
+    PartitionRow {
+        name: text(format!("nvme{d}n1p{n}")),
+        start_bytes,
+        size_bytes,
+        holder: None,
+        mount: Some(text(mount)),
+        extra_mounts: Arc::from([]),
+        label: Some(text(format!("part{d}{n}"))),
+        fs_type: Some(text(fs_type)),
+        usage_pct: known(40.0),
+        flags: Arc::from([]),
+        type_name: text(type_name),
+        read_only: false,
+        unallocated: false,
+    }
+}
+
 /// A seeded host whose processes and devices change once per second at the measured rates.
 struct Host {
     rng: Rng,
@@ -178,6 +256,11 @@ struct Host {
     tick: u64,
     topology: Arc<CpuTopology>,
     bands: Arc<Vec<MemGroupBand>>,
+    /// Every unit of both managers; the first `m::UNIT_GROUPS` are `units`.
+    unit_records: Vec<UnitRecord>,
+    windows: Vec<WindowEntry>,
+    catalog: Vec<DeviceEntry>,
+    disk_details: Vec<(DeviceIdx, DiskDetails)>,
     /// Every part this test never changes keeps one `Arc`, as the engine reuses it.
     base: Snapshot,
 }
@@ -269,6 +352,10 @@ impl Host {
             tick: 0,
             topology,
             bands,
+            unit_records: Vec::new(),
+            windows: Vec::new(),
+            catalog: Vec::new(),
+            disk_details: Vec::new(),
             base: Snapshot::empty(BOOT, 1),
         };
         let mut kinds = Vec::with_capacity(m::PROCESSES);
@@ -284,6 +371,14 @@ impl Host {
         for kind in kinds {
             host.start(kind);
         }
+        host.unit_records = host.make_units();
+        host.windows = host.make_windows();
+        host.catalog = host.make_catalog();
+        host.disk_details = host.make_disk_details();
+        host.base.inventory = host.inventory();
+        host.base.services = host.services(1);
+        host.base.devices = host.devices(1);
+        host.base.device_details = host.device_details(1);
         host
     }
 
@@ -847,6 +942,615 @@ impl Host {
         })
     }
 
+    /// The units of both managers, System first, as the engine sorts them. The first
+    /// `m::UNIT_GROUPS` are the units the processes run in: running services with a main PID.
+    /// The rest are a mix of unit types, a third of them active.
+    fn make_units(&mut self) -> Vec<UnitRecord> {
+        const KINDS: [(UnitType, &str); 9] = [
+            (UnitType::Service, "service"),
+            (UnitType::Service, "service"),
+            (UnitType::Service, "service"),
+            (UnitType::Socket, "socket"),
+            (UnitType::Timer, "timer"),
+            (UnitType::Mount, "mount"),
+            (UnitType::Target, "target"),
+            (UnitType::Slice, "slice"),
+            (UnitType::Path, "path"),
+        ];
+        let mut out = Vec::with_capacity(real::UNITS);
+        for i in 0..real::UNITS {
+            let (unit, kind, running, main_pid) = if i < m::UNIT_GROUPS {
+                let pid = self
+                    .procs
+                    .iter()
+                    .find(|p| p.kind == Kind::Unit(i))
+                    .map_or(0, |p| p.record.key.pid);
+                (self.units[i].clone(), UnitType::Service, true, pid)
+            } else {
+                let (kind, suffix) = KINDS[self.rng.below(KINDS.len())];
+                let manager = if self.rng.below(4) == 0 {
+                    Manager::User
+                } else {
+                    Manager::System
+                };
+                let name = text(format!(
+                    "{}-{}-{}.{suffix}",
+                    self.rng.word(),
+                    self.rng.word(),
+                    self.rng.word()
+                ));
+                (UnitRef { manager, name }, kind, self.rng.below(3) == 0, 0)
+            };
+            out.push(self.unit_record(unit, kind, running, main_pid));
+        }
+        out.sort_by_key(|r| r.unit.manager == Manager::User);
+        out
+    }
+
+    fn unit_record(
+        &mut self,
+        unit: UnitRef,
+        kind: UnitType,
+        running: bool,
+        main_pid: u32,
+    ) -> UnitRecord {
+        let rng = &mut self.rng;
+        let (dir, slice) = match unit.manager {
+            Manager::System => ("/usr/lib/systemd/system", "system.slice"),
+            Manager::User => (
+                "/usr/lib/systemd/user",
+                "user.slice/user-1000.slice/user@1000.service/app.slice",
+            ),
+        };
+        let (status, sub_state) = match (kind, running) {
+            (UnitType::Service, true) => (ServiceStatus::Running, "running"),
+            (UnitType::Socket, true) => (ServiceStatus::Active, "listening"),
+            (UnitType::Timer, true) => (ServiceStatus::Active, "waiting"),
+            (UnitType::Mount, true) => (ServiceStatus::Active, "mounted"),
+            (_, true) => (ServiceStatus::Active, "active"),
+            (_, false) => (ServiceStatus::Stopped, "dead"),
+        };
+        let service = kind == UnitType::Service;
+        let unit_file = format!("{dir}/{}", unit.name);
+        let path = if service {
+            format!("/usr/lib/{}/{}", rng.word(), rng.word())
+        } else {
+            unit_file.clone()
+        };
+        let control_group = (running && matches!(kind, UnitType::Service | UnitType::Slice))
+            .then(|| text(format!("/{slice}/{}", unit.name)));
+        let socket = service && rng.below(5) == 0;
+        UnitRecord {
+            description: text(format!(
+                "{} {} {} {}",
+                rng.word(),
+                rng.word(),
+                rng.word(),
+                rng.word()
+            )),
+            status,
+            sub_state: text(sub_state),
+            load_state: text("loaded"),
+            startup: [
+                StartupType::Enabled,
+                StartupType::Static,
+                StartupType::Disabled,
+                StartupType::Indirect,
+            ][rng.below(4)],
+            main_pid,
+            user: text(match unit.manager {
+                Manager::System => "root",
+                Manager::User => "user",
+            }),
+            path: text(path),
+            unit_file: Some(text(unit_file)),
+            active_since_us: running.then(|| 1_761_800_000_000_000 + rng.next() % 72_000_000_000),
+            triggered_by: if socket {
+                Arc::from([text(unit.name.replace(".service", ".socket"))])
+            } else {
+                Arc::from([])
+            },
+            has_cgroup_procs: control_group.is_some(),
+            control_group,
+            can_reload: service && rng.below(4) == 0,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: Total::default(),
+            memory_bytes: Total::default(),
+            disk_bps: Total::default(),
+            tasks: Total::default(),
+            kind,
+            unit,
+        }
+    }
+
+    /// A unit with no processes in the table starts or stops, as a signal batch from systemd
+    /// reports it.
+    fn step_services(&mut self) {
+        let i = loop {
+            let i = self.rng.below(self.unit_records.len());
+            if self.unit_records[i].main_pid == 0 {
+                break i;
+            }
+        };
+        let r = &self.unit_records[i];
+        let (unit, kind, running) = (r.unit.clone(), r.kind, r.status == ServiceStatus::Stopped);
+        self.unit_records[i] = self.unit_record(unit, kind, running, 0);
+    }
+
+    /// The services part of a session with no Services page query: no rows and no counts of
+    /// its own, every unit record.
+    fn services(&self, version: u64) -> Arc<ServicesSnapshot> {
+        Arc::new(ServicesSnapshot {
+            header: header(version, self.now_ns),
+            units: self.unit_records.clone().into(),
+            ..ServicesSnapshot::default()
+        })
+    }
+
+    /// Windows of the app processes.
+    fn make_windows(&mut self) -> Vec<WindowEntry> {
+        let pids: Vec<u32> = self
+            .procs
+            .iter()
+            .filter(|p| matches!(p.kind, Kind::App(_)))
+            .map(|p| p.record.key.pid)
+            .take(real::WINDOWS)
+            .collect();
+        let rng = &mut self.rng;
+        let mut out: Vec<WindowEntry> = pids
+            .into_iter()
+            .enumerate()
+            .map(|(i, pid)| {
+                let class = rng.word();
+                WindowEntry {
+                    internal_id: text(format!(
+                        "{{{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}}}",
+                        rng.next() as u32,
+                        rng.below(0x1_0000),
+                        rng.below(0x1000),
+                        rng.below(0x1_0000),
+                        rng.next() >> 16
+                    )),
+                    pid,
+                    caption: text(format!("{} {} - {}", rng.word(), rng.word(), class)),
+                    desktop_file_name: text(format!("org.example.{class}")),
+                    resource_class: text(class),
+                    minimized: rng.below(4) == 0,
+                    maximized: rng.below(3) == 0,
+                    keep_above: false,
+                    frame_geometry: FrameGeometry {
+                        x: rng.below(2560) as i32,
+                        y: rng.below(1440) as i32,
+                        width: 400 + rng.below(2000) as i32,
+                        height: 300 + rng.below(1100) as i32,
+                    },
+                    window_type: 0,
+                    stack_index: i as u32,
+                }
+            })
+            .collect();
+        out.sort_by_key(|w| w.pid);
+        out
+    }
+
+    fn windows(&self, version: u64) -> Arc<WindowsSnapshot> {
+        Arc::new(WindowsSnapshot {
+            header: header(version, self.now_ns),
+            windows: self.windows.clone().into(),
+            pick: None,
+        })
+    }
+
+    /// The catalog of a desktop: the CPU package and its 32 logical CPUs, memory, one GPU, 3
+    /// disks, 7 network interfaces, 40 temperature sensors, 6 fans, the 3 aggregates and 42
+    /// memory groups.
+    fn make_catalog(&mut self) -> Vec<DeviceEntry> {
+        let mut ids = vec![(DeviceIdentity::CpuPackage, text("CPU"), text("cpu"))];
+        for id in 0..32u16 {
+            ids.push((
+                DeviceIdentity::CpuLogical { id },
+                text(format!("CPU {id}")),
+                text(format!("cpu:{id}")),
+            ));
+        }
+        ids.push((DeviceIdentity::Memory, text("Memory"), text("memory")));
+        ids.push((
+            DeviceIdentity::Gpu {
+                uuid: [7; 16],
+                pci_bus_id: text("0000:03:00.0"),
+            },
+            text("GPU 0"),
+            text("gpu:pci:0000:03:00.0"),
+        ));
+        for d in 0..3u32 {
+            let name = text(format!("nvme{d}n1"));
+            ids.push((
+                DeviceIdentity::Disk {
+                    major: 259,
+                    minor: d,
+                    name: name.clone(),
+                    wwn_or_serial: Some(text(format!("eui.{:016x}", self.rng.next()))),
+                },
+                text(format!("Disk {d} ({name})")),
+                text(format!("disk:{name}")),
+            ));
+        }
+        for n in 0..7u32 {
+            let name = text(format!("{}{n}", self.rng.word()));
+            ids.push((
+                DeviceIdentity::Net {
+                    netns_ino: 4_026_531_840,
+                    ifindex: 2 + n,
+                    name: name.clone(),
+                },
+                name.clone(),
+                text(format!("net:{name}")),
+            ));
+        }
+        for s in 0..40u16 {
+            let chip = text(["k10temp", "nvme", "amdgpu", "it8689"][usize::from(s % 4)]);
+            let label = text(format!("temp{}", s / 4 + 1));
+            ids.push((
+                DeviceIdentity::Sensor {
+                    chip: chip.clone(),
+                    label: label.clone(),
+                },
+                text(format!("{chip} {label}")),
+                text(format!("sensor:hwmon:{chip}-pci-00c3:{label}_input")),
+            ));
+        }
+        for index in 0..6u16 {
+            ids.push((
+                DeviceIdentity::Fan {
+                    chip: text("it8689"),
+                    index,
+                },
+                text(format!("Fan {}", index + 1)),
+                text(format!("fan:it8689:{index}")),
+            ));
+        }
+        for (kind, name) in [
+            (AggregateKind::Disks, "Disks"),
+            (AggregateKind::Nets, "Network"),
+            (AggregateKind::Gpus, "GPUs"),
+        ] {
+            ids.push((
+                DeviceIdentity::Aggregate(kind),
+                text(name),
+                text(format!("aggregate:{name}")),
+            ));
+        }
+        for _ in 0..42 {
+            let word = self.rng.word();
+            let exe = format!("exe:/usr/lib/{}/{word}", self.rng.word());
+            ids.push((
+                DeviceIdentity::MemGroup { key: text(&exe) },
+                text(&word),
+                text(format!("memgroup:{exe}")),
+            ));
+        }
+        assert_eq!(ids.len(), real::DEVICES);
+        ids.into_iter()
+            .enumerate()
+            .map(
+                |(i, (identity, display_name, persistent_key))| DeviceEntry {
+                    idx: DeviceIdx(i as u16),
+                    net_kind: matches!(identity, DeviceIdentity::Net { .. })
+                        .then_some(NetKind::Wired),
+                    parent: matches!(identity, DeviceIdentity::CpuLogical { .. })
+                        .then_some(DeviceIdx(0)),
+                    hot_c: matches!(identity, DeviceIdentity::Sensor { .. }).then_some(95.0),
+                    identity,
+                    generation: 0,
+                    display_name,
+                    present: true,
+                    persistent_key,
+                },
+            )
+            .collect()
+    }
+
+    /// A memory group comes or goes.
+    fn step_devices(&mut self) {
+        let groups = real::DEVICES - 42;
+        let i = groups + self.rng.below(42);
+        let e = &mut self.catalog[i];
+        e.present = !e.present;
+        if e.present {
+            e.generation += 1;
+        }
+    }
+
+    fn devices(&self, version: u64) -> Arc<DeviceCatalog> {
+        Arc::new(DeviceCatalog {
+            version,
+            entries: self.catalog.clone().into(),
+        })
+    }
+
+    fn make_disk_details(&mut self) -> Vec<(DeviceIdx, DiskDetails)> {
+        (0..3u16)
+            .map(|d| {
+                let used = (300 + self.rng.below(900) as u64) << 30;
+                (
+                    DeviceIdx(36 + d),
+                    DiskDetails {
+                        kind: text("SSD"),
+                        model: known(text(format!("Example NVMe SSD {}", self.rng.word()))),
+                        wwn: known(text(format!("eui.{:016x}", self.rng.next()))),
+                        serial: known(text(format!("{:020X}", self.rng.next()))),
+                        interface: known(text("NVMe")),
+                        scheduler: known(text("none")),
+                        smart_temp_c: Some(40.0),
+                        formatted_bytes: known(2 << 40),
+                        used_bytes: known(used),
+                        free_bytes: known((2 << 40) - used),
+                        system_disk: known(d == 0),
+                        swap: known(false),
+                        partitions: Some(Arc::new(PartitionTable {
+                            kind: text("GPT"),
+                            rows: Arc::from([
+                                partition(d, 1, 1 << 20, 1 << 30, "/boot", "vfat", "EFI system"),
+                                partition(
+                                    d,
+                                    2,
+                                    (1 << 30) + (1 << 20),
+                                    (2 << 40) - (2 << 30),
+                                    if d == 0 { "/" } else { "/home" },
+                                    "btrfs",
+                                    "Linux filesystem",
+                                ),
+                            ]),
+                        })),
+                        ..DiskDetails::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Free space on the system disk moves.
+    fn step_disks(&mut self) {
+        let delta = (1 + self.rng.below(64) as u64) << 20;
+        let disk = &mut self.disk_details[0].1;
+        disk.used_bytes.value += delta;
+        disk.free_bytes.value -= delta;
+    }
+
+    fn device_details(&mut self, version: u64) -> Arc<DeviceDetailsSnapshot> {
+        let rng = &mut self.rng;
+        let nets = (0..7u16)
+            .map(|n| {
+                (
+                    DeviceIdx(39 + n),
+                    NetDetails {
+                        type_label: text("Ethernet"),
+                        connection: Some(text(format!("Wired connection {}", n + 1))),
+                        adapter_name: known(text("Example 2.5GbE Controller")),
+                        driver: known(text("igc")),
+                        mac: known(text(format!(
+                            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                            rng.below(256),
+                            rng.below(256),
+                            rng.below(256),
+                            rng.below(256),
+                            rng.below(256),
+                            rng.below(256)
+                        ))),
+                        ifindex: 2 + u32::from(n),
+                        link_speed_mbps: known(2500),
+                        state: LinkState::Up,
+                        addresses: Arc::from([
+                            text(format!("10.0.{n}.{}/24", 2 + rng.below(250))),
+                            text(format!(
+                                "2001:db8:{n:x}::{:x}:{:x}/64",
+                                rng.next() as u16,
+                                rng.next() as u16
+                            )),
+                            text(format!(
+                                "fe80::{:x}:{:x}/64",
+                                rng.next() as u16,
+                                rng.next() as u16
+                            )),
+                        ]),
+                        kind: NetKind::Wired,
+                        wifi: None,
+                    },
+                )
+            })
+            .collect();
+        Arc::new(DeviceDetailsSnapshot {
+            header: header(version, self.now_ns),
+            cpu: Arc::new(CpuStaticInfo {
+                cores: 16,
+                logical: 32,
+                driver: known(text("amd-pstate-epp")),
+                governor: known(text("powersave")),
+                epp: known(text("balance_performance")),
+                platform_profile: known(text("balanced")),
+                prefcore_rank: (0..32u32).map(|c| Some(166 + c % 16 * 5)).collect(),
+                prefcore_differs: true,
+                microcode: known(text("0x0b404023")),
+                ..CpuStaticInfo::default()
+            }),
+            memory: Arc::new(MemoryDetails {
+                zram: Arc::from([ZramDetail {
+                    name: text("zram0"),
+                    disksize: 16 << 30,
+                    algorithm: Some(text("zstd")),
+                    stats: None,
+                }]),
+                zswap: known(None),
+                swaps: known(Arc::from([SwapDevice {
+                    name: text("/dev/zram0"),
+                    kind: SwapKindModel::Zram,
+                    size_bytes: 16 << 30,
+                    used_bytes: 1 << 30,
+                    priority: 100,
+                }])),
+            }),
+            disks: self.disk_details.clone().into(),
+            nets,
+            batteries: Arc::from([]),
+            on_battery: None,
+        })
+    }
+
+    /// The Information tab values: one scan at the start, never changed.
+    fn inventory(&mut self) -> Arc<InventorySnapshot> {
+        let rng = &mut self.rng;
+        Arc::new(InventorySnapshot {
+            header: header(1, self.now_ns),
+            os: OsInfo {
+                name: known(text("Example Linux")),
+                logo_icon: Some(text("example-logo")),
+                version: known(text("rolling")),
+                build: known(text("rolling")),
+                kernel: known(text("Linux")),
+                kernel_version: known(text("7.3.0-4-generic #1 SMP PREEMPT_DYNAMIC")),
+                architecture: known(text("x86_64")),
+                install_date_s: known(1_700_000_000),
+                package_manager: known(text("pacman (1532 packages)")),
+                machine_id: known(text(format!("{:016x}{:016x}", rng.next(), rng.next()))),
+            },
+            processor: ProcessorInfo {
+                name: known(text("Example 16-Core Processor")),
+                vendor: known(text("AuthenticAMD")),
+                architecture: known(text("x86_64")),
+                family: known(26),
+                model: known(68),
+                stepping: known(0),
+                cores: known(16),
+                logical: known(32),
+                base_mhz: known(4300),
+                max_mhz: known(5750),
+                core_max_mhz: known(
+                    (0..32)
+                        .map(|_| Some(5000 + rng.below(750) as u32))
+                        .collect(),
+                ),
+                microcode: known(text("0x0b404023")),
+                virtualization: known(text("AMD-V")),
+                avx512: known(true),
+                bits: known(64),
+            },
+            system: SystemInfo {
+                pretty_hostname: known(text("desktop")),
+                static_hostname: known(text("desktop")),
+                user_name: known(text("user")),
+                domain: None,
+                boot_time_s: known(1_761_800_000),
+                desktop: known(text("KDE")),
+                windowing_system: known(text("Wayland")),
+                session_type: known(text("wayland")),
+                session_class: known(text("user")),
+                virtual_terminal: known(text("tty2")),
+            },
+            memory: MemoryInfo {
+                total_bytes: known(64 << 30),
+                page_size: known(4096),
+                huge_page_size: known(2 << 20),
+                swap_total_bytes: known(16 << 30),
+                zram_bytes: known(16 << 30),
+                peak_committed_bytes: known(40 << 30),
+            },
+            modules: (0..4)
+                .map(|s| MemoryModule {
+                    slot: known(text(format!("DIMM {s}"))),
+                    capacity_bytes: known(16 << 30),
+                    speed_mts: known(6000),
+                    kind: known(text("DDR5")),
+                    form_factor: known(text("DIMM")),
+                    manufacturer: known(text("Example")),
+                    part_number: known(text(format!("EX{:08X}", rng.next() as u32))),
+                    configured_speed_mts: known(6000),
+                    rank: known(1),
+                    configured_voltage_mv: known(1350),
+                })
+                .collect(),
+            slots_total: known(4),
+            disks: self
+                .disk_details
+                .iter()
+                .enumerate()
+                .take(real::INVENTORY_DISKS)
+                .map(|(d, (idx, disk))| DiskDrive {
+                    device: Some(*idx),
+                    name: Some(text(format!("nvme{d}n1"))),
+                    model: disk.model.clone(),
+                    kind: known(text("SSD")),
+                    interface: known(text("NVMe")),
+                    capacity_bytes: known(2 << 40),
+                    free_bytes: disk.free_bytes,
+                    volumes: Arc::from([text("/"), text("/home"), text("/boot")]),
+                    serial: disk.serial.clone(),
+                })
+                .collect(),
+            firmware: FirmwareInfo {
+                firmware_type: known(Some(FirmwareType::Uefi)),
+                bios_vendor: known(text("Example Megatrends")),
+                bios_version: known(text("3001")),
+                bios_date: known(text("2025-08-14")),
+                bios_release: known(text("5.35")),
+                secure_boot: known(false),
+            },
+            board: BoardInfo {
+                manufacturer: known(text("Example Computer Inc.")),
+                product: known(text("EXAMPLE X870E BOARD")),
+                version: known(text("Rev 1.xx")),
+                system_vendor: known(text("Example Computer Inc.")),
+                system_product: known(text("System Product Name")),
+                chassis_type: known(text("Desktop")),
+                serial: known(text(format!("{:016X}", rng.next()))),
+            },
+            graphics: Arc::from([GraphicsAdapter {
+                device: Some(DeviceIdx(35)),
+                pci_slot: Some(text("0000:03:00.0")),
+                name: known(text("Example GPU 16 GB")),
+                driver_version: known(text("580.95.05")),
+                kernel_module: known(text("nvidia")),
+                vulkan_version: known(text("1.4.312")),
+                opengl_version: known(text("4.6.0")),
+                temperature_source: known(text("nvidia-smi")),
+                dedicated_bytes: known(16 << 30),
+                shared_bytes: known(32 << 30),
+                displays: (0..2)
+                    .map(|d| DisplayMode {
+                        width: 2560,
+                        height: 1440,
+                        refresh_mhz: 144_000,
+                        primary: d == 0,
+                        monitor_name: Some(text(format!("Example 27 {d}"))),
+                        connector: DisplayConnector::DisplayPort,
+                        max_bpc: Some(10),
+                        rotation: Some(0),
+                        scale: Some(1.0),
+                    })
+                    .collect(),
+            }]),
+            network: (0..real::INVENTORY_NETS as u16)
+                .map(|n| NetworkAdapter {
+                    device: Some(DeviceIdx(39 + n)),
+                    connection: known(text(format!("Wired connection {}", n + 1))),
+                    adapter_name: known(text("Example 2.5GbE Controller")),
+                    driver: known(text("igc")),
+                    link_speed_mbps: known(2500),
+                    ip_addresses: Arc::from([
+                        text(format!("10.0.{n}.{}", 2 + rng.below(250))),
+                        text(format!("2001:db8:{n:x}::{:x}", rng.next() as u16)),
+                        text(format!(
+                            "fe80::{:x}:{:x}",
+                            rng.next() as u16,
+                            rng.next() as u16
+                        )),
+                    ]),
+                    mac: known(text(format!("{:012x}", rng.next() >> 16))),
+                })
+                .collect(),
+            public_ip: Default::default(),
+        })
+    }
+
     /// The snapshot of second `second`. Devices change every second. With `processes_tab` the
     /// process sweep runs every second; without it only the history sweep runs, every 10 s
     /// (`HISTORY_PERIOD` in tl-engine's processes worker, for the memory group series), and
@@ -866,11 +1570,31 @@ impl Host {
             }
         }
         let version = second + 1;
+        // The parts a visible window gets besides the process view, as often as the real
+        // engine changes them (`real`): services in 5 of 59 frames, devices in 24, device
+        // details in 19, windows and health in every one.
+        if second % real::SERVICES_PERIOD_S == real::SERVICES_PERIOD_S / 2 {
+            self.step_services();
+            self.base.services = self.services(version);
+        }
+        if matches!(second % 5, 1 | 3) {
+            self.step_devices();
+            self.base.devices = self.devices(version);
+        }
+        if second > 0 && second.is_multiple_of(real::DEVICE_DETAILS_PERIOD_S) {
+            self.step_disks();
+            self.base.device_details = self.device_details(version);
+        }
         let mut s = self.base.clone();
         s.sequence = version;
         s.published_ns = self.now_ns;
         s.system = self.system(version);
         s.series = self.series(version);
+        s.windows = self.windows(version);
+        s.health = Arc::new(HealthSnapshot {
+            version,
+            ..(*self.base.health).clone()
+        });
         if sweep {
             s.processes = self.processes(version);
             s.table = self.table(version);
@@ -891,6 +1615,10 @@ struct Wire {
     complete: usize,
     /// Uncompressed postcard bytes per part over the delta frames.
     parts: Vec<(&'static str, usize)>,
+    /// Delta frames that carry each part, in the order of `parts`.
+    carried: Vec<usize>,
+    /// Uncompressed postcard bytes of each part in the complete frame.
+    whole: Vec<(&'static str, usize)>,
 }
 
 impl Wire {
@@ -907,11 +1635,17 @@ impl Wire {
             self.complete,
             self.acks
         );
-        for (part, n) in &self.parts {
-            if *n > 0 {
+        let deltas = SECONDS as usize - 1;
+        for ((part, n), carried) in self.parts.iter().zip(&self.carried) {
+            let whole = self
+                .whole
+                .iter()
+                .find(|(name, _)| name == part)
+                .map_or(0, |(_, w)| *w);
+            if *n > 0 || whole > 0 {
                 println!(
-                    "  {part}: {} B per delta frame, uncompressed",
-                    n / (SECONDS as usize - 1)
+                    "  {part}: {whole} B in the complete frame; in {carried} of {deltas} delta frames, {} B per delta frame, uncompressed",
+                    n / deltas
                 );
             }
         }
@@ -999,6 +1733,8 @@ fn run_session_with(
         acks: 0,
         complete: 0,
         parts: Vec::new(),
+        carried: Vec::new(),
+        whole: Vec::new(),
     };
     let mut installed = Snapshot::empty(BOOT, 0);
     let mut installed_frame = 0;
@@ -1027,14 +1763,17 @@ fn run_session_with(
         wire.server += bytes.len();
         if frame.base == 0 {
             wire.complete = bytes.len();
+            wire.whole = part_sizes(&frame);
         } else {
             let sizes = part_sizes(&frame);
             if wire.parts.is_empty() {
-                wire.parts = sizes;
-            } else {
-                for (sum, (_, n)) in wire.parts.iter_mut().zip(sizes) {
-                    sum.1 += n;
-                }
+                wire.carried = sizes.iter().map(|_| 0).collect();
+                wire.parts = sizes.iter().map(|(name, _)| (*name, 0)).collect();
+            }
+            for ((sum, carried), (_, n)) in wire.parts.iter_mut().zip(&mut wire.carried).zip(sizes)
+            {
+                sum.1 += n;
+                *carried += usize::from(n > 0);
             }
         }
 
