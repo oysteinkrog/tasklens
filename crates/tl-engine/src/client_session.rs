@@ -1147,32 +1147,39 @@ impl ClientSession {
     }
 
     /// `base` with this session's six parts and its views of details and device details, each
-    /// part only while the session's demand asks for it (ADR-018 Sessions, leader decision on
+    /// part only while the session's demand asks for it (ADR-018 Sessions, leader decisions on
     /// tasklens-q4x76.15). In place of a part it does not ask for the session gets its empty
     /// one, the same `Arc` on every publish, so its frames do not carry that part. When the
     /// demand comes back, the part is the session's current one again and its next frame
     /// carries it whole.
     ///
-    /// Each part and what gates it. "A window" is `window_visible`; "tray graphs" is any of the
-    /// tray's cpu, memory, disks, nets and gpus flags; "graph targets" is a non-empty
-    /// `graph_targets` (tray and minigraph process graphs):
-    /// - `sequence`, `epoch`, `boot_id`, `published_ns`, `system`: always. `system` holds the
-    ///   title bar value, all a host that is not shown asks for.
-    /// - `series`, `health`: a window or tray graphs.
-    /// - `devices`: a window, tray graphs, or what gates `device_details`, whose disks it names.
-    /// - `processes`: a window, graph targets (the tray names a process graph from it), or
-    ///   what gates `table`, whose rows name records in it by index.
-    /// - `process_series`: graph targets.
-    /// - `table`: `process_table`, `services` (the Services page's cells read the table) or an
-    ///   open Properties window (`details`). The reducer rebuilds a table built from older
-    ///   processes before the publish (`ClientSessions::stale_tables`), so the first snapshot
-    ///   that carries the table again holds the current one.
-    /// - `inventory`, `windows`, `connections`, `services`, `startup`: a window.
-    /// - `details`, `device_details`: a window, or a scan, handle search or eject of the
-    ///   session's own that it still shows.
-    /// - `device_history`: a window or `device_history_range`.
-    /// - `history`: always. It holds only the answers to the session's own history queries
-    ///   and changes only when one arrives, so no demand flag gates it.
+    /// Each part is gated by the narrowest `Demand` field that names it. Window visibility
+    /// (`window_visible`) gates only the parts no field names. "Tray graphs" is any of the
+    /// tray's cpu, memory, disks, nets and gpus flags; "own" is a scan, handle search or eject
+    /// of the session's own that it still shows.
+    ///
+    /// | Part | Gate |
+    /// |---|---|
+    /// | `sequence`, `epoch`, `boot_id`, `published_ns` | always (frame header) |
+    /// | `system` | always: it holds the title bar value, all a host that is not shown asks for |
+    /// | `series`, `health` | a window or tray graphs |
+    /// | `devices` | a window, tray graphs or own (`device_details` names its disks by index) |
+    /// | `processes` | a window, `graph_targets` or the `table` gate (table rows index into it) |
+    /// | `process_series` | `graph_targets` |
+    /// | `table` | `process_table`, `services` (the Services page's cells read it) or `details` |
+    /// | `inventory` | `inventory` |
+    /// | `windows` | a window |
+    /// | `services` | `services`, `service_cgroup_stats` or `unit_details` |
+    /// | `startup` | `startup` |
+    /// | `connections` | `connections` or `connections_all_netns` |
+    /// | `details` | `details`, `affinity_targets` or own |
+    /// | `device_details` | a window or own |
+    /// | `device_history` | a window or `device_history_range` |
+    /// | `history` | always: only the answers to the session's own history queries |
+    ///
+    /// The reducer rebuilds a table built from older processes before the publish
+    /// (`ClientSessions::stale_tables`), so the first snapshot that carries the table again
+    /// holds the current one.
     pub fn snapshot(&self, base: Snapshot) -> Snapshot {
         let d = &self.demand;
         let e = &self.empty;
@@ -1181,6 +1188,8 @@ impl ClientSession {
         let targets = !d.graph_targets.is_empty();
         let own = !self.shown.is_empty();
         let table = table_demanded(d);
+        let services = d.services || d.service_cgroup_stats || !d.unit_details.is_empty();
+        let details = !d.details.is_empty() || !d.affinity_targets.is_empty() || own;
         Snapshot {
             series: gate(window || tray, base.series, &e.series),
             devices: gate(window || tray || own, base.devices, &e.devices),
@@ -1188,12 +1197,16 @@ impl ClientSession {
             processes: gate(window || targets || table, base.processes, &e.processes),
             process_series: gate(targets, base.process_series, &e.process_series),
             table: gate(table, Arc::clone(&self.table), &e.table),
-            inventory: gate(window, base.inventory, &e.inventory),
+            inventory: gate(d.inventory, base.inventory, &e.inventory),
             windows: gate(window, base.windows, &e.windows),
-            services: gate(window, Arc::clone(&self.services), &e.services),
-            startup: gate(window, Arc::clone(&self.startup), &e.startup),
-            connections: gate(window, Arc::clone(&self.connections), &e.connections),
-            details: gate(window || own, Arc::clone(&self.details), &e.details),
+            services: gate(services, Arc::clone(&self.services), &e.services),
+            startup: gate(d.startup, Arc::clone(&self.startup), &e.startup),
+            connections: gate(
+                d.connections || d.connections_all_netns,
+                Arc::clone(&self.connections),
+                &e.connections,
+            ),
+            details: gate(details, Arc::clone(&self.details), &e.details),
             device_details: gate(
                 window || own,
                 Arc::clone(&self.device_details),
