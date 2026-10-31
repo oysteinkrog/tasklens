@@ -8,12 +8,14 @@
 //! saves the setting through the engine socket, as a control-only client (no snapshots).
 //!
 //! `on` and `off` are one transaction each. The command holds an exclusive `flock` on
-//! `$XDG_RUNTIME_DIR/<app>/remote-admin.lock` for the whole run; a second command waits up to
+//! `$XDG_RUNTIME_DIR/tasklens/remote-admin.lock` for the whole run. The path is the same for
+//! every `--app-id`, because there is one rules file per host. A second command waits up to
 //! `LOCK_WAIT`, then fails. Before it changes anything it asks `tasklens-setup remote-admin
 //! state` whether the rules file is present or absent and keeps the answer itself. Any failure
 //! after the script was started to change the file (the script exiting non-zero, even after it
-//! wrote the file, or the save failing) puts that state back through the script (`on` for
-//! present, `off` for absent) before anything is printed (leader decision on tasklens-q4x76.31).
+//! wrote the file, reading its output or waiting for it failing, or the save failing) puts that
+//! state back through the script (`on` for present, `off` for absent) before anything is printed
+//! (leader decision on tasklens-q4x76.31).
 //!
 //! - `on` reads the host settings, prints what remote admin reaches and asks for confirmation.
 //!   Then it writes the rule and saves `remote_admin = true`.
@@ -30,10 +32,10 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,21 +67,19 @@ const POLKIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs `tasklens remote-admin <what>` for this user. `app_id` is the checked `--app-id`.
 pub fn main(app_id: Option<&str>, what: What) -> ExitCode {
-    let app_dir = app_id.unwrap_or(paths::APP_DIR);
-    let socket =
-        match engine_link::socket_path(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), app_dir) {
-            Ok(socket) => socket,
-            Err(e) => {
-                eprintln!("tasklens remote-admin: {e}");
-                return ExitCode::from(1);
-            }
-        };
+    let (socket, lock) = match endpoints(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), app_id) {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("tasklens remote-admin: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let uid = server::own_uid();
     let unit: &dyn Fn(Duration) -> bool = &engine_link::start_unit;
     let setup = Setup::pkexec();
     let polkit = |pid: u32| polkit_answer(pid, uid);
     let env = Env {
-        lock: socket.with_file_name(LOCK_NAME),
+        lock,
         lock_wait: LOCK_WAIT,
         socket,
         uid,
@@ -107,6 +107,19 @@ pub fn main(app_id: Option<&str>, what: What) -> ExitCode {
     ExitCode::from(code)
 }
 
+/// The engine socket for this instance and the lock file. The socket is under
+/// `$XDG_RUNTIME_DIR/<app>`. The lock is always `$XDG_RUNTIME_DIR/tasklens/remote-admin.lock`,
+/// whatever the `--app-id`: every instance changes the same polkit rules file, so every instance
+/// takes the same lock.
+fn endpoints(
+    runtime: Option<&std::ffi::OsStr>,
+    app_id: Option<&str>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let lock = engine_link::socket_path(runtime, paths::APP_DIR)?.with_file_name(LOCK_NAME);
+    let socket = engine_link::socket_path(runtime, app_id.unwrap_or(paths::APP_DIR))?;
+    Ok((socket, lock))
+}
+
 /// The user's name for the messages: `$USER`, else the uid.
 fn user_name(uid: u32) -> String {
     std::env::var("USER")
@@ -120,7 +133,8 @@ fn user_name(uid: u32) -> String {
 pub struct Env<'a> {
     /// `$XDG_RUNTIME_DIR/<app>/engine.sock`.
     pub socket: PathBuf,
-    /// `$XDG_RUNTIME_DIR/<app>/remote-admin.lock`, held for the whole of `on` and `off`.
+    /// `$XDG_RUNTIME_DIR/tasklens/remote-admin.lock` for every `--app-id`, held for the whole of
+    /// `on` and `off`.
     pub lock: PathBuf,
     /// `LOCK_WAIT` in the app.
     pub lock_wait: Duration,
@@ -649,32 +663,22 @@ impl Setup {
         command
     }
 
-    /// Runs the script, waits for it and returns what it printed. pkexec's own exit codes are
-    /// named.
+    /// Runs the script, waits for it and returns what it printed. Only a failed spawn means the
+    /// script never ran; after the spawn the script may have changed the file, so a failure to
+    /// read its output or to wait for it is `Failed`, and the caller restores.
     fn run(&self, step: Step) -> Result<String, SetupError> {
-        let output = self
-            .command(step)
-            .spawn()
-            .and_then(std::process::Child::wait_with_output)
-            .map_err(|e| {
-                SetupError::NotStarted(format!("{}: {e}", self.program.to_string_lossy()))
-            })?;
-        match output.status.code() {
-            Some(0) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
-            Some(126) => Err(SetupError::NotStarted(
-                "the password prompt was dismissed (pkexec exit 126)".to_owned(),
-            )),
-            Some(127) => Err(SetupError::NotStarted(
-                "polkit did not allow it (pkexec exit 127)".to_owned(),
-            )),
-            Some(code) => Err(SetupError::Failed(format!(
-                "{SETUP_PATH} remote-admin {} exited with {code}",
-                step.word()
-            ))),
-            None => Err(SetupError::Failed(
-                "tasklens-setup was ended by a signal".to_owned(),
-            )),
-        }
+        let mut child = self.command(step).spawn().map_err(|e| {
+            SetupError::NotStarted(format!("{}: {e}", self.program.to_string_lossy()))
+        })?;
+        let mut stdout = Vec::new();
+        // The pipe is closed before the wait, so a script still writing ends instead of
+        // blocking.
+        let read = child
+            .stdout
+            .take()
+            .map_or(Ok(0), |mut pipe| pipe.read_to_end(&mut stdout));
+        let status = child.wait();
+        outcome(step, read.map(|_| stdout), status)
     }
 
     /// Asks whether the rules file is there.
@@ -694,6 +698,43 @@ impl Setup {
         self.run(rule_file.step())
             .map(drop)
             .map_err(|e| e.text().to_owned())
+    }
+}
+
+/// Classifies a run of the script that was spawned. pkexec's own exit codes 126 and 127 mean the
+/// script never ran. Everything else that is not exit 0 with its output read is `Failed`.
+fn outcome(
+    step: Step,
+    stdout: io::Result<Vec<u8>>,
+    status: io::Result<ExitStatus>,
+) -> Result<String, SetupError> {
+    let status = status.map_err(|e| {
+        SetupError::Failed(format!(
+            "waiting for {SETUP_PATH} remote-admin {}: {e}",
+            step.word()
+        ))
+    })?;
+    match status.code() {
+        Some(0) => match stdout {
+            Ok(stdout) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+            Err(e) => Err(SetupError::Failed(format!(
+                "reading the output of {SETUP_PATH} remote-admin {}: {e}",
+                step.word()
+            ))),
+        },
+        Some(126) => Err(SetupError::NotStarted(
+            "the password prompt was dismissed (pkexec exit 126)".to_owned(),
+        )),
+        Some(127) => Err(SetupError::NotStarted(
+            "polkit did not allow it (pkexec exit 127)".to_owned(),
+        )),
+        Some(code) => Err(SetupError::Failed(format!(
+            "{SETUP_PATH} remote-admin {} exited with {code}",
+            step.word()
+        ))),
+        None => Err(SetupError::Failed(
+            "tasklens-setup was ended by a signal".to_owned(),
+        )),
     }
 }
 
@@ -1590,5 +1631,68 @@ polkit.addRule(function(action, subject) {{
             assert_eq!(status.code(), Some(1), "{uid:?}");
             assert!(!rig.rule().exists(), "{uid:?}");
         }
+    }
+
+    /// Every `--app-id` takes the same lock, because they all change the one rules file. The
+    /// sockets stay apart.
+    #[test]
+    fn one_lock_for_every_app_id() {
+        let runtime = tempfile::tempdir().expect("tempdir");
+        let dir = Some(runtime.path().as_os_str());
+        let (socket, lock) = endpoints(dir, None).expect("default");
+        let (socket_a, lock_a) = endpoints(dir, Some("a")).expect("a");
+        let (socket_b, lock_b) = endpoints(dir, Some("b")).expect("b");
+        let expected = runtime.path().join("tasklens").join(LOCK_NAME);
+        assert_eq!([&lock, &lock_a, &lock_b], [&expected, &expected, &expected]);
+        assert_eq!(socket, runtime.path().join("tasklens/engine.sock"));
+        assert_eq!(socket_a, runtime.path().join("a/engine.sock"));
+        assert_eq!(socket_b, runtime.path().join("b/engine.sock"));
+        let _held = engine_link::lock_engine(&lock_a)
+            .expect("lock a")
+            .expect("free");
+        assert!(
+            engine_link::lock_engine(&lock_b).expect("lock b").is_none(),
+            "a second app id must wait for the first"
+        );
+    }
+
+    /// Only pkexec's 126 and 127 mean the script never ran. A failure to read the output or to
+    /// wait, once the script was spawned, may follow a change to the file, so it is `Failed` and
+    /// the caller restores.
+    #[test]
+    fn a_failure_after_the_spawn_is_failed() {
+        use std::os::unix::process::ExitStatusExt;
+        let exit = |code: i32| Ok(ExitStatus::from_raw(code << 8));
+        fn closed<T>() -> io::Result<T> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+        assert!(matches!(
+            outcome(Step::On, closed(), exit(0)),
+            Err(SetupError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Step::On, Ok(Vec::new()), closed()),
+            Err(SetupError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Step::Off, closed(), closed()),
+            Err(SetupError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Step::On, Ok(Vec::new()), exit(1)),
+            Err(SetupError::Failed(_))
+        ));
+        assert!(matches!(
+            outcome(Step::On, closed(), exit(126)),
+            Err(SetupError::NotStarted(_))
+        ));
+        assert!(matches!(
+            outcome(Step::On, Ok(Vec::new()), exit(127)),
+            Err(SetupError::NotStarted(_))
+        ));
+        assert_eq!(
+            outcome(Step::State, Ok(b"absent\n".to_vec()), exit(0)).expect("ok"),
+            "absent\n"
+        );
     }
 }
