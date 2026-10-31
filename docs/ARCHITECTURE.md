@@ -2549,8 +2549,8 @@ ADR-005 already puts the engine behind `EngineClient`, and `tl-ui` uses nothing 
 | Piece | Kind | Allowed workspace deps | New external deps |
 |---|---|---|---|
 | `tl-model/src/remote_proto.rs` | protocol types and the envelope codec, pure | (tl-model's own) | serde `rc` feature on (amends ADR-002): message types derive `Serialize`/`Deserialize` with `Arc<str>` and `Arc<[T]>` sent by value |
-| `tl-remote` | lib: transports, envelope compression, `RemoteClient`, server sessions' wire side | tl-model | `zstd`, `arc-swap`, `async-channel`, `rustix` (already allowed in tl-model/tl-ops rows) |
-| `tl-server` | bin `tasklens-engine`: the engine service | tl-model, tl-engine, tl-history, tl-remote | `sd-notify` |
+| `tl-remote` | lib: transports, envelope compression, `RemoteClient`, the service's endpoint checks, server sessions' wire side | tl-model | `zstd`, `arc-swap`, `async-channel`, `rustix` (already allowed in tl-model/tl-ops rows) |
+| `tl-server` | bin `tasklens-engine`: the engine service | tl-model, tl-engine, tl-history, tl-remote | `sd-notify`; `tracing` and `tracing-subscriber` for its log, `libc` for the SIGTERM wait (q4x76.5) |
 | `tl-app` | bin `tasklens`: the window, `tasklens bridge` | adds tl-remote | none |
 
 asupersync stays inside `tl-engine` (D-001); its normal dependency closure may now reach `tl-server` as it does `tl-app`. `xtask check-deps` gains rows for `tl-remote` and `tl-server` and checks that `tl-remote` has no asupersync, Tokio or GPUI in its closure. `tasklens-engine` joins the shipped-binary checks (ADR-002).
