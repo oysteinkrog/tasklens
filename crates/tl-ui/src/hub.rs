@@ -60,6 +60,8 @@ fn note_live_sensors(live: &mut FxHashSet<DeviceIdx>, snap: &Snapshot) {
 pub struct SnapshotHub {
     client: Arc<dyn EngineClient>,
     current: Arc<Snapshot>,
+    /// `EngineClient::generation` of `current`.
+    generation: u64,
     /// Set when a `SnapshotChanged` is emitted and no render has been noted since.
     pending_notify_since: Option<Instant>,
     last_render: Option<Instant>,
@@ -81,9 +83,16 @@ impl SnapshotHub {
         let receiver = Arc::clone(&client);
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             while wake.recv().await.is_ok() {
-                // Load after receive (ADR-005).
+                // Load after receive (ADR-005). The generation is read first: the client changes
+                // it before it stores the first snapshot of a new generation and wakes after
+                // that store, so a snapshot read with the old value is installed again on the
+                // next wake under the new one.
+                let generation = receiver.generation();
                 let snap = receiver.latest();
-                if this.update(cx, |hub, cx| hub.install(snap, cx)).is_err() {
+                if this
+                    .update(cx, |hub, cx| hub.install(generation, snap, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -105,11 +114,13 @@ impl SnapshotHub {
         })
         .detach();
 
+        let generation = client.generation();
         let current = client.latest();
         let mut live_sensors = FxHashSet::default();
         note_live_sensors(&mut live_sensors, &current);
         Self {
             current,
+            generation,
             client,
             pending_notify_since: None,
             last_render: None,
@@ -130,14 +141,26 @@ impl SnapshotHub {
     }
 
     /// Installs `snap` if its sequence is newer, then emits `SnapshotChanged` when any component
-    /// version differs from the installed snapshot. Never notifies views.
-    pub fn install(&mut self, snap: Arc<Snapshot>, cx: &mut Context<Self>) {
-        if snap.sequence <= self.current.sequence {
+    /// version differs from the installed snapshot. A new `generation` (a reconnect or another
+    /// engine instance, ADR-018) installs `snap` even at the same sequence and reports every
+    /// component and every series as changed, since versions from two generations cannot be
+    /// compared. Never notifies views.
+    pub fn install(&mut self, generation: u64, snap: Arc<Snapshot>, cx: &mut Context<Self>) {
+        let new_generation = generation != self.generation;
+        if snap.sequence < self.current.sequence
+            || (snap.sequence == self.current.sequence && !new_generation)
+        {
             return;
         }
         note_live_sensors(&mut self.live_sensors, &snap);
         let mut changed_series = SmallVec::new();
-        let mask = snap.changed_since(&self.current, &mut changed_series);
+        let mask = if new_generation {
+            self.generation = generation;
+            let blank = Snapshot::empty(snap.boot_id, snap.epoch);
+            snap.changed_since(&blank, &mut changed_series) | ComponentMask::ALL
+        } else {
+            snap.changed_since(&self.current, &mut changed_series)
+        };
         self.current = snap;
         if mask == ComponentMask::NONE {
             return;
@@ -201,7 +224,9 @@ impl Global for GlobalHub {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::fake_engine::FakeEngine;
+    use std::sync::Mutex;
+
+    use crate::testing::fake_engine::{FakeEngine, empty_snapshot};
     use gpui_kit::{AppContext, TestAppContext};
 
     #[test]
@@ -232,6 +257,78 @@ mod tests {
             assert_eq!(hub.pending_notify_since, None);
             assert!(hub.last_render().is_some());
         });
+    }
+
+    /// Counts `SnapshotChanged` events and keeps the last mask.
+    fn watch(hub: &Entity<SnapshotHub>, cx: &mut TestAppContext) -> Arc<Mutex<Vec<ComponentMask>>> {
+        let masks = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&masks);
+        cx.update(|cx| {
+            cx.subscribe(hub, move |_, ev: &SnapshotChanged, _| {
+                seen.lock().unwrap().push(ev.mask);
+            })
+            .detach();
+        });
+        masks
+    }
+
+    #[gpui_kit::test]
+    fn engine_restart_shows_fresh_data(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        let masks = watch(&hub, cx);
+        engine.publish_with(|s| {
+            Arc::make_mut(&mut s.system).header.version = 3;
+            Arc::make_mut(&mut s.system).boot_time_s = 100;
+        });
+        cx.run_until_parked();
+        assert_eq!(*masks.lock().unwrap(), [ComponentMask::SYSTEM]);
+
+        // The new engine's counters start over and reach the same version with other data.
+        let mut fresh = empty_snapshot();
+        fresh.sequence = 2;
+        Arc::make_mut(&mut fresh.system).header.version = 3;
+        Arc::make_mut(&mut fresh.system).boot_time_s = 200;
+        engine.restart(fresh);
+        cx.run_until_parked();
+        assert_eq!(masks.lock().unwrap().last(), Some(&ComponentMask::ALL));
+        hub.read_with(cx, |hub, _| {
+            assert_eq!(hub.current().system.boot_time_s, 200);
+        });
+
+        // Within the new generation versions compare again.
+        engine.publish_with(|_| {});
+        cx.run_until_parked();
+        assert_eq!(masks.lock().unwrap().len(), 2);
+    }
+
+    #[gpui_kit::test]
+    fn new_generation_reinstalls_same_sequence(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        let masks = watch(&hub, cx);
+        // The hub read the old generation, then the client stored the new generation's first
+        // snapshot: the hub installs it by version.
+        let mut first = empty_snapshot();
+        first.sequence = 1;
+        let generation = engine.generation();
+        hub.update(cx, |hub, cx| hub.install(generation, Arc::new(first), cx));
+        assert!(masks.lock().unwrap().is_empty());
+        // The next wake reads the new generation with the same snapshot.
+        engine.bump_generation();
+        let snap = engine.latest();
+        let mut same = Snapshot::clone(&snap);
+        same.sequence = 1;
+        let generation = engine.generation();
+        hub.update(cx, |hub, cx| hub.install(generation, Arc::new(same), cx));
+        assert_eq!(*masks.lock().unwrap(), [ComponentMask::ALL]);
+        // An older sequence is never installed, whatever the generation.
+        engine.bump_generation();
+        let generation = engine.generation();
+        hub.update(cx, |hub, cx| hub.install(generation, snap, cx));
+        assert_eq!(masks.lock().unwrap().len(), 1);
     }
 
     #[gpui_kit::test]

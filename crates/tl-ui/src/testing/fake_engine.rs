@@ -4,6 +4,7 @@
 //! journal query the UI sent. The channels match the real engine (ADR-005, ADR-018): a one-token
 //! wake channel, a 256-slot action event channel and an unbounded request end channel.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tl_model::actions::ActionEvent;
@@ -25,6 +26,8 @@ pub struct FakeEngine {
     ev_rx: async_channel::Receiver<ActionEvent>,
     req_tx: async_channel::Sender<RequestEvent>,
     req_rx: async_channel::Receiver<RequestEvent>,
+    /// `EngineClient::generation`, changed by `restart`.
+    generation: AtomicU64,
 }
 
 struct FakeState {
@@ -63,6 +66,7 @@ impl FakeEngine {
             ev_rx,
             req_tx,
             req_rx,
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -83,6 +87,18 @@ impl FakeEngine {
         snap.sequence += 1;
         f(&mut snap);
         self.publish(snap);
+    }
+
+    /// A new engine generation, as after a reconnect: changes `generation`, then publishes
+    /// `snap`, whose component versions start over.
+    pub fn restart(&self, snap: Snapshot) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.publish(snap);
+    }
+
+    /// Changes `generation` and publishes nothing.
+    pub fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Queues one action event. A full channel drops the event.
@@ -148,6 +164,10 @@ impl EngineClient for FakeEngine {
 
     fn request_events(&self) -> async_channel::Receiver<RequestEvent> {
         self.req_rx.clone()
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     fn set_demand(&self, demand: Demand) {
