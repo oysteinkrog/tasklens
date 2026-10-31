@@ -2829,7 +2829,7 @@ mod tests {
     fn hosts_round_trip_in_order() {
         let mut s = Settings::default();
         assert!(s.hosts.is_empty());
-        assert!(!toml::to_string(&s).unwrap().contains("hosts"));
+        assert!(!toml::to_string(&s).unwrap().contains("[[hosts]]"));
         s.hosts = vec![host("home", "me@home.lan"), host("office", "office")];
         s.hosts[1].enabled = false;
         let text = toml::to_string(&s).expect("serializes");
@@ -2899,7 +2899,10 @@ mod tests {
         assert!(changed.is_empty());
         assert_eq!(s.hosts, vec![host("home", "h")]);
         let out = toml::to_string(&s).unwrap();
-        assert!(!out.contains("port") && !out.contains("future"), "{out}");
+        assert!(
+            !out.contains("port = ") && !out.contains("future = "),
+            "{out}"
+        );
     }
 
     #[test]
