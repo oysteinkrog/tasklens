@@ -516,6 +516,10 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     let (remote, _remote_wake) = link();
     let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
     msgs.extend(data());
+    msgs.extend([
+        on(REMOTE, table_query(8, "")),
+        on(REMOTE, services_query(9, "")),
+    ]);
     let local = rig.run(msgs);
     let shown = remote.latest.load_full();
     assert_eq!(pids(&shown), [10, 11, 20]);
@@ -561,16 +565,18 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     assert!(Arc::ptr_eq(&later.services, &hidden.services));
     assert!(Arc::ptr_eq(&later.series, &hidden.series));
 
-    // Shown again: the whole current table, over the current processes.
-    let local = rig.run(vec![
-        demand(REMOTE, processes_tab()),
-        sweep(4_000_000_000, &[10, 11, 20, 21, 22]),
-    ]);
+    // Shown again: the session's own table and the shared parts come back at once, and the
+    // next sweep brings the whole current table, over the current processes.
+    let local = rig.run(vec![demand(REMOTE, processes_tab())]);
+    let back = remote.latest.load_full();
+    assert!(Arc::ptr_eq(&back.processes, &local.processes));
+    assert!(!back.table.rows.is_empty());
+    assert_eq!(units(&back), ["alpha.service", "gamma.service"]);
+    let local = rig.run(vec![sweep(4_000_000_000, &[10, 11, 20, 21, 22])]);
     let again = remote.latest.load_full();
     assert_eq!(pids(&again), [10, 11, 20, 21, 22]);
     assert!(Arc::ptr_eq(&again.processes, &local.processes));
     assert!(again.table.header.version > shown.table.header.version);
-    assert_eq!(units(&again), ["alpha.service", "gamma.service"]);
 }
 
 #[test]
