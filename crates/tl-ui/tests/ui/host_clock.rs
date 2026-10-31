@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui_kit::base::Root;
+use gpui_kit::base::Root as BaseRoot;
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, div, px,
@@ -326,7 +326,7 @@ fn collector_health_ages_use_the_offset_learned_after_open(cx: &mut TestAppConte
                 .read(cx)
                 .get(&WindowKey::CollectorHealth)
         })
-        .and_then(|h| h.downcast::<Root>())
+        .and_then(|h| h.downcast::<BaseRoot>())
         .expect("health window registered");
     let frame = cx
         .update(|cx| TlSecondaryWindow::<CollectorHealthWindow>::find(handle, cx))
