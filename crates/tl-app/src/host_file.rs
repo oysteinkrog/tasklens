@@ -10,8 +10,8 @@
 //! Writes run on their own thread, one at a time in the order they were sent, so the caller (the
 //! UI thread) never waits for the disk. A switch to the service closes the file before the
 //! window's engine stops and before the lock is released. Every write sent before that finishes
-//! first, and any later write gets `EngineStopped`. So the service, which loads the file only after it has taken the lock, sees
-//! every change the window made.
+//! first, and any later write gets `EngineStopped`. So the service, which loads the file only
+//! after it has taken the lock, sees every change the window made.
 
 use std::path::Path;
 use std::sync::mpsc;
