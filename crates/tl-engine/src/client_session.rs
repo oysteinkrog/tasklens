@@ -1152,7 +1152,8 @@ impl ClientSession {
     /// `graph_targets` (tray and minigraph process graphs):
     /// - `sequence`, `epoch`, `boot_id`, `published_ns`, `system`: always. `system` holds the
     ///   title bar value, all a host that is not shown asks for.
-    /// - `series`, `devices`, `health`: a window or tray graphs.
+    /// - `series`, `health`: a window or tray graphs.
+    /// - `devices`: a window, tray graphs, or what gates `device_details`, whose disks it names.
     /// - `processes`: a window or graph targets (the tray names a process graph from it).
     /// - `process_series`: graph targets.
     /// - `table`: `process_table`, `services` (the Services page's cells read the table) or an
@@ -1173,7 +1174,7 @@ impl ClientSession {
         let table = d.process_table || d.services || !d.details.is_empty();
         Snapshot {
             series: gate(window || tray, base.series, &e.series),
-            devices: gate(window || tray, base.devices, &e.devices),
+            devices: gate(window || tray || own, base.devices, &e.devices),
             health: gate(window || tray, base.health, &e.health),
             processes: gate(window || targets, base.processes, &e.processes),
             process_series: gate(targets, base.process_series, &e.process_series),
