@@ -14,15 +14,19 @@ use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use tl_engine::client_session::{
     ClientMsg, ClientSessionId, ClientSessions, OpenError, PortState, SESSIONS_MAX, SessionLink,
+    combine,
 };
 use tl_engine::reducer::{Publisher, Reducer};
 use tl_engine::source::WorkerControl;
 use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate};
 use tl_model::actions::SchedPolicy;
 use tl_model::command::Command;
-use tl_model::demand::{CpuDemand, Demand};
+use tl_model::demand::{
+    CpuDemand, Demand, DetailDemand, DeviceHistoryRequest, DeviceRange, TrayDemand,
+};
+use tl_model::details::{DetailTab, DetailTarget};
 use tl_model::health::ManagerState;
-use tl_model::ids::{ColumnId, GroupKey, ProcessKey};
+use tl_model::ids::{ColumnId, GraphTarget, GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
 use tl_model::snapshot::{ServiceBackend, ServiceStatus, Snapshot, StartupType, UnitRecord};
 use tl_model::system::CpuSet;
@@ -139,12 +143,15 @@ fn demand(id: ClientSessionId, demand: Demand) -> EngineMsg {
     })
 }
 
-/// A window on the Processes tab. A session gets only the parts its demand asks for, so the
-/// tests that read a session's table, processes or services send this first.
-fn processes_tab() -> Demand {
+/// A window that shows the Processes, Services, Startup and Connections tables. A session
+/// gets only the parts its demand asks for, so the tests that read those parts send this first.
+fn every_table() -> Demand {
     Demand {
         any_surface_visible: true,
         process_table: true,
+        services: true,
+        startup: true,
+        connections: true,
         ..Demand::default()
     }
 }
@@ -378,7 +385,7 @@ fn data() -> Vec<EngineMsg> {
 fn two_sessions_get_their_own_table_and_services_views() {
     let mut rig = Rig::new();
     let (remote, _remote_wake) = link();
-    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
+    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, every_table())];
     msgs.extend(data());
     msgs.extend([
         on(ClientSessionId::LOCAL, table_query(3, "1")),
@@ -439,7 +446,7 @@ fn a_new_session_starts_with_default_queries_over_current_data() {
     ]);
     rig.run(msgs);
     let (remote, _remote_wake) = link();
-    let local = rig.run(vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())]);
+    let local = rig.run(vec![open(REMOTE, &remote), demand(REMOTE, every_table())]);
     let other = remote.latest.load_full();
     assert_eq!(pids(&local), [10, 11]);
     assert_eq!(other.table.query_generation, 0);
@@ -518,7 +525,7 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     let (_local_tx, local_rx) = watch::channel(Demand::default());
     rig.reducer.as_mut().expect("the reducer is back").demand_rx = Some(local_rx);
     let (remote, _remote_wake) = link();
-    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, processes_tab())];
+    let mut msgs = vec![open(REMOTE, &remote), demand(REMOTE, every_table())];
     msgs.extend(data());
     msgs.extend([
         on(REMOTE, table_query(8, "")),
@@ -572,7 +579,7 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
 
     // Shown again with no sweep in between: the first snapshot has a table built from the
     // processes it carries, not the one from before the session was hidden.
-    let local = rig.run(vec![demand(REMOTE, processes_tab())]);
+    let local = rig.run(vec![demand(REMOTE, every_table())]);
     let back = remote.latest.load_full();
     assert!(Arc::ptr_eq(&back.processes, &local.processes));
     let mut carried: Vec<u32> = back.processes.records.iter().map(|r| r.key.pid).collect();
@@ -592,6 +599,258 @@ fn a_session_gets_only_the_parts_its_demand_asks_for() {
     rig.run(vec![services(&["alpha.service"])]);
     let kept = remote.latest.load_full();
     assert!(Arc::ptr_eq(&kept.table, &back.table));
+}
+
+/// A gated part of a session's snapshot: its name and whether two snapshots hold the same
+/// `Arc` for it.
+type GatedPart = (&'static str, fn(&Snapshot, &Snapshot) -> bool);
+
+macro_rules! part {
+    ($field:ident) => {
+        (stringify!($field), |a: &Snapshot, b: &Snapshot| {
+            Arc::ptr_eq(&a.$field, &b.$field)
+        })
+    };
+}
+
+/// Every part `ClientSession::snapshot` gates. `system`, `history` and the header fields always
+/// go out.
+fn gated_parts() -> [GatedPart; 14] {
+    [
+        part!(series),
+        part!(devices),
+        part!(health),
+        part!(processes),
+        part!(process_series),
+        part!(table),
+        part!(inventory),
+        part!(windows),
+        part!(services),
+        part!(startup),
+        part!(connections),
+        part!(details),
+        part!(device_details),
+        part!(device_history),
+    ]
+}
+
+/// One case per `Demand` field: the demand with only that field set and the parts it gates.
+fn gate_cases() -> Vec<(&'static str, Demand, &'static [&'static str])> {
+    // Lists every field, so a new `Demand` field does not build until it has a case here.
+    let Demand {
+        any_surface_visible: _,
+        cpu: _,
+        cpu_fast: _,
+        memory: _,
+        disks: _,
+        nets: _,
+        gpus: _,
+        sensors: _,
+        process_table: _,
+        process_top: _,
+        process_columns: _,
+        detail_keys: _,
+        gpu_process: _,
+        connections: _,
+        services: _,
+        startup: _,
+        inventory: _,
+        details: _,
+        affinity_targets: _,
+        service_cgroup_stats: _,
+        unit_details: _,
+        remote_host_cookies: _,
+        connections_all_netns: _,
+        tray: _,
+        graph_targets: _,
+        recording: _,
+        device_history: _,
+        device_history_range: _,
+        device_timeline: _,
+    } = Demand::default();
+    let key = proc_record(10).key;
+    let only = |set: &dyn Fn(&mut Demand)| {
+        let mut d = Demand::default();
+        set(&mut d);
+        d
+    };
+    let tray = |set: &dyn Fn(&mut TrayDemand)| {
+        only(&|d| {
+            set(&mut d.tray);
+        })
+    };
+    const WINDOW: &[&str] = &[
+        "series",
+        "devices",
+        "health",
+        "processes",
+        "windows",
+        "device_details",
+        "device_history",
+    ];
+    const TRAY_GRAPH: &[&str] = &["series", "devices", "health"];
+    const TABLE: &[&str] = &["processes", "table"];
+    vec![
+        (
+            "any_surface_visible",
+            only(&|d| d.any_surface_visible = true),
+            WINDOW,
+        ),
+        ("cpu", only(&|d| d.cpu = CpuDemand::PerCore), &[]),
+        ("cpu_fast", only(&|d| d.cpu_fast = true), &[]),
+        ("memory", only(&|d| d.memory = true), &[]),
+        ("disks", only(&|d| d.disks = true), &[]),
+        ("nets", only(&|d| d.nets = true), &[]),
+        ("gpus", only(&|d| d.gpus = true), &[]),
+        ("sensors", only(&|d| d.sensors = true), &[]),
+        ("process_table", only(&|d| d.process_table = true), TABLE),
+        ("process_top", only(&|d| d.process_top = true), &[]),
+        (
+            "process_columns",
+            only(&|d| d.process_columns.insert(ColumnId::Cpu)),
+            &[],
+        ),
+        (
+            "detail_keys",
+            only(&|d| d.detail_keys = Arc::from([key])),
+            &[],
+        ),
+        ("gpu_process", only(&|d| d.gpu_process = true), &[]),
+        (
+            "connections",
+            only(&|d| d.connections = true),
+            &["connections"],
+        ),
+        (
+            "services",
+            only(&|d| d.services = true),
+            &["processes", "table", "services"],
+        ),
+        ("startup", only(&|d| d.startup = true), &["startup"]),
+        ("inventory", only(&|d| d.inventory = true), &["inventory"]),
+        (
+            "details",
+            only(&|d| {
+                d.details = Arc::from([DetailDemand {
+                    target: DetailTarget::Process(key),
+                    tab: DetailTab::General,
+                }]);
+            }),
+            &["processes", "table", "details"],
+        ),
+        (
+            "affinity_targets",
+            only(&|d| d.affinity_targets = Arc::from([key])),
+            &["details"],
+        ),
+        (
+            "service_cgroup_stats",
+            only(&|d| d.service_cgroup_stats = true),
+            &["services"],
+        ),
+        (
+            "unit_details",
+            only(&|d| {
+                d.unit_details = Arc::from([UnitRef {
+                    manager: Manager::User,
+                    name: Arc::from("alpha.service"),
+                }]);
+            }),
+            &["services"],
+        ),
+        (
+            "remote_host_cookies",
+            only(&|d| d.remote_host_cookies = Arc::from([1u64])),
+            &[],
+        ),
+        (
+            "connections_all_netns",
+            only(&|d| d.connections_all_netns = true),
+            &["connections"],
+        ),
+        ("tray.icons_shown", tray(&|t| t.icons_shown = true), &[]),
+        ("tray.cpu", tray(&|t| t.cpu = true), TRAY_GRAPH),
+        ("tray.memory", tray(&|t| t.memory = true), TRAY_GRAPH),
+        ("tray.disks", tray(&|t| t.disks = true), TRAY_GRAPH),
+        ("tray.nets", tray(&|t| t.nets = true), TRAY_GRAPH),
+        ("tray.gpus", tray(&|t| t.gpus = true), TRAY_GRAPH),
+        (
+            "graph_targets",
+            only(&|d| d.graph_targets = Arc::from([(GraphTarget::Process(key), ColumnId::Cpu)])),
+            &["processes", "process_series"],
+        ),
+        ("recording", only(&|d| d.recording = true), &[]),
+        ("device_history", only(&|d| d.device_history = true), &[]),
+        (
+            "device_history_range",
+            only(&|d| {
+                d.device_history_range = Some(DeviceHistoryRequest {
+                    range: DeviceRange::H1,
+                    end_realtime_ns: None,
+                });
+            }),
+            &["device_history"],
+        ),
+        ("device_timeline", only(&|d| d.device_timeline = true), &[]),
+    ]
+}
+
+/// Leader decision on tasklens-q4x76.15 (second hold): each part goes out only while the
+/// narrowest `Demand` field that names it is set, and window visibility gates only the parts
+/// no field names. A session with one field set gets exactly the parts that field gates; every
+/// other gated part is its empty one, the same `Arc` as while it asks for nothing.
+#[test]
+fn each_demand_field_alone_sends_exactly_the_parts_it_gates() {
+    let parts = gated_parts();
+    for (field, want, on) in gate_cases() {
+        let mut rig = Rig::new();
+        let (remote, _remote_wake) = link();
+        let mut msgs = vec![open(REMOTE, &remote)];
+        msgs.extend(data());
+        // A device history answer, so the session's own device history is not its empty one.
+        msgs.push(EngineMsg::Source(SourceUpdate::DeviceHistory(Arc::from(
+            Vec::new(),
+        ))));
+        rig.run(msgs);
+        let hidden = remote.latest.load_full();
+        let local = rig.run(vec![demand(REMOTE, want)]);
+        let got = remote.latest.load_full();
+        assert!(got.sequence > hidden.sequence, "{field}: a new publish");
+        assert!(Arc::ptr_eq(&got.system, &local.system), "{field}: system");
+        for (name, same) in parts {
+            if on.contains(&name) {
+                assert!(!same(&got, &hidden), "{field} must send {name}");
+            } else {
+                assert!(same(&got, &hidden), "{field} must not send {name}");
+            }
+        }
+    }
+
+    // With every field set, every gated part goes out, so each case above can tell the part
+    // it sends from the empty one.
+    let mut rig = Rig::new();
+    let (remote, _remote_wake) = link();
+    let mut msgs = vec![open(REMOTE, &remote)];
+    msgs.extend(data());
+    msgs.push(EngineMsg::Source(SourceUpdate::DeviceHistory(Arc::from(
+        Vec::new(),
+    ))));
+    rig.run(msgs);
+    let hidden = remote.latest.load_full();
+    let mut all = Demand::default();
+    for (_, d, _) in gate_cases() {
+        all = combine(&[&all, &d]);
+    }
+    // `combine` keeps the first part's range.
+    all.device_history_range = Some(DeviceHistoryRequest {
+        range: DeviceRange::H1,
+        end_realtime_ns: None,
+    });
+    rig.run(vec![demand(REMOTE, all)]);
+    let got = remote.latest.load_full();
+    for (name, same) in parts {
+        assert!(!same(&got, &hidden), "every field sends {name}");
+    }
 }
 
 #[test]
