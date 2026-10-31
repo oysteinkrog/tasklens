@@ -2751,6 +2751,16 @@ fn logs_timeout_retry(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn logs_overflow_offers_retry(cx: &mut TestAppContext) {
+    let t = open_logs(cx);
+    t.send(cx, 0, JournalEvent::Error(JournalError::Overflow));
+    let st = t.status(cx);
+    assert_eq!(st.heading.as_deref(), Some("Could not read the journal"));
+    assert_eq!(st.text, None);
+    assert_eq!(st.button.as_deref(), Some("Retry"));
+}
+
+#[gpui_kit::test]
 fn logs_exit_error_text(cx: &mut TestAppContext) {
     let t = open_logs(cx);
     t.send(

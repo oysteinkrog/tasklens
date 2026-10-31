@@ -44,8 +44,8 @@ pub enum JournalAccess {
 }
 
 /// Why the journal could not be read. The UI owns the texts: `NotFound` is
-/// "journalctl not found", `Timeout` is "Reading the journal took too long.", and `Exit` is
-/// "Could not read the journal".
+/// "journalctl not found", `Timeout` is "Reading the journal took too long.", and `Exit` and
+/// `Overflow` are "Could not read the journal".
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum JournalError {
     NotFound,
@@ -54,6 +54,9 @@ pub enum JournalError {
         code: i32,
         stderr_first_line: Arc<str>,
     },
+    /// The engine service ended the stream because the window did not read it fast enough
+    /// (ADR-018 Queues).
+    Overflow,
 }
 
 /// Events from the engine's journal task to the UI.

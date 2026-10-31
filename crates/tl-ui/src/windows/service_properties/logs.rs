@@ -1133,6 +1133,10 @@ impl LogsView {
                     .one_line(),
             )
             .into_any_element(),
+            ListState::Error(JournalError::Overflow) => {
+                retry(TlEmptyState::new("").heading(tr(cx, "services-sys038-read-failed")))
+                    .into_any_element()
+            }
             ListState::Loading => {
                 TlEmptyState::new(tr(cx, "services-sys038-loading")).into_any_element()
             }
@@ -1163,6 +1167,11 @@ impl LogsView {
             }) => (
                 Some(tr(cx, "services-sys038-read-failed")),
                 Some(SharedString::from(stderr_first_line.to_string())),
+                Some(tr(cx, "services-sys038-retry")),
+            ),
+            ListState::Error(JournalError::Overflow) => (
+                Some(tr(cx, "services-sys038-read-failed")),
+                None,
                 Some(tr(cx, "services-sys038-retry")),
             ),
             ListState::Loading => (None, Some(tr(cx, "services-sys038-loading")), None),
