@@ -27,10 +27,14 @@
 //! is a button the user clicks (ADR-006, P3).
 //!
 //! Tracking is keyed by host and session (ADR-018 Implementation contracts "Reconnect"). Each
-//! host has its own tracker, and each request keeps the client generation it was sent in. When
-//! the host's hub reports the link stale, every request from an older session becomes "Outcome
-//! unknown" with "connection to <host> lost", unless the client ended it first. While the link
-//! is stale, until the first complete frame of the next session, nothing is sent:
+//! host has its own tracker, and each request keeps the client generation it was sent in. As
+//! soon as the tracker sees a newer generation for its host, from any source, every request
+//! from an older session becomes "Outcome unknown" with "connection to <host> lost", unless the
+//! client ended it first. The sources are the hub's link events (either way), every installed
+//! snapshot, a reply to a request from a newer session and a new send. No source depends on the
+//! hub's 500 ms stale check, so a drop and reconnect faster than that still ends the lost
+//! requests when the next session's first snapshot arrives. While the link is stale, until the
+//! first complete frame of the next session, nothing is sent:
 //! [`ActionTracker::track`] returns `EngineStopped` and [`ActionTracker::track_or_toast`] shows
 //! "Not sent while reconnecting to <host>.".
 //!
@@ -63,7 +67,7 @@ use tracing::{debug, warn};
 use crate::components::dialog::TlDialog;
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::host::{HostContext, HostRegistry};
-use crate::hub::{LinkChanged, SnapshotHub};
+use crate::hub::{LinkChanged, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 use crate::window::main::push_main_toast;
@@ -331,9 +335,11 @@ pub struct ActionTracker {
     finished: VecDeque<(ActionId, FinalStates)>,
     /// The deadline sweep runs only while requests are pending.
     sweeping: bool,
+    /// The newest client generation seen for this host. Requests from an older one have ended.
+    seen_generation: u64,
     _events: Task<()>,
-    /// The hub's `LinkChanged`: a lost session ends its requests.
-    _link: Option<Subscription>,
+    /// The hub's `LinkChanged` and `SnapshotChanged`: each can show a newer generation.
+    _hub_events: SmallVec<[Subscription; 2]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pushed: Vec<PushedToast>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -387,13 +393,23 @@ impl ActionTracker {
         App::on_action(cx, move |a: &ShowActionDetails, cx| {
             let _ = this.update(cx, |t, cx| t.show_details(ActionId(a.0), cx));
         });
-        let link = hub.as_ref().map(|hub| {
-            cx.subscribe(hub, |t: &mut Self, _, ev: &LinkChanged, cx| {
-                if !ev.live {
-                    t.end_lost_sessions(cx);
-                }
-            })
-        });
+        let mut hub_events = SmallVec::new();
+        if let Some(hub) = &hub {
+            // A link event either way: the client's generation is the newest known.
+            hub_events.push(cx.subscribe(hub, |t: &mut Self, _, _: &LinkChanged, cx| {
+                let generation = t.client.generation();
+                t.see_generation(generation, cx);
+            }));
+            // An installed snapshot: its generation. A drop and reconnect faster than the
+            // hub's 500 ms check sends no link event, only this.
+            hub_events.push(
+                cx.subscribe(hub, |t: &mut Self, hub, _: &SnapshotChanged, cx| {
+                    let generation = hub.read(cx).generation();
+                    t.see_generation(generation, cx);
+                }),
+            );
+        }
+        let seen_generation = client.generation();
 
         Self {
             client,
@@ -404,8 +420,9 @@ impl ActionTracker {
             details: VecDeque::new(),
             finished: VecDeque::new(),
             sweeping: false,
+            seen_generation,
             _events: task,
-            _link: link,
+            _hub_events: hub_events,
             #[cfg(any(test, feature = "test-hooks"))]
             pushed: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -461,6 +478,7 @@ impl ActionTracker {
             return Err(CommandError::EngineStopped);
         }
         let session = self.client.generation();
+        self.see_generation(session, cx);
         self.client.send(Command::Action(request.clone()))?;
         let deadline = request_deadline(&request);
         debug!(target: "tasklens::ui", ?id, ?deadline, "action tracked");
@@ -543,6 +561,15 @@ impl ActionTracker {
     fn on_event(&mut self, ev: ActionEvent, cx: &mut Context<Self>) {
         let Some(entry) = self.pending.get_mut(&ev.id) else {
             debug!(target: "tasklens::ui", id = ?ev.id, "event for an unknown action");
+            return;
+        };
+        // A reply to a request from a newer session: the older sessions are over. Replies from
+        // one session arrive in order, so an older session's replies were handled before this.
+        let session = entry.session;
+        if session > self.seen_generation {
+            self.see_generation(session, cx);
+        }
+        let Some(entry) = self.pending.get_mut(&ev.id) else {
             return;
         };
         match (ev.target, ev.state) {
@@ -744,15 +771,19 @@ impl ActionTracker {
         keep
     }
 
-    /// The host's session ended: every pending request sent in an older session than the
-    /// client's current one gets the summary `OutcomeUnknown("connection to <host> lost")`.
-    /// A request the client already ended is not pending any more, so each ends once.
-    fn end_lost_sessions(&mut self, cx: &mut Context<Self>) {
-        let current = self.client.generation();
+    /// Notes that the host's client has reached `generation` (ADR-018 rule 4). The first time a
+    /// generation is newer than any seen before, every pending request sent in an older session
+    /// gets the summary `OutcomeUnknown("connection to <host> lost")`. A request the client
+    /// already ended is not pending any more, so each ends once.
+    fn see_generation(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if generation <= self.seen_generation {
+            return;
+        }
+        self.seen_generation = generation;
         let lost: SmallVec<[ActionId; 4]> = self
             .pending
             .iter()
-            .filter(|(_, e)| e.session < current)
+            .filter(|(_, e)| e.session < generation)
             .map(|(id, _)| *id)
             .collect();
         if lost.is_empty() {

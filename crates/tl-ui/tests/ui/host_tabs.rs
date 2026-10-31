@@ -27,6 +27,7 @@ use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::DEMAND_COALESCE;
 use tl_ui::host::HostContext;
 use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
+use tl_ui::hub::LinkChanged;
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::pages::processes::delegate::ProcRowId;
 use tl_ui::pages::services::ServicesPage;
@@ -785,4 +786,73 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     rig.vcx.simulate_keystrokes("delete");
     rig.draw();
     assert_eq!(Rig::actions(&rig.remotes["home"]), 2);
+}
+
+/// ADR-018 rule 4: the tracker ends a lost session's requests on first sight of a newer
+/// generation, not on a link-down event. Home drops and reconnects inside one 500 ms check, so
+/// the hub never reports the link stale. The End task sent in the old session still ends as
+/// outcome unknown as soon as the next session's first snapshot is installed.
+#[gpui_kit::test]
+fn host_tab_fast_reconnect_ends_lost_actions(cx: &mut TestAppContext) {
+    let mut rig = boot(cx, &["home"]);
+    rig.select_host(1);
+    let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
+    let hub = home.hub().expect("hub").clone();
+    let links = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&links);
+    rig.vcx.update(|_, cx| {
+        cx.subscribe(&hub, move |_, ev: &LinkChanged, _| {
+            seen.lock().expect("links").push(ev.live);
+        })
+        .detach();
+    });
+
+    assert!(rig.end_task(&home, 4321).is_some());
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
+    let tracker = home.tracker().expect("tracker").clone();
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+
+    // The drop raises the generation. No snapshot and no 500 ms check yet: nothing has shown
+    // the tracker the newer generation, so the request is still pending.
+    rig.remotes["home"].bump_generation();
+    rig.draw();
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
+
+    // The next session's first snapshot arrives before the check.
+    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    fresh.sequence = 1;
+    rig.remotes["home"].restart(fresh);
+    rig.draw();
+    assert!(
+        links.lock().expect("links").is_empty(),
+        "no link event fired"
+    );
+    rig.vcx.read_entity(&hub, |hub, _| {
+        assert!(hub.is_live() && hub.session_current())
+    });
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 0);
+    let pushed = rig.vcx.read_entity(&tracker, |t, _| {
+        t.pushed()
+            .iter()
+            .map(|p| p.text.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        pushed.iter().filter(|t| *t == "Outcome unknown").count(),
+        1,
+        "the lost action ended once: {pushed:?}"
+    );
+
+    // A late 500 ms check finds the session current: no link event, nothing more ends.
+    rig.tick();
+    assert!(links.lock().expect("links").is_empty());
+    assert_eq!(
+        rig.vcx.read_entity(&tracker, |t, _| t.pushed().len()),
+        pushed.len()
+    );
+
+    // The new session sends.
+    assert!(rig.end_task(&home, 4321).is_some());
+    assert_eq!(Rig::actions(&rig.remotes["home"]), 2);
+    assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
 }
