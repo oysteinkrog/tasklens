@@ -32,6 +32,7 @@ Where these records deviate from Astra, the ADR says so under "Deviation from As
 | 016 | Data sources and parsing rules |
 | 017 | Device metric history |
 | 018 | Engine service, clients and multiple hosts |
+| 019 | Configurable widget layout |
 
 ---
 
@@ -2638,3 +2639,245 @@ Four rules hold for every connection, thread and queue in this ADR (leader decis
 - **Settings migration.** The release that adds the service stops writing host keys from the window. The service imports them from `settings.toml` once, then owns them; its revision counter is stored in `engine.toml` and survives restarts. `tasklens remote-admin` changes `remote_admin` through the engine socket, never by writing the file. Each machine has one window process (single instance, ADR-010), so `settings.toml` keeps one writer.
 - **Lifetime.** "Always on" means from login to logout of the owner's user, plus linger when turned on. When the window's fallback engine holds the lock, the window shows "Switch to engine service" in the status bar; it stops its engine (flushing history), releases the lock, starts the unit and connects.
 - **Rescue mode.** `--low-memory` keeps its own stripped engine (ADR-004). It writes no history, so it neither takes nor needs the engine lock.
+
+---
+
+## ADR-019: Configurable widget layout
+
+Status: accepted (D-041, 2026-10-31). Phase P2. This ADR turns `docs/plan/layout-system.md` into build rules. Phase 1 (epic E27, beads `tasklens-lhliq.2` to `.8`) builds it for the Overview GPU box only. Phases 2 to 4 reuse the same types for the other boxes and the resource pages, each in its own epic.
+
+### Context
+
+Each Overview box has 1 to 5 fixed modes (UI-PRF-019), an Arrange choice, one inner splitter and some kind-specific keys in `OverviewGridSetting` (`mode`, `split`, `arrange`, `power`, `power_split`, `power_placement`, `clocks`, `hidden`). The owner wants to pick freely what a box shows: any metric of the device (each GPU engine, VRAM, clocks, power, temperature) as any mix of chart, load bar, current value, stats and name, placed on a snap grid inside the box (D-041). The Overview must keep its render contract (UI-PRF-017, UI-PRF-019): a sample never makes the page or a box notify, and each chart is a cached view. Settings written by 1.1.0 must keep their look, and an older build must still open a file a newer build wrote.
+
+### Decision
+
+**Terms.**
+
+- A **container** is a box or page that holds widgets. Its id is a string: `overview.<kind>` for an Overview box (phase 1: `overview.gpu` only), later `page.cpu`, `page.memory` and `page.gpu.<device key>` for resource pages. Overview kinds are unique on the page (UI-PRF-056), so the kind names the box.
+- A **widget** shows one metric of one device (its **source**) in one or more **forms**: `chart` (history over the box range), `bar` (load bar), `value` (current value), `stats` (min, average and peak over the range) and `label` (the source's name). Phase 1 has single-metric widgets only. Group widgets (all cores, all engines) and the Details grid widget come in later phases.
+- A **composition** is the fixed arrangement a widget uses for its forms at its size (UI-PRF-061): `Cell`, `Row` or `Tile`.
+- A **layout** is a container's list of widgets. It is either a **flow layout**, placed by a built-in **preset** (one of today's modes), or a **grid layout**, where every widget has its own cells on the container's inner snap grid. Defaults and converted old settings are flow layouts. The first applied inner edit turns a flow layout into a grid layout (see "Editing").
+
+**Types** (`tl-model/src/layout.rs`, plain serde data like `OverviewLayoutSetting`; `tl-ui` turns them into its views):
+
+```rust
+pub const LAYOUT_VERSION: u32 = 1;
+pub const GPU_BOX_CONTAINER: &str = "overview.gpu";
+/// The containers this build supports. Phase 1: GPU_BOX_CONTAINER only.
+pub const LAYOUT_CONTAINERS: &[&str] = &[GPU_BOX_CONTAINER];
+/// The inner grid of the GPU box (see "Inner grid").
+pub const GPU_BOX_GRID_COLS: u16 = 6;
+
+/// `[[performance.layouts]]` in file order.
+pub struct LayoutsSetting(pub Vec<LayoutEntry>);
+
+pub enum LayoutEntry {
+    /// A container this build supports, at a version it reads.
+    Known(ContainerLayout),
+    /// A container this build does not support, or a newer `version`: kept as read and
+    /// written back unchanged. The container keeps using its old settings.
+    Kept(toml::Table),
+}
+
+pub struct ContainerLayout {
+    pub container: String,
+    pub version: u32,
+    /// `Some`: a flow layout placed by a built-in preset. `None`: a grid layout.
+    pub preset: Option<PresetSetting>,
+    /// Empty is an empty box, which is not the same as no entry (the default).
+    pub widgets: Vec<WidgetSetting>,
+}
+
+pub struct PresetSetting {
+    /// A mode id of the container's kind in OVERVIEW_BOX_MODES: for the GPU box
+    /// "engine_charts", "chart_engines" or "chart".
+    pub id: String,
+    /// An id from OVERVIEW_ARRANGES; None is the preset's default.
+    pub arrange: Option<String>,
+    /// In OVERVIEW_SPLIT_RANGE; None is the preset's default.
+    pub split: Option<f64>,
+}
+
+pub struct WidgetSetting {
+    /// Unique in its container. A new widget takes the highest id plus 1, so ids are never
+    /// reused while the entry exists.
+    pub id: u32,
+    pub source: SourceSelector,
+    pub forms: FormSet,
+    /// Required in a grid layout, never written in a flow layout.
+    pub cell: Option<WidgetCell>,
+    pub options: WidgetOptions,
+    /// The device's name when the widget was placed, shown only while the device is gone.
+    pub device_name: Option<Arc<str>>,
+}
+
+/// A durable source: never a runtime SeriesId or DeviceIdx.
+pub struct SourceSelector {
+    pub device: DeviceSelector,
+    pub metric: MetricKey,
+}
+
+pub enum DeviceSelector {
+    /// The device's persistent key (PERF-005, R-155, ADR-017), for example
+    /// "gpu:GPU-0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9" or "gpu:0000:01:00.0".
+    Key(Arc<str>),
+    /// The nth device the box shows (0 or 1 for the GPU box), in sidebar order. Flow
+    /// layouts only, so a default or converted layout follows the GPUs present.
+    Slot(u8),
+}
+
+/// A stable metric name, written as text (see "Metric keys"). An unknown key is kept.
+pub struct MetricKey(pub Arc<str>);
+
+bitflags::bitflags! {
+    /// Never empty in a loaded widget. Written as names in this order.
+    pub struct FormSet: u8 { const CHART = 1; const BAR = 2; const VALUE = 4; const STATS = 8; const LABEL = 16; }
+}
+
+pub struct WidgetCell { pub col: u16, pub row: u16, pub cols: u16, pub rows: u16 }
+
+/// Chart options. Written only when not the default.
+pub struct WidgetOptions { pub fill: bool /* true */, pub dashed: bool /* false */ }
+```
+
+`PerformanceSettings` gains `layouts: LayoutsSetting`, written only when it has an entry. A kernel overlay option (CPU) and group sources come with the containers that need them.
+
+**Metric keys** (phase 1, GPU devices). `tl-model/src/layout.rs` maps each key to its `MetricId`:
+
+| Key | MetricId | Name (en-US) |
+|---|---|---|
+| `engine:<key>`, `<key>` from `GpuEngine::key()` (`gpu`, `memctl`, `enc`, `dec`, `jpeg`, `ofa`, `compute`, `dma`, `render`, `copy`, `video`, `video-enhance`) | `GpuEngine::metric()` | the engine's name on the GPU page for the GPU's vendor |
+| `vram` | `GPU_MEM` | VRAM |
+| `clock_gfx` | `GPU_CLOCK` | Graphics clock |
+| `clock_mem` | `GPU_MEM_CLOCK` | Memory clock |
+| `power` | `GPU_POWER` | Power draw |
+| `temp` | `GPU_TEMP` | Temperature |
+
+Later phases add keys; a key is never renamed or reused.
+
+**Settings schema** (canonical table (a)):
+
+```toml
+[[performance.layouts]]
+container = "overview.gpu"
+version = 1
+widgets = [
+  { id = 1, device = "gpu:GPU-0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9", device_name = "NVIDIA GeForce RTX 4090", metric = "engine:gpu", forms = ["chart", "value", "label"], col = 0, row = 0, cols = 3, rows = 4 },
+  { id = 2, device = "gpu:GPU-0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9", device_name = "NVIDIA GeForce RTX 4090", metric = "vram", forms = ["bar", "value", "stats", "label"], col = 0, row = 4, cols = 6, rows = 1 },
+]
+```
+
+A flow layout has `preset = { id = "chart_engines", arrange = "auto", split = 0.5 }` and widgets with `slot = 0` or `slot = 1` instead of `device`, and no cells.
+
+**Load rules** (`Settings::clamp`, one `warn!` line for all layout drops, key `performance.layouts`):
+
+- An entry without a string `container` is dropped. A second entry for the same container is dropped.
+- An entry for a container not in `LAYOUT_CONTAINERS`, or with `version` above `LAYOUT_VERSION`, becomes `LayoutEntry::Kept` and is written back unchanged. A missing `version` reads as 1.
+- An unknown preset id reads as the kind's default preset. `arrange` and `split` follow the UI-PRF-019 rules.
+- A widget is dropped when its `id` is missing or repeated, or when it has no known form. Unknown form names are ignored.
+- A widget is dropped when it has both `device` and `slot`, or neither, or a `slot` above 1, or a `slot` in a grid layout.
+- In a grid layout, a widget is dropped when its cells are missing, have a span below 1, end past the grid's columns or overlap an earlier widget.
+- An unknown metric key or a device key that no device has is **kept**. Such a widget shows its unavailable state (UI-PRF-061).
+
+**Conversion of the GPU box** (`layout::convert_gpu_box(&OverviewGridSetting) -> ContainerLayout`). It runs in `Settings::clamp` for the GPU box when there is no `overview.gpu` entry and the GPU box's grid entry has `mode`, `split`, `arrange` or `hidden`. The result is a flow layout:
+
+- `preset.id` is the entry's `mode` (or `engine_charts`), with its `arrange` and `split`.
+- Widgets, for slot 0 and then slot 1, ids from 1 in this order:
+  - `engine_charts`: `engine:<key>` for every key in `GpuEngine::ALL` order with forms `chart`, `value`, `label`; then `vram` with `bar`, `value`, `label`.
+  - `chart_engines`: `engine:gpu` with `chart` (the section chart of UI-PRF-017); `engine:<key>` for every key in `GpuEngine::ALL` order except `memctl`, with `chart`, `bar`, `value`, `label`; `vram` with `bar`, `value`, `label`; `temp` with `value`; `power` with `value`.
+  - `chart`: `engine:gpu` with `chart`; `vram` with `bar`, `value`, `label`.
+- `hidden` names (en-US, D-029) leave out the widgets they name. Each name maps to engine keys the same way for every vendor: "3D / Compute" and "Graphics" to `gpu`, "Video Encode" to `enc`, "Video Decode" to `dec`, "Video Encode/Decode" to `enc` and `dec`, "Memory controller" to `memctl`, "Compute" to `compute`, "DMA" to `dma`, "JPEG" to `jpeg`, "Optical flow" to `ofa`, "Render/3D" to `render`, "Copy" to `copy`, "Video" to `video`, "Video Processing" to `video-enhance`, and "VRAM" to `vram`. An unknown name is ignored.
+- The built-in default (no entry and no old key) is `convert_gpu_box` of an entry with no keys. It is used in memory and never written.
+- Conversion is deterministic: the same entry always gives the same layout, and it reads no device. It is idempotent: once an `overview.gpu` entry exists, conversion does not run again.
+- The old keys of the GPU box's grid entry are kept as loaded and written back unchanged, and a build with an `overview.gpu` entry ignores them. So an older build that drops `[[performance.layouts]]` still shows the old mode. Every other box keeps using its old keys.
+- Before the first save after a load that converted a container, `tl-app` (`settings_store.rs`) copies the current `settings.toml` to `settings.toml.pre-layouts-v1` in the same directory, mode `0600`, unless that file already exists. `Settings::clamp` reports the conversion with the key `LAYOUTS_CONVERTED_KEY = "performance.layouts.converted"`, which the load step logs with `info!` and does not show as a clamped value.
+
+**Metric metadata** (`tl-ui/src/pages/performance/widget/meta.rs`, `MetricMeta`, one entry per metric key). Each entry gives: the unit; the `ValueFormat`; the chart `YScale`; gauge or counter; the bar's denominator (`BarMax::Fixed(100.)`, `BarMax::Total(fn)` from the device record, or `BarMax::None`); and the stats rule (`StatsRule::MinAvgPeak` or `StatsRule::None`). The forms a metric offers follow from it: `bar` only with a denominator, `stats` only with a stats rule. Phase 1 entries:
+
+| Key | Format | Scale | Kind | Bar max | Stats |
+|---|---|---|---|---|---|
+| `engine:*` | `Percent` | `Fixed { 0, 100 }` | gauge | 100 | min, avg, peak |
+| `vram` | `Bytes`, as "3.1 / 16.0 GiB" (UI-PRF-017 VRAM row) | `FixedTotal(mem_total)` | gauge | `mem_total` | min, avg, peak |
+| `clock_gfx` | `Mhz` | `StickyUp { hw_max: clock_gfx_max_mhz }` | gauge | `clock_gfx_max_mhz`, else no bar | min, avg, peak |
+| `clock_mem` | `Mhz` | `StickyUp { hw_max: clock_mem_max_mhz }` | gauge | `clock_mem_max_mhz`, else no bar | min, avg, peak |
+| `power` | `Watts` | `StickyUp { hw_max: power_limit_w }` | gauge | `power_limit_w`, else `power_max_limit_w`, else no bar | min, avg, peak |
+| `temp` | `Celsius` | `StickyTemp` | gauge | `slowdown_temp_c`, else no bar | min, avg, peak |
+
+A counter (later phases, for example energy) offers no bar and no stats; its value is the running total. `MinAvgPeak` covers the box range (`performance.overview_range`) with the figures UI-PRF-055 gives box titles: the valid samples of the live series for 1 min and 5 min, the `DeviceHistory` points (min of the mins, mean of the means, max of the maxes) for 1 h, 24 h and 7 d. With no valid sample in the range the stats text is empty, as in the box titles. The text uses the existing string `perf-overview-figures` ("min {$min}  avg {$avg}  peak {$peak}").
+
+**Entities and data flow** (`tl-ui/src/pages/performance/widget/`):
+
+- `MetricWidget` (`metric_widget.rs`) is one GPUI entity per widget, keyed by its widget id. It owns its `ChartView` when it shows a chart, picks its composition from its forms and size (`compose.rs`), formats its text only when the value, stats or bar bucket changed, and notifies only then.
+- `SourceData` (`source.rs`) is one entity per source in use. It resolves the `SourceSelector` to a `SeriesId` from the device catalog (again only when the catalog changes), subscribes to `SnapshotHub`, and on a snapshot whose series version changed it updates the current value and the stats and notifies. Each `MetricWidget` observes its `SourceData`. Widgets on the same source share one `SourceData`, so history is read and stats are computed once per data revision. `SourceStore` (one per Overview page) maps selectors to `SourceData` entities and drops an entry when no widget uses it.
+- `SourceData` emits `AvailabilityChanged` when its device goes or comes back, or the device stops or starts reporting the metric. This is the only source event the container subscribes to.
+- `WidgetContainer` (`container.rs`) holds the widgets of one container: it places them (flow or grid), keeps a map from widget id to `Entity<MetricWidget>`, and adds the sources it shows to the page's demand part. A layout change compares by widget id: a widget whose id stays keeps its entity and gets its new settings in place; only new ids get new entities. The container re-renders on a layout change, a resize, an edit mode change and `AvailabilityChanged`, never because of a sample.
+- Chart geometry stays cached by `ChartView` (ADR-009): rebuilt only when the series version, the scale or the size changes.
+- Hidden widgets do no work. A widget that takes no space (a metric the device does not report, an empty slot, a widget cut by a fit rule) has no entity. A `SourceData` with no observer is dropped, and nothing reads a source while the Overview page is not shown (the demand part is withdrawn, as today).
+- **Render contract.** UI-PRF-017 and UI-PRF-019 still hold. GPUI marks every ancestor of a notifying view dirty (crw.34), so a widget's notify can make the container and page render once in that frame. That render does fixed work: it reads no snapshot, formats nothing and builds no geometry. The gate is therefore: on a sample, the page and the container never notify, no widget entity is created or dropped, and only the widgets on a changed source notify.
+
+**Flow placement** (`tl-ui/src/pages/performance/overview/gpu_flow.rs`). A flow layout is placed by its preset's rules, which are the GPU box rules of UI-PRF-017, UI-PRF-019 and UI-PRF-059 with the fixed engine lists replaced by the widget list:
+
+- Slot 0 and slot 1 are the first and second GPU the box shows today (the sidebar's visible GPU cards, in order). At most two sections show; the second only when both fit; GPUs left over give the "+n more" row.
+- In a section, engine widgets draw in the order of the old mode: the GPU page grid order (`grid_engines`) in `engine_charts`, and the vendor order (`shown_engines`, with one shared "Video Encode/Decode" row when `enc_dec_shared`) in `chart_engines`. Other widgets keep list order after them. An engine widget whose engine the device does not report, or that `performance.hidden_gpu_engines` hides, takes no space. That global setting applies to flow layouts only; a widget in a grid layout shows what the user placed.
+- In `engine_charts` the widgets with a chart are cells of `parts::fill_grid` (at least 120 × 48 px) and the rest are rows under the grid. In `chart_engines` the first widget whose only form is `chart` is the section chart, widgets with a bar are spark rows (`spark_row`), and widgets whose only form is `value` share one line, joined by " · " (today's temperature and power line). `arrange`, `split` and the inner splitter work as UI-PRF-019. The UI-PRF-059 fit rules ("+n more engines", rows giving way) are unchanged.
+- The box menu keeps "Layout" (preset radio items), "Arrange" and "Engines" for a flow layout. They edit the flow layout entry: a preset change replaces the widget list with that preset's list, leaving out the engines the Engines list hides; an Engines change removes or adds that engine's widgets.
+
+**Inner grid** (`tl-ui/src/pages/performance/widget/grid.rs`, pure functions with `proptest` tests, like `overview/layout.rs`). For grid layouts:
+
+- The GPU box grid has `GPU_BOX_GRID_COLS` = 6 columns over the box body width, a row unit of 24 logical px and a 4 px gutter (`sp2`) in both directions. Column width `cw = (W − 5·gutter) / 6`. A later container sets its own column count and unit.
+- **Fill** (D-037, D-040): when the widgets end above the bottom of the body, every row grows by the same amount: the drawn row height is `max(unit, (H − (R − 1)·gutter) / R)`, where `R` is the last used row. A taller layout keeps the unit and the body scrolls vertically with a scrollbar. Columns never scroll sideways.
+- **Minimum span**: a widget spans at least `max(1, ceil(min_w / cw))` columns and `max(1, ceil(min_h / unit))` rows, where `min_w × min_h` is the smallest composition of its forms (UI-PRF-061). It is enforced when a move, resize or add ends. At draw time a widget keeps its saved span, and a widget drawn below its minimum drops forms in the UI-PRF-061 order.
+- **Insert** (Add Widget): at the new widget's default span (3 × 4 cells when it shows a chart, else 6 × 1), raised to its minimum span, in the first free place scanning rows top to bottom and columns left to right; with no free place, under the lowest widget.
+- **Move**: the widget snaps to whole cells. Widgets in the way move down to make room, and widgets above a freed space close up, as the Overview grid does (UI-PRF-056).
+- **Resize**: the bottom-right handle changes the span in whole cells, clamped at the minimum span and at the last column. Widgets in the way move down.
+- **Shrink** (the box gets smaller): the layout does not change. Spans are kept, the body scrolls vertically, and compositions drop forms.
+- **Scale**: the unit, gutter and every minimum are logical px times `ui_scale` (ADR-009). Spans do not change with the scale.
+- No two widgets overlap after any action (proptest over random action sequences).
+
+**Editing** (`tl-ui/src/pages/performance/widget/edit.rs` and `menu.rs`). Editing the boxes on the page (Edit Layout, UI-PRF-018 and UI-PRF-056) and editing the widgets in one box (Edit Widgets, UI-PRF-061) are separate modes, and at most one is on. Starting Edit Widgets ends Edit Layout as "Done" does. Edit Layout is disabled while a box is in Edit Widgets.
+
+- Inner editing is a transaction: `LayoutEdit { container, before: Option<ContainerLayout>, working: Option<ContainerLayout>, undo: Vec<Option<ContainerLayout>>, selected: Option<u32> }`. `None` means no entry (the built-in default). Each action pushes the previous working copy onto `undo`, at most 100 steps.
+- Entering Edit Widgets on a flow layout pins it into the working copy (`grid::pin`):
+  - Each widget that takes space gets the cells nearest its drawn rectangle: rounded to whole cells, span at least 1, overlaps moved down.
+  - Each slot selector becomes the device's persistent key, and `device_name` is set.
+  - Widgets cut by a fit rule are placed under the lowest widget at their minimum span.
+  - Widgets of an empty slot, and widgets whose metric the device does not report, are left out.
+  - When the user cancels, the saved flow layout stays as it was.
+- **Apply** saves the working copy: an entry for a layout, no entry for `None` (after Reset). With no change from `before`, nothing is saved. **Cancel** (and Esc) drops the working copy and places `before` again; entities of widgets in `before` were kept during editing, so none is created again. **Undo** restores the previous working copy. **Reset** asks first, then sets the working copy to `None`; Undo can bring it back before Apply.
+- Only Apply writes settings. Nothing is saved during a drag or while editing.
+
+**Files the later beads create or change.**
+
+| Bead | Files |
+|---|---|
+| `tasklens-lhliq.2` | `tl-model/src/layout.rs` (new: the types, metric key map, load rules, `convert_gpu_box`, the hidden name map), `tl-model/src/settings.rs` (`PerformanceSettings.layouts`, conversion in `Settings::clamp`, `LAYOUTS_KEY`, `LAYOUTS_CONVERTED_KEY`), `tl-model/src/lib.rs` (mod line), `tl-app/src/settings_store.rs` (the `.pre-layouts-v1` copy) |
+| `tasklens-lhliq.3` | `tl-ui/src/pages/performance/widget/meta.rs` (new: `MetricMeta`, `BarMax`, `StatsRule`, `MetricKind`, the stats function), `widget/mod.rs` (new) |
+| `tasklens-lhliq.4` | `widget/metric_widget.rs` (`MetricWidget`), `widget/compose.rs` (`Composition`, minimum sizes, form drop order), `widget/source.rs` (`SourceStore`, `SourceData`, `AvailabilityChanged`) |
+| `tasklens-lhliq.5` | `widget/container.rs` (`WidgetContainer`), `widget/grid.rs` (pure inner grid rules and pinning) |
+| `tasklens-lhliq.6` | `widget/edit.rs` (`LayoutEdit`, the edit toolbar, keys), `widget/menu.rs` (widget menu, Add Widget, the Reset and preset confirmations), `overview/box_menu.rs` ("Edit Widgets…"), `pages/performance/actions.rs` (the actions of UI-PRF-061), `assets/locales/en-US.ftl` (the UI-PRF-061 strings) |
+| `tasklens-lhliq.7` | `overview/gpu_box.rs` (hosts a `WidgetContainer`), `overview/gpu_flow.rs` (new: the GPU presets' flow placement), `overview/mod.rs` (wiring) |
+| `tasklens-lhliq.8` | `crates/tl-model/tests/fixtures/layouts/*.toml` (old GPU box settings), `crates/tl-ui/tests/ui/overview_widgets.rs` (new module of the `ui` test binary), the `perf-overview` bench scenes |
+
+Paths under `widget/` are in `crates/tl-ui/src/pages/performance/widget/`.
+
+### Consequences
+
+- The GPU box looks as in 1.1.0 until the user edits it. Old settings stay in the file, so going back to an older build keeps the old mode. That build drops the `[[performance.layouts]]` entries at its next save. `settings.toml.pre-layouts-v1` holds the file as it was before the first conversion.
+- The GPU box code splits into the flow placement (`gpu_flow.rs`) and the shared widget code. The other boxes do not change in phase 1.
+- A layout written by a later build for a box this build does not support survives a save unchanged.
+- Each widget is an entity, so a box with 30 widgets has 30 entities. Widgets that take no space have none.
+
+### Rejected alternatives
+
+- **Store `SeriesId` or `DeviceIdx` in settings.** Rejected: both are valid only within one engine session (ADR-003, ADR-017).
+- **Convert old modes into grid cells on load.** Rejected: the engines a GPU reports and its vendor order are not known at load, so the result would depend on the machine and would not be deterministic. Flow layouts keep the old placement rules instead.
+- **One `schema_version` bump of `settings.toml` with a migration in `tl-app/src/migrations.rs`.** Rejected: an older build would open the whole file read-only (ADR-011 load step 3), and the conversion must run per container and only for containers this build supports.
+- **One render of the container per sample, drawing every widget.** Rejected: it breaks the render contract of UI-PRF-017.
+
+### Verification
+
+- tl-model: a fixture per old GPU mode, with and without `hidden` engines, with "VRAM" hidden, and with `arrange` and `split` set, converts to the expected widgets; converting twice gives the same layout; no entry and `widgets = []` load as different states; an unknown metric key and an unknown device key are kept; a newer `version` and an unknown container are written back unchanged; each drop rule drops only its widget.
+- tl-app: the first save after a conversion writes `settings.toml.pre-layouts-v1` with the old bytes, and a later save does not change it.
+- tl-ui (`test-hooks`): every composition at its minimum size and larger; the three unavailable states; two widgets on one source share one `SourceData`; inner grid insert, move, resize and shrink at 1.0, 1.5 and 2.0 scale and at the GPU box minimum of 200 × 220 px; no overlap after random actions (proptest); Apply saves, Cancel restores, Undo steps back; the counter test of the render contract above; widget entity ids survive a move of another widget and a Cancel.
+- Phase gate (`tasklens-lhliq.8`): migration fixtures for every old GPU box setting; a visual check of the default and of each old mode against screenshots of 1.1.0 taken in a hidden session; a hotplug test (a GPU gone and back keeps the layout and shows the unavailable state between); the `perf-overview` and `perf-overview-static` bench scenes within their ADR-014 budgets with the GPU box on widgets.
