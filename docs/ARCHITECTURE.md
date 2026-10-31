@@ -2617,6 +2617,13 @@ With nobody at the remote screen, a polkit prompt cannot be answered. `tasklens-
 
 Each bead below owns its contract and a test for it.
 
+Four rules hold for every connection, thread and queue in this ADR (leader decisions on q4x76.5, .7, .8, .18, .20, 2026-10-31):
+
+- **One deadline per operation.** An operation (a connection attempt, a handshake, a frame write, a child process's shutdown) has one overall deadline on a monotonic clock. Every blocking step inside it (connect, read, write, join, wait) is bounded by the time left, never by its own fresh timeout. Past the deadline the operation fails and frees what it holds: the session slot, the child process, the pipe threads.
+- **Up means handshaken.** A connection counts as up only after its handshake is complete and checked, never when a socket accepts or a process starts.
+- **Level-triggered state.** A latest-value request (demand, table query, settings) is kept and re-offered on the receiver's own tick until it is taken; close and end markers never travel through a queue that can drop them.
+- **Generations.** Every stream, subscription, client or engine instance carries a generation. Opening or switching bumps it, and anything from an older generation is dropped.
+
 - **Delta flow.** At most one unacknowledged frame per session. The next frame is built only after the `Ack`, against the acknowledged snapshot, from the newest publish (latest wins). A series whose base sample has left the ring, or whose ring was reset, is sent whole. The table part carries the row order as a key list whenever the order changed. Component versions on the client are the server's, copied as they are; the client resets its hub comparison state on every reconnect and engine instance change. History points that change after they were sent (decimation) make `device_history` go whole.
 - **Queues in bytes.** Replies: 16 messages or 4 MiB. Journal: at most 4 streams per session, 1 MiB queued per stream. Snapshots are never starved: one goes out at least every 2 s while others wait. A write blocked for 10 s closes that session only. `JournalClose` and `Ack` travel on the control path, ahead of the command queue, so closing works when the queue is full; follow and cursor rules stay as ADR-005.
 - **Per session.** One `SnapshotHub` per host connection in the window. Server limits per session: 8 detail requests, 4 history windows, 4 journal streams.
