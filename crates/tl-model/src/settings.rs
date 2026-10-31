@@ -3297,7 +3297,8 @@ mod tests {
             )
         };
         let (s, changed) = load_toml(&entry("gpu"));
-        assert!(changed.is_empty(), "{changed:?}");
+        // The old key converts to a widget layout once (ADR-019) and stays as loaded.
+        assert_eq!(changed, [LAYOUTS_CONVERTED_KEY]);
         let b = first(&s);
         assert_eq!(b.hidden, ["Copy", "Nope"]);
         let text = toml::to_string(&s).unwrap();
@@ -3416,7 +3417,7 @@ mod tests {
         let gpu = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"gpu\", \
                    width = 1.0, mode = \"chart_engines\" }] }]\n";
         let (s, changed) = load_toml(gpu);
-        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(changed, [LAYOUTS_CONVERTED_KEY]);
         let b = first(&s);
         assert_eq!(b.mode.as_deref(), Some("chart_engines"));
     }

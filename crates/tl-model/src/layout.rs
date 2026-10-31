@@ -417,10 +417,9 @@ impl ContainerLayout {
     /// whether any part was dropped or replaced. Unknown keys are ignored (ADR-011).
     fn from_table(container: &str, t: &Table) -> (Self, bool) {
         let mut changed = false;
-        let preset = match t.get("preset") {
-            None => None,
-            Some(v) => Some(PresetSetting::from_value(container, v, &mut changed)),
-        };
+        let preset = t
+            .get("preset")
+            .map(|v| PresetSetting::from_value(container, v, &mut changed));
         let flow = preset.is_some();
         let cols = grid_cols(container);
         let mut widgets: Vec<WidgetSetting> = Vec::new();
