@@ -30,6 +30,7 @@ use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::pages::processes::delegate::ProcRowId;
 use tl_ui::pages::services::ServicesPage;
+use tl_ui::table::tree_table::TreeTableDelegate as _;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{MainWindow, main_window_title, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
@@ -535,8 +536,9 @@ fn host_tabs_properties_window_stays_on_its_host(cx: &mut TestAppContext) {
     );
 }
 
-/// One process row for `pid`: its record and the table row that shows it.
-fn with_process_row(s: &mut Snapshot, pid: u32) {
+/// One process row for `pid`: its record and the table row that shows it, built for the
+/// page's table query `generation` (a view for another one is not shown).
+fn with_process_row(s: &mut Snapshot, pid: u32, generation: u64) {
     let header = ComponentHeader {
         version: s.processes.header.version + 1,
         validity: Validity::Valid,
@@ -549,6 +551,7 @@ fn with_process_row(s: &mut Snapshot, pid: u32) {
     });
     s.table = Arc::new(ProcessTableView {
         header,
+        query_generation: generation,
         rows: vec![TableRow {
             node: NodeId::Process(key(pid)),
             depth: 0,
@@ -573,7 +576,6 @@ fn with_process_row(s: &mut Snapshot, pid: u32) {
 fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     let mut rig = boot(cx, &["home", "office"]);
     let pid = 4321;
-    rig.remotes["home"].publish_with(|s| with_process_row(s, pid));
     rig.select_host(1);
     let home = rig.vcx.read_entity(&rig.main, |m, _| m.host().clone());
     let local = rig.vcx.update(|_, cx| HostContext::local(cx));
@@ -596,6 +598,14 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
         .expect("home's Processes page");
     let table = rig.vcx.read_entity(&page, |p, _| p.table().clone());
     let row = ProcRowId::Process(key(pid));
+    let publish_row = |rig: &mut Rig| {
+        let generation = rig
+            .vcx
+            .read_entity(&table, |t, _| t.delegate.query().generation());
+        rig.remotes["home"].publish_with(|s| with_process_row(s, pid, generation));
+        rig.draw();
+    };
+    publish_row(&mut rig);
     let body = rig
         .vcx
         .debug_bounds("TlTreeTable-body")
@@ -630,9 +640,23 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
 
     // Live: Delete on the focused table sends End task to home, which waits for its result.
     select(&mut rig);
+    let shown = rig
+        .vcx
+        .read_entity(&table, |t, _| t.delegate.row_index(row));
+    assert!(shown.is_some(), "the process row is in home's table");
+    let captured = rig
+        .vcx
+        .update(|_, cx| page.read(cx).capture_targets(None, cx).items.len());
+    assert_eq!(captured, 1, "the selection captures the row");
     rig.vcx.simulate_keystrokes("delete");
     rig.draw();
-    assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
+    assert_eq!(
+        Rig::actions(&rig.remotes["home"]),
+        1,
+        "toasts {:?}, focused {:?}",
+        toasts(&mut rig.vcx),
+        rig.vcx.update(|window, cx| window.focused(cx).is_some())
+    );
     let tracker = home.tracker().expect("tracker").clone();
     assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
 
@@ -699,16 +723,23 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     assert_eq!(rig.end_task(&home, pid), None);
     assert_eq!(Rig::actions(&rig.remotes["home"]), 1);
 
-    // A command sent without the tracker is not sent either: window picking.
+    // A command sent without the tracker is not sent either: window picking. Its toast joins
+    // the two refusals above, so the count goes up.
+    let refusals = |rig: &mut Rig| {
+        toasts(&mut rig.vcx)
+            .into_iter()
+            .find(|t| t.starts_with("Not sent while reconnecting to home."))
+    };
+    assert_eq!(
+        refusals(&mut rig).as_deref(),
+        Some("Not sent while reconnecting to home. (×2)")
+    );
     rig.vcx.dispatch_action(StartWindowPick);
     rig.draw();
     assert_eq!(picks(&rig.remotes["home"]), 0);
-    assert!(
-        toasts(&mut rig.vcx)
-            .iter()
-            .any(|t| t == "Not sent while reconnecting to home."),
-        "{:?}",
-        toasts(&mut rig.vcx)
+    assert_eq!(
+        refusals(&mut rig).as_deref(),
+        Some("Not sent while reconnecting to home. (×3)")
     );
 
     // The other hosts are live: their actions go out.
@@ -732,7 +763,6 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
     let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
     fresh.sequence = 1;
-    with_process_row(&mut fresh, pid);
     rig.statuses
         .lock()
         .expect("statuses")
@@ -746,6 +776,7 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     );
     assert!(rig.vcx.debug_bounds("MainWindowReconnect").is_none());
     // Clicks and keys reach the page again.
+    publish_row(&mut rig);
     select(&mut rig);
     rig.vcx.simulate_click(below, Modifiers::none());
     rig.draw();
