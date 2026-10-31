@@ -1739,19 +1739,20 @@ fn grouped_rows(
     let is_kthread = |i: usize| records[i].flags.contains(ProcFlags::KERNEL_THREAD);
     let unit_of = |i: usize| input.extras.get(i).and_then(|x| x.unit.as_ref());
 
-    // Lowercase app names for the filter: the name of the app's first record with an app id,
-    // else of its first record.
-    let app_pids: FxHashSet<u32> = records
+    // Lowercase app names for the filter, by the same rule as the row name: the app's primary
+    // record (an app id, parent outside the app's own pids), else its first record. The pid
+    // set is per group, so an app started from another app still has a primary.
+    let app_pids: FxHashSet<(GroupKey, u32)> = records
         .iter()
         .filter(|r| r.meta.app_id.is_some())
-        .map(|r| r.key.pid)
+        .map(|r| (r.group, r.key.pid))
         .collect();
     let mut app_names: FxHashMap<GroupKey, (bool, String)> = FxHashMap::default();
     for (i, r) in records.iter().enumerate() {
         if class[i] != GroupClass::Apps {
             continue;
         }
-        let primary = r.meta.app_id.is_some() && !app_pids.contains(&r.ppid);
+        let primary = r.meta.app_id.is_some() && !app_pids.contains(&(r.group, r.ppid));
         match app_names.get_mut(&r.group) {
             None => {
                 app_names.insert(r.group, (primary, r.meta.name.to_lowercase()));
@@ -2913,6 +2914,39 @@ mod tests {
         assert_eq!(view.groups.len(), 1);
         assert_eq!(&*view.groups[0].name, "Google Chrome");
         assert_eq!(view.groups[0].members, 3);
+    }
+
+    /// Chrome's cat-first fixture, with the main process started from another app (Konsole).
+    fn chrome_fixture(parent_in_other_app: bool) -> Fixture {
+        let cat = in_app(rec(50, 100, "cat", 0.0), "chrome", true);
+        let ppid = if parent_in_other_app { 10 } else { 1 };
+        let main = in_app(rec(100, ppid, "Google Chrome", 3.0), "chrome", true);
+        let child = in_app(rec(101, 100, "chrome", 1.0), "chrome", true);
+        let mut v = vec![(cat, None), (main, None), (child, None)];
+        if parent_in_other_app {
+            v.push((in_app(rec(10, 1, "Konsole", 0.0), "konsole", true), None));
+        }
+        Fixture::new(v)
+    }
+
+    #[test]
+    fn filter_matches_app_by_primary_name() {
+        for other in [false, true] {
+            let fx = chrome_fixture(other);
+            for f in ["google", "chrome"] {
+                let view = fx.build(f, &headers(), CPU_DESC);
+                assert!(
+                    view.groups.iter().any(|g| &*g.name == "Google Chrome"),
+                    "filter {f:?}, parent in other app: {other}"
+                );
+            }
+            // The helper's name is not the app's name.
+            let view = fx.build("cat", &headers(), CPU_DESC);
+            assert!(
+                view.groups.iter().all(|g| &*g.name != "Google Chrome"),
+                "parent in other app: {other}"
+            );
+        }
     }
 
     #[test]
