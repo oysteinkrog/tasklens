@@ -349,8 +349,23 @@ impl EngineHandle {
     /// Blocks until the reducer answers, at most `OPEN_WAIT`. Without an answer by then the
     /// open is withdrawn and the result is `Err(Busy)`.
     pub fn open_session(&self, id: ClientSessionId) -> Result<SessionPort, OpenError> {
+        self.open_session_until(id, Instant::now() + OPEN_WAIT)
+    }
+
+    /// `open_session` that waits for the reducer only until `deadline`, and never longer than
+    /// `OPEN_WAIT`. The engine service passes its handshake deadline, so an open cannot keep a
+    /// connection in its handshake past it. A deadline already passed is `Err(Busy)` with no
+    /// open sent.
+    pub fn open_session_until(
+        &self,
+        id: ClientSessionId,
+        deadline: Instant,
+    ) -> Result<SessionPort, OpenError> {
+        if Instant::now() >= deadline {
+            return Err(OpenError::Busy);
+        }
         let port = self.send_open(id)?;
-        let deadline = Instant::now() + OPEN_WAIT;
+        let deadline = deadline.min(Instant::now() + OPEN_WAIT);
         let stopped = || self.inner.stopped.load(Ordering::Acquire);
         match port.state.wait_admission(deadline, OPEN_POLL, stopped) {
             Some(Ok(())) => Ok(port),
@@ -1190,6 +1205,39 @@ mod tests {
             .open_session(ClientSessionId(2))
             .expect("the refused open kept no slot");
         drop(again);
+        live.shutdown();
+    }
+
+    #[test]
+    fn open_session_until_waits_no_longer_than_its_deadline() {
+        let live = Live::start();
+        live.park();
+        let begin = Instant::now();
+        assert_eq!(
+            live.handle
+                .open_session_until(ClientSessionId(1), begin + Duration::from_millis(300))
+                .err(),
+            Some(OpenError::Busy),
+            "a parked reducer does not answer by the deadline"
+        );
+        let waited = begin.elapsed();
+        assert!(
+            waited >= Duration::from_millis(300) && waited < OPEN_WAIT,
+            "waited {waited:?}"
+        );
+        assert_eq!(
+            live.handle
+                .open_session_until(ClientSessionId(2), Instant::now())
+                .err(),
+            Some(OpenError::Busy),
+            "a passed deadline sends no open"
+        );
+        live.release();
+        // The withdrawn open holds its id until the reducer has read the drop.
+        assert!(
+            within_5s(|| live.handle.open_session(ClientSessionId(1)).is_ok()),
+            "the withdrawn open frees its id"
+        );
         live.shutdown();
     }
 
