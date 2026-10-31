@@ -28,8 +28,13 @@
 //!
 //! After a drop the client connects again after 1, 2, 4, 8, 16, then every 30 s. Each new
 //! session starts from a complete frame. Its component versions are the new session's, so each
-//! snapshot is stored together with its session number as `generation`, and the hub compares
-//! nothing across two of them. Until that first snapshot `latest` keeps the last data.
+//! snapshot is stored together with its session's generation, and the hub compares nothing
+//! across two of them. Until that first snapshot `latest` keeps the last data.
+//!
+//! The client's generation goes up when a connection opens and again the moment it is lost
+//! (ADR-018 Generations). So from the drop on, `generation()` is newer than the stored
+//! snapshot's, and the window knows that snapshot's session has ended before the next one
+//! sends anything. A session's snapshots carry the generation it opened with.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -92,8 +97,9 @@ pub const BACKOFF: [Duration; 6] = [
 pub enum Observed {
     /// A frame was applied and is about to be stored; the wake token and the `Ack` follow.
     SnapshotInstalled { generation: u64, frame: u64 },
-    /// The first snapshot of session `generation` is about to be stored. `generation()` returns
-    /// it once `AckQueued` for that frame is reported and the state lock is free.
+    /// The first snapshot of session `generation` is about to be stored. `generation()` has
+    /// returned that value since the session opened; `latest_with_generation` returns it once
+    /// the snapshot is stored.
     Generation(u64),
     /// `Ack { frame }` is about to be pushed on the control path. The reader holds the client's
     /// state lock from this report until the Ack is pushed and the writer is rung, so any client
@@ -103,7 +109,8 @@ pub enum Observed {
     AckWritten(u64),
     /// A request end is about to be passed to `request_events`.
     RequestEnded(RequestEvent),
-    /// The session lost its link, and the ends of its open requests were passed on.
+    /// The session with this generation lost its link, the client's generation went up, and
+    /// the ends of its open requests were passed on.
     SessionEnded(u64),
 }
 
@@ -218,8 +225,9 @@ struct Installed {
 struct State {
     /// The writer's queues while a session is open.
     link: Option<Link>,
-    /// Sessions opened so far. Numbers the current one while `link` is set.
-    session: u64,
+    /// The client's generation: raised when a connection opens and again when it is lost. It
+    /// is the current session's while `link` is set; while `link` is unset no snapshot has it.
+    generation: u64,
     /// Requests sent and not yet ended, by kind and id, with how many are open.
     pending: HashMap<(IdKind, u64), u32>,
     /// One sender per host settings change sent and not yet answered, oldest first.
@@ -361,8 +369,10 @@ impl EngineClient for RemoteClient {
         self.shared.requests_rx.clone()
     }
 
+    /// Newer than the stored snapshot's generation from the moment its connection is lost, and
+    /// while a new connection waits for its first snapshot.
     fn generation(&self) -> u64 {
-        self.shared.latest.load().generation
+        lock(&self.shared.state).generation
     }
 
     fn latest_with_generation(&self) -> (u64, Arc<Snapshot>) {
@@ -417,7 +427,7 @@ impl EngineClient for RemoteClient {
 
     /// Queues `SetHostSettings` behind the commands already queued. The server checks
     /// `base_rev`, so a change made from older values comes back as `Conflict`. A `generation`
-    /// that is not the current connection's session means the write was made from an earlier
+    /// that is not the current connection's means the write was made from an earlier
     /// connection's snapshot, perhaps of another engine instance with the same revision: it is
     /// not sent, and its channel is closed. That holds from the moment a new connection opens,
     /// before its first snapshot.
@@ -431,7 +441,7 @@ impl EngineClient for RemoteClient {
         let Some(link) = &st.link else {
             return Err(CommandError::EngineStopped);
         };
-        if generation != st.session {
+        if generation != st.generation {
             return Ok(async_channel::bounded(1).1);
         }
         match link
@@ -472,7 +482,7 @@ impl EngineClient for RemoteClient {
         link.ring();
         st.next_stream += 1;
         st.journals.insert(stream, events_tx);
-        let session = st.session;
+        let session = st.generation;
         drop(st);
         let shared = Arc::clone(&self.shared);
         let spawned = thread::Builder::new()
@@ -508,7 +518,7 @@ fn forward_journal(
 ) {
     while let Ok(control) = control_rx.recv_blocking() {
         let st = lock(&shared.state);
-        if st.session != session {
+        if st.generation != session {
             continue;
         }
         if let Some(link) = &st.link {
@@ -529,7 +539,7 @@ fn forward_journal(
 /// Forgets `stream` and sends `JournalClose`, if `session` is still open. A later session may
 /// use the same stream number, so nothing is touched then.
 fn close_stream(st: &mut State, session: u64, stream: StreamId) {
-    if st.session != session {
+    if st.generation != session {
         return;
     }
     if let Some(link) = &st.link {
@@ -736,7 +746,8 @@ struct WriterInputs {
 }
 
 /// Opens session state for a new connection and queues the session state to send first: the
-/// demand and the table queries. Returns the session number.
+/// demand and the table queries. Raises the client's generation and returns it: the session's
+/// snapshots carry it.
 fn open_link(shared: &Shared, identity: HostIdentity) -> (u64, WriterInputs) {
     let (control_tx, control) = async_channel::unbounded();
     let (commands_tx, commands) = async_channel::bounded(COMMAND_QUEUE);
@@ -761,11 +772,11 @@ fn open_link(shared: &Shared, identity: HostIdentity) -> (u64, WriterInputs) {
             .try_send(ClientMsg::Command(Command::SetSysTableQuery(q.clone())));
     }
     link.ring();
-    st.session += 1;
+    st.generation += 1;
     st.next_stream = 1;
     st.host = Some(identity);
     st.link = Some(link);
-    let session = st.session;
+    let session = st.generation;
     (
         session,
         WriterInputs {
@@ -781,10 +792,13 @@ fn open_link(shared: &Shared, identity: HostIdentity) -> (u64, WriterInputs) {
 
 /// Closes the session's queues and ends every request still open: an action with an
 /// `OutcomeUnknown` summary and then `Lost`, every other kind with `Lost`. Runs on the
-/// connection thread after its last read, so no end from the server can follow.
+/// connection thread after its last read, so no end from the server can follow. Raises the
+/// client's generation at once, so the window stops treating the session's last snapshot as
+/// current and no write made from it is sent (ADR-018 Generations).
 fn end_session(shared: &Shared, host_name: &str) {
     let pending = {
         let mut st = lock(&shared.state);
+        st.generation += 1;
         st.link = None;
         st.shutdown = None;
         // Dropping the senders closes each handle's events, and each host settings reply.

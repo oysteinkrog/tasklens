@@ -31,6 +31,9 @@ pub trait EngineClient: Send + Sync + 'static {
     /// Changes when the snapshots start over from another engine session: a reconnect or a new
     /// engine instance (ADR-018 Delta flow). Component versions in snapshots from different
     /// generations cannot be compared, so the hub treats a new value as everything changed.
+    /// It also goes up the moment a connection is lost or a switch starts (ADR-018
+    /// Generations), so it can be newer than the generation `latest_with_generation` gives:
+    /// the stored snapshot's session has ended and no new one has arrived yet.
     /// The default is 0 for a client whose engine never changes.
     fn generation(&self) -> u64 {
         0

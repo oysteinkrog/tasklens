@@ -521,6 +521,7 @@ fn host_settings_come_in_the_snapshot_and_each_write_gets_its_reply() {
 #[test]
 fn engine_instance_change_starts_a_new_generation() {
     let (client, conns) = client();
+    let steps = client.observe();
     let demand = Demand {
         any_surface_visible: true,
         ..Demand::default()
@@ -538,20 +539,35 @@ fn engine_instance_change_starts_a_new_generation() {
     assert_eq!(client.generation(), 1);
     drop(server);
 
+    // Losing the connection raises the generation at once (ADR-018 Generations), before any
+    // reconnect. The stored snapshot keeps its own, older generation, so the window sees that
+    // its session has ended.
+    wait_step("the session end", &steps, |s| {
+        (*s == Observed::SessionEnded(1)).then_some(())
+    });
+    assert_eq!(client.generation(), 2);
+    let (stored, snap) = client.latest_with_generation();
+    assert_eq!((stored, snap.system.boot_time_s), (1, 100));
+
     let mut server = Server::connect(&conns, "home", 2);
     wait_for("the new instance", || {
         (client.host()?.engine_instance == 2).then_some(())
     });
-    // Until the new session's first snapshot the last data stays.
-    assert_eq!(client.latest().system.boot_time_s, 100);
-    assert_eq!(client.generation(), 1);
+    // Until the new session's first snapshot the last data stays, with its old generation. The
+    // client's generation is the new session's from the moment it opened.
+    let (stored, snap) = client.latest_with_generation();
+    assert_eq!((stored, snap.system.boot_time_s), (1, 100));
+    assert_eq!(client.generation(), 3);
     assert_eq!(client.status(), LinkStatus::Connecting);
     // A host settings write made from the old instance's snapshot is refused, even though that
-    // snapshot is still the one shown: the new instance may have the same revision.
-    let refused = client
-        .set_host_settings(1, 1, HostSettingsChanges::default())
-        .unwrap();
-    assert!(refused.is_closed());
+    // snapshot is still the one shown: the new instance may have the same revision. So is one
+    // tagged with the generation of the time between the two connections.
+    for old in [1, 2] {
+        let refused = client
+            .set_host_settings(old, 1, HostSettingsChanges::default())
+            .unwrap();
+        assert!(refused.is_closed());
+    }
 
     // The session state goes to the new session: demand, then the table query. They are read
     // before the first snapshot is sent, since its Ack may pass them on the control path.
@@ -566,9 +582,12 @@ fn engine_instance_change_starts_a_new_generation() {
     assert_eq!(base, 0);
     let (_, before) = server.ack();
     assert!(before.is_empty(), "{before:?}");
-    let latest = client.latest();
-    assert_eq!((latest.sequence, latest.system.boot_time_s), (2, 200));
-    assert_eq!(client.generation(), 2);
+    let (stored, latest) = client.latest_with_generation();
+    assert_eq!(
+        (stored, latest.sequence, latest.system.boot_time_s),
+        (3, 2, 200)
+    );
+    assert_eq!(client.generation(), 3);
     assert_eq!(client.status(), LinkStatus::Connected);
 }
 
@@ -592,7 +611,8 @@ fn generation_and_snapshot_are_read_together() {
                 let expected = match generation {
                     0 => 0,
                     1 => 100,
-                    2 => 200,
+                    // 2 is the generation between the two connections, which no snapshot has.
+                    3 => 200,
                     other => panic!("generation {other}"),
                 };
                 assert_eq!(snap.system.boot_time_s, expected, "generation {generation}");
@@ -609,14 +629,14 @@ fn generation_and_snapshot_are_read_together() {
     let mut server = Server::connect(&conns, "home", 2);
     server.publish(&snapshot(5, 200));
     server.ack();
-    // The reader stops only after it has read generation 2 itself. If it panicked, the join
+    // The reader stops only after it has read generation 3 itself. If it panicked, the join
     // below passes its message on.
-    wait_for("the reader to read generation 2", || {
-        (seen.load(Ordering::Acquire) == 2 || reader.is_finished()).then_some(())
+    wait_for("the reader to read generation 3", || {
+        (seen.load(Ordering::Acquire) == 3 || reader.is_finished()).then_some(())
     });
     stop.store(true, Ordering::Release);
-    assert_eq!(reader.join().unwrap(), 2);
-    assert_eq!(client.generation(), 2);
+    assert_eq!(reader.join().unwrap(), 3);
+    assert_eq!(client.generation(), 3);
 }
 
 #[test]
