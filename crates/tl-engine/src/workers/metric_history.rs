@@ -25,11 +25,14 @@
 //! sample, which it gets when it first reaches the top 20, and so enters the block catalog under
 //! its display name. Outside the top 20 it gets no samples, so its points are gaps.
 //!
-//! Read path: while `Demand.device_history_range` is set, the worker reads the range's tier once
-//! per tier point (1 s, 10 s or 60 s) and whenever the request changes, and publishes at most
-//! 1,024 min/max-decimated points per series. A series whose points did not change keeps its
-//! `Arc`, and a read that changed nothing is not sent. When the range is cleared, one empty
-//! `DeviceHistory` frees the points.
+//! Read path: the worker answers each wanted range (ADR-018): the local window's
+//! `Demand.device_history_range`, then the distinct ranges of the other client sessions, which the
+//! sink sends as `MetricMsg::Ranges`. Two sessions on one range share one read and one answer.
+//! For each range the worker reads its tier once per tier point (1 s, 10 s or 60 s) and whenever
+//! the range becomes wanted, and publishes at most 1,024 min/max-decimated points per series. A
+//! series whose points did not change keeps its `Arc`, and a read that changed nothing is not
+//! sent. All answers go to the reducer together as `DeviceHistories`, which also holds the key
+//! `None` when a session shows no range: one empty `DeviceHistory` that frees the points.
 //!
 //! Timeline (UI-PRF-057): while `Demand.device_timeline` is true, the same component carries a
 //! `DeviceTimeline`: the last 24 hours of the 1 min tier for CPU total, memory in use, the
@@ -77,7 +80,7 @@ use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
 use super::event_detector::{EventDetector, JournalEnv, JournalEvents, JournalFetch, Reading};
 use crate::source::WorkerIo;
-use crate::update::{EngineMsg, SourceUpdate, WorkerError};
+use crate::update::{DeviceHistories, EngineMsg, SourceUpdate, WorkerError};
 
 /// Capacity of the channel each open creates.
 pub const METRIC_CHANNEL_CAPACITY: usize = 512;
@@ -112,6 +115,8 @@ pub enum MetricMsg {
     Reading(Box<Reading>),
     /// Logind `PrepareForSleep`.
     Sleep { entering: bool, t_ns: TimeNs },
+    /// The distinct ranges of the client sessions other than the local one (ADR-018).
+    Ranges(Arc<[DeviceHistoryRequest]>),
 }
 
 /// The sender of one open store. `generation` tells the sink that a new store needs the catalog.
@@ -144,6 +149,9 @@ pub struct MetricSink {
     reading_sec: Option<u64>,
     /// The `HELD` series the sink repeats.
     held: Vec<Held>,
+    /// The other client sessions' ranges, and the sender generation that received them.
+    ranges: Arc<[DeviceHistoryRequest]>,
+    ranges_sent_to: Option<u64>,
 }
 
 impl MetricSink {
@@ -154,6 +162,35 @@ impl MetricSink {
             catalog_sent_to: None,
             reading_sec: None,
             held: Vec::new(),
+            ranges: Arc::from([]),
+            ranges_sent_to: None,
+        }
+    }
+
+    /// The distinct ranges of the client sessions other than the local one, in connect order.
+    /// They go to the open store's worker now and to each new one; a send the full queue
+    /// refused is tried again at the next call or system sample.
+    pub fn set_ranges(&mut self, ranges: &[DeviceHistoryRequest]) {
+        if *self.ranges != *ranges {
+            self.ranges = Arc::from(ranges);
+            self.ranges_sent_to = None;
+        }
+        let guard = self.slot.load();
+        if let Some(tx) = guard.as_deref() {
+            self.sync_ranges(tx);
+        }
+    }
+
+    fn sync_ranges(&mut self, tx: &MetricTx) {
+        if self.ranges_sent_to == Some(tx.generation) {
+            return;
+        }
+        if tx
+            .tx
+            .try_send(MetricMsg::Ranges(Arc::clone(&self.ranges)))
+            .is_ok()
+        {
+            self.ranges_sent_to = Some(tx.generation);
         }
     }
 
@@ -193,6 +230,7 @@ impl MetricSink {
         if !self.sync_catalog(tx) {
             return;
         }
+        self.sync_ranges(tx);
         let held = self.hold(t_ns, series);
         let batch: Box<[(SeriesId, Sample)]> = if held.is_empty() {
             series.into()
@@ -300,7 +338,7 @@ pub fn plan(req: DeviceHistoryRequest, now_realtime_ns: i64) -> (Tier, i64, i64)
 /// One published series: its id in the current catalog and its points.
 type HistSeries = (SeriesId, Arc<[HistPoint]>);
 
-/// What the last `DeviceHistory` held, to reuse its `Arc`s and skip unchanged reads.
+/// What the last read of one range held, to reuse its `Arc`s and skip unchanged reads.
 struct Published {
     request: DeviceHistoryRequest,
     tier: Tier,
@@ -331,7 +369,15 @@ pub struct State {
     by_key: FxHashMap<Arc<str>, DeviceIdx>,
     /// The store handle of each live series; `None` when its device is not in the catalog.
     slots: FxHashMap<SeriesId, Option<MetricSlot>>,
-    published: Option<Published>,
+    /// The last read of each wanted range.
+    published: Vec<Published>,
+    /// The answers sent last, one per wanted key in `wanted` order. It starts with the key
+    /// `None` and the empty answer, which the reducer's component already is.
+    sent: Vec<(Option<DeviceHistoryRequest>, Arc<DeviceHistory>)>,
+    /// The other client sessions' ranges (`MetricMsg::Ranges`).
+    ranges: Arc<[DeviceHistoryRequest]>,
+    /// Store reads for ranges, for tests.
+    range_reads: u64,
     detector: EventDetector,
     /// Counts installs, so a journal fetch started for one store does not queue into the next.
     opens: u64,
@@ -356,7 +402,10 @@ impl State {
             catalog: DeviceCatalog::default(),
             by_key: FxHashMap::default(),
             slots: FxHashMap::default(),
-            published: None,
+            published: Vec::new(),
+            sent: vec![(None, Arc::new(DeviceHistory::default()))],
+            ranges: Arc::from([]),
+            range_reads: 0,
             detector: EventDetector::new(),
             opens: 0,
             journal_access: None,
@@ -473,7 +522,25 @@ impl State {
                 let span = self.detector.sleep(entering, t_ns);
                 self.queue_events(span);
             }
+            MetricMsg::Ranges(ranges) => self.ranges = ranges,
         }
+    }
+
+    /// The keys to answer: `local`, the local window's range, then each other session's range
+    /// that is not in the list yet.
+    pub fn wanted(&self, local: Option<DeviceHistoryRequest>) -> Vec<Option<DeviceHistoryRequest>> {
+        let mut wanted = vec![local];
+        for &r in self.ranges.iter() {
+            if !wanted.contains(&Some(r)) {
+                wanted.push(Some(r));
+            }
+        }
+        wanted
+    }
+
+    /// Store reads for ranges so far.
+    pub fn range_reads(&self) -> u64 {
+        self.range_reads
     }
 
     /// The ADR-008 clock check: queues a sleep span the Logind signal did not report.
@@ -537,62 +604,137 @@ impl State {
         self.answer_with(request, false, now_t_ns)
     }
 
-    /// The `DeviceHistory` to send for `request` and, with `timeline`, the 24-hour timeline at
-    /// `now_t_ns`, or `None` when nothing needs sending: the request, the data and the timeline
-    /// are unchanged, or the last reads are too recent. A cleared request and timeline send one
-    /// empty `DeviceHistory`.
+    /// [`State::answer_all`] for one range: its `DeviceHistory`, or `None` when nothing needs
+    /// sending.
     pub fn answer_with(
         &mut self,
         request: Option<DeviceHistoryRequest>,
         timeline: bool,
         now_t_ns: TimeNs,
     ) -> Result<Option<DeviceHistory>, tl_history::HistoryError> {
-        let range = self.answer_range(request, now_t_ns)?;
-        let timeline = self.answer_timeline(timeline, now_t_ns)?;
-        Ok((range || timeline).then(|| self.current()))
+        let all = self.answer_all(&[request], timeline, now_t_ns)?;
+        Ok(all.map(|all| DeviceHistory::clone(&all[0].1)))
     }
 
-    /// Reads `request` when due. True when the published range part changed.
+    /// The answer for each key of `wanted` and, with `timeline`, the 24-hour timeline at
+    /// `now_t_ns`, or `None` when nothing needs sending: the keys, the data and the timeline are
+    /// unchanged, or the last reads are too recent. Equal keys are answered once. A key that is
+    /// newly wanted gets an answer even when it is empty, so a cleared range and timeline send
+    /// one empty `DeviceHistory`. After a failed read every key is answered again next time.
+    pub fn answer_all(
+        &mut self,
+        wanted: &[Option<DeviceHistoryRequest>],
+        timeline: bool,
+        now_t_ns: TimeNs,
+    ) -> Result<Option<DeviceHistories>, tl_history::HistoryError> {
+        let answer = self.answer_keys(wanted, timeline, now_t_ns);
+        if answer.is_err() {
+            self.sent.clear();
+        }
+        answer
+    }
+
+    fn answer_keys(
+        &mut self,
+        wanted: &[Option<DeviceHistoryRequest>],
+        timeline: bool,
+        now_t_ns: TimeNs,
+    ) -> Result<Option<DeviceHistories>, tl_history::HistoryError> {
+        let mut keys: Vec<Option<DeviceHistoryRequest>> = Vec::with_capacity(wanted.len());
+        for &key in wanted {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        self.published.retain(|p| keys.contains(&Some(p.request)));
+        // The timeline is shared: when it changes, every key is answered again.
+        let timeline_changed = self.answer_timeline(timeline, now_t_ns)?;
+        let mut changed = Vec::new();
+        for request in keys.iter().flatten() {
+            if self.answer_range(*request, now_t_ns)? {
+                changed.push(*request);
+            }
+        }
+        let same_keys = self.sent.len() == keys.len()
+            && self.sent.iter().zip(&keys).all(|((k, _), key)| k == key);
+        if !timeline_changed && changed.is_empty() && same_keys {
+            return Ok(None);
+        }
+        let mut next = Vec::with_capacity(keys.len());
+        for key in keys {
+            let old = self
+                .sent
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, h)| Arc::clone(h));
+            let fresh = timeline_changed || key.is_some_and(|r| changed.contains(&r));
+            let answer = match old {
+                Some(old) if !fresh => old,
+                _ => Arc::new(self.current(key)),
+            };
+            next.push((key, answer));
+        }
+        self.sent = next.clone();
+        Ok(Some(next.into()))
+    }
+
+    /// The store closed: each key sent last gets the empty answer. `None` when nothing was
+    /// published, so the reducer already has empty answers.
+    pub fn answer_closed(&mut self) -> Option<DeviceHistories> {
+        let had = !self.published.is_empty() || self.timeline.is_some();
+        self.published.clear();
+        self.timeline = None;
+        if !had {
+            return None;
+        }
+        let empty = Arc::new(self.empty());
+        self.sent = self
+            .sent
+            .iter()
+            .map(|(key, _)| (*key, Arc::clone(&empty)))
+            .collect();
+        Some(self.sent.clone().into())
+    }
+
+    /// Reads `request` when due. True when its published part changed.
     fn answer_range(
         &mut self,
-        request: Option<DeviceHistoryRequest>,
+        request: DeviceHistoryRequest,
         now_t_ns: TimeNs,
     ) -> Result<bool, tl_history::HistoryError> {
-        let Some(request) = request else {
-            return Ok(self.published.take().is_some());
-        };
         let Some(store) = self.store.as_mut() else {
             return Ok(false);
         };
         let now_rt = (now_t_ns as i64).saturating_add(self.realtime_offset_ns);
         let (tier, from, to) = plan(request, now_rt);
-        if let Some(p) = &self.published
-            && p.request == request
+        let at = self.published.iter().position(|p| p.request == request);
+        if let Some(p) = at.map(|i| &self.published[i])
             && p.tier == tier
             && now_t_ns < p.read_at.saturating_add(tier.point_ns())
         {
             return Ok(false);
         }
+        self.range_reads += 1;
         let span = store.read(tier, from, to, now_t_ns)?;
         let since = store.since_realtime_ns(tier);
         let mut boots = store.boots_realtime_ns();
         boots.retain(|&t| (from..=to).contains(&t));
-        let (series, reused) = self.map_series(span);
+        let prev = at.map(|i| &self.published[i]);
+        let (series, reused) = self.map_series(span, prev.map(|p| &p.series));
         let step_ns = series_step(tier, from, to);
-        let unchanged = self.published.as_ref().is_some_and(|p| {
-            p.request == request
-                && p.tier == tier
+        let unchanged = prev.is_some_and(|p| {
+            p.tier == tier
                 && p.step_ns == step_ns
                 && p.since == since
                 && *p.boots == *boots
                 && reused
                 && p.series.len() == series.len()
         });
-        if unchanged && let Some(p) = &mut self.published {
-            p.read_at = now_t_ns;
+        if unchanged && let Some(i) = at {
+            self.published[i].read_at = now_t_ns;
             return Ok(false);
         }
-        self.published = Some(Published {
+        let next = Published {
             request,
             tier,
             step_ns,
@@ -600,7 +742,11 @@ impl State {
             series: series.into(),
             boots: boots.into(),
             read_at: now_t_ns,
-        });
+        };
+        match at {
+            Some(i) => self.published[i] = next,
+            None => self.published.push(next),
+        }
         Ok(true)
     }
 
@@ -639,10 +785,10 @@ impl State {
         Ok(true)
     }
 
-    /// The component from the published range part and timeline.
-    fn current(&self) -> DeviceHistory {
+    /// The answer for `key` from its published read and the timeline.
+    fn current(&self, key: Option<DeviceHistoryRequest>) -> DeviceHistory {
         let mut h = self.empty();
-        if let Some(p) = &self.published {
+        if let Some(p) = key.and_then(|r| self.published.iter().find(|p| p.request == r)) {
             h.request = Some(p.request);
             h.since_realtime_ns = p.since;
             h.step_ns = p.step_ns;
@@ -653,9 +799,14 @@ impl State {
         h
     }
 
-    /// The span's series under their current `SeriesId`, sorted, with the `Arc` of the last
-    /// publish where the points are equal. The bool is true when every series was reused.
-    fn map_series(&self, span: MetricSpan) -> (Vec<HistSeries>, bool) {
+    /// The span's series under their current `SeriesId`, sorted, with the `Arc` of `prev`, the
+    /// range's last read, where the points are equal. The bool is true when every series was
+    /// reused.
+    fn map_series(
+        &self,
+        span: MetricSpan,
+        prev: Option<&Arc<[HistSeries]>>,
+    ) -> (Vec<HistSeries>, bool) {
         let mut out: Vec<HistSeries> = span
             .series
             .into_iter()
@@ -679,7 +830,6 @@ impl State {
             .collect();
         out.sort_by_key(|(id, _)| *id);
         let mut all_reused = true;
-        let prev = self.published.as_ref().map(|p| &p.series);
         for (id, points) in &mut out {
             let old = prev.and_then(|s| {
                 s.binary_search_by_key(id, |(sid, _)| *sid)
@@ -958,7 +1108,7 @@ pub async fn run_metric_history(
                 if let Err(e) = st.close(now_boot_ns()) {
                     tracing::debug!("device history close failed: {e}");
                 }
-                st.answer_with(None, false, now_boot_ns()).ok().flatten()
+                st.answer_closed()
             });
             let empty = match job {
                 Ok(mut job) => match join_result(&cx, job.join(&cx).await) {
@@ -968,8 +1118,7 @@ pub async fn run_metric_history(
                 Err(outcome) => stop!(outcome),
             };
             if let Some(empty) = empty
-                && let Some(outcome) =
-                    send(&cx, &io, SourceUpdate::DeviceHistory(Arc::new(empty))).await
+                && let Some(outcome) = send(&cx, &io, SourceUpdate::DeviceHistory(empty)).await
             {
                 stop!(outcome);
             }
@@ -1112,7 +1261,8 @@ pub async fn run_metric_history(
                 tracing::debug!("device history write failed: {e}");
                 error = Some(());
             }
-            let answer = match st.answer_with(request, timeline, now_t_ns) {
+            let wanted = st.wanted(request);
+            let answer = match st.answer_all(&wanted, timeline, now_t_ns) {
                 Ok(answer) => answer,
                 Err(e) => {
                     tracing::debug!("device history read failed: {e}");
@@ -1130,8 +1280,7 @@ pub async fn run_metric_history(
         };
         msgs = batch;
         if let Some(history) = answer
-            && let Some(outcome) =
-                send(&cx, &io, SourceUpdate::DeviceHistory(Arc::new(history))).await
+            && let Some(outcome) = send(&cx, &io, SourceUpdate::DeviceHistory(history)).await
         {
             stop!(outcome);
         }
@@ -1736,6 +1885,109 @@ mod tests {
         assert!(empty.series.is_empty() && empty.request.is_none());
         assert_eq!(empty.realtime_offset_ns, OFFSET);
         assert!(st.answer(None, now + 4 * SEC).expect("read").is_none());
+    }
+
+    /// ADR-018: sessions on 24 h and 7 d each get the answer for their own range, and a timeline
+    /// change answers every range again.
+    #[test]
+    fn each_range_gets_its_own_answer() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
+        ));
+        for i in 0..5 {
+            st.push(&[(sid(0, MetricId::CPU_TOTAL), sample(t0 + i * SEC, 1.0))]);
+        }
+        let (day, week) = (live(DeviceRange::H24), live(DeviceRange::D7));
+        let now = t0 + 6 * SEC;
+        let all = st
+            .answer_all(&[day, week], false, now)
+            .expect("read")
+            .expect("sent");
+        let keys: Vec<_> = all.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, [day, week]);
+        assert_eq!(all[0].1.request, day);
+        assert_eq!(all[1].1.request, week);
+        assert_eq!(
+            all[0].1.step_ns,
+            90 * SEC,
+            "24 h: the 10 s tier in 90 s buckets"
+        );
+        assert_eq!(
+            all[1].1.step_ns,
+            600 * SEC,
+            "7 d: the 1 min tier in 10 min buckets"
+        );
+        assert_eq!(st.range_reads(), 2);
+
+        // A session leaves the 7 d range: one answer, its `Arc` kept.
+        let one = st
+            .answer_all(&[day], false, now + SEC)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(one.len(), 1);
+        assert!(Arc::ptr_eq(&one[0].1, &all[0].1));
+
+        // The timeline turns on: the 24 h answer and the no-range answer both carry it.
+        let with = st
+            .answer_all(&[day, None], true, now + 2 * SEC)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(with.len(), 2);
+        assert!(with.iter().all(|(_, h)| h.timeline.is_some()));
+        assert_eq!(with[0].1.request, day);
+        assert_eq!(with[1].1.request, None);
+        assert!(with[1].1.series.is_empty());
+    }
+
+    /// ADR-018: two sessions on one range cause one read and share one answer; the other
+    /// sessions' ranges come as `MetricMsg::Ranges` after the local one.
+    #[test]
+    fn two_sessions_on_one_range_read_once() {
+        let dir = tempdir();
+        let t0 = 1_000 * SEC;
+        let mut st = open(dir.path(), 1, OFFSET, t0);
+        st.set_catalog(catalog(
+            1,
+            vec![entry(0, DeviceIdentity::CpuPackage, "cpu", true)],
+        ));
+        let (day, hour) = (live(DeviceRange::H24), live(DeviceRange::H1));
+        let day_req = day.expect("a range");
+        let hour_req = hour.expect("a range");
+        st.apply(MetricMsg::Ranges(Arc::from([day_req, hour_req, day_req])));
+        assert_eq!(st.wanted(day), [day, hour]);
+        assert_eq!(st.wanted(None), [None, day, hour]);
+
+        let now = t0 + 2 * SEC;
+        let all = st
+            .answer_all(&[day, day], false, now)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1.request, day);
+        assert_eq!(st.range_reads(), 1);
+
+        // The local window and one other session on 24 h, one more on 1 h: two reads.
+        let wanted = st.wanted(day);
+        let all = st
+            .answer_all(&wanted, false, now + 10 * SEC)
+            .expect("read")
+            .expect("sent");
+        assert_eq!(all.len(), 2);
+        assert_eq!(st.range_reads(), 3);
+
+        // The store closes: each key gets the empty answer once.
+        let closed = st.answer_closed().expect("sent");
+        assert_eq!(closed.len(), 2);
+        assert!(
+            closed
+                .iter()
+                .all(|(_, h)| h.request.is_none() && h.series.is_empty())
+        );
+        assert!(st.answer_closed().is_none());
     }
 
     /// UI-PRF-057, ADR-017: the timeline carries the four bands of the last 24 hours (the

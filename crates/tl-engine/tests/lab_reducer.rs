@@ -9,22 +9,24 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use smallvec::SmallVec;
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
+use tl_engine::client_session::ClientSessionId;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
 use tl_engine::source::{Source, WorkerCommand, WorkerControl};
 use tl_engine::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
     DeviceKinds, DeviceList, DiskSample, DrmProcessVram, EngineMsg, GpuInfoUpdate, GpuSample,
-    GpuStaticInfo, HelperUpdate, MemorySample, NetSample, ProcessSweep, PssEntry, SensorSample,
-    ServicesUpdate, SourceUpdate, StartupUpdate,
+    GpuStaticInfo, HelperUpdate, HistoryUpdate, MemorySample, NetSample, ProcessSweep, PssEntry,
+    SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
+use tl_engine::workers::history::{HistoryMsg, HistorySink, HistoryTx};
 use tl_engine::workers::sensors::SensorsSource;
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
@@ -478,13 +480,38 @@ fn history_component_replaced() {
             points: Arc::clone(&points),
         })
         .collect();
+    // The query goes to the history worker under a new engine id; the answer names that id.
+    let (tx, mut history_rx) = mpsc::channel(8);
+    let slot = Arc::new(ArcSwapOption::from_pointee(HistoryTx { generation: 1, tx }));
+    rig.reducer().history_cmd = Some(HistorySink::new(slot));
+    rig.run(vec![cmd(Command::HistoryQuery {
+        id: 7,
+        range: HistoryRange::Live,
+        what: HistoryWhat::TopAt {
+            t: 0,
+            metric: HistoryMetric::Cpu,
+            n: 3,
+        },
+    })])
+    .expect("no invariant violation");
+    let engine = match history_rx.try_recv() {
+        Ok(HistoryMsg::Query { owner, id, .. }) => {
+            assert_eq!(owner, ClientSessionId::LOCAL);
+            id
+        }
+        _ => panic!("the query reached the history worker"),
+    };
     let view = Arc::new(HistoryView {
-        query_id: 7,
+        query_id: engine,
         series: Arc::clone(&series),
         ..HistoryView::default()
     });
-    rig.run(vec![src(SourceUpdate::History(Arc::clone(&view)))])
-        .expect("no invariant violation");
+    rig.run(vec![src(SourceUpdate::History(HistoryUpdate::View {
+        owner: ClientSessionId::LOCAL,
+        answers: Some(engine),
+        view: Arc::clone(&view),
+    }))])
+    .expect("no invariant violation");
     let next = rig.latest();
     // The reducer owns the header version, so the view's payload is published, not its `Arc`.
     assert!(Arc::ptr_eq(&next.history.series, &series));
@@ -1694,7 +1721,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
         }),
         SourceUpdate::Inventory(Box::default()),
         SourceUpdate::Windows(Box::default()),
-        SourceUpdate::History(Arc::default()),
+        SourceUpdate::History(HistoryUpdate::Started { generation: 1 }),
         SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Cpu(Arc::default())),
         SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Memory(Arc::default())),
         SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Nets {

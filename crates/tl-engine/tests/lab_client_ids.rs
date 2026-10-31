@@ -977,6 +977,7 @@ fn every_terminal_event_ends_its_request() {
         IdKind::Search => snap.details.handle_search.as_ref().map(|s| s.search.0),
         IdKind::Eject => shown_eject(snap),
         IdKind::Action => unreachable!("the gate tests actions"),
+        IdKind::History => unreachable!("lab_client_history tests history queries"),
     };
     for (n, (kind, request, end, expected, keeps)) in cases.into_iter().enumerate() {
         let client = 10 + n as u64;
@@ -1004,6 +1005,7 @@ fn every_terminal_event_ends_its_request() {
             IdKind::Search => search_state(engine),
             IdKind::Eject => disk_eject(engine),
             IdKind::Action => unreachable!("the gate tests actions"),
+            IdKind::History => unreachable!("lab_client_history tests history queries"),
         }]);
         assert_eq!(late(&mut rig), before + 1, "case {n}: counted");
         assert!(drain(&remote.requests).is_empty(), "case {n}: no event");

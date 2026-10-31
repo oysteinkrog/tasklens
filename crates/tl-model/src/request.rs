@@ -1,8 +1,8 @@
 //! The one end of each client request (ADR-018).
 //!
-//! Every action, Strings scan, handle search and eject a window sends ends with exactly one
-//! `RequestEvent` on the window's request channel, `EngineClient::request_events`. The ids are
-//! the window's own. Progress and results still come through the snapshot and the action
+//! Every action, Strings scan, handle search, eject and history query a window sends ends with
+//! exactly one `RequestEvent` on the window's request channel, `EngineClient::request_events`.
+//! The ids are the window's own. Progress and results still come through the snapshot and the action
 //! events; this channel only says that a request ended and how, so a request the engine lost
 //! does not wait forever.
 
@@ -19,13 +19,15 @@ pub enum IdKind {
     Eject,
     /// `ActionId` of `Command::Action`.
     Action,
+    /// `id` of `Command::HistoryQuery`.
+    History,
 }
 
 /// How a request ended.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum RequestEnd {
     /// A scan `Finished`, `StoppedLimit` or `StoppedExited`; a handle search or eject `Done`;
-    /// an action whose summary is `Succeeded`.
+    /// an action whose summary is `Succeeded`; a history query answered.
     Done,
     /// A scan or handle search `Failed`; an eject `Failed` or `Blocked`; an action whose summary
     /// is `Failed`, `OutcomeUnknown` or `Rejected` for a reason other than `Busy`.
@@ -44,7 +46,7 @@ pub enum RequestEnd {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RequestEvent {
     pub kind: IdKind,
-    /// The window's own id: `ScanId`, `SearchId`, eject `seq` or `ActionId`.
+    /// The window's own id: `ScanId`, `SearchId`, eject `seq`, `ActionId` or history query `id`.
     pub id: u64,
     pub end: RequestEnd,
 }

@@ -11,13 +11,20 @@
 //! go to the reducer's own `Publisher`. Other sessions are opened with `ClientMsg::Open` and get
 //! their snapshots through their `SessionLink`.
 //!
-//! Ids a client picks (actions, string scans, handle searches, ejects) are its own. The reducer
-//! gives each one a new engine-wide id from one counter before it reaches the workers or the
-//! action gate, and maps it back on the way out, so two windows never see each other's results.
-//! Actions keep no mapping here: the gate routes each one by engine id until `ActionFinished`.
+//! Each session also has its own `Demand`; so far only its `device_history_range` is read. The
+//! `MetricHistory` worker answers each distinct range once, and each session shows the answer
+//! for its own range in its own `device_history`. Each session's `history` shows only the
+//! answers to its own `HistoryQuery`s.
 //!
-//! Request lifecycle (scans, handle searches, ejects). Every request a session sends ends with
-//! exactly one `RequestEvent` on the session's own request channel, and one owner sends it:
+//! Ids a client picks (actions, string scans, handle searches, ejects, history queries) are its
+//! own. The reducer gives each one a new engine-wide id from one counter before it reaches the
+//! workers or the action gate, and maps it back on the way out, so two windows never see each
+//! other's results. Actions keep no mapping here: the gate routes each one by engine id until
+//! `ActionFinished`.
+//!
+//! Request lifecycle (scans, handle searches, ejects, history queries). Every request a session
+//! sends ends with exactly one `RequestEvent` on the session's own request channel, and one
+//! owner sends it:
 //! - the reducer, as queue owner, for a request no worker took: `Busy` at admission (no mapping
 //!   is made), `Lost` when the control watch is closed or its command leaves the worker queue
 //!   before a worker claimed it (`CommandProgress::evict`, under the lock the worker's
@@ -27,6 +34,9 @@
 //!   requests in engine id order and keep one per slot);
 //! - the new worker generation, for the requests the stopped one claimed (`RequestsLost`,
 //!   `EjectsLost`): `Lost`;
+//! - for history queries, the reducer: `Lost` when the history sink dropped the query or a new
+//!   history worker generation started after the one that took it (`HistoryUpdate::Started`),
+//!   `Done` when the session's answer arrives;
 //! - the engine supervisor, for every session's requests when the reducer stops
 //!   (`Reducer::stopped`): `Lost`. The local session outlives the reducer; the others end with
 //!   it.
@@ -50,7 +60,8 @@
 //! admission bounds what it holds (`ACTIVE_MAX` per kind, so 256 ends at most, actions
 //! included). Its event is only lost when the UI dropped the receiver, which is counted in
 //! `ClientSession::dropped`. A linked session's channel comes from the server and should be
-//! unbounded too; when it is full or closed, the session ends.
+//! unbounded too; when it is full or closed, the session ends. History queries have their own
+//! limit, `HISTORY_ACTIVE_MAX` (ADR-018 "4 history windows").
 //!
 //! `crate::session` is the ADR-004 restart session, which is something else. The registry lives
 //! in the reducer, so a reducer restart drops every session but the local one.
@@ -61,16 +72,18 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use tl_model::actions::ActionEvent;
 use tl_model::command::Command;
+use tl_model::demand::{Demand, DeviceHistoryRequest};
 use tl_model::details::{
     DetailTab, DetailTarget, DetailsSnapshot, HandlePhase, HandleSearchState, ScanId, ScanPhase,
     SearchId, StringScanState, TabPayload, TabSlot,
 };
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
+use tl_model::history::{HistoryTop, HistoryView};
 use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
-    EjectState, ServicesSnapshot, Snapshot, StartupSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
+    DiskDetails, EjectState, ServicesSnapshot, Snapshot, StartupSnapshot,
 };
 use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery};
 use tl_model::validity::Validity;
@@ -82,22 +95,33 @@ use crate::source::CommandProgress;
 /// Sessions at most, the local one included (ADR-018).
 pub const SESSIONS_MAX: usize = 8;
 
-/// The four snapshot parts each session builds itself, in `ClientSession::published` order.
-pub const SESSION_BITS: [ComponentMask; 4] = [
+/// The six snapshot parts each session builds itself, in `ClientSession::published` order.
+pub const SESSION_BITS: [ComponentMask; 6] = [
     ComponentMask::TABLE,
     ComponentMask::SERVICES,
     ComponentMask::STARTUP,
     ComponentMask::CONNECTIONS,
+    ComponentMask::HISTORY,
+    ComponentMask::DEVICE_HISTORY,
 ];
+
+/// The session parts that a change of the shared component does not rebuild for every
+/// session: each session checks whether its own answer changed.
+const OWN_ANSWERS: ComponentMask =
+    ComponentMask(ComponentMask::HISTORY.0 | ComponentMask::DEVICE_HISTORY.0);
 
 /// Active requests per kind and session (scans, handle searches, ejects). One more is refused
 /// with `RequestEnd::Busy` until one of them ends.
 pub const ACTIVE_MAX: usize = 64;
 
+/// History queries in flight per session (ADR-018 "4 history windows"). The fifth is refused
+/// with `RequestEnd::Busy` until one is answered.
+pub const HISTORY_ACTIVE_MAX: usize = 4;
+
 pub use tl_model::request::{IdKind, RequestEnd, RequestEvent};
 
 /// The kinds the reducer maps here. Actions keep no mapping: the gate routes them.
-const MAPPED: [IdKind; 3] = [IdKind::Scan, IdKind::Search, IdKind::Eject];
+const MAPPED: [IdKind; 4] = [IdKind::Scan, IdKind::Search, IdKind::Eject, IdKind::History];
 
 /// The place of `kind` in `ClientSession::requests`. The action list stays empty.
 fn index(kind: IdKind) -> usize {
@@ -106,24 +130,35 @@ fn index(kind: IdKind) -> usize {
         IdKind::Search => 1,
         IdKind::Eject => 2,
         IdKind::Action => 3,
+        IdKind::History => 4,
     }
 }
 
-/// The worker whose queue the requests of `kind` go to. `None` for actions.
+/// Active requests of `kind` a session may have.
+fn active_max(kind: IdKind) -> usize {
+    match kind {
+        IdKind::History => HISTORY_ACTIVE_MAX,
+        _ => ACTIVE_MAX,
+    }
+}
+
+/// The worker whose command queue the requests of `kind` go to. `None` for actions and for
+/// history queries, which go through the history sink.
 fn source(kind: IdKind) -> Option<SourceId> {
     match kind {
         IdKind::Scan | IdKind::Search => Some(SourceId::ProcessDetail),
         IdKind::Eject => Some(SourceId::Udisks),
-        IdKind::Action => None,
+        IdKind::Action | IdKind::History => None,
     }
 }
 
-/// The snapshot part that shows requests of `kind`. None for actions.
+/// The snapshot part that shows requests of `kind` in a slot. None for actions and history
+/// queries, whose answers the session shows itself.
 fn view_bit(kind: IdKind) -> ComponentMask {
     match kind {
         IdKind::Scan | IdKind::Search => ComponentMask::DETAILS,
         IdKind::Eject => ComponentMask::DEVICE_DETAILS,
-        IdKind::Action => ComponentMask::NONE,
+        IdKind::Action | IdKind::History => ComponentMask::NONE,
     }
 }
 
@@ -137,6 +172,8 @@ pub enum IdSlot {
     Search,
     /// An eject of this disk, by kernel name.
     Eject(Arc<str>),
+    /// A history query. Queries have no slot of their own: each is answered.
+    History,
 }
 
 impl IdSlot {
@@ -145,6 +182,7 @@ impl IdSlot {
             IdSlot::Scan(_) => IdKind::Scan,
             IdSlot::Search => IdKind::Search,
             IdSlot::Eject(_) => IdKind::Eject,
+            IdSlot::History => IdKind::History,
         }
     }
 }
@@ -242,7 +280,7 @@ pub enum MapError {
     #[error("session not open")]
     NoSession,
     /// The session got `RequestEnd::Busy` for it.
-    #[error("{ACTIVE_MAX} requests of this kind are active")]
+    #[error("the session's limit of active requests of this kind is reached")]
     Busy,
 }
 
@@ -251,7 +289,8 @@ struct Request {
     client: u64,
     engine: u64,
     slot: IdSlot,
-    /// The worker queue `seq` of its command, 0 until it is forwarded.
+    /// The worker queue `seq` of its command, 0 until it is forwarded. For a history query,
+    /// the history worker generation that took it.
     queued: u64,
 }
 
@@ -323,6 +362,11 @@ pub enum ClientMsg {
         link: SessionLink,
     },
     Close(ClientSessionId),
+    /// The demand of session `id` (ADR-018). Only its `device_history_range` is read so far.
+    Demand {
+        id: ClientSessionId,
+        demand: Box<Demand>,
+    },
     /// A command from session `id`. Table and system table queries apply to that session only,
     /// and its client ids are mapped into the engine-wide namespace; every other command acts as
     /// it does for the local session.
@@ -344,6 +388,9 @@ pub enum OpenError {
 /// One connected window's queries and the table parts built for them.
 pub struct ClientSession {
     id: ClientSessionId,
+    /// The window's demand (ADR-018). Only `device_history_range` is read so far. The local
+    /// session's comes from the reducer's demand watch at each publish.
+    pub demand: Demand,
     pub query: TableQuery,
     /// The last `SetSysTableQuery` per system table: Services, Startup, Connections.
     pub sys_queries: [Option<SysTableQuery>; 3],
@@ -357,8 +404,20 @@ pub struct ClientSession {
     /// ejects, under its own ids. The header is the shared one.
     details: Arc<DetailsSnapshot>,
     device_details: Arc<DeviceDetailsSnapshot>,
+    /// The last answer to one of the session's history queries, under its own ids, with the
+    /// shared header.
+    history: Arc<HistoryView>,
+    /// Engine id to the session's own id of the history queries its views name: the last
+    /// Frame and TopAt queries, kept after they end so a view sent again after a delete maps.
+    history_ids: Vec<(u64, u64)>,
+    /// The worker's top list the session shows, and the session's copy of it.
+    history_top: Option<(Arc<HistoryTop>, Arc<HistoryTop>)>,
+    /// The answer for the session's range, with the shared header, and the shared answer it
+    /// was made from. The session keeps it while no answer for its range has arrived.
+    device_history: Arc<DeviceHistory>,
+    device_history_src: Option<Arc<DeviceHistory>>,
     /// The active requests by `index` of their kind, oldest first.
-    requests: [Vec<Request>; 4],
+    requests: [Vec<Request>; 5],
     /// Per slot, the newest request the session sent there.
     shown: Vec<Shown>,
     /// The shared disk list and the session's view of it, while no eject view changed.
@@ -383,6 +442,7 @@ impl ClientSession {
     fn new(id: ClientSessionId, link: Option<SessionLink>, empty: &Snapshot) -> Self {
         ClientSession {
             id,
+            demand: Demand::default(),
             query: TableQuery::default(),
             sys_queries: [None, None, None],
             table: Arc::clone(&empty.table),
@@ -391,6 +451,11 @@ impl ClientSession {
             connections: Arc::clone(&empty.connections),
             details: Arc::clone(&empty.details),
             device_details: Arc::clone(&empty.device_details),
+            history: Arc::clone(&empty.history),
+            history_ids: Vec::new(),
+            history_top: None,
+            device_history: Arc::clone(&empty.device_history),
+            device_history_src: None,
             requests: Default::default(),
             shown: Vec::new(),
             disks: None,
@@ -483,6 +548,101 @@ impl ClientSession {
 
     pub fn device_details(&self) -> &Arc<DeviceDetailsSnapshot> {
         &self.device_details
+    }
+
+    pub fn history(&self) -> &Arc<HistoryView> {
+        &self.history
+    }
+
+    pub fn device_history(&self) -> &Arc<DeviceHistory> {
+        &self.device_history
+    }
+
+    /// Takes the shared answer for the session's range when it is new, and the shared
+    /// validity when it changed. Without an answer for its range the session keeps what it
+    /// shows, as one window did while its new range was read.
+    fn select_device_history(&mut self, c: &Components) {
+        let key = self.demand.device_history_range;
+        let found = c
+            .device_histories
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, h)| h);
+        let validity = c.device_history.header.validity;
+        let same_src = match (found, &self.device_history_src) {
+            (None, _) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(_), None) => false,
+        };
+        if same_src && self.device_history.header.validity == validity {
+            return;
+        }
+        let src = found.unwrap_or(&self.device_history);
+        self.device_history = Arc::new(DeviceHistory {
+            header: ComponentHeader {
+                version: 0,
+                validity,
+                ..src.header
+            },
+            ..DeviceHistory::clone(src)
+        });
+        if let Some(found) = found {
+            self.device_history_src = Some(Arc::clone(found));
+        }
+        self.dirty |= ComponentMask::DEVICE_HISTORY;
+    }
+
+    /// Takes the shared validity of `history` when it changed.
+    fn select_history_validity(&mut self, c: &Components) {
+        let validity = c.history.header.validity;
+        if self.history.header.validity == validity {
+            return;
+        }
+        self.history = Arc::new(HistoryView {
+            header: ComponentHeader {
+                version: 0,
+                validity,
+                ..self.history.header
+            },
+            ..HistoryView::clone(&self.history)
+        });
+        self.dirty |= ComponentMask::HISTORY;
+    }
+
+    /// The session's own id of history query `engine`, from the queries its views name. 0, the
+    /// id of no query, when the session does not know it: it ended before its answer came.
+    fn history_client(&self, engine: u64) -> u64 {
+        self.history_ids
+            .iter()
+            .find(|(e, _)| *e == engine)
+            .map_or(0, |(_, c)| *c)
+    }
+
+    /// Shows `view` under the session's own query ids, with the shared validity. A top list
+    /// the session showed already keeps its `Arc` (ADR-003).
+    fn show_history(&mut self, view: &HistoryView, validity: Validity) {
+        let top = view.top.as_ref().map(|src| match &self.history_top {
+            Some((old, out)) if Arc::ptr_eq(old, src) => Arc::clone(out),
+            _ => Arc::new(HistoryTop {
+                query_id: self.history_client(src.query_id),
+                ..HistoryTop::clone(src)
+            }),
+        });
+        self.history_top = view.top.clone().zip(top.clone());
+        let query_id = self.history_client(view.query_id);
+        let named = [view.query_id, view.top.as_ref().map_or(0, |t| t.query_id)];
+        self.history_ids.retain(|(e, _)| named.contains(e));
+        self.history = Arc::new(HistoryView {
+            header: ComponentHeader {
+                version: 0,
+                validity,
+                ..view.header
+            },
+            query_id,
+            top,
+            ..view.clone()
+        });
+        self.dirty |= ComponentMask::HISTORY;
     }
 
     /// The session's action event channel. `None` for the local session, whose events go to
@@ -624,6 +784,7 @@ impl ClientSession {
                     .filter(|(seq, _)| *seq == shown.engine)
                     .filter(|(_, state)| !matches!(&shown.view, Some(View::Eject((_, s))) if s == state))
                     .map(|(_, state)| Report::Eject(state).view(shown.client)),
+                IdSlot::History => None,
             };
             if let Some(view) = next {
                 changed.push((i, view));
@@ -645,6 +806,7 @@ impl ClientSession {
                 IdSlot::Search => c.details.handle_search.is_none(),
                 IdSlot::Eject(disk) => disk_idx(c, disk)
                     .is_none_or(|idx| !c.device_details.disks.iter().any(|(i, _)| *i == idx)),
+                IdSlot::History => true,
             })
             .map(|(i, _)| i)
             .collect();
@@ -760,13 +922,21 @@ impl ClientSession {
         })
     }
 
-    /// Brings the four parts up to date for a publish. A part is rebuilt when this session
+    /// Brings the six parts up to date for a publish. A part is rebuilt when this session
     /// changed it or when `shared` (the reducer's dirty mask) has its bit; the system tables
-    /// then take every field but their rows, generation and counts from `c`. A rebuilt part
-    /// gets version one above its last published one. The views of details and device details
-    /// are rebuilt from `c` when their bit is set; they keep the shared header.
+    /// then take every field but their rows, generation and counts from `c`. The history parts
+    /// are the session's own answers: they change only when the session's answer or the shared
+    /// header changed. A rebuilt part gets version one above its last published one. The views
+    /// of details and device details are rebuilt from `c` when their bit is set; they keep the
+    /// shared header.
     pub(crate) fn prepare(&mut self, shared: ComponentMask, c: &Components) {
         self.refresh(shared, c);
+        if shared.contains(ComponentMask::HISTORY) {
+            self.select_history_validity(c);
+        }
+        // A session whose range changed picks its answer even when no new one arrived.
+        self.select_device_history(c);
+        let shared = ComponentMask(shared.0 & !OWN_ANSWERS.0);
         let dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE) | shared;
         if dirty.contains(ComponentMask::DETAILS) {
             self.details = self.view_details(&c.details);
@@ -781,6 +951,8 @@ impl ClientSession {
             let p = self.published[i];
             self.published[i] = match bit {
                 ComponentMask::TABLE => bump(&mut self.table, p),
+                ComponentMask::HISTORY => bump(&mut self.history, p),
+                ComponentMask::DEVICE_HISTORY => bump(&mut self.device_history, p),
                 ComponentMask::SERVICES => {
                     let own = &self.services;
                     self.services = Arc::new(ServicesSnapshot {
@@ -819,7 +991,7 @@ impl ClientSession {
         }
     }
 
-    /// `base` with this session's four parts and its views of details and device details.
+    /// `base` with this session's six parts and its views of details and device details.
     pub fn snapshot(&self, base: Snapshot) -> Snapshot {
         Snapshot {
             table: Arc::clone(&self.table),
@@ -828,6 +1000,8 @@ impl ClientSession {
             connections: Arc::clone(&self.connections),
             details: Arc::clone(&self.details),
             device_details: Arc::clone(&self.device_details),
+            history: Arc::clone(&self.history),
+            device_history: Arc::clone(&self.device_history),
             ..base
         }
     }
@@ -895,8 +1069,9 @@ impl ClientSessions {
 
     /// Admits session `id`'s request `client` in `slot`: maps it to a new engine id and returns
     /// that. A client id sent again gets a new engine id; cancels use the newest active one.
-    /// When the session has `ACTIVE_MAX` active requests of the slot's kind, it gets
-    /// `RequestEnd::Busy` and no mapping is made.
+    /// When the session has `ACTIVE_MAX` active requests of the slot's kind
+    /// (`HISTORY_ACTIVE_MAX` history queries), it gets `RequestEnd::Busy` and no mapping is
+    /// made.
     pub fn admit(
         &mut self,
         id: ClientSessionId,
@@ -909,7 +1084,7 @@ impl ClientSessions {
             .position(|s| s.id == id)
             .ok_or(MapError::NoSession)?;
         let kind = slot.kind();
-        if self.sessions[at].active(kind) >= ACTIVE_MAX {
+        if self.sessions[at].active(kind) >= active_max(kind) {
             self.sessions[at].send(RequestEvent {
                 kind,
                 id: client,
@@ -925,6 +1100,10 @@ impl ClientSessions {
             slot: slot.clone(),
             queued: 0,
         });
+        if kind == IdKind::History {
+            // Each query is answered: there is no slot to show.
+            return Ok(engine);
+        }
         // The new request is the newest in its slot: the slot shows nothing until the worker
         // reports it.
         let had = session.shown.iter().position(|s| s.slot == slot);
@@ -1001,6 +1180,37 @@ impl ClientSessions {
         true
     }
 
+    /// The history worker sent client session `owner` a view. A view that `answers` a query
+    /// ends it as `Done`; the session then shows the view under its own ids. A view for a
+    /// session that is gone, or that answers a query no longer active, is counted as late; the
+    /// latter is still shown.
+    pub fn history_view(
+        &mut self,
+        owner: ClientSessionId,
+        answers: Option<u64>,
+        view: &HistoryView,
+        validity: Validity,
+    ) {
+        let Some(session) = self.sessions.iter_mut().find(|s| s.id == owner) else {
+            self.late += 1;
+            tracing::debug!(target: "tasklens::engine", owner = owner.0, "history view for a closed session: dropped");
+            return;
+        };
+        if let Some(engine) = answers {
+            match session.client_id(IdKind::History, engine) {
+                Some(client) => {
+                    session.history_ids.push((engine, client));
+                    session.finish(IdKind::History, engine, RequestEnd::Done, None);
+                }
+                None => {
+                    self.late += 1;
+                    tracing::debug!(target: "tasklens::engine", engine, "answer to a history query that already ended");
+                }
+            }
+        }
+        session.show_history(view, validity);
+    }
+
     /// A new worker generation started after an older one stopped. The active requests of
     /// `kinds` whose command was queued at or before `through`, the last one the older
     /// generation claimed, died with it and end as `Lost`. Later ones the new generation runs.
@@ -1019,8 +1229,8 @@ impl ClientSessions {
         }
     }
 
-    /// The reducer stops: it restarts or the engine shuts down. Each active scan, handle search
-    /// and eject of every session ends as `Lost`; the local session outlives the reducer, the
+    /// The reducer stops: it restarts or the engine shuts down. Each active scan, handle search,
+    /// eject and history query of every session ends as `Lost`; the local session outlives the reducer, the
     /// others end with it right after. A command still in the worker queue is evicted first,
     /// under the lock a worker's claim takes, so the next reducer's workers never run a request
     /// that already ended; the unclaimed commands of that worker queued before it are skipped
@@ -1083,6 +1293,26 @@ impl ClientSessions {
 
     pub fn local(&self) -> &ClientSession {
         &self.sessions[0]
+    }
+
+    /// The local window's demand, from the reducer's demand watch.
+    pub fn set_local_demand(&mut self, demand: Demand) {
+        self.sessions[0].demand = demand;
+    }
+
+    /// The distinct device history ranges of the sessions other than the local one, in connect
+    /// order. The `MetricHistory` worker answers them after the local one (ADR-018).
+    pub fn linked_ranges(&self) -> Vec<DeviceHistoryRequest> {
+        let mut out = Vec::new();
+        for r in self.sessions[1..]
+            .iter()
+            .filter_map(|s| s.demand.device_history_range)
+        {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out
     }
 
     pub fn len(&self) -> usize {

@@ -18,15 +18,13 @@ use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, TabPayload};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::history::HistoryView;
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DeviceHistory,
-    DiskDetails, DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
-    ProcessSnapshot, ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
-    WindowsSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
+    DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
+    ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
 use tl_model::system::{GpuEngine, GpuTotals, MemGroupBand, MemoryTotals, Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
@@ -48,8 +46,8 @@ use crate::client_session::{
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
-    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, MemorySample,
-    NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
+    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, HistoryUpdate,
+    MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
 use crate::workers::history::HistoryMsg;
 use crate::workers::process_detail::pss_keys;
@@ -665,20 +663,33 @@ impl Reducer {
                 self.components.windows = Arc::new(next);
                 self.mark(ComponentMask::WINDOWS);
             }
-            SourceUpdate::History(view) => {
-                // A new `Arc` each answer; the reducer owns the version (ADR-003).
-                let mut next = HistoryView::clone(&view);
-                next.header.version = 0;
-                next.header.validity = Validity::Valid;
-                self.components.history = Arc::new(next);
+            SourceUpdate::History(HistoryUpdate::Started { generation }) => {
+                // Every query an older generation took died with it.
+                self.clients
+                    .restarted(&[IdKind::History], generation.saturating_sub(1));
+            }
+            SourceUpdate::History(HistoryUpdate::View {
+                owner,
+                answers,
+                view,
+            }) => {
+                // The session shows the answer; each session versions its own (ADR-003, ADR-018).
+                if self.components.history.header.validity != Validity::Valid {
+                    Arc::make_mut(&mut self.components.history).header.validity = Validity::Valid;
+                }
+                self.clients
+                    .history_view(owner, answers, &view, Validity::Valid);
                 self.mark(ComponentMask::HISTORY);
             }
-            SourceUpdate::DeviceHistory(history) => {
-                // The worker reuses the series `Arc`s; the reducer owns the version (ADR-003).
-                let mut next = DeviceHistory::clone(&history);
-                next.header.version = 0;
-                next.header.validity = Validity::Valid;
-                self.components.device_history = Arc::new(next);
+            SourceUpdate::DeviceHistory(histories) => {
+                // The worker reuses the series `Arc`s and the `Arc` of each unchanged answer;
+                // each session versions the answer for its range (ADR-003, ADR-018).
+                if self.components.device_history.header.validity != Validity::Valid {
+                    Arc::make_mut(&mut self.components.device_history)
+                        .header
+                        .validity = Validity::Valid;
+                }
+                self.components.device_histories = histories;
                 self.mark(ComponentMask::DEVICE_HISTORY);
             }
             // E29-020: `HEALTH` only on a change, so `health` keeps its `Arc` otherwise.
@@ -712,10 +723,18 @@ impl Reducer {
                 }
             }
             ClientMsg::Close(id) => {
-                if !self.clients.close(id) {
+                if self.clients.close(id) {
+                    self.send_history(HistoryMsg::Forget(id));
+                } else {
                     tracing::debug!(target: "tasklens::engine", id = id.0, "close: no such client session");
                 }
             }
+            ClientMsg::Demand { id, demand } => match self.clients.get_mut(id) {
+                Some(session) => session.demand = *demand,
+                None => {
+                    tracing::debug!(target: "tasklens::engine", id = id.0, "demand of a closed client session dropped");
+                }
+            },
             ClientMsg::Command { id, cmd } => {
                 if self.clients.get(id).is_none() {
                     tracing::debug!(target: "tasklens::engine", id = id.0, "command from a closed client session dropped");
@@ -858,10 +877,32 @@ impl Reducer {
                     );
                 }
             }
-            Command::HistoryQuery { id, range, what } => {
-                self.send_history(HistoryMsg::Query { id, range, what });
+            Command::HistoryQuery {
+                id: client,
+                range,
+                what,
+            } => {
+                if let Some(engine) = self.admit(id, IdSlot::History, client) {
+                    let msg = HistoryMsg::Query {
+                        owner: id,
+                        id: engine,
+                        range,
+                        what,
+                    };
+                    match self.send_history(msg) {
+                        Some(generation) => {
+                            self.clients.queued(IdKind::History, engine, generation);
+                        }
+                        None => {
+                            self.clients
+                                .finish(IdKind::History, engine, RequestEnd::Lost);
+                        }
+                    }
+                }
             }
-            Command::HistoryDelete { keys } => self.send_history(HistoryMsg::Delete { keys }),
+            Command::HistoryDelete { keys } => {
+                self.send_history(HistoryMsg::Delete { keys });
+            }
             Command::SetupStatus => self.send_helper(HelperCommand::SetupStatus),
             Command::RunSetup { step } => self.send_helper(HelperCommand::RunSetup(step)),
             Command::Device(DeviceCommand::Eject { seq, disk }) => {
@@ -972,11 +1013,15 @@ impl Reducer {
     }
 
     /// `try_send` into the history worker's channel (E30-A2). Without a sink the command is
-    /// dropped: history is not wired in this engine.
-    fn send_history(&mut self, msg: HistoryMsg) {
+    /// dropped: history is not wired in this engine. The generation that took it, or `None`
+    /// when it was dropped.
+    fn send_history(&mut self, msg: HistoryMsg) -> Option<u64> {
         match self.history_cmd.as_mut() {
             Some(sink) => sink.command(msg),
-            None => tracing::debug!(target: "tasklens::engine", "no history sink: command dropped"),
+            None => {
+                tracing::debug!(target: "tasklens::engine", "no history sink: command dropped");
+                None
+            }
         }
     }
 

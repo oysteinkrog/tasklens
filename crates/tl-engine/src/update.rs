@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tl_model::actions::{ActionId, CgroupRef};
 use tl_model::command::{Command, SetupState};
+use tl_model::demand::DeviceHistoryRequest;
 use tl_model::details::{
     AffinityInfo, DetailTab, DetailTarget, HandleSearchState, ScanId, TabPayload,
 };
@@ -39,7 +40,27 @@ use tl_model::table::{Manager, UnitRef};
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
-use crate::client_session::ClientMsg;
+use crate::client_session::{ClientMsg, ClientSessionId};
+
+/// The device history answer for each wanted range, the local session's first (ADR-017,
+/// ADR-018). The key `None` is the answer for a session with no range: no points, only the
+/// timeline. An answer that did not change keeps its `Arc`.
+pub type DeviceHistories = Arc<[(Option<DeviceHistoryRequest>, Arc<DeviceHistory>)]>;
+
+/// What the `HistoryRecorder` worker tells the reducer (E30, ADR-018).
+#[derive(Debug, Clone)]
+pub enum HistoryUpdate {
+    /// A worker generation starts, before it takes queries. Every query sent to an older
+    /// generation is lost.
+    Started { generation: u64 },
+    /// A view for client session `owner`. `answers` is the engine id of the query it answers;
+    /// `None` for the last view sent again after a delete.
+    View {
+        owner: ClientSessionId,
+        answers: Option<u64>,
+        view: Arc<HistoryView>,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub enum EngineMsg {
@@ -118,11 +139,11 @@ pub enum SourceUpdate {
     Inventory(Box<InventorySnapshot>),
     /// E14 `KWin`.
     Windows(Box<WindowsSnapshot>),
-    /// E30 answer to `HistoryQuery`.
-    History(Arc<HistoryView>),
-    /// ADR-017 `MetricHistory`: the answer to `Demand.device_history_range`. The reducer owns
-    /// the header version.
-    DeviceHistory(Arc<DeviceHistory>),
+    /// E30 answer to `HistoryQuery`, per client session (ADR-018).
+    History(HistoryUpdate),
+    /// ADR-017 `MetricHistory`: the answer to each wanted `Demand.device_history_range`
+    /// (ADR-018). The reducer owns the header versions.
+    DeviceHistory(DeviceHistories),
     /// E12 static and slow device rows (R-139 item 7).
     DeviceDetails(DeviceDetailsUpdate),
     /// E29 helper session state (R-150 item 1).
@@ -717,7 +738,10 @@ mod tests {
                 Some(SourceId::Inventory),
             ),
             (SourceUpdate::Windows(Box::default()), Some(SourceId::KWin)),
-            (SourceUpdate::History(Arc::default()), None),
+            (
+                SourceUpdate::History(HistoryUpdate::Started { generation: 1 }),
+                None,
+            ),
             (SourceUpdate::DeviceHistory(Arc::default()), None),
             (
                 SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Cpu(Arc::default())),

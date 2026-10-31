@@ -13,10 +13,11 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
 use asupersync::types::{Budget, Outcome, RegionId};
 use asupersync::{Cx, LabConfig, LabRuntime};
+use tl_engine::client_session::ClientSessionId;
 use tl_engine::dbus::SharedHandles;
 use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::{WorkerFactory, build_supervisor};
-use tl_engine::update::{EngineMsg, SourceUpdate, WorkerError};
+use tl_engine::update::{EngineMsg, HistoryUpdate, SourceUpdate, WorkerError};
 use tl_engine::workers::history::{
     HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, run_history,
 };
@@ -274,6 +275,7 @@ impl Rig {
         self.next_id += 1;
         let id = self.next_id;
         self.sink.command(HistoryMsg::Query {
+            owner: ClientSessionId::LOCAL,
             id,
             range: HistoryRange::Live,
             what: HistoryWhat::Frame {
@@ -285,8 +287,12 @@ impl Rig {
         });
         self.lab.run_until_idle();
         while let Ok(msg) = self.rx.try_recv() {
-            if let EngineMsg::Source(SourceUpdate::History(view)) = msg
-                && view.query_id == id
+            if let EngineMsg::Source(SourceUpdate::History(HistoryUpdate::View {
+                answers: Some(answers),
+                view,
+                ..
+            })) = msg
+                && answers == id
             {
                 return view;
             }

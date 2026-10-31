@@ -7,7 +7,13 @@
 //! the worker reports it in its health message.
 //!
 //! Each worker generation creates its own channel and stores the sender in the `HistorySlot`, so
-//! no `mpsc::Receiver` moves into a restartable worker (ADR-004 factory contract).
+//! no `mpsc::Receiver` moves into a restartable worker (ADR-004 factory contract). Before that
+//! it sends `HistoryUpdate::Started` with its generation, and the sink tells the reducer which
+//! generation took each query, so the reducer ends the queries an older generation took as lost.
+//!
+//! Queries are per client session (ADR-018). The worker keeps each session's last Frame and
+//! TopAt queries and last view apart, answers a session only with its own, and after a delete
+//! sends each session its view again. `HistoryMsg::Forget` drops a closed session's.
 //!
 //! The worker switches between three modes each turn (ADR-012, D-010, PROC-086): recording to
 //! the store when `history.enabled` is true, the 10-minute `RollingWindow` when recording is off
@@ -27,6 +33,7 @@
 //! `borrow_and_clone()` (bead `c11v6v`).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -57,9 +64,10 @@ use tl_model::series::Sample;
 use tl_model::settings::{EngineSettings, HistorySettings};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
+use crate::client_session::ClientSessionId;
 use crate::history_query::{self, QueryCtx, QuerySource};
 use crate::source::WorkerIo;
-use crate::update::{EngineMsg, SourceUpdate, WorkerError};
+use crate::update::{EngineMsg, HistoryUpdate, SourceUpdate, WorkerError};
 
 /// Capacity of the channel each worker generation creates.
 pub const HISTORY_CHANNEL_CAPACITY: usize = 512;
@@ -80,11 +88,15 @@ pub enum HistoryMsg {
     },
     /// `DeviceCatalog` holds its entries in an `Arc`, so the clone is cheap.
     Catalog(DeviceCatalog),
+    /// Query `id`, an engine id, of client session `owner`.
     Query {
+        owner: ClientSessionId,
         id: u64,
         range: HistoryRange,
         what: HistoryWhat,
     },
+    /// Client session `owner` closed: drop its queries and view.
+    Forget(ClientSessionId),
     Delete {
         keys: Arc<[ProcessKey]>,
     },
@@ -98,9 +110,19 @@ pub enum HistoryMsg {
     Inspect(Box<dyn FnOnce(&Mode) + Send>),
 }
 
-/// Each worker generation creates a fresh `mpsc::channel(512)` and stores its `Sender` here; the
-/// sink reads it.
-pub type HistorySlot = Arc<ArcSwapOption<mpsc::Sender<HistoryMsg>>>;
+/// The sender of one worker generation.
+pub struct HistoryTx {
+    /// From 1, unique per process.
+    pub generation: u64,
+    pub tx: mpsc::Sender<HistoryMsg>,
+}
+
+/// Each worker generation creates a fresh `mpsc::channel(512)` and stores its `HistoryTx` here;
+/// the sink reads it.
+pub type HistorySlot = Arc<ArcSwapOption<HistoryTx>>;
+
+/// Worker generations, unique per process.
+static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// The reducer's `RecordSink` while history is on. A thin forwarder to the worker's channel.
 pub struct HistorySink {
@@ -120,8 +142,9 @@ impl HistorySink {
     }
 
     /// For `Command::HistoryQuery` and `Command::HistoryDelete` routed by the reducer (E30-A2).
-    pub fn command(&mut self, msg: HistoryMsg) {
-        self.send(msg);
+    /// The generation that took `msg`, or `None` when it was dropped.
+    pub fn command(&mut self, msg: HistoryMsg) -> Option<u64> {
+        self.send(msg)
     }
 
     /// Messages dropped so far: no sender, queue full or channel closed.
@@ -129,15 +152,16 @@ impl HistorySink {
         self.dropped
     }
 
-    fn send(&mut self, msg: HistoryMsg) {
+    /// The generation that took `msg`, or `None` when it was dropped.
+    fn send(&mut self, msg: HistoryMsg) -> Option<u64> {
         let guard = self.slot.load();
-        let Some(tx) = guard.as_deref() else {
+        let Some(HistoryTx { generation, tx }) = guard.as_deref() else {
             self.dropped += 1;
-            return;
+            return None;
         };
         if tx.try_send(msg).is_err() {
             self.dropped += 1;
-            return;
+            return None;
         }
         if self.dropped > self.reported
             && tx
@@ -148,6 +172,7 @@ impl HistorySink {
         {
             self.reported = self.dropped;
         }
+        Some(*generation)
     }
 }
 
@@ -345,6 +370,7 @@ impl RecordingState {
             // `State::apply` handles queries and deletes (E30-015).
             HistoryMsg::Delete { .. }
             | HistoryMsg::Query { .. }
+            | HistoryMsg::Forget(_)
             | HistoryMsg::Dropped { .. }
             | HistoryMsg::Inspect(_) => {}
         }
@@ -585,6 +611,17 @@ fn wanted(demand: &Demand, settings: &EngineSettings) -> Wanted {
 /// A TopAt query: `(id, t, metric, n)`.
 type TopQuery = (u64, TimeNs, HistoryMetric, u8);
 
+/// One client session's queries and view (ADR-018).
+struct Owner {
+    id: ClientSessionId,
+    /// The last Frame query, answered again after a delete (UI-PRC-037).
+    last_frame: Option<(u64, HistoryRange, HistoryWhat)>,
+    /// The last TopAt query and its answer, merged into every view.
+    last_top: Option<(TopQuery, Arc<HistoryTop>)>,
+    /// The last view sent. A TopAt answer goes out as this view with the new top list.
+    last_view: Option<HistoryView>,
+}
+
 /// The worker's state. Each blocking job locks it.
 struct State {
     mode: Mode,
@@ -595,12 +632,8 @@ struct State {
     version: u64,
     /// The highest drop total the sink sent.
     dropped: u64,
-    /// The last Frame query, answered again after a delete (UI-PRC-037).
-    last_frame: Option<(u64, HistoryRange, HistoryWhat)>,
-    /// The last TopAt query and its answer, merged into every view.
-    last_top: Option<(TopQuery, Arc<HistoryTop>)>,
-    /// The last view sent. A TopAt answer goes out as this view with the new top list.
-    last_view: Option<HistoryView>,
+    /// The client sessions that sent a query, in the order of their first one.
+    owners: Vec<Owner>,
 }
 
 impl State {
@@ -656,13 +689,27 @@ impl State {
             match msg {
                 HistoryMsg::Dropped { total } => self.dropped = self.dropped.max(total),
                 HistoryMsg::Inspect(f) => f(&self.mode),
-                HistoryMsg::Query { id, range, what } => {
-                    let view = self.answer(id, range, what);
-                    out.push(SourceUpdate::History(Arc::new(view)));
+                HistoryMsg::Query {
+                    owner,
+                    id,
+                    range,
+                    what,
+                } => {
+                    let view = self.answer(owner, id, range, what);
+                    out.push(SourceUpdate::History(HistoryUpdate::View {
+                        owner,
+                        answers: Some(id),
+                        view: Arc::new(view),
+                    }));
                 }
+                HistoryMsg::Forget(owner) => self.owners.retain(|o| o.id != owner),
                 HistoryMsg::Delete { keys } => {
-                    if let Some(view) = self.delete(&keys) {
-                        out.push(SourceUpdate::History(Arc::new(view)));
+                    for (owner, view) in self.delete(&keys) {
+                        out.push(SourceUpdate::History(HistoryUpdate::View {
+                            owner,
+                            answers: None,
+                            view: Arc::new(view),
+                        }));
                     }
                 }
                 msg => match &mut self.mode {
@@ -674,31 +721,54 @@ impl State {
         }
     }
 
-    /// Answers a query (E30-015). A Frame query builds a new view; a TopAt query answers the
-    /// top list and sends it merged into the last view.
-    fn answer(&mut self, id: u64, range: HistoryRange, what: HistoryWhat) -> HistoryView {
+    /// The index of `owner` in `owners`, added when new.
+    fn owner(&mut self, owner: ClientSessionId) -> usize {
+        match self.owners.iter().position(|o| o.id == owner) {
+            Some(i) => i,
+            None => {
+                self.owners.push(Owner {
+                    id: owner,
+                    last_frame: None,
+                    last_top: None,
+                    last_view: None,
+                });
+                self.owners.len() - 1
+            }
+        }
+    }
+
+    /// Answers a query of `owner` (E30-015). A Frame query builds a new view; a TopAt query
+    /// answers the top list and sends it merged into the owner's last view.
+    fn answer(
+        &mut self,
+        owner: ClientSessionId,
+        id: u64,
+        range: HistoryRange,
+        what: HistoryWhat,
+    ) -> HistoryView {
+        let i = self.owner(owner);
         let view = match what {
             HistoryWhat::TopAt { t, metric, n } => {
                 let top = history_query::answer_top(self.source(), &self.ctx(), id, t, metric, n);
-                self.last_top = Some(((id, t, metric, n), Arc::new(top)));
-                match &self.last_view {
+                self.owners[i].last_top = Some(((id, t, metric, n), Arc::new(top)));
+                match &self.owners[i].last_view {
                     Some(view) => view.clone(),
                     None => self.frame(id, range, &what),
                 }
             }
             what => {
                 let view = self.frame(id, range, &what);
-                self.last_frame = Some((id, range, what));
+                self.owners[i].last_frame = Some((id, range, what));
                 view
             }
         };
-        self.publish(view)
+        self.publish(i, view)
     }
 
-    /// "Delete from history" (R-103), then the last Frame and TopAt queries again, so the keys
-    /// leave the next view (UI-PRC-037). `None` when no view was sent yet. While the store is
-    /// not open, the keys are not saved.
-    fn delete(&mut self, keys: &[ProcessKey]) -> Option<HistoryView> {
+    /// "Delete from history" (R-103), then each owner's last Frame and TopAt queries again, so
+    /// the keys leave its next view (UI-PRC-037). An owner that was sent no view yet gets none.
+    /// While the store is not open, the keys are not saved.
+    fn delete(&mut self, keys: &[ProcessKey]) -> Vec<(ClientSessionId, HistoryView)> {
         match &mut self.mode {
             Mode::Off => {}
             Mode::Rolling(window) => window.delete_keys(keys),
@@ -711,23 +781,32 @@ impl State {
                 }
             }
         }
-        if let Some(((id, t, metric, n), _)) = self.last_top {
-            let top = history_query::answer_top(self.source(), &self.ctx(), id, t, metric, n);
-            self.last_top = Some(((id, t, metric, n), Arc::new(top)));
+        let mut out = Vec::new();
+        for i in 0..self.owners.len() {
+            if let Some(((id, t, metric, n), _)) = self.owners[i].last_top {
+                let top = history_query::answer_top(self.source(), &self.ctx(), id, t, metric, n);
+                self.owners[i].last_top = Some(((id, t, metric, n), Arc::new(top)));
+            }
+            let view = match &self.owners[i].last_frame {
+                Some((id, range, what)) => self.frame(*id, *range, what),
+                None => match self.owners[i].last_view.clone() {
+                    Some(view) => view,
+                    None => continue,
+                },
+            };
+            out.push((self.owners[i].id, self.publish(i, view)));
         }
-        let view = match &self.last_frame {
-            Some((id, range, what)) => self.frame(*id, *range, what),
-            None => self.last_view.clone()?,
-        };
-        Some(self.publish(view))
+        out
     }
 
-    /// Bumps the version, merges the last top list and keeps the view as the last one sent.
-    fn publish(&mut self, mut view: HistoryView) -> HistoryView {
+    /// Bumps the version, merges owner `i`'s last top list and keeps the view as its last one
+    /// sent.
+    fn publish(&mut self, i: usize, mut view: HistoryView) -> HistoryView {
         self.version += 1;
         view.header.version = self.version;
-        view.top = self.last_top.as_ref().map(|(_, top)| Arc::clone(top));
-        self.last_view = Some(view.clone());
+        let owner = &mut self.owners[i];
+        view.top = owner.last_top.as_ref().map(|(_, top)| Arc::clone(top));
+        owner.last_view = Some(view.clone());
         view
     }
 
@@ -776,7 +855,10 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         HistoryMsg::Catalog(catalog) => window.on_device_catalog(&catalog),
         HistoryMsg::SessionStart { t_ns, .. } => window.mark_gap(t_ns),
         // `State::apply` handles queries and deletes (E30-015).
-        HistoryMsg::Delete { .. } | HistoryMsg::Query { .. } | HistoryMsg::Dropped { .. } => {}
+        HistoryMsg::Delete { .. }
+        | HistoryMsg::Query { .. }
+        | HistoryMsg::Forget(_)
+        | HistoryMsg::Dropped { .. } => {}
         HistoryMsg::Inspect(_) => {}
     }
 }
@@ -801,7 +883,7 @@ fn realtime_offset_ns() -> i64 {
 /// slot while it still holds this generation's sender.
 struct SlotGuard {
     slot: HistorySlot,
-    mine: Option<Arc<mpsc::Sender<HistoryMsg>>>,
+    mine: Option<Arc<HistoryTx>>,
 }
 
 impl Drop for SlotGuard {
@@ -834,7 +916,13 @@ pub async fn run_history(
     cfg: HistoryWorkerConfig,
 ) -> Outcome<(), WorkerError> {
     let (tx, mut rx) = mpsc::channel::<HistoryMsg>(HISTORY_CHANNEL_CAPACITY);
-    let mine = Some(Arc::new(tx));
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
+    // The reducer learns of this generation before any query can reach it.
+    let started = SourceUpdate::History(HistoryUpdate::Started { generation });
+    if let Some(outcome) = send(&cx, &io, started).await {
+        return outcome;
+    }
+    let mine = Some(Arc::new(HistoryTx { generation, tx }));
     slot.store(mine.clone());
     let _guard = SlotGuard { slot, mine };
 
@@ -844,9 +932,7 @@ pub async fn run_history(
         realtime_offset_ns: 0,
         version: 0,
         dropped: 0,
-        last_frame: None,
-        last_top: None,
-        last_view: None,
+        owners: Vec::new(),
     }));
     let mut msgs: Vec<HistoryMsg> = Vec::with_capacity(BATCH_MAX);
     // Runtime time in ns of the next MemTotal and clock offset read.
@@ -1066,7 +1152,8 @@ mod tests {
 
     fn slot_with_channel() -> (HistorySlot, mpsc::Receiver<HistoryMsg>) {
         let (tx, rx) = mpsc::channel(HISTORY_CHANNEL_CAPACITY);
-        let slot: HistorySlot = Arc::new(ArcSwapOption::from_pointee(tx));
+        let slot: HistorySlot =
+            Arc::new(ArcSwapOption::from_pointee(HistoryTx { generation: 3, tx }));
         (slot, rx)
     }
 
@@ -1161,17 +1248,21 @@ mod tests {
             metric: HistoryMetric::Cpu,
             n: 3,
         };
-        sink.command(HistoryMsg::Query {
+        let took = sink.command(HistoryMsg::Query {
+            owner: ClientSessionId(2),
             id: 42,
             range: HistoryRange::At(5),
             what: what.clone(),
         });
+        assert_eq!(took, Some(3), "the generation that took it");
         match rx.try_recv() {
             Ok(HistoryMsg::Query {
+                owner,
                 id,
                 range,
                 what: got,
             }) => {
+                assert_eq!(owner, ClientSessionId(2));
                 assert_eq!(id, 42);
                 assert_eq!(range, HistoryRange::At(5));
                 assert_eq!(got, what);

@@ -53,7 +53,7 @@ use tl_model::validity::Validity;
 
 use crate::client_session::ClientSessions;
 use crate::source::WorkerControl;
-use crate::update::EngineMsg;
+use crate::update::{DeviceHistories, EngineMsg};
 use crate::workers::history::HistorySink;
 use crate::workers::metric_history::MetricSink;
 
@@ -94,7 +94,8 @@ pub enum HelperCommand {
 
 /// The current `Arc` of every shared snapshot component, header included. The process table
 /// is per client session; so are the rows, query generation and counts of `connections`,
-/// `services` and `startup`, which stay unused here (ADR-018).
+/// `services` and `startup`, which stay unused here (ADR-018). `history` and `device_history`
+/// only hold the shared validity: each session shows its own answers.
 pub struct Components {
     pub system: Arc<SystemSnapshot>,
     pub series: Arc<SeriesSet>,
@@ -114,6 +115,8 @@ pub struct Components {
     pub device_details: Arc<DeviceDetailsSnapshot>,
     /// ADR-017.
     pub device_history: Arc<DeviceHistory>,
+    /// The `MetricHistory` worker's answer for each wanted range (ADR-018).
+    pub device_histories: DeviceHistories,
 }
 
 /// Where one client session's action reports (ADR-018). `id` is the engine-wide id that the
@@ -216,16 +219,14 @@ pub struct Reducer {
 /// The components that carry a `ComponentHeader` and that `build_snapshot` versions itself.
 /// `SERIES` comes from `SeriesStore::publish`; `DEVICES` and `HEALTH` have their own `version`.
 /// Each client session versions `SESSION_BITS` itself.
-const HEADER_BITS: [ComponentMask; 9] = [
+const HEADER_BITS: [ComponentMask; 7] = [
     ComponentMask::SYSTEM,
     ComponentMask::PROCESSES,
     ComponentMask::INVENTORY,
     ComponentMask::WINDOWS,
     ComponentMask::DETAILS,
-    ComponentMask::HISTORY,
     ComponentMask::PROCESS_SERIES,
     ComponentMask::DEVICE_DETAILS,
-    ComponentMask::DEVICE_HISTORY,
 ];
 
 impl Reducer {
@@ -271,6 +272,7 @@ impl Reducer {
                 process_series: empty.process_series,
                 device_details: empty.device_details,
                 device_history: empty.device_history,
+                device_histories: Arc::from([]),
             },
             control,
             record_sink: None,
@@ -333,6 +335,10 @@ impl Reducer {
                 .map(watch::Receiver::borrow_and_clone)
             {
                 self.apply_demand(&demand, &settings);
+                self.clients.set_local_demand(demand);
+            }
+            if let Some(sink) = self.metric_sink.as_mut() {
+                sink.set_ranges(&self.clients.linked_ranges());
             }
             tracing::debug!(target: "tasklens::engine", applied, "reducer publish");
             // No await between the store and the wake (ADR-005).
@@ -404,9 +410,7 @@ impl Reducer {
                 ComponentMask::INVENTORY => bump(&mut c.inventory, p),
                 ComponentMask::WINDOWS => bump(&mut c.windows, p),
                 ComponentMask::DETAILS => bump(&mut c.details, p),
-                ComponentMask::HISTORY => bump(&mut c.history, p),
                 ComponentMask::PROCESS_SERIES => bump(&mut c.process_series, p),
-                ComponentMask::DEVICE_HISTORY => bump(&mut c.device_history, p),
                 _ => bump(&mut c.device_details, p),
             };
         }
@@ -432,10 +436,10 @@ impl Reducer {
             health: Arc::clone(&c.health),
             windows: Arc::clone(&c.windows),
             details: Arc::clone(local.details()),
-            history: Arc::clone(&c.history),
+            history: Arc::clone(local.history()),
             process_series: Arc::clone(&c.process_series),
             device_details: Arc::clone(local.device_details()),
-            device_history: Arc::clone(&c.device_history),
+            device_history: Arc::clone(local.device_history()),
         }
     }
 }
