@@ -15,6 +15,7 @@ use tl_model::settings::{Settings, TimelineClick, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::host::HostContext;
 use tl_ui::host_settings::{self, HOST_KEYS};
 use tl_ui::pages::performance::overview::timeline::click_mode;
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
@@ -50,7 +51,7 @@ fn setup(cx: &mut TestAppContext, engine: &Arc<FakeEngine>, settings: Settings) 
 }
 
 fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
-    cx.update(all_pages)
+    cx.update(|cx| all_pages(&HostContext::local(cx), cx))
         .into_iter()
         .find(|p| p.id() == PageId::Processes)
         .expect("Processes page listed")
@@ -64,13 +65,13 @@ fn a_fresh_client_never_sends_values_it_has_not_read(cx: &mut TestAppContext) {
     // An engine that has not given them yet: revision 0.
     engine.publish(Snapshot::empty(BootId(0), 0));
     setup(cx, &engine, Settings::default());
-    assert!(!cx.update(|cx| host_settings::known(cx)));
+    assert!(!cx.update(|cx| host_settings::known(&HostContext::local(cx), cx)));
 
     cx.update(|cx| {
         TlSettings::set(cx, SettingKey::ProcessesIntervalMs, SettingValue::Int(2000));
         TlSettings::toggle(cx, SettingKey::HistoryEnabled);
         TlSettings::set(cx, SettingKey::HistoryRetentionH, SettingValue::Int(12));
-        host_settings::change(cx, |v| v.history.persist = false);
+        host_settings::change(&HostContext::local(cx), cx, |v| v.history.persist = false);
     });
     cx.run_until_parked();
     assert!(
@@ -107,7 +108,11 @@ fn a_fresh_client_never_sends_values_it_has_not_read(cx: &mut TestAppContext) {
     assert!(writes[0].1.history.as_ref().is_some_and(|h| h.enabled));
     assert_eq!(writes[0].1.interval_ms, None, "only what changed");
     assert_eq!(writes[0].1.remote_admin, None, "never from the window");
-    assert!(cx.update(|cx| host_settings::values(cx).history.enabled));
+    assert!(cx.update(|cx| {
+        host_settings::values(&HostContext::local(cx), cx)
+            .history
+            .enabled
+    }));
 }
 
 /// Another window changed the interval after this one read it: the write conflicts, nothing of
@@ -124,11 +129,11 @@ fn a_conflicting_write_shows_the_current_values(cx: &mut TestAppContext) {
     let writes = engine.host_writes();
     assert_eq!(writes.len(), 1);
     assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
-    let shown = cx.update(|cx| host_settings::current(cx));
+    let shown = cx.update(|cx| host_settings::current(&HostContext::local(cx), cx));
     assert_eq!((shown.rev, shown.values.interval_ms), (2, 5000));
     // The Refresh menu and the Settings page mark 5.0s, the current value, not 2.0s.
     assert_eq!(
-        cx.update(|cx| menus_settings::refresh_marks(cx)),
+        cx.update(|cx| menus_settings::refresh_marks(&HostContext::local(cx), cx)),
         [false, false, false, false, true, false]
     );
     assert_eq!(
@@ -202,7 +207,7 @@ fn the_history_timeline_click_follows_the_host_recording_setting(cx: &mut TestAp
         cx.update(|cx| {
             (
                 TlSettings::settings(cx).performance.timeline_click,
-                click_mode(cx),
+                click_mode(HostContext::local(cx).hub(), cx),
             )
         })
     };

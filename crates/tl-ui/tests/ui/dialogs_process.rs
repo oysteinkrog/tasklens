@@ -22,6 +22,7 @@ use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::toast::{self, ToastQueue};
 use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
 use tl_ui::demand::GlobalDemand;
+use tl_ui::host::HostContext;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::windows::affinity::{self, AffinityDialog, affinity_words};
 
@@ -245,7 +246,15 @@ fn open_on(cx: &mut TestAppContext, topo: CpuTopology, mask: Option<(CpuSet, Cpu
 
     let targets: SmallVec<[ActionTarget; 1]> = smallvec![ActionTarget::Process(key())];
     let handle = cx
-        .update(|cx| affinity::open(targets, "firefox (PID 4321)".into(), parent.into(), cx))
+        .update(|cx| {
+            affinity::open(
+                &HostContext::local(cx),
+                targets,
+                "firefox (PID 4321)".into(),
+                parent.into(),
+                cx,
+            )
+        })
         .expect("dialog opens");
     let dialog = cx
         .update(|cx| AffinityDialog::find(handle, cx))
@@ -607,6 +616,7 @@ fn open_many(
     let handle = cx
         .update(|cx| {
             affinity::open_with_masks(
+                &HostContext::local(cx),
                 targets.into_iter().collect(),
                 subtitle.into(),
                 given,
@@ -928,6 +938,7 @@ mod virustotal {
     use tl_model::validity::Validity;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::host::HostContext;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
@@ -1002,7 +1013,7 @@ mod virustotal {
 
     pub(super) fn open(r: &mut Rig) {
         r.pcx
-            .update(|window, cx| open_virustotal(key(), window, cx));
+            .update(|window, cx| open_virustotal(&HostContext::local(cx), key(), window, cx));
         r.pcx.run_until_parked();
     }
 
@@ -1331,6 +1342,7 @@ mod priority {
     use tl_ui::components::dialog::TlDialogView;
     use tl_ui::components::toast::{ToastKey, ToastQueue};
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::host::HostContext;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::actions::PriorityApply;
     use tl_ui::windows::priority::{self, PriorityDialog};
@@ -1367,6 +1379,7 @@ mod priority {
         let handle = cx
             .update(|cx| {
                 priority::open(
+                    &HostContext::local(cx),
                     targets,
                     "firefox (PID 4321)".into(),
                     initial,
@@ -1723,6 +1736,7 @@ mod signal {
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::host::HostContext;
     use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
@@ -1775,8 +1789,9 @@ mod signal {
             targets: SmallVec<[ActionTarget; 1]>,
             names: TargetNames,
         ) {
-            self.pcx
-                .update(|window, cx| signal::send_signal(signo, targets, names, window, cx));
+            self.pcx.update(|window, cx| {
+                signal::send_signal(&HostContext::local(cx), signo, targets, names, window, cx)
+            });
             self.pcx.run_until_parked();
             self.cx.run_until_parked();
         }
@@ -1923,8 +1938,9 @@ mod signal {
             vcx.update(|window, cx| {
                 let focus = cx.focus_handle();
                 let targets = CapturedTargets::new([target], None);
+                let host = HostContext::local(cx);
                 TlMenu::build(window, cx, focus, |menu, window, cx| {
-                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                    row_menu(&host, menu, &targets, &MenuCaps::default(), window, cx)
                 })
             })
         };
@@ -1973,8 +1989,9 @@ mod signal {
             let menu = vcx.update(|window, cx| {
                 let focus = cx.focus_handle();
                 let targets = CapturedTargets::new(targets, None);
+                let host = HostContext::local(cx);
                 TlMenu::build(window, cx, focus, |menu, window, cx| {
-                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                    row_menu(&host, menu, &targets, &MenuCaps::default(), window, cx)
                 })
             });
             vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
@@ -2024,8 +2041,9 @@ mod signal {
                     gdb,
                     ..MenuCaps::default()
                 };
+                let host = HostContext::local(cx);
                 TlMenu::build(window, cx, focus, |menu, window, cx| {
-                    row_menu(menu, &targets, &caps, window, cx)
+                    row_menu(&host, menu, &targets, &caps, window, cx)
                 })
             });
             vcx.update(|window, cx| menu.read(cx).entries_for_test(window))
@@ -2269,6 +2287,7 @@ mod signal {
             .cx
             .update(|cx| {
                 signal::open_rt_signal(
+                    &HostContext::local(cx),
                     smallvec![ActionTarget::Process(super::key())],
                     TargetNames::process("firefox", 4321),
                     rig.parent.into(),
@@ -2435,6 +2454,7 @@ mod dump {
     use tl_ui::components::dialog::TlDialogView;
     use tl_ui::components::toast::ToastKey;
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::host::HostContext;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -2579,7 +2599,8 @@ mod dump {
     }
 
     pub(super) fn start(r: &mut Rig, pid: u32) {
-        r.pcx.update(|window, cx| start_dump(key(pid), window, cx));
+        r.pcx
+            .update(|window, cx| start_dump(&HostContext::local(cx), key(pid), window, cx));
         r.pcx.run_until_parked();
     }
 
@@ -3152,6 +3173,7 @@ mod prc014 {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::host::HostContext;
     use tl_ui::pages::processes::confirm::{ConfirmKind, ProtectedAction, texts as confirm_texts};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::open_main_window_on;
@@ -3246,7 +3268,7 @@ mod prc014 {
             .update(|cx| open_main_window_on(Tab::Processes, cx))
             .expect("the main window opens");
         cx.run_until_parked();
-        cx.update(open_handle_search);
+        cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
         cx.run_until_parked();
         let (handle, view) = cx
             .update(|cx| {

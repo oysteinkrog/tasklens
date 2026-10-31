@@ -1155,6 +1155,7 @@ mod panel {
     use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::toast::ToastKind;
     use tl_ui::demand::DemandAggregator;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::minigraph::GraphColor;
     use tl_ui::pages::minigraph::actions::{
@@ -1260,7 +1261,8 @@ mod panel {
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         let panel_demand = demand.clone();
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
-            panel: cx.new(|cx| MinigraphPanel::new(&hub, &panel_demand, cx)),
+            panel: cx
+                .new(|cx| MinigraphPanel::new(&HostContext::local(cx), &hub, &panel_demand, cx)),
         });
         let mut vcx = vcx.clone();
         vcx.simulate_scale_factor_change(1.0);
@@ -2501,8 +2503,9 @@ mod panel {
             let targets = CapturedTargets::new(targets, None);
             let menu = r.vcx.update(|window, cx| {
                 let focus = cx.focus_handle();
+                let host = HostContext::local(cx);
                 TlMenu::build(window, cx, focus, |menu, window, cx| {
-                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                    row_menu(&host, menu, &targets, &MenuCaps::default(), window, cx)
                 })
             });
             r.vcx

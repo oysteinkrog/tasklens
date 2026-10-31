@@ -38,6 +38,7 @@ use tl_ui::components::shield::TlShield;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::host::HostContext;
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -527,7 +528,7 @@ fn restricted_fds(
         p.header.version += 1;
     });
     cx.run_until_parked();
-    cx.update(|cx| open_process_properties(key(PID), cx));
+    cx.update(|cx| open_process_properties(&HostContext::local(cx), key(PID), cx));
     cx.run_until_parked();
     let handle: AnyWindowHandle = cx
         .update(|cx| {
@@ -610,7 +611,7 @@ fn grant_access_starts_helper(cx: &mut TestAppContext) {
 fn search_all_starts_helper_and_resends(cx: &mut TestAppContext) {
     let (engine, _main) = setup(cx);
     publish_helper(cx, &engine, HelperState::Locked, None);
-    cx.update(open_handle_search);
+    cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
     cx.run_until_parked();
     let (handle, view) = cx
         .update(|cx| {
@@ -771,7 +772,7 @@ fn open_settings(
 }
 
 fn privileges_page(cx: &mut TestAppContext) -> tl_ui::window::settings::PageBuilder {
-    cx.update(all_pages)
+    cx.update(|cx| all_pages(&HostContext::local(cx), cx))
         .into_iter()
         .find(|p| p.id() == PageId::Privileges)
         .expect("Privileges page listed")

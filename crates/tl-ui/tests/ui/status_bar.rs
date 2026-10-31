@@ -21,6 +21,7 @@ use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
 use tl_ui::components::menu::{close_context_menu, open_context_menu};
 use tl_ui::demand::DemandAggregator;
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::overview::layout::BoxKind;
@@ -155,8 +156,10 @@ mod performance_tab {
         let client: Arc<dyn EngineClient> = engine.clone();
         install(cx, &client, Settings::default());
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, demand, cx));
+        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+        // Only EngineGlobal is installed here, so the host has the client, hub and demand.
+        let host = HostContext::from_parts(Some(client), Some(hub), Some(demand), None, None);
+        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(1280.), px(800.)));
         draw(vcx);

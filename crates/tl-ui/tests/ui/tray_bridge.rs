@@ -23,6 +23,7 @@ use tl_model::tray::{
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -1148,7 +1149,7 @@ fn reopen_clears_hidden_flag(cx: &mut TestAppContext) {
 fn settings_tray_rows_toggle_keys(cx: &mut TestAppContext) {
     let mut f = full(cx, Vec::new());
     let page = f.vcx.update(|_, cx| {
-        all_pages(cx)
+        all_pages(&HostContext::local(cx), cx)
             .into_iter()
             .find(|p| p.id() == PageId::StartupWindow)
             .expect("page listed")
@@ -1309,7 +1310,8 @@ mod row_menu_tray {
         let menu = vcx.update(|window, cx| {
             let focus = cx.focus_handle();
             TlMenu::build(window, cx, focus, |menu, window, cx| {
-                row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                let host = HostContext::local(cx);
+                row_menu(&host, menu, &targets, &MenuCaps::default(), window, cx)
             })
         });
         vcx.update(|window, cx| menu.read(cx).entries_for_test(window))

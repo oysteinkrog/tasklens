@@ -1514,7 +1514,7 @@ mod tabstrip {
         let mut r = rig(cx, 100, all(), Tab::Processes, false);
         let strip = r.strip.clone();
         r.cx.update(|window, cx| {
-            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, window, cx));
+            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, None, window, cx));
             strip.update(cx, |s, cx| s.set_filter_slot(Some(filter.into()), cx));
         });
         draw(r.cx);
@@ -1631,7 +1631,7 @@ mod tabstrip {
     fn with_filter_box(r: &mut Rig, width: f32) -> Entity<FilterBox> {
         let strip = r.strip.clone();
         let filter = r.cx.update(|window, cx| {
-            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, window, cx));
+            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, None, window, cx));
             strip.update(cx, |s, cx| {
                 s.set_filter_slot(Some(filter.clone().into()), cx)
             });
@@ -2682,8 +2682,10 @@ mod main_window {
                 let engine = FakeEngine::new();
                 let client: Arc<dyn EngineClient> = engine;
                 cx.set_global(EngineGlobal(client.clone()));
-                tl_ui::action_tracker::install(client.clone(), cx);
+                // The tracker reads the hub's helper state later, when GlobalHub is set, so
+                // it gets the hub the test installs below.
                 let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+                tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
                 let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
                 cx.set_global(GlobalHub(hub));
                 cx.set_global(GlobalDemand(demand));
@@ -5517,6 +5519,7 @@ mod startup_items {
     // ---- Secondary-window pins (E20-029) ----
 
     use tl_ui::components::window_frame::ToggleAlwaysOnTop;
+    use tl_ui::host::HostContext;
     use tl_ui::window::settings::open_settings;
 
     impl Rig {
@@ -5595,7 +5598,7 @@ mod startup_items {
         let r = init_bar(cx, true);
         let _vcx = open(cx);
         r.publish_windows(cx, Validity::Valid, "tasklens");
-        cx.update(open_settings);
+        cx.update(|cx| open_settings(&HostContext::local(cx), cx));
         cx.run_until_parked();
         assert!(settings_open(cx));
         pin(cx, WindowKey::Settings, "Settings");
@@ -5611,7 +5614,7 @@ mod startup_items {
         });
         cx.run_until_parked();
         assert!(!settings_open(cx));
-        cx.update(open_settings);
+        cx.update(|cx| open_settings(&HostContext::local(cx), cx));
         cx.run_until_parked();
         pin(cx, WindowKey::Settings, "Settings");
         let sent: Vec<bool> = r

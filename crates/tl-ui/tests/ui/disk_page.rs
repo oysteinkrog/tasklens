@@ -26,6 +26,7 @@ use tl_ui::chart::scale::{ScaleState, compute};
 use tl_ui::chart::{ChartState, ValueFormat, YScale, format_value};
 use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::disk::{
@@ -138,6 +139,8 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         TlSettings::init(cx);
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+    // Only EngineGlobal is installed here, so the host has the client and nothing else.
+    let ctx = HostContext::from_parts(Some(Arc::clone(&client)), None, None, None, None);
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
     let key = DeviceKey(Arc::from("disk:eui.0025388b"));
     let row = DeviceRow {
@@ -149,7 +152,7 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         fan_connected: None,
     };
     let (h, d) = (hub.clone(), demand.clone());
-    let page = cx.new(|cx| DiskPage::new(key, row, h, d, cx));
+    let page = cx.new(|cx| DiskPage::new(&ctx, key, row, h, d, cx));
     let host = page.clone();
     let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
     vcx.simulate_scale_factor_change(1.0);

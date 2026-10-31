@@ -17,6 +17,7 @@ use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::shield::{EndHelperSession, StartHelperSession};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::helper_flow::GlobalHelperFlow;
+use tl_ui::host::HostContext;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
@@ -83,7 +84,7 @@ fn open_props(cx: &mut TestAppContext, engine: &FakeEngine, pid: u32) -> VisualT
         p.header.version += 1;
     });
     cx.run_until_parked();
-    cx.update(|cx| open_process_properties(key(pid), cx));
+    cx.update(|cx| open_process_properties(&HostContext::local(cx), key(pid), cx));
     cx.run_until_parked();
     let handle: AnyWindowHandle = cx
         .update(|cx| {
@@ -99,7 +100,7 @@ fn open_props(cx: &mut TestAppContext, engine: &FakeEngine, pid: u32) -> VisualT
 
 /// Opens the Handle Search window, activates it and types a pattern.
 fn open_search(cx: &mut TestAppContext) -> (VisualTestContext, Entity<HandleSearchWindow>) {
-    cx.update(open_handle_search);
+    cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
     cx.run_until_parked();
     let (handle, view) = cx
         .update(|cx| {

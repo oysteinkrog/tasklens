@@ -280,6 +280,7 @@ mod query_and_demand {
     use tl_model::validity::Validity;
     use tl_ui::app::EngineGlobal;
     use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::sys_table::{SysPageState, SysQuery};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -396,7 +397,7 @@ mod query_and_demand {
         let mut conns = SysPageState::new(Tab::Connections, &[SourceId::Connections]);
         let (mut q1, mut q2) = (query(), query());
 
-        cx.update(|cx| startup.on_activated(&mut q1, &agg, cx));
+        cx.update(|cx| startup.on_activated(&HostContext::local(cx), &mut q1, &agg, cx));
         let d = flushed(cx, &engine);
         assert!(d.any_surface_visible && d.startup);
         assert!(!d.services && !d.connections);
@@ -407,7 +408,7 @@ mod query_and_demand {
         assert!(!d.startup && !d.any_surface_visible);
         assert!(!startup.visible);
 
-        cx.update(|cx| conns.on_activated(&mut q2, &agg, cx));
+        cx.update(|cx| conns.on_activated(&HostContext::local(cx), &mut q2, &agg, cx));
         let d = flushed(cx, &engine);
         assert!(d.any_surface_visible && d.connections);
         assert!(!d.startup && !d.services);
@@ -422,7 +423,7 @@ mod query_and_demand {
         );
         let mut q = query();
 
-        cx.update(|cx| page.on_activated(&mut q, &agg, cx));
+        cx.update(|cx| page.on_activated(&HostContext::local(cx), &mut q, &agg, cx));
         assert_eq!(
             refreshes(&engine),
             [SourceId::SystemdSystem, SourceId::SystemdUser]
@@ -432,7 +433,7 @@ mod query_and_demand {
         assert!(flushed(cx, &engine).services);
 
         cx.update(|cx| page.on_deactivated(&agg, cx));
-        cx.update(|cx| page.on_activated(&mut q, &agg, cx));
+        cx.update(|cx| page.on_activated(&HostContext::local(cx), &mut q, &agg, cx));
         assert_eq!(
             refreshes(&engine).len(),
             2,
@@ -971,7 +972,7 @@ mod sys_actions {
         vcx.update(|window, _| window.activate_window());
         let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
         let client: Arc<dyn EngineClient> = engine.clone();
-        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, None, cx)));
         let actions = vcx.update(|_, cx| cx.new(|cx| SysActions::new(&tracker, cx)));
         let events: Rc<RefCell<Vec<SysActionsEvent>>> = Rc::default();
         let sink = events.clone();
@@ -1474,6 +1475,7 @@ mod frame {
     use tl_ui::actions::ClearFilter;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::menu::TlMenu;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::{GlobalHub, SnapshotChanged};
     use tl_ui::pages::sys_table::{SysBody, SysDelegate, SysTableFrame, loading_status_text};
     use tl_ui::table::actions::TABLE_CONTEXT;
@@ -1658,7 +1660,9 @@ mod frame {
                 column: NAME,
                 ascending: true,
             };
+            let host = HostContext::local(cx);
             let mut frame = SysTableFrame::new(
+                &host,
                 Tab::Startup,
                 CONTEXT,
                 &[SourceId::Startup],

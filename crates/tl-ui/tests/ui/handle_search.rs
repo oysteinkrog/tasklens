@@ -31,6 +31,7 @@ use tl_ui::components::menu::{MenuEntryKind, TlMenu};
 use tl_ui::components::shield::StartHelperSession;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::host::HostContext;
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::pages::processes::confirm::{ConfirmKind, texts};
 use tl_ui::table::tree_table::TreeTableDelegate as _;
@@ -72,7 +73,7 @@ fn setup(cx: &mut TestAppContext) -> Rig {
         .update(|cx| open_main_window_on(Tab::Processes, cx))
         .expect("the main window opens");
     cx.run_until_parked();
-    cx.update(open_handle_search);
+    cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
     cx.run_until_parked();
     let (handle, view) = find(cx).expect("the Handle Search window opens");
     let mut win = VisualTestContext::from_window(handle.into(), cx);
@@ -287,7 +288,7 @@ fn handle_search_esc_stops_then_closes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn handle_search_open_twice_is_one_window(cx: &mut TestAppContext) {
     let _rig = setup(cx);
-    cx.update(open_handle_search);
+    cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
     cx.run_until_parked();
     let count = cx.update(|cx| {
         cx.windows()

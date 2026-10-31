@@ -17,6 +17,7 @@ use tl_model::snapshot::{
 use tl_model::table::{ConnColumn, SysNodeId, SysRow};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
+use tl_ui::host::HostContext;
 use tl_ui::pages::connections::delegate::{
     CONNECTION_COLUMNS, ConnectionsDelegate, DEFAULT_COLUMNS, default_width, id, state_class,
 };
@@ -122,7 +123,7 @@ fn delegate(
     processes.sort_unstable_by_key(|process| process.key);
     cx.update(|cx| {
         setup(cx);
-        let mut delegate = ConnectionsDelegate::new(cx);
+        let mut delegate = ConnectionsDelegate::new(&HostContext::local(cx), cx);
         let rows = records
             .iter()
             .enumerate()
@@ -179,7 +180,7 @@ fn text(out: &CellOut) -> String {
 fn connections_columns_default_and_optional(cx: &mut TestAppContext) {
     let delegate = cx.update(|cx| {
         setup(cx);
-        ConnectionsDelegate::new(cx)
+        ConnectionsDelegate::new(&HostContext::local(cx), cx)
     });
     assert_eq!(
         delegate.columns().order,
@@ -320,7 +321,7 @@ fn conn_restricted_tooltip_is_localized(cx: &mut TestAppContext) {
             cx,
             "connections-owner-restricted-tip = Socket de { $user } requires helper",
         );
-        ConnectionsDelegate::new(cx)
+        ConnectionsDelegate::new(&HostContext::local(cx), cx)
     });
     let mut record = connection(1, SmallVec::new());
     record.owner_validity = Validity::Restricted;
@@ -488,7 +489,7 @@ mod page {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
     use tl_ui::components::toast::ToastQueue;
-    use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
+    use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::connections::actions::bind_keys_connections;
     use tl_ui::pages::connections::actions::{ConnectionCopyForeign, ConnectionCopyLocal};
@@ -558,9 +559,8 @@ mod page {
             .update(|cx| {
                 let page_slot = Rc::clone(&page_slot);
                 cx.open_window(options, move |window, cx| {
-                    let hub = cx.global::<GlobalHub>().0.clone();
-                    let demand = cx.global::<GlobalDemand>().0.clone();
-                    let page = cx.new(|cx| ConnectionsPage::new(&hub, &demand, client, window, cx));
+                    let host_ctx = HostContext::local(cx);
+                    let page = cx.new(|cx| ConnectionsPage::new(&host_ctx, window, cx));
                     *page_slot.borrow_mut() = Some(page.clone());
                     let host = cx.new(|_| Host { page });
                     cx.new(|cx| Root::new(host, window, cx))
@@ -2559,7 +2559,7 @@ mod props {
     }
 
     fn open(cx: &mut TestAppContext, cookie: u64) -> Option<WindowHandle<Root>> {
-        cx.update(|cx| open_connection_properties(cookie, cx));
+        cx.update(|cx| open_connection_properties(&HostContext::local(cx), cookie, cx));
         cx.run_until_parked();
         cx.update(|cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
@@ -3383,7 +3383,6 @@ mod remote_host {
         let records = (1..=count)
             .map(|cookie| foreign_record(cookie, RemoteHost::NotRequested))
             .collect();
-        let delegate = delegate(cx, records, Vec::new());
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine;
         cx.update(|cx| {
@@ -3391,6 +3390,8 @@ mod remote_host {
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalDemand(demand));
         });
+        // The delegate takes its demand aggregator from the host, so the global comes first.
+        let delegate = delegate(cx, records, Vec::new());
         let slot = Rc::new(RefCell::new(None));
         let keep = Rc::clone(&slot);
         cx.add_window(move |window, cx| {
@@ -3400,10 +3401,8 @@ mod remote_host {
         });
         let table = slot.borrow().clone().expect("table");
         cx.update(|cx| {
-            let demand = cx.global::<GlobalDemand>().0.clone();
             table.update(cx, |table, cx| {
                 let d = table.delegate_mut();
-                d.set_demand(demand);
                 d.set_active(true, cx);
             });
         });

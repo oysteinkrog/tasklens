@@ -35,6 +35,7 @@ use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::host::HostContext;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::actions::{
     CollapseAll, EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
@@ -953,7 +954,9 @@ fn settings_menu_refresh_labels(cx: &mut TestAppContext) {
         ["0.25s", "0.5s", "1.0s", "2.0s", "5.0s", "10.0s"]
     );
     // interval_ms = 1000: the mark is on "1.0s". A value off the list marks nothing.
-    let marks = |cx: &mut VisualTestContext| cx.update(|_, cx| menus_settings::refresh_marks(cx));
+    let marks = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| menus_settings::refresh_marks(&HostContext::local(cx), cx))
+    };
     assert_eq!(marks(r.cx), [false, false, true, false, false, false]);
     r.engine.publish_host_settings(|v| v.interval_ms = 1500);
     r.cx.run_until_parked();
@@ -971,7 +974,8 @@ fn settings_menu_refresh_radio(cx: &mut TestAppContext) {
     assert_eq!(writes.len(), 1);
     assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
     assert_eq!(host(&r).interval_ms, 2000);
-    let marks = r.cx.update(|_, cx| menus_settings::refresh_marks(cx));
+    let marks =
+        r.cx.update(|_, cx| menus_settings::refresh_marks(&HostContext::local(cx), cx));
     assert_eq!(marks, [false, false, false, true, false, false]);
 }
 
@@ -1644,7 +1648,10 @@ fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
     use tl_ui::components::menu::MenuEntryKind;
     let mut r = rig(cx);
     set_gpus(&mut r, 0);
-    assert!(!r.cx.update(|_, cx| menus_view::has_gpu(cx)));
+    assert!(
+        !r.cx
+            .update(|_, cx| menus_view::has_gpu(&HostContext::local(cx), cx))
+    );
     open_graphs(r.cx);
     let built = graphs_entries(r.cx);
     let kinds: Vec<(Option<String>, MenuEntryKind, Option<String>)> = built
@@ -1686,7 +1693,7 @@ fn gpu_items_disabled_without_gpu(cx: &mut TestAppContext) {
     // One GPU: all seven checks are enabled.
     keys(r.cx, "escape escape");
     set_gpus(&mut r, 1);
-    assert!(r.cx.update(|_, cx| menus_view::has_gpu(cx)));
+    assert!(r.cx.update(|_, cx| menus_view::has_gpu(&HostContext::local(cx), cx)));
     open_graphs(r.cx);
     let enabled = graphs_entries(r.cx)
         .iter()
@@ -3467,7 +3474,8 @@ fn set_up_launchers(r: &mut Rig<'_>, monitor: Option<&'static str>) {
         cx.set_global(SystemMonitor(monitor));
         menus_file::init(cx);
         menus_help::init(cx);
-        tl_ui::action_tracker::install(engine, cx);
+        let hub = HostContext::local(cx).hub().cloned();
+        tl_ui::action_tracker::install(engine, hub, cx);
     });
 }
 

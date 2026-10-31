@@ -770,6 +770,7 @@ pub(crate) mod tests {
         let set_interval = |cx: &mut TestAppContext| {
             cx.update(|cx| {
                 host_settings::set(
+                    &tl_ui::host::HostContext::local(cx),
                     cx,
                     SettingKey::ProcessesIntervalMs,
                     &SettingValue::Int(2000),
@@ -793,11 +794,11 @@ pub(crate) mod tests {
 
         let service = TestBackend::new(1, 1);
         service.publish_host(1, host(3000));
-        assert!(cx.update(|cx| host_settings::known(cx)));
+        assert!(cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
         // From the start of the switch, before the new backend is in place, the host controls
         // are disabled and a change reaches no engine.
         switch.begin_switch();
-        assert!(!cx.update(|cx| host_settings::known(cx)));
+        assert!(!cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
         set_interval(cx);
         assert!(lock(&local.host_writes).is_empty());
         // A newer snapshot of the old engine in between leaves them disabled: it keeps the
@@ -805,13 +806,21 @@ pub(crate) mod tests {
         local.publish_host(3, host(1000));
         pumped.pump();
         cx.run_until_parked();
-        assert!(!cx.update(|cx| host_settings::known(cx)));
+        assert!(!cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
         switch.switch_to(service.clone());
         // The hub has not loaded the new engine's snapshot yet, so the host controls are
         // disabled, as in a fresh window, and the old values stay shown.
-        assert!(!cx.update(|cx| host_settings::known(cx)));
-        assert_eq!(cx.update(|cx| host_settings::current(cx)).rev, 0);
-        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
+        assert!(!cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
+        assert_eq!(
+            cx.update(|cx| host_settings::current(&tl_ui::host::HostContext::local(cx), cx))
+                .rev,
+            0
+        );
+        assert_eq!(
+            cx.update(|cx| host_settings::values(&tl_ui::host::HostContext::local(cx), cx))
+                .interval_ms,
+            1000
+        );
         set_interval(cx);
         assert!(lock(&local.host_writes).is_empty());
         assert!(lock(&service.host_writes).is_empty());
@@ -820,7 +829,7 @@ pub(crate) mod tests {
         pumped.pump();
         cx.run_until_parked();
         assert_eq!(interval(cx, &hub), 3000);
-        assert!(cx.update(|cx| host_settings::known(cx)));
+        assert!(cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
         set_interval(cx);
         assert_eq!(*lock(&service.host_writes), [(1, 3)]);
         assert!(lock(&local.host_writes).is_empty());
@@ -862,16 +871,28 @@ pub(crate) mod tests {
         });
         let hub = cx.new(|cx| SnapshotHub::new(pumped.clone(), cx));
         cx.update(|cx| cx.set_global(GlobalHub(hub.clone())));
-        assert!(cx.update(|cx| host_settings::known(cx)));
-        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
+        assert!(cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
+        assert_eq!(
+            cx.update(|cx| host_settings::values(&tl_ui::host::HostContext::local(cx), cx))
+                .interval_ms,
+            1000
+        );
 
         // The service goes away. The second connection's server does not answer yet, so the
         // client stays between the two sessions.
         cut.shutdown(std::net::Shutdown::Both).expect("shutdown");
         wait_until("the drop seen", || remote.generation() == 2);
-        assert!(!cx.update(|cx| host_settings::known(cx)));
-        assert_eq!(cx.update(|cx| host_settings::current(cx)).rev, 0);
-        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 1000);
+        assert!(!cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
+        assert_eq!(
+            cx.update(|cx| host_settings::current(&tl_ui::host::HostContext::local(cx), cx))
+                .rev,
+            0
+        );
+        assert_eq!(
+            cx.update(|cx| host_settings::values(&tl_ui::host::HostContext::local(cx), cx))
+                .interval_ms,
+            1000
+        );
 
         // The new connection is up and its first snapshot is stored, but the hub has not
         // installed it: still disabled.
@@ -880,11 +901,15 @@ pub(crate) mod tests {
         wait_until("the second snapshot", || {
             remote.latest_with_generation().0 == 3
         });
-        assert!(!cx.update(|cx| host_settings::known(cx)));
+        assert!(!cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
 
         pumped.pump();
         cx.run_until_parked();
-        assert!(cx.update(|cx| host_settings::known(cx)));
-        assert_eq!(cx.update(|cx| host_settings::values(cx)).interval_ms, 3000);
+        assert!(cx.update(|cx| host_settings::known(&tl_ui::host::HostContext::local(cx), cx)));
+        assert_eq!(
+            cx.update(|cx| host_settings::values(&tl_ui::host::HostContext::local(cx), cx))
+                .interval_ms,
+            3000
+        );
     }
 }

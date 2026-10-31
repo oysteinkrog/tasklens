@@ -233,10 +233,10 @@ mod page_frame {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AnyElement, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
-        SharedString, Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, div,
-        px,
+        AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+        IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _,
+        Render, SharedString, Styled as _, TestAppContext, TestDispatcher, VisualTestContext,
+        Window, div, px,
     };
     use smallvec::SmallVec;
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -253,6 +253,7 @@ mod page_frame {
     use tl_ui::components::kv_grid;
     use tl_ui::components::menu::TlMenu;
     use tl_ui::components::tooltip::DELAY_CONTROL;
+    use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::performance::actions::PerfShowMiniWindow;
     use tl_ui::pages::performance::details::KeyValueModel;
     use tl_ui::pages::performance::page::{DevicePage, DevicePageFrame, PageWords, header_text};
@@ -453,6 +454,9 @@ mod page_frame {
     impl DevicePage for TestPage {
         fn key(&self) -> &DeviceKey {
             &self.key
+        }
+        fn hub(&self) -> Option<&Entity<SnapshotHub>> {
+            None
         }
         fn header(&self) -> (SharedString, SharedString) {
             ("Processor".into(), self.model.clone())
@@ -706,6 +710,7 @@ mod page_frame {
         use gpui_kit::{AnyView, AppContext as _};
         use tl_model::client::EngineClient;
         use tl_ui::demand::DemandAggregator;
+        use tl_ui::host::HostContext;
         use tl_ui::hub::SnapshotHub;
         use tl_ui::pages::performance::DeviceRow;
         use tl_ui::pages::performance::page::build_page;
@@ -733,7 +738,8 @@ mod page_frame {
             net_class: None,
             fan_connected: None,
         };
-        let view = cx.update(|cx| build_page(&key, &row, &hub, &demand, cx));
+        let view =
+            cx.update(|cx| build_page(&HostContext::default(), &key, &row, &hub, &demand, cx));
         let (_, vcx) = cx.add_window_view(move |_, _| Host(view));
         draw(vcx);
         assert!(vcx.debug_bounds("perf-page-header").is_some());
@@ -1309,6 +1315,7 @@ mod tab {
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::kv_grid;
     use tl_ui::demand::DemandAggregator;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::actions::PerfToggleSidebar;
@@ -1434,9 +1441,11 @@ mod tab {
         let persisted = install(cx, state, cpus);
         let client = cx.read(|cx| Arc::clone(&cx.global::<EngineGlobal>().0));
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let d = demand.clone();
-        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, d, cx));
+        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+        // The test installs only EngineGlobal; the hub and demand are its own.
+        let host =
+            HostContext::from_parts(Some(client), Some(hub), Some(demand.clone()), None, None);
+        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(width), px(height)));
         let focus = vcx.update(|_, cx| page.read(cx).primary_focus());

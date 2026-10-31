@@ -12,6 +12,7 @@ use tl_model::process::ProcFlags;
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::time::BootId;
 use tl_ui::components::menu::{MENU_MAX_W, TlMenu, context_menu_layer, open_context_menu_at};
+use tl_ui::host::HostContext;
 use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use tl_ui::pages::processes::menu::priority_submenu;
 use tl_ui::table::tree_table::RowKind;
@@ -95,8 +96,9 @@ fn priority_menu_is_wider_than_the_default_for_the_autogroup_note() {
     vcx.update(|window, cx| {
         focus.focus(window, cx);
         let targets = targets();
+        let host = HostContext::local(cx);
         let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
-            priority_submenu(menu, &targets, window, cx)
+            priority_submenu(&host, menu, &targets, window, cx)
         });
         open_context_menu_at(gpui_kit::point(px(10.), px(10.)), window, cx, menu);
     });

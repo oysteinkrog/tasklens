@@ -308,6 +308,7 @@ mod delegate {
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::EngineGlobal;
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::{init_strings, tr_calls};
     use tl_ui::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS, process_column};
@@ -544,7 +545,14 @@ mod delegate {
 
     fn new_delegate(vcx: &mut VisualTestContext, snap: Arc<Snapshot>) -> ProcessDelegate {
         vcx.update(|window, cx| {
-            ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx)
+            ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            )
         })
     }
 
@@ -797,8 +805,14 @@ mod delegate {
         let slot = Rc::new(std::cell::RefCell::new(None));
         let keep = Rc::clone(&slot);
         let handle = cx.add_window(move |window, cx| {
-            let d =
-                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
             *keep.borrow_mut() = Some(table.clone());
             Root::new(table, window, cx)
@@ -861,8 +875,14 @@ mod delegate {
         let slot = Rc::new(std::cell::RefCell::new(None));
         let keep = Rc::clone(&slot);
         let handle = cx.add_window(move |window, cx| {
-            let d =
-                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
             *keep.borrow_mut() = Some(table.clone());
             Root::new(table, window, cx)
@@ -1140,8 +1160,14 @@ mod delegate {
         let slot = Rc::new(std::cell::RefCell::new(None));
         let (out, hits) = (slot.clone(), opened.clone());
         let (_, vcx) = cx.add_window_view(move |window, cx| {
-            let d =
-                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
             *out.borrow_mut() = Some(table.clone());
             Host {
@@ -1313,6 +1339,7 @@ mod page {
     use tl_model::table::{TableMode, TableQuery, TableRow};
     use tl_model::validity::Validity;
     use tl_ui::app::EngineGlobal;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::table::GroupHeader;
@@ -1367,7 +1394,7 @@ mod page {
         let slot = Rc::new(std::cell::RefCell::new(None));
         let (out, hits) = (slot.clone(), opened.clone());
         let (_, vcx) = cx.add_window_view(move |window, cx| {
-            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            let page = cx.new(|cx| ProcessesPage::new(&HostContext::local(cx), window, cx));
             *out.borrow_mut() = Some(page.clone());
             Host { page, opened: hits }
         });
@@ -1456,7 +1483,7 @@ mod page {
         let slot = Rc::new(std::cell::RefCell::new(None));
         let out = slot.clone();
         let (_, vcx) = cx.add_window_view(move |window, cx| {
-            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            let page = cx.new(|cx| ProcessesPage::new(&HostContext::local(cx), window, cx));
             *out.borrow_mut() = Some(page.clone());
             Host {
                 page,
@@ -1976,8 +2003,8 @@ mod shell {
             });
             TlSettings::init(cx);
             cx.set_global(EngineGlobal(client.clone()));
-            tl_ui::action_tracker::install(client.clone(), cx);
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));

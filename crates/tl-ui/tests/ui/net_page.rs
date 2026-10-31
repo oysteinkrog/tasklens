@@ -26,6 +26,7 @@ use tl_ui::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
 use tl_ui::components::kv_grid;
 use tl_ui::components::menu::{context_menu_layer, open_context_menu};
 use tl_ui::demand::DemandAggregator;
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID};
@@ -161,6 +162,8 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         cx.set_global(NetSettingsDesktop(None));
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+    // Only EngineGlobal is installed here, so the host has the client and nothing else.
+    let ctx = HostContext::from_parts(Some(Arc::clone(&client)), None, None, None, None);
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
     let key = DeviceKey(Arc::from("net:enp38s0"));
     let row = DeviceRow {
@@ -172,7 +175,7 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         fan_connected: None,
     };
     let (h, d) = (hub.clone(), demand.clone());
-    let page = cx.new(|cx| NetPage::new(key, row, h, d, cx));
+    let page = cx.new(|cx| NetPage::new(&ctx, key, row, h, d, cx));
     let host = page.clone();
     let (_, vcx) = cx.add_window_view(move |window, cx| {
         let driver = cx.new(AnimationDriver::new);

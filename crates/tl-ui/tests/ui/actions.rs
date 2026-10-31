@@ -142,10 +142,12 @@ fn init(cx: &mut TestAppContext) {
 fn rig(cx: &mut TestAppContext, helper: Option<HelperState>) -> Rig {
     init(cx);
     let engine = FakeEngine::new();
+    let mut tracker_hub = None;
     if let Some(helper) = helper {
         engine.publish_with(|s| Arc::make_mut(&mut s.health).helper = helper);
         let client: Arc<dyn EngineClient> = engine.clone();
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        tracker_hub = Some(hub.clone());
         cx.update(|cx| cx.set_global(GlobalHub(hub)));
     }
     let window = cx.add_window(|window, cx| {
@@ -156,7 +158,7 @@ fn rig(cx: &mut TestAppContext, helper: Option<HelperState>) -> Rig {
     vcx.update(|window, _| window.activate_window());
     let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
     let client: Arc<dyn EngineClient> = engine.clone();
-    let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+    let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, tracker_hub, cx)));
     vcx.run_until_parked();
     Rig {
         engine,
@@ -878,7 +880,7 @@ mod with_shell {
 
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
-        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, None, cx)));
         let texts = ToastTexts {
             retry_as_admin: true,
             ..end_task_texts()

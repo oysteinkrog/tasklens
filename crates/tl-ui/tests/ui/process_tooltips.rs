@@ -21,6 +21,7 @@ use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
 use tl_ui::components::tooltip::{DELAY_CONTROL, DELAY_PROCESS_CELL};
+use tl_ui::host::HostContext;
 use tl_ui::pages::processes::cells::{
     CellCtx, CellTipWords, CellWords, GroupMembers, PowerSensor, RowRef, TipCtx, cell_tooltip,
     process_column,
@@ -555,7 +556,15 @@ fn open(cx: &mut TestAppContext) -> (Entity<TlTreeTable<ProcessDelegate>>, Visua
     });
     let mut table = None;
     let window = cx.add_window(|window, cx| {
-        let d = ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+        let host_ctx = HostContext::local(cx);
+        let d = ProcessDelegate::new(
+            &host_ctx,
+            snap,
+            &Settings::default(),
+            &UiState::default(),
+            window,
+            cx,
+        );
         let t = cx.new(|cx| TlTreeTable::new(d, window, cx));
         table = Some(t.clone());
         let host = cx.new(|_| Host { table: t });

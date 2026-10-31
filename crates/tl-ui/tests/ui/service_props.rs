@@ -37,6 +37,7 @@ use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::demand::GlobalDemand;
+use tl_ui::host::HostContext;
 use tl_ui::pages::sys_status::{DotStyle, LabelTone};
 use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -179,7 +180,7 @@ fn publish(
 }
 
 fn open(cx: &mut TestAppContext, name: &str, tab: ServicePropsTab) -> Option<WindowHandle<Root>> {
-    cx.update(|cx| ServicePropertiesWindow::open(unit(name), tab, cx));
+    cx.update(|cx| ServicePropertiesWindow::open(&HostContext::local(cx), unit(name), tab, cx));
     cx.run_until_parked();
     cx.update(|cx| {
         let registry = cx.global::<GlobalRegistry>().0.clone();
@@ -2136,7 +2137,9 @@ fn open_logs_of(cx: &mut TestAppContext, unit: UnitRef) -> Logs {
         ServiceBackend::Systemd,
     );
     let key = WindowKey::Service(unit.clone());
-    cx.update(|cx| ServicePropertiesWindow::open(unit, ServicePropsTab::Logs, cx));
+    cx.update(|cx| {
+        ServicePropertiesWindow::open(&HostContext::local(cx), unit, ServicePropsTab::Logs, cx)
+    });
     cx.run_until_parked();
     let handle = cx
         .update(|cx| {

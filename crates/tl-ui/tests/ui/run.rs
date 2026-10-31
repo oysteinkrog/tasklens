@@ -70,6 +70,7 @@ mod window {
     use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::components::window_frame::{TestClientFrame, client_frame_extra, frame_bottom};
+    use tl_ui::host::HostContext;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::windows::run::{POPUP_ID, ROW_H, RunWindow, VISIBLE_ROWS, open_run_window};
@@ -144,7 +145,7 @@ mod window {
         let main = VisualTestContext::from_window(handle.into(), cx);
         cx.run_until_parked();
 
-        cx.update(open_run_window);
+        cx.update(|cx| open_run_window(&HostContext::local(cx), cx));
         cx.run_until_parked();
         let (handle, view) = find_run(cx).expect("the Run window opens");
         let mut run = VisualTestContext::from_window(handle.into(), cx);

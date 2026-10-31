@@ -23,6 +23,7 @@ use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric, N
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::chart::ChartView;
+use tl_ui::host::HostContext;
 use tl_ui::pages::performance::overview::layout::BoxKind;
 use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
 use tl_ui::pages::performance::overview::timeline::{
@@ -353,14 +354,19 @@ fn timeline_click_modes(cx: &mut TestAppContext) {
 
     // History: hidden and read as pause while recording is off.
     set_click(&mut r, TimelineClick::History, false);
-    let (mode, choices) = r.vcx.update(|_, cx| (click_mode(cx), click_choices(cx)));
+    let (mode, choices) = r.vcx.update(|_, cx| {
+        let host = HostContext::local(cx);
+        (click_mode(host.hub(), cx), click_choices(host.hub(), cx))
+    });
     assert_eq!(mode, TimelineClick::Pause);
     assert!(!choices.contains(&TimelineClick::History));
 
     // With recording on, a click asks the process history for that second first. The test
     // clock booted 2 hours ago, so the clicks within the last half hour fall in this boot.
     set_click(&mut r, TimelineClick::History, true);
-    let choices = r.vcx.update(|_, cx| click_choices(cx));
+    let choices = r
+        .vcx
+        .update(|_, cx| click_choices(HostContext::local(cx).hub(), cx));
     assert!(choices.contains(&TimelineClick::History));
     // 28.8 minutes ago.
     click_bands(&mut r, 0.98);

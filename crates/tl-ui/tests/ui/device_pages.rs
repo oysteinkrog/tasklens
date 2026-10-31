@@ -26,9 +26,11 @@ use tl_model::system::{
     FanControlMode, MemoryTotals, Metric, SensorKind, SensorReading, ZramTotals,
 };
 use tl_model::validity::Validity;
+use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::actions::PerfSetGraphRange;
@@ -190,11 +192,24 @@ fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
 
 /// The Performance tab as the window root, 1280 × 800, CPU selected.
 fn open(cx: &mut TestAppContext) -> Rig<'_> {
+    open_with(cx, false)
+}
+
+/// `open`, and with `with_tracker` also an action tracker in the page's host, set as
+/// `GlobalActionTracker` too. The tracker belongs to the host when the page is built.
+fn open_with(cx: &mut TestAppContext, with_tracker: bool) -> Rig<'_> {
     let engine = install(cx);
     let client: Arc<dyn EngineClient> = engine.clone();
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-    let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, demand, cx));
+    let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+    let tracker = with_tracker.then(|| {
+        let tracker = cx.new(|cx| ActionTracker::new(Arc::clone(&client), None, cx));
+        cx.update(|cx| cx.set_global(GlobalActionTracker(tracker.clone())));
+        tracker
+    });
+    // Only EngineGlobal (and the tracker) are installed here; the hub and demand are the test's.
+    let host = HostContext::from_parts(Some(client), Some(hub), Some(demand), tracker, None);
+    let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
     vcx.simulate_scale_factor_change(1.0);
     vcx.simulate_resize(size(px(1280.), px(800.)));
     draw(vcx);
@@ -1987,7 +2002,6 @@ mod disk_in_use {
     use tl_model::snapshot::{Blocker, DiskDetails, EjectState};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
-    use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::toast::ToastKind;
     use tl_ui::components::window_frame::TlSecondaryWindow;
@@ -2078,13 +2092,8 @@ mod disk_in_use {
     /// the app does, so the window's own toast stack takes the action toasts.
     fn setup(cx: &mut TestAppContext) -> Rig<'_> {
         cx.update(tl_ui::components::toast::init);
-        let mut r = open(cx);
+        let mut r = open_with(cx, true);
         select(&mut r, SDA);
-        let client: Arc<dyn EngineClient> = r.engine.clone();
-        r.vcx.update(|_, cx| {
-            let tracker = cx.new(|cx| ActionTracker::new(client, cx));
-            cx.set_global(GlobalActionTracker(tracker));
-        });
         publish(&mut r, None);
         r
     }
@@ -3161,7 +3170,6 @@ mod net_settings {
         ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, LaunchSpec, LaunchWhat,
     };
     use tl_model::command::Command;
-    use tl_ui::action_tracker::{ActionTracker, GlobalActionTracker};
     use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::toast::{self, ToastQueue};
     use tl_ui::pages::performance::PAGE_PANEL_ID;
@@ -3191,7 +3199,11 @@ mod net_settings {
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
-        let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
+        let tracker = cx.new(|cx| ActionTracker::new(Arc::clone(&client), None, cx));
+        cx.update(|cx| cx.set_global(GlobalActionTracker(tracker.clone())));
+        let host =
+            HostContext::from_parts(Some(client), Some(hub), Some(demand), Some(tracker), None);
+        let page = cx.new(|cx| PerformancePage::new(&host, cx));
         let root_page = page.clone();
         let window = cx.add_window(move |window, cx| Root::new(root_page, window, cx));
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
@@ -3199,10 +3211,6 @@ mod net_settings {
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(1280.), px(800.)));
         let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
-        vcx.update(|_, cx| {
-            let tracker = cx.new(|cx| ActionTracker::new(client, cx));
-            cx.set_global(GlobalActionTracker(tracker));
-        });
         draw(&mut vcx);
         (engine, vcx, page, queue)
     }
@@ -3474,7 +3482,7 @@ fn aggregate_type_multiple(cx: &mut TestAppContext) {
     let (hub, demand) = aggregate_hub(cx, entries, &[(0, "NVMe"), (1, "NVMe"), (2, "SSD")]);
     let k = key("aggregate:disk");
     let row = aggregate_row(DeviceKind::AggregateDisk, &k, 3);
-    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    let view = cx.update(|cx| build_page(&HostContext::local(cx), &k, &row, &hub, &demand, cx));
     let page = view
         .downcast::<AggregateDiskPage>()
         .expect("an AggregateDiskPage");
@@ -3505,7 +3513,7 @@ fn aggregate_exists_only_with_two_devices(cx: &mut TestAppContext) {
     let (hub, demand) = aggregate_hub(cx, entries, &[]);
     let k = key("aggregate:gpu");
     let row = aggregate_row(DeviceKind::AggregateGpu, &k, 1);
-    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    let view = cx.update(|cx| build_page(&HostContext::local(cx), &k, &row, &hub, &demand, cx));
     assert!(view.downcast::<PlaceholderPage>().is_ok());
 
     let (order, overrides) = (Vec::new(), std::collections::HashMap::new());
@@ -3538,7 +3546,7 @@ fn aggregate_gpu_adapters_row(cx: &mut TestAppContext) {
     let (hub, demand) = aggregate_hub(cx, entries, &[]);
     let k = key("aggregate:gpu");
     let row = aggregate_row(DeviceKind::AggregateGpu, &k, 2);
-    let view = cx.update(|cx| build_page(&k, &row, &hub, &demand, cx));
+    let view = cx.update(|cx| build_page(&HostContext::local(cx), &k, &row, &hub, &demand, cx));
     let page = view
         .downcast::<AggregateGpuPage>()
         .expect("an AggregateGpuPage");
@@ -4387,8 +4395,9 @@ mod smartctl_fallback {
             cx.set_global(GlobalHub(hub.clone()));
             tl_ui::windows::smart::init(cx);
         });
-        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, demand, cx));
+        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+        let host = HostContext::from_parts(Some(client), Some(hub), Some(demand), None, None);
+        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(1280.), px(800.)));
         draw(vcx);

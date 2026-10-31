@@ -1631,6 +1631,7 @@ mod page {
     use tl_ui::app::EngineGlobal;
     use tl_ui::components::toast::{self, ToastQueue};
     use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::information::actions::{CopyInformationSection, bind_keys_information};
     use tl_ui::pages::information::{InformationPage, REFRESH_TOAST_AFTER};
@@ -1678,14 +1679,16 @@ mod page {
             cx.set_global(EngineGlobal(client.clone()));
         });
         let hub = cx.update(|cx| cx.new(|cx| SnapshotHub::new(client.clone(), cx)));
-        let demand = cx.update(|cx| cx.new(|cx| DemandAggregator::new(client, &hub, cx)));
+        let demand = cx.update(|cx| cx.new(|cx| DemandAggregator::new(client.clone(), &hub, cx)));
+        // The test installs only EngineGlobal; the hub and demand are its own.
+        let ctx = HostContext::from_parts(Some(client), Some(hub), Some(demand), None, None);
         let retries = Rc::new(Cell::new(0));
         let clears = Rc::new(Cell::new(0));
         let slot = Rc::new(RefCell::new(None));
         let window = cx.add_window({
             let (slot, retries, clears) = (slot.clone(), retries.clone(), clears.clone());
             move |window, cx| {
-                let page = cx.new(|cx| InformationPage::new(&hub, &demand, window, cx));
+                let page = cx.new(|cx| InformationPage::new(&ctx, window, cx));
                 let host = cx.new(|_| PageHost {
                     page: page.clone(),
                     width,

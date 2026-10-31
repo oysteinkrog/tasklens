@@ -22,6 +22,7 @@ use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::ChartState;
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui::host::HostContext;
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::pages::minigraph::GraphColor;
 use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource};
@@ -112,7 +113,7 @@ fn open(
     cards: Vec<MinigraphEntry>,
 ) -> (VisualTestContext, Entity<DetachedGraphWindow>) {
     let handle = cx
-        .update(|cx| open_detached(id, cards, None, cx))
+        .update(|cx| open_detached(&HostContext::local(cx), id, cards, None, cx))
         .expect("window opens");
     let view = cx
         .update(|cx| DetachedGraphWindow::find(handle.into(), cx))
@@ -157,7 +158,7 @@ fn detached_window_opens_with_caption(cx: &mut TestAppContext) {
     // A window id above 255 does not fit the registry key.
     let before = cx.update(|cx| cx.windows().len());
     assert!(
-        cx.update(|cx| open_detached(256, vec![cpu_entry()], None, cx))
+        cx.update(|cx| open_detached(&HostContext::local(cx), 256, vec![cpu_entry()], None, cx))
             .is_err()
     );
     assert_eq!(cx.update(|cx| cx.windows().len()), before);
@@ -241,6 +242,7 @@ mod detach {
     use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
     use tl_ui::components::toast::ToastKind;
     use tl_ui::demand::DemandAggregator;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::pages::minigraph::actions::{
         MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphDetach,
@@ -294,7 +296,7 @@ mod detach {
     ) -> (Entity<MinigraphPanel>, VisualTestContext) {
         let (hub, demand) = (hub.clone(), demand.clone());
         let (host, vcx) = cx.add_window_view(move |_, cx| PanelHost {
-            panel: cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)),
+            panel: cx.new(|cx| MinigraphPanel::new(&HostContext::local(cx), &hub, &demand, cx)),
         });
         let mut vcx = vcx.clone();
         vcx.simulate_scale_factor_change(1.0);
@@ -1097,7 +1099,7 @@ mod mini {
             cx.set_global(GlobalHub(hub.clone()));
             cx.set_global(GlobalDemand(demand.clone()));
             if main {
-                tl_ui::action_tracker::install(Arc::clone(&client), cx);
+                tl_ui::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
                 toast::init(cx);
                 tl_ui::actions::bind_keys_global(cx);
                 for tab in Tab::ALL {
@@ -1712,6 +1714,7 @@ mod keep {
     use tl_ui::app::{BootSettings, EngineGlobal, UiExitSlot};
     use tl_ui::components::toast;
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::host::HostContext;
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::pages::minigraph::panel::any_detached_open;
     use tl_ui::settings_global::TlSettings;
@@ -1787,8 +1790,8 @@ mod keep {
             });
             TlSettings::init(cx);
             cx.set_global(EngineGlobal(client.clone()));
-            tl_ui::action_tracker::install(client.clone(), cx);
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            tl_ui::action_tracker::install(client.clone(), Some(hub.clone()), cx);
             let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
             cx.set_global(GlobalHub(hub));
             cx.set_global(GlobalDemand(demand));
@@ -1805,7 +1808,7 @@ mod keep {
         vcx.update(|window, _| window.activate_window());
         vcx.run_until_parked();
         let graph = cx
-            .update(|cx| open_detached(1, vec![cpu_entry()], None, cx))
+            .update(|cx| open_detached(&HostContext::local(cx), 1, vec![cpu_entry()], None, cx))
             .expect("detached window opens");
         cx.run_until_parked();
         assert!(cx.read(any_detached_open));

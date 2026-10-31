@@ -32,6 +32,7 @@ use tl_model::snapshot::ComponentHeader;
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::host::HostContext;
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::pages::processes::history::actions::{HistoryLive, bind_keys_history};
 use tl_ui::pages::processes::history::table::HistoryTableDelegate;
@@ -163,7 +164,8 @@ fn history_renders_only_on_history_bit(cx: &mut TestAppContext) {
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
         cx.set_global(GlobalHub(hub));
     });
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let count =
         |vcx: &mut gpui_kit::VisualTestContext| vcx.read_entity(&page, |p, _| p.render_count.get());
@@ -273,7 +275,8 @@ fn scrub(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext, t: TimeNs) {
 #[gpui_kit::test]
 fn history_one_query_in_flight(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let sent = queries(&engine);
     assert_eq!(sent.len(), 1, "mode entry sends one query");
@@ -290,7 +293,8 @@ fn history_one_query_in_flight(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn pending_replaced_by_latest(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     for t in [100, 200, 300] {
         scrub(&page, vcx, t * S);
@@ -311,7 +315,8 @@ fn pending_replaced_by_latest(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn foreign_answer_ignored(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     scrub(&page, vcx, 100 * S);
     answer(&engine, 99, vcx);
@@ -322,7 +327,8 @@ fn foreign_answer_ignored(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn live_queries_each_second(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (_page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     for _ in 0..5 {
         let last = queries(&engine).last().expect("a query").0;
@@ -337,7 +343,8 @@ fn live_queries_each_second(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_once_per_minute(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (_page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     for _ in 0..60 {
         let last = queries(&engine).last().expect("a query").0;
@@ -355,7 +362,8 @@ fn overview_once_per_minute(cx: &mut TestAppContext) {
 fn busy_retried_next_tick(cx: &mut TestAppContext) {
     let engine = init(cx);
     engine.set_busy(true);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     assert!(queries(&engine).is_empty());
     assert!(vcx.read_entity(&page, |p, _| p.query_pending()).is_some());
@@ -382,7 +390,8 @@ fn busy_retried_next_tick(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn unanswered_query_resent_after_timeout(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     answer(&engine, 1, vcx);
     scrub(&page, vcx, 100 * S);
@@ -502,7 +511,8 @@ fn init_settings(cx: &mut TestAppContext, engine: &Arc<FakeEngine>, settings: Se
 #[gpui_kit::test]
 fn history_table_default_sort_cpu_desc(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     // CPU 0.0 to 19.0 in a scrambled order.
     let rows = (0..20u32)
@@ -580,7 +590,8 @@ fn history_table_default_sort_cpu_desc(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn history_missing_identity_row_marked(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let mut gone = prow(7, "gone", 99.0);
     gone.present = false;
@@ -626,7 +637,8 @@ fn history_missing_identity_row_marked(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn previous_boot_marked(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let mut old = prow(5, "old", 0.0);
     old.present = false;
@@ -650,7 +662,8 @@ fn previous_boot_marked(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn range_peak_tooltip(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let mut busy = prow(3, "busy", 10.0);
     busy.peak = Some(HistoryPeaks {
@@ -691,7 +704,8 @@ fn hide_system_filters_history(cx: &mut TestAppContext) {
     let mut settings = Settings::default();
     settings.processes.hide_system = true;
     init_settings(cx, &engine, settings);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let mut sys = prow(1, "systemd", 5.0);
     sys.system = true;
@@ -727,7 +741,8 @@ fn hide_system_filters_history(cx: &mut TestAppContext) {
 fn history_sort_persisted(cx: &mut TestAppContext) {
     let engine = init(cx);
     init_settings(cx, &engine, Settings::default());
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let rows = vec![prow(3, "c", 1.0), prow(1, "a", 3.0), prow(2, "b", 2.0)];
     publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
@@ -765,7 +780,8 @@ fn answer_last(engine: &FakeEngine, page: &Entity<HistoryPage>, vcx: &mut Visual
 #[gpui_kit::test]
 fn scrubbed_frame_inputs_send_one_query_each(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     answer_last(&engine, &page, vcx);
     scrub(&page, vcx, 100 * S);
@@ -828,7 +844,8 @@ fn scrubbed_frame_inputs_send_one_query_each(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn live_frame_inputs_wait_for_tick(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     answer_last(&engine, &page, vcx);
     let base = queries(&engine).len();
@@ -919,7 +936,8 @@ fn builds(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) -> u32 {
 #[gpui_kit::test]
 fn scrubber_geometry_cached_until_key_changes(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     publish_view(&engine, vcx, strip_view(1, Vec::new()));
     draw(vcx);
@@ -954,7 +972,8 @@ fn scrubber_geometry_cached_until_key_changes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn scrubber_draws_gap_band(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     publish_view(&engine, vcx, strip_view(1, Vec::new()));
     draw(vcx);
@@ -1036,7 +1055,8 @@ fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
         "fire"
     );
 
-    let page = vcx.update(|window, cx| cx.new(|cx| HistoryPage::new(window, cx)));
+    let page =
+        vcx.update(|window, cx| cx.new(|cx| HistoryPage::new(&HostContext::local(cx), window, cx)));
     vcx.run_until_parked();
     let rows = vec![prow(2, "firefox", 1.0), prow(3, "bash", 2.0)];
     publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
@@ -1067,7 +1087,8 @@ fn keys_page_engine(
 ) -> (Entity<HistoryPage>, Arc<FakeEngine>, &mut VisualTestContext) {
     let engine = init(cx);
     cx.update(bind_keys_history);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let v = HistoryView {
         header: ComponentHeader {
@@ -1290,7 +1311,8 @@ mod row_actions {
             });
         });
         main.run_until_parked();
-        let (page, vcx) = cx.add_window_view(HistoryPage::new);
+        let (page, vcx) =
+            cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
         vcx.run_until_parked();
         publish_rows(
             &engine,
@@ -1530,8 +1552,11 @@ mod row_actions {
     /// The host setting `history.enabled` the window shows.
     fn recording(r: &mut Rig<'_>) -> bool {
         r.vcx.run_until_parked();
-        r.vcx
-            .update(|_, cx| tl_ui::host_settings::values(cx).history.enabled)
+        r.vcx.update(|_, cx| {
+            tl_ui::host_settings::values(&HostContext::local(cx), cx)
+                .history
+                .enabled
+        })
     }
 
     #[gpui_kit::test]
@@ -1541,7 +1566,8 @@ mod row_actions {
         assert!(banner_drawn(&mut r));
         let Rig { main, .. } = r;
         // History mode entered again in the same session: a second page, no second toast.
-        let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+        let (_page, vcx) =
+            cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
         vcx.run_until_parked();
         draw(vcx);
         let mut main = main;
@@ -1568,7 +1594,8 @@ mod row_actions {
         click_selector(r.vcx, "TlButton-history-off-close");
         assert!(!banner_drawn(&mut r));
         let Rig { .. } = r;
-        let (_page, vcx) = cx.add_window_view(HistoryPage::new);
+        let (_page, vcx) =
+            cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
         vcx.run_until_parked();
         draw(vcx);
         assert!(vcx.debug_bounds("history-off-banner").is_none());
@@ -1667,7 +1694,8 @@ fn live_button_state_follows_scrub(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn rolling_window_labels_capped_10min(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     publish_view(
         &engine,
@@ -1829,8 +1857,11 @@ fn page_dropped_when_its_host_lets_go(cx: &mut TestAppContext) {
         }
     }
     let engine = init(cx);
-    let (host, vcx) =
-        cx.add_window_view(|window, cx| Host(Some(cx.new(|cx| HistoryPage::new(window, cx)))));
+    let (host, vcx) = cx.add_window_view(|window, cx| {
+        Host(Some(cx.new(|cx| {
+            HistoryPage::new(&HostContext::local(cx), window, cx)
+        })))
+    });
     vcx.run_until_parked();
     let v = HistoryView {
         header: ComponentHeader {
@@ -1867,7 +1898,8 @@ fn hover_page(
     cx: &mut TestAppContext,
 ) -> (Arc<FakeEngine>, Entity<HistoryPage>, &mut VisualTestContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let v = HistoryView {
         header: ComponentHeader {
@@ -2288,7 +2320,8 @@ fn minimap_page(
     view_range: (TimeNs, TimeNs),
 ) -> (Arc<FakeEngine>, Entity<HistoryPage>, &mut VisualTestContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let v = HistoryView {
         header: ComponentHeader {
@@ -2467,7 +2500,8 @@ fn overview_points() -> Arc<[HistoryPoint]> {
 #[gpui_kit::test]
 fn minimap_path_cached(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     let builds =
         |vcx: &mut VisualTestContext| vcx.read_entity(&page, |p, _| p.minimap().build_count);
@@ -2494,7 +2528,8 @@ fn minimap_path_cached(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn minimap_metric_change_asks_overview(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    let (page, vcx) =
+        cx.add_window_view(|window, cx| HistoryPage::new(&HostContext::local(cx), window, cx));
     vcx.run_until_parked();
     answer(&engine, 1, vcx);
     advance(vcx, Duration::from_secs(1));
@@ -3017,7 +3052,7 @@ mod mode {
 
 /// The real Settings Processes page, rebuilt from the live settings.
 fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
-    cx.update(all_pages)
+    cx.update(|cx| all_pages(&HostContext::local(cx), cx))
         .into_iter()
         .find(|p| p.id() == PageId::Processes)
         .expect("Processes page listed")
@@ -3026,7 +3061,7 @@ fn processes_page(cx: &mut TestAppContext) -> PageBuilder {
 /// The `[history]` host settings the window shows (tasklens-q4x76.23).
 fn history_settings(cx: &mut TestAppContext) -> HistorySettings {
     cx.run_until_parked();
-    cx.update(|cx| tl_ui::host_settings::values(cx).history)
+    cx.update(|cx| tl_ui::host_settings::values(&HostContext::local(cx), cx).history)
 }
 
 #[gpui_kit::test]

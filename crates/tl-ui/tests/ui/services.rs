@@ -28,6 +28,7 @@ use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::menu::{self, TlMenu};
 use tl_ui::components::toast::{self, ToastQueue};
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::services::actions::*;
 use tl_ui::pages::services::delegate::{ServicesDelegate, services_columns};
@@ -83,7 +84,13 @@ fn delegate_table_with_engine(
     let slot = Rc::new(RefCell::new(None));
     let keep = Rc::clone(&slot);
     cx.add_window(move |window, cx| {
-        let table = cx.new(|cx| TlTreeTable::new(ServicesDelegate::new(&state), window, cx));
+        let table = cx.new(|cx| {
+            TlTreeTable::new(
+                ServicesDelegate::new(&HostContext::local(cx), &state),
+                window,
+                cx,
+            )
+        });
         *keep.borrow_mut() = Some(table.clone());
         Root::new(table, window, cx)
     });
@@ -163,7 +170,7 @@ fn services_default_columns_and_widths() {
 
 #[test]
 fn services_row_kinds_and_selectable() {
-    let mut delegate = ServicesDelegate::new(&UiState::default());
+    let mut delegate = ServicesDelegate::new(&HostContext::default(), &UiState::default());
     install_rows(&mut delegate);
     assert_eq!(delegate.row_kind(0), RowKind::GroupHeader);
     assert_eq!(delegate.row_kind(1), RowKind::Unit);
@@ -1362,7 +1369,7 @@ mod menu_tests {
         vcx.update(|window, _| window.activate_window());
         let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
         let client: Arc<dyn EngineClient> = FakeEngine::new();
-        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, None, cx)));
         let actions = vcx.update(|_, cx| cx.new(|cx| SysActions::new(&tracker, cx)));
         Rig {
             vcx,
@@ -2328,7 +2335,7 @@ fn delegate_for(
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        let mut d = ServicesDelegate::new(&UiState::default());
+        let mut d = ServicesDelegate::new(&HostContext::local(cx), &UiState::default());
         d.refresh_look(cx);
         let mut rows = vec![SysRow {
             node: SysNodeId::ServiceGroup(Manager::System),
@@ -2897,6 +2904,7 @@ mod page {
     };
     use tl_ui::components::toast::ToastQueue;
     use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::services::actions::{
         GoToService, JumpOrigin, ManagerArg, ServicesClearAllFilters, ServicesShowHidden,
@@ -3036,7 +3044,7 @@ mod page {
         let handle = cx
             .update(|cx| {
                 cx.open_window(options, move |window, cx| {
-                    let page = cx.new(|cx| ServicesPage::new(window, cx));
+                    let page = cx.new(|cx| ServicesPage::new(&HostContext::local(cx), window, cx));
                     *keep.borrow_mut() = Some(page.clone());
                     let host = cx.new(|_| Host { page });
                     cx.new(|cx| Root::new(host, window, cx))
@@ -3914,7 +3922,7 @@ mod page {
     }
 
     fn services_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
-        let page = cx.new(|cx| ServicesPage::new(window, cx));
+        let page = cx.new(|cx| ServicesPage::new(&HostContext::local(cx), window, cx));
         PageSlot::new(page, cx)
     }
 
@@ -4749,9 +4757,10 @@ mod page {
 
             let mut rig = rig(cx);
             let panel = rig.vcx.update(|_, cx| {
+                let host = HostContext::local(cx);
                 let hub = cx.global::<GlobalHub>().0.clone();
                 let demand = cx.global::<GlobalDemand>().0.clone();
-                cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx))
+                cx.new(|cx| MinigraphPanel::new(&host, &hub, &demand, cx))
             });
             rig.activate();
             publish_one(&mut rig, child_process(812, ProcFlags::empty()));

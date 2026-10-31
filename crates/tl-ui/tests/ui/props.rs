@@ -22,6 +22,7 @@ use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::components::kv_grid::{ValueLook, kv_words, value_look_in};
 use tl_ui::components::window_frame::{client_frame_extra, window_options};
+use tl_ui::host::HostContext;
 use tl_ui::text::fonts::UI_FAMILY;
 use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};
@@ -205,7 +206,7 @@ fn host(cx: &mut TestAppContext, width: f32) -> (Entity<Host>, &mut VisualTestCo
     });
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
-        let tab = cx.new(|cx| GeneralTab::new(KEY, filter.clone(), cx));
+        let tab = cx.new(|cx| GeneralTab::new(&HostContext::local(cx), KEY, filter.clone(), cx));
         Host { tab, filter, width }
     });
     draw(cx);
@@ -944,7 +945,7 @@ fnd-kv-not-reported = <not-reported>
     // The tab alone: the frame check below is for the tab, not the filter bar.
     let (t, cx) = cx.add_window_view(|window, cx| {
         let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
-        GeneralTab::new(KEY, filter, cx)
+        GeneralTab::new(&HostContext::local(cx), KEY, filter, cx)
     });
     let mut d = detail("firefox");
     d.cgroup.value = None;
@@ -1014,7 +1015,7 @@ pwn-general-seccomp-filter-many = <filter { $n }>
     });
     let (t, cx) = cx.add_window_view(|window, cx| {
         let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
-        GeneralTab::new(KEY, filter, cx)
+        GeneralTab::new(&HostContext::local(cx), KEY, filter, cx)
     });
     feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
     draw(cx);
@@ -1224,7 +1225,9 @@ mod app_props {
         });
         let (host, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
-            let tab = cx.new(|cx| AppGeneralTab::new(GroupKey(77), filter.clone(), cx));
+            let tab = cx.new(|cx| {
+                AppGeneralTab::new(&HostContext::local(cx), GroupKey(77), filter.clone(), cx)
+            });
             AppHost { tab, filter, width }
         });
         draw(cx);
@@ -1607,8 +1610,9 @@ mod window {
         let build = |targets: CapturedTargets, main: &mut VisualTestContext| {
             let focus = main.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
             main.update(|window, cx| {
+                let host = HostContext::local(cx);
                 TlMenu::build(window, cx, focus, |menu, window, cx| {
-                    row_menu(menu, &targets, &MenuCaps::default(), window, cx)
+                    row_menu(&host, menu, &targets, &MenuCaps::default(), window, cx)
                 })
             })
         };
@@ -1660,7 +1664,7 @@ mod window {
     }
 
     fn open(cx: &mut TestAppContext, pid: u32) -> Option<AnyWindowHandle> {
-        cx.update(|cx| open_process_properties(key(pid), cx));
+        cx.update(|cx| open_process_properties(&HostContext::local(cx), key(pid), cx));
         cx.run_until_parked();
         cx.update(|cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
@@ -1669,7 +1673,7 @@ mod window {
     }
 
     fn open_app(cx: &mut TestAppContext, group: GroupKey) -> Option<AnyWindowHandle> {
-        cx.update(|cx| open_app_properties(group, cx));
+        cx.update(|cx| open_app_properties(&HostContext::local(cx), group, cx));
         cx.run_until_parked();
         cx.update(|cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
@@ -5000,7 +5004,9 @@ mod threads {
         });
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("Threads", window, cx));
-            let tab = cx.new(|cx| ThreadsTab::new(KEY, filter.clone(), window, cx));
+            let tab = cx.new(|cx| {
+                ThreadsTab::new(&HostContext::local(cx), KEY, filter.clone(), window, cx)
+            });
             ThreadsHost { tab, filter }
         });
         draw(cx);
@@ -5497,7 +5503,8 @@ mod maps {
         });
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("Memory maps", window, cx));
-            let tab = cx.new(|cx| MapsTab::new(KEY, filter.clone(), window, cx));
+            let tab =
+                cx.new(|cx| MapsTab::new(&HostContext::local(cx), KEY, filter.clone(), window, cx));
             MapsHost { tab, filter }
         });
         draw(cx);

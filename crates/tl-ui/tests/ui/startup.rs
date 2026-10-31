@@ -445,7 +445,8 @@ mod page {
         MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu,
     };
     use tl_ui::components::toast::{ToastKey, ToastQueue};
-    use tl_ui::demand::{DEMAND_COALESCE, GlobalDemand};
+    use tl_ui::demand::DEMAND_COALESCE;
+    use tl_ui::host::HostContext;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::startup::actions::bind_keys_startup;
     use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
@@ -525,9 +526,8 @@ mod page {
                 let page_slot = Rc::clone(&page_slot);
                 let opened = Rc::clone(&opened);
                 cx.open_window(options, move |window, cx| {
-                    let hub = cx.global::<GlobalHub>().0.clone();
-                    let demand = cx.global::<GlobalDemand>().0.clone();
-                    let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+                    let host_ctx = HostContext::local(cx);
+                    let page = cx.new(|cx| StartupPage::new(&host_ctx, window, cx));
                     *page_slot.borrow_mut() = Some(page.clone());
                     let host = cx.new(|_| Host { page, opened });
                     cx.new(|cx| Root::new(host, window, cx))
@@ -631,10 +631,8 @@ mod page {
     }
 
     fn startup_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
-        let hub = cx.global::<GlobalHub>().0.clone();
-        let demand = cx.global::<GlobalDemand>().0.clone();
-        let client = Arc::clone(&cx.global::<tl_ui::app::EngineGlobal>().0);
-        let page = cx.new(|cx| StartupPage::new(&hub, &demand, client, window, cx));
+        let host_ctx = HostContext::local(cx);
+        let page = cx.new(|cx| StartupPage::new(&host_ctx, window, cx));
         PageSlot::new(page, cx)
     }
 

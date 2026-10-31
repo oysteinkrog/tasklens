@@ -29,6 +29,7 @@ use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::GlobalActionTracker;
 use tl_ui::app::{AppEnv, OpenHooks, TasklensUi, UiExit, UiExitSlot, UiInit, start_for_test};
 use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::host::HostContext;
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
@@ -1223,7 +1224,7 @@ fn settings_lowmem_switch_writes_key(cx: &mut TestAppContext) {
 
     let page = |cx: &mut TestAppContext| {
         cx.update(|cx| {
-            all_pages(cx)
+            all_pages(&HostContext::local(cx), cx)
                 .into_iter()
                 .find(|p| p.id() == PageId::StartupWindow)
                 .expect("page listed")

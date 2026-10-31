@@ -3128,6 +3128,7 @@ mod highlight {
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::anim::AnimationDriver;
     use tl_ui::components::motion::ease_out_cubic;
+    use tl_ui::host::HostContext;
     use tl_ui::pages::processes::cells::{
         TINT_ALPHA, TintKind, linger_ns, row_tint, tint_deadline,
     };
@@ -3396,8 +3397,14 @@ mod highlight {
         let window = cx.add_window(move |window, cx| {
             let driver = cx.new(AnimationDriver::new);
             AnimationDriver::register(&driver, window, cx);
-            let mut d =
-                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let mut d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
             d.set_window(Some(window.window_handle()));
             prepare(&mut d);
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
@@ -3702,6 +3709,7 @@ mod row_tooltip {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
     use tl_ui::components::tooltip::DELAY_ROW_NAME;
+    use tl_ui::host::HostContext;
     use tl_ui::pages::processes::cells::RowRef;
     use tl_ui::pages::processes::delegate::ProcessDelegate;
     use tl_ui::pages::processes::tooltip::{RowTipWords, TipLine, row_tooltip_lines};
@@ -4111,8 +4119,14 @@ mod row_tooltip {
             tl_ui::i18n::init_strings(cx, "en-US");
         });
         let window = cx.add_window(move |window, cx| {
-            let d =
-                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &Settings::default(),
+                &UiState::default(),
+                window,
+                cx,
+            );
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
             let host = cx.new(|_| Host { table });
             Root::new(host, window, cx)
@@ -4165,6 +4179,7 @@ mod live {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
+    use tl_ui::host::HostContext;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::cells::{DELETED_SUFFIX, SUBTREE_PREFIX};
     use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate};
@@ -4248,7 +4263,14 @@ mod live {
         let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
         let out = slot.clone();
         let (_, vcx) = cx.add_window_view(move |window, cx| {
-            let d = ProcessDelegate::new(snap, &settings, &UiState::default(), window, cx);
+            let d = ProcessDelegate::new(
+                &HostContext::local(cx),
+                snap,
+                &settings,
+                &UiState::default(),
+                window,
+                cx,
+            );
             let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
             *out.borrow_mut() = Some(table.clone());
             Host { table }

@@ -360,7 +360,10 @@ fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
         ascending: true,
     };
     let mut query = SysQuery::new(SysTable::Startup, sort, None);
-    cx.update(|cx| page.on_activated(&mut query, &demand, cx));
+    cx.update(|cx| {
+        let host = tl_ui::host::HostContext::local(cx);
+        page.on_activated(&host, &mut query, &demand, cx);
+    });
     assert!(query.last_sent() > 0, "the first visit sends the query");
 
     let read = |cx: &mut TestAppContext| {
@@ -533,7 +536,8 @@ fn services_child_demand_runs_process_sweep(cx: &mut TestAppContext) {
     let slot = Rc::new(RefCell::new(None));
     let keep = Rc::clone(&slot);
     let handle = cx.add_window(move |window, cx| {
-        let delegate = ServicesDelegate::new(&UiState::default());
+        let host = tl_ui::host::HostContext::local(cx);
+        let delegate = ServicesDelegate::new(&host, &UiState::default());
         let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
         *keep.borrow_mut() = Some(table.clone());
         Root::new(table, window, cx)

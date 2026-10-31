@@ -27,6 +27,7 @@ use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
+use tl_ui::host::HostContext;
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::ThemeStore;
@@ -50,8 +51,8 @@ type Frame = TlSecondaryWindow<SettingsWindow>;
 
 /// A test page (under the Advanced id) with the Animations switch and a smooth scroll amount
 /// slider.
-fn test_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
-    let mut page = PageBuilder::new(PageId::Advanced);
+fn test_pages(cx: &mut gpui_kit::App) -> Vec<PageBuilder> {
+    let mut page = PageBuilder::new(&HostContext::local(cx), PageId::Advanced);
     page.switch("Motion", SettingKey::MotionAnimations, "Animations", None)
         .slider(
             "Motion",
@@ -71,7 +72,7 @@ fn no_test_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
 fn p2_pages(cx: &mut TestAppContext) -> Vec<PageBuilder> {
     cx.update(|cx| {
         cx.set_global(TestPages(no_test_pages));
-        all_pages(cx)
+        all_pages(&HostContext::local(cx), cx)
     })
 }
 
@@ -313,8 +314,12 @@ fn settings_window_server_decorations_by_default(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn page_builder_records_keys(cx: &mut TestAppContext) {
     setup(cx);
-    let (pages, before) =
-        cx.update(|cx| (all_pages(cx), TlSettings::settings(cx).motion.animations));
+    let (pages, before) = cx.update(|cx| {
+        (
+            all_pages(&HostContext::local(cx), cx),
+            TlSettings::settings(cx).motion.animations,
+        )
+    });
     // The test page comes after the real ones.
     let test_page = pages.last().expect("pages");
     assert_eq!(test_page.id(), PageId::Advanced);
@@ -392,7 +397,7 @@ fn settings_window_ignores_unrelated_snapshots(cx: &mut TestAppContext) {
 
 /// The real page with `id`.
 fn page(cx: &mut TestAppContext, id: PageId) -> PageBuilder {
-    cx.update(all_pages)
+    cx.update(|cx| all_pages(&HostContext::local(cx), cx))
         .into_iter()
         .find(|p| p.id() == id)
         .expect("page listed")
@@ -591,7 +596,7 @@ fn processes_refresh_dropdown(cx: &mut TestAppContext) {
     assert_eq!(writes.len(), 1, "the engine gets the interval");
     assert_eq!((writes[0].0, writes[0].1.interval_ms), (1, Some(2000)));
     assert_eq!(
-        cx.update(|cx| tl_ui::host_settings::values(cx).interval_ms),
+        cx.update(|cx| tl_ui::host_settings::values(&HostContext::local(cx), cx).interval_ms),
         2000
     );
     assert!(engine.settings().is_empty());
@@ -1072,7 +1077,11 @@ fn graphs_services_keys(cx: &mut TestAppContext) {
         ]
     );
     // Page order: Graphs and Services follow Performance.
-    let ids: Vec<PageId> = cx.update(all_pages).iter().map(|p| p.id()).collect();
+    let ids: Vec<PageId> = cx
+        .update(|cx| all_pages(&HostContext::local(cx), cx))
+        .iter()
+        .map(|p| p.id())
+        .collect();
     let perf = ids
         .iter()
         .position(|id| *id == PageId::Performance)
@@ -1095,7 +1104,7 @@ struct DeviceProbe {
 impl DeviceProbe {
     /// A probe that draws the custom item labelled `label`.
     fn with_label(label: &'static str, cx: &mut Context<Self>) -> Self {
-        let page = all_pages(cx)
+        let page = all_pages(&HostContext::local(cx), cx)
             .into_iter()
             .find(|p| p.id() == PageId::Performance)
             .expect("Performance page");
@@ -1433,7 +1442,8 @@ fn page_builder_action_switch_dispatches(cx: &mut TestAppContext) {
     cx.update(|cx| {
         cx.on_action(move |_: &FlipAnimations, _| seen.set(seen.get() + 1));
     });
-    let mut page = PageBuilder::new(PageId::Advanced);
+    let host = cx.read(HostContext::local);
+    let mut page = PageBuilder::new(&host, PageId::Advanced);
     page.action_switch("G", SettingKey::MotionAnimations, "Animations", || {
         Box::new(FlipAnimations)
     });
@@ -1460,7 +1470,8 @@ fn page_builder_action_dropdown_dispatches(cx: &mut TestAppContext) {
     cx.update(|cx| {
         cx.on_action(move |a: &PickName, _| seen.borrow_mut().push(a.name.to_string()));
     });
-    let mut page = PageBuilder::new(PageId::Advanced);
+    let host = cx.read(HostContext::local);
+    let mut page = PageBuilder::new(&host, PageId::Advanced);
     page.action_dropdown(
         "G",
         SettingKey::ThemeActive,
@@ -1493,7 +1504,8 @@ fn page_builder_action_dropdown_dispatches(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn page_builder_indent_tooltip_disabled(cx: &mut TestAppContext) {
     setup(cx);
-    let mut page = PageBuilder::new(PageId::Advanced);
+    let host = cx.read(HostContext::local);
+    let mut page = PageBuilder::new(&host, PageId::Advanced);
     page.switch("G", SettingKey::MotionAnimations, "Animations", None)
         .indent_next(16.)
         .disable_next(true)
@@ -1526,7 +1538,8 @@ fn page_builder_indent_tooltip_disabled(cx: &mut TestAppContext) {
 fn page_builder_str_switch_restart_toast(cx: &mut TestAppContext) {
     setup(cx);
     let (_, mut vcx) = open(cx, 1);
-    let mut page = PageBuilder::new(PageId::Advanced);
+    let host = vcx.update(|_, cx| HostContext::local(cx));
+    let mut page = PageBuilder::new(&host, PageId::Advanced);
     vcx.update(|_, cx| {
         page.restart_note_toast(cx, "Restart to apply".into())
             .str_switch(
@@ -1558,9 +1571,9 @@ fn page_builder_str_switch_restart_toast(cx: &mut TestAppContext) {
 
 static COMMITTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
-fn commit_pages(_: &mut gpui_kit::App) -> Vec<PageBuilder> {
+fn commit_pages(cx: &mut gpui_kit::App) -> Vec<PageBuilder> {
     // A key no real page has a slider for: the window keeps the first slider of a key.
-    let mut page = PageBuilder::new(PageId::Advanced);
+    let mut page = PageBuilder::new(&HostContext::local(cx), PageId::Advanced);
     page.slider_on_commit(|v, _| COMMITTED.store(v, std::sync::atomic::Ordering::SeqCst))
         .slider(
             "History",
@@ -2134,7 +2147,11 @@ fn appearance_keys(cx: &mut TestAppContext) {
         ]
     );
     // Page order: Appearance is the second page.
-    let ids: Vec<PageId> = cx.update(all_pages).iter().map(|p| p.id()).collect();
+    let ids: Vec<PageId> = cx
+        .update(|cx| all_pages(&HostContext::local(cx), cx))
+        .iter()
+        .map(|p| p.id())
+        .collect();
     assert_eq!(ids[..2], [PageId::General, PageId::Appearance]);
 }
 
@@ -2502,7 +2519,7 @@ fn ctrl_esc_write_error_reverts(cx: &mut TestAppContext) {
 /// Presses the import button, answers the file chooser with `picked` and lets the import run.
 fn press_import(vcx: &mut VisualTestContext, picked: &str) {
     let advanced = vcx
-        .update(|_, cx| all_pages(cx))
+        .update(|_, cx| all_pages(&HostContext::local(cx), cx))
         .into_iter()
         .find(|p| p.id() == PageId::Advanced)
         .expect("Advanced page");
@@ -2644,7 +2661,7 @@ fn settings_two_group_page_has_no_sidebar_children(cx: &mut TestAppContext) {
 fn settings_groups_keep_clear_of_the_scrollbar(cx: &mut TestAppContext) {
     setup(cx);
     let groups = cx.update(|cx| {
-        all_pages(cx)
+        all_pages(&HostContext::local(cx), cx)
             .into_iter()
             .filter(|p| !p.is_empty())
             .flat_map(|p| p.kit_groups(cx))
