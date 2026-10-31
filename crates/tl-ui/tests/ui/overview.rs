@@ -22,19 +22,19 @@ fn meter_fill_width_rounds_to_physical_px() {
     assert_eq!(meter_fill_w(f32::NAN, px(101.), sf), px(0.));
 }
 
-/// D-029, UI-PRF-059: 18 px rows in the fewest columns that fit them, at most 4, then the rows
-/// scroll.
+/// D-029, UI-PRF-059, D-040: 18 px rows in the fewest columns that fit them, at most 4, grown
+/// to fill the height, then the rows scroll.
 #[test]
 fn core_bars_layout_32_cores() {
     let l = core_bars_layout(32, px(776.), px(600.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(18.)));
+    assert_eq!((l.cols, l.rows, l.row_h), (1, 32, px(600. / 32.)));
     assert!(!l.scrolls);
     // 32 rows of 18 px need 576 px: a lower part takes the fewest columns that fit.
     let l = core_bars_layout(32, px(776.), px(520.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(18.)));
+    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(520. / 16.)));
     assert!(!l.scrolls);
     let l = core_bars_layout(32, px(776.), px(400.), 1.);
-    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(18.)));
+    assert_eq!((l.cols, l.rows, l.row_h), (2, 16, px(400. / 16.)));
     let l = core_bars_layout(32, px(776.), px(200.), 1.);
     assert_eq!((l.cols, l.rows), (3, 11));
     let l = core_bars_layout(32, px(776.), px(144.), 1.);
@@ -58,17 +58,20 @@ fn core_bars_layout_32_cores() {
     assert!(l.scrolls);
 }
 
-/// UI-PRF-059: core rows are 18 px apart at every part height, core count and scale; they
-/// never shrink to share the height, and scrolling rows keep the same pitch.
+/// UI-PRF-059, D-040: core rows are at least 18 px apart at every part height, core count and
+/// scale; rows that fit grow to fill the part's height, and scrolling rows keep 18 px.
 #[test]
-fn core_rows_always_18px_apart() {
+fn core_rows_fill_the_height_and_never_shrink() {
     for scale in [1., 1.5] {
         for n in [1, 4, 8, 12, 16, 24, 32, 64, 128] {
             for h in (0..=1200).step_by(7) {
                 let l = core_bars_layout(n, px(776.), px(h as f32), scale);
-                assert_eq!(l.row_h, px(18. * scale), "{n} cores in {h} px at {scale}x");
-                if !l.scrolls {
-                    assert!(l.content_h() <= px(h as f32 + 1e-3), "{n} in {h}: {l:?}");
+                let at = format!("{n} cores in {h} px at {scale}x: {l:?}");
+                assert!(l.row_h >= px(18. * scale - 1e-3), "{at}");
+                if l.scrolls {
+                    assert_eq!(l.row_h, px(18. * scale), "{at}");
+                } else {
+                    assert!((f32::from(l.content_h()) - h as f32).abs() < 1e-2, "{at}");
                 }
             }
         }
@@ -87,13 +90,14 @@ fn core_rows_fill_columns_top_to_bottom() {
 }
 
 /// crw.53: the CPU box at 1200 × 900 is 776 × 516. Its body is 750 × 456 and the side part
-/// beside the 40% chart is 750 × 0.6 − 12 = 438 px wide: 2 columns of 215 px, 16 rows of 18 px.
+/// beside the 40% chart is 750 × 0.6 − 12 = 438 px wide: 2 columns of 215 px, 16 rows that
+/// share the 456 px (D-040).
 #[test]
 fn core_rows_fit_32_threads_at_1200x900() {
     let l = core_bars_layout(32, px(438.), px(456.), 1.);
     assert_eq!((l.cols, l.rows), (2, 16));
     assert_eq!(l.cell_w, px(215.));
-    assert_eq!(l.row_h, px(18.));
+    assert_eq!(l.row_h, px(456. / 16.));
     assert!(!l.scrolls);
     assert_eq!(l.fit, CoreCellFit::Full);
     assert_eq!(
@@ -1106,7 +1110,7 @@ mod boxes {
         });
         assert!(r.vcx.update(|_, cx| cpu.read(cx).side_by_side()));
         assert_eq!((layout.cols, layout.rows), (2, 16));
-        assert_eq!(layout.row_h, px(18.));
+        assert!(layout.row_h >= px(18.), "{layout:?}");
         assert!(!layout.scrolls);
         assert_eq!(layout.fit, CoreCellFit::Full);
         assert_eq!(sparks.len(), usize::from(N));
@@ -1118,7 +1122,16 @@ mod boxes {
                 .vcx
                 .debug_bounds(id)
                 .unwrap_or_else(|| panic!("core {i} sparkline drawn"));
-            assert_eq!(b.size, size(px(48.), px(14.)), "core {i} sparkline size");
+            // The sparkline is 48 px wide and fills its row less a 2 px inset (D-040).
+            let row_h = layout.row_h;
+            // Layout rounds to whole pixels.
+            assert_eq!(b.size.width, px(48.), "core {i} sparkline width");
+            let want = f32::from(row_h) - 4.;
+            assert!(
+                (f32::from(b.size.height) - want).abs() <= 1.,
+                "core {i} sparkline height {:?}, want {want}",
+                b.size.height
+            );
             assert!(
                 b.left() >= frame.left()
                     && b.right() <= frame.right()
@@ -1138,7 +1151,8 @@ mod boxes {
                     .vcx
                     .debug_bounds(Box::leak(core_spark_id(i - 1).into_boxed_str()));
                 let above = above.expect("row above");
-                assert_eq!(b.top() - above.top(), px(18.), "core {i} one row lower");
+                let step = f32::from(b.top() - above.top());
+                assert!((step - f32::from(row_h)).abs() <= 1., "core {i} one row lower: {step}");
             }
         }
         // The sparklines are bound to their core's series.
@@ -1218,7 +1232,9 @@ mod boxes {
         draw(r.vcx);
         let cpu = r.cpu();
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
-        assert_eq!((layout.cols, layout.rows, layout.row_h), (2, 16, px(18.)));
+        assert_eq!((layout.cols, layout.rows), (2, 16));
+        assert!(layout.row_h > px(18.), "rows fill the part (D-040): {layout:?}");
+        let row_h = layout.row_h;
         let parts = core_cell(&layout, 1.);
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
 
@@ -1230,13 +1246,13 @@ mod boxes {
             let (col, row) = (l.core / 16, l.core % 16);
             assert!(l.name.x > frame.left() && l.pct_right <= frame.right());
             assert!(
-                l.name.y + px(18.) <= frame.bottom(),
+                l.name.y + row_h <= frame.bottom() + px(0.01),
                 "C{} inside the box",
                 l.core
             );
             let x = first.name.x + (layout.cell_w + px(8.)) * col as f32;
             assert_eq!(l.name.x, x, "C{} in column {col}", l.core);
-            assert_eq!(l.name.y, first.name.y + px(18.) * row as f32, "C{}", l.core);
+            assert_eq!(l.name.y, first.name.y + row_h * row as f32, "C{}", l.core);
             assert_eq!(l.pct_right, l.name.x + parts.pct_right);
         }
 
@@ -1245,12 +1261,12 @@ mod boxes {
         for l in &labels {
             let id: &'static str = Box::leak(core_spark_id(l.core).into_boxed_str());
             let spark = r.vcx.debug_bounds(id).expect("sparkline drawn");
-            assert!(spark.top() >= l.name.y && spark.bottom() <= l.name.y + px(18.));
+            assert!(spark.top() >= l.name.y && spark.bottom() <= l.name.y + row_h + px(0.01));
             assert_eq!(spark.left(), l.name.x + parts.spark_x, "C{}", l.core);
             let track = quads
                 .iter()
                 .find(|q| q.left() == l.name.x + parts.meter_x && q.top() > l.name.y)
-                .filter(|q| q.bottom() < l.name.y + px(18.))
+                .filter(|q| q.bottom() < l.name.y + row_h)
                 .unwrap_or_else(|| panic!("C{} bar", l.core));
             assert!(spark.right() < track.left(), "C{} spark before bar", l.core);
             assert!(

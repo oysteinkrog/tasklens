@@ -2,6 +2,12 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-31
+
+### D-040 Core rows grow to fill their part
+
+- **Decision** (owner request, 2026-10-31): the core rows of the Overview CPU box and the CPU page's core board grow to fill the height of their part, so they reach the bottom instead of stopping after the last row. The columns are chosen as before (the fewest columns, at most 4, in which 18 px rows fit), then every row gets the same share of the height. The sparkline and the bar grow with the row; the text keeps its size and stays centred. Rows never get shorter than 18 px, and rows that scroll keep 18 px. This replaces the fixed 18 px pitch of UI-PRF-059.
+
 ## 2026-10-29
 
 ### D-038 Engine service and several PCs in one window

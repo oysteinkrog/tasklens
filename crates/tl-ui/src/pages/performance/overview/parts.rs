@@ -545,7 +545,8 @@ pub struct CoreBarsLayout {
     pub row_h: Pixels,
     /// The clock column, wider when the clocks carry the BogoMIPS mark.
     pub clock_w: Pixels,
-    /// True when 18 px rows do not fit in 4 columns: the rows scroll under a scrollbar.
+    /// True when 18 px rows do not fit in 4 columns: the rows scroll under a scrollbar. Rows that
+    /// do not scroll grow to fill the height (D-040).
     pub scrolls: bool,
     pub fit: CoreCellFit,
 }
@@ -585,8 +586,8 @@ const CORE_SPARK_TAIL_W: f32 = PART_GAP + CORE_METER_MIN_W + PART_GAP + PCT_W;
 const CORE_SPARK_MIN_CELL_W: f32 = NAME_W + CORE_SPARK_MIN_W + PCT_W + 3. * PART_GAP;
 
 /// The grid for `n` cores in `w × h` (D-029, UI-PRF-059): one column of 18 px rows, or the
-/// fewest equal columns (at most 4) that fit them. When 18 px rows do not fit in 4 columns the
-/// rows stay 18 px and scroll, with room for the scrollbar. A cell never gets narrower than its
+/// fewest equal columns (at most 4) that fit them. The rows then grow to fill `h` (D-040). When
+/// 18 px rows do not fit in 4 columns the rows stay 18 px and scroll, with room for the scrollbar. A cell never gets narrower than its
 /// name and percent, so a narrow part takes fewer columns and scrolls sooner.
 pub fn core_bars_layout(n: usize, w: Pixels, h: Pixels, scale: f32) -> CoreBarsLayout {
     core_bars_layout_marked(n, w, h, scale, false)
@@ -619,6 +620,8 @@ pub fn core_bars_layout_marked(
     let rows = n.div_ceil(cols);
     // The fewest columns for those rows, so no column is left empty.
     let cols = n.div_ceil(rows);
+    // Rows that fit grow to fill the part's height (D-040); scrolling rows keep their pitch.
+    let row_h = if scrolls { row_h } else { row_h.max(h / rows as f32) };
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
     let fit = if cell_w >= (CORE_FULL_W + mark_w) * scale {
         CoreCellFit::Full
@@ -725,13 +728,17 @@ pub fn core_sparks(
     let inset = px(CORE_SPARK_INSET * s);
     let tail = px(CORE_SPARK_TAIL_W * s);
     for r in 0..l.rows {
-        let mut row = div()
+        let row = div()
             .flex()
             .flex_row()
             .w_full()
-            .gap(px(CELL_GAP * s))
-            .flex_none()
-            .h(l.row_h);
+            .gap(px(CELL_GAP * s));
+        // Rows that fill the height share it, so they follow the part inside one layout class.
+        let mut row = if l.scrolls {
+            row.flex_none().h(l.row_h)
+        } else {
+            row.flex_1().min_h_0()
+        };
         for c in 0..l.cols {
             let slot = c * l.rows + r;
             let mut cell = div().relative().flex_1().min_w_0().h_full();
@@ -914,7 +921,8 @@ impl Element for CoreBars {
         );
         let parts = core_cell(&l, s);
         let gap = px(CELL_GAP * s);
-        let bar_h = px(METER_H * s);
+        // The meter grows with a tall row in proportion, like the sparkline (D-040).
+        let bar_h = px(METER_H * s) * (l.row_h / px(CORE_ROW_H * s)).max(1.);
         if let Some(hitbox) = hitbox.clone() {
             // The row under the pointer goes to the sink; pointer moves notify nothing here.
             let shared = Rc::clone(&self.model);
