@@ -2434,11 +2434,18 @@ fn dump_through_pipeline_has_no_deadline() {
     h.submit(req(1, dump_kind(&p3.dumps, "app.core"), &procs(&[500])));
     h.run();
     h.advance(Duration::ZERO);
-    // The engine chose the full path and reports it in the end event.
+    // The engine reads the file size while gdb runs and sends it as progress before the final
+    // state. The fake writes no data, so the size is 0. The engine chose the full path and
+    // reports it in the end event.
     let saved = ActionState::Saved(Arc::from(dump_path(&p3.dumps, "app.core")));
     assert_eq!(
         h.events_for(ActionId(1)),
-        expected(std::slice::from_ref(&saved), saved.clone())
+        [
+            (None, ActionState::Started),
+            (Some(0), ActionState::Progress { bytes: 0 }),
+            (Some(0), saved.clone()),
+            (None, saved.clone()),
+        ]
     );
     assert_eq!(h.finished(), [ActionId(1)]);
     assert_eq!(h.ops.calls(), [FakeCall::Dump(500)]);
@@ -2718,6 +2725,22 @@ fn explore_helper_calls() {
         let mut dumps = Vec::new();
         for id in 1..=all {
             let events = h.events_for(ActionId(id));
+            // A dump's progress comes only for its target, between Started and the final state.
+            let first_final = events.iter().position(|(t, s)| t.is_some() && s.is_final());
+            for (i, (target, state)) in events.iter().enumerate() {
+                if matches!(state, ActionState::Progress { .. }) {
+                    assert!(id >= first_dump, "seed {seed} action {id}: {events:?}");
+                    assert_eq!(*target, Some(0), "seed {seed} action {id}");
+                    assert!(
+                        i > 0 && first_final.is_some_and(|f| i < f),
+                        "seed {seed} action {id}: {events:?}"
+                    );
+                }
+            }
+            let events: Vec<_> = events
+                .into_iter()
+                .filter(|(_, s)| !matches!(s, ActionState::Progress { .. }))
+                .collect();
             assert_eq!(events.len(), 3, "seed {seed} action {id}: {events:?}");
             assert_eq!(events[0], (None, ActionState::Started), "seed {seed}");
             assert_eq!(events[1].0, Some(0), "seed {seed} action {id}");
@@ -2736,11 +2759,17 @@ fn explore_helper_calls() {
         let want: Vec<ActionId> = (1..=all).map(ActionId).collect();
         assert_eq!(done, want, "seed {seed}");
 
-        // Exactly one result per dump; only the succeeded ones left a file.
+        // Exactly one result per dump; only the succeeded ones left a file, at the path they
+        // report.
         assert_eq!(dumps.len(), DUMPS as usize, "seed {seed}");
+        for (name, state) in &dumps {
+            if let ActionState::Saved(path) = state {
+                assert_eq!(&**path, dump_path(&p3.dumps, name).as_str(), "seed {seed}");
+            }
+        }
         let kept: BTreeSet<String> = dumps
             .iter()
-            .filter(|(_, s)| *s == ActionState::Succeeded)
+            .filter(|(_, s)| s.is_success())
             .map(|(name, _)| name.clone())
             .collect();
         assert_eq!(files_in(&p3.dumps), kept, "seed {seed}: {dumps:?}");
