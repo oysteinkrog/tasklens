@@ -1,8 +1,8 @@
 //! The engine service's endpoint (ADR-018 Local transport, Implementation contracts
 //! "Endpoints"): the runtime directory and socket directory checks, binding the socket with
 //! stale-socket handling, the `SO_PEERCRED` check on each connection, and the bootstrap
-//! handshake. The window's client reuses the directory and peer checks (q4x76.8). The
-//! per-session wire side follows in q4x76.20.
+//! handshake. The window's client reuses the directory and peer checks (q4x76.8). After the
+//! handshake, `serve_session` (module `session`) runs the session's wire side.
 //!
 //! Every check names the path it refused. Nothing here fixes a wrong owner or mode: an existing
 //! directory that is wrong is an error.
@@ -23,6 +23,16 @@ use tl_model::remote_proto::{
 };
 
 use crate::envelope::{EnvelopeError, FrameReader};
+
+mod session;
+
+#[cfg(feature = "test-hooks")]
+pub use session::Step;
+pub use session::{
+    ACK_TIMEOUT, ACTION_QUEUE, Item, JOURNAL_BATCHES_MAX, JOURNAL_BYTES_MAX, JOURNAL_STREAMS_MAX,
+    Port, REPLIES_MAX, REPLY_BYTES_MAX, SNAPSHOT_FLOOR, SessionConfig, SessionEnd, SessionReport,
+    WRITE_TIMEOUT, serve_session,
+};
 
 /// The socket's file name in the socket directory.
 pub const SOCKET_NAME: &str = "engine.sock";
