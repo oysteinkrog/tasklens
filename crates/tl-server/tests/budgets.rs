@@ -11,7 +11,7 @@
 //!   client uses at most 10% more CPU time than today's in-process engine with the window hidden
 //!   to the tray (leader decision on tasklens-q4x76.15, Q3 A).
 //! - `wire_bytes_of_the_real_engine_on_this_host`: the bytes a Processes tab session and a
-//!   hidden host would send, from this host's real snapshots. A cross-check of the synthetic
+//!   hidden host send, from the snapshots this host's real engine publishes to a session. A cross-check of the synthetic
 //!   fixture in `tl-remote/tests/budgets.rs`; it prints and asserts nothing.
 
 #![allow(clippy::unwrap_used)]
@@ -25,7 +25,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
+use tl_engine::client_session::ClientSessionId;
+use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode, SessionPort};
 use tl_model::client::EngineClient;
 use tl_model::demand::{ColumnSet, CpuDemand, Demand};
 use tl_model::ids::ColumnId;
@@ -292,19 +293,19 @@ fn part_sizes(frame: &SnapshotFrame) -> Vec<(&'static str, usize)> {
     out
 }
 
-/// Runs one session against `engine` for `MEASURE`: one frame per second from the newest
-/// publish, acknowledged at once, the first frame complete.
-fn session_bytes(engine: &EngineHandle) -> (Wire, Arc<Snapshot>) {
+/// Runs one session for `MEASURE`: one frame per second from the session's newest publish,
+/// acknowledged at once, the first frame complete.
+fn session_bytes(port: &SessionPort) -> (Wire, Arc<Snapshot>) {
     let mut encoder = DeltaEncoder::default();
     let mut writer = FrameWriter::new().unwrap();
     let mut wire = Wire::default();
     let begin = Instant::now();
-    let mut last = engine.latest();
+    let mut last = port.latest();
     for second in 0..MEASURE.as_secs() {
         std::thread::sleep(
             (begin + Duration::from_secs(second)).saturating_duration_since(Instant::now()),
         );
-        last = engine.latest();
+        last = port.latest();
         let now_ns = begin.elapsed().as_nanos() as u64;
         let built = encoder.next_frame(&last, now_ns).unwrap().unwrap();
         let frame = built.frame;
@@ -370,13 +371,18 @@ fn report(name: &str, wire: &Wire, last: &Snapshot) {
 fn wire_bytes_of_the_real_engine_on_this_host() {
     let tmp = tempfile::tempdir().unwrap();
     let engine = start_engine(tmp.path());
-    engine.set_demand(processes_tab_demand());
+    // The bytes are those of a connected session, which gets only the parts its demand asks
+    // for; the local window is hidden, as in the service.
+    engine.set_demand(hidden_window_demand());
+    let port = engine.open_session(ClientSessionId(1)).unwrap();
+    port.set_demand(processes_tab_demand());
     std::thread::sleep(RINGS_FULL);
-    let (wire, last) = session_bytes(&engine);
+    let (wire, last) = session_bytes(&port);
     report("Processes tab session", &wire, &last);
-    engine.set_demand(hidden_host_demand());
+    port.set_demand(hidden_host_demand());
     std::thread::sleep(Duration::from_secs(5));
-    let (wire, last) = session_bytes(&engine);
+    let (wire, last) = session_bytes(&port);
     report("hidden host", &wire, &last);
+    drop(port);
     assert!(engine.shutdown().clean());
 }
