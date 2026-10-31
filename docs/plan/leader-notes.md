@@ -1028,3 +1028,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-30 o55.54 held: chrome rule = box height - plot heights - 16 px per allowed label line (one per plot group or meter row) <= 40 px; x ticks overlay inside plots; Network peak inline, totals in tooltip; Memory/Timeline exempt. Requeued.
 - 2026-10-30 o55.54 round 2: the plot's 1 px outline counts as plot (dilate by the outline width only is approved); Disks (~42 px) takes its 2 px from cell gaps. Requeued.
 - 2026-10-31 q4x76.18 held: history worker channel becomes level-triggered (each send carries the full wanted (session, range) set incl. None, worker reconciles, no Forget message, newest set wins); 2000-step model test with random drops. Requeued.
+- 2026-10-31 q4x76.18 round 2: None answers come before any store access on every wanted set (start, restart, store failure); model test adds restart and store-failure steps. Requeued.
