@@ -1047,3 +1047,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31 q4x76.8 prep: switching proxy client; hub orders by (generation, seq); 3 s socket fallback; status chip segment; rescue mode never writes history. Requeued.
 - 2026-10-31 q4x76.8 held: up = handshake complete, not socket accepted; every blocking step of an attempt under one overall deadline; sweep engine_link.rs blocking calls. Requeued.
 - 2026-10-31 q4x76.10 held: ending an operation wakes every blocked step (poll on non-blocking fds or shut down every fd); added to ADR-018 rule 1; sweep ssh.rs and bridge.rs. Requeued.
+- 2026-10-31 q4x76.9 prep: per-kind network totals in the engine; host_settings snapshot part + set_host_settings; engine-lock holder owns engine.toml; split into .9 + .22 .23 .24 (.11 and .16 wait for .24). Requeued.
