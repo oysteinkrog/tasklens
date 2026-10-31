@@ -7,13 +7,16 @@
 //! The rescue window (`--low-memory`) holds no lock and only reads the file; a change made there
 //! stays in its engine's memory.
 //!
-//! A switch to the service closes the file before the window's engine stops and before the lock
-//! is released. A write that is under way finishes first, and any later write gets
-//! `EngineStopped`. So the service, which loads the file only after it has taken the lock, sees
+//! Writes run on their own thread, one at a time in the order they were sent, so the caller (the
+//! UI thread) never waits for the disk. A switch to the service closes the file before the
+//! window's engine stops and before the lock is released. Every write sent before that finishes
+//! first, and any later write gets `EngineStopped`. So the service, which loads the file only after it has taken the lock, sees
 //! every change the window made.
 
 use std::path::Path;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tl_model::actions::ActionEvent;
@@ -83,9 +86,24 @@ pub fn local_engine(
     stop: Box<dyn FnOnce() + Send>,
 ) -> LocalEngine {
     install(file.current());
+    let shared = host_settings::SharedHostSettings::new(file, install);
+    let (tx, writes) = mpsc::channel();
+    let writer = match thread::Builder::new()
+        .name("tl-host-settings".into())
+        .spawn(move || write_all(&shared, &writes))
+    {
+        Ok(thread) => Some(Writer { tx, thread }),
+        Err(e) => {
+            warn!(
+                target: "tasklens::engine",
+                "host settings thread did not start, so host settings cannot be changed: {e}"
+            );
+            None
+        }
+    };
     let client = Arc::new(OwningClient {
         engine,
-        file: Mutex::new(Some(host_settings::SharedHostSettings::new(file, install))),
+        writer: Mutex::new(writer),
     });
     let closer = Arc::clone(&client);
     LocalEngine {
@@ -97,22 +115,52 @@ pub fn local_engine(
     }
 }
 
+/// A host settings change waiting for the writer thread.
+struct Write {
+    base_rev: u64,
+    changes: HostSettingsChanges,
+    reply: async_channel::Sender<SetHostSettingsReply>,
+}
+
+/// The thread that owns `engine.toml` and the queue to it.
+struct Writer {
+    tx: mpsc::Sender<Write>,
+    thread: JoinHandle<()>,
+}
+
+/// The writer thread: stores each change in the order it was sent and replies. Ends once every
+/// sender is gone and the queue is empty.
+fn write_all(shared: &host_settings::SharedHostSettings, writes: &mpsc::Receiver<Write>) {
+    while let Ok(write) = writes.recv() {
+        let reply = shared.set(write.base_rev, &write.changes);
+        // The caller may have dropped its receiver; the change is stored either way.
+        let _ = write.reply.try_send(reply);
+    }
+}
+
 /// The window's own engine with `engine.toml`: host settings writes go through the file, every
 /// other call goes to the engine.
 struct OwningClient {
     engine: Arc<dyn EngineClient>,
     /// `None` once closed.
-    file: Mutex<Option<host_settings::SharedHostSettings>>,
+    writer: Mutex<Option<Writer>>,
 }
 
 impl OwningClient {
-    fn file(&self) -> MutexGuard<'_, Option<host_settings::SharedHostSettings>> {
-        self.file.lock().unwrap_or_else(PoisonError::into_inner)
+    fn writer(&self) -> MutexGuard<'_, Option<Writer>> {
+        self.writer.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Waits for a write that is under way, then refuses every later one.
+    /// Refuses every later write, then waits until every write sent before has been stored.
     fn close(&self) {
-        *self.file() = None;
+        // The guard is dropped at the end of this statement, so callers never wait on the join.
+        let writer = self.writer().take();
+        if let Some(Writer { tx, thread }) = writer {
+            drop(tx);
+            if thread.join().is_err() {
+                warn!(target: "tasklens::engine", "host settings thread panicked");
+            }
+        }
     }
 }
 
@@ -149,9 +197,10 @@ impl EngineClient for OwningClient {
         self.engine.set_settings(settings);
     }
 
-    /// Checks `base_rev` against `engine.toml`'s revision, stores the change and hands it to the
-    /// engine, as the service does. A write from another generation gets a closed channel, as in
-    /// the engine. `Err(EngineStopped)` once the file is closed.
+    /// Queues the change for the writer thread and returns at once. The thread checks `base_rev`
+    /// against `engine.toml`'s revision, stores the change and hands it to the engine, as the
+    /// service does. A write from another generation gets a closed channel, as in the engine.
+    /// `Err(EngineStopped)` once the file is closed.
     fn set_host_settings(
         &self,
         generation: u64,
@@ -161,16 +210,20 @@ impl EngineClient for OwningClient {
         if generation != self.engine.generation() {
             return Ok(async_channel::bounded(1).1);
         }
-        let reply = {
-            let file = self.file();
-            let Some(shared) = &*file else {
-                return Err(CommandError::EngineStopped);
-            };
-            shared.set(base_rev, &changes)
+        let (reply, rx) = async_channel::bounded(1);
+        let writer = self.writer();
+        let Some(writer) = &*writer else {
+            return Err(CommandError::EngineStopped);
         };
-        let (tx, rx) = async_channel::bounded(1);
-        // The channel is new and has one free slot, so this cannot fail.
-        let _ = tx.try_send(reply);
+        // Sent under the lock, so `close` cannot drop the sender between the check and the send.
+        writer
+            .tx
+            .send(Write {
+                base_rev,
+                changes,
+                reply,
+            })
+            .map_err(|_| CommandError::EngineStopped)?;
         Ok(rx)
     }
 
@@ -227,7 +280,7 @@ mod tests {
         let rx = client
             .set_host_settings(client.generation(), base_rev, interval(ms))
             .unwrap();
-        rx.try_recv().unwrap()
+        rx.recv_blocking().unwrap()
     }
 
     /// The test that the bead names: a setting changed under the fallback engine is seen by the
@@ -326,6 +379,65 @@ mod tests {
             Err(CommandError::EngineStopped)
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), stored);
+    }
+
+    /// The UI thread never waits for the disk: `set_host_settings` returns while the writer thread
+    /// is still busy. Writes are stored in the order they were sent, and `stop` returns only once
+    /// every write sent before it is stored.
+    #[test]
+    fn writes_run_off_the_calling_thread_in_order_and_finish_before_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = TestBackend::new(0, 1);
+        let publisher = Arc::clone(&backend);
+        let (entered_tx, entered) = async_channel::unbounded::<u64>();
+        let (release, gate) = async_channel::unbounded::<()>();
+        let engine = local_engine(
+            open(tmp.path()),
+            backend,
+            Box::new(move |h: &HostSettings| {
+                if h.rev > 1 {
+                    let _ = entered_tx.send_blocking(h.rev);
+                    let _ = gate.recv_blocking();
+                }
+                publisher.publish_host(h.rev, h.clone());
+            }),
+            Box::new(|| {}),
+        );
+        let client = Arc::clone(&engine.client);
+        let send = |base_rev, ms| {
+            client
+                .set_host_settings(client.generation(), base_rev, interval(ms))
+                .unwrap()
+        };
+
+        let first = send(1, 500);
+        // The writer thread now holds the first write until the gate opens, yet the calls return.
+        assert_eq!(entered.recv_blocking().unwrap(), 2);
+        let second = send(2, 600);
+        let third = send(3, 700);
+        assert!(
+            first.try_recv().is_err(),
+            "the first reply waits for the writer thread"
+        );
+
+        for _ in 0..3 {
+            release.send_blocking(()).unwrap();
+        }
+        (engine.stop)();
+        assert_eq!(
+            first.try_recv().unwrap(),
+            SetHostSettingsReply::Ack { rev: 2 }
+        );
+        assert_eq!(
+            second.try_recv().unwrap(),
+            SetHostSettingsReply::Ack { rev: 3 }
+        );
+        assert_eq!(
+            third.try_recv().unwrap(),
+            SetHostSettingsReply::Ack { rev: 4 }
+        );
+        let read = read_only(tmp.path());
+        assert_eq!((read.rev, read.values.interval_ms), (4, 700));
     }
 
     #[test]
