@@ -6717,9 +6717,19 @@ mod page {
         });
         set_disk_arrange(&mut r, "auto");
         widest_rates(&mut r);
-        let gap = r.vcx.update(|_, cx| tl_ui::theme::metrics(cx).sp[2]);
         let mut pairs = 0;
-        for (w, h) in [(1200., 900.), (900., 560.), (500., 900.)] {
+        for (pct, (w, h)) in [100u16, 150, 200]
+            .into_iter()
+            .flat_map(|pct| [(1200., 900.), (900., 560.), (500., 900.)].map(|wh| (pct, wh)))
+        {
+            let gap = r.vcx.update(|_, cx| {
+                let appearance = tl_model::settings::AppearanceSettings {
+                    ui_scale_pct: pct,
+                    ..Default::default()
+                };
+                tl_ui::theme::metrics::recompute(&appearance, cx);
+                tl_ui::theme::metrics(cx).sp[2]
+            });
             r.vcx.simulate_resize(size(px(w), px(h)));
             draw(r.vcx);
             let shown: Vec<&DeviceKey> = keys.iter().take(shown_disks(&mut r)).collect();
@@ -6733,7 +6743,10 @@ mod page {
                     .into_iter()
                     .fold(px(0.), |m, x| if x > m { x } else { m });
                 let next = r.bounds_of(head_id(pair[1], "name")).left();
-                assert!(next - last >= gap - px(0.5), "{w}x{h} {last:?} to {next:?}");
+                assert!(
+                    next - last >= gap - px(0.5),
+                    "{pct}% {w}x{h} {last:?} to {next:?}"
+                );
                 pairs += 1;
             }
         }
