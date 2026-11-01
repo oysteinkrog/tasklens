@@ -8274,14 +8274,21 @@ mod page {
                     .expect("cell");
                 (c.row, c.col)
             };
-            let drawn_order = |id: u32| {
-                let b = r
-                    .vcx
-                    .update(|_, cx| gpu.read(cx).drawn_bounds(id))
-                    .expect("drawn");
-                (f32::from(b.origin.y) as i32, f32::from(b.origin.x) as i32)
-            };
             let mut by_drawn: Vec<u32> = parts.iter().map(|p| p.0).chain([vram]).collect();
+            let at: Vec<(u32, (i32, i32))> = r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                by_drawn
+                    .iter()
+                    .map(|id| {
+                        let b = g.drawn_bounds(*id).expect("drawn");
+                        (
+                            *id,
+                            (f32::from(b.origin.y) as i32, f32::from(b.origin.x) as i32),
+                        )
+                    })
+                    .collect()
+            });
+            let drawn_order = |id: u32| at.iter().find(|(i, _)| *i == id).map(|(_, p)| *p);
             let mut by_cell = by_drawn.clone();
             by_drawn.sort_by_key(|id| drawn_order(*id));
             by_cell.sort_by_key(|id| cell(*id));

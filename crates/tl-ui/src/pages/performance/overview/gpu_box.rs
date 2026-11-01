@@ -39,14 +39,17 @@ use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
+    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP};
+use tl_model::layout::{
+    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
+};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
@@ -894,6 +897,7 @@ impl GpuBox {
             notify_count: Cell::new(0),
         };
         this.build_sections(gpus, cx);
+        this.sync_slots(gpus, cx);
         this
     }
 
