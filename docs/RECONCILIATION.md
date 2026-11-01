@@ -2056,13 +2056,17 @@ env_mask = true
 
 [performance]
 graph_range_s = 60             # 30 | 60 | 300 | 600 (300 and 600 from P2)
-cpu_graph_mode = "per_core"    # overall | per_core | all_cores_overlaid | all_cores_stacked
+cpu_graph_mode = "per_core"    # overall | per_core | all_cores_overlaid | all_cores_stacked | board; the CPU page flow preset (ADR-019 phase 3)
+cpu_board_sort = "number"      # number | load (crw.104)
 cpu_kernel = true
-cpu_secondary_graph = "power"  # none | power | clock | temperature
-gpu_optional_graphs = []       # subset of ["power", "clocks"]
+cpu_secondary_graph = "power"  # none | power | clock | clocks | temperature; a widget of the CPU page flow layout
+gpu_optional_graphs = []       # subset of ["power", "clocks"]; widgets of the GPU page flow layout
 hidden_gpu_engines = []        # engine keys
 memory_composition = true
 memory_swap_graph = true
+memory_view = "usage"          # usage | apps; the Memory page flow preset (UI-PRF-060)
+# The page keys above are not converted (ADR-019 phase 3): a page without a [[performance.layouts]] entry builds its flow
+#   layout from them in memory; a page with an entry ignores them, except cpu_kernel, cpu_board_sort and hidden_gpu_engines.
 show_disks = true
 show_gpus = true
 show_fans = true
@@ -2085,7 +2089,10 @@ overview_row_unit_px = 40      # 24..=80, snap grid row height in logical px (UI
 timeline_click = "pause"       # pause | preview | history; history only while history.enabled (UI-PRF-057, P2)
 
 [[performance.layouts]]         # P2, ADR-019 (D-041): one entry per widget container; none by default
-container = "overview.gpu"     # overview.cpu | overview.memory | overview.gpu | overview.disk | overview.net | overview.processes | overview.timeline; other containers and newer versions are kept and written back unchanged
+container = "overview.gpu"     # overview.cpu | overview.memory | overview.gpu | overview.disk | overview.net | overview.processes | overview.timeline;
+#   page.<persistent device key> for a device page (phase 3): page.cpu, page.memory, page.gpu:<id>, page.disk:<id>, page.net:<id>,
+#   page.fan:<id>, page.bat:<id>, page.aggregate:disk, page.aggregate:gpu; an entry of a device that is gone is kept;
+#   other containers, page kinds this build does not support and newer versions are kept and written back unchanged
 version = 2                    # LAYOUT_VERSION 2; reads 1 and 2; written as 1 only for an overview.gpu entry with phase 1 content alone (single-metric widgets), else 2
 preset = { id = "engine_charts", arrange = "auto", split = 0.5 } # flow layout only (omit for a grid layout); id: a mode of the box kind in OVERVIEW_BOX_MODES; arrange: auto | vertical | horizontal; split: 0.2..=0.8
 # CPU box presets also: power_split = 0.1..=0.5, power_placement = "full_width" | "under_graph" (written only when set)
@@ -2098,11 +2105,18 @@ next_id = 1                    # the id the next new widget takes; only grows, r
 #   cpu total | kernel | freq | temp | power | power_cores | power_draw | core_clocks | pressure; cpu:<n> load | freq;
 #   memory used | cached | available | swap | commit | pressure | composition;
 #   disk:* and aggregate:disk active | read | write | io, disk:* also temp; net:* and aggregate:net rx | tx | traffic
+# phase 3 keys: cpu cores_overlaid | cores_stacked | clock | freq_max; memory physical | commit_pct | dirty;
+#   gpu:* memory | vram_shared | clocks | fan; disk:* response | total_read | total_written; net:* total_rx | total_tx | signal;
+#   fan:* speed | rpm | pwm | temp; bat:* power | percent; aggregate:gpu util | memory
 # group widget: { id, device = "cpu" | "aggregate:disk" | "aggregate:net" | "gpu:<key>" (slot in GPU box flow only),
 #   group = "cores" | "disks" | "adapters" | "engines", metric = "<member key>" ("engine:*" for engines), forms, cells as above,
 #   items = "rows" | "cells" (default rows for cores, cells otherwise), limit = 1..=256 (omitted = all), arrange = auto | vertical | horizontal (cells only, omitted = auto) }
-# fixed widget: { id, fixed = "processes" (overview.processes) | "timeline" (overview.timeline) | "memory_by_app" (overview.memory), cells as above }; at most one per kind; no forms
-# Grid columns: overview.cpu, overview.processes, overview.timeline 12; overview.memory, overview.gpu, overview.disk, overview.net 6.
+# fixed widget: { id, fixed = "processes" (overview.processes) | "timeline" (overview.timeline) | "memory_by_app" (overview.memory, page.memory), cells as above }; at most one per kind; no forms
+# page fixed widgets (phase 3): "details" (every page); "cpu_core_grid", "cpu_core_board" (page.cpu); "gpu_engine_grid", "gpu_displays" (page.gpu:*);
+#   "memory_bar", "memory_compressed", "swap_devices", "memory_modules" (page.memory); "disk_partitions" (page.disk:*); "net_settings" (page.net:*);
+#   "battery_history" (page.bat:*)
+# Grid columns: overview.cpu, overview.processes, overview.timeline 12; overview.memory, overview.gpu, overview.disk, overview.net 6; every page.* 12.
+# Page entries are written as version 2. A reset of a page removes its entry only; the page keys stay.
 # The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v2 once (pre-layouts-v1 from 1.2.0 is left alone) (ADR-019).
 # A reset to the default removes the entry and the old keys its box converts from: GPU mode, split, arrange, hidden; CPU mode, split, arrange,
 #   power, power_split, power_placement, clocks; Memory, Disk and Net mode, split, arrange (ADR-019).
