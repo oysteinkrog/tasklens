@@ -3458,7 +3458,7 @@ tl-app -> tl-ui (shell) -> tl-ui-sys -> tl-ui-procs --------\
                                                               \-> tl-ui-table --/
 ```
 
-The ADR-001 rule 1 closure for tl-ui applies to every `tl-ui-*` crate: no tl-engine, tl-collect or tl-ops, and arc-swap and zbus only through gpui-kit. asupersync and zbus stay out of every tl-ui closure.
+The ADR-001 rule 1 closure for tl-ui applies to every `tl-ui-*` crate: no tl-engine, tl-collect or tl-ops, and arc-swap and zbus only through gpui-kit. asupersync stays out of every tl-ui closure (rule 2).
 
 **Test hooks.** Test-only code is gated on `cfg(any(debug_assertions, feature = "test-hooks"))`. Items that only unit tests use may add `test` to that list. The `test-hooks` feature stays only for release-mode bench builds (`bench` enables it). Debug builds (`cargo run`, the smoke harness) compile the hooks behind their runtime checks; release builds never do. A hook that changes behaviour must do nothing until a test turns it on. CS-B2 sorts the hooks into recorders, readers and switches and adds the list of switches to this ADR. CS-B2 to CS-B7 move the gates one directory at a time, and CS-B8 removes `--features test-hooks` from tl-app's dev-dependency, the tests, the scripts and the docs.
 

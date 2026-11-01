@@ -226,7 +226,8 @@ on every loop.
 3. Test hooks are compiled into debug builds (`cargo run`, smoke harness) behind their runtime checks, never
    into release builds.
 4. cargo-hakari is allowed if CS-B9 shows that pinning features in `[workspace.dependencies]` does not stop
-   `-p` sets from rebuilding dependencies. asupersync and zbus stay out of the tl-ui closures.
+   `-p` sets from rebuilding dependencies. The hakari crate must not give a tl-ui crate a direct asupersync or zbus
+   dependency (ADR-001 rule 1).
 5. Phase 3 (tasklens-hzire) starts once CS-E7 (tl-ui-perf) and CS-F5 have closed, not after the whole epic.
 6. During the split, moved code keeps its old paths through root re-exports. CS-J1 rewrites them to direct
    crate paths after CS-E10 and CS-F9, before the final measurement.
