@@ -502,12 +502,19 @@ pub fn editor_of(
 
 /// Whether a box of the page of `hub` is in Edit Widgets.
 pub fn any_editing(hub: &Entity<SnapshotHub>, cx: &App) -> bool {
+    editing_except(hub, None, cx)
+}
+
+/// Whether a container of `hub`'s window other than editor `except` is in Edit Widgets. An
+/// editor asks this while it is being updated, so it must not read itself.
+fn editing_except(hub: &Entity<SnapshotHub>, except: Option<EntityId>, cx: &App) -> bool {
     cx.try_global::<WidgetEditors>().is_some_and(|editors| {
         editors
             .0
             .iter()
             .filter(|(h, _, _)| *h == hub.entity_id())
             .filter_map(|(_, _, e)| e.upgrade())
+            .filter(|e| Some(e.entity_id()) != except)
             .any(|e| e.read(cx).is_editing())
     })
 }
@@ -672,7 +679,7 @@ impl WidgetEditor {
             return;
         }
         // At most one container of the window is in Edit Widgets.
-        if any_editing(&self.hub, cx) {
+        if editing_except(&self.hub, Some(cx.entity_id()), cx) {
             return;
         }
         window.focus(&self.focus, cx);

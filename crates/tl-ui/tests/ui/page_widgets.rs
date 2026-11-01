@@ -16,11 +16,14 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
-use tl_model::ids::DeviceIdx;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{FixedWidget, WidgetContent};
 use tl_model::layout_boxes::{DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ};
+use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{DiskTotals, Metric};
+use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -134,6 +137,19 @@ fn totals(idx: u16, read: f64) -> DiskTotals {
     }
 }
 
+/// One series of the aggregate with one valid sample of `v`.
+fn series(metric: MetricId, v: f32, version: u64) -> Arc<SeriesView> {
+    Arc::new(SeriesView {
+        id: SeriesId {
+            device: DeviceIdx(AGG),
+            metric,
+        },
+        version,
+        period_ns: 100_000_000,
+        samples: Arc::from([Sample::valid(now_boot_ns(), v)]),
+    })
+}
+
 struct Rig<'a> {
     engine: Arc<FakeEngine>,
     page: Entity<AggregateDiskPage>,
@@ -156,6 +172,24 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
             .iter()
             .map(|(i, _)| (DeviceIdx(*i), totals(*i, 1.)))
             .collect();
+        // The aggregate's series, which its charts draw and read their values from.
+        let version = sys.header.version;
+        let views: Vec<_> = [
+            (MetricId::DISK_ACTIVE, 40.),
+            (MetricId::DISK_READ, (2. * MIB) as f32),
+            (MetricId::DISK_WRITE, 0.),
+        ]
+        .into_iter()
+        .map(|(metric, v)| series(metric, v, version))
+        .collect();
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            series: views.into(),
+            slow: Arc::from([]),
+        });
     });
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {

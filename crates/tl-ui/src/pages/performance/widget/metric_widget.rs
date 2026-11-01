@@ -45,10 +45,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
-    relative, size,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, relative, size,
 };
 use tl_model::ids::SeriesId;
 use tl_model::layout::{FormSet, WidgetSetting};
@@ -997,7 +997,6 @@ fn chart_spec(key: &ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) ->
         smooth: s.smooth,
         background: if page { ChartBg::Window } else { ChartBg::List },
         hover: page,
-        ..ChartSpec::default()
     }
 }
 
