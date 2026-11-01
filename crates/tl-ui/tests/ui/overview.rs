@@ -9640,7 +9640,8 @@ mod page {
                 "{what}: widget {id} back"
             );
             draw(r.vcx);
-            for &name in &mine {
+            // Undo puts the widget back but not the selection, so its outline stays off.
+            for &name in mine.iter().filter(|&&name| name != outline) {
                 assert!(drawn(r, name), "{what}: {name} back after Undo");
             }
         }
