@@ -31,6 +31,7 @@ use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::YScale;
+use tl_ui::chart::labels::LabelKind;
 use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, open_context_menu};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
@@ -41,8 +42,8 @@ use tl_ui::pages::performance::widget::compose::{
 };
 use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
 use tl_ui::pages::performance::widget::edit::{
-    ADD_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, WidgetEditor, corner_id, default_layout, editor_id,
-    frame_id, gear_id, grip_id,
+    ADD_ID, APPLY_ID, CANCEL_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, UNDO_ID, WidgetEditor,
+    corner_id, default_layout, editor_id, frame_id, gear_id, grip_id,
 };
 use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
@@ -2181,7 +2182,8 @@ fn overview_widget_add_scrolls_new_widget_into_view(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_widget_add_taller_than_body_shows_top(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    let (e, _) = r.editor(four_widgets(), 176., 172.);
+    // The one-line toolbar leaves 108 px of body, under the new widget's 113 px.
+    let (e, _) = r.editor(four_widgets(), 176., 140.);
     r.start(&e);
     let id = r
         .ed(&e, |e, _, cx| e.add(&source(2, "vram"), cx))
@@ -2192,5 +2194,96 @@ fn overview_widget_add_taller_than_body_shows_top(cx: &mut TestAppContext) {
         .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
         .expect("scrolling body");
     let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("drawn");
+    assert!(
+        w.size.height > body.size.height,
+        "{w:?} taller than {body:?}"
+    );
     assert!((w.top() - body.top()).abs() <= px(0.5), "{w:?} {body:?}");
+}
+
+/// The edit toolbar stays one row at the GPU box minimum width (200 px) at every scale, with
+/// Cancel and Apply inside the strip (tasklens-lhliq.10).
+#[gpui_kit::test]
+fn overview_widget_edit_toolbar_one_row_at_min_width(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, _) = r.editor(four_widgets(), 200., 220.);
+    r.start(&e);
+    for pct in [100u16, 150, 200] {
+        let s = f32::from(pct) / 100.;
+        r.set_ui_scale(pct);
+        r.ed(&e, |_, _, cx| cx.notify());
+        let host = r.host.clone();
+        r.vcx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                if let Some(x) = h.editor.as_mut() {
+                    x.1 = 200. * s;
+                    x.2 = 220. * s;
+                }
+                cx.notify();
+            })
+        });
+        draw(r.vcx);
+        let bar = r.vcx.debug_bounds(TOOLBAR_ID).expect("toolbar");
+        assert!(
+            (f32::from(bar.size.height) - 32. * s).abs() < 0.5,
+            "{pct}%: one 32 px row, got {:?}",
+            bar.size
+        );
+        let mid = bar.center().y;
+        for id in [ADD_ID, UNDO_ID, RESET_ID, CANCEL_ID, APPLY_ID] {
+            let b = r
+                .vcx
+                .debug_bounds(leak(format!("TlButton-{id}")))
+                .unwrap_or_else(|| panic!("{pct}%: {id} is drawn"));
+            assert!(
+                b.left() >= bar.left() && b.right() <= bar.right(),
+                "{pct}%: {id} {b:?} inside {bar:?}"
+            );
+            assert!(
+                b.top() >= bar.top() && b.bottom() <= bar.bottom(),
+                "{pct}%: {id} {b:?} on the row of {bar:?}"
+            );
+            assert!(
+                (f32::from(b.center().y - mid)).abs() < 1.5,
+                "{pct}%: {id} shares the row"
+            );
+        }
+    }
+}
+
+/// The gear covers no chart label: not the scale label in the plot's top-right corner, and it
+/// sits clear of the grip (tasklens-lhliq.10).
+#[gpui_kit::test]
+fn overview_widget_edit_gear_clear_of_chart_labels(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    for id in [1u32, 2] {
+        let gear = r.vcx.debug_bounds(leak(gear_id(id))).expect("gear");
+        let grip = r.vcx.debug_bounds(leak(grip_id(id))).expect("grip");
+        assert!(!gear.intersects(&grip), "{gear:?} vs {grip:?}");
+        let chart = r
+            .vcx
+            .read_entity(&c, |c, cx| {
+                c.widget(id).and_then(|w| w.read(cx).chart().cloned())
+            })
+            .expect("chart");
+        let labels = r.vcx.read_entity(&chart, |v, _| {
+            [LabelKind::AxisMax, LabelKind::Heading, LabelKind::Value]
+                .into_iter()
+                .filter_map(|k| v.label_cache().painted(k))
+                .map(|p| (p.kind, p.bounds()))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            labels.iter().any(|(k, _)| *k == LabelKind::AxisMax),
+            "widget {id} paints its scale label"
+        );
+        for (k, b) in labels {
+            assert!(
+                !gear.intersects(&b),
+                "widget {id}: gear {gear:?} on {k:?} {b:?}"
+            );
+        }
+    }
 }

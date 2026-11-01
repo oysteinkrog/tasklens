@@ -9,10 +9,10 @@
 //! [`WidgetEditor`] is the entity a box hosts around its [`WidgetContainer`]. Outside Edit
 //! Widgets it only draws the container. In Edit Widgets it adds:
 //!
-//! - the 32 px edit toolbar: Add Widget, Undo and Reset at the left, Cancel and Apply at the
-//!   right (the right group wraps under the left one below 360 px);
+//! - the 32 px edit toolbar, always one line: Add Widget, Undo and Reset as icon buttons with
+//!   tooltips at the left, Cancel (icon) and Apply at the right;
 //! - the edit chrome over each widget: a 1 px divider border (2 px accent when selected), the
-//!   grip at the top left, the gear at the top right and the resize corner at the bottom right;
+//!   grip and the gear at the top left and the resize corner at the bottom right;
 //! - the placement preview of a drag: an accent outline of the target cells, the widget at its
 //!   old place dimmed, and the other widgets where the drop puts them;
 //! - the keys of the `PerfWidgetEdit` context (Tab, Alt+arrows, Alt+Shift+arrows, Delete,
@@ -69,11 +69,9 @@ use crate::theme::{current, metrics};
 
 /// The most undo steps an edit keeps.
 pub const UNDO_LIMIT: usize = 100;
-/// The edit toolbar's height, logical px; twice this when it wraps.
+/// The edit toolbar's height, logical px.
 pub const TOOLBAR_H: f32 = 32.;
-/// Below this box width the toolbar's right group wraps to a second line, logical px.
-pub const TOOLBAR_WRAP_W: f32 = 360.;
-/// The grip and the gear, logical px.
+/// The grip and the gear, logical px. The gear sits right of the grip.
 pub const HANDLE: f32 = 16.;
 /// The resize corner, logical px.
 pub const CORNER: f32 = 10.;
@@ -1164,23 +1162,25 @@ impl WidgetEditor {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let s = m.ui_scale;
-        let width = self.body.get().0;
-        let wrap = width > px(0.) && width < px(TOOLBAR_WRAP_W * s);
         let this = cx.entity().downgrade();
-        let button = |id: &'static str, kind: TlButtonKind, label: SharedString| {
-            TlButton::new(SharedString::from(id), kind)
-                .size(TlButtonSize::Sm)
-                .label(label)
+        let button = |id: &'static str, kind: TlButtonKind| {
+            TlButton::new(SharedString::from(id), kind).size(TlButtonSize::Sm)
+        };
+        // An icon button: the label is its tooltip.
+        let icon_button = |id: &'static str, icon: TlIcon, label: SharedString| {
+            button(id, TlButtonKind::Ghost)
+                .icon(icon)
+                .icon_size(m.icon.sm)
+                .tooltip(label)
         };
         let add = {
             let this = this.clone();
-            button(ADD_ID, TlButtonKind::Ghost, tr(cx, "perf-widget-add"))
-                .trailing_icon(TlIcon::ChevronDown)
-                .icon_size(m.icon.sm)
-                .on_click(move |ev, window, cx| {
+            icon_button(ADD_ID, TlIcon::Plus, tr(cx, "perf-widget-add")).on_click(
+                move |ev, window, cx| {
                     let at = ev.position();
                     let _ = this.update(cx, |e, cx| e.open_add_menu(at, window, cx));
-                })
+                },
+            )
         };
         let add_measure = {
             let bounds = Rc::clone(&self.add_bounds);
@@ -1190,7 +1190,7 @@ impl WidgetEditor {
         };
         let undo = {
             let this = this.clone();
-            button(UNDO_ID, TlButtonKind::Ghost, tr(cx, "perf-widget-undo"))
+            icon_button(UNDO_ID, TlIcon::Undo2, tr(cx, "perf-widget-undo"))
                 .disabled(!edit.can_undo())
                 .on_click(move |_, _, cx| {
                     let _ = this.update(cx, |e, cx| e.undo(cx));
@@ -1198,7 +1198,7 @@ impl WidgetEditor {
         };
         let reset = {
             let this = this.clone();
-            button(RESET_ID, TlButtonKind::Ghost, tr(cx, "perf-widget-reset")).on_click(
+            icon_button(RESET_ID, TlIcon::RotateCcw, tr(cx, "perf-widget-reset")).on_click(
                 move |_, window, cx| {
                     let _ = this.update(cx, |e, cx| e.request_reset(window, cx));
                 },
@@ -1206,13 +1206,14 @@ impl WidgetEditor {
         };
         let cancel = {
             let this = this.clone();
-            button(CANCEL_ID, TlButtonKind::Ghost, tr(cx, "perf-widget-cancel")).on_click(
+            icon_button(CANCEL_ID, TlIcon::X, tr(cx, "perf-widget-cancel")).on_click(
                 move |_, _, cx| {
                     let _ = this.update(cx, |e, cx| e.cancel(cx));
                 },
             )
         };
-        let apply = button(APPLY_ID, TlButtonKind::Primary, tr(cx, "perf-widget-apply"))
+        let apply = button(APPLY_ID, TlButtonKind::Primary)
+            .label(tr(cx, "perf-widget-apply"))
             .disabled(!edit.changed())
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |e, cx| {
@@ -1231,20 +1232,18 @@ impl WidgetEditor {
             .flex()
             .items_center()
             .gap(gap)
-            .when(wrap, |d| d.justify_end())
             .child(cancel)
             .child(apply);
-        let h = if wrap { TOOLBAR_H * 2. } else { TOOLBAR_H };
         div()
             .debug_selector(|| TOOLBAR_ID.to_owned())
             .flex_none()
             .w_full()
-            .h(px(h * s))
+            .h(px(TOOLBAR_H * s))
             .px(gap)
             .bg(theme.toolbar)
             .flex()
-            .when(wrap, |d| d.flex_col().justify_center())
-            .when(!wrap, |d| d.items_center().justify_between())
+            .items_center()
+            .justify_between()
             .child(left)
             .child(right)
             .into_any_element()
@@ -1296,7 +1295,8 @@ impl WidgetEditor {
                     .debug_selector(move || gear_id(id))
                     .absolute()
                     .top_0()
-                    .right_0()
+                    // Right of the grip, clear of the chart's scale label in the top right.
+                    .left(px(HANDLE * s))
                     // A press on the gear is not the start of a drag.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(button)

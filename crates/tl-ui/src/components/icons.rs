@@ -54,6 +54,7 @@ pub enum TlIcon {
     ArrowDownToLine,
     AppWindow,
     Settings2,
+    Undo2,
     Cpu,
     MemoryStick,
     Gpu,
@@ -64,7 +65,7 @@ pub enum TlIcon {
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 49] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronsRight,
@@ -106,6 +107,7 @@ impl TlIcon {
         Self::ArrowDownToLine,
         Self::AppWindow,
         Self::Settings2,
+        Self::Undo2,
         Self::Cpu,
         Self::MemoryStick,
         Self::Gpu,
@@ -159,6 +161,7 @@ impl TlIcon {
             Self::ArrowDownToLine => IconName::ArrowDownToLine,
             Self::AppWindow => IconName::AppWindow,
             Self::Settings2 => IconName::Settings2,
+            Self::Undo2 => IconName::Undo2,
             Self::Cpu => IconName::Cpu,
             Self::MemoryStick => IconName::MemoryStick,
             Self::Gpu => IconName::Gpu,
@@ -257,7 +260,7 @@ gpui_kit::assets::icon_assets!(
         Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert, Activity,
         Scaling, Gauge, ChartArea, Server, AppWindow, SlidersHorizontal, Archive, Cog, FileCode,
         FunnelX, Eject, Trash, ScanSearch, Terminal, ArrowDownToLine, Pencil, Plug, Clock,
-        CircleDot, Box, Gpu, Fan
+        CircleDot, Box, Gpu, Fan, Undo2
     ]
 );
 
