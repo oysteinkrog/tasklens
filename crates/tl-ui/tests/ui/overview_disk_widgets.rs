@@ -310,6 +310,28 @@ impl Rig<'_> {
         draw(self.vcx);
     }
 
+    /// The Network box's widgets draw `perf-widget-<id>` too, after the Disk box: take the
+    /// Network box off the page, so a Disk widget's debug selector finds the Disk widget.
+    fn leave_out_net(&mut self) {
+        use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
+        self.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                let perf = &mut d.settings.performance;
+                let mut layout = perf
+                    .overview
+                    .clone()
+                    .unwrap_or_else(OverviewLayoutSetting::grid_default);
+                layout.grid.retain(|b| b.kind != "net");
+                perf.overview = Some(layout);
+            });
+        });
+        draw(self.vcx);
+        assert!(
+            self.vcx.debug_bounds(NET_BOX_ID).is_none(),
+            "no Network box"
+        );
+    }
+
     /// nvme0n1 goes away from the catalog, or comes back.
     fn publish_nvme(&mut self, present: bool) {
         self.engine.publish_with(|s| {
@@ -327,6 +349,7 @@ impl Rig<'_> {
 #[gpui_kit::test]
 fn overview_disk_flow_matches_modes(cx: &mut TestAppContext) {
     let mut r = open(cx, 1200., 900.);
+    r.leave_out_net();
     let body = container_id(DISK_BOX_CONTAINER);
     let modes: [(&str, Option<&str>); 5] = [
         ("disk_charts", None),

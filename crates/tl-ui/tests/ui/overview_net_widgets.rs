@@ -51,7 +51,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 /// The network total's catalog index.
 const NET_AGG: u16 = 51;
 
-/// The two adapters: (catalog index, ifindex, name, kind). wlan0 is the busiest.
+/// The two adapters: (catalog index, ifindex, name, kind). wlan0 is the busiest: it uploads
+/// 1 GB/s.
 const ADAPTERS: [(u16, u32, &str, NetKind); 2] = [
     (30, 2, "eth0", NetKind::Wired),
     (33, 3, "wlan0", NetKind::Wireless),
@@ -127,12 +128,12 @@ fn catalog(version: u64, wlan: bool) -> DeviceCatalog {
     }
 }
 
-/// An adapter's record: `rx` bytes per second down, nothing up.
-fn totals(idx: u16, rx: f64) -> NetTotals {
+/// An adapter's record: `rx` bytes per second down, `tx` up.
+fn totals(idx: u16, rx: f64, tx: f64) -> NetTotals {
     NetTotals {
         device: DeviceIdx(idx),
         rx_bps: Metric::valid(rx),
-        tx_bps: Metric::valid(0.),
+        tx_bps: Metric::valid(tx),
         rx_total: 1 << 30,
         tx_total: 1 << 20,
         link_speed_mbps: Metric::default(),
@@ -140,11 +141,12 @@ fn totals(idx: u16, rx: f64) -> NetTotals {
     }
 }
 
-/// The adapters' records: eth0 at `eth0` B/s down, wlan0 at 100 000 B/s.
+/// The adapters' records: eth0 downloads `eth0` B/s, wlan0 downloads nothing and uploads
+/// 1 GB/s, so the download sum is eth0's and wlan0 stays the busiest.
 fn nets(eth0: f64) -> Arc<[(DeviceIdx, NetTotals)]> {
     Arc::from([
-        (DeviceIdx(ADAPTERS[0].0), totals(ADAPTERS[0].0, eth0)),
-        (DeviceIdx(ADAPTERS[1].0), totals(ADAPTERS[1].0, 100_000.)),
+        (DeviceIdx(ADAPTERS[0].0), totals(ADAPTERS[0].0, eth0, 0.)),
+        (DeviceIdx(ADAPTERS[1].0), totals(ADAPTERS[1].0, 0., 1e9)),
     ])
 }
 
@@ -472,10 +474,11 @@ fn overview_net_flow_matches_modes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_net_sample_renders_only_its_widgets(cx: &mut TestAppContext) {
     let mut r = open(cx, 1200., 900.);
+    // Steps of 1 MB/s (8 Mbps), so each sample changes the download text.
     let mut eth0 = 1000.;
     for mode in ["stacked", "combined", "adapter_charts"] {
         r.set_mode(mode);
-        eth0 += 1000.;
+        eth0 += 1_000_000.;
         r.publish_eth0(eth0);
         let net = r.net();
         let container = r.container();
@@ -515,7 +518,7 @@ fn overview_net_sample_renders_only_its_widgets(cx: &mut TestAppContext) {
         assert!(before_entity.is_some(), "{mode}: {changed} has an entity");
         let before = counts(&mut r, changed);
         let before_still = still.map(|id| counts(&mut r, id)[2]);
-        eth0 += 1000.;
+        eth0 += 1_000_000.;
         r.publish_eth0(eth0);
         let after = counts(&mut r, changed);
         assert_eq!(after[0], before[0], "{mode}: the box does not notify");

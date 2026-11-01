@@ -174,9 +174,12 @@ fn open(cx: &mut TestAppContext, cores: u16, w: f32, h: f32) -> Rig<'_> {
         settings.motion.smooth_graphs = false;
         // Raw core values: two samples a few ms apart barely move a smoothed bar.
         settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
-        // The Memory box's widgets would draw `perf-widget-<id>` too: leave the box out.
+        // The Memory and Network boxes' widgets would draw `perf-widget-<id>` too: leave the
+        // boxes out.
         let mut overview = OverviewLayoutSetting::grid_default();
-        overview.grid.retain(|b| b.kind != "memory");
+        overview
+            .grid
+            .retain(|b| b.kind != "memory" && b.kind != "net");
         settings.performance.overview = Some(overview);
         cx.set_global(BootSettings {
             settings,

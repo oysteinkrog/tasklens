@@ -8367,6 +8367,7 @@ mod page {
         use tl_ui::pages::performance::widget::metric_widget::widget_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        leave_out_disk_and_net(&mut r);
         let page = r.page.clone();
         let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
         let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
@@ -8527,7 +8528,7 @@ mod page {
         use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
-        leave_out_disks(&mut r);
+        leave_out_disk_and_net(&mut r);
         // A record for the GPU, so the rows show values.
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
@@ -8704,15 +8705,28 @@ mod page {
         }
     }
 
-    /// The Disk box's widgets draw `perf-widget-<id>` too, after the GPU box: hide the disks so
-    /// the Disk box leaves the page and a GPU widget's debug selector finds the GPU widget.
-    fn leave_out_disks(r: &mut Rig) {
+    /// The Disk and Network boxes' widgets draw `perf-widget-<id>` too, after the GPU box: hide
+    /// the disks so the Disk box leaves the page, and take the Network box off the page, so a
+    /// GPU widget's debug selector finds the GPU widget.
+    fn leave_out_disk_and_net(r: &mut Rig) {
+        use tl_model::settings::OverviewLayoutSetting;
         use tl_ui::pages::performance::overview::disk_box::DISK_BOX_ID;
+        use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
         r.vcx.update(|_, cx| {
-            TlSettings::update(cx, |d| d.settings.performance.show_disks = false);
+            TlSettings::update(cx, |d| {
+                let perf = &mut d.settings.performance;
+                perf.show_disks = false;
+                let mut layout = perf
+                    .overview
+                    .clone()
+                    .unwrap_or_else(OverviewLayoutSetting::grid_default);
+                layout.grid.retain(|b| b.kind != "net");
+                perf.overview = Some(layout);
+            });
         });
         draw(r.vcx);
         assert!(r.vcx.debug_bounds(DISK_BOX_ID).is_none(), "no Disk box");
+        assert!(r.vcx.debug_bounds(NET_BOX_ID).is_none(), "no Network box");
     }
 
     /// Every widget the container places is drawn by the box exactly there: each widget's
@@ -8780,7 +8794,7 @@ mod page {
         use tl_ui::pages::performance::overview::gpu_flow::widget_of;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
-        leave_out_disks(&mut r);
+        leave_out_disk_and_net(&mut r);
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;
@@ -8834,7 +8848,7 @@ mod page {
         use tl_ui::pages::performance::overview::gpu_flow::widget_of;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
-        leave_out_disks(&mut r);
+        leave_out_disk_and_net(&mut r);
         let publish = |r: &mut Rig, temp: Metric<f32>, power: f32| {
             r.engine.publish_with(|s| {
                 let sys = Arc::make_mut(&mut s.system);
@@ -8922,7 +8936,7 @@ mod page {
         use tl_ui::pages::performance::widget::container::container_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
-        leave_out_disks(&mut r);
+        leave_out_disk_and_net(&mut r);
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;

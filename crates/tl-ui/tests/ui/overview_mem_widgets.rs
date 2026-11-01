@@ -170,6 +170,11 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
+        // The Network box's widgets would draw `perf-widget-<id>` too, after the Memory box:
+        // leave the box out.
+        let mut overview = OverviewLayoutSetting::grid_default();
+        overview.grid.retain(|b| b.kind != "net");
+        settings.performance.overview = Some(overview);
         cx.set_global(BootSettings {
             settings,
             state: UiState::default(),
