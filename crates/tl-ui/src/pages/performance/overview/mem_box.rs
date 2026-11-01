@@ -311,13 +311,23 @@ pub struct MemRows {
     pub percents: [SharedString; ROWS],
 }
 
-/// The box's [`MemRows`], shared with its widgets. Two are equal when they are the same model.
+/// How the box lays its rows out on its last render: on one line (`wide`, else two), and in
+/// `rows` the text part's share of the row beside the sparkline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowGeom {
+    pub wide: bool,
+    pub share: f32,
+}
+
+/// The box's [`MemRows`] and [`RowGeom`], shared with its widgets. Two are equal when they are
+/// the same model. The box sets the geometry before its widgets render, so a resize that moves
+/// a row renders that row with the new geometry and no look changes.
 #[derive(Clone, Debug)]
-pub struct MemRowsRef(pub Rc<RefCell<MemRows>>);
+pub struct MemRowsRef(pub Rc<RefCell<MemRows>>, pub Rc<Cell<RowGeom>>);
 
 impl PartialEq for MemRowsRef {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Rc::ptr_eq(&self.0, &other.0) && Rc::ptr_eq(&self.1, &other.1)
     }
 }
 
@@ -661,10 +671,16 @@ impl MemBox {
             fraction: None,
             color: colors[i],
         });
-        let model = MemRowsRef(Rc::new(RefCell::new(MemRows {
-            rows,
-            percents: Default::default(),
-        })));
+        let model = MemRowsRef(
+            Rc::new(RefCell::new(MemRows {
+                rows,
+                percents: Default::default(),
+            })),
+            Rc::new(Cell::new(RowGeom {
+                wide: true,
+                share: MODES[0].split.unwrap_or_default(),
+            })),
+        );
         let flow = mem_flow::flow_layout(default_keys());
         let saved = saved_grid(cx);
         let plan = PlanCell::default();
@@ -1495,7 +1511,7 @@ pub(crate) fn mem_row_part(
     rows: &MemRows,
     index: usize,
     wide: bool,
-    spark: Option<&(Entity<ChartView>, f32)>,
+    spark: Option<(&Entity<ChartView>, f32)>,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
@@ -1527,7 +1543,7 @@ pub(crate) fn mem_row_part(
                 .flex_col()
                 .flex_shrink(1.)
                 .min_w_0()
-                .w(relative(*share))
+                .w(relative(share))
                 .h_full()
                 .child(text),
         )
@@ -1615,12 +1631,13 @@ impl MemBox {
     }
 
     /// Row `i`'s widget in a column of rows: it shares the column's height and is at least one
-    /// line (two when not `wide`) high. `spark` is the sparkline beside it in `rows`.
+    /// line (two when not `wide`) high. `spark` is the sparkline beside it in `rows`, the text
+    /// part taking the share of the row geometry.
     fn row_slot(
         &self,
         i: usize,
         wide: bool,
-        spark: Option<(Entity<ChartView>, f32)>,
+        spark: Option<Entity<ChartView>>,
         m: &UiMetrics,
         drawn: &mut Drawn,
         cx: &mut Context<Self>,
@@ -1629,7 +1646,6 @@ impl MemBox {
         let look = FlowLook::MemRow {
             rows: self.model.clone(),
             index: i,
-            wide,
             spark: spark.clone(),
         };
         let model = self.model.clone();
@@ -1637,7 +1653,11 @@ impl MemBox {
         let part = self.widget_part(
             id,
             look,
-            || mem_row_part(&model.0.borrow(), i, wide, spark.as_ref(), m, &theme),
+            || {
+                let share = model.1.get().share;
+                let spark = spark.as_ref().map(|c| (c, share));
+                mem_row_part(&model.0.borrow(), i, wide, spark, m, &theme)
+            },
             drawn,
             cx,
         );
@@ -1652,19 +1672,29 @@ impl MemBox {
     }
 
     /// The five rows in a column that shares the body height. A row that does not fit whole
-    /// is left out, top first (UI-PRF-017). `sparks` puts each row's sparkline beside it, the
-    /// text part taking that share.
+    /// is left out, top first (UI-PRF-017). With `share`, each row's sparkline sits beside it,
+    /// the text part taking that share. The rows' widgets read `wide` and `share` from the row
+    /// geometry, which a change of either sets here; a share change (a splitter drag) renders
+    /// them again, a width change moves them and so renders them.
     fn rows_column(
-        &self,
+        &mut self,
         wide: bool,
-        sparks: Option<f32>,
+        share: Option<f32>,
         m: &UiMetrics,
         drawn: &mut Drawn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let geom = RowGeom {
+            wide,
+            share: share.unwrap_or(self.model.1.get().share),
+        };
+        let old = self.model.1.replace(geom);
+        if old.share != geom.share {
+            self.notify_rows([true; ROWS], cx);
+        }
         let mut rows = whole_rows().size_full().gap(m.sp[2]);
         for i in 0..ROWS {
-            let spark = sparks.map(|share| (self.sparks[i].clone(), share));
+            let spark = share.map(|_| self.sparks[i].clone());
             rows = rows.child(self.row_slot(i, wide, spark, m, drawn, cx));
         }
         rows.into_any_element()

@@ -641,7 +641,7 @@ fn overview_mem_edit_add_remove_move_apply(cx: &mut TestAppContext) {
         "the By app widget in Edit Widgets asks for the sweep"
     );
 
-    // Remove Swap, then move Memory pressure one cell right.
+    // Remove Swap, then move Memory pressure one cell toward the free side.
     r.vcx.update(|_, cx| {
         editor.update(cx, |e, cx| {
             e.select(swap, cx);
@@ -657,16 +657,17 @@ fn overview_mem_edit_add_remove_move_apply(cx: &mut TestAppContext) {
             .expect("pressure cell")
     };
     let before = cell_of(&mut r);
-    let moved = r
-        .vcx
-        .update(|_, cx| editor.update(cx, |e, cx| e.move_selected(1, 0, cx)));
+    let dx: i32 = if before.col > 0 { -1 } else { 1 };
+    assert!(
+        r.vcx
+            .update(|_, cx| editor.update(cx, |e, cx| e.move_selected(dx, 0, cx)))
+    );
     let after = cell_of(&mut r);
-    if moved {
-        assert_eq!(after.col, before.col + 1, "{before:?} → {after:?}");
-    } else {
-        // A full-width widget has no room to move right.
-        assert_eq!(after, before);
-    }
+    assert_eq!(
+        i64::from(after.col),
+        i64::from(before.col) + i64::from(dx),
+        "{before:?} → {after:?}"
+    );
     let saved = r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx)));
     assert!(saved, "Apply saves");
     draw(r.vcx);

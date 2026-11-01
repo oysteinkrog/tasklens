@@ -131,13 +131,12 @@ pub enum FlowLook {
     /// The value alone in the small secondary text, as the temperature and power line draws it.
     Text,
     /// A Memory box row (UI-PRF-017): row `index`'s label, value, meter and percent from the
-    /// box's model, on one line when `wide` (else two). In `rows` the row's sparkline sits
-    /// beside it (`spark`), the text part taking the given share of the width.
+    /// box's model, on one or two lines as the box's row geometry says. In `rows` the row's
+    /// sparkline sits beside it (`spark`), the text part taking the geometry's share.
     MemRow {
         rows: MemRowsRef,
         index: usize,
-        wide: bool,
-        spark: Option<(Entity<ChartView>, f32)>,
+        spark: Option<Entity<ChartView>>,
     },
     /// A `charts` cell of the Memory box (D-029): row `index`'s name, value and percent over
     /// its chart.
@@ -1111,12 +1110,11 @@ impl MetricWidget {
                 .size_full()
                 .child(cached(chart))
                 .into_any_element(),
-            FlowLook::MemRow {
-                rows,
-                index,
-                wide,
-                spark,
-            } => mem_row_part(&rows.0.borrow(), *index, *wide, spark.as_ref(), m, theme),
+            FlowLook::MemRow { rows, index, spark } => {
+                let geom = rows.1.get();
+                let spark = spark.as_ref().map(|c| (c, geom.share));
+                mem_row_part(&rows.0.borrow(), *index, geom.wide, spark, m, theme)
+            }
             FlowLook::MemCell { rows, index, chart } => {
                 mem_cell_part(&rows.0.borrow(), *index, chart, m, theme)
             }

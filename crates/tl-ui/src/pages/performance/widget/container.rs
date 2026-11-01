@@ -515,13 +515,14 @@ impl WidgetContainer {
         cx.notify();
     }
 
-    /// A new body size: a new placement, and one render when it moved a widget.
+    /// A new body size: a new placement, and one render when it moved a widget the container
+    /// draws. A hosted flow layout draws nothing here, so it does not render then.
     fn resize(&mut self, area: Size<Pixels>, cx: &mut Context<Self>) {
         if area == self.area {
             return;
         }
         self.area = area;
-        if self.relayout(cx) {
+        if self.relayout(cx) && !self.host_draws() {
             self.notify(cx);
         }
     }

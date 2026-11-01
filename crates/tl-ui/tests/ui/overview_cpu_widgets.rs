@@ -18,7 +18,9 @@ use tl_model::layout::{
 };
 use tl_model::layout_boxes::{METRIC_CPU_KERNEL, METRIC_FREQ};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::anim::AnimationDriver;
@@ -172,6 +174,10 @@ fn open(cx: &mut TestAppContext, cores: u16, w: f32, h: f32) -> Rig<'_> {
         settings.motion.smooth_graphs = false;
         // Raw core values: two samples a few ms apart barely move a smoothed bar.
         settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
+        // The Memory box's widgets would draw `perf-widget-<id>` too: leave the box out.
+        let mut overview = OverviewLayoutSetting::grid_default();
+        overview.grid.retain(|b| b.kind != "memory");
+        settings.performance.overview = Some(overview);
         cx.set_global(BootSettings {
             settings,
             state: UiState::default(),
