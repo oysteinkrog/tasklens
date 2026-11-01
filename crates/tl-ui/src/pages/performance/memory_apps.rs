@@ -46,7 +46,7 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::command::Tab;
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::series::{Sample, SeriesView};
+use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::WineGroupInfo;
@@ -413,7 +413,16 @@ fn value_at(view: &SeriesView, t_ns: u64) -> f64 {
         return 0.;
     };
     let slack = view.period_ns.saturating_mul(3) / 2;
-    if s.is_valid() && s.t_ns.abs_diff(t_ns) <= slack.max(1) {
+    // A late sweep leaves a hole between two valid samples that the engine joined (no
+    // `GAP_BEFORE`). Hold the nearest value across it, so no column drops through all bands
+    // (tasklens-36kya). A gap sample, a break or the newest edge still read as 0.
+    let joined = split
+        .checked_sub(1)
+        .and_then(|i| samples.get(i).zip(samples.get(split)))
+        .is_some_and(|(a, b)| {
+            a.is_valid() && b.is_valid() && !b.flags.contains(SampleFlags::GAP_BEFORE)
+        });
+    if s.is_valid() && (joined || s.t_ns.abs_diff(t_ns) <= slack.max(1)) {
         f64::from(s.value)
     } else {
         0.
@@ -1676,5 +1685,35 @@ mod tests {
         let ranked: Vec<Arc<str>> = (0..5).map(|i| key(&format!("exe:{i}"))).collect();
         assert_eq!(split_top(&ranked, 3).0.len(), 3);
         assert_eq!(split_top(&ranked, 10).1.len(), 0);
+    }
+
+    fn view_of(samples: Vec<Sample>) -> SeriesView {
+        SeriesView {
+            id: series_id(DeviceIdx(0)),
+            version: 0,
+            period_ns: 1_000_000_000,
+            samples: samples.into(),
+        }
+    }
+
+    #[test]
+    fn value_at_holds_across_a_late_sweep() {
+        // One sweep is missing: samples at 1 s and 5 s, joined. 3 s is not a column of zeros.
+        let v = view_of(vec![
+            Sample::valid(1_000_000_000, 10.),
+            Sample::valid(5_000_000_000, 20.),
+        ]);
+        assert_eq!(value_at(&v, 3_000_000_000), 10.);
+        assert_eq!(value_at(&v, 4_000_000_000), 20.);
+    }
+
+    #[test]
+    fn value_at_keeps_a_break_and_the_newest_edge_at_zero() {
+        let mut after = Sample::valid(5_000_000_000, 20.);
+        after.flags |= SampleFlags::GAP_BEFORE;
+        let v = view_of(vec![Sample::valid(1_000_000_000, 10.), after]);
+        assert_eq!(value_at(&v, 3_000_000_000), 0.);
+        // Past the newest sample there is nothing to join to.
+        assert_eq!(value_at(&v, 9_000_000_000), 0.);
     }
 }
