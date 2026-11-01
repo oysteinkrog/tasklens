@@ -2383,7 +2383,7 @@ mod bottom {
             })
         };
         let (line, count, entity, drawn) = state(&mut r);
-        assert_eq!(line, "120 W");
+        assert_eq!(line, "120.0 W");
         assert!(
             entity.is_some() && drawn,
             "the power value is placed and drawn"
@@ -2405,7 +2405,7 @@ mod bottom {
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(Metric::valid(130.)))]));
         draw(r.vcx);
         let (line, back_count, back_entity, back_drawn) = state(&mut r);
-        assert_eq!(line, "130 W");
+        assert_eq!(line, "130.0 W");
         assert_eq!(back_count, count, "a value coming back places nothing");
         assert_eq!(back_entity, entity);
         assert!(back_drawn);

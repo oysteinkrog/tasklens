@@ -95,7 +95,7 @@ use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::grid::SlotDevice;
 use crate::pages::performance::widget::metric_widget::{FlowLook, MetricWidget};
-use crate::pages::performance::widget::source::{Availability, SourceStore};
+use crate::pages::performance::widget::source::SourceStore;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -218,6 +218,9 @@ pub struct GpuSection {
     line_parts: (bool, bool),
     /// Whether the line shows each of them now: in the layout and known.
     line_known: (bool, bool),
+    /// Whether the line has a place for each of them: in the layout and reported by the GPU's
+    /// record (not `Unsupported`), known now or not.
+    line_reported: (bool, bool),
 }
 
 /// One engine row: label, meter and percent in `meter`, and a sparkline of the engine's series.
@@ -1275,6 +1278,7 @@ impl GpuBox {
                         line: SharedString::default(),
                         line_parts: (false, false),
                         line_known: (false, false),
+                        line_reported: (false, false),
                     }
                 }
             };
@@ -1560,6 +1564,7 @@ fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
         s.vram.fraction = None;
         s.line = SharedString::default();
         s.line_known = (false, false);
+        s.line_reported = (false, false);
         return;
     };
     let unit = NetworkUnit::default();
@@ -1593,6 +1598,10 @@ fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
     s.line_known = (
         temp && shown(t.temp_c.validity),
         power && shown(t.power_w.validity),
+    );
+    s.line_reported = (
+        temp && t.temp_c.validity != Validity::Unsupported,
+        power && t.power_w.validity != Validity::Unsupported,
     );
     if temp && shown(t.temp_c.validity) {
         format_value(ValueFormat::Celsius, t.temp_c.value, unit, &mut line);
@@ -1820,21 +1829,15 @@ fn place_plan(
 impl GpuBox {
     /// The plan of a flow render (ADR-019 "Flow placement"): the parts each section shows and
     /// the widget of each, with `side_share` for `chart_engines` Side by side. The temperature
-    /// and power line has the values the GPU reports (`Availability::Available`), known now or
-    /// not, so a sample does not move it. The caller sets the stacked split and whether the
+    /// and power line has the values the GPU's record reports, known now or not, so a value
+    /// that comes and goes does not move it. The caller sets the stacked split and whether the
     /// first section collapsed.
-    fn make_plan(&self, side_share: Option<f32>, m: &UiMetrics, cx: &App) -> FlowPlan {
+    fn make_plan(&self, side_share: Option<f32>, m: &UiMetrics) -> FlowPlan {
         let flow = &self.flow;
         let part = |id: Option<u32>| -> Option<Part> {
             let id = id?;
             let w = flow.widgets.iter().find(|w| w.id == id)?;
             Some((id, w.source.metric.clone()))
-        };
-        let reported = |id: u32| {
-            self.container
-                .read(cx)
-                .source(id)
-                .is_some_and(|s| s.read(cx).availability() == Availability::Available)
         };
         let look = match self.mode {
             GpuMode::EngineCharts => PlanLook::Cells,
@@ -1845,33 +1848,36 @@ impl GpuBox {
             .sections
             .iter()
             .enumerate()
-            .map(|(i, sec)| PlanSection {
-                chart: if look == PlanLook::Cells {
-                    None
-                } else {
-                    part(chart_of(flow, i))
-                },
-                engines: sec
-                    .engines
-                    .iter()
-                    .map(|e| {
-                        part(if look == PlanLook::Cells {
-                            engine_widget(flow, i, e.key)
-                        } else {
-                            row_widget(flow, i, e)
+            .map(|(i, sec)| {
+                let (temp, power) = sec.line_reported;
+                PlanSection {
+                    chart: if look == PlanLook::Cells {
+                        None
+                    } else {
+                        part(chart_of(flow, i))
+                    },
+                    engines: sec
+                        .engines
+                        .iter()
+                        .map(|e| {
+                            part(if look == PlanLook::Cells {
+                                engine_widget(flow, i, e.key)
+                            } else {
+                                row_widget(flow, i, e)
+                            })
                         })
-                    })
-                    .collect(),
-                vram: part(widget_of(flow, i, METRIC_VRAM)),
-                line: if look == PlanLook::Rows {
-                    [METRIC_TEMP, METRIC_POWER]
-                        .into_iter()
-                        .filter_map(|metric| part(widget_of(flow, i, metric)))
-                        .filter(|(id, _)| reported(*id))
-                        .collect()
-                } else {
-                    SmallVec::new()
-                },
+                        .collect(),
+                    vram: part(widget_of(flow, i, METRIC_VRAM)),
+                    line: if look == PlanLook::Rows {
+                        [(METRIC_TEMP, temp), (METRIC_POWER, power)]
+                            .into_iter()
+                            .filter(|(_, reported)| *reported)
+                            .filter_map(|(metric, _)| part(widget_of(flow, i, metric)))
+                            .collect()
+                    } else {
+                        SmallVec::new()
+                    },
+                }
             })
             .collect();
         FlowPlan {
@@ -1914,7 +1920,7 @@ impl GpuBox {
             self.chart_split.sharer(m.sp[5], s)
         });
         let share_at = sharer.as_ref().map(|f| f(f32::from(body_size.width)));
-        let mut plan = self.make_plan(share_at, m, cx);
+        let mut plan = self.make_plan(share_at, m);
         let rows = plan.list_rows();
         let shown = fit(body_size, &rows, total, share_at, m);
         self.shown = shown.sections;
@@ -2152,7 +2158,7 @@ impl GpuBox {
         self.meters = meter_fits(self.body.get().width, m);
         let more = self.shown_more_text();
         let min = cell_min(m);
-        let plan = self.make_plan(None, m, cx);
+        let plan = self.make_plan(None, m);
         let id_of = |p: &Option<Part>| p.as_ref().map(|p| p.0);
 
         let mut body = div()
