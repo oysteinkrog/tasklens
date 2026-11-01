@@ -924,9 +924,9 @@ impl GpuBox {
         let sections = &self.sections;
         let mode = self.mode;
         layout.widgets.retain(|w| {
-            let slot = match w.source.device {
-                tl_model::layout::DeviceSelector::Slot(n) => usize::from(n),
-                tl_model::layout::DeviceSelector::Key(_) => return true,
+            let slot = match w.content.device() {
+                Some(tl_model::layout::DeviceSelector::Slot(n)) => usize::from(*n),
+                _ => return true,
             };
             let Some(section) = sections.get(slot) else {
                 return true;
@@ -934,7 +934,7 @@ impl GpuBox {
             if w.forms == FormSet::CHART && mode != GpuMode::EngineCharts {
                 return true;
             }
-            match w.source.metric.gpu_engine() {
+            match w.content.metric().and_then(|s| s.metric.gpu_engine()) {
                 Some(e) => section.engines.iter().any(|r| r.key == e.key()),
                 None => true,
             }
@@ -1848,7 +1848,7 @@ impl GpuBox {
         let part = |id: Option<u32>| -> Option<Part> {
             let id = id?;
             let w = flow.widgets.iter().find(|w| w.id == id)?;
-            Some((id, w.source.metric.clone()))
+            Some((id, w.content.metric()?.metric.clone()))
         };
         let look = match self.mode {
             GpuMode::EngineCharts => PlanLook::Cells,

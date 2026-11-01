@@ -81,7 +81,7 @@ fn every_old_gpu_setting_converts_to_its_flow_layout() {
             let n = l
                 .widgets
                 .iter()
-                .filter(|w| w.source.device == DeviceSelector::Slot(slot))
+                .filter(|w| w.content.device() == Some(&DeviceSelector::Slot(slot)))
                 .count();
             assert_eq!(n, per_slot, "{name}: slot {slot}");
         }
@@ -139,9 +139,9 @@ fn old_keys_stay_for_an_older_build() {
 
 #[test]
 fn a_gpu_box_with_no_old_key_converts_nothing() {
-    let (s, changed) = load(&fixture("no_gpu_keys"));
-    assert!(!changed.contains(&LAYOUTS_CONVERTED_KEY), "{changed:?}");
-    assert!(s.performance.layouts.is_empty());
+    // The CPU box's `power` key converts that box (phase 2); the GPU box converts nothing.
+    let (s, _) = load(&fixture("no_gpu_keys"));
+    assert!(s.performance.layouts.entry(GPU_BOX_CONTAINER).is_none());
     let text = toml::to_string(&s).expect("serializes");
-    assert!(!text.contains("layouts"), "{text}");
+    assert!(!text.contains("overview.gpu"), "{text}");
 }

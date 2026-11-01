@@ -1,0 +1,8 @@
+# Settings written by 1.2.0: Network box mode stacked with split.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "net", col = 0, row = 0, cols = 8, rows = 8, mode = "stacked", split = 0.4 },
+  { kind = "processes", col = 0, row = 8, cols = 12, rows = 8 },
+]

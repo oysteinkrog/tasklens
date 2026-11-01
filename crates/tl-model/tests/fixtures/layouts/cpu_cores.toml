@@ -1,0 +1,8 @@
+# Settings written by 1.2.0: CPU box mode cores with the power draw strip.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "cpu", col = 0, row = 0, cols = 8, rows = 8, mode = "cores", split = 0.6, power = true, power_split = 0.25 },
+  { kind = "processes", col = 0, row = 8, cols = 12, rows = 8 },
+]

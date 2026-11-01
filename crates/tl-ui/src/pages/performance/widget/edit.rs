@@ -43,11 +43,10 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::layout::{
-    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
-    SourceSelector, WidgetCell, WidgetOptions, WidgetSetting, convert_gpu_box, grid_cols,
-    reset_to_default,
+    ContainerLayout, DeviceSelector, FormSet, LAYOUT_VERSION, MetricKey, SourceSelector,
+    WidgetCell, WidgetContent, WidgetOptions, WidgetSetting, default_box_layout, grid_cols,
+    overview_kind, reset_to_default,
 };
-use tl_model::settings::OverviewGridSetting;
 
 use super::container::WidgetContainer;
 use super::grid::{self, Drawn, InnerGrid, SlotDevice};
@@ -128,11 +127,11 @@ pub fn corner_id(id: u32) -> String {
     format!("perf-widget-edit-corner-{id}")
 }
 
-/// The built-in default layout of `container`, which no entry stands for: the GPU box's
+/// The built-in default layout of `container`, which no entry stands for: the Overview box's
 /// default preset, else no widgets.
 pub fn default_layout(container: &str) -> ContainerLayout {
-    if container == GPU_BOX_CONTAINER {
-        return convert_gpu_box(&OverviewGridSetting::default());
+    if let Some(layout) = overview_kind(container).and_then(default_box_layout) {
+        return layout;
     }
     ContainerLayout {
         container: container.to_owned(),
@@ -358,7 +357,7 @@ pub fn set_widget_source(
     let Some(w) = layout.widgets.iter_mut().find(|w| w.id == id) else {
         return false;
     };
-    if w.source == source {
+    if w.content.metric() == Some(&source) {
         return false;
     }
     let kept = w.forms & offered;
@@ -367,7 +366,7 @@ pub fn set_widget_source(
     } else {
         kept
     };
-    w.source = source;
+    w.content = WidgetContent::Metric(source);
     w.device_name = name;
     if let Some(cell) = w.cell {
         grid::set_cell(layout, id, cell, grid);
@@ -918,7 +917,7 @@ impl WidgetEditor {
         let (selector, name, offered) = self.resolve(source, cx);
         let widget = WidgetSetting {
             id: 0,
-            source: selector,
+            content: WidgetContent::Metric(selector),
             forms: menu::default_forms(offered),
             cell: None,
             options: WidgetOptions::default(),
@@ -969,7 +968,10 @@ impl WidgetEditor {
         if !from_source.is_empty() {
             return from_source;
         }
-        MetricMeta::of(&w.source.metric).map_or(w.forms, |m| m.forms())
+        w.content
+            .metric_key()
+            .and_then(MetricMeta::of)
+            .map_or(w.forms, |m| m.forms())
     }
 
     /// Opens widget `id`'s menu at `position` and selects the widget.
@@ -1561,15 +1563,17 @@ impl Render for WidgetEditor {
 
 #[cfg(test)]
 mod tests {
+    use tl_model::layout::GPU_BOX_CONTAINER;
+
     use super::*;
 
     fn widget(id: u32, cell: WidgetCell, forms: FormSet) -> WidgetSetting {
         WidgetSetting {
             id,
-            source: SourceSelector {
+            content: WidgetContent::Metric(SourceSelector {
                 device: DeviceSelector::Key(Arc::from("gpu:a")),
                 metric: MetricKey::new("vram"),
-            },
+            }),
             forms,
             cell: Some(cell),
             options: WidgetOptions::default(),
@@ -1589,7 +1593,7 @@ mod tests {
     fn layout(widgets: Vec<WidgetSetting>) -> ContainerLayout {
         ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: LAYOUT_VERSION,
+            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             next_id: widgets.iter().map(|w| w.id + 1).max().unwrap_or(1),
             widgets,

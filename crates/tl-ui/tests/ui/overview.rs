@@ -2034,9 +2034,9 @@ mod bottom {
             let mut keys: Vec<std::sync::Arc<str>> = working
                 .widgets
                 .iter()
-                .filter_map(|w| match &w.source.device {
-                    DeviceSelector::Key(k) => Some(k.clone()),
-                    DeviceSelector::Slot(_) => None,
+                .filter_map(|w| match w.content.device() {
+                    Some(DeviceSelector::Key(k)) => Some(k.clone()),
+                    _ => None,
                 })
                 .collect();
             keys.sort();
@@ -8457,7 +8457,10 @@ mod page {
             {
                 let w = working.widgets.iter().find(|w| w.id == id);
                 let w = w.unwrap_or_else(|| panic!("{mode}: widget {id} pinned"));
-                assert!(matches!(w.source.device, DeviceSelector::Key(_)), "{w:?}");
+                assert!(
+                    matches!(w.content.device(), Some(DeviceSelector::Key(_))),
+                    "{w:?}"
+                );
                 assert!(w.cell.is_some(), "{w:?}");
             }
             // Pinned in the order drawn: the parts top to bottom, left to right.
@@ -8576,7 +8579,7 @@ mod page {
                 flow.widgets
                     .iter()
                     .find(|w| w.id == *id)
-                    .is_some_and(|w| w.source.device == DeviceSelector::Slot(0))
+                    .is_some_and(|w| w.content.device() == Some(&DeviceSelector::Slot(0)))
             };
             let first = placed.iter().filter(|id| slot0(id)).count();
             assert_eq!(first, parts.len() + 1 + line, "{mode}: {placed:?}");
@@ -8958,8 +8961,8 @@ mod page {
     #[gpui_kit::test]
     fn overview_gpu_vram_chart_widget_draws_history(cx: &mut TestAppContext) {
         use tl_model::layout::{
-            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
-            SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
+            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
+            MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
         };
         use tl_ui::pages::performance::overview::gpu_box::EMPTY_ID;
         use tl_ui::pages::performance::widget::metric_widget::widget_id;
@@ -8973,17 +8976,17 @@ mod page {
         });
         let layout = |widgets: Vec<WidgetSetting>| ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: LAYOUT_VERSION,
+            version: LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             widgets,
             next_id: 2,
         };
         let vram = WidgetSetting {
             id: 1,
-            source: SourceSelector {
+            content: WidgetContent::Metric(SourceSelector {
                 device: DeviceSelector::Key(key),
                 metric: MetricKey::new("vram"),
-            },
+            }),
             forms: FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
             cell: Some(WidgetCell {
                 col: 0,
@@ -9077,8 +9080,8 @@ mod page {
     #[gpui_kit::test]
     fn overview_gpu_hotplug_keeps_the_saved_layout(cx: &mut TestAppContext) {
         use tl_model::layout::{
-            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
-            SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
+            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
+            MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
         };
         use tl_ui::pages::performance::widget::metric_widget::widget_id;
 
@@ -9090,14 +9093,14 @@ mod page {
             .update(|_, cx| gpu.read(cx).sections()[0].key.0.clone());
         let saved = ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: LAYOUT_VERSION,
+            version: LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             widgets: vec![WidgetSetting {
                 id: 1,
-                source: SourceSelector {
+                content: WidgetContent::Metric(SourceSelector {
                     device: DeviceSelector::Key(key),
                     metric: MetricKey::new("vram"),
-                },
+                }),
                 forms: FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
                 cell: Some(WidgetCell {
                     col: 0,

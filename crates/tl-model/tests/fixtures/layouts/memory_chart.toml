@@ -1,0 +1,8 @@
+# Settings written by 1.2.0: Memory box mode chart.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "memory", col = 0, row = 0, cols = 8, rows = 8, mode = "chart" },
+  { kind = "processes", col = 0, row = 8, cols = 12, rows = 8 },
+]

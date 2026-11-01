@@ -17,10 +17,11 @@ use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
-    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
-    PresetSetting, SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
+    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
+    MetricKey, PresetSetting, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
+    WidgetSetting,
 };
-use tl_model::layout::{convert_old_settings, gpu_box_layout};
+use tl_model::layout::{box_layout, convert_old_settings};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{
     AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
@@ -216,7 +217,7 @@ fn selector(device: DeviceSelector, metric: &str) -> SourceSelector {
 fn widget(id: u32, source: SourceSelector, forms: FormSet) -> WidgetSetting {
     WidgetSetting {
         id,
-        source,
+        content: WidgetContent::Metric(source),
         forms,
         cell: None,
         options: WidgetOptions::default(),
@@ -312,7 +313,8 @@ impl Rig<'_> {
         let host = self.host.clone();
         let store = &mut self.store;
         let widget = self.vcx.update(|_, cx| {
-            let source = store.source(&setting.source, cx);
+            let selector = setting.content.metric().expect("a metric widget");
+            let source = store.source(selector, cx);
             let widget = cx.new(|cx| MetricWidget::new(setting, source, &hub, cx));
             host.update(cx, |host, cx| {
                 host.widgets.push((widget.clone(), w, h));
@@ -838,12 +840,12 @@ fn overview_widget_source_switch_updates_chart_labels(cx: &mut TestAppContext) {
     let view = r.read(&w, |w| w.chart().cloned()).expect("chart");
 
     let vram = WidgetSetting {
-        source: selector(DeviceSelector::Key(key(1)), "vram"),
+        content: WidgetContent::Metric(selector(DeviceSelector::Key(key(1)), "vram")),
         ..first
     };
     let store = &mut r.store;
     r.vcx.update(|_, cx| {
-        let source = store.source(&vram.source, cx);
+        let source = store.source(vram.content.metric().expect("a metric"), cx);
         w.update(cx, |w, cx| w.set_setting(vram, source, cx));
     });
     draw(r.vcx);
@@ -863,7 +865,7 @@ fn grid_layout(widgets: Vec<(u32, SourceSelector, FormSet, WidgetCell)>) -> Cont
     let next_id = widgets.iter().map(|w| w.0 + 1).max().unwrap_or(1);
     ContainerLayout {
         container: GPU_BOX_CONTAINER.to_owned(),
-        version: LAYOUT_VERSION,
+        version: LAYOUT_VERSION_GPU_ONLY,
         preset: None,
         widgets: widgets
             .into_iter()
@@ -1283,8 +1285,7 @@ fn overview_widget_container_flow_leaves_out_unavailable(cx: &mut TestAppContext
 
     layout.preset = Some(PresetSetting {
         id: "chart".to_owned(),
-        arrange: None,
-        split: None,
+        ..PresetSetting::default()
     });
     for w in &mut layout.widgets {
         w.cell = None;
@@ -1571,11 +1572,10 @@ fn overview_widget_edit_cancel_restores(cx: &mut TestAppContext) {
     let slot = |m: &str| selector(DeviceSelector::Slot(0), m);
     let flow = ContainerLayout {
         container: GPU_BOX_CONTAINER.to_owned(),
-        version: LAYOUT_VERSION,
+        version: LAYOUT_VERSION_GPU_ONLY,
         preset: Some(PresetSetting {
             id: "chart".to_owned(),
-            arrange: None,
-            split: None,
+            ..PresetSetting::default()
         }),
         widgets: vec![
             widget(1, slot(&engine_gpu()), CHART_FORMS),
@@ -1593,7 +1593,7 @@ fn overview_widget_edit_cancel_restores(cx: &mut TestAppContext) {
     assert!(pinned.preset.is_none());
     for w in &pinned.widgets {
         assert!(w.cell.is_some(), "{w:?}");
-        assert_eq!(w.source.device, DeviceSelector::Key(key(1)));
+        assert_eq!(w.content.device(), Some(&DeviceSelector::Key(key(1))));
         assert_eq!(w.device_name.as_deref(), Some("Card A"));
     }
     assert_eq!(
@@ -1809,7 +1809,7 @@ fn overview_widget_reset_survives_reload(cx: &mut TestAppContext) {
             d.settings.performance.overview = Some(layout);
             assert!(convert_old_settings(&mut d.settings.performance));
         });
-        gpu_box_layout(&TlSettings::settings(cx).performance)
+        box_layout(&TlSettings::settings(cx).performance, "gpu").expect("gpu")
     });
     assert!(converted.preset.is_some());
     let (e, c) = r.editor(converted, 400., 320.);
@@ -1833,7 +1833,10 @@ fn overview_widget_reset_survives_reload(cx: &mut TestAppContext) {
     assert!(gpu.hidden.is_empty());
     let mut reloaded = perf.clone();
     assert!(!convert_old_settings(&mut reloaded), "nothing converts");
-    assert_eq!(gpu_box_layout(&reloaded), default_layout(GPU_BOX_CONTAINER));
+    assert_eq!(
+        box_layout(&reloaded, "gpu").expect("gpu"),
+        default_layout(GPU_BOX_CONTAINER)
+    );
 }
 
 /// The widget menu lists Source, Show and Chart, then Remove Widget; Show lists only the forms
@@ -2029,7 +2032,7 @@ fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
         .find(|w| w.id == 5)
         .expect("widget 5");
     assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
-    assert_eq!(w.source.device, DeviceSelector::Key(key(2)));
+    assert_eq!(w.content.device(), Some(&DeviceSelector::Key(key(2))));
     assert_eq!(w.device_name.as_deref(), Some("Card B"));
     assert!(w.cell.is_some());
 }
@@ -2051,7 +2054,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     let card_a = r.submenu_entries(&pick(source, "Card A"));
     r.choose(&e, pick(card_a, "Power draw"));
     let w = r.working_widget(&e, 1).expect("widget 1");
-    assert_eq!(w.source, a("power"));
+    assert_eq!(w.content, WidgetContent::Metric(a("power")));
     assert_eq!(w.device_name.as_deref(), Some("Card A"));
     assert_eq!(w.forms, FormSet::all() - FormSet::BAR);
 
@@ -2141,7 +2144,10 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     assert!(!vram.checked);
     r.choose(&e, vram);
     let w = r.working_widget(&e, 5).expect("widget 5");
-    assert_eq!(w.source, selector(DeviceSelector::Key(key(2)), "vram"));
+    assert_eq!(
+        w.content,
+        WidgetContent::Metric(selector(DeviceSelector::Key(key(2)), "vram"))
+    );
     assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
     assert!(w.cell.is_some());
     assert_eq!(r.selected(&e), Some(5));

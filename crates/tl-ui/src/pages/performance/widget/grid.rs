@@ -493,11 +493,13 @@ pub fn pin(
             continue;
         }
         let mut w = w.clone();
-        if let DeviceSelector::Slot(n) = w.source.device {
+        if let Some(device) = w.content.device_mut()
+            && let DeviceSelector::Slot(n) = *device
+        {
             let Some(dev) = slots.get(usize::from(n)) else {
                 continue;
             };
-            w.source.device = DeviceSelector::Key(Arc::clone(&dev.key));
+            *device = DeviceSelector::Key(Arc::clone(&dev.key));
             w.device_name = Some(Arc::clone(&dev.name));
         }
         match how {
@@ -543,14 +545,14 @@ pub fn pin(
 mod tests {
     use proptest::prelude::*;
     use tl_model::layout::{
-        GPU_BOX_CONTAINER, GPU_BOX_GRID_COLS, LAYOUT_VERSION, MetricKey, PresetSetting,
-        SourceSelector, WidgetOptions,
+        GPU_BOX_CONTAINER, MetricKey, PresetSetting, SourceSelector, WidgetContent, WidgetOptions,
     };
 
     use super::*;
     use crate::pages::performance::widget::compose::row_min;
 
-    const COLS: u16 = GPU_BOX_GRID_COLS;
+    /// The GPU box's columns (`grid_cols(GPU_BOX_CONTAINER)`).
+    const COLS: u16 = 6;
 
     fn cell(col: u16, row: u16, cols: u16, rows: u16) -> WidgetCell {
         WidgetCell {
@@ -564,10 +566,10 @@ mod tests {
     fn widget(id: u32, forms: FormSet, cell: Option<WidgetCell>) -> WidgetSetting {
         WidgetSetting {
             id,
-            source: SourceSelector {
+            content: WidgetContent::Metric(SourceSelector {
                 device: DeviceSelector::Key(Arc::from("gpu:a")),
                 metric: MetricKey::new("engine:gpu"),
-            },
+            }),
             forms,
             cell,
             options: WidgetOptions::default(),
@@ -578,7 +580,7 @@ mod tests {
     fn grid_layout(cells: &[(u32, FormSet, WidgetCell)]) -> ContainerLayout {
         ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: LAYOUT_VERSION,
+            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             widgets: cells
                 .iter()
@@ -801,24 +803,23 @@ mod tests {
         let g = InnerGrid::new(304., COLS, 1.);
         let slot = |id, metric: &str, forms| WidgetSetting {
             id,
-            source: SourceSelector {
+            content: WidgetContent::Metric(SourceSelector {
                 device: DeviceSelector::Slot(0),
                 metric: MetricKey::new(metric),
-            },
+            }),
             forms,
             cell: None,
             options: WidgetOptions::default(),
             device_name: None,
         };
         let mut second = slot(5, "vram", ROW);
-        second.source.device = DeviceSelector::Slot(1);
+        *second.content.device_mut().expect("a metric") = DeviceSelector::Slot(1);
         let flow = ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: LAYOUT_VERSION,
+            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: Some(PresetSetting {
                 id: "engine_charts".to_owned(),
-                arrange: None,
-                split: None,
+                ..PresetSetting::default()
             }),
             widgets: vec![
                 slot(1, "engine:gpu", CHART),
@@ -866,7 +867,10 @@ mod tests {
             ]
         );
         for w in &pinned.widgets {
-            assert_eq!(w.source.device, DeviceSelector::Key(Arc::from("gpu:a")));
+            assert_eq!(
+                w.content.device(),
+                Some(&DeviceSelector::Key(Arc::from("gpu:a")))
+            );
             assert_eq!(w.device_name.as_deref(), Some("Card A"));
         }
         let cells: Vec<WidgetCell> = pinned.widgets.iter().filter_map(|w| w.cell).collect();

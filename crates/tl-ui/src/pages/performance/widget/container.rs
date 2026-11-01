@@ -380,7 +380,12 @@ impl WidgetContainer {
     fn sync_sources(&mut self, cx: &mut Context<Self>) {
         let mut sources = FxHashMap::default();
         for w in &self.layout.widgets {
-            let source = self.store.borrow_mut().source(&w.source, cx);
+            // Group and fixed widgets get their views from their own beads (tasklens-6swdr.3,
+            // .8); until then they take no space here.
+            let Some(selector) = w.content.metric() else {
+                continue;
+            };
+            let source = self.store.borrow_mut().source(selector, cx);
             sources.insert(w.id, source);
         }
         let mut old = std::mem::take(&mut self.source_subs);
@@ -455,10 +460,15 @@ impl WidgetContainer {
         // The name gets the GPU's name in front when the box shows widgets of two devices.
         let mut devices: SmallVec<[&DeviceSelector; 2]> = SmallVec::new();
         for p in &placement.widgets {
-            if let Some(w) = self.layout.widgets.iter().find(|w| w.id == p.id)
-                && !devices.contains(&&w.source.device)
+            if let Some(device) = self
+                .layout
+                .widgets
+                .iter()
+                .find(|w| w.id == p.id)
+                .and_then(|w| w.content.device())
+                && !devices.contains(&device)
             {
-                devices.push(&w.source.device);
+                devices.push(device);
             }
         }
         let prefix = devices.len() > 1;

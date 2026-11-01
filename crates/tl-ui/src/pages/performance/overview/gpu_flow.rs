@@ -81,13 +81,14 @@ pub fn flow_layout(
 
 /// Whether `w` is a widget of slot `slot`.
 fn in_slot(w: &WidgetSetting, slot: usize) -> bool {
-    matches!(w.source.device, DeviceSelector::Slot(n) if usize::from(n) == slot)
+    matches!(w.content.device(), Some(DeviceSelector::Slot(n)) if usize::from(*n) == slot)
 }
 
 /// Whether `w` is the section chart of `chart_engines` and `chart`: the 3D engine with the chart
 /// alone.
 fn is_section_chart(w: &WidgetSetting) -> bool {
-    w.forms == FormSet::CHART && w.source.metric.gpu_engine() == Some(GpuEngine::Gpu)
+    w.forms == FormSet::CHART
+        && w.content.metric().and_then(|s| s.metric.gpu_engine()) == Some(GpuEngine::Gpu)
 }
 
 /// The id of the widget of slot `slot` showing `metric`, leaving out the section chart.
@@ -95,7 +96,11 @@ pub fn widget_of(layout: &ContainerLayout, slot: usize, metric: &str) -> Option<
     layout
         .widgets
         .iter()
-        .find(|w| in_slot(w, slot) && w.source.metric.as_str() == metric && !is_section_chart(w))
+        .find(|w| {
+            in_slot(w, slot)
+                && w.content.metric().map(|s| s.metric.as_str()) == Some(metric)
+                && !is_section_chart(w)
+        })
         .map(|w| w.id)
 }
 
@@ -659,7 +664,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
                 let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
                     continue;
                 };
-                if *metric != item.setting.source.metric
+                if item.setting.content.metric().map(|s| &s.metric) != Some(metric)
                     || item.availability == Availability::Unknown
                 {
                     continue;

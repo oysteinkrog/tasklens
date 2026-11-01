@@ -156,7 +156,7 @@ pub fn default_forms(offered: FormSet) -> FormSet {
 
 /// The device key of a widget's source; `None` for a slot selector.
 fn device_key(w: &WidgetSetting) -> Option<&str> {
-    match &w.source.device {
+    match w.content.device()? {
         DeviceSelector::Key(k) => Some(k.as_ref()),
         DeviceSelector::Slot(_) => None,
     }
@@ -245,7 +245,9 @@ pub fn widget_menu(
     cx: &mut App,
 ) -> TlMenu {
     let id = w.id;
-    let selected = device_key(w).map(|k| (Arc::from(k), w.source.metric.clone()));
+    let selected = device_key(w)
+        .zip(w.content.metric_key())
+        .map(|(k, m)| (Arc::from(k), m.clone()));
     let source_groups = Rc::clone(groups);
     let mut menu = menu.submenu(
         tr(cx, "perf-widget-source"),

@@ -1,0 +1,8 @@
+# Settings written by 1.2.0: CPU box mode core_charts with arrange and the power draw strip.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "cpu", col = 0, row = 0, cols = 8, rows = 8, mode = "core_charts", arrange = "vertical", split = 0.35, power = true, power_placement = "full_width" },
+  { kind = "processes", col = 0, row = 8, cols = 12, rows = 8 },
+]

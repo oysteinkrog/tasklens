@@ -3082,11 +3082,17 @@ mod tests {
         &s.performance.overview.as_ref().expect("overview").grid[0]
     }
 
+    /// Whether `changed` holds nothing but the ADR-019 conversion of a box's old keys, which
+    /// is a log line, not a clamped value.
+    fn only_converted(changed: &[&str]) -> bool {
+        changed.iter().all(|k| *k == LAYOUTS_CONVERTED_KEY)
+    }
+
     #[test]
     fn overview_cpu_power_keys_saved_and_dropped() {
         // `power` and `power_split` load, and are written only when not the default.
         let (s, changed) = load_toml(&cpu_entry("power = true, power_split = 0.3"));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         let b = first(&s);
         assert_eq!((b.power, b.power_split), (true, Some(0.3)));
         let text = toml::to_string(&s).expect("serializes");
@@ -3119,7 +3125,7 @@ mod tests {
     #[test]
     fn overview_cpu_power_placement_round_trip_and_default() {
         let (s, changed) = load_toml(&cpu_entry("power = true"));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert_eq!(first(&s).power_placement, None);
         let text = toml::to_string(&s).expect("serializes");
         assert!(!text.contains("power_placement"), "{text}");
@@ -3127,7 +3133,7 @@ mod tests {
         let (s, changed) = load_toml(&cpu_entry(
             "power = true, power_placement = \"under_graph\"",
         ));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert_eq!(first(&s).power_placement.as_deref(), Some("under_graph"));
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("power_placement = \"under_graph\""), "{text}");
@@ -3163,7 +3169,7 @@ mod tests {
         assert!(!text.contains("clocks"), "{text}");
 
         let (s, changed) = load_toml(&cpu_entry("clocks = true"));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert!(first(&s).clocks);
         let text = toml::to_string(&s).expect("serializes");
         assert!(text.contains("clocks = true"), "{text}");
@@ -3207,7 +3213,7 @@ mod tests {
         assert!(text.contains("split = 0.457"), "{text}");
         assert!(!text.contains("cpu_split"), "{text}");
         let (back, changed) = load_toml(&text);
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         let grid = back.performance.overview.expect("saved").grid;
         assert_eq!(grid[0].split, Some(0.457));
         assert_eq!(grid[1].split, None);
@@ -3232,7 +3238,7 @@ mod tests {
         // The crw.63 `cpu_split` of a row layout loads as `split` without a log line, and is
         // written as `split` on the grid entry.
         let (s, changed) = load_toml(&cpu_row_entry("cpu_split = 0.6"));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert_eq!(first(&s).split, Some(0.6));
         let text = toml::to_string(&s).expect("serializes");
         assert!(
@@ -3258,7 +3264,7 @@ mod tests {
              1.0, cpu_split = 0.5 }, { kind = \"memory\", width = 1.0, cpu_split = 0.5 }, \
              { kind = \"net\", width = 1.0, split = 0.7 }] }]\n",
         );
-        assert_eq!(changed, ["performance.overview"]);
+        assert_eq!(changed, [OVERVIEW_KEY, LAYOUTS_CONVERTED_KEY]);
         let grid = &s.performance.overview.expect("kept").grid;
         let splits: Vec<_> = grid.iter().map(|b| b.split).collect();
         assert_eq!(splits, [Some(0.5), None, Some(0.7)]);
@@ -3268,7 +3274,7 @@ mod tests {
     fn overview_box_mode_unknown_loads_default() {
         // A mode of the box's kind loads and is written back.
         let (s, changed) = load_toml(&cpu_entry("mode = \"core_charts\""));
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         let b = first(&s);
         assert_eq!(b.mode.as_deref(), Some("core_charts"));
         let text = toml::to_string(&s).expect("serializes");
@@ -3277,7 +3283,7 @@ mod tests {
         // default (`None`) with one log line; the box and its other keys stay.
         for v in ["\"bogus\"", "\"engine_charts\"", "3", "\"\""] {
             let (s, changed) = load_toml(&cpu_entry(&format!("mode = {v}, split = 0.5")));
-            assert_eq!(changed, ["performance.overview"], "{v}");
+            assert_eq!(changed, [OVERVIEW_KEY, LAYOUTS_CONVERTED_KEY], "{v}");
             let b = first(&s);
             assert_eq!((b.kind.as_str(), b.mode.as_deref()), ("cpu", None), "{v}");
             assert_eq!(b.split, Some(0.5), "{v}");
@@ -3314,7 +3320,7 @@ mod tests {
         // D-027: each arrange value loads and is written back on its box entry.
         for v in OVERVIEW_ARRANGES {
             let (s, changed) = load_toml(&cpu_entry(&format!("arrange = \"{v}\"")));
-            assert!(changed.is_empty(), "{v} {changed:?}");
+            assert!(only_converted(&changed), "{v} {changed:?}");
             let b = first(&s);
             assert_eq!(b.arrange.as_deref(), Some(v));
             let text = toml::to_string(&s).expect("serializes");
@@ -3324,7 +3330,7 @@ mod tests {
         // with one log line; the box and its other keys stay.
         for v in ["\"diagonal\"", "\"\"", "2", "true"] {
             let (s, changed) = load_toml(&cpu_entry(&format!("arrange = {v}, split = 0.5")));
-            assert_eq!(changed, ["performance.overview"], "{v}");
+            assert_eq!(changed, [OVERVIEW_KEY, LAYOUTS_CONVERTED_KEY], "{v}");
             let b = first(&s);
             assert_eq!(
                 (b.kind.as_str(), b.arrange.as_deref()),
@@ -3428,7 +3434,7 @@ mod tests {
         let mem = "[performance.overview]\nrows = [{ height = 1.0, boxes = [{ kind = \"memory\", \
                    width = 1.0, mode = \"apps\" }] }]\n";
         let (s, changed) = load_toml(mem);
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert_eq!(first(&s).mode.as_deref(), Some("apps"));
     }
 
@@ -3444,7 +3450,7 @@ mod tests {
         assert!(!text.contains("rows = ["), "{text}");
         assert!(!text.contains("overview_top_processes"), "{text}");
         let (back, changed) = load_toml(&text);
-        assert!(changed.is_empty(), "{changed:?}");
+        assert!(only_converted(&changed), "{changed:?}");
         assert_eq!(back.performance.overview, Some(layout));
 
         // The spec's inline form loads too; a missing table is the default.
