@@ -94,7 +94,8 @@ A widget shows one metric source in one display form.
    and value on top, bar beside, chart below), each with a minimum size. An empty form set is
    not allowed. The Details grid is its own widget type, not a metric widget.
 5. **Groups later.** Phase 1 has single-metric widgets only. Group widgets (all cores, all
-   engines) come later, with member order, limits and scrolling defined then.
+   engines) come later, with member order, limits and scrolling defined then. Phase 2 defines them
+   in ADR-019 "Phase 2".
 6. **Shared data.** Widgets that show the same source share its history and its statistics;
    chart geometry is cached by data revision and size. Hidden widgets do no work.
 7. **Migration.** The layout settings get a schema version. Conversion is deterministic and

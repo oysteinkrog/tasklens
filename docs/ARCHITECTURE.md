@@ -2644,7 +2644,7 @@ Four rules hold for every connection, thread and queue in this ADR (leader decis
 
 ## ADR-019: Configurable widget layout
 
-Status: accepted (D-041, 2026-10-31). Phase P2. This ADR turns `docs/plan/layout-system.md` into build rules. Phase 1 (epic E27, beads `tasklens-lhliq.2` to `.8`) builds it for the Overview GPU box only. Phases 2 to 4 reuse the same types for the other boxes and the resource pages, each in its own epic.
+Status: accepted (D-041, 2026-10-31). Phase P2. This ADR turns `docs/plan/layout-system.md` into build rules. Phase 1 (epic E27, beads `tasklens-lhliq.2` to `.8`) builds it for the Overview GPU box only. Phase 2 (epic E28, `tasklens-6swdr`) moves every other Overview box onto the same types and adds group and fixed widgets (section "Phase 2"). Phases 3 and 4 reuse the same types for the resource pages, named presets and copy layout, each in its own epic.
 
 ### Context
 
@@ -2655,7 +2655,7 @@ Each Overview box has 1 to 5 fixed modes (UI-PRF-019), an Arrange choice, one in
 **Terms.**
 
 - A **container** is a box or page that holds widgets. Its id is a string: `overview.<kind>` for an Overview box (phase 1: `overview.gpu` only), later `page.cpu`, `page.memory` and `page.gpu.<device key>` for resource pages. Overview kinds are unique on the page (UI-PRF-056), so the kind names the box.
-- A **widget** shows one metric of one device (its **source**) in one or more **forms**: `chart` (history over the box range), `bar` (load bar), `value` (current value), `stats` (min, average and peak over the range) and `label` (the source's name). Phase 1 has single-metric widgets only. Group widgets (all cores, all engines) and the Details grid widget come in later phases.
+- A **widget** shows one metric of one device (its **source**) in one or more **forms**: `chart` (history over the box range), `bar` (load bar), `value` (current value), `stats` (min, average and peak over the range) and `label` (the source's name). Phase 1 has single-metric widgets only. Phase 2 adds group widgets (all cores, disks, adapters or engines) and fixed widgets (the Processes table, the Timeline, Memory by app); see "Phase 2". The Details grid widget comes with the resource pages.
 - A **composition** is the fixed arrangement a widget uses for its forms at its size (UI-PRF-061): `Cell`, `Row` or `Tile`.
 - A **layout** is a container's list of widgets. It is either a **flow layout**, placed by a built-in **preset** (one of today's modes), or a **grid layout**, where every widget has its own cells on the container's inner snap grid. Defaults and converted old settings are flow layouts. The first applied inner edit turns a flow layout into a grid layout (see "Editing").
 
@@ -2866,6 +2866,276 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 | `tasklens-lhliq.8` | `crates/tl-model/tests/fixtures/layouts/*.toml` (old GPU box settings), `crates/tl-ui/tests/ui/overview_widgets.rs` (new module of the `ui` test binary), the `perf-overview` bench scenes |
 
 Paths under `widget/` are in `crates/tl-ui/src/pages/performance/widget/`.
+
+### Phase 2: every Overview box (epic E28, `tasklens-6swdr`)
+
+Phase 2 moves the CPU, Memory, Disk, Network, Top processes and Timeline boxes onto the widget container. It reuses the phase 1 types, rules and files: `WidgetContainer`, `SourceStore`, `SourceData`, `MetricWidget`, `compose.rs`, `grid.rs`, `edit.rs`, `menu.rs`, `meta.rs`, and the load, conversion and reset code in `tl-model/src/layout.rs`. Nothing is forked per box. Every rule of phase 1 above holds for every container unless this section says otherwise. That includes the render contract, the editor rule of `tasklens-lhliq.12` (no edit decoration covers text, edit-mode scrolling equals the applied view), Apply, Cancel and Undo, and "Saving the default". The GPU box does not change, except that Add Widget offers its engine group.
+
+**Containers and inner grids.** `LAYOUT_CONTAINERS` holds all seven Overview containers: `overview.cpu`, `overview.memory`, `overview.gpu`, `overview.disk`, `overview.net`, `overview.processes` and `overview.timeline` (the kind keys of `OVERVIEW_BOX_MODES`). `OVERVIEW_GRID_COLS` replaces `GPU_BOX_GRID_COLS` in `grid_cols(container)`:
+
+| Container | Columns | Why |
+|---|---|---|
+| `overview.cpu` | 12 | The box spans 2 of 3 page columns by default (about 750 px of body), so 12 columns are about 60 px each |
+| `overview.memory`, `overview.gpu`, `overview.disk`, `overview.net` | 6 | One page column (about 360 px of body); the GPU value is unchanged |
+| `overview.processes`, `overview.timeline` | 12 | Full page width |
+
+Every container uses the row unit of 24 logical px and the 4 px gutter of the GPU box, and the Fill, Move, Resize, Shrink and Scale rules of "Inner grid". The **default span** of a new widget generalizes the GPU rule: a widget with a chart spans half the columns (rounded up) and 4 rows; any other single-metric widget spans all columns and 1 row; a group or fixed widget spans all columns and 8 rows. Each is then raised to its minimum span.
+
+**Widget content.** A widget shows one of three kinds of content. `WidgetSetting.source` becomes `content`:
+
+```rust
+pub enum WidgetContent {
+    /// One metric of one device (phase 1).
+    Metric(SourceSelector),
+    /// One metric of every member of a group: every core, disk, adapter or GPU engine.
+    Group(GroupSelector),
+    /// A widget with content of its own that is not a metric.
+    Fixed(FixedWidget),
+}
+
+pub struct GroupSelector {
+    /// The device the members belong to: `Key("cpu")` for cores, `Key("aggregate:disk")` for
+    /// disks, `Key("aggregate:net")` for adapters, a GPU key (or a slot, flow layouts only) for
+    /// engines.
+    pub device: DeviceSelector,
+    pub members: GroupKind,
+    /// The metric each member shows. For `Engines` it is `engine:*`: each member shows
+    /// `engine:<key>` of its engine.
+    pub metric: MetricKey,
+    pub options: GroupOptions,
+}
+
+pub enum GroupKind {
+    Cores,
+    Disks,
+    Adapters,
+    Engines,
+    /// A name this build does not know: kept, written back, shown as unavailable.
+    Other(Arc<str>),
+}
+
+pub struct GroupOptions {
+    /// Show at most this many members; the others are counted in a "+n more" item.
+    /// `None` shows all. Key `limit`, 1..=256.
+    pub limit: Option<u16>,
+    /// How the members are drawn. Key `items`.
+    pub items: GroupItems,
+    /// `Cells` only: an id from OVERVIEW_ARRANGES; `None` is `auto`. Key `arrange`.
+    pub arrange: Option<String>,
+}
+
+pub enum GroupItems {
+    /// One Row composition per member, filling the height as D-040 does.
+    Rows,
+    /// One Cell composition per member (Tile when the forms have no chart) in a grid.
+    Cells,
+}
+
+pub enum FixedWidget {
+    /// The Top processes table (UI-PRF-017), in `overview.processes` only.
+    Processes,
+    /// The 24-hour timeline (UI-PRF-057), in `overview.timeline` only.
+    Timeline,
+    /// The Memory by app chart and its legend (UI-PRF-060), in `overview.memory` only.
+    MemoryByApp,
+    /// A name this build does not know: kept, written back, shown as unavailable.
+    Other(Arc<str>),
+}
+```
+
+`forms`, `options` and `device_name` keep their phase 1 meaning for metric and group widgets. A fixed widget has no forms and no options: `forms` is not written, and on load it reads as empty and is not a drop reason.
+
+**Settings schema** (canonical table (a)). A group widget writes `group` and its options; a fixed widget writes `fixed` and its cells only:
+
+```toml
+[[performance.layouts]]
+container = "overview.cpu"
+version = 2
+widgets = [
+  { id = 1, device = "cpu", metric = "total", forms = ["chart"], col = 0, row = 0, cols = 5, rows = 12 },
+  { id = 2, device = "cpu", group = "cores", metric = "load", forms = ["chart", "bar", "value", "label"], items = "rows", col = 5, row = 0, cols = 7, rows = 12 },
+  { id = 3, device = "cpu", metric = "power_draw", forms = ["chart", "value", "label"], col = 0, row = 12, cols = 12, rows = 4 },
+]
+
+[[performance.layouts]]
+container = "overview.processes"
+version = 2
+widgets = [
+  { id = 1, fixed = "processes", col = 0, row = 0, cols = 8, rows = 10 },
+  { id = 2, device = "cpu", metric = "total", forms = ["chart", "value", "label"], col = 8, row = 0, cols = 4, rows = 10 },
+]
+```
+
+A disk group writes `{ id = 1, device = "aggregate:disk", group = "disks", metric = "io", forms = [...], items = "cells", limit = 8, arrange = "vertical" }`; an engine group writes `{ id = 7, device = "gpu:<key>", group = "engines", metric = "engine:*", forms = [...], items = "cells" }`. `limit` and `arrange` are written only when set.
+
+**Schema version.** `LAYOUT_VERSION` = 2; this build reads versions 1 and 2. It writes version 1 for an `overview.gpu` entry with single-metric widgets only. It writes version 2 for every other entry. So a 1.2.0 build still reads a plain GPU layout, keeps every version 2 entry unchanged as `LayoutEntry::Kept`, and shows that box by its old keys, which conversion left in place. Before the first save after a load that converted a container, `tl-app` copies `settings.toml` to `settings.toml.pre-layouts-v{LAYOUT_VERSION}` (now `settings.toml.pre-layouts-v2`), mode `0600`, unless that file already exists. An existing `settings.toml.pre-layouts-v1` is left as it is.
+
+**Load rules added in phase 2** (same warn line and keys as phase 1):
+
+- A widget with `fixed` is a fixed widget. It is dropped when it also has `group`, `device`, `slot` or `metric`. It is also dropped when its kind is not allowed in the container (see `FixedWidget`), or when an earlier widget there has the same fixed kind. An unknown `fixed` name is kept as `Other` and shows "Needs a newer tasklens".
+- A widget with `group` is a group widget. It is dropped when its device does not fit the group: `Cores` needs `device = "cpu"`, `Disks` `device = "aggregate:disk"`, `Adapters` `device = "aggregate:net"`, `Engines` a `gpu:` key or, in a flow layout, a slot. It is also dropped when `limit` is outside 1..=256, or when it has no known form. An unknown `items` reads as the group's default (`rows` for cores, `cells` for the others); an unknown `arrange` reads as `auto`. An unknown `group` name is kept as `Other` and shows "Needs a newer tasklens".
+- `slot` stays a GPU box selector: a `slot` in any other container drops the widget.
+- In a grid layout, group and fixed widgets need cells like the others.
+
+**Metric keys added in phase 2.** A key is looked up together with its device's kind, so `temp` and `power` can mean a CPU or a GPU metric. The kind comes from the persistent key (PERF-005): `cpu` is the CPU package, `cpu:<n>` a logical CPU (the key the reducer gives `CpuLogical { id: n }`), `memory`, `disk:…`, `net:…`, `aggregate:disk` and `aggregate:net`. `tl-model/src/layout_boxes.rs` maps each key to its series:
+
+| Device | Key | Series | Name (en-US) |
+|---|---|---|---|
+| `cpu` | `total` | `CPU_TOTAL` | Utilization |
+| `cpu` | `kernel` | `CPU_KERNEL` | Kernel time |
+| `cpu` | `freq` | `CPU_FREQ` | Speed |
+| `cpu` | `temp` | `CPU_TEMP` | Temperature |
+| `cpu` | `power` | `CPU_POWER_PKG` | Package power |
+| `cpu` | `power_cores` | `CPU_POWER_CORE` | Core power |
+| `cpu` | `power_draw` | `CPU_POWER_PKG` filled and `CPU_POWER_CORE` dashed, one chart (the UI-PRF-019 strip) | Power draw |
+| `cpu` | `core_clocks` | `CPU_CORE_CLOCK` of every physical core, one line each (`CoreClocks`, tasklens-o55.57) | Core clocks |
+| `cpu` | `pressure` | `PSI_CPU_SOME` | CPU pressure |
+| `cpu:<n>` | `load` | `CPU_TOTAL` of the logical CPU | C{n} |
+| `cpu:<n>` | `freq` | `CPU_FREQ` of the logical CPU | C{n} speed |
+| `memory` | `used`, `cached`, `available`, `swap`, `commit` | `MEM_USED`, `MEM_CACHED`, `MEM_AVAILABLE`, `SWAP_USED`, `MEM_COMMIT` | In use, Cached, Available, Swap, Commit (the `perf-overview-mem-*` strings) |
+| `memory` | `pressure` | `PSI_MEM_SOME` | Memory pressure |
+| `memory` | `composition` | `MEM_USED`, `MEM_CACHED`, `MEM_AVAILABLE` stacked, with the legend of the `chart` mode | Memory composition |
+| `disk:…`, `aggregate:disk` | `active` | `DISK_ACTIVE` | Active time |
+| `disk:…`, `aggregate:disk` | `read`, `write` | `DISK_READ`, `DISK_WRITE` | Read, Write |
+| `disk:…`, `aggregate:disk` | `io` | `DISK_READ` and `DISK_WRITE`, two lines in one chart (the `disk_charts` cell chart) | Read and write |
+| `disk:…` | `temp` | no series: the disk record's `temp_c`, else the SMART temperature, as the Disk page's Temperature row | Temperature |
+| `net:…`, `aggregate:net` | `rx`, `tx` | `NET_RX`, `NET_TX` | Download, Upload |
+| `net:…`, `aggregate:net` | `traffic` | `NET_RX` and `NET_TX`, two lines in one chart (the `combined` chart) | Download and upload |
+
+On `aggregate:net` the series are the Network box's counted total (`NetTotal`: the engine's total of every class minus the per-class totals of the classes `show_network_*` hides), as the box draws today. The `total` chart draws the `CPU_KERNEL` line under it while `performance.cpu_kernel` is on, in flow and grid layouts alike, as the CPU box does today; there is no per-widget kernel option. A key with two or more series (`power_draw`, `core_clocks`, `composition`, `io`, `traffic`) is a **multi-series metric**: one widget, one source, several lines.
+
+The Name form shows the metric name for a CPU, memory or aggregate device ("Utilization", "In use", "Download"). For a disk or adapter it shows the device name (the sidebar card's name) for `io` and `traffic`, and "{device} · {metric}" for the other keys ("nvme0n1 · Read"). In a group, each member's name follows the same rule; cores are "C{n}" and engines keep their GPU page name.
+
+**Metric metadata added in phase 2** (`widget/meta.rs`). `DeviceFact` becomes `fn(&Snapshot, DeviceIdx) -> Option<f32>`, so a denominator or a scale can read the CPU, memory, disk and network records as well as `GpuTotals`. `MetricMeta` gains `lines: Lines` (`One`, the phase 1 case; `Pair { second_dashed: bool }` for two lines in one chart; `Stacked` for `composition`; `PerCore` for `core_clocks`; `NoSeries` for `disk temp`) and `smoothed: bool`. Chart and stats are offered only with a series (`Lines` other than `NoSeries`). A multi-series metric offers chart, value and name, with no bar and no stats. `smoothed` makes the value and the bar use the core smoothing of UI-PRF-018 (`overview_core_smoothing`), and the chart plot 1-second means, as the core rows and their sparklines do today. Only `load` is smoothed.
+
+**Sources of multi-series and derived metrics** (`widget/source.rs`, bead `tasklens-6swdr.2`). `SourceData` keeps one source per selector, also for a multi-series metric. It resolves the selector to a list of series (`series_list()`; `series()` stays the first one) and to the device record it reads. Its revision bumps when the version of any series in the list changes, and the page's demand part asks for every series in the list. The list is resolved again on a catalog change, which matters for `core_clocks` (one series per physical core). On `aggregate:net` the list is the engine total and the per-class totals of the hidden classes (`NetTotal`), resolved again when a `show_network_*` setting changes. Availability follows the first series: the source is available when the device reports it.
+
+| Key | Format | Scale | Kind | Bar max | Stats | Value text |
+|---|---|---|---|---|---|---|
+| `total`, `kernel`, `pressure` (CPU and memory), `load`, `active` | `Percent` | `Fixed { 0, 100 }` | gauge | 100 | min, avg, peak | "42%"; `load` smoothed |
+| `freq` (CPU and core) | `Mhz` | `StickyUp { hw_max: inventory max_mhz }`, as the CPU page's Clock graph | gauge | the inventory's `processor.max_mhz`, else no bar | min, avg, peak | as the CPU box title ("3.40 GHz") |
+| `temp` (CPU) | `Celsius` | `StickyTemp` | gauge | the device's `hot_c`, else no bar | min, avg, peak | "52 °C" |
+| `power`, `power_cores` | `Watts` | `StickyUp { hw_max: none }` | gauge | no bar | min, avg, peak | "35.2 W" |
+| `power_draw` | `Watts` | as the CPU page's Power draw row | gauge | no bar | none | the package watts |
+| `core_clocks` | `Mhz` | as the CPU page's Core clocks chart | gauge | no bar | none | none (offers chart and name) |
+| `used`, `cached`, `available` | `Bytes` | `FixedTotal(MemTotal)` | gauge | `MemTotal` | min, avg, peak | `OfTotal`: "8.0 / 31.2 GiB" |
+| `swap` | `Bytes` | `FixedTotal(SwapTotal)` | gauge | `SwapTotal` | min, avg, peak | `OfTotal`; "No swap" without swap |
+| `commit` | `Bytes` | `StickyUp { hw_max: CommitLimit }` | gauge | `CommitLimit` (the bar stops at full; the value can pass it) | min, avg, peak | `OfTotal` with `CommitLimit` |
+| `composition` | `Bytes` | `FixedTotal(MemTotal)` | gauge | no bar | none | In use as `OfTotal` |
+| `read`, `write` | `RateIec` | `StickyUp { hw_max: none }` | gauge | no bar | min, avg, peak | "1.2 MB/s" |
+| `io` | `RateIec` | one `StickyUp` scale for both lines | gauge | no bar | none | "R 1.2 MB/s  W 340 KB/s" |
+| `temp` (disk) | `Celsius` | none | gauge | no bar | none | "38 °C" (offers value and name) |
+| `rx`, `tx` | `RateNetwork` (`network_unit`) | the Network page's rule (`network_dynamic_scale`; link speed on an adapter) | gauge | an adapter's link speed when known, else no bar; none on `aggregate:net` | min, avg, peak | "1.4 Mbps" |
+| `traffic` | `RateNetwork` | one scale for both lines, as `rx` | gauge | no bar | none | "↓ 1.4 Mbps  ↑ 220 kbps" |
+
+`source.rs` reads each current value from the same record the box shows it from today (CPU totals, memory totals, disk and network records, `GpuTotals`), so a widget and the 1.2.0 box show the same text.
+
+**Group widgets** (implementation rule 5).
+
+- **Members** (`widget/members.rs`, a pure function of the snapshot and the settings):
+  - `Cores`: every present `CpuLogical` device, by logical id (C0, C1, …). Each member is the source `{ device = "cpu:<n>", metric }`.
+  - `Disks`: the whole disks of the sidebar's visible disk cards, in sidebar order (`device_order`), as the Disk box lists them today. Partitions never.
+  - `Adapters`: the present adapters the Network box counts (not `lo`, a class `show_network_*` shows), in sidebar order.
+  - `Engines`: the engines the GPU reports, in the GPU page's grid order (`grid_engines`). `performance.hidden_gpu_engines` leaves engines out only in a flow layout, as for single widgets.
+  - The order is fixed in phase 2; the user cannot reorder members.
+- **Limit**: the group shows `shown = min(members, limit)` members, then, when `hidden = members − shown` is above 0, a "+{hidden} more" item (`perf-overview-more`). Without a limit every member shows. Members past the limit have no `SourceData`. In a grid layout only the limit hides members; members that do not fit scroll. In a flow layout the 1.2.0 fit rules also cut members (UI-PRF-059), and those count in the same "+n more" item.
+- **Forms**: a group offers the forms its member metric offers, and draws them for every member. The Name form is each member's name. A group has no heading; the box title names the box. A group of a multi-series metric (`io`, `traffic`) draws each member's lines in that member's item.
+- **Fill** (`widget/group_fill.rs`, pure functions with `proptest` tests, like `grid.rs`). The group lays its items out inside its own rectangle:
+  - `Rows`: each item is a Row composition (UI-PRF-061). The column count is the fewest columns, at most 4, in which every item fits at 18 px with each column at least the Row minimum width of the forms; items flow top to bottom, then into the next column (C0 to C{k − 1} in the first). Then every row takes the same share of the height, at least 18 px; the bar and the sparkline grow and the text stays centred (D-040). When the items do not fit at 18 px in the columns that fit the width, rows stay 18 px and the widget scrolls vertically with a scrollbar. The "+n more" item is the last row.
+  - `Cells`: each item is a Cell composition (a Tile when the forms have no chart). `arrange = auto` picks the column count that gives the largest equal cells for the item count, every cell at least the composition's minimum (the `parts::fill_grid` rule of UI-PRF-019); `vertical` is one column and `horizontal` one row, every cell an equal share at least the minimum. When the cells do not fit at their minimum, the widget scrolls in the arrangement's direction (vertically for `auto` and `vertical`) with a scrollbar. The "+n more" item is a cell of its own with the text centred.
+  - **Minimum span**: one item of its composition (Row: the Row minimum width × 18 px; Cells: the Cell or Tile minimum). More items scroll.
+  - **Edit mode**: the group lays out its items in the widget's rectangle minus the UI-PRF-061 edit margins, with the column count and item kind of the applied view, so nothing jumps; a Row item drops parts by the narrow rule and a Cell draws its chart smaller. No edit decoration covers any item's text, and the group scrolls as in the applied view.
+- **Hotplug**: members come and go with the device catalog, and the widget keeps its id, entity and cells. A member that goes away leaves the group; one that comes back takes its place in the order again. When the group's own device is gone (a GPU), the widget shows "Not connected". A group with no members shows "None found" (`perf-widget-group-none`) centred.
+- **Entity** (`widget/group_widget.rs`): `GroupWidget`, one entity per group widget id. It takes one `SourceData` per shown member from the page's `SourceStore`, shared with single widgets and other groups on the same member source, and keeps one cached `ChartView` per member item with a chart. It formats a member's text only when that member's source notified, and notifies only when a shown member's value text, stats text or bar bucket changed, or the member list changed. A member list change (catalog version, visible cards, `show_network_*`) re-fits the group inside its own cells: the container does not re-render and keeps every entity. A sample notifies only the group widgets with a changed member, never the container or the page.
+- **Extra member sources of a flow look.** Some 1.2.0 parts show a second value per member. Their `GroupFlowLook` takes a second `SourceData` per member from the same `SourceStore` and asks for its series too: the core rows read `freq` for the clock column; the disk sections and `disk_charts` cells read `active` for the header percent and the device details for the model. A change of either source counts as a member change. The busiest-first expansion of the disk sections (UI-PRF-017 "Disk fit") is worked out inside the group widget, which fills the Disk box body, so an activity change re-renders that group only. The Network `rx` and `tx` flow looks work out the 60 s peak from their own series and the total from the network record, as the box does today.
+
+**Fixed widgets.**
+
+- `FixedWidgetView` (`widget/fixed_widget.rs`) is one entity per fixed widget id. It hosts the content view that the box draws today, out of its box frame: the Top processes rows of `procs_box.rs`, the timeline of `timeline.rs`, and `MemoryAppsChart` of `memory_apps.rs` in its Overview place. Each keeps its own render contract, interaction and demand: `process_top` while the Processes widget is placed, `device_timeline` while the Timeline widget is placed, the process sweep while Memory by app is placed.
+- Minimum size, logical px: Processes 256 × 192 and Timeline 376 × 92 (the box body at the kind minimum of UI-PRF-056), Memory by app 160 × 100 (the size from which the legend shows, UI-PRF-060).
+- Each fixed kind is allowed in its own container only, at most once. Add Widget lists it, after a separator, while the container has none.
+- The widget menu of a fixed widget has only "Remove Widget". In flow and grid layouts it draws its content at its rectangle; it has no compositions.
+
+**Presets** (the flow layouts of phase 2). Each box's modes become presets as the GPU modes did. A preset's widget list replaces the box's fixed parts; each widget of a flow layout draws its 1.2.0 part (`FlowLook`; for groups `GroupFlowLook`), at its 1.2.0 place, with the 1.2.0 fit rules: the core rows of D-040 with their clock column, the `core_charts` cells, the disk sections and `disk_charts` cells with "+n more" (UI-PRF-059), the Download and Upload parts with their peak line and total tooltip, the adapter cells. The box draws only what is not a widget: the title line, the range figures row, the time axis, the splitters and the "+n more" rows the fit rules add. Widget ids start at 1 in list order. In the tables, "group" means a group widget on the box's device with the given members.
+
+CPU box (`device = "cpu"`, flow placement `overview/cpu_flow.rs`):
+
+| Preset | Widgets |
+|---|---|
+| `chart_cores` (default) | `total` [chart]; group cores `load` [chart, bar, value, label], `items = "rows"` |
+| `chart` | `total` [chart] |
+| `cores` | group cores `load` [chart, bar, value, label], `items = "rows"` |
+| `core_charts` | group cores `load` [chart, value, label], `items = "cells"`, `arrange` from the preset |
+
+After these, in every preset: `core_clocks` [chart, label] when the Core clocks chart is on, then `power_draw` [chart, value, label] when the power draw strip is on. `core_clocks` draws under the total chart in `chart_cores` and `chart` and takes no space in `cores` and `core_charts`, as today. `power_draw` is the strip, placed by `power_placement` with the share `power_split`; when RAPL is unreadable or has no zone it takes no space, as today. The box menu's "Show power draw" and "Show core clocks" add or remove these widgets. `PresetSetting` gains `power_split: Option<f64>` (in `OVERVIEW_POWER_SPLIT_RANGE`) and `power_placement: Option<String>` (in `OVERVIEW_POWER_PLACEMENTS`), CPU box only, written only when set. A drag of the strip's splitter saves `power_split` there.
+
+Memory box (`device = "memory"`, `overview/mem_flow.rs`):
+
+| Preset | Widgets |
+|---|---|
+| `rows` (default) | `used`, `cached`, `available`, `swap`, `commit`, each [chart, bar, value, label] |
+| `chart_rows` | `used` [chart]; then `used`, `cached`, `available`, `swap`, `commit`, each [bar, value, label] |
+| `chart` | `composition` [chart] |
+| `charts` | `used`, `cached`, `available`, `swap`, `commit`, each [chart, value, label] |
+| `apps` | fixed `memory_by_app` |
+
+Disk box (`device = "aggregate:disk"`, `overview/disk_flow.rs`):
+
+| Preset | Widgets |
+|---|---|
+| `disk_charts` (default) | group disks `io` [chart, value, label], `items = "cells"`, `limit = 8`, `arrange` from the preset |
+| `rows` | group disks `io` [chart, value, label], `items = "rows"`, `limit = 8` |
+| `total_chart` | `io` [chart] on `aggregate:disk` |
+
+Network box (`device = "aggregate:net"`, `overview/net_flow.rs`):
+
+| Preset | Widgets |
+|---|---|
+| `stacked` (default) | `rx` [chart, value, label]; `tx` [chart, value, label] |
+| `columns` | `rx` [chart, value, label]; `tx` [chart, value, label] |
+| `combined` | `traffic` [chart, value, label] |
+| `adapter_charts` | group adapters `traffic` [chart, value, label], `items = "cells"`, `arrange` from the preset |
+
+Top processes box: preset `list`, widgets: fixed `processes`. Timeline box: preset `bands`, widgets: fixed `timeline`. A flow layout whose only widget is fixed draws it over the whole body (`fixed_flow` in `widget/container.rs`).
+
+Changing the preset in the box menu replaces the widget list with the new preset's list, as for the GPU box. The CPU box keeps its `core_clocks` and `power_draw` widgets across the change, so the two switches survive a mode change as they do today. With a grid layout the box-specific menu items ("Arrange", "Show power draw", "Show core clocks", "Engines") are hidden, as phase 1 hides "Arrange" and "Engines".
+
+**Conversion of the other boxes** (`layout_boxes.rs`: `convert_cpu_box`, `convert_memory_box`, `convert_disk_box`, `convert_net_box`, each `fn(&OverviewGridSetting) -> ContainerLayout`, called through `convert_box(kind, entry)`). It runs in `Settings::clamp` for each supported box that has no entry and whose grid entry has one of its old keys. It gives a flow layout: the entry's `mode` (or the default) as `preset.id` with its `arrange` and `split`, and that preset's widget list from the tables above. The old keys per kind:
+
+| Box | Old keys conversion reads and "Saving the default" removes |
+|---|---|
+| CPU | `mode`, `split`, `arrange`, `power`, `power_split`, `power_placement`, `clocks` (the old `cpu_split` already loads as `split`) |
+| Memory, Disk, Network | `mode`, `split`, `arrange` |
+| GPU | `mode`, `split`, `arrange`, `hidden` (phase 1) |
+| Top processes, Timeline | none: they never convert; no entry gives the built-in default |
+
+The CPU box adds `core_clocks` when `clocks = true` and `power_draw` when `power = true`, and copies `power_split` and `power_placement` into the preset. The built-in default of a box is its conversion of an entry with no keys, used in memory and never written. Conversion is deterministic (it reads no device: a group stands for whatever members are present), idempotent per container, and leaves the old keys in place, as phase 1. `gpu_box_layout` becomes `box_layout(perf, kind)`, and `reset_to_default` removes the old keys of the container's kind.
+
+**Editing in every box.** "Edit Widgets…" is in every box's menu. Entering Edit Widgets pins a flow layout as phase 1 does. A group widget keeps its `items`, `limit` and `arrange`, and gets the cells nearest its drawn rectangle. Its selector is durable already, except for an engine group with a slot: the slot becomes the GPU's persistent key and `device_name` is set, as for a single widget. An engine group of an empty slot is left out. A fixed widget gets the cells nearest its rectangle. After pinning, each widget draws its UI-PRF-061 composition instead of its flow look. Parts that only the flow look draws do not carry over: the core rows' clock column, a disk header's active percent and model, and the Network 60 s peak line and its total tooltip. The user can add a cores group of `freq` and disk `active` widgets instead. The disk model, the 60 s peak and the total since boot have no widget in phase 2; the `stats` form gives min, average and peak over the box range instead. Reset in a box with an old-key conversion removes that kind's old keys, as for the GPU box.
+
+**Demand.** A container asks for the series of the sources it places, group members included, and the demand of its fixed widgets. The CPU box asks for `cpu_fast` while it places a cores group or a core widget, as it does today. A widget or member that takes no space asks for nothing.
+
+**Files the phase 2 beads create or change.** Paths under `widget/` and `overview/` are in `crates/tl-ui/src/pages/performance/`.
+
+| Bead | Files |
+|---|---|
+| `tasklens-6swdr.2` | `tl-model/src/layout.rs` (`WidgetContent`, `GroupSelector`, `GroupKind`, `GroupOptions`, `GroupItems`, `FixedWidget`, `LAYOUT_VERSION` 2 and the version write rule, `LAYOUT_CONTAINERS`, `OVERVIEW_GRID_COLS`, `grid_cols`, the phase 2 load rules, `PresetSetting` power fields, `box_layout`, conversion and `reset_to_default` for every box), `tl-model/src/layout_boxes.rs` (new: the phase 2 metric keys and their series, `convert_box` and the four `convert_*_box`, the preset widget lists), `tl-model/src/lib.rs` (mod line), `tl-app/src/settings_store.rs` (the backup name from `LAYOUT_VERSION`), `widget/meta.rs` (the phase 2 entries, `Lines`, `smoothed`, `DeviceFact` on the snapshot), `widget/source.rs` (per-kind readings and names, multi-series and derived sources with `series_list()`, the "Not reported by this device" text), the phase 1 users of `WidgetSetting.source` (`widget/container.rs`, `widget/menu.rs`, `widget/edit.rs`, `overview/gpu_flow.rs`) for the rename to `content`, `crates/tl-model/tests/fixtures/layouts/{cpu,memory,disk,net}_*.toml` |
+| `tasklens-6swdr.3` (needs the types of `.2`) | `widget/members.rs` (new), `widget/group_fill.rs` (new, pure, `proptest`), `widget/group_widget.rs` (new: `GroupWidget`), `widget/container.rs` (a group gets a `GroupWidget` entity; the id map holds metric, group and fixed views), `widget/compose.rs` (group minimum span), `widget/menu.rs` (group items in Add Widget and the group menu items of UI-PRF-061), `crates/tl-ui/tests/ui/overview_groups.rs` (new module) |
+| `tasklens-6swdr.4` | `overview/cpu_box.rs` (hosts a `WidgetContainer`, draws each flow widget's entity at its 1.2.0 place), `overview/cpu_flow.rs` (new), `overview/box_menu.rs` (CPU switches edit the flow layout; "Edit Widgets…" in every box), `overview/mod.rs` (wiring), `widget/metric_widget.rs` and `widget/group_widget.rs` (the CPU flow looks), `crates/tl-ui/tests/ui/overview_cpu_widgets.rs` |
+| `tasklens-6swdr.5` | `overview/mem_box.rs`, `overview/mem_flow.rs` (new), `widget/fixed_widget.rs` (new: `FixedWidgetView`, first used here for Memory by app), `memory_apps.rs` (hosted by a fixed widget), `widget/metric_widget.rs` (the Memory flow looks), `crates/tl-ui/tests/ui/overview_mem_widgets.rs` |
+| `tasklens-6swdr.6` | `overview/disk_box.rs`, `overview/disk_flow.rs` (new), `widget/group_widget.rs` (the disk flow looks), `crates/tl-ui/tests/ui/overview_disk_widgets.rs` |
+| `tasklens-6swdr.7` | `overview/net_box.rs`, `overview/net_flow.rs` (new), `widget/metric_widget.rs` and `widget/group_widget.rs` (the Network flow looks), `crates/tl-ui/tests/ui/overview_net_widgets.rs` |
+| `tasklens-6swdr.8` | `overview/procs_box.rs`, `overview/timeline.rs` (their content in a `FixedWidgetView`), `widget/container.rs` (`fixed_flow`), `crates/tl-ui/tests/ui/overview_fixed_widgets.rs` |
+| `tasklens-6swdr.9` | `crates/tl-model/tests/fixtures/layouts/*.toml` (every old setting of every box), the hotplug and counter tests of the boxes' test modules, the `perf-overview` and `perf-overview-static` bench scenes |
+
+Each tl-ui bead adds its UI-PRF-061 strings to `assets/locales/en-US.ftl`.
+
+**Verification (phase 2).**
+
+- tl-model: a fixture per old mode of each box, with `arrange` and `split` set and, for the CPU box, with `power`, `power_split`, `power_placement` and `clocks`, converts to the preset lists above; converting twice changes nothing; an entry with only phase 1 content in `overview.gpu` writes version 1 and any other entry version 2; each new drop rule drops only its widget; unknown `group` and `fixed` names are kept and written back; every phase 2 key has metadata; reset of each box removes its old keys and reloads as the built-in default.
+- tl-app: the first save after a phase 2 conversion writes `settings.toml.pre-layouts-v2` once and leaves `-v1` alone.
+- tl-ui (`test-hooks`): group fill at 1, 8, 32 and 128 members in rows and cells, with and without a limit, at 1.0, 1.5 and 2.0 scale; 32 cores fill the height as D-040; members added and removed keep the entity and cells; a sample notifies only the group widgets with a changed member; fixed widgets at their minimum; each box's presets place the same rectangles as 1.2.0 at 1200 × 900; Edit Widgets add, remove, move and Apply in each box; the editor rule of `tasklens-lhliq.12` for group and fixed widgets.
+- Phase gate (`tasklens-6swdr.9`): migration fixtures for every old setting of every box; a visual check of each box's default and old modes against 1.2.0 screenshots in a hidden session; hotplug tests for disks, adapters and logical CPUs going offline; the counter test (a sample renders no page or container and keeps every widget entity); the `perf-overview` bench budgets within 10% of v1.2.0 under the same conditions.
 
 ### Consequences
 

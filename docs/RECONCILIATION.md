@@ -2085,16 +2085,27 @@ overview_row_unit_px = 40      # 24..=80, snap grid row height in logical px (UI
 timeline_click = "pause"       # pause | preview | history; history only while history.enabled (UI-PRF-057, P2)
 
 [[performance.layouts]]         # P2, ADR-019 (D-041): one entry per widget container; none by default
-container = "overview.gpu"     # phase 1: overview.gpu only; other containers and newer versions are kept and written back unchanged
-version = 1                    # LAYOUT_VERSION
-preset = { id = "engine_charts", arrange = "auto", split = 0.5 } # flow layout only (omit for a grid layout); id: engine_charts | chart_engines | chart; arrange: auto | vertical | horizontal; split: 0.2..=0.8
+container = "overview.gpu"     # overview.cpu | overview.memory | overview.gpu | overview.disk | overview.net | overview.processes | overview.timeline; other containers and newer versions are kept and written back unchanged
+version = 2                    # LAYOUT_VERSION 2; reads 1 and 2; written as 1 only for an overview.gpu entry with phase 1 content alone (single-metric widgets), else 2
+preset = { id = "engine_charts", arrange = "auto", split = 0.5 } # flow layout only (omit for a grid layout); id: a mode of the box kind in OVERVIEW_BOX_MODES; arrange: auto | vertical | horizontal; split: 0.2..=0.8
+# CPU box presets also: power_split = 0.1..=0.5, power_placement = "full_width" | "under_graph" (written only when set)
 widgets = []                   # [] = empty box, which differs from no entry (the default)
 next_id = 1                    # the id the next new widget takes; only grows, raised on load to at least the highest widget id + 1
-# one widget: { id = 1, device = "<persistent device key>" | slot = 0..=1 (flow only), metric = "engine:<GpuEngine key>" | "vram" | "clock_gfx" | "clock_mem" | "power" | "temp",
-#   forms = subset of ["chart", "bar", "value", "stats", "label"] (not empty), col, row, cols, rows (grid layout only; GPU box: 6 columns),
+# metric widget: { id = 1, device = "<persistent device key>" | slot = 0..=1 (GPU box flow only), metric = "<key>",
+#   forms = subset of ["chart", "bar", "value", "stats", "label"] (not empty), col, row, cols, rows (grid layout only),
 #   fill = true, dashed = false (written only when not the default), device_name = "<display only>" }
-# The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v1 once (ADR-019).
-# A reset to the default removes the entry and the GPU box's old mode, split, arrange and hidden keys, so they do not convert again (ADR-019).
+# metric keys by device (ADR-019): gpu:* engine:<GpuEngine key> | vram | clock_gfx | clock_mem | power | temp;
+#   cpu total | kernel | freq | temp | power | power_cores | power_draw | core_clocks | pressure; cpu:<n> load | freq;
+#   memory used | cached | available | swap | commit | pressure | composition;
+#   disk:* and aggregate:disk active | read | write | io, disk:* also temp; net:* and aggregate:net rx | tx | traffic
+# group widget: { id, device = "cpu" | "aggregate:disk" | "aggregate:net" | "gpu:<key>" (slot in GPU box flow only),
+#   group = "cores" | "disks" | "adapters" | "engines", metric = "<member key>" ("engine:*" for engines), forms, cells as above,
+#   items = "rows" | "cells" (default rows for cores, cells otherwise), limit = 1..=256 (omitted = all), arrange = auto | vertical | horizontal (cells only, omitted = auto) }
+# fixed widget: { id, fixed = "processes" (overview.processes) | "timeline" (overview.timeline) | "memory_by_app" (overview.memory), cells as above }; at most one per kind; no forms
+# Grid columns: overview.cpu, overview.processes, overview.timeline 12; overview.memory, overview.gpu, overview.disk, overview.net 6.
+# The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v2 once (pre-layouts-v1 from 1.2.0 is left alone) (ADR-019).
+# A reset to the default removes the entry and the old keys its box converts from: GPU mode, split, arrange, hidden; CPU mode, split, arrange,
+#   power, power_split, power_placement, clocks; Memory, Disk and Net mode, split, arrange (ADR-019).
 
 [fans]                          # per fan key, P3
 # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
