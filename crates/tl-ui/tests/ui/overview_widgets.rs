@@ -1773,8 +1773,7 @@ fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
     );
 
     // Power without a power limit has no bar to offer.
-    r.vcx
-        .update(|window, cx| tl_ui::components::menu::close_context_menu(window, cx));
+    r.vcx.update(tl_ui::components::menu::close_context_menu);
     draw(r.vcx);
     let gear = r.vcx.debug_bounds(leak(gear_id(2))).expect("gear");
     r.vcx.simulate_click(gear.center(), Modifiers::none());

@@ -32,8 +32,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Global, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    AnyElement, App, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle, Global,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window, canvas, div,
     prelude::FluentBuilder as _, px,
@@ -1516,7 +1516,7 @@ mod tests {
 
     #[test]
     fn push_of_the_same_layout_is_no_step() {
-        let mut edit = LayoutEdit::new(GPU_BOX_CONTAINER, None, Some(two()));
+        let mut edit = LayoutEdit::new(GPU_BOX_CONTAINER, Some(two()), Some(two()));
         assert!(!edit.push(Some(two())));
         assert!(!edit.can_undo());
         assert!(edit.push(None));

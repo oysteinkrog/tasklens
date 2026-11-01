@@ -8082,7 +8082,7 @@ mod page {
     #[gpui_kit::test]
     fn overview_widget_edit_modes_exclusive(cx: &mut TestAppContext) {
         use tl_model::layout::GPU_BOX_CONTAINER;
-        use tl_ui::pages::performance::actions::{PerfWidgetCancel, PerfWidgetEditStart};
+        use tl_ui::pages::performance::actions::PerfWidgetEditStart;
         use tl_ui::pages::performance::widget::container::WidgetContainer;
         use tl_ui::pages::performance::widget::edit::{WidgetEditor, any_editing, default_layout};
         use tl_ui::pages::performance::widget::source::SourceStore;
@@ -8108,10 +8108,9 @@ mod page {
         r.page_action(&PerfOverviewEditLayout);
         assert!(!r.editing(), "Edit Layout stays off during Edit Widgets");
 
-        r.vcx.update(|window, cx| {
-            let focus = editor.read(cx).focus_handle().clone();
-            focus.dispatch_action(&PerfWidgetCancel, window, cx);
-        });
+        // The editor is not drawn here, so Cancel runs on it directly.
+        r.vcx
+            .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
         draw(r.vcx);
         assert!(!r.vcx.read_entity(&editor, |e, _| e.is_editing()));
         r.edit_layout();
