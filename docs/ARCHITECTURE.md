@@ -2644,7 +2644,7 @@ Four rules hold for every connection, thread and queue in this ADR (leader decis
 
 ## ADR-019: Configurable widget layout
 
-Status: accepted (D-041, 2026-10-31). Phase P2. This ADR turns `docs/plan/layout-system.md` into build rules. Phase 1 (epic E27, beads `tasklens-lhliq.2` to `.8`) builds it for the Overview GPU box only. Phase 2 (epic E28, `tasklens-6swdr`) moves every other Overview box onto the same types and adds group and fixed widgets (section "Phase 2"). Phases 3 and 4 reuse the same types for the resource pages, named presets and copy layout, each in its own epic.
+Status: accepted (D-041, 2026-10-31). Phase P2. This ADR turns `docs/plan/layout-system.md` into build rules. Phase 1 (epic E27, beads `tasklens-lhliq.2` to `.8`) builds it for the Overview GPU box only. Phase 2 (epic E28, `tasklens-6swdr`) moves every other Overview box onto the same types and adds group and fixed widgets (section "Phase 2"). Phase 3 (epic E29, `tasklens-hzire`) makes every device page a container (section "Phase 3"). Phase 4 reuses the same types for named presets and copy layout, in its own epic.
 
 ### Context
 
@@ -2654,8 +2654,8 @@ Each Overview box has 1 to 5 fixed modes (UI-PRF-019), an Arrange choice, one in
 
 **Terms.**
 
-- A **container** is a box or page that holds widgets. Its id is a string: `overview.<kind>` for an Overview box (phase 1: `overview.gpu` only), later `page.cpu`, `page.memory` and `page.gpu.<device key>` for resource pages. Overview kinds are unique on the page (UI-PRF-056), so the kind names the box.
-- A **widget** shows one metric of one device (its **source**) in one or more **forms**: `chart` (history over the box range), `bar` (load bar), `value` (current value), `stats` (min, average and peak over the range) and `label` (the source's name). Phase 1 has single-metric widgets only. Phase 2 adds group widgets (all cores, disks, adapters or engines) and fixed widgets (the Processes table, the Timeline, Memory by app); see "Phase 2". The Details grid widget comes with the resource pages.
+- A **container** is a box or page that holds widgets. Its id is a string: `overview.<kind>` for an Overview box (phase 1: `overview.gpu` only), and `page.<persistent device key>` for a device page (`page.cpu`, `page.gpu:GPU-…`; see "Phase 3"). Overview kinds are unique on the page (UI-PRF-056), so the kind names the box.
+- A **widget** shows one metric of one device (its **source**) in one or more **forms**: `chart` (history over the box range), `bar` (load bar), `value` (current value), `stats` (min, average and peak over the range) and `label` (the source's name). Phase 1 has single-metric widgets only. Phase 2 adds group widgets (all cores, disks, adapters or engines) and fixed widgets (the Processes table, the Timeline, Memory by app); see "Phase 2". The Details grid widget and the page parts come in phase 3.
 - A **composition** is the fixed arrangement a widget uses for its forms at its size (UI-PRF-061): `Cell`, `Row` or `Tile`.
 - A **layout** is a container's list of widgets. It is either a **flow layout**, placed by a built-in **preset** (one of today's modes), or a **grid layout**, where every widget has its own cells on the container's inner snap grid. Defaults and converted old settings are flow layouts. The first applied inner edit turns a flow layout into a grid layout (see "Editing").
 
@@ -3140,12 +3140,197 @@ Each tl-ui bead adds its UI-PRF-061 strings to `assets/locales/en-US.ftl`.
 - tl-ui (`test-hooks`): group fill at 1, 8, 32 and 128 members in rows and cells, with and without a limit, at 1.0, 1.5 and 2.0 scale; 32 cores fill the height as D-040; members added and removed keep the entity and cells; a sample notifies only the group widgets with a changed member; fixed widgets at their minimum; each box's presets place the same rectangles as 1.2.0 at 1200 × 900; Edit Widgets add, remove, move and Apply in each box; the editor rule of `tasklens-lhliq.12` for group and fixed widgets.
 - Phase gate (`tasklens-6swdr.9`): migration fixtures for every old setting of every box; a visual check of each box's default and old modes against 1.2.0 screenshots in a hidden session; hotplug tests for disks, adapters and logical CPUs going offline; the counter test (a sample renders no page or container and keeps every widget entity); the `perf-overview` bench budgets within 10% of v1.2.0 under the same conditions.
 
+### Phase 3: resource pages (epic E29, `tasklens-hzire`)
+
+Phase 3 makes every device page one widget container: CPU, Memory, each GPU, each disk, each network adapter, each fan, each battery, Aggregate storage and Aggregate graphics. There is no separate Sensors page in 1.3.0: the fan and battery pages of `sensors.rs` are "the other device pages". Phase 3 reuses the phase 1 and phase 2 types, rules and files: `WidgetContainer`, `WidgetEditor`, `SourceStore`, `SourceData`, `MetricWidget`, `GroupWidget`, `FixedWidgetView`, `compose.rs`, `grid.rs`, `group_fill.rs`, `look.rs`, `meta.rs`, `menu.rs`, and the load and reset code of `tl-model/src/layout.rs`. Nothing is forked per page. Every rule above holds for a page container unless this section says otherwise. That includes the render contract, the editor rule of `tasklens-lhliq.12`, Apply, Cancel and Undo, the selector rule (container id in every widget selector, every selector through `tl_selector`) and "One look in every layout". The leader rules of 2026-11-01 hold too. Everything a source or view derives lives in one state struct that an update compares whole. A widget computes every value it shows from the current snapshot when it is created.
+
+**Containers.** A page container's id is `page.` followed by the page's persistent device key (PERF-005): `page.cpu`, `page.memory`, `page.gpu:GPU-0a1b2c3d-…`, `page.gpu:pci:0000:01:00.0`, `page.disk:…`, `page.net:…`, `page.fan:…`, `page.bat:BAT0`, `page.aggregate:disk` and `page.aggregate:gpu`. The key is kept whole, so `page_key(container)` gets it back by removing `page.`. Each GPU, disk, adapter, fan and battery has its own layout; a new device shows its page's default.
+
+- `tl-model/src/layout_pages.rs` keeps `PAGE_CONTAINER_PREFIX = "page."` and `PAGE_KINDS`, the device kinds whose pages this build supports. Each page bead adds its kind (`tasklens-hzire.4` adds GPU, `.5` CPU and so on). `is_layout_container(id)` is true for an id in `LAYOUT_CONTAINERS` and for `page.<key>` when the key's kind is in `PAGE_KINDS`. Every check that read `LAYOUT_CONTAINERS` directly calls it. An entry for a page kind this build does not support is `LayoutEntry::Kept`, so it survives a save.
+- `layout_boxes::DeviceKind` gains `Fan` (key `fan:…`), `Battery` (`bat:…`) and `AggregateGpu` (`aggregate:gpu`). `fan:` keys stop being `Other`.
+- The entry of a device that is gone is kept and written back unchanged. When the device comes back, its page shows the saved layout. Phase 3 never prunes entries.
+
+**Schema version.** `LAYOUT_VERSION` stays 2. Page entries are written as version 2. A 1.3.0 build keeps every `page.*` entry as `LayoutEntry::Kept` (an unknown container), so it shows its pages as before and writes the entries back unchanged. Phase 3 changes nothing in the Overview containers.
+
+**Inner grid of a page.** `grid_cols(container)` returns `PAGE_GRID_COLS` = 12 for every page container. The page body is the page width minus `page_pad` on both sides: at least 368 px (`PAGE_MIN_W` 400), about 900 to 1600 px on a desktop. Rules that differ from the boxes:
+
+- **Gutter and row unit**: both 12 logical px, from `grid_gutter(container)` and `grid_unit(container)` in `widget/grid.rs`; the Overview containers keep 4 px and 24 px. The gutter is `sp4`, the gap between the 1.3.0 page parts, so pinning keeps the page's spacing. The row pitch is 24 px, so a part of height `h` pins to `(h + 12) / 24` rows, a half rounded up: the 300 px charts to 13 rows (300 px), the 240 px chart to 11 rows (252 px), the 150 px charts to 7 rows (156 px) and the 120 px chart to 6 rows (132 px). A Row composition (18 px) needs 2 rows.
+- **No fill**: a page is a scrolling column (UI-PRF-020), so its rows never grow. A layout shorter than the body leaves space under it, as the 1.3.0 pages do; a taller one scrolls. D-037 and D-040 do not apply to page containers. Without this rule the rows would stretch the moment Edit Widgets pins a short page, and the parts would jump.
+- **Scrolling**: the page header row stays at the top of the page and only the body under it scrolls, with one vertical scrollbar. In Edit Widgets the edit toolbar sits between the header and the body, so Apply and Cancel stay in view. The body is the container's scroll area, so edit-mode scrolling equals the applied view as phase 1 requires. This is the one look change of phase 3: in 1.3.0 the header scrolls away with the page. Scroll offset 0 looks the same as 1.3.0.
+- **Default span** of a new widget: a widget with a chart 6 columns × 7 rows (the 150 px page chart); any other single-metric widget 12 × 2; a group or fixed widget 12 × 16. Each is then raised to its minimum span.
+
+**Page style.** A widget in a page container draws in the page style of Part C; a widget in an Overview box draws in the box style of phases 1 and 2. The style follows the container, never the placement, so "One look in every layout" holds: a page widget looks the same in its page's flow layout, in Edit Widgets and in a grid layout.
+
+- A Cell in a page container draws its chart as the 1.3.0 page charts do (UI-PRF-001): the Name form is the chart heading at the top left, the Value form is the value at the right of the heading, then the legend, and the range text under the plot ("Utilization over 60 seconds"). The Cell header line of the box style is left out. Stats and bar sit between the heading row and the plot. Minimum height 30 + 20 (heading row) + 18 (range text) + 16 for stats + 14 for the bar; minimum width 120.
+- Tile and Row are the same in both styles.
+- Value text in a page container uses the page format of Part C for the keys in the table below, in every composition. Other keys use their phase 1 or phase 2 value text.
+
+| Key | Value text in a page container |
+|---|---|
+| `total`, `kernel`, `active`, `engine:*`, `util` | one decimal, "18.6%" (UI-PRF-024, UI-PRF-029, UI-PRF-033) |
+| `swap` | bytes used, "1.20 GiB" (UI-PRF-026) |
+| `io` | read + write, "12.3 MiB/s" (UI-PRF-029); write is the dashed line |
+| `traffic` | download + upload, "1.5 Mbps" (UI-PRF-031); upload is the dashed, tinted line |
+| `power` (GPU) | "31.9 / 300 W" (UI-PRF-032) |
+| `freq` (CPU) | "4631 MHz" (UI-PRF-025) |
+
+- The heading tooltips of the 1.3.0 page charts stay on the widget's name in both styles: Commit ("Memory the system has promised to programs…"), GPU Power (limit range and energy), GPU Clocks (P-state and throttle reasons), the AMD "Own processes only" engine note, and the CPU fallback note below.
+
+**Metric keys added in phase 3** (`tl-model/src/layout_pages.rs`, looked up with the device kind as in phase 2). The Name strings are in UI-PRF-061 "Phase 3". "Menu label" is the text of the Source and Add Widget items when it differs from the name, so two keys never share an item text.
+
+| Device | Key | Series | Name | Menu label |
+|---|---|---|---|---|
+| `cpu` | `cores_overlaid` | `CPU_TOTAL` of every present logical CPU, one line each at alpha max(1/n, 0.08), no fill, no kernel line (UI-PRF-023) | All cores overlaid | |
+| `cpu` | `cores_stacked` | the same, as stacked filled bands, `Stacked(n)` scale | All cores stacked | |
+| `cpu` | `clock` | `CPU_FREQ` filled and `CPU_CLOCK_MAX` dashed (the UI-PRF-025 Clock speed chart) | Clock speed | |
+| `cpu` | `freq_max` | `CPU_CLOCK_MAX` | Fastest core | |
+| `memory` | `physical` | `MEM_USED` filled, `MEM_COMMIT` dashed, `MEM_DIRTY` as a 1 px line at 0.6 (UI-PRF-026) | Physical memory | |
+| `memory` | `commit_pct` | `MEM_COMMIT` on `YScale::Commit(CommitLimit)` | Commit | Commit (% of limit) |
+| `memory` | `dirty` | `MEM_DIRTY` | Modified | |
+| `gpu:…` | `memory` | `GPU_MEM` filled and `GPU_MEM_SHARED` dashed (absent on NVIDIA) | Memory | Memory (dedicated and shared) |
+| `gpu:…` | `vram_shared` | `GPU_MEM_SHARED` | Shared memory | |
+| `gpu:…` | `clocks` | `GPU_CLOCK` filled and `GPU_MEM_CLOCK` dashed (the UI-PRF-032 Clocks chart) | Clocks | |
+| `gpu:…` | `fan` | no series: `GpuTotals.fan_pct` and `fan_rpm` | Fan speed | |
+| `disk:…` | `response` | no series: the disk record's `response_ms` | Average response time | |
+| `disk:…` | `total_read`, `total_written` | no series: the disk record's running totals | Total read, Total written | |
+| `net:…` | `total_rx`, `total_tx` | no series: the adapter record's running totals | Total downloaded, Total uploaded | |
+| `net:…` | `signal` | no series: the Wi-Fi signal (wired adapters do not report it) | Signal | |
+| `fan:…` | `speed` | `FAN_RPM` filled and `FAN_PWM` dashed on its own 0..100 axis (UI-PRF-034) | Fan speed | |
+| `fan:…` | `rpm` | `FAN_RPM` | RPM | |
+| `fan:…` | `pwm` | `FAN_PWM` | PWM | |
+| `fan:…` | `temp` | `SENSOR_TEMP` of the paired sensor (`[fans]` `temp`) | Temperature | |
+| `bat:…` | `power` | `BATTERY_POWER` | Power | |
+| `bat:…` | `percent` | `BATTERY_PCT` | Percentage | |
+| `aggregate:gpu` | `util` | `GPU_UTIL` of the aggregate (the busiest adapter) | Utilization | |
+| `aggregate:gpu` | `memory` | `GPU_MEM` of the aggregate (the sum), one line | Memory | |
+
+The phase 2 keys `active`, `read`, `write` and `io` on `aggregate:disk`, and every phase 1 and phase 2 key, also serve the pages. Details rows that have no series and no key here (Processes, Threads, Handles, Up time, Load average, addresses and the like) are shown only by the Details widget.
+
+**Metric metadata added in phase 3** (`widget/meta.rs`). `Lines` gains `PerLogical { stacked: bool }` (`cores_overlaid`, `cores_stacked`), `Physical` (the three lines of `physical`) and `RpmPwm` (`speed`). `MetricMeta` gains `menu_label: Option<&'static str>` (an `en-US.ftl` key) and `page_value: Option<ValueText>` (the page format of the table above).
+
+| Key | Format | Scale | Kind | Bar max | Stats | Value text |
+|---|---|---|---|---|---|---|
+| `cores_overlaid`, `cores_stacked` | `Percent` | `Fixed { 0, 100 }`; stacked `Stacked(n)` | gauge | no bar | none | none (offers chart and name) |
+| `clock`, `freq_max` | `Mhz` | `StickyUp { hw_max: cpuinfo_max_freq }` | gauge | `freq_max`: the inventory's `max_mhz`; `clock`: no bar | `freq_max` min, avg, peak; `clock` none | "4631 MHz" |
+| `physical` | `Bytes` | `FixedTotal(MemTotal)` | gauge | no bar | none | used, "34.68 GiB" |
+| `commit_pct` | `PercentOf { CommitLimit }` | `Commit(CommitLimit)`, axis text above 100% | gauge | 100% of the limit (the bar stops at full) | min, avg, peak | "69.0%" |
+| `dirty` | `Bytes` | `StickyUp { hw_max: none }` | gauge | no bar | min, avg, peak | "120.00 MiB" |
+| `memory` (GPU) | `Bytes` | `FixedTotal(mem_total)` | gauge | no bar | none | "2.80 GiB / 15.92 GiB" |
+| `vram_shared` | `Bytes` | `FixedTotal(shared_total)` | gauge | `shared_total` | min, avg, peak | `OfTotal` |
+| `clocks` | `Mhz` | `StickyUp { hw_max: clock_gfx_max_mhz }` | gauge | no bar | none | as the 1.3.0 Clocks chart, "1905 / 3105 MHz" |
+| `fan` (GPU) | `Percent` | none | gauge | 100 | none | "0% (0 RPM)" (offers bar, value and name) |
+| `response` | text as the Details row | none | gauge | no bar | none | "0.42 ms" (offers value and name) |
+| `total_read`, `total_written`, `total_rx`, `total_tx` | `Bytes` | none | counter | no bar | none | the running total, "812.40 GiB" (offers value and name) |
+| `signal` | text as the Details row | none | gauge | 100 (the percent) | none | "-52 dBm (78%)" (offers bar, value and name) |
+| `speed` | `Rpm` | `StickyUp { hw_max: fanN_max }`, else sticky 1-2-5 | gauge | `fanN_max`, else no bar | none | "1200 RPM" |
+| `rpm` | `Rpm` | as `speed` | gauge | `fanN_max`, else no bar | min, avg, peak | "1200 RPM" |
+| `pwm` | `Percent` | `Fixed { 0, 100 }` | gauge | 100 | min, avg, peak | "45%" |
+| `temp` (fan) | `Celsius` | `StickyTemp` | gauge | no bar | min, avg, peak | "45 °C"; with no paired sensor "-" and the plot shows "Choose a sensor" centred (UI-PRF-034) |
+| `power` (battery) | `Watts` | `Symmetric` (charge above the zero line, discharge below) | gauge | no bar | min, avg, peak | "-12.4 W" |
+| `percent` | `Percent` | `Fixed { 0, 100 }` | gauge | 100 | min, avg, peak | "85.0%" |
+| `util` | `Percent` | `Fixed { 0, 100 }` | gauge | 100 | min, avg, peak | "10.9%" |
+| `memory` (aggregate GPU) | `Bytes` | `FixedTotal(sum of mem_total)` | gauge | the sum | min, avg, peak | `OfTotal` |
+
+**Fixed widgets added in phase 3.** Each page part that is not a single metric becomes a fixed widget kind. `FixedWidget` gains the kinds below. Each is allowed only in the page containers named, at most once, like the phase 2 kinds; `memory_by_app` is now allowed in `page.memory` as well as `overview.memory`. A fixed widget's device is its page's device. Its view keeps the 1.3.0 part's own render contract, interaction, tooltips, menus and demand, and is hosted by `FixedWidgetView` as in phase 2.
+
+| Written as | Page | The 1.3.0 part | Minimum, logical px |
+|---|---|---|---|
+| `details` | every page | the "Details" heading and the page's Details grid (UI-PRF-021), with its link values, prefixes and suffixes (Needs setup, Display unit, Public IP Fetch, Wi-Fi bars) | 360 × 74 (heading and one grid row) |
+| `cpu_core_grid` | `page.cpu` | the per-core `ChartGridView` with kernel lines, core marks and heading tooltips (UI-PRF-023) | 120 × 112 |
+| `cpu_core_board` | `page.cpu` | the core board with its heading and sort toggle (`CpuBoard`, crw.104) | 200 × 60 |
+| `gpu_engine_grid` | `page.gpu:…` | the engine `ChartGridView` with "Hide this engine graph" (UI-PRF-032) | 120 × 112 |
+| `memory_bar` | `page.memory` | the composition bar with its caption (UI-PRF-027) | 160 × 44 |
+| `memory_compressed` | `page.memory` | the "Compressed memory" block (UI-PRF-028) | 360 × 74 |
+| `swap_devices` | `page.memory` | the "Swap devices" table | 360 × 74 |
+| `memory_modules` | `page.memory` | the "Memory modules" block | 360 × 74 |
+| `gpu_displays` | `page.gpu:…` | the "Displays" block (UI-PRF-033) | 360 × 48 |
+| `disk_partitions` | `page.disk:…` | the partitions heading and table (UI-PRF-030) | 360 × 74 |
+| `net_settings` | `page.net:…` | the "Network settings" link (UI-PRF-031) | 160 × 24 |
+| `battery_history` | `page.bat:…` | the 24-hour charge chart with its day labels (UI-PRF-035) | 200 × 80 |
+
+- The core grid and the engine grid stay fixed widgets because each is one element with three paths for all its cells (ADR-009 rule 7, the `perf-cpu` scene of ADR-014). A cores group or an engines group would make one `ChartView` per member. In a grid layout each grid lays out its columns by width as today, and its rows share the widget's height equally, at least `grid_cell_h` 112 px each; a taller grid scrolls inside the widget. The engine grid follows `performance.hidden_gpu_engines` in every layout, because "Hide this engine graph" is part of it.
+- The core board stays a fixed widget because of its heading and its sort toggle (`performance.cpu_board_sort`). A user who wants the core rows without them adds a cores group, which draws the same rows.
+- A block that 1.3.0 hides (no zram and zswap off, no swap device, no module data, a desktop without a network settings tool, a battery with fewer than 2 history points) takes no space in a flow layout. In a grid layout it keeps its cells and shows its heading and the centred `text_secondary` line "Nothing to show on this device" (`perf-widget-nothing-to-show`). Add Widget does not list a block the page cannot show.
+- A block taller than its widget scrolls inside the widget. A table keeps its own header row and scrollbar.
+- **Details and the render contract.** In 1.3.0 a page re-renders when a Details value changes (1 Hz). In phase 3 the Details grid is its own entity, `DetailsView` (`widget/details_widget.rs`). The page keeps building the `KeyValueModel` on a snapshot, as today, and hands it to `DetailsView`, which compares the whole model and notifies only when a row's text, validity or tooltip changed. The page itself does not notify. The page blocks follow the same rule with their own views. Copy device info (UI-PRF-022) still reads the page's Details model and blocks, whatever the layout holds.
+
+**Group widgets on pages.** The CPU page offers "All cores >" (`load`, `freq`) and each GPU page "All engines" for its own GPU, as the Overview boxes do. The other pages show one device and offer no group.
+
+**Presets of the pages** (the flow layouts of phase 3). Each widget of a page flow layout draws its 1.3.0 page part at its 1.3.0 place and height, in the page style. The flow placement (`pages/performance/page_flow/`) draws only what is not a widget: the gaps (`sp4` between parts, `details_gap` 24 above Details, `sp6` above each block), the Memory page's Usage and By app switch, and the CPU fallback note. All device keys are the page's own key; ids start at 1 in list order. "Details" means fixed `details`; every list ends with it and then the page's blocks, in the order of the 1.3.0 page.
+
+| Page | Preset (from) | Widgets |
+|---|---|---|
+| CPU | `overall` (`cpu_graph_mode`) | `total` [chart, value, label], 300 px |
+| CPU | `per_core` (default) | fixed `cpu_core_grid` |
+| CPU | `all_cores_overlaid` | `cores_overlaid` [chart, label], 300 px |
+| CPU | `all_cores_stacked` | `cores_stacked` [chart, label], 300 px |
+| CPU | `board` | `total` [chart, value, label] at `BOARD_CHART_SHARE` of the width, beside fixed `cpu_core_board`, 300 px |
+| Memory | `usage` (default, `memory_view`) | `physical` [chart, value, label]; `commit_pct` [chart, value, label]; `swap` [chart, value, label]; fixed `memory_bar`; Details; `memory_compressed`, `swap_devices`, `memory_modules` |
+| Memory | `apps` | fixed `memory_by_app` at 300 px in place of `physical`; the rest as `usage` |
+| GPU | `default` | fixed `gpu_engine_grid`; `memory` and `temp` [chart, value, label] side by side; `power` and `clocks` [chart, value, label] side by side; Details; `gpu_displays` |
+| Disk | `default` | `active` [chart, value, label]; `io` [chart, value, label]; Details; `disk_partitions` |
+| Network | `default` | `traffic` [chart, value, label], 240 px; Details; `net_settings` |
+| Fan | `default` | `speed` [chart, value, label]; `temp` [chart, value, label]; Details |
+| Battery | `default` | `power` [chart, value, label]; `percent` [chart, value, label]; fixed `battery_history`; Details |
+| Aggregate storage | `default` | `active` [chart, value, label]; `io` [chart, value, label]; Details |
+| Aggregate graphics | `default` | `util` [chart, value, label]; `memory` [chart, value, label]; Details |
+
+Every chart is 150 px high unless the table says otherwise. Flow rules:
+
+- **CPU secondary graph.** After the mode's widgets, every CPU preset lists the secondary graph of `performance.cpu_secondary_graph`, 120 px: `power` gives `power_draw` [chart, value, label] and then the two fallbacks `temp` and `clock` [chart, value, label]; `clock` gives `clock`; `clocks` gives `core_clocks` [chart, label]; `temperature` gives `temp`; `none` gives nothing. Of these widgets only the first that `effective_secondary` allows takes space. When a fallback shows, its heading carries the 1.3.0 tooltip "Power draw is not available. Showing Temperature." (or Clock speed).
+- **Memory.** `swap` takes no space while `memory_swap_graph` is off or SwapTotal is 0; `memory_bar` takes no space while `memory_composition` is off.
+- **GPU.** `power` and `clocks` take space only when `gpu_optional_graphs` holds them; one alone takes the full width. With every engine hidden the engine grid takes no space.
+- **Battery.** `power` takes space on a system battery only, `percent` on a peripheral only (UI-PRF-035).
+- A widget whose metric the device does not report, and a block 1.3.0 hides, take no space (as phase 1).
+- 1.3.0 animates some flow changes: the CPU mode cross-fade, the swap chart height and the engine row collapse. Phase 3 drops these three; the change shows at once, as 1.3.0 already does with reduced motion.
+
+**Conversion of the page settings.** A page's flow layout is built in memory from today's page keys every time it is needed and is never written: `page_layout(perf, container) -> ContainerLayout` in `layout_pages.rs`. It reads `cpu_graph_mode`, `cpu_secondary_graph`, `memory_view`, `memory_swap_graph`, `memory_composition` and `gpu_optional_graphs`, and nothing else; the flow placement applies `hidden_gpu_engines` and the device rules above. It reads no device, so it is deterministic, and it writes nothing, so running it twice changes nothing. `container_layout(perf, container)` (replacing `box_layout(perf, kind)` for every container) gives a page's own entry when it has one, else `page_layout`.
+
+- These keys stay what they are in 1.3.0: one value per page kind, shared by every page of that kind, edited by the page menu and the CPU header buttons. A page without an entry follows them; a page with an entry ignores them, except `cpu_kernel`, `cpu_board_sort`, `hidden_gpu_engines` in the engine grid, `memory_by_app.*` and `network_dynamic_scale`, which every widget follows in every layout.
+- So nothing is converted on load, `LAYOUTS_CONVERTED_KEY` is never reported for a page, and no backup copy is made: the file does not change until the user applies Edit Widgets on a page. An older build keeps showing every page by these keys.
+- **Saving the default** of a page removes the page's entry only. It never touches the page keys, because they also drive every other page of that kind. The page then shows `page_layout` again.
+
+**Editing a page.**
+
+- **Entering.** The page menu (UI-PRF-015) gets "Edit Widgets…" (`PerfWidgetEditStart`, dispatched on the page) and "Reset Page" (`PerfWidgetResetPage`) as the first page-specific items, followed by a separator. "Reset Page" is disabled while the page has no entry. Entering pins a flow layout as phase 1 does: each widget that takes space gets the cells nearest its drawn rectangle (with the page gutter), and widgets that take no space are left out, the secondary fallbacks not shown included.
+- **Select Pages and Edit Layout.** "Select Pages" (`PerfEnterEditMode`, UI-PRF-013) edits which pages the sidebar shows and their order. Edit Widgets edits the widgets inside one page or box. They are separate modes, and at most one of Select Pages, Edit Layout and Edit Widgets is on in a window, as phase 1 rules for Edit Layout. Starting Edit Widgets ends Select Pages as "Done" does. While any container of the window is in Edit Widgets, "Select Pages" (the sidebar pencil and the card menu item), "Edit Layout", "Graph Summary View" and "Edit Widgets…" of every other container are disabled.
+- **Leaving the page.** Selecting another page, tab or host tab keeps the edit open, as an Overview box does; the page shows it again when the user comes back. When the page's device goes away, the edit ends as Cancel does.
+- **Header buttons and page menu outside Edit Widgets.** With a flow layout, every 1.3.0 item works as today and edits its page key. With a grid layout, the items that pick a preset stay and ask "Replace your widgets?" first; on Replace the page's entry is removed and the key is set, so the page shows the chosen preset. These are the CPU mode button and "Graph >" items (`cpu_graph_mode`) and the Memory Usage and By app switch (`memory_view`). The items that add or remove flow widgets are hidden: CPU "Secondary graph >", Memory "Show memory composition" and "Show swap usage", and the "Power" and "Clocks" items of GPU "Select GPU engine graphs >" (its engine items stay while the page has the engine grid widget). Items that are not about layout stay as they are: Kernel, SMART, Eject, Network settings, Rename fan, Temperature sensor and "Groups shown" (on the By app widget's own menu in a grid layout).
+- **Reset.** In Edit Widgets, Reset asks first, then sets the working copy to the page's `page_layout`. "Reset Page" outside Edit Widgets asks as "Reset Box" does with a grid layout, then saves the default.
+- **Double-click** on a chart widget of a page outside Edit Widgets opens the mini window (`PerfShowMiniWindow`), as the 1.3.0 graph area does.
+- **Source lists.** "Source >" and Add Widget list the metrics of the page's own device in the order of the key tables (phase 1, phase 2, then phase 3 for that device kind), by menu label. The CPU page also lists "Core load >" and "Core speed >". Then the groups the page offers, then a separator and the page's fixed widgets it does not hold yet, Details first. A widget may still name another device's key (a hand edit, or copy layout in phase 4); it is kept and shows its unavailable state when that device is missing. The Overview box menus do not change in phase 3.
+
+**Render contract and demand.** A page renders on a header change (`DEVICES`), a header button change, a layout change, an edit mode change and a resize, never because of a sample. Its body is one `WidgetContainer` cached view. The gate is the phase 1 gate with "page" in place of "Overview page": on a sample the page and its container never notify, no widget entity is created or dropped, and only widgets on a changed source (and a `DetailsView` whose rows changed) notify. The page asks for what its placed widgets and fixed widgets ask for, plus its 1.3.0 page bits (`cpu`, `memory`, `gpus`, `disks`, `nets`, `sensors`, `cpu_fast` while the core grid or board shows). With the default flow layout its demand equals 1.3.0's. A page that is not shown asks for nothing, as today. Each page has its own `SourceStore`.
+
+**Files the phase 3 beads create or change.** Paths under `widget/` and `page_flow/` are in `crates/tl-ui/src/pages/performance/`.
+
+| Bead | Files |
+|---|---|
+| `tasklens-hzire.2` | `tl-model/src/layout_pages.rs` (new: `PAGE_CONTAINER_PREFIX`, `PAGE_KINDS`, `PAGE_GRID_COLS`, `page_container`, `page_key`, the phase 3 metric keys and their series, the page preset lists, `page_layout`), `tl-model/src/layout.rs` (`FixedWidget` kinds and where each is allowed, `is_layout_container`, `grid_cols` for pages, `container_layout`, `reset_to_default` of a page), `tl-model/src/layout_boxes.rs` (`DeviceKind::Fan`, `Battery`, `AggregateGpu`), `tl-model/src/lib.rs` (mod line), `widget/meta.rs` (the phase 3 entries, `Lines::PerLogical`, `Physical`, `RpmPwm`, `menu_label`, `page_value`), `widget/source.rs` (readings and names of the phase 3 keys), `crates/tl-model/tests/fixtures/layouts/page_*.toml` |
+| `tasklens-hzire.3` | `page.rs` (fixed header, the edit toolbar row, the body as a `WidgetContainer`; `DevicePage` gains the container and the fixed views), `page_flow/mod.rs` (new: the column flow, gaps and side-by-side rows), `widget/details_widget.rs` (new: `DetailsView`), `widget/fixed_widget.rs` (page fixed kinds, "Nothing to show on this device"), `widget/container.rs` and `widget/grid.rs` (`grid_gutter`, no fill for pages), `widget/look.rs` and `widget/compose.rs` (page style Cell), `widget/edit.rs` (page containers, mode exclusion with Select Pages), `widget/menu.rs` (page source lists, page fixed items), `menu.rs` (Edit Widgets… and Reset Page), `sidebar.rs` (Select Pages disabled while editing), `actions.rs` (`PerfWidgetResetPage`), one page wired end to end (the Aggregate storage page: two charts and Details), `crates/tl-ui/tests/ui/page_widgets.rs` (new module) |
+| `tasklens-hzire.4` | `gpu.rs`, `page_flow/gpu.rs` (new), the `gpu_engine_grid` and `gpu_displays` views, `crates/tl-ui/tests/ui/page_gpu_widgets.rs` |
+| `tasklens-hzire.5` | `cpu.rs`, `cpu_grid.rs`, `cpu_board.rs`, `page_flow/cpu.rs` (new), `crates/tl-ui/tests/ui/page_cpu_widgets.rs` |
+| `tasklens-hzire.6` | `memory.rs`, `memory_bar.rs`, `memory_apps.rs` (hosted on the page), `page_flow/memory.rs` (new), the block views, `crates/tl-ui/tests/ui/page_mem_widgets.rs` |
+| `tasklens-hzire.7` | `disk.rs`, `page_flow/disk.rs` (new), the `disk_partitions` view, `crates/tl-ui/tests/ui/page_disk_widgets.rs` |
+| `tasklens-hzire.8` | `net.rs`, `page_flow/net.rs` (new), the `net_settings` view, `crates/tl-ui/tests/ui/page_net_widgets.rs` |
+| `tasklens-hzire.9` | `sensors.rs` (Fan and Battery), `aggregate.rs` (Aggregate graphics; Aggregate storage is `.3`), `page_flow/sensors.rs` and `page_flow/aggregate.rs` (new), the `battery_history` view, `crates/tl-ui/tests/ui/page_other_widgets.rs` |
+| `tasklens-hzire.10` | the page fixtures of every toggle combination, the hotplug and counter tests of the page modules, the look sweep over every page, the `perf-cpu` and Performance page bench scenes |
+
+Each tl-ui bead adds its UI-PRF-061 strings to `assets/locales/en-US.ftl`.
+
+**Verification (phase 3).**
+
+- tl-model: `page_layout` for every value of `cpu_graph_mode` × `cpu_secondary_graph`, both `memory_view` values with `memory_swap_graph` and `memory_composition` on and off, and every subset of `gpu_optional_graphs` gives the preset lists above; calling it twice gives the same layout; no page key changes on load and no conversion is reported; an entry for a page kind not in `PAGE_KINDS` and an entry of a device that is gone are written back unchanged; a page fixed kind outside its page is dropped; every phase 3 key has metadata; reset of a page removes its entry and leaves every page key as it was.
+- tl-ui (`test-hooks`): each page's default places the same rectangles as 1.3.0 at 1200 × 900; Edit Widgets add, move, resize, remove, Undo, Apply and Cancel on a page; the Details widget shows the same rows as the 1.3.0 grid; a sample renders no page or container (the counter gate) and a Details change notifies only `DetailsView`; a second GPU and a second disk keep separate layouts; a device gone and back shows its saved layout; the page body scrolls and the header stays; no fill on a short page; the page style Cell at its minimum at 1.0, 1.5 and 2.0 scale; edit decorations cover no text on a page; Select Pages and Edit Widgets exclude each other; a preset item with a grid layout asks before it replaces.
+- Phase gate (`tasklens-hzire.10`): the fixtures above, a visual check of every page's default and each old toggle against 1.3.0 screenshots in a hidden session, hotplug tests for GPUs, disks and adapters, the counter test, the look sweep (each page's widgets look the same in flow, in Edit Widgets and after Apply), and the `perf-cpu` and Performance page bench budgets within 10% of v1.3.0 under the same conditions.
+
 ### Consequences
 
 - The GPU box looks as in 1.1.0 until the user edits it. Old settings stay in the file, so going back to an older build keeps the old mode. After a reset of the GPU box both builds show their default. That build drops the `[[performance.layouts]]` entries at its next save. `settings.toml.pre-layouts-v1` holds the file as it was before the first conversion.
 - The GPU box code splits into the flow placement (`gpu_flow.rs`) and the shared widget code. The other boxes do not change in phase 1.
 - A layout written by a later build for a box this build does not support survives a save unchanged.
 - Each widget is an entity, so a box with 30 widgets has 30 entities. Widgets that take no space have none.
+- Phase 3: each device page looks as in 1.3.0 until the user applies Edit Widgets on it, except that the page header stays at the top while the body scrolls, and three flow animations go. The settings file does not change until then. Each GPU, disk, adapter, fan and battery has its own page layout, kept after the device is gone.
 
 ### Rejected alternatives
 
@@ -3153,6 +3338,8 @@ Each tl-ui bead adds its UI-PRF-061 strings to `assets/locales/en-US.ftl`.
 - **Convert old modes into grid cells on load.** Rejected: the engines a GPU reports and its vendor order are not known at load, so the result would depend on the machine and would not be deterministic. Flow layouts keep the old placement rules instead.
 - **One `schema_version` bump of `settings.toml` with a migration in `tl-app/src/migrations.rs`.** Rejected: an older build would open the whole file read-only (ADR-011 load step 3), and the conversion must run per container and only for containers this build supports.
 - **One render of the container per sample, drawing every widget.** Rejected: it breaks the render contract of UI-PRF-017.
+- **Write page flow layouts on load (phase 3), one entry per device or one per page kind.** Rejected: an entry per device needs the device list at load, so the result would depend on the machine. One entry per kind adds a second lookup level, and the page menus would then edit the entry and the page keys would go stale. The page keys already hold the flow layout, are shared by every page of a kind and are what an older build reads, so `page_layout` builds the flow layout from them in memory.
+- **The CPU core grid and the GPU engine grid as group widgets.** Rejected: each is one element with three paths for every cell (ADR-009 rule 7, the `perf-cpu` budget of ADR-014); a group makes one `ChartView` per member. A cores or engines group is still offered for users who want one.
 
 ### Verification
 
