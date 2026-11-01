@@ -48,7 +48,13 @@ const ROWS: [Row; 9] = [
         13,
     ),
     // The bad mode and the out-of-range split are dropped.
-    ("invalid_values", "engine_charts", None, None, 13),
+    (
+        "invalid_values",
+        "engine_charts",
+        Some("horizontal"),
+        None,
+        13,
+    ),
 ];
 
 #[test]

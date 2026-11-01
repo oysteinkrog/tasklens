@@ -1,8 +1,8 @@
-# Settings written by 1.1.0 and edited by hand: a mode that does not exist and a split out of range.
+# Settings written by 1.1.0 and edited by hand: a mode that does not exist and a split out of range, with a valid arrange.
 schema_version = 1
 
 [performance.overview]
 grid = [
   { kind = "cpu", col = 0, row = 0, cols = 6, rows = 4, power = true, power_split = 0.3 },
-  { kind = "gpu", col = 6, row = 0, cols = 6, rows = 4, mode = "bogus", split = 5.0 },
+  { kind = "gpu", col = 6, row = 0, cols = 6, rows = 4, mode = "bogus", split = 5.0, arrange = "horizontal" },
 ]
