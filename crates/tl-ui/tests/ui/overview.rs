@@ -8210,7 +8210,8 @@ mod page {
                 Some(mode),
                 "the mode is the preset"
             );
-            assert!(engines.len() >= 2, "{mode}: {engines:?}");
+            // The chart preset has no engine widgets, so its sections build no engine rows.
+            assert_eq!(engines.len() >= 2, mode != "chart", "{mode}: {engines:?}");
             // (widget, the part the box drew for it)
             let mut parts: Vec<(u32, String)> = Vec::new();
             if mode != "engine_charts" {
@@ -8225,7 +8226,7 @@ mod page {
                 }
             }
             if mode == "chart" {
-                for k in &engines {
+                for k in ["gpu", "enc", "dec", "memctl"] {
                     let id = engine_widget(&flow, 0, k);
                     assert!(id.is_none(), "chart has no engine widgets: {k}");
                 }
