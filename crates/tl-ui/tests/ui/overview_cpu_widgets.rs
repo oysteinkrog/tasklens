@@ -460,6 +460,34 @@ fn overview_cpu_core_sample_renders_only_the_group(cx: &mut TestAppContext) {
     assert_eq!(same.entity_id(), group.entity_id(), "same entity");
 }
 
+/// The render contract in the `chart` mode: the box shows no core rows, so a core sample
+/// renders neither the box nor its container.
+#[gpui_kit::test]
+fn overview_cpu_core_sample_in_chart_mode_renders_nothing(cx: &mut TestAppContext) {
+    let mut r = open(cx, 4, 1200., 900.);
+    r.page_action(&PerfOverviewSetBoxMode {
+        kind: "cpu".into(),
+        mode: "chart".into(),
+    });
+    r.publish_cores(&[10., 20., 30., 40.]);
+    let cpu = r.cpu();
+    let container = r.container();
+    let counts = |r: &mut Rig| {
+        let (cpu, container) = (cpu.clone(), container.clone());
+        r.vcx.update(|_, cx| {
+            (
+                cpu.read(cx).notify_count.get(),
+                container.read(cx).notify_count.get(),
+            )
+        })
+    };
+    let before = counts(&mut r);
+    r.publish_cores(&[55., 65., 75., 85.]);
+    let after = counts(&mut r);
+    assert_eq!(after.0, before.0, "the box does not notify");
+    assert_eq!(after.1, before.1, "the container does not notify");
+}
+
 /// UI-PRF-061 phase 2: in Edit Widgets the CPU box lists its metrics and cores, adds a
 /// widget, a core widget and an all-cores group, removes, moves, and Apply saves a grid layout
 /// that the box then draws.

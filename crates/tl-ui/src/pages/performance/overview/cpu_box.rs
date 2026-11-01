@@ -808,14 +808,17 @@ impl CpuBox {
     }
 
     /// A core row's text or bucket changed: the cores group draws the rows, so only it renders
-    /// again. Without a drawn group (a grid layout keeps its own sources) the box does nothing;
-    /// before the first flow render the box renders.
+    /// again. When the box draws no cores group (a grid layout keeps its own sources, and the
+    /// `chart` mode shows no rows) nothing renders; before the first flow render places the
+    /// group, the box renders.
     fn notify_cores(&mut self, cx: &mut Context<Self>) {
-        if !self.host_draws() {
+        if !self.host_draws() || self.mode == CpuMode::Chart {
             return;
         }
-        let group = cpu_flow::cores_of(&self.flow)
-            .and_then(|id| self.container.read(cx).group(id).cloned());
+        let Some(id) = cpu_flow::cores_of(&self.flow) else {
+            return;
+        };
+        let group = self.container.read(cx).group(id).cloned();
         match group {
             Some(g) => g.update(cx, |g, cx| g.flow_changed(cx)),
             None => self.notify(cx),
