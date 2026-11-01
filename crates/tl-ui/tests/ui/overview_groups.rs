@@ -17,8 +17,8 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentit
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FormSet, GroupItems,
-    GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, MetricKey, SourceSelector, WidgetCell,
-    WidgetContent, WidgetOptions, WidgetSetting,
+    GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, METRIC_ENGINE_ANY, MetricKey,
+    SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
 };
 use tl_model::layout_boxes::{DEVICE_CPU, DEVICE_DISKS, METRIC_DISK_IO, METRIC_LOAD};
 use tl_model::series::{Sample, SeriesView};
@@ -869,6 +869,94 @@ fn overview_group_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
                 for (part, b) in &texts {
                     for (d, db) in &decorations {
                         assert!(!covers(*db, *b), "{at}: {d} {db:?} on {part} {b:?}");
+                    }
+                }
+            }
+        }
+        r.ed(&e, |e, _, cx| e.cancel(cx));
+    }
+}
+
+/// In Edit Widgets no edit decoration covers the centred lines of an empty group: "None
+/// found", and a gone GPU's name over "Not connected". The widgets are one row high and
+/// narrow, at scale 1.0, 1.5 and 2.0, selected or not. The lines stay inside the widget.
+#[gpui_kit::test]
+fn overview_group_edit_decorations_cover_no_empty_text(cx: &mut TestAppContext) {
+    let mut r = open(cx, 4, &[]);
+    let engines = GroupSelector {
+        device: DeviceSelector::Key(Arc::from("gpu:GPU-x")),
+        members: GroupKind::Engines,
+        metric: MetricKey::new(METRIC_ENGINE_ANY),
+        options: GroupOptions {
+            limit: None,
+            items: GroupItems::Cells,
+            arrange: None,
+        },
+    };
+    let mut gone = group_widget(2, engines, CELL_FORMS, cell(3, 0, 3, 1));
+    gone.device_name = Some("Old GPU".to_owned());
+    let widgets = vec![
+        group_widget(
+            1,
+            disks(GroupItems::Cells, None),
+            CELL_FORMS,
+            cell(0, 0, 2, 1),
+        ),
+        gone,
+    ];
+    for pct in [100u16, 150, 200] {
+        let scale = f32::from(pct) / 100.;
+        let (e, c) = r.editor(
+            layout(CPU_BOX_CONTAINER, widgets.clone()),
+            720. * scale,
+            640. * scale,
+        );
+        r.set_ui_scale(pct);
+        r.ed(&e, |e, window, cx| e.start(window, cx));
+        assert!(r.vcx.read_entity(&e, |e, _| e.is_editing()));
+        for selected in [false, true] {
+            for (id, state, parts) in [
+                (1u32, GroupState::NoneFound, &["reason"][..]),
+                (2, GroupState::Gone, &["name", "reason"][..]),
+            ] {
+                let at = format!("{pct} % group {id} selected {selected}");
+                if selected {
+                    r.ed(&e, |e, _, cx| e.select(id, cx));
+                }
+                let g = r.group(&c, id);
+                assert_eq!(r.vcx.read_entity(&g, |g, _| g.state()), state, "{at}");
+                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
+                    (
+                        "grip".into(),
+                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                    ),
+                    (
+                        "gear".into(),
+                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                    ),
+                    (
+                        "corner".into(),
+                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                    ),
+                ];
+                decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
+                decorations.extend(ring(w, OUTLINE).map(|b| ("outline".to_owned(), b)));
+                for part in parts {
+                    let b = r
+                        .vcx
+                        .debug_bounds(leak(part_id(id, part)))
+                        .unwrap_or_else(|| panic!("{at}: {part}"));
+                    assert!(
+                        b.left() >= w.left()
+                            && b.right() <= w.right()
+                            && b.top() >= w.top()
+                            && b.bottom() <= w.bottom(),
+                        "{at}: {part} {b:?} outside the widget {w:?}"
+                    );
+                    for (d, db) in &decorations {
+                        assert!(!covers(*db, b), "{at}: {d} {db:?} on {part} {b:?}");
                     }
                 }
             }

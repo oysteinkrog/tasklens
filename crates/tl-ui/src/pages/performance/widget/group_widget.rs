@@ -58,6 +58,9 @@ use crate::theme::{UiMetrics, current, metrics};
 const EDIT_EDGE: f32 = super::edit::OUTLINE;
 /// The right edge the items keep free in Edit Widgets, logical px: the resize corner.
 const EDIT_RIGHT: f32 = super::edit::CORNER;
+/// The width an empty group's lines keep free in Edit Widgets, from the widget's left edge:
+/// the grip and the gear, each `edit::HANDLE` wide, logical px.
+const EDIT_LEAD: f32 = 2. * super::edit::HANDLE;
 
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_NONE: &str = "perf-widget-group-none";
@@ -307,9 +310,14 @@ impl GroupWidget {
         }
     }
 
-    /// A new UI scale: the items' minimums change.
+    /// A new UI scale: the items' minimums change, and in Edit Widgets an empty group's lines
+    /// move to stay clear of the grip, the gear and the resize corner.
     fn on_metrics(&mut self, cx: &mut Context<Self>) {
-        if metrics(cx).ui_scale != self.scale && self.relayout(cx) {
+        if metrics(cx).ui_scale == self.scale {
+            return;
+        }
+        let empty_in_edit = self.edit_inset && !matches!(self.state, GroupState::Members { .. });
+        if self.relayout(cx) || empty_in_edit {
             self.notify(cx);
         }
     }
@@ -537,18 +545,24 @@ impl Render for GroupWidget {
                 *el.text_style() = t_sm(&m);
                 let p = part_id(id, part);
                 el.debug_selector(move || p)
+                    .max_w_full()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(theme.text_secondary)
                     .child(text)
             };
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .size_full();
+            // In Edit Widgets the lines lie inside the outline and left of the resize corner,
+            // and start right of the grip and the gear, so no edit control covers them.
+            let mut body = div().size_full();
+            if self.edit_inset {
+                body = body
+                    .pt(px(EDIT_EDGE))
+                    .pb(px(EDIT_EDGE))
+                    .pl(px(EDIT_LEAD * m.ui_scale))
+                    .pr(px(EDIT_RIGHT * m.ui_scale));
+            }
+            body = body.flex().flex_col().items_center().justify_center();
             if !name.is_empty() {
                 body = body.child(line("name", name.into()));
             }
