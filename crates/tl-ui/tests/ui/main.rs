@@ -39,6 +39,7 @@ mod menus;
 mod minigraphs;
 mod net_page;
 mod overview;
+mod overview_cpu_widgets;
 mod overview_groups;
 mod overview_range;
 mod overview_timeline;
