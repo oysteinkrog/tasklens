@@ -1080,3 +1080,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 2026-11-01 lhliq closed after .12 recheck: no edit decoration covers text; edit-mode scroll equals applied view. Suite 7058/0. Next: release 1.2.0.
 2026-11-01 released 1.2.0 (6429cc53, tag v1.2.0): installed on office and home, engine and windows restarted, main and tag pushed.
 2026-11-01 filed E28 tasklens-6swdr (D-041 phase 2: CPU, Memory, Disk, Network boxes on widgets, group widgets, Processes and Timeline as fixed widgets; 9 beads, chained).
+2026-11-01 6swdr.2 held: SourceData::update compared a hand-picked field list (3 stale-state findings). Rule: one derived-state struct compared whole; sweep test against a freshly built SourceData for every input change. Requeued on opus.
