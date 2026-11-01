@@ -1,0 +1,8 @@
+# Settings written by 1.1.0: mode, arrange, split and hidden all set.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "cpu", col = 0, row = 0, cols = 6, rows = 4, power = true, power_split = 0.3 },
+  { kind = "gpu", col = 6, row = 0, cols = 6, rows = 4, mode = "chart_engines", arrange = "horizontal", split = 0.35, hidden = ["VRAM", "Compute"] },
+]

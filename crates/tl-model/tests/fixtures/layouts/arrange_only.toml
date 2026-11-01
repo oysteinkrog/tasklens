@@ -1,0 +1,8 @@
+# Settings written by 1.1.0: only arrange is set.
+schema_version = 1
+
+[performance.overview]
+grid = [
+  { kind = "cpu", col = 0, row = 0, cols = 6, rows = 4, power = true, power_split = 0.3 },
+  { kind = "gpu", col = 6, row = 0, cols = 6, rows = 4, arrange = "vertical" },
+]
