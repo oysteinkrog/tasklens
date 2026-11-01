@@ -12,7 +12,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::health::SourceId;
-use tl_model::ids::SeriesId;
+use tl_model::ids::{MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesRing, SeriesView};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::TimeNs;
@@ -204,7 +204,11 @@ impl SeriesStore {
             // The stale run ends here; do not join the line across it.
             entry.stale = false;
             entry.stale_changes += 1;
-            entry.gap_next = true;
+            // A late sweep of the memory group series is not a break. Every group is late at
+            // once, so a gap here would cut a column through all bands of the By app stack.
+            // The line joins across the late sweep; a suspend or restart still gaps through
+            // `mark_gap_all` and `mark_gap_source` (tasklens-36kya).
+            entry.gap_next |= id.metric != MetricId::MEM_GROUP;
         }
         let mut s = Sample { t_ns, value, flags };
         if !s.is_valid() {
@@ -349,7 +353,7 @@ impl SeriesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_model::ids::{DeviceIdx, MetricId};
+    use tl_model::ids::DeviceIdx;
 
     const MS: u64 = 1_000_000;
     const SEC: u64 = 1_000_000_000;
@@ -551,6 +555,39 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert!(!samples[0].flags.contains(SampleFlags::STALE));
         assert!(samples[1].flags.contains(SampleFlags::GAP_BEFORE));
+    }
+
+    #[test]
+    fn late_memory_group_sweep_does_not_gap() {
+        let group = sid(0, MetricId::MEM_GROUP);
+        let cpu = sid(1, MetricId::CPU_TOTAL);
+        let mut store = SeriesStore::new();
+        for id in [group, cpu] {
+            store.append(id, 10 * SEC, 1.0, SEC, SampleFlags::VALID);
+        }
+        // One sweep is skipped for 6 s, past the 3 s stale limit.
+        store.mark_stale(16 * SEC);
+        for id in [group, cpu] {
+            store.append(id, 16 * SEC, 2.0, SEC, SampleFlags::VALID);
+        }
+        let set = store.publish();
+        let late = view(&set, group).samples[1];
+        assert!(late.is_valid() && !late.flags.contains(SampleFlags::GAP_BEFORE));
+        assert!(!late.flags.contains(SampleFlags::STALE));
+        assert!(
+            view(&set, cpu).samples[1]
+                .flags
+                .contains(SampleFlags::GAP_BEFORE)
+        );
+        // A suspend still gaps the group series.
+        store.mark_gap_all();
+        store.append(group, 17 * SEC, 3.0, SEC, SampleFlags::VALID);
+        let set = store.publish();
+        assert!(
+            view(&set, group).samples[2]
+                .flags
+                .contains(SampleFlags::GAP_BEFORE)
+        );
     }
 
     fn slow_id(id: SeriesId) -> SeriesId {
