@@ -1434,10 +1434,6 @@ impl Rig<'_> {
         })
     }
 
-    fn windows(&mut self) -> usize {
-        self.vcx.update(|_, cx| cx.windows().len())
-    }
-
     fn window_list(&mut self) -> Vec<gpui_kit::AnyWindowHandle> {
         self.vcx.update(|_, cx| cx.windows())
     }
