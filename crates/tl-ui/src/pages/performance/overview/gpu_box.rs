@@ -33,8 +33,10 @@
 //! the rules give it (`FlowLook`) and takes its value and bar from its own source. The box draws
 //! only what is not a widget: the section headings, the "+n more" rows and the splitter. It
 //! keeps the charts of the parts and hands each one to its widget, so a chart is still built
-//! only when the engine list changes. The box records which widgets it drew and where, so the
-//! container keeps only their entities and Edit Widgets pins them to the grid where they were.
+//! only when the engine list changes. Each render the box makes a `gpu_flow::FlowPlan` (the
+//! parts and their widgets, no sample value), and the container's placer works out every
+//! widget's rectangle from it and the body size by the same rules, so the container keeps only
+//! the entities of the placed widgets and Edit Widgets pins them where they are drawn.
 //! A grid layout (the user's own widgets, after Apply) is drawn by the box's [`WidgetEditor`]
 //! and its `WidgetContainer`, one cached entity per widget; so is the box while Edit Widgets is
 //! on.
@@ -68,8 +70,8 @@ use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
 use super::fit::fit_text;
 use super::gpu_flow::{
-    self, DrawnRects, chart_of, engine_widget, flow_layout, shows_engine, shows_line, shows_vram,
-    widget_of,
+    self, FlowPlan, Part, PlanCell, PlanLook, PlanSection, chart_of, engine_widget, flow_layout,
+    shows_engine, shows_line, shows_vram, widget_of,
 };
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
@@ -93,7 +95,7 @@ use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::grid::SlotDevice;
 use crate::pages::performance::widget::metric_widget::{FlowLook, MetricWidget};
-use crate::pages::performance::widget::source::SourceStore;
+use crate::pages::performance::widget::source::{Availability, SourceStore};
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -377,7 +379,7 @@ fn shown(v: Validity) -> bool {
 }
 
 /// The vertical space of the parts of a section, in px for `scale`: (row, gap, section gap).
-fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
+pub(super) fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
     (
         LABEL_ROW * m.ui_scale,
         f32::from(m.sp[2]),
@@ -386,7 +388,7 @@ fn spacing(m: &UiMetrics) -> (f32, f32, f32) {
 }
 
 /// The body was laid out: before the first paint its size is zero.
-fn painted(body: Size<Pixels>) -> bool {
+pub(super) fn painted(body: Size<Pixels>) -> bool {
     body.width > px(0.) || body.height > px(0.)
 }
 
@@ -397,13 +399,13 @@ fn whole_rows(h: f32, m: &UiMetrics) -> usize {
     (h / (row + gap) + 1e-3).floor().max(0.) as usize
 }
 
-/// A section's body rows under its chart: the engine rows, the VRAM row and, when known, the
-/// temperature and power row.
+/// A section's body rows under its chart: the engine rows, the VRAM row and, when the GPU
+/// reports one of its values, the temperature and power row (`FlowPlan::list_rows`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct SectionRows {
-    engines: usize,
-    vram: bool,
-    line: bool,
+pub(super) struct SectionRows {
+    pub(super) engines: usize,
+    pub(super) vram: bool,
+    pub(super) line: bool,
 }
 
 impl SectionRows {
@@ -413,34 +415,18 @@ impl SectionRows {
     }
 }
 
-/// `chart` shows the chart and the VRAM row only.
-fn section_rows(s: &GpuSection, mode: GpuMode, vram: bool) -> SectionRows {
-    if mode == GpuMode::Chart {
-        return SectionRows {
-            engines: 0,
-            vram,
-            line: false,
-        };
-    }
-    SectionRows {
-        engines: s.engines.len(),
-        vram,
-        line: !s.line.is_empty(),
-    }
-}
-
 /// The rows a section draws after `cut` rows gave way (UI-PRF-059): the temperature and power
 /// row first, then VRAM. The count rows go last, from the bottom: the "+n more" row, then the
 /// engine rows (one row by then, or the `engine_charts` "+n more engines" row).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Kept {
-    engines: bool,
-    vram: bool,
-    line: bool,
-    more: bool,
+pub(super) struct Kept {
+    pub(super) engines: bool,
+    pub(super) vram: bool,
+    pub(super) line: bool,
+    pub(super) more: bool,
 }
 
-fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
+pub(super) fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
     let mut keep = |has: bool| {
         let gone = has && cut > 0;
         cut -= usize::from(gone);
@@ -461,10 +447,10 @@ fn kept(r: SectionRows, more: bool, mut cut: usize) -> Kept {
 /// What `engine_charts` shows: how many sections, each shown section's grid with the number
 /// of whole cells it shows, and how many rows under the first grid gave way (`kept`).
 #[derive(Clone, Copy, PartialEq, Debug)]
-struct ChartsFit {
-    sections: usize,
-    grids: [ListFit; MAX_GPUS],
-    cut: usize,
+pub(super) struct ChartsFit {
+    pub(super) sections: usize,
+    pub(super) grids: [ListFit; MAX_GPUS],
+    pub(super) cut: usize,
 }
 
 impl ChartsFit {
@@ -480,14 +466,20 @@ impl ChartsFit {
 }
 
 /// The smallest `engine_charts` cell, in px.
-fn cell_min(m: &UiMetrics) -> Size<Pixels> {
+pub(super) fn cell_min(m: &UiMetrics) -> Size<Pixels> {
     size(px(CELL_MIN_W * m.ui_scale), px(CELL_MIN_H * m.ui_scale))
 }
 
 /// The height of an `engine_charts` section without its grid: a heading row when `heading`,
 /// the gap above the rows when it has `engines`, then the VRAM row (unless `vram` is off) and
 /// `lines` more rows.
-fn charts_fixed_h(engines: usize, lines: usize, vram: bool, heading: bool, m: &UiMetrics) -> f32 {
+pub(super) fn charts_fixed_h(
+    engines: usize,
+    lines: usize,
+    vram: bool,
+    heading: bool,
+    m: &UiMetrics,
+) -> f32 {
     let (row, gap, _) = spacing(m);
     let head = if heading { row + gap } else { 0. };
     let above = if engines > 0 { gap } else { 0. };
@@ -500,7 +492,7 @@ fn charts_fixed_h(engines: usize, lines: usize, vram: bool, heading: bool, m: &U
 /// cells that would be cut are left out, and a "+n more engines" row takes its height from the
 /// grid's part (UI-PRF-059). When even the rows under a grid with no cell do not fit, they give
 /// way in the order of `kept`, so none shows below 22 px.
-fn charts_fit(
+pub(super) fn charts_fit(
     arrange: Arrange,
     body: Size<Pixels>,
     engines: &[usize],
@@ -578,22 +570,22 @@ fn charts_fit(
 
 /// What a body shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Fit {
+pub(super) struct Fit {
     /// How many sections.
-    sections: usize,
+    pub(super) sections: usize,
     /// The first section shows only its busiest engine and a "+n more engines" row.
-    collapsed: bool,
+    pub(super) collapsed: bool,
     /// A collapsed section keeps its busiest engine's row. When that row would be cut, it
     /// joins "+n more engines" too (UI-PRF-059).
-    busiest: bool,
+    pub(super) busiest: bool,
     /// How many of the first section's rows gave way after that (`kept`), so no row crosses
     /// the body's bottom.
-    cut: usize,
+    pub(super) cut: usize,
     /// The first section's chart shows. Below its height it gives way too, and only the rows
     /// that fit whole show.
-    chart: bool,
+    pub(super) chart: bool,
     /// The engine rows draw their meters (see `meter_fits`).
-    meters: bool,
+    pub(super) meters: bool,
 }
 
 impl Fit {
@@ -610,7 +602,7 @@ impl Fit {
 
 /// The engine rows a section draws: all of them, or, when `collapsed`, the busiest (when
 /// `busiest`) and "+n more engines".
-fn engine_lines(engines: usize, collapsed: bool, busiest: bool) -> usize {
+pub(super) fn engine_lines(engines: usize, collapsed: bool, busiest: bool) -> usize {
     match (collapsed, busiest) {
         (false, _) => engines,
         (true, true) => engines.min(2),
@@ -621,7 +613,7 @@ fn engine_lines(engines: usize, collapsed: bool, busiest: bool) -> usize {
 /// The content height of a section, in px: its heading row (`heading`), a `MIN_CHART_H` chart
 /// and `lines` body rows. `side` puts the chart beside the rows, so the section is as high as
 /// the taller of the two.
-fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
+pub(super) fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
     let (row, gap, _) = spacing(m);
     let head = if heading { row + gap } else { 0. };
     let (chart, rows) = (MIN_CHART_H * m.ui_scale, lines as f32 * (gap + row));
@@ -636,7 +628,7 @@ fn section_h(lines: usize, heading: bool, side: bool, m: &UiMetrics) -> f32 {
 /// whole rows give way in the order of `kept` (UI-PRF-059). When the body is lower than the
 /// chart, the chart gives way and the rows that fit whole show at the top, none below 22 px.
 /// `side` is the chart's share of the width when it sits beside the rows (Side by side).
-fn fit(
+pub(super) fn fit(
     body: Size<Pixels>,
     rows: &[SectionRows],
     total: usize,
@@ -781,8 +773,8 @@ pub struct GpuBox {
     editor: Entity<WidgetEditor>,
     container: Entity<WidgetContainer>,
     store: Rc<RefCell<SourceStore>>,
-    /// Where the last flow render drew each widget.
-    drawn: DrawnRects,
+    /// The plan of the last flow render, which the container's placer reads.
+    plan: PlanCell,
     _subs: [Subscription; 5],
     _editor_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -813,13 +805,13 @@ impl GpuBox {
         let flow = flow_layout(MODES[0].id, Some(Arrange::Auto), None, &[]);
         let store = Rc::new(RefCell::new(SourceStore::new(hub)));
         let grid = saved_grid(cx);
-        let drawn = DrawnRects::default();
+        let plan = PlanCell::default();
         let shown = grid.clone().unwrap_or_else(|| flow.clone());
         let container = {
             let store = Rc::clone(&store);
             cx.new(|cx| {
                 let mut c = WidgetContainer::new(GPU_BOX_CONTAINER, shown, hub, store, cx);
-                c.set_flow_placer(Some(gpu_flow::placer(drawn.clone())), cx);
+                c.set_flow_placer(Some(gpu_flow::placer(plan.clone())), cx);
                 // The box draws the widgets of its flow layouts in their 1.1.0 parts.
                 c.set_hosted(true, cx);
                 c
@@ -873,7 +865,7 @@ impl GpuBox {
             editor,
             container,
             store,
-            drawn,
+            plan,
             _editor_sub: editor_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -905,19 +897,19 @@ impl GpuBox {
         self.grid.as_ref()
     }
 
-    /// Where the last flow render drew widget `id`, in the body, px.
-    pub fn drawn_bounds(&self, id: u32) -> Option<gpui_kit::Bounds<Pixels>> {
-        self.drawn.bounds(id)
+    /// The plan of the last flow render: the parts and their widgets the placer places.
+    pub fn flow_plan(&self) -> Option<FlowPlan> {
+        self.plan.plan()
     }
 
     /// The widgets the last flow render drew, in drawing order.
     pub fn drawn_widgets(&self) -> SmallVec<[u32; 16]> {
-        self.drawn.ids()
+        self.plan.drawn()
     }
 
     /// Gets the container ready for Edit Widgets: with a flow layout it takes the preset's
-    /// widgets that the box shows or would show with more room, placed where the box drew them,
-    /// so the editor pins them there. Engines `performance.hidden_gpu_engines` hides, and the
+    /// widgets that the box shows or would show with more room, placed where the fit rules put
+    /// them, so the editor pins them there. Engines `performance.hidden_gpu_engines` hides, and the
     /// decode engine of a shared encode/decode row, are left out. With a grid layout the
     /// container already holds it.
     pub fn prepare_edit(&mut self, cx: &mut Context<Self>) {
@@ -943,7 +935,7 @@ impl GpuBox {
                 None => true,
             }
         });
-        // The placement takes the rectangles of the last paint, which the editor pins.
+        // The placer works out each widget's rectangle from the plan; the editor pins them.
         self.container.update(cx, |c, cx| {
             c.set_layout(layout, cx);
             c.place_again(cx);
@@ -1701,24 +1693,16 @@ fn section_heading(
 }
 
 /// What a flow render draws: each widget it shows gets its entity from the box's container
-/// and is noted, with its metric, so the container keeps only the entities of those widgets.
+/// and is noted, for `GpuBox::drawn_widgets`.
 struct FlowDraw<'a> {
     container: &'a Entity<WidgetContainer>,
-    flow: &'a ContainerLayout,
-    drawn: &'a DrawnRects,
-    shown: SmallVec<[(u32, MetricKey); 16]>,
+    shown: SmallVec<[u32; 16]>,
 }
 
 impl<'a> FlowDraw<'a> {
-    fn new(
-        container: &'a Entity<WidgetContainer>,
-        flow: &'a ContainerLayout,
-        drawn: &'a DrawnRects,
-    ) -> Self {
+    fn new(container: &'a Entity<WidgetContainer>) -> Self {
         Self {
             container,
-            flow,
-            drawn,
             shown: SmallVec::new(),
         }
     }
@@ -1731,48 +1715,30 @@ impl<'a> FlowDraw<'a> {
         cx: &mut App,
     ) -> Option<Entity<MetricWidget>> {
         let id = id?;
-        let metric = self
-            .flow
-            .widgets
-            .iter()
-            .find(|w| w.id == id)?
-            .source
-            .metric
-            .clone();
         let widget = self
             .container
             .update(cx, |c, cx| c.flow_widget(id, look, cx))?;
-        self.shown.push((id, metric));
+        self.shown.push(id);
         Some(widget)
     }
 
     /// `slot`, the place of widget `id` in 1.1.0, filled by the widget's cached view drawing
-    /// `look`, with the probe that records where it is painted.
+    /// `look`.
     fn slot(&mut self, slot: Div, id: Option<u32>, look: FlowLook, cx: &mut App) -> Div {
-        let slot = slot.relative();
-        match self.widget(id, look, cx).zip(id) {
-            Some((widget, id)) => slot
-                .child(widget.cached(StyleRefinement::default().size_full()))
-                .child(self.drawn.probe(id)),
+        match self.widget(id, look, cx) {
+            Some(widget) => slot.child(widget.cached(StyleRefinement::default().size_full())),
             None => slot,
         }
     }
 
     /// Widget `id` as one value of a shared line: its own width, so the values sit side by side.
-    fn text(&mut self, id: Option<u32>, cx: &mut App) -> Option<AnyElement> {
-        let widget = self.widget(id, FlowLook::Text, cx)?;
-        Some(
-            div()
-                .relative()
-                .flex_none()
-                .child(widget)
-                .children(id.map(|id| self.drawn.probe(id)))
-                .into_any_element(),
-        )
+    fn text(&mut self, id: u32, cx: &mut App) -> Option<AnyElement> {
+        let widget = self.widget(Some(id), FlowLook::Text, cx)?;
+        Some(div().flex_none().child(widget).into_any_element())
     }
 
-    /// The widgets drawn, for `DrawnRects::set_shown`.
-    fn finish(self) -> SmallVec<[(u32, MetricKey); 16]> {
+    /// The widgets drawn.
+    fn finish(self) -> SmallVec<[u32; 16]> {
         self.shown
     }
 }
@@ -1801,50 +1767,50 @@ fn row_slot(m: &UiMetrics) -> Div {
     div().flex_none().w_full().h(px(LABEL_ROW * m.ui_scale))
 }
 
-/// The temperature and power line of section `i`: the values known now, joined by " · ", in
-/// the small secondary text.
+/// The temperature and power line of a section: of the values the GPU reports (`line`, placed
+/// whether known or not), those known now, joined by " · ", in the small secondary text.
 fn line_row(
     fd: &mut FlowDraw<'_>,
-    i: usize,
+    line: &[Part],
     section: &GpuSection,
     m: &UiMetrics,
     theme: &TlTheme,
     cx: &mut App,
 ) -> AnyElement {
-    let (temp, power) = section.line_known;
-    let temp = temp
-        .then(|| fd.text(widget_of(fd.flow, i, METRIC_TEMP), cx))
-        .flatten();
-    let power = power
-        .then(|| fd.text(widget_of(fd.flow, i, METRIC_POWER), cx))
-        .flatten();
-    let sep = (temp.is_some() && power.is_some()).then(|| {
-        let mut sep = div();
-        *sep.text_style() = t_xs(m);
-        sep.flex_none()
-            .whitespace_nowrap()
-            .text_color(theme.text_secondary)
-            .child(SEP)
-    });
-    row_slot(m)
-        .flex()
-        .flex_row()
-        .overflow_hidden()
-        .children(temp)
-        .children(sep)
-        .children(power)
-        .into_any_element()
+    let (temp_known, power_known) = section.line_known;
+    let known = |p: &&Part| match p.1.as_str() {
+        METRIC_TEMP => temp_known,
+        METRIC_POWER => power_known,
+        _ => false,
+    };
+    let mut row = row_slot(m).flex().flex_row().overflow_hidden();
+    for (k, (id, _)) in line.iter().filter(known).enumerate() {
+        if k > 0 {
+            let mut sep = div();
+            *sep.text_style() = t_xs(m);
+            row = row.child(
+                sep.flex_none()
+                    .whitespace_nowrap()
+                    .text_color(theme.text_secondary)
+                    .child(SEP),
+            );
+        }
+        row = row.children(fd.text(*id, cx));
+    }
+    row.into_any_element()
 }
 
-/// The box placed its widgets again when the set it drew changed: the container keeps only the
-/// entities of those widgets.
-fn place_shown(
+/// Takes the plan and the widgets of a flow render. When the plan can place a widget elsewhere,
+/// the container places its widgets again and keeps only the entities of those it places.
+fn place_plan(
     container: &Entity<WidgetContainer>,
-    drawn: &DrawnRects,
-    shown: SmallVec<[(u32, MetricKey); 16]>,
+    cell: &PlanCell,
+    plan: FlowPlan,
+    drawn: SmallVec<[u32; 16]>,
     cx: &mut App,
 ) {
-    if drawn.set_shown(shown) {
+    cell.set_drawn(drawn);
+    if cell.set(plan) {
         container.update(cx, |c, cx| {
             c.place_again(cx);
         });
@@ -1852,17 +1818,81 @@ fn place_shown(
 }
 
 impl GpuBox {
+    /// The plan of a flow render (ADR-019 "Flow placement"): the parts each section shows and
+    /// the widget of each, with `side_share` for `chart_engines` Side by side. The temperature
+    /// and power line has the values the GPU reports (`Availability::Available`), known now or
+    /// not, so a sample does not move it. The caller sets the stacked split and whether the
+    /// first section collapsed.
+    fn make_plan(&self, side_share: Option<f32>, m: &UiMetrics, cx: &App) -> FlowPlan {
+        let flow = &self.flow;
+        let part = |id: Option<u32>| -> Option<Part> {
+            let id = id?;
+            let w = flow.widgets.iter().find(|w| w.id == id)?;
+            Some((id, w.source.metric.clone()))
+        };
+        let reported = |id: u32| {
+            self.container
+                .read(cx)
+                .source(id)
+                .is_some_and(|s| s.read(cx).availability() == Availability::Available)
+        };
+        let look = match self.mode {
+            GpuMode::EngineCharts => PlanLook::Cells,
+            GpuMode::ChartEngines => PlanLook::Rows,
+            GpuMode::Chart => PlanLook::Chart,
+        };
+        let sections = self
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(i, sec)| PlanSection {
+                chart: if look == PlanLook::Cells {
+                    None
+                } else {
+                    part(chart_of(flow, i))
+                },
+                engines: sec
+                    .engines
+                    .iter()
+                    .map(|e| {
+                        part(if look == PlanLook::Cells {
+                            engine_widget(flow, i, e.key)
+                        } else {
+                            row_widget(flow, i, e)
+                        })
+                    })
+                    .collect(),
+                vram: part(widget_of(flow, i, METRIC_VRAM)),
+                line: if look == PlanLook::Rows {
+                    [METRIC_TEMP, METRIC_POWER]
+                        .into_iter()
+                        .filter_map(|metric| part(widget_of(flow, i, metric)))
+                        .filter(|(id, _)| reported(*id))
+                        .collect()
+                } else {
+                    SmallVec::new()
+                },
+            })
+            .collect();
+        FlowPlan {
+            look,
+            arrange: self.arrange,
+            m: *m,
+            total: self.sections.len() + self.more,
+            vram: !self.vram_hidden(),
+            sections,
+            side_share,
+            chart_share: None,
+            busiest: self.sections.first().map_or(0, |s| busiest(&s.engines)),
+            collapsed: false,
+        }
+    }
+
     /// `chart_engines` and `chart`: the sections of UI-PRF-017, or only their charts and VRAM rows.
     fn list_body(&mut self, m: &UiMetrics, theme: &TlTheme, cx: &mut Context<Self>) -> AnyElement {
         let s = m.ui_scale;
         let row_h = px(LABEL_ROW * s);
         let mode = self.mode;
-        let vram_hidden = self.vram_hidden();
-        let rows: SmallVec<[SectionRows; MAX_GPUS]> = self
-            .sections
-            .iter()
-            .map(|sec| section_rows(sec, mode, !vram_hidden))
-            .collect();
         let total = self.sections.len() + self.more;
         let body_size = self.body.get();
         let side = mode == GpuMode::ChartEngines && self.arrange == Arrange::Horizontal;
@@ -1884,6 +1914,8 @@ impl GpuBox {
             self.chart_split.sharer(m.sp[5], s)
         });
         let share_at = sharer.as_ref().map(|f| f(f32::from(body_size.width)));
+        let mut plan = self.make_plan(share_at, m, cx);
+        let rows = plan.list_rows();
         let shown = fit(body_size, &rows, total, share_at, m);
         self.shown = shown.sections;
         self.collapsed = shown.collapsed;
@@ -1944,8 +1976,11 @@ impl GpuBox {
             split_share = Some(share);
             if self.chart_split.saved() != self.chart_split.default_share() && len > 0. {
                 custom_chart_h = Some(share * len);
+                plan.chart_share = Some(share);
             }
         }
+        plan.collapsed = shown.collapsed;
+        let id_of = |p: &Option<Part>| p.as_ref().map(|p| p.0);
 
         let mut body = div()
             .relative()
@@ -1954,8 +1989,9 @@ impl GpuBox {
             .size_full()
             .overflow_hidden()
             .gap(m.sp[5]);
-        let mut fd = FlowDraw::new(&self.container, &self.flow, &self.drawn);
+        let mut fd = FlowDraw::new(&self.container);
         for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
+            let widgets = &plan.sections[i];
             let collapsed = shown.collapsed && i == 0;
             let keep = keeps[i];
             let fixed = custom_chart_h.filter(|_| i == 0);
@@ -1984,16 +2020,17 @@ impl GpuBox {
                 .w_full()
                 .gap(m.sp[2]);
             if with_rows && keep.engines {
-                let engine = |fd: &mut FlowDraw<'_>, e: &EngineRow, cx: &mut App| {
+                let engine = |fd: &mut FlowDraw<'_>, j: usize, cx: &mut App| {
+                    let e = &section.engines[j];
                     let key = e.key;
                     let slot = row_slot(m).debug_selector(move || engine_row_id(i, key));
                     let look = row_look(&e.meter.label, Some(&e.chart), shown.meters);
-                    let id = row_widget(fd.flow, i, e);
+                    let id = widgets.engines.get(j).and_then(id_of);
                     fd.slot(slot, id, look, cx)
                 };
                 if collapsed && shown.busiest {
-                    let e = &section.engines[busiest(&section.engines)];
-                    section_rows = section_rows.child(engine(&mut fd, e, cx)).child(text_row(
+                    let j = busiest(&section.engines);
+                    section_rows = section_rows.child(engine(&mut fd, j, cx)).child(text_row(
                         &section.engines_more,
                         m,
                         theme,
@@ -2002,18 +2039,19 @@ impl GpuBox {
                     section_rows =
                         section_rows.child(text_row(&section.engines_more_all, m, theme));
                 } else {
-                    for e in &section.engines {
-                        section_rows = section_rows.child(engine(&mut fd, e, cx));
+                    for j in 0..section.engines.len() {
+                        section_rows = section_rows.child(engine(&mut fd, j, cx));
                     }
                 }
             }
             if keep.vram {
                 let look = row_look(&section.vram.label, None, shown.meters);
-                let id = widget_of(fd.flow, i, METRIC_VRAM);
+                let id = id_of(&widgets.vram);
                 section_rows = section_rows.child(fd.slot(row_slot(m), id, look, cx));
             }
             if with_rows && keep.line {
-                section_rows = section_rows.child(line_row(&mut fd, i, section, m, theme, cx));
+                let line = line_row(&mut fd, &widgets.line, section, m, theme, cx);
+                section_rows = section_rows.child(line);
             }
             if keep.more {
                 section_rows = section_rows.child(text_row(&more, m, theme));
@@ -2026,7 +2064,7 @@ impl GpuBox {
                 div()
                     .debug_selector(move || chart_id(i))
                     .min_h(px(MIN_CHART_H * s)),
-                chart_of(fd.flow, i),
+                id_of(&widgets.chart),
                 FlowLook::Chart(section.chart.clone()),
                 cx,
             );
@@ -2052,7 +2090,7 @@ impl GpuBox {
             body = body.child(col.child(chart).child(section_rows));
         }
         let drawn = fd.finish();
-        place_shown(&self.container, &self.drawn, drawn, cx);
+        place_plan(&self.container, &self.plan, plan, drawn, cx);
         let probe_m = *m;
         body = body.child(class_probe(
             Rc::clone(&self.body),
@@ -2114,6 +2152,8 @@ impl GpuBox {
         self.meters = meter_fits(self.body.get().width, m);
         let more = self.shown_more_text();
         let min = cell_min(m);
+        let plan = self.make_plan(None, m, cx);
+        let id_of = |p: &Option<Part>| p.as_ref().map(|p| p.0);
 
         let mut body = div()
             .relative()
@@ -2122,8 +2162,9 @@ impl GpuBox {
             .size_full()
             .overflow_hidden()
             .gap(m.sp[5]);
-        let mut fd = FlowDraw::new(&self.container, &self.flow, &self.drawn);
+        let mut fd = FlowDraw::new(&self.container);
         for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
+            let widgets = &plan.sections[i];
             let last = i + 1 == shown.sections;
             let extra = usize::from(last && !more.is_empty());
             let fit = shown.grids[i];
@@ -2148,7 +2189,7 @@ impl GpuBox {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
             let mut cells = Vec::with_capacity(fit.shown);
-            for e in section.engines.iter().take(fit.shown) {
+            for (j, e) in section.engines.iter().take(fit.shown).enumerate() {
                 let key = e.key;
                 let slot = div()
                     .debug_selector(move || engine_cell_id(i, key))
@@ -2161,7 +2202,7 @@ impl GpuBox {
                     chart: e.chart.clone(),
                     chart_id: engine_chart_id(i, key).into(),
                 };
-                let id = engine_widget(fd.flow, i, key);
+                let id = widgets.engines.get(j).and_then(id_of);
                 cells.push(fd.slot(slot, id, look, cx).into_any_element());
             }
             let cells = grid_cells(&fit.grid, cells, m.sp[2], grid_id(i));
@@ -2190,7 +2231,7 @@ impl GpuBox {
             }
             if keep.vram {
                 let look = row_look(&section.vram.label, None, self.meters);
-                let id = widget_of(fd.flow, i, METRIC_VRAM);
+                let id = id_of(&widgets.vram);
                 rest = rest.child(fd.slot(row_slot(m), id, look, cx));
             }
             if keep.more {
@@ -2205,7 +2246,7 @@ impl GpuBox {
             body = body.child(col);
         }
         let drawn = fd.finish();
-        place_shown(&self.container, &self.drawn, drawn, cx);
+        place_plan(&self.container, &self.plan, plan, drawn, cx);
         let probe_m = *m;
         body = body.child(class_probe(
             Rc::clone(&self.body),
@@ -2247,7 +2288,6 @@ impl Render for GpuBox {
                 .relative()
                 .size_full()
                 .child(div().absolute().top_0().left_0().size_full().child(editor))
-                .child(self.drawn.body_probe())
                 .child(body)
                 .into_any_element()
         };

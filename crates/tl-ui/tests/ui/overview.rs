@@ -2349,6 +2349,72 @@ mod bottom {
         assert!(r.vcx.debug_bounds(leak(engine_row_id(0, "dec"))).is_none());
     }
 
+    /// tasklens-lhliq.7, ADR-019 "Flow placement": the temperature and power line keeps its
+    /// place while its values come and go. A sample in which the power draw has no value yet
+    /// leaves the power widget placed, with its entity, and places nothing; the line then
+    /// draws no value. The next value shows in the same place, again without a placement.
+    #[gpui_kit::test]
+    fn gpu_box_line_values_place_nothing(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_flow::widget_of;
+
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (box_h(300.), 200.));
+        let totals = |power: Metric<f32>| {
+            let mut t = gpu_engines(false);
+            t.power_w = power;
+            t
+        };
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(Metric::valid(120.)))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let power = r
+            .vcx
+            .update(|_, cx| widget_of(gpu.read(cx).flow(), 0, "power"))
+            .expect("power widget");
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let c = g.container().read(cx);
+                (
+                    g.sections()[0].line.to_string(),
+                    c.relayout_count.get(),
+                    c.widget(power).map(|w| w.entity_id()),
+                    g.drawn_widgets().contains(&power),
+                )
+            })
+        };
+        let (line, count, entity, drawn) = state(&mut r);
+        assert_eq!(line, "120 W");
+        assert!(
+            entity.is_some() && drawn,
+            "the power value is placed and drawn"
+        );
+        let at = r
+            .vcx
+            .update(|_, cx| gpu.read(cx).container().read(cx).placement().bounds(power));
+
+        r.system(|s| {
+            s.gpus = Arc::from([(DeviceIdx(10), totals(Metric::with(Validity::WarmingUp)))])
+        });
+        draw(r.vcx);
+        let (line, gone_count, gone_entity, gone_drawn) = state(&mut r);
+        assert_eq!(line, "", "the line shows no value");
+        assert_eq!(gone_count, count, "a value going away places nothing");
+        assert_eq!(gone_entity, entity, "the widget keeps its entity");
+        assert!(!gone_drawn, "and draws nothing");
+
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(Metric::valid(130.)))]));
+        draw(r.vcx);
+        let (line, back_count, back_entity, back_drawn) = state(&mut r);
+        assert_eq!(line, "130 W");
+        assert_eq!(back_count, count, "a value coming back places nothing");
+        assert_eq!(back_entity, entity);
+        assert!(back_drawn);
+        let back_at = r
+            .vcx
+            .update(|_, cx| gpu.read(cx).container().read(cx).placement().bounds(power));
+        assert_eq!(back_at, at, "in the same place");
+    }
+
     /// Two GPUs with 2 engines each (3D / Compute and a shared Video Encode/Decode), VRAM and
     /// the temperature and power row: a GPU with two engines collapses too (UI-PRF-019 GPU
     /// fit). The first section in full with "+1 more" needs 48 + 5 × 22 = 158 px, with
@@ -8260,20 +8326,32 @@ mod page {
     }
 
     /// UI-PRF-061, ADR-019 "Flow placement": the default and each old mode are flow layouts of
-    /// the preset's widgets. The box draws each widget's part where 1.1.0 drew it and records
-    /// that rectangle; Edit Widgets pins the drawn widgets there, keyed to the GPU.
+    /// the preset's widgets. The container places each widget at the rectangle the fit rules
+    /// give it, worked out from the box's plan and the body size, not from a paint; that is
+    /// where the box draws the part, as 1.1.0 did. Edit Widgets pins the placed widgets there,
+    /// keyed to the GPU.
     #[gpui_kit::test]
     fn overview_gpu_flow_matches_modes(cx: &mut TestAppContext) {
-        use tl_model::layout::DeviceSelector;
+        use gpui_kit::Pixels;
+        use tl_model::layout::{DeviceSelector, GPU_BOX_CONTAINER};
         use tl_ui::pages::performance::actions::PerfWidgetEditStart;
         use tl_ui::pages::performance::overview::gpu_box::{
             chart_id, engine_cell_id, engine_row_id,
         };
         use tl_ui::pages::performance::overview::gpu_flow::{chart_of, engine_widget, widget_of};
+        use tl_ui::pages::performance::widget::container::container_id;
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         let page = r.page.clone();
         let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
+        let body = leak_str(container_id(GPU_BOX_CONTAINER));
+        // The placement of widget `id`, in the body, px.
+        let placed = |r: &mut Rig, id: u32| {
+            r.vcx
+                .update(|_, cx| container.read(cx).placement().bounds(id))
+        };
         for mode in ["engine_charts", "chart_engines", "chart"] {
             r.page_action(&PerfOverviewSetBoxMode {
                 kind: "gpu".into(),
@@ -8311,25 +8389,30 @@ mod page {
                     assert!(id.is_none(), "chart has no engine widgets: {k}");
                 }
             }
-            let mut offset = None;
-            for (id, part) in &parts {
-                let drawn = r
-                    .vcx
-                    .update(|_, cx| gpu.read(cx).drawn_bounds(*id))
-                    .unwrap_or_else(|| panic!("{mode}: {part} recorded"));
-                let at = r.bounds_of(part.clone());
-                assert_eq!(drawn.size, at.size, "{mode}: {part}");
-                // One offset for every part: the body's origin.
-                let d = at.origin - drawn.origin;
-                assert_eq!(*offset.get_or_insert(d), d, "{mode}: {part}");
-            }
+            // Each placed rectangle is the painted part, from the body's origin. Painted edges
+            // snap to whole device pixels, so they may differ from the worked-out ones by
+            // less than one.
+            let origin = r.bounds_of(body).origin;
+            let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
             let vram = widget_of(&flow, 0, "vram").expect("VRAM widget");
-            assert!(
-                r.vcx
-                    .update(|_, cx| gpu.read(cx).drawn_bounds(vram))
-                    .is_some(),
-                "{mode}: the VRAM row is recorded"
-            );
+            let vram_part = (vram, String::new());
+            for (id, part) in parts.iter().chain([&vram_part]) {
+                let at = placed(&mut r, *id).unwrap_or_else(|| panic!("{mode}: {id} placed"));
+                // The VRAM row draws no selector of its own: its widget's view fills it.
+                let painted = if part.is_empty() {
+                    r.bounds_of(widget_id(*id))
+                } else {
+                    r.bounds_of(part.clone())
+                };
+                let (x, y) = (painted.origin.x - origin.x, painted.origin.y - origin.y);
+                assert!(
+                    near(at.origin.x, x)
+                        && near(at.origin.y, y)
+                        && near(at.size.width, painted.size.width)
+                        && near(at.size.height, painted.size.height),
+                    "{mode}: {id} {part}: placed {at:?}, painted {painted:?} from {origin:?}"
+                );
+            }
 
             // Edit Widgets pins every drawn widget, keyed to the GPU, on the grid.
             r.page_action(&PerfWidgetEditStart);
@@ -8356,19 +8439,16 @@ mod page {
                 (c.row, c.col)
             };
             let mut by_drawn: Vec<u32> = parts.iter().map(|p| p.0).chain([vram]).collect();
-            let at: Vec<(u32, (i32, i32))> = r.vcx.update(|_, cx| {
-                let g = gpu.read(cx);
-                by_drawn
-                    .iter()
-                    .map(|id| {
-                        let b = g.drawn_bounds(*id).expect("drawn");
-                        (
-                            *id,
-                            (f32::from(b.origin.y) as i32, f32::from(b.origin.x) as i32),
-                        )
-                    })
-                    .collect()
-            });
+            let at: Vec<(u32, (i32, i32))> = by_drawn
+                .iter()
+                .map(|id| {
+                    let b = placed(&mut r, *id).expect("placed");
+                    (
+                        *id,
+                        (f32::from(b.origin.y) as i32, f32::from(b.origin.x) as i32),
+                    )
+                })
+                .collect();
             let drawn_order = |id: u32| at.iter().find(|(i, _)| *i == id).map(|(_, p)| *p);
             let mut by_cell = by_drawn.clone();
             by_drawn.sort_by_key(|id| drawn_order(*id));

@@ -19,9 +19,10 @@
 //! A hosted container (the GPU box, `set_hosted`) holds the entities of a flow layout but does
 //! not draw them: its host draws each widget in the 1.1.0 part the preset's rules give it
 //! (`MetricWidget`'s `FlowLook`), and the values of one line side by side, joined by " · ". The
-//! host takes the entities with [`WidgetContainer::flow_widget`] and places the widgets again
-//! ([`WidgetContainer::place_again`]) when the set it draws changed. In Edit Widgets, and for a
-//! grid layout, the container draws the widgets itself.
+//! host takes the entities with [`WidgetContainer::flow_widget`]. Its placer works out each
+//! widget's rectangle from what the host shows and the body size, and the host asks for a new
+//! placement ([`WidgetContainer::place_again`]) when what it shows changed. In Edit Widgets,
+//! and for a grid layout, the container draws the widgets itself.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -243,9 +244,8 @@ impl WidgetContainer {
     }
 
     /// The entity of widget `id` of the flow layout the host draws as `look`, created with that
-    /// look when it has none yet. The host then places the widgets again with the ids it drew
-    /// ([`Self::place_again`]), so a widget it no longer draws loses its entity. `None` when the
-    /// layout has no widget `id`.
+    /// look when it has none yet. A widget the placer does not place loses its entity at the
+    /// next placement. `None` when the layout has no widget `id`.
     pub fn flow_widget(
         &mut self,
         id: u32,
@@ -265,8 +265,8 @@ impl WidgetContainer {
         Some(widget)
     }
 
-    /// The host drew another set of widgets: places them again, which drops the entities of
-    /// the widgets it no longer draws. A hosted flow layout draws nothing here, so this does
+    /// What the host shows changed: places the widgets again, which drops the entities of the
+    /// widgets the placer no longer places. A hosted flow layout draws nothing here, so this does
     /// not notify then. Returns whether the placement changed.
     pub fn place_again(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.relayout(cx);

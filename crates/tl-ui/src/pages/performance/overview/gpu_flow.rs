@@ -5,25 +5,27 @@
 //! the widget list: a section shows an engine, the VRAM row or the temperature and power line
 //! only when the layout has that widget for the section's slot.
 //!
-//! The GPU box works out the fit rules and gives each widget it shows the place 1.1.0 drew the
-//! part at: an `engine_charts` cell, a spark row, the section chart, or a value on the shared
-//! temperature and power line. Each of those is the widget's own `MetricWidget` entity, which
+//! Each part the box shows (an `engine_charts` cell, a spark row, the section chart, or a value
+//! on the shared temperature and power line) is the widget's own `MetricWidget` entity, which
 //! draws the 1.1.0 part (`FlowLook`); the box draws only what is not a widget (the section
 //! headings, the "+n more" rows and the splitter). A widget the rules leave out takes no space
 //! and has no entity.
 //!
-//! [`DrawnRects`] holds the widgets the box drew in its last render, with the metric each
-//! showed, and the rectangle each was painted at. The [`placer`] places exactly those widgets
-//! in the box's `WidgetContainer`, so the container keeps their entities and drops the others,
-//! and Edit Widgets pins the widgets to the grid where the user saw them. The box places again
-//! only when the set it draws changed: a resize, a layout change, and in the collapsed fit
-//! state (UI-PRF-059) a sample that makes another engine the busiest one.
+//! The box makes a [`FlowPlan`] on each render: the parts of each section and their widgets,
+//! the split and the busiest engine, but no body size and no sample value. The [`placer`]
+//! works out every widget's rectangle from the plan and the container's body size with the
+//! fit rules the box draws by (`FlowPlan::rects`), so the container keeps the entities of
+//! those widgets and drops the others, and Edit Widgets pins the widgets to the grid where the
+//! user saw them. The container places again on a resize and a layout change, and the box
+//! asks it to when the plan changed: a new engine list, mode, arrangement or split, and in the
+//! collapsed fit state (UI-PRF-059) a sample that makes another engine the busiest one. No
+//! other sample places anything; the temperature and power line keeps its place while its
+//! values come and go.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::{Bounds, IntoElement, Pixels, Point, Styled as _, canvas, px};
-use rustc_hash::FxHashMap;
+use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::SmallVec;
 use tl_model::layout::{
     ContainerLayout, DeviceSelector, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
@@ -32,10 +34,16 @@ use tl_model::layout::{
 use tl_model::settings::OverviewGridSetting;
 use tl_model::system::GpuEngine;
 
+use super::gpu_box::{
+    Kept, MAX_GPUS, SectionRows, cell_min, charts_fit, charts_fixed_h, engine_lines, fit, kept,
+    section_h, spacing,
+};
 use super::layout::Arrange;
+use super::parts::{MIN_CHART_H, arrange_min_h};
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::pages::performance::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::pages::performance::widget::source::Availability;
+use crate::theme::UiMetrics;
 
 /// The flow layout of preset `mode` with `arrange`, `split` and the box's hidden engine names
 /// (D-029): the widget list of `layout::convert_gpu_box`, so it is the same list a converted
@@ -109,108 +117,450 @@ pub fn shows_line(layout: &ContainerLayout, slot: usize) -> (bool, bool) {
     )
 }
 
-/// The widgets the GPU box drew in its last flow render, and where: the body's origin, per
-/// widget id the metric it showed (in drawing order), and the bounds it was painted at, in
-/// window px.
-#[derive(Default, Debug)]
-pub struct Drawn {
-    origin: Point<Pixels>,
-    shown: SmallVec<[(u32, MetricKey); 16]>,
-    rects: FxHashMap<u32, Bounds<Pixels>>,
+/// One part of a section and the widget that draws it: the widget's id and its metric.
+pub type Part = (u32, MetricKey);
+
+/// The GPU box mode a [`FlowPlan`] is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlanLook {
+    /// `engine_charts`: a grid of engine cells, then the rows under it.
+    Cells,
+    /// `chart_engines`: the section chart, then the engine rows, VRAM and the line.
+    Rows,
+    /// `chart`: the section chart and the VRAM row.
+    Chart,
 }
 
-/// The widgets of [`Drawn`], shared by the box (which records them) and its placer.
-#[derive(Clone, Default, Debug)]
-pub struct DrawnRects(Rc<RefCell<Drawn>>);
-
-impl DrawnRects {
-    /// The widgets a render drew, with the metric each showed, in drawing order. Returns
-    /// whether that changed, so the box must place its widgets again.
-    pub fn set_shown(&self, shown: SmallVec<[(u32, MetricKey); 16]>) -> bool {
-        let mut d = self.0.borrow_mut();
-        if d.shown == shown {
-            return false;
+impl PlanLook {
+    /// The preset id of the mode.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Cells => "engine_charts",
+            Self::Rows => "chart_engines",
+            Self::Chart => "chart",
         }
-        d.rects
-            .retain(|id, _| shown.iter().any(|(shown, _)| shown == id));
-        d.shown = shown;
-        true
+    }
+}
+
+/// One section of a [`FlowPlan`]: its parts and their widgets.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct PlanSection {
+    /// The section chart (`chart_engines` and `chart`).
+    pub chart: Option<Part>,
+    /// One entry per engine cell or engine row the box built, in drawing order: the widget that
+    /// draws it, if the layout has one.
+    pub engines: SmallVec<[Option<Part>; 8]>,
+    /// The VRAM row.
+    pub vram: Option<Part>,
+    /// The values of the temperature and power line that the GPU reports, temperature first.
+    /// The line shows when there is one.
+    pub line: SmallVec<[Part; 2]>,
+}
+
+/// What the GPU box shows in a flow layout, apart from the body size: the mode, the parts of
+/// each section and the widget of each part, the split, and the busiest engine. The box makes
+/// it from the engine lists, the layout and the split on each render. [`placer`] works out
+/// every widget's rectangle from it and the container's body size with the same fit rules
+/// the box draws by, so no rectangle comes from a paint.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FlowPlan {
+    pub look: PlanLook,
+    pub arrange: Arrange,
+    pub m: UiMetrics,
+    /// Every GPU the box has, with a section or not.
+    pub total: usize,
+    /// The sections have a VRAM row.
+    pub vram: bool,
+    pub sections: SmallVec<[PlanSection; MAX_GPUS]>,
+    /// `chart_engines` Side by side: the chart's share of the body width.
+    pub side_share: Option<f32>,
+    /// `chart_engines` stacked, with the split moved: the first chart's share of the body
+    /// height.
+    pub chart_share: Option<f32>,
+    /// The index of the first section's busiest engine.
+    pub busiest: usize,
+    /// The box's render showed the first section collapsed (UI-PRF-059), so `busiest` decides
+    /// which engine row shows.
+    pub collapsed: bool,
+}
+
+impl FlowPlan {
+    /// The body rows of each section for `gpu_box::fit`: `chart` has no engine rows and no
+    /// line; `chart_engines` has the line when the GPU reports its temperature or power.
+    pub(super) fn list_rows(&self) -> SmallVec<[SectionRows; MAX_GPUS]> {
+        self.sections
+            .iter()
+            .map(|s| SectionRows {
+                engines: if self.look == PlanLook::Chart {
+                    0
+                } else {
+                    s.engines.len()
+                },
+                vram: self.vram,
+                line: self.look == PlanLook::Rows && !s.line.is_empty(),
+            })
+            .collect()
     }
 
-    /// The bounds of widget `id` in the body, px, as last painted; `None` when the last render
-    /// did not draw it.
-    pub fn bounds(&self, id: u32) -> Option<Bounds<Pixels>> {
-        let d = self.0.borrow();
-        if !d.shown.iter().any(|(shown, _)| *shown == id) {
-            return None;
+    /// Every widget's rectangle in a body of `area`, px from the body's top left corner, in
+    /// drawing order.
+    pub fn rects(&self, area: Size<Pixels>) -> Vec<(&Part, Bounds<Pixels>)> {
+        let mut out = Vec::new();
+        match self.look {
+            PlanLook::Cells => self.cell_rects(area, &mut out),
+            PlanLook::Rows | PlanLook::Chart => self.row_rects(area, &mut out),
         }
-        d.rects.get(&id).map(|b| Bounds {
-            origin: b.origin - d.origin,
-            size: b.size,
-        })
+        out
     }
 
-    /// The ids drawn, in drawing order.
-    pub fn ids(&self) -> SmallVec<[u32; 16]> {
-        self.0.borrow().shown.iter().map(|(id, _)| *id).collect()
+    /// `engine_charts`: the engine cells of each section's grid and its VRAM row, as
+    /// `GpuBox::charts_body` lays them out.
+    fn cell_rects<'p>(&'p self, area: Size<Pixels>, out: &mut Vec<(&'p Part, Bounds<Pixels>)>) {
+        let m = &self.m;
+        let (row, gap, section_gap) = spacing(m);
+        let engines: SmallVec<[usize; MAX_GPUS]> =
+            self.sections.iter().map(|s| s.engines.len()).collect();
+        let fit = charts_fit(self.arrange, area, &engines, self.total, self.vram, m);
+        let n = fit.sections.min(self.sections.len());
+        let more = self.total > n;
+        let min = cell_min(m);
+        let items: SmallVec<[FlexItem; MAX_GPUS]> = (0..n)
+            .map(|i| {
+                let extra = usize::from(i + 1 == n && more);
+                let grid = arrange_min_h(self.arrange, engines[i], area.width, min, m.sp[2]);
+                FlexItem {
+                    basis: charts_fixed_h(engines[i], extra, self.vram, i > 0, m) + f32::from(grid),
+                    grow: 1.,
+                    shrink: 1.,
+                    min: 0.,
+                }
+            })
+            .collect();
+        let heights = flex_col(&items, f32::from(area.height), section_gap);
+        let mut top = 0.;
+        for (i, s) in self.sections.iter().take(n).enumerate() {
+            let g = fit.grids[i];
+            let head = if i > 0 { row + gap } else { 0. };
+            let rows = SectionRows {
+                engines: usize::from(g.shown < engines[i]),
+                vram: self.vram,
+                line: false,
+            };
+            let keep = kept(rows, i + 1 == n && more, if i == 0 { fit.cut } else { 0 });
+            let grid_top = top + head;
+            let (cw, ch) = (f32::from(g.grid.cell.width), f32::from(g.grid.cell.height));
+            let cols = g.grid.cols.max(1);
+            for (c, part) in s.engines.iter().take(g.shown).enumerate() {
+                let Some(part) = part else {
+                    continue;
+                };
+                let (r, q) = ((c / cols) as f32, (c % cols) as f32);
+                out.push((
+                    part,
+                    rect(q * (cw + gap), grid_top + r * (ch + gap), cw, ch),
+                ));
+            }
+            if let Some(vram) = s.vram.as_ref().filter(|_| keep.vram) {
+                // The rows under the grid sit at the section's bottom; the grid takes the rest.
+                let k = usize::from(keep.engines) + 1 + usize::from(keep.more);
+                let rest_h = k as f32 * row + (k - 1) as f32 * gap;
+                let rest_top = if engines[i] > 0 {
+                    grid_top + (heights[i] - head - gap - rest_h).max(0.) + gap
+                } else {
+                    grid_top
+                };
+                let y = rest_top + if keep.engines { row + gap } else { 0. };
+                out.push((vram, rect(0., y, f32::from(area.width), row)));
+            }
+            top += heights[i] + section_gap;
+        }
     }
 
-    /// A probe that records the body's origin. It fills its parent, which must be `relative`.
-    pub fn body_probe(&self) -> impl IntoElement + use<> {
-        let me = self.clone();
-        canvas(
-            move |bounds, _, _| me.0.borrow_mut().origin = bounds.origin,
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    }
-
-    /// A probe that records widget `id` at its parent's bounds. It fills its parent, which must
-    /// be `relative`.
-    pub fn probe(&self, id: u32) -> impl IntoElement + use<> {
-        let me = self.clone();
-        canvas(
-            move |bounds: Bounds<Pixels>, _, _| {
-                me.0.borrow_mut().rects.insert(id, bounds);
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    }
-}
-
-/// The placer of the GPU box's flow layouts: the widgets the box drew in its last render, at
-/// the rectangles they were painted at, when the box drew them for the same metric. Widgets the
-/// box did not draw (cut by a fit rule, or left out) are not placed, so they have no entity.
-/// In Edit Widgets, when the box drew none of the layout's widgets (the layout is not the one it
-/// showed, as after Reset), the widgets go in list order (`container::list_flow`).
-pub fn placer(drawn: DrawnRects) -> FlowPlace {
-    Rc::new(move |input: &FlowInput<'_>| place(&drawn, input))
-}
-
-fn place(drawn: &DrawnRects, input: &FlowInput<'_>) -> InnerPlacement {
-    let d = drawn.0.borrow();
-    let mut widgets = Vec::new();
-    for (id, metric) in &d.shown {
-        let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
-            continue;
+    /// `chart_engines` and `chart`: each section's chart, engine rows, VRAM row and line, as
+    /// `GpuBox::list_body` lays them out.
+    fn row_rects<'p>(&'p self, area: Size<Pixels>, out: &mut Vec<(&'p Part, Bounds<Pixels>)>) {
+        let m = &self.m;
+        let (row, gap, section_gap) = spacing(m);
+        let with_rows = self.look == PlanLook::Rows;
+        let side = self.side_share.filter(|_| with_rows);
+        let rows = self.list_rows();
+        let shown = fit(area, &rows, self.total, side, m);
+        let n = shown.sections.min(self.sections.len());
+        let more = self.total > n;
+        let (w, h) = (f32::from(area.width), f32::from(area.height));
+        let chart_min = MIN_CHART_H * m.ui_scale;
+        let rows_h = |l: usize| {
+            if l == 0 {
+                0.
+            } else {
+                l as f32 * row + (l - 1) as f32 * gap
+            }
         };
-        if *metric != item.setting.source.metric || item.availability == Availability::Unknown {
-            continue;
+        let keeps: SmallVec<[Kept; MAX_GPUS]> = (0..n)
+            .map(|i| {
+                kept(
+                    rows[i],
+                    i + 1 == n && more,
+                    if i == 0 { shown.cut } else { 0 },
+                )
+            })
+            .collect();
+        let lines: SmallVec<[usize; MAX_GPUS]> = keeps
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let engines = if k.engines {
+                    engine_lines(rows[i].engines, shown.collapsed && i == 0, shown.busiest)
+                } else {
+                    0
+                };
+                engines + usize::from(k.vram) + usize::from(k.line) + usize::from(k.more)
+            })
+            .collect();
+        let custom = self
+            .chart_share
+            .filter(|_| with_rows && side.is_none() && shown.chart && h > 0.)
+            .map(|share| share * h);
+        let items: SmallVec<[FlexItem; MAX_GPUS]> = (0..n)
+            .map(|i| {
+                let l = lines[i];
+                let head = if i > 0 { row + gap } else { 0. };
+                let (basis, grow, min) = if !shown.chart {
+                    (0., 1., rows_h(l))
+                } else if side.is_some() {
+                    (section_h(l, i > 0, true, m), 1., head)
+                } else if let Some(ch) = custom.filter(|_| i == 0) {
+                    let ch = ch.max(chart_min);
+                    (ch + l as f32 * (gap + row), 0., ch + gap + rows_h(l))
+                } else {
+                    (
+                        section_h(l, i > 0, false, m),
+                        1.,
+                        head + chart_min + gap + rows_h(l),
+                    )
+                };
+                FlexItem {
+                    basis,
+                    grow,
+                    shrink: 0.,
+                    min,
+                }
+            })
+            .collect();
+        let heights = flex_col(&items, h, section_gap);
+        let mut top = 0.;
+        for (i, s) in self.sections.iter().take(n).enumerate() {
+            let (keep, l) = (keeps[i], lines[i]);
+            let head = if i > 0 { row + gap } else { 0. };
+            let chart = s.chart.as_ref().filter(|_| shown.chart);
+            // Where the rows start, and their left edge and width.
+            let (x, rw, mut y) = if !shown.chart {
+                (0., w, top + head)
+            } else if let Some(share) = side {
+                let parts_h = (heights[i] - head).max(chart_min);
+                let cw = share * w;
+                if let Some(c) = chart {
+                    out.push((c, rect(0., top + head, cw, parts_h)));
+                }
+                let sp = f32::from(m.sp[5]);
+                (cw + sp, (w - cw - sp).max(0.), top + head)
+            } else {
+                let ch = match custom.filter(|_| i == 0) {
+                    Some(ch) => ch.max(chart_min),
+                    None => (heights[i] - head - gap - rows_h(l)).max(chart_min),
+                };
+                if let Some(c) = chart {
+                    out.push((c, rect(0., top + head, w, ch)));
+                }
+                (0., w, top + head + ch + gap)
+            };
+            let mut next = || {
+                let at = y;
+                y += row + gap;
+                at
+            };
+            if with_rows && keep.engines {
+                let collapsed = shown.collapsed && i == 0;
+                if collapsed && shown.busiest {
+                    let busiest = self.busiest.min(s.engines.len().saturating_sub(1));
+                    let at = next();
+                    if let Some(Some(p)) = s.engines.get(busiest) {
+                        out.push((p, rect(x, at, rw, row)));
+                    }
+                    next();
+                } else if collapsed {
+                    next();
+                } else {
+                    for p in &s.engines {
+                        let at = next();
+                        if let Some(p) = p {
+                            out.push((p, rect(x, at, rw, row)));
+                        }
+                    }
+                }
+            }
+            if keep.vram {
+                let at = next();
+                if let Some(v) = &s.vram {
+                    out.push((v, rect(x, at, rw, row)));
+                }
+            }
+            if with_rows && keep.line {
+                // The values share the line: each gets an equal part of it, so where a widget
+                // goes does not follow its text.
+                let at = next();
+                let part = rw / s.line.len().max(1) as f32;
+                for (k, p) in s.line.iter().enumerate() {
+                    out.push((p, rect(x + k as f32 * part, at, part, row)));
+                }
+            }
+            top += heights[i] + section_gap;
         }
-        let bounds = d.rects.get(id).map_or_else(Bounds::default, |b| Bounds {
-            origin: b.origin - d.origin,
-            size: b.size,
-        });
-        widgets.push(PlacedWidget { id: *id, bounds });
     }
-    drop(d);
+}
+
+/// A rectangle from its left, top, width and height in px.
+fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+    Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+}
+
+/// One item of a flex column: its basis, its grow and shrink factors and its least height, px.
+#[derive(Clone, Copy, Debug)]
+struct FlexItem {
+    basis: f32,
+    grow: f32,
+    shrink: f32,
+    min: f32,
+}
+
+/// The heights a flex column `avail` px high, with `gap` between its items, gives `items`: the
+/// flexible lengths of CSS flexbox (section 9.7) without max sizes. Spare height goes by the
+/// grow factors; missing height comes off by the shrink factors times the bases. An item is
+/// never lower than its least height.
+fn flex_col(items: &[FlexItem], avail: f32, gap: f32) -> SmallVec<[f32; MAX_GPUS]> {
+    let n = items.len();
+    let mut out: SmallVec<[f32; MAX_GPUS]> = items.iter().map(|i| i.basis.max(i.min)).collect();
+    if n == 0 {
+        return out;
+    }
+    let inner = avail - gap * (n - 1) as f32;
+    let grow = out.iter().sum::<f32>() < inner;
+    let weight = |i: &FlexItem| if grow { i.grow } else { i.shrink * i.basis };
+    let mut frozen: SmallVec<[bool; MAX_GPUS]> = items
+        .iter()
+        .map(|i| weight(i) <= 0. || (!grow && i.basis < i.min))
+        .collect();
+    while frozen.iter().any(|f| !f) {
+        let used: f32 = (0..n)
+            .map(|k| if frozen[k] { out[k] } else { items[k].basis })
+            .sum();
+        let free = inner - used;
+        let total: f32 = (0..n)
+            .filter(|k| !frozen[*k])
+            .map(|k| weight(&items[k]))
+            .sum();
+        let mut clamped: SmallVec<[bool; MAX_GPUS]> = SmallVec::new();
+        for k in 0..n {
+            if frozen[k] {
+                clamped.push(false);
+                continue;
+            }
+            let share = if total > 0. {
+                free * weight(&items[k]) / total
+            } else {
+                0.
+            };
+            let raw = items[k].basis + share;
+            out[k] = raw.max(items[k].min);
+            clamped.push(raw < items[k].min);
+        }
+        if !clamped.iter().any(|c| *c) {
+            break;
+        }
+        for k in 0..n {
+            frozen[k] |= clamped[k];
+        }
+    }
+    out
+}
+
+/// What the GPU box placed and drew: the plan of its last flow render, and the widgets that
+/// render drew, in drawing order.
+#[derive(Default, Debug)]
+struct PlanState {
+    plan: Option<FlowPlan>,
+    drawn: SmallVec<[u32; 16]>,
+}
+
+/// The [`FlowPlan`] shared by the box (which makes it) and its [`placer`].
+#[derive(Clone, Default, Debug)]
+pub struct PlanCell(Rc<RefCell<PlanState>>);
+
+impl PlanCell {
+    /// Takes the plan of a render. Returns whether it can place a widget elsewhere, so the box
+    /// must place its widgets again. On a sample only the busiest engine of a collapsed first
+    /// section can do that: a new busiest engine in a section that is not collapsed moves
+    /// nothing.
+    pub fn set(&self, plan: FlowPlan) -> bool {
+        let mut st = self.0.borrow_mut();
+        let changed = match st.plan.as_mut() {
+            Some(old) => {
+                if !plan.collapsed {
+                    old.busiest = plan.busiest;
+                }
+                *old != plan
+            }
+            None => true,
+        };
+        st.plan = Some(plan);
+        changed
+    }
+
+    /// The plan of the last flow render.
+    pub fn plan(&self) -> Option<FlowPlan> {
+        self.0.borrow().plan.clone()
+    }
+
+    /// The widgets a render drew, in drawing order.
+    pub fn set_drawn(&self, drawn: SmallVec<[u32; 16]>) {
+        self.0.borrow_mut().drawn = drawn;
+    }
+
+    /// The widgets the last flow render drew, in drawing order.
+    pub fn drawn(&self) -> SmallVec<[u32; 16]> {
+        self.0.borrow().drawn.clone()
+    }
+}
+
+/// The placer of the GPU box's flow layouts: every widget of the box's plan at the rectangle
+/// the fit rules give it in the container's body now (`FlowPlan::rects`), when the layout has
+/// that widget for the same metric. A widget the rules leave out (cut, or not in the plan) is
+/// not placed, so it has no entity. In Edit Widgets, when none of the layout's widgets is in
+/// the plan (the layout is not the one the box shows, as after Reset), the widgets go in list
+/// order (`container::list_flow`).
+pub fn placer(plan: PlanCell) -> FlowPlace {
+    Rc::new(move |input: &FlowInput<'_>| place(&plan, input))
+}
+
+fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
+    let mut widgets = Vec::new();
+    {
+        let st = cell.0.borrow();
+        let preset = input.layout.preset.as_ref().map(|p| p.id.as_str());
+        if let Some(plan) = st.plan.as_ref().filter(|p| preset == Some(p.look.id())) {
+            for ((id, metric), bounds) in plan.rects(input.area) {
+                let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
+                    continue;
+                };
+                if *metric != item.setting.source.metric
+                    || item.availability == Availability::Unknown
+                {
+                    continue;
+                }
+                widgets.push(PlacedWidget { id: *id, bounds });
+            }
+        }
+    }
     if widgets.is_empty() && input.frozen.is_some() {
         return list_flow(input);
     }
@@ -231,8 +581,9 @@ fn place(drawn: &DrawnRects, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::point;
     use tl_model::layout::GPU_BOX_CONTAINER;
+
+    use super::super::gpu_box::{CELL_MIN_H, CELL_MIN_W};
 
     use super::*;
 
@@ -271,30 +622,185 @@ mod tests {
         assert!(shows_vram(&chart, 0));
     }
 
+    fn part(id: u32, metric: &str) -> Part {
+        (id, MetricKey::new(metric))
+    }
+
+    /// `chart_engines` with one GPU: 3D, encode and decode rows, VRAM, temperature and power.
+    fn rows_plan() -> FlowPlan {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        FlowPlan {
+            look: PlanLook::Rows,
+            arrange: Arrange::Auto,
+            m,
+            total: 1,
+            vram: true,
+            sections: smallvec::smallvec![PlanSection {
+                chart: Some(part(1, "engine:gpu")),
+                engines: smallvec::smallvec![
+                    Some(part(2, "engine:gpu")),
+                    Some(part(3, "engine:enc")),
+                    Some(part(4, "engine:dec")),
+                ],
+                vram: Some(part(5, METRIC_VRAM)),
+                line: smallvec::smallvec![part(6, METRIC_TEMP), part(7, METRIC_POWER)],
+            }],
+            side_share: None,
+            chart_share: None,
+            busiest: 2,
+            collapsed: false,
+        }
+    }
+
+    fn rects_of(plan: &FlowPlan, w: f32, h: f32) -> Vec<(u32, [f32; 4])> {
+        plan.rects(gpui_kit::size(px(w), px(h)))
+            .into_iter()
+            .map(|((id, _), b)| {
+                (
+                    *id,
+                    [
+                        f32::from(b.origin.x),
+                        f32::from(b.origin.y),
+                        f32::from(b.size.width),
+                        f32::from(b.size.height),
+                    ],
+                )
+            })
+            .collect()
+    }
+
+    /// The 1.1.0 parts: the chart takes the spare height, the 18 px rows sit under it 4 px
+    /// apart, and the line's two values share its row.
     #[test]
-    fn drawn_rects_are_body_relative() {
-        let d = DrawnRects::default();
-        d.0.borrow_mut().origin = point(px(10.), px(20.));
-        assert!(d.set_shown(smallvec::smallvec![(3, MetricKey::new(METRIC_VRAM))]));
-        assert!(
-            !d.set_shown(smallvec::smallvec![(3, MetricKey::new(METRIC_VRAM))]),
-            "the same set"
-        );
-        d.0.borrow_mut().rects.insert(
-            3,
-            Bounds::new(point(px(15.), px(60.)), gpui_kit::size(px(100.), px(18.))),
-        );
+    fn rows_plan_places_every_part() {
+        let r = rects_of(&rows_plan(), 400., 300.);
         assert_eq!(
-            d.bounds(3),
-            Some(Bounds::new(
-                point(px(5.), px(40.)),
-                gpui_kit::size(px(100.), px(18.))
-            ))
+            r,
+            vec![
+                (1, [0., 0., 400., 190.]),
+                (2, [0., 194., 400., 18.]),
+                (3, [0., 216., 400., 18.]),
+                (4, [0., 238., 400., 18.]),
+                (5, [0., 260., 400., 18.]),
+                (6, [0., 282., 200., 18.]),
+                (7, [200., 282., 200., 18.]),
+            ]
         );
-        assert_eq!(d.ids().as_slice(), [3]);
-        // A render that does not draw it forgets it.
-        assert!(d.set_shown(SmallVec::new()));
-        assert_eq!(d.bounds(3), None);
-        assert!(d.0.borrow().rects.is_empty());
+    }
+
+    /// A 152 px body collapses the section to its busiest engine and "+2 more engines".
+    #[test]
+    fn collapsed_plan_places_the_busiest_engine() {
+        let r = rects_of(&rows_plan(), 400., 152.);
+        assert_eq!(
+            r,
+            vec![
+                (1, [0., 0., 400., 64.]),
+                (4, [0., 68., 400., 18.]),
+                (5, [0., 112., 400., 18.]),
+                (6, [0., 134., 200., 18.]),
+                (7, [200., 134., 200., 18.]),
+            ]
+        );
+    }
+
+    /// Side by side the chart takes its share of the width and the rows the rest, 12 px apart.
+    #[test]
+    fn side_plan_puts_rows_beside_the_chart() {
+        let plan = FlowPlan {
+            side_share: Some(0.5),
+            ..rows_plan()
+        };
+        let r = rects_of(&plan, 400., 300.);
+        assert_eq!(r[0], (1, [0., 0., 200., 300.]));
+        assert_eq!(r[1], (2, [212., 0., 188., 18.]));
+        assert_eq!(r[4], (5, [212., 66., 188., 18.]));
+    }
+
+    /// `engine_charts`: the cells fill the grid above the VRAM row, which sits at the bottom.
+    #[test]
+    fn cells_plan_places_cells_and_vram() {
+        let plan = FlowPlan {
+            look: PlanLook::Cells,
+            sections: smallvec::smallvec![PlanSection {
+                chart: None,
+                engines: smallvec::smallvec![
+                    Some(part(2, "engine:gpu")),
+                    Some(part(3, "engine:enc")),
+                ],
+                vram: Some(part(5, METRIC_VRAM)),
+                line: SmallVec::new(),
+            }],
+            ..rows_plan()
+        };
+        let r = rects_of(&plan, 400., 300.);
+        assert_eq!(r.len(), 3, "{r:?}");
+        let (vram, cells) = (r[2].1, [r[0].1, r[1].1]);
+        assert_eq!(vram, [0., 282., 400., 18.]);
+        for c in cells {
+            assert!(
+                c[1] + c[3] <= 278. + 1e-3,
+                "a cell above the VRAM row: {c:?}"
+            );
+            assert!(c[2] >= CELL_MIN_W && c[3] >= CELL_MIN_H, "{c:?}");
+        }
+        assert_eq!(cells[0][0], 0.);
+    }
+
+    /// The flex column: spare height by the grow factors, missing height by shrink times basis,
+    /// and never below an item's least height.
+    #[test]
+    fn flex_col_follows_css() {
+        let item = |basis, grow, shrink, min| FlexItem {
+            basis,
+            grow,
+            shrink,
+            min,
+        };
+        let grow = flex_col(&[item(100., 1., 0., 0.), item(50., 1., 0., 0.)], 262., 12.);
+        assert_eq!(grow.as_slice(), [150., 100.]);
+        let fixed = flex_col(&[item(100., 0., 0., 0.), item(50., 1., 0., 0.)], 262., 12.);
+        assert_eq!(fixed.as_slice(), [100., 150.]);
+        let shrink = flex_col(&[item(200., 1., 1., 0.), item(100., 1., 1., 0.)], 162., 12.);
+        assert_eq!(shrink.as_slice(), [100., 50.]);
+        let held = flex_col(
+            &[item(200., 1., 1., 180.), item(100., 1., 1., 0.)],
+            162.,
+            12.,
+        );
+        assert_eq!(held.as_slice(), [180., 0.]);
+    }
+
+    /// Only a change that can move a widget asks for a new placement: a new busiest engine
+    /// counts only while the first section is collapsed.
+    #[test]
+    fn plan_cell_ignores_the_busiest_engine_unless_collapsed() {
+        let cell = PlanCell::default();
+        assert!(cell.set(rows_plan()), "the first plan");
+        assert!(!cell.set(rows_plan()), "the same plan");
+        let busier = FlowPlan {
+            busiest: 0,
+            ..rows_plan()
+        };
+        assert!(!cell.set(busier.clone()), "not collapsed: nothing moves");
+        let collapsed = FlowPlan {
+            collapsed: true,
+            ..busier
+        };
+        assert!(cell.set(collapsed.clone()), "the section collapsed");
+        assert!(!cell.set(collapsed.clone()), "same busiest engine");
+        assert!(
+            cell.set(FlowPlan {
+                busiest: 1,
+                ..collapsed
+            }),
+            "another busiest engine"
+        );
+        let mut no_temp = rows_plan();
+        no_temp.sections[0].line.remove(0);
+        assert!(
+            cell.set(no_temp),
+            "the GPU stopped reporting its temperature"
+        );
     }
 }
