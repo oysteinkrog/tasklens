@@ -254,6 +254,8 @@ pub struct OverviewPage {
     _subs: SmallVec<[Subscription; 4]>,
     /// Window focus loss ends a drag, for the window of the last render.
     _activation: Option<Subscription>,
+    /// The widget editor whose start and end re-render the page (UI-PRF-061).
+    widget_edit_sub: Option<(EntityId, Subscription)>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -399,6 +401,7 @@ impl OverviewPage {
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
             _subs: subs,
             _activation: None,
+            widget_edit_sub: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1293,6 +1296,10 @@ impl Render for OverviewPage {
         )
         .absolute()
         .inset_0();
+        // While a box is in Edit Widgets the rest of the page takes no pointer input except
+        // the wheel (UI-PRF-061): covers over the other boxes, the edited box's title line and
+        // the range header.
+        let widget_edit = self.widget_edit_box(cx);
         // A box drag moves the boxes under the pointer, so the gaps are not splitters then.
         let live = self.is_editing();
         let gaps: SmallVec<[AnyElement; 8]> = if box_dragging {
@@ -1337,6 +1344,15 @@ impl Render for OverviewPage {
                         .bg(color)
                 });
                 let el = el.children(edge);
+                let el = match widget_edit {
+                    Some(edited) if edited == kind => {
+                        el.child(box_menu::widget_edit_title_cover(kind, cx))
+                    }
+                    Some(_) => el.child(
+                        box_menu::widget_edit_cover(box_menu::widget_edit_cover_id(kind)).h_full(),
+                    ),
+                    None => el,
+                };
                 self.edit_box(p, el, window, cx).into_any_element()
             })
             .collect();
@@ -1354,7 +1370,19 @@ impl Render for OverviewPage {
             .children(boxes)
             .children(gaps)
             .children(overlays);
-        let header = self.range_header(cx);
+        let header = self.range_header(cx).map(|h| match widget_edit {
+            Some(_) => div()
+                .relative()
+                .flex_none()
+                .w_full()
+                .child(h)
+                .child(
+                    box_menu::widget_edit_cover(box_menu::WIDGET_EDIT_HEADER_COVER_ID.to_owned())
+                        .h_full(),
+                )
+                .into_any_element(),
+            None => h,
+        });
         let toolbar = self.edit_toolbar(cx);
         let body = div()
             .id(SCROLL_ID)

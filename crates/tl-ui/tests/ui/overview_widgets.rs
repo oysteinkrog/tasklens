@@ -41,7 +41,8 @@ use tl_ui::pages::performance::widget::compose::{
 };
 use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
 use tl_ui::pages::performance::widget::edit::{
-    PREVIEW_ID, TOOLBAR_ID, WidgetEditor, default_layout, frame_id, gear_id, grip_id,
+    ADD_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, WidgetEditor, corner_id, default_layout, frame_id,
+    gear_id, grip_id,
 };
 use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
@@ -1320,6 +1321,26 @@ fn source(n: u8, metric: &str) -> WidgetSource {
     }
 }
 
+/// The entry labelled `label`.
+fn pick(entries: Vec<MenuEntryInfo>, label: &str) -> MenuEntryInfo {
+    entries
+        .into_iter()
+        .find(|e| e.label.as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("no {label} entry"))
+}
+
+/// Whether `shown` is the built-in default pinned to the grid: no preset, every widget on
+/// cells, and only widgets of the default.
+fn is_pinned_default(shown: &ContainerLayout) -> bool {
+    let default = default_layout(GPU_BOX_CONTAINER);
+    shown.preset.is_none()
+        && !shown.widgets.is_empty()
+        && shown
+            .widgets
+            .iter()
+            .all(|w| w.cell.is_some() && default.widgets.iter().any(|d| d.id == w.id))
+}
+
 fn labels(entries: &[MenuEntryInfo]) -> Vec<(String, MenuEntryKind, bool)> {
     entries
         .iter()
@@ -1415,6 +1436,54 @@ impl Rig<'_> {
 
     fn windows(&mut self) -> usize {
         self.vcx.update(|_, cx| cx.windows().len())
+    }
+
+    fn window_list(&mut self) -> Vec<gpui_kit::AnyWindowHandle> {
+        self.vcx.update(|_, cx| cx.windows())
+    }
+
+    /// The window that opened after `before` (a confirm dialog), drawn and active.
+    fn new_window(&mut self, before: &[gpui_kit::AnyWindowHandle]) -> VisualTestContext {
+        let any = self
+            .window_list()
+            .into_iter()
+            .find(|w| !before.contains(w))
+            .expect("a new window");
+        let mut d = VisualTestContext::from_window(any, &self.vcx.cx);
+        d.update(|window, _| window.activate_window());
+        d.run_until_parked();
+        d.update(|window, cx| window.draw(cx).clear(cx));
+        d
+    }
+
+    /// Clicks the element with debug selector `id`.
+    fn click(&mut self, id: &str) {
+        let at = self
+            .vcx
+            .debug_bounds(leak(id.to_owned()))
+            .unwrap_or_else(|| panic!("{id}"))
+            .center();
+        self.vcx.simulate_click(at, Modifiers::none());
+        draw(self.vcx);
+    }
+
+    /// Runs the action of the menu entry `entry` on the editor, as choosing it does.
+    fn choose(&mut self, e: &Entity<WidgetEditor>, entry: MenuEntryInfo) {
+        let label = entry.label.clone();
+        let action = entry
+            .action
+            .unwrap_or_else(|| panic!("{label:?} has an action"));
+        self.vcx.update(|window, cx| {
+            let focus = e.read(cx).focus_handle().clone();
+            focus.dispatch_action(&*action, window, cx);
+        });
+        self.vcx.update(tl_ui::components::menu::close_context_menu);
+        draw(self.vcx);
+    }
+
+    /// The working widget `id`.
+    fn working_widget(&mut self, e: &Entity<WidgetEditor>, id: u32) -> Option<WidgetSetting> {
+        self.working(e)?.widgets.into_iter().find(|w| w.id == id)
     }
 
     /// The entries of the open context menu.
@@ -1573,7 +1642,8 @@ fn overview_widget_edit_undo(cx: &mut TestAppContext) {
     assert!(r.working(&e).is_some_and(|l| l.widgets.len() == 3));
     assert!(r.ed(&e, |e, _, cx| e.reset_confirmed(cx)));
     assert_eq!(r.working(&e), None);
-    assert_eq!(r.shown(&c), default_layout(GPU_BOX_CONTAINER));
+    let shown = r.shown(&c);
+    assert!(is_pinned_default(&shown), "{shown:?}");
 
     assert!(r.ed(&e, |e, _, cx| e.undo(cx)));
     assert!(r.working(&e).is_some_and(|l| l.widgets.len() == 3));
@@ -1642,19 +1712,84 @@ fn overview_widget_edit_keyboard(cx: &mut TestAppContext) {
     assert_eq!(cell_of(&saved, 1).map(|c| c.row), Some(1));
 }
 
-/// Reset asks first; the confirmed Reset puts the default in the working layout.
+/// Reset asks first: the dialog's Cancel changes nothing and its Reset puts the default in the
+/// working layout. The default shows pinned to the grid, so its widgets can be selected with
+/// Tab, opened in the widget menu, dragged and resized at once.
 #[gpui_kit::test]
 fn overview_widget_reset_asks(cx: &mut TestAppContext) {
     let mut r = open(cx);
     let (e, c) = r.editor(four_widgets(), 400., 320.);
     r.start(&e);
-    let windows = r.windows();
-    r.ed(&e, |e, window, cx| e.request_reset(window, cx));
-    assert_eq!(r.windows(), windows + 1, "a confirm dialog opened");
-    assert_eq!(r.working(&e), Some(four_widgets()), "nothing changed yet");
-    assert!(r.ed(&e, |e, _, cx| e.reset_confirmed(cx)));
+
+    // The dialog closes without Reset: nothing changes.
+    let before = r.window_list();
+    r.click(&format!("TlButton-{RESET_ID}"));
+    assert_eq!(r.window_list().len(), before.len() + 1, "a confirm dialog");
+    let mut d = r.new_window(&before);
+    d.update(|window, _| window.remove_window());
+    d.run_until_parked();
+    draw(r.vcx);
+    assert_eq!(r.window_list().len(), before.len(), "the dialog closed");
+    assert_eq!(r.working(&e), Some(four_widgets()), "nothing changed");
+
+    // Enter on the dialog's Reset button (it has focus): the default.
+    r.click(&format!("TlButton-{RESET_ID}"));
+    let mut d = r.new_window(&before);
+    d.simulate_keystrokes("enter");
+    d.run_until_parked();
+    draw(r.vcx);
+    assert_eq!(r.window_list().len(), before.len(), "the dialog closed");
     assert_eq!(r.working(&e), None);
-    assert_eq!(r.shown(&c), default_layout(GPU_BOX_CONTAINER));
+    let shown = r.shown(&c);
+    assert!(is_pinned_default(&shown), "{shown:?}");
+    assert!(
+        r.vcx
+            .read_entity(&e, |e, _| e.edit().is_some_and(|x| x.changed())),
+        "Apply is on"
+    );
+
+    // Tab selects the first default widget in reading order.
+    let first = r
+        .ed(&e, |e, _, cx| e.select_step(true, cx))
+        .expect("Tab selects a default widget");
+    let order = r.vcx.read_entity(&e, |e, cx| {
+        e.working_layout(cx)
+            .map(|l| tl_ui::pages::performance::widget::edit::reading_order(&l).to_vec())
+            .unwrap_or_default()
+    });
+    assert_eq!(order.first(), Some(&first));
+
+    // Its gear opens the widget menu.
+    r.click(&gear_id(first));
+    let top: Vec<String> = labels(&r.menu_entries())
+        .into_iter()
+        .map(|(l, _, _)| l)
+        .collect();
+    assert_eq!(top.first().map(String::as_str), Some("Source"), "{top:?}");
+    r.vcx.update(tl_ui::components::menu::close_context_menu);
+    draw(r.vcx);
+
+    // Its grip drags it down two rows.
+    let pitch = r.vcx.read_entity(&c, |c, _| {
+        c.placement().grid.row + c.placement().grid.gutter
+    });
+    let start = cell_of(&shown, first).expect("a cell");
+    let grip = r.vcx.debug_bounds(leak(grip_id(first))).expect("grip");
+    let from = grip.center();
+    let to = point(from.x, from.y + px(pitch * 2.));
+    r.press(from, 1);
+    r.move_to(to);
+    r.release(to);
+    let dropped = r.working_widget(&e, first).and_then(|w| w.cell);
+    assert_eq!(dropped.map(|c| c.row), Some(start.row + 2), "{dropped:?}");
+
+    // Undo goes back to the default, which Alt+Shift+Down then makes taller.
+    assert!(r.ed(&e, |e, _, cx| e.undo(cx)));
+    assert_eq!(r.working(&e), None);
+    r.ed(&e, |e, _, cx| e.select(first, cx));
+    assert!(r.ed(&e, |e, _, cx| e.resize_selected(0, 1, cx)));
+    let grown = r.working_widget(&e, first).and_then(|w| w.cell);
+    assert_eq!(grown.map(|c| c.rows), Some(start.rows + 1), "{grown:?}");
 }
 
 /// A converted GPU box reset and applied leaves no entry and no old keys, so nothing converts
@@ -1899,4 +2034,117 @@ fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
     assert_eq!(w.source.device, DeviceSelector::Key(key(2)));
     assert_eq!(w.device_name.as_deref(), Some("Card B"));
     assert!(w.cell.is_some());
+}
+
+/// The widget menu changes the source, the forms and the chart options of the working widget,
+/// and removes it.
+#[gpui_kit::test]
+fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let layout = grid_layout(vec![(1, a("vram"), FormSet::all(), cell(0, 0, 6, 4))]);
+    let (e, _) = r.editor(layout, 400., 320.);
+    r.start(&e);
+
+    // Source > Card A > Power draw: power keeps the forms it offers; it has no bar.
+    r.click(&gear_id(1));
+    let entries = r.menu_entries();
+    let source = r.submenu_entries(&entries[0]);
+    let card_a = r.submenu_entries(&pick(source, "Card A"));
+    r.choose(&e, pick(card_a, "Power draw"));
+    let w = r.working_widget(&e, 1).expect("widget 1");
+    assert_eq!(w.source, a("power"));
+    assert_eq!(w.device_name.as_deref(), Some("Card A"));
+    assert_eq!(w.forms, FormSet::all() - FormSet::BAR);
+
+    // Chart > Dashed line on, then Fill under the line off.
+    r.click(&gear_id(1));
+    let chart = {
+        let entries = r.menu_entries();
+        r.submenu_entries(&pick(entries, "Chart"))
+    };
+    r.choose(&e, pick(chart, "Dashed line"));
+    let w = r.working_widget(&e, 1).expect("widget 1");
+    assert!(w.options.dashed && w.options.fill, "{:?}", w.options);
+    r.click(&gear_id(1));
+    let chart = {
+        let entries = r.menu_entries();
+        r.submenu_entries(&pick(entries, "Chart"))
+    };
+    r.choose(&e, pick(chart, "Fill under the line"));
+    let w = r.working_widget(&e, 1).expect("widget 1");
+    assert!(w.options.dashed && !w.options.fill, "{:?}", w.options);
+
+    // Show > Name off.
+    r.click(&gear_id(1));
+    let show = {
+        let entries = r.menu_entries();
+        r.submenu_entries(&pick(entries, "Show"))
+    };
+    r.choose(&e, pick(show, "Name"));
+    let w = r.working_widget(&e, 1).expect("widget 1");
+    assert!(!w.forms.contains(FormSet::LABEL), "{:?}", w.forms);
+
+    // Remove Widget.
+    r.click(&gear_id(1));
+    let entries = r.menu_entries();
+    r.choose(&e, pick(entries, "Remove Widget"));
+    assert_eq!(r.working_widget(&e, 1), None);
+    assert_eq!(r.selected(&e), None);
+}
+
+/// A double-click on the resize corner sets the widget to its minimum span.
+#[gpui_kit::test]
+fn overview_widget_corner_double_click_minimum(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    let min = r
+        .vcx
+        .read_entity(&c, |c, _| c.placement().grid.forms_min_span(CHART_FORMS));
+    assert!(
+        min.0 < 3 || min.1 < 4,
+        "widget 1 is above its minimum: {min:?}"
+    );
+    let corner = r.vcx.debug_bounds(leak(corner_id(1))).expect("corner");
+    r.press(corner.center(), 1);
+    r.release(corner.center());
+    assert_eq!(
+        r.working(&e),
+        Some(four_widgets()),
+        "a click changes nothing"
+    );
+    r.press(corner.center(), 2);
+    r.release(corner.center());
+    let after = r.working_widget(&e, 1).and_then(|w| w.cell);
+    assert_eq!(after, Some(cell(0, 0, min.0, min.1)));
+    assert_eq!(r.selected(&e), Some(1));
+}
+
+/// Add Widget lists the sources by GPU; choosing one adds and selects the widget.
+#[gpui_kit::test]
+fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, _) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    r.click(&format!("TlButton-{ADD_ID}"));
+    let entries = r.menu_entries();
+    let groups: Vec<(String, MenuEntryKind, bool)> = labels(&entries);
+    assert_eq!(
+        groups,
+        [
+            ("Card A".to_owned(), MenuEntryKind::Submenu, false),
+            ("Card B".to_owned(), MenuEntryKind::Submenu, false),
+        ]
+    );
+    let card_b = r.submenu_entries(&entries[1]);
+    let vram = pick(card_b, "VRAM");
+    assert_eq!(vram.kind, MenuEntryKind::Item, "a plain item");
+    assert!(!vram.checked);
+    r.choose(&e, vram);
+    let w = r.working_widget(&e, 5).expect("widget 5");
+    assert_eq!(w.source, selector(DeviceSelector::Key(key(2)), "vram"));
+    assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
+    assert!(w.cell.is_some());
+    assert_eq!(r.selected(&e), Some(5));
 }

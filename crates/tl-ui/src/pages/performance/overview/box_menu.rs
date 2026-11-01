@@ -43,7 +43,7 @@ use crate::pages::performance::actions::{
     PerfWidgetEditStart,
 };
 use crate::pages::performance::cpu::PowerState;
-use crate::pages::performance::widget::edit::editor_of;
+use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
 use crate::pages::performance::widget::menu::{confirm_preset, confirm_reset_now};
 use crate::settings_global::TlSettings;
 use crate::theme::metrics;
@@ -66,6 +66,34 @@ const GEAR_RIGHT: f32 = 20.;
 /// The debug selector of `kind`'s gear in Edit Layout mode.
 pub fn gear_id(kind: BoxKind) -> String {
     format!("perf-overview-gear-{}", kind.key())
+}
+
+/// The debug selector of the cover over `kind` while a box is in Edit Widgets: the whole box,
+/// or the title line of the box being edited.
+pub fn widget_edit_cover_id(kind: BoxKind) -> String {
+    format!("perf-overview-widget-edit-cover-{}", kind.key())
+}
+
+/// The debug selector of the cover over the range header while a box is in Edit Widgets.
+pub const WIDGET_EDIT_HEADER_COVER_ID: &str = "perf-overview-widget-edit-cover-header";
+
+/// A cover over part of the page while a box is in Edit Widgets (UI-PRF-061). The part under
+/// it stays live and drawn, but takes no pointer input except the wheel, so the page still
+/// scrolls. It also keeps the Performance tab's right-press from opening a menu.
+pub(super) fn widget_edit_cover(id: String) -> gpui_kit::Div {
+    div()
+        .debug_selector(move || id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .block_mouse_except_scroll()
+}
+
+/// The cover over `kind`'s title line, when `kind` is the box in Edit Widgets. Its body holds
+/// the editor and stays open to the pointer.
+pub(super) fn widget_edit_title_cover(kind: BoxKind, cx: &App) -> gpui_kit::Div {
+    widget_edit_cover(widget_edit_cover_id(kind)).h(px(TITLE_LINE * metrics(cx).ui_scale))
 }
 
 /// The box a right-click landed on, the mode it showed and the arrangement of that mode.
@@ -422,6 +450,28 @@ impl OverviewPage {
         }
     }
 
+    /// The box in Edit Widgets, if any. Phase 1 has an editor on the GPU box only. The page
+    /// renders again when that editor starts or ends Edit Widgets, so the covers follow.
+    pub(super) fn widget_edit_box(&mut self, cx: &mut Context<Self>) -> Option<BoxKind> {
+        let editor = editor_of(&self.hub, GPU_BOX_CONTAINER, cx)?;
+        self.watch_widget_editor(&editor, cx);
+        editor.read(cx).is_editing().then_some(BoxKind::Gpu)
+    }
+
+    /// Listens to `editor`'s start and end. One editor at a time; a new one replaces the old.
+    fn watch_widget_editor(&mut self, editor: &Entity<WidgetEditor>, cx: &mut Context<Self>) {
+        let id = editor.entity_id();
+        if self
+            .widget_edit_sub
+            .as_ref()
+            .is_some_and(|(watched, _)| *watched == id)
+        {
+            return;
+        }
+        let sub = cx.subscribe(editor, |this, _, _: &WidgetEditEvent, cx| this.notify(cx));
+        self.widget_edit_sub = Some((id, sub));
+    }
+
     /// `PerfWidgetEditStart`: Edit Layout ends as "Done" ends it, then the GPU box starts Edit
     /// Widgets. Without a widget editor on the GPU box it does nothing.
     pub(super) fn on_widget_edit_start(
@@ -433,6 +483,7 @@ impl OverviewPage {
         let Some(editor) = editor_of(&self.hub, GPU_BOX_CONTAINER, cx) else {
             return;
         };
+        self.watch_widget_editor(&editor, cx);
         if self.is_editing() {
             self.on_edit_done(&PerfOverviewEditDone, window, cx);
         }

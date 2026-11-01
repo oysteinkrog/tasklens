@@ -249,22 +249,18 @@ impl LayoutEdit {
 
     /// The widget ids of the working copy in reading order: by row, then column.
     pub fn reading_order(&self) -> SmallVec<[u32; 16]> {
-        let Some(layout) = &self.working else {
-            return SmallVec::new();
-        };
-        let mut cells: SmallVec<[(u16, u16, u32); 16]> = layout
-            .widgets
-            .iter()
-            .filter_map(|w| w.cell.map(|c| (c.row, c.col, w.id)))
-            .collect();
-        cells.sort_unstable();
-        cells.into_iter().map(|(_, _, id)| id).collect()
+        self.working.as_ref().map(reading_order).unwrap_or_default()
     }
 
     /// Selects the next widget in reading order (`forward`) or the previous one, wrapping
     /// around. With none selected, the first or the last.
     pub fn select_step(&mut self, forward: bool) -> Option<u32> {
         let order = self.reading_order();
+        self.select_step_in(&order, forward)
+    }
+
+    /// [`LayoutEdit::select_step`] over the widget ids `order`.
+    pub fn select_step_in(&mut self, order: &[u32], forward: bool) -> Option<u32> {
         if order.is_empty() {
             self.selected = None;
             return None;
@@ -282,6 +278,17 @@ impl LayoutEdit {
         self.selected = Some(order[next]);
         self.selected
     }
+}
+
+/// The widget ids of `layout` that have cells, in reading order: by row, then column.
+pub fn reading_order(layout: &ContainerLayout) -> SmallVec<[u32; 16]> {
+    let mut cells: SmallVec<[(u16, u16, u32); 16]> = layout
+        .widgets
+        .iter()
+        .filter_map(|w| w.cell.map(|c| (c.row, c.col, w.id)))
+        .collect();
+    cells.sort_unstable();
+    cells.into_iter().map(|(_, _, id)| id).collect()
 }
 
 /// Removes widget `id` from `layout`. Its id is not given out again (`next_id` stays).
@@ -665,16 +672,40 @@ impl WidgetEditor {
         cx.notify();
     }
 
-    /// Shows the working copy: the default layout for `None`.
+    /// Shows the working copy. For `None` (after Reset) it shows the default layout pinned to
+    /// the grid, as entering Edit Widgets does, so its widgets can be selected, dragged and
+    /// configured. The working copy stays `None`, so Apply saves the default.
     fn show_working(&mut self, cx: &mut Context<Self>) {
         let Some(edit) = &self.edit else {
             return;
         };
-        let layout = edit
-            .working
-            .clone()
-            .unwrap_or_else(|| default_layout(&edit.container));
+        let Some(layout) = edit.working.clone() else {
+            let default = default_layout(&edit.container);
+            self.container
+                .update(cx, |c, cx| c.set_layout(default.clone(), cx));
+            if default.preset.is_some() {
+                // The container placed the flow layout just now, so it can be pinned.
+                let pinned = self.pinned(&default, cx);
+                self.container.update(cx, |c, cx| c.set_layout(pinned, cx));
+            }
+            return;
+        };
         self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+    }
+
+    /// The layout edit actions work on: the working copy, or for `None` (after Reset) the
+    /// pinned default the container shows.
+    pub fn working_layout(&self, cx: &App) -> Option<ContainerLayout> {
+        let edit = self.edit.as_ref()?;
+        if let Some(layout) = &edit.working {
+            return Some(layout.clone());
+        }
+        let shown = self.container.read(cx).layout();
+        Some(if shown.preset.is_some() {
+            self.pinned(shown, cx)
+        } else {
+            shown.clone()
+        })
     }
 
     /// Runs `f` on a copy of the working layout (the default pinned to the grid after Reset)
@@ -684,21 +715,10 @@ impl WidgetEditor {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut ContainerLayout, &InnerGrid) -> bool,
     ) -> bool {
-        let Some(edit) = &self.edit else {
+        let Some(mut next) = self.working_layout(cx) else {
             return false;
         };
         let grid = self.edit_grid(cx);
-        let mut next = match &edit.working {
-            Some(layout) => layout.clone(),
-            None => {
-                let shown = self.container.read(cx).layout().clone();
-                if shown.preset.is_some() {
-                    self.pinned(&shown, cx)
-                } else {
-                    shown
-                }
-            }
-        };
         if !f(&mut next, &grid) {
             return false;
         }
@@ -745,7 +765,11 @@ impl WidgetEditor {
 
     /// Tab and Shift+Tab.
     pub fn select_step(&mut self, forward: bool, cx: &mut Context<Self>) -> Option<u32> {
-        let id = self.edit.as_mut()?.select_step(forward);
+        let order = self
+            .working_layout(cx)
+            .map(|l| reading_order(&l))
+            .unwrap_or_default();
+        let id = self.edit.as_mut()?.select_step_in(&order, forward);
         cx.notify();
         id
     }
@@ -895,11 +919,8 @@ impl WidgetEditor {
         cx: &mut Context<Self>,
     ) {
         let Some(setting) = self
-            .edit
-            .as_ref()
-            .and_then(|e| e.working.as_ref())
-            .and_then(|l| l.widgets.iter().find(|w| w.id == id))
-            .cloned()
+            .working_layout(cx)
+            .and_then(|l| l.widgets.into_iter().find(|w| w.id == id))
         else {
             return;
         };
@@ -946,7 +967,7 @@ impl WidgetEditor {
         window.focus(&self.focus, cx);
         self.select(id, cx);
         self.drag = None;
-        let Some(base) = self.edit.as_ref().and_then(|e| e.working.clone()) else {
+        let Some(base) = self.working_layout(cx) else {
             return;
         };
         let Some(start_cell) = base

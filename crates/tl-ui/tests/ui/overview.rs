@@ -8832,6 +8832,121 @@ mod wired {
         );
     }
 
+    /// While the GPU box is in Edit Widgets the rest of the page takes no pointer input but the
+    /// wheel (UI-PRF-061): no box menu, no page menu, and the page still scrolls. Ending Edit
+    /// Widgets takes the covers away.
+    #[gpui_kit::test]
+    fn overview_widget_edit_page_takes_only_scroll(cx: &mut TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+        use tl_model::layout::GPU_BOX_CONTAINER;
+        use tl_ui::pages::performance::actions::PerfWidgetEditStart;
+        use tl_ui::pages::performance::overview::box_menu::widget_edit_cover_id;
+        use tl_ui::pages::performance::overview::layout::BoxKind;
+        use tl_ui::pages::performance::widget::container::WidgetContainer;
+        use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
+        use tl_ui::pages::performance::widget::source::SourceStore;
+
+        let mut r = open(cx);
+        select(&mut r, OVERVIEW_KEY);
+        // A short window, so the page scrolls.
+        r.vcx.simulate_resize(size(px(1600.), px(420.)));
+        draw(r.vcx);
+        let page = overview(&mut r).expect("an OverviewPage");
+        let editor = r.vcx.update(|_, cx| {
+            let hub = page.read(cx).hub().expect("a hub").clone();
+            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
+            let layout = default_layout(GPU_BOX_CONTAINER);
+            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
+            cx.new(|cx| WidgetEditor::new(c, &hub, cx))
+        });
+        draw(r.vcx);
+        let cover =
+            |kind| -> &'static str { Box::leak(widget_edit_cover_id(kind).into_boxed_str()) };
+        assert!(r.vcx.debug_bounds(cover(BoxKind::Cpu)).is_none());
+        r.vcx.update(|window, cx| {
+            let focus = gpui_kit::Focusable::focus_handle(page.read(cx), cx);
+            focus.dispatch_action(&PerfWidgetEditStart, window, cx);
+        });
+        draw(r.vcx);
+        assert!(r.vcx.read_entity(&editor, |e, _| e.is_editing()));
+        let cpu = r.vcx.debug_bounds(CPU_BOX_ID).expect("the CPU box");
+        let cpu_cover = r
+            .vcx
+            .debug_bounds(cover(BoxKind::Cpu))
+            .expect("the CPU box cover");
+        assert!(
+            cpu_cover.contains(&cpu.center())
+                && cpu_cover.size.width >= cpu.size.width - px(1.)
+                && cpu_cover.size.height >= cpu.size.height - px(1.),
+            "the cover is the whole box: {cpu_cover:?} {cpu:?}"
+        );
+        let gpu_title = r
+            .vcx
+            .debug_bounds(Box::leak(title_row_id(GPU_BOX_ID).into_boxed_str()))
+            .expect("the GPU title line");
+        let gpu_cover = r
+            .vcx
+            .debug_bounds(cover(BoxKind::Gpu))
+            .expect("the GPU title cover");
+        assert!(
+            gpu_cover.contains(&gpu_title.center()),
+            "{gpu_cover:?} {gpu_title:?}"
+        );
+        let gpu = r.vcx.debug_bounds(GPU_BOX_ID).expect("the GPU box");
+        assert!(
+            gpu_cover.size.height < gpu.size.height / 2.,
+            "the body stays open"
+        );
+
+        // No box menu, no page menu.
+        let cpu_title = r
+            .vcx
+            .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
+            .expect("the CPU title line");
+        for at in [cpu_title.center(), cpu.center(), gpu_title.center()] {
+            mouse(r.vcx, MouseButton::Right, at);
+            draw(r.vcx);
+            let open = r
+                .vcx
+                .update(|window, cx| open_context_menu(window, cx).is_some());
+            assert!(!open, "a right-click at {at:?} opens no menu");
+        }
+
+        // The wheel over a covered box still scrolls the page.
+        let top = cpu.origin.y;
+        r.vcx.simulate_event(ScrollWheelEvent {
+            position: cpu.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        draw(r.vcx);
+        let scrolled = r
+            .vcx
+            .debug_bounds(CPU_BOX_ID)
+            .expect("the CPU box")
+            .origin
+            .y;
+        assert!(scrolled < top, "the page scrolled: {top:?} to {scrolled:?}");
+
+        // Cancel ends Edit Widgets; the covers go and the box menu opens again.
+        r.vcx
+            .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(cover(BoxKind::Cpu)).is_none());
+        assert!(r.vcx.debug_bounds(cover(BoxKind::Gpu)).is_none());
+        let cpu_title = r
+            .vcx
+            .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
+            .expect("the CPU title line");
+        mouse(r.vcx, MouseButton::Right, cpu_title.center());
+        let (labels, _) = open_menu(&mut r);
+        assert_eq!(labels[0], (MenuEntryKind::Submenu, "Layout".to_owned()));
+    }
+
     #[gpui_kit::test]
     fn overview_page_menu_and_copy(cx: &mut TestAppContext) {
         let mut r = open(cx);
