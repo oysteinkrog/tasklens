@@ -1074,3 +1074,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-11-01: lhliq.7 requeued: drawing and placement must share one function; sweep test drawn bounds == placed rect for every mode at two sizes.
 - 2026-11-01: lhliq.7 line decision D: tnum digits; re-place only when the line's shape (values present, character counts) changes.
 - 2026-11-01: lhliq.8 bench gate: compare HEAD with v1.1.0 under the same load (within 10%), not absolute budgets on a loaded desktop; 144 Hz check not verifiable here.
+2026-11-01 lhliq visual check: added widgets land below the box body with no sign (ADR-019 Insert); filed .9 (scroll new widget into view) and .10 (one-line edit toolbar, gear clear of axis labels), .10 after .9.
