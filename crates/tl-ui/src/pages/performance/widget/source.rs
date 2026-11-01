@@ -12,52 +12,83 @@
 //! handles only: a `SourceData` lives while a widget holds it, and is dropped with the last one.
 //! The store also tells slot sources (`DeviceSelector::Slot`) which GPUs the box shows.
 //!
-//! Phase 1 reads GPU devices only. The source reads the Overview's snapshot (`box_snapshot`),
-//! so it follows the timeline's pause like the boxes do.
+//! A source reads the record its box shows the value from today (ADR-019 phase 2): the GPU
+//! record, the CPU and memory totals, a disk's or an adapter's record, and for a logical CPU,
+//! the disk aggregate and the network aggregate the newest sample of the series. A metric with
+//! two or more lines (`power_draw`, `core_clocks`, `composition`, `io`, `traffic`) is one source
+//! with a list of series ([`SourceData::series_list`]). The source reads the Overview's snapshot
+//! (`box_snapshot`), so it follows the timeline's pause like the boxes do.
 
 use std::sync::Arc;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, SharedString, Subscription, WeakEntity,
 };
 use rustc_hash::FxHashMap;
-use tl_model::ids::{DeviceIdx, SeriesId};
+use smallvec::SmallVec;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
     DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
     METRIC_VRAM, MetricKey, SourceSelector,
+};
+use tl_model::layout_boxes::{
+    CPU_LOGICAL_PREFIX, DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL, METRIC_CPU_TOTAL,
+    METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE, METRIC_FREQ,
+    METRIC_LOAD, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT,
+    METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX, METRIC_NET_TRAFFIC,
+    METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE, MetricSeries,
+    metric_series,
 };
 use tl_model::settings::OverviewRange;
 use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::validity::Validity;
 
-use super::meta::{MetricMeta, ValueText};
+use super::meta::{MetricMeta, NetView};
 use crate::chart::YScale;
 use crate::chart::labels::{NetFormat, format_value};
 use crate::components::validity::copy_text;
 use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
+use crate::net_totals::NetTotal;
 use crate::pages::performance::DeviceKey;
+use crate::pages::performance::core_clocks::core_lines;
+use crate::pages::performance::cpu::logical_devices;
 use crate::pages::performance::details::Template;
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals};
+use crate::pages::performance::overview::cpu_box::CoreAverage;
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::range::{Figures, current_range, figures_text};
-use crate::pages::performance::overview::timeline::OverviewPause;
+use crate::pages::performance::overview::timeline::{OverviewPause, paused};
 use crate::settings_global::TlSettings;
 
 /// The name of VRAM.
 const KEY_VRAM: &str = "perf-overview-gpu-vram";
 /// The stats line, "min {$min}  avg {$avg}  peak {$peak}".
 const KEY_FIGURES: &str = "perf-overview-figures";
+/// The swap row's value without swap.
+const KEY_NO_SWAP: &str = "perf-overview-mem-no-swap";
+/// Why a GPU widget is empty: "Not reported by this GPU".
+const KEY_NOT_REPORTED_GPU: &str = "perf-widget-not-reported";
+/// Why a widget of another device is empty: "Not reported by this device".
+const KEY_NOT_REPORTED_DEVICE: &str = "perf-widget-not-reported-device";
+/// A logical CPU's load, "C{$n}", and its clock, "C{$n} speed".
+const KEY_CORE: &str = "perf-widget-metric-core";
+const KEY_CORE_SPEED: &str = "perf-widget-metric-core-speed";
+/// A disk's or an adapter's metric, "{$device} · {$metric}".
+const KEY_DEVICE_METRIC: &str = "perf-widget-device-metric";
 
 /// The parts of a snapshot a source reads: the device record, the series and the history for
-/// the stats, the catalog for the device, and the inventory for the vendor's engine names.
+/// the stats, the catalog for the device, the inventory for the vendor's engine names and the
+/// CPU's maximum clock, and the device details for a disk's SMART temperature.
 const MASK: ComponentMask = ComponentMask(
     ComponentMask::SYSTEM.0
         | ComponentMask::SERIES.0
         | ComponentMask::DEVICES.0
         | ComponentMask::DEVICE_HISTORY.0
-        | ComponentMask::INVENTORY.0,
+        | ComponentMask::INVENTORY.0
+        | ComponentMask::DEVICE_DETAILS.0,
 );
 
 /// Whether a source can be shown, and if not, why (UI-PRF-061 "Unavailable widget").
@@ -66,7 +97,8 @@ pub enum Availability {
     Available,
     /// The device is gone, or the slot has no device: "Not connected".
     Gone,
-    /// The device does not report the metric: "Not reported by this GPU".
+    /// The device does not report the metric: "Not reported by this GPU" or "… by this
+    /// device" ([`SourceData::not_reported_key`]).
     NotReported,
     /// The metric key is unknown to this build: "Needs a newer tasklens".
     Unknown,
@@ -107,6 +139,206 @@ pub fn metric_name_key(metric: &MetricKey, vendor: GpuVendor) -> Option<&'static
         METRIC_POWER => Some("perf-widget-metric-power"),
         METRIC_TEMP => Some("perf-widget-metric-temp"),
         _ => None,
+    }
+}
+
+/// The `en-US.ftl` key of the name of `metric` on a device of `kind` (ADR-019 phase 2 "Metric
+/// keys"): "Utilization", "In use", "Download" and so on. GPU keys are [`metric_name_key`]. A
+/// logical CPU's names take the CPU number ([`KEY_CORE`]). `None` for an unknown key.
+pub fn box_metric_name_key(kind: DeviceKind, metric: &MetricKey) -> Option<&'static str> {
+    let key = match (kind, metric.as_str()) {
+        (DeviceKind::Gpu, _) => return metric_name_key(metric, GpuVendor::Unknown),
+        (DeviceKind::Cpu, METRIC_CPU_TOTAL) => "perf-widget-metric-cpu-total",
+        (DeviceKind::Cpu, METRIC_CPU_KERNEL) => "perf-widget-metric-cpu-kernel",
+        (DeviceKind::Cpu, METRIC_FREQ) => "perf-widget-metric-speed",
+        (DeviceKind::Cpu | DeviceKind::Disk, METRIC_TEMP) => "perf-widget-metric-temp",
+        (DeviceKind::Cpu, METRIC_POWER) => "perf-widget-metric-cpu-power",
+        (DeviceKind::Cpu, METRIC_POWER_CORES) => "perf-widget-metric-cpu-power-cores",
+        (DeviceKind::Cpu, METRIC_POWER_DRAW) => "perf-widget-metric-power",
+        (DeviceKind::Cpu, METRIC_CORE_CLOCKS) => "perf-widget-metric-core-clocks",
+        (DeviceKind::Cpu, METRIC_PRESSURE) => "perf-widget-metric-cpu-pressure",
+        (DeviceKind::CpuLogical, METRIC_LOAD) => KEY_CORE,
+        (DeviceKind::CpuLogical, METRIC_FREQ) => KEY_CORE_SPEED,
+        (DeviceKind::Memory, METRIC_MEM_USED) => "perf-overview-mem-used",
+        (DeviceKind::Memory, METRIC_MEM_CACHED) => "perf-overview-mem-cached",
+        (DeviceKind::Memory, METRIC_MEM_AVAILABLE) => "perf-overview-mem-available",
+        (DeviceKind::Memory, METRIC_MEM_SWAP) => "perf-overview-mem-swap",
+        (DeviceKind::Memory, METRIC_MEM_COMMIT) => "perf-overview-mem-commit",
+        (DeviceKind::Memory, METRIC_PRESSURE) => "perf-widget-metric-mem-pressure",
+        (DeviceKind::Memory, METRIC_MEM_COMPOSITION) => "perf-widget-metric-mem-composition",
+        (DeviceKind::Disk | DeviceKind::Disks, METRIC_DISK_ACTIVE) => {
+            "perf-widget-metric-disk-active"
+        }
+        (DeviceKind::Disk | DeviceKind::Disks, METRIC_DISK_READ) => "perf-widget-metric-disk-read",
+        (DeviceKind::Disk | DeviceKind::Disks, METRIC_DISK_WRITE) => {
+            "perf-widget-metric-disk-write"
+        }
+        (DeviceKind::Disk | DeviceKind::Disks, METRIC_DISK_IO) => "perf-widget-metric-disk-io",
+        (DeviceKind::Net | DeviceKind::Nets, METRIC_NET_RX) => "perf-widget-metric-net-rx",
+        (DeviceKind::Net | DeviceKind::Nets, METRIC_NET_TX) => "perf-widget-metric-net-tx",
+        (DeviceKind::Net | DeviceKind::Nets, METRIC_NET_TRAFFIC) => {
+            "perf-widget-metric-net-traffic"
+        }
+        _ => return None,
+    };
+    Some(key)
+}
+
+/// The CPU number of a logical CPU's persistent key, `cpu:<n>`.
+fn cpu_number(key: &str) -> Option<u32> {
+    key.strip_prefix(CPU_LOGICAL_PREFIX)?.parse().ok()
+}
+
+/// A value of the record as `f32`.
+fn as_f32_64(m: Metric<f64>) -> Metric<f32> {
+    as_f32(m, |v| v as f32)
+}
+
+/// The newest valid sample of `id`: `Missing` when the series has none yet, `Unsupported` when
+/// the snapshot has no such series.
+fn newest(snap: &Snapshot, id: SeriesId) -> Metric<f32> {
+    let Some(view) = snap.series.get(id) else {
+        return Metric::with(Validity::Unsupported);
+    };
+    match view.samples.iter().rev().find(|s| s.is_valid()) {
+        Some(s) => Metric::valid(s.value),
+        None => Metric::with(Validity::Missing),
+    }
+}
+
+/// The current reading of `metric` on the device `idx` of `kind`, and the second line's value
+/// of a pair. Each value comes from the record the box shows it from today. `Unsupported` when
+/// the device does not report it, or the key is unknown.
+fn box_reading(
+    kind: DeviceKind,
+    metric: &MetricKey,
+    snap: &Snapshot,
+    idx: DeviceIdx,
+    net: Option<&NetTotal>,
+) -> (Metric<f32>, Option<f32>) {
+    let unsupported = (Metric::with(Validity::Unsupported), None);
+    let one = |m: Metric<f32>| (m, None);
+    let pair = |a: Metric<f32>, b: Metric<f32>| (a, shown(b.validity).then_some(b.value));
+    let key = metric.as_str();
+    match kind {
+        DeviceKind::Gpu => {
+            one(gpu_totals(snap, idx).map_or(Metric::default(), |t| reading(metric, t)))
+        }
+        DeviceKind::Cpu => {
+            let c = &snap.system.cpu;
+            match key {
+                METRIC_CPU_TOTAL => one(c.util_pct),
+                METRIC_CPU_KERNEL => one(c.kernel_pct),
+                METRIC_FREQ => one(as_f32(c.freq_mhz, |v| v as f32)),
+                METRIC_TEMP => one(c.temp_c),
+                METRIC_POWER => one(c.package_power_w),
+                METRIC_POWER_CORES => one(c.core_power_w),
+                METRIC_POWER_DRAW => pair(c.package_power_w, c.core_power_w),
+                METRIC_PRESSURE => one(c.psi_some_pct),
+                // No value: available while a core reports a clock (see `refresh`).
+                METRIC_CORE_CLOCKS => one(Metric::valid(0.0)),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::CpuLogical => match key {
+            METRIC_LOAD => one(newest(
+                snap,
+                SeriesId {
+                    device: idx,
+                    metric: MetricId::CPU_TOTAL,
+                },
+            )),
+            METRIC_FREQ => one(newest(
+                snap,
+                SeriesId {
+                    device: idx,
+                    metric: MetricId::CPU_FREQ,
+                },
+            )),
+            _ => unsupported,
+        },
+        DeviceKind::Memory => {
+            let m = &snap.system.memory;
+            let bytes = |v: u64| Metric {
+                value: v as f32,
+                validity: m.validity,
+            };
+            match key {
+                METRIC_MEM_USED | METRIC_MEM_COMPOSITION => one(bytes(m.used)),
+                METRIC_MEM_CACHED => one(bytes(m.cached)),
+                METRIC_MEM_AVAILABLE => one(bytes(m.available)),
+                METRIC_MEM_SWAP => one(bytes(m.swap_total.saturating_sub(m.swap_free))),
+                METRIC_MEM_COMMIT => one(bytes(m.committed)),
+                METRIC_PRESSURE => one(m.psi_some_pct),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Disk => {
+            let record = snap.system.disks.iter().find(|(i, _)| *i == idx);
+            let Some((_, d)) = record else {
+                return (Metric::with(Validity::Missing), None);
+            };
+            match key {
+                METRIC_DISK_ACTIVE => one(d.active_pct),
+                METRIC_DISK_READ => one(as_f32_64(d.read_bps)),
+                METRIC_DISK_WRITE => one(as_f32_64(d.write_bps)),
+                METRIC_DISK_IO => pair(as_f32_64(d.read_bps), as_f32_64(d.write_bps)),
+                // The drive's own sensor, else SMART, as the Disk page's Temperature row.
+                METRIC_TEMP if d.temp_c.validity == Validity::Unsupported => one(snap
+                    .device_details
+                    .disks
+                    .iter()
+                    .find(|(i, _)| *i == idx)
+                    .and_then(|(_, details)| details.smart_temp_c)
+                    .map_or(Metric::with(Validity::Unsupported), Metric::valid)),
+                METRIC_TEMP => one(d.temp_c),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Disks => {
+            let id = |metric| {
+                newest(
+                    snap,
+                    SeriesId {
+                        device: idx,
+                        metric,
+                    },
+                )
+            };
+            match key {
+                METRIC_DISK_ACTIVE => one(id(MetricId::DISK_ACTIVE)),
+                METRIC_DISK_READ => one(id(MetricId::DISK_READ)),
+                METRIC_DISK_WRITE => one(id(MetricId::DISK_WRITE)),
+                METRIC_DISK_IO => pair(id(MetricId::DISK_READ), id(MetricId::DISK_WRITE)),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Net => {
+            let record = snap.system.nets.iter().find(|(i, _)| *i == idx);
+            let Some((_, n)) = record else {
+                return (Metric::with(Validity::Missing), None);
+            };
+            match key {
+                METRIC_NET_RX => one(as_f32_64(n.rx_bps)),
+                METRIC_NET_TX => one(as_f32_64(n.tx_bps)),
+                METRIC_NET_TRAFFIC => pair(as_f32_64(n.rx_bps), as_f32_64(n.tx_bps)),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Nets => {
+            // The Network box's counted total: the engine total less the hidden kinds.
+            let total = |metric| match net.and_then(|n| n.newest(snap, metric)) {
+                Some(v) => Metric::valid(v),
+                None => Metric::with(Validity::Missing),
+            };
+            match key {
+                METRIC_NET_RX => one(total(MetricId::NET_RX)),
+                METRIC_NET_TX => one(total(MetricId::NET_TX)),
+                METRIC_NET_TRAFFIC => pair(total(MetricId::NET_RX), total(MetricId::NET_TX)),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Other => unsupported,
     }
 }
 
@@ -155,24 +387,80 @@ struct Resolved {
 struct Reading {
     availability: Availability,
     value: Metric<f32>,
+    /// The second line's value of a pair (`io`, `traffic`, `power_draw`).
+    second: Option<f32>,
     bar_max: Option<f32>,
+    /// The total an "x / y" value names.
+    total: Option<f32>,
     y_scale: YScale,
     offered: FormSet,
     figures: Option<Figures>,
+}
+
+/// The settings a source follows, compared to tell whether a settings change concerns it.
+#[derive(Clone, Debug, PartialEq)]
+struct Followed {
+    range: OverviewRange,
+    net: NetView,
+    /// The network kinds the Network box leaves out (`show_network_*`).
+    hidden_nets: SmallVec<[tl_model::devices::NetKind; 5]>,
+    /// The core smoothing's time constant in seconds; 0 is off.
+    tau_s: f32,
+}
+
+impl Followed {
+    fn read(cx: &App) -> Self {
+        let range = current_range(cx);
+        let Some(settings) = cx
+            .try_global::<TlSettings>()
+            .map(|_| TlSettings::settings(cx))
+        else {
+            return Self {
+                range,
+                net: NetView::default(),
+                hidden_nets: SmallVec::new(),
+                tau_s: 0.0,
+            };
+        };
+        let p = &settings.performance;
+        Self {
+            range,
+            net: NetView {
+                format: NetFormat::of(cx),
+                dynamic_scale: p.network_dynamic_scale,
+            },
+            hidden_nets: crate::net_totals::hidden_kinds(p).collect(),
+            tau_s: p.overview_core_smoothing.tau_s(),
+        }
+    }
 }
 
 /// One source in use: its device, its current value and its stats over the Overview range.
 pub struct SourceData {
     hub: Entity<SnapshotHub>,
     selector: SourceSelector,
+    /// The kind of device the selector names; a slot is a GPU.
+    kind: DeviceKind,
     meta: Option<&'static MetricMeta>,
+    /// The series the metric names on its kind of device (`None` for an unknown key).
+    series_of: Option<MetricSeries>,
     /// The device key the selector stands for: its own key, or the slot's GPU from the store.
     key: Option<Arc<str>>,
     /// The catalog version the device was resolved at; `None` forces a new lookup.
     catalog_version: Option<u64>,
     device: Option<Resolved>,
+    /// The series the chart draws, resolved with the device: the metric's series on the
+    /// device, one per physical core for `core_clocks`, and for the network aggregate the
+    /// engine total. Empty while the device is gone.
+    series: SmallVec<[SeriesId; 4]>,
+    /// The network aggregate's total and hidden kinds, whose series the total leaves out.
+    net_total: Option<NetTotal>,
+    /// The hidden kinds' series of the network aggregate's metric, each line's.
+    minus: SmallVec<[SeriesId; 5]>,
+    /// The smoothed load of a logical CPU (UI-PRF-018).
+    average: CoreAverage,
     vendor: GpuVendor,
-    range: OverviewRange,
+    followed: Followed,
     reading: Reading,
     name: SharedString,
     value_text: SharedString,
@@ -204,20 +492,30 @@ impl SourceData {
             DeviceSelector::Key(k) => Some(Arc::clone(k)),
             DeviceSelector::Slot(_) => slot_key,
         };
-        let meta = MetricMeta::of(&selector.metric);
+        let kind = DeviceKind::of(&selector.device);
+        let meta = MetricMeta::of(kind, &selector.metric);
+        let series_of = metric_series(kind, &selector.metric);
         let mut this = Self {
             hub: hub.clone(),
             selector,
+            kind,
             meta,
+            series_of,
             key,
             catalog_version: None,
             device: None,
+            series: SmallVec::new(),
+            net_total: None,
+            minus: SmallVec::new(),
+            average: CoreAverage::default(),
             vendor: GpuVendor::Unknown,
-            range: current_range(cx),
+            followed: Followed::read(cx),
             reading: Reading {
                 availability: Availability::Gone,
                 value: Metric::default(),
+                second: None,
                 bar_max: None,
+                total: None,
                 y_scale: YScale::StickyUp { hw_max: None },
                 offered: FormSet::empty(),
                 figures: None,
@@ -268,15 +566,44 @@ impl SourceData {
         self.device.as_ref().map(|d| &d.name)
     }
 
-    /// The series a chart of the source draws, while the source is available.
+    /// The first series a chart of the source draws, while the source is available.
     pub fn series(&self) -> Option<SeriesId> {
+        self.series_list().first().copied()
+    }
+
+    /// Every series a chart of the source draws, while the source is available: one for most
+    /// metrics, two for a pair, three for `composition`, one per physical core for
+    /// `core_clocks`. On the network aggregate it is the engine's total; the hidden kinds'
+    /// totals it leaves out are [`Self::minus_list`]. The page asks for every series in it.
+    pub fn series_list(&self) -> &[SeriesId] {
         if self.reading.availability != Availability::Available {
-            return None;
+            return &[];
         }
-        Some(SeriesId {
-            device: self.device()?,
-            metric: self.selector.metric.metric()?,
-        })
+        &self.series
+    }
+
+    /// The series a network aggregate source takes away from its total: the per-kind totals of
+    /// the kinds `show_network_*` hides. Empty for every other source.
+    pub fn minus_list(&self) -> &[SeriesId] {
+        if self.reading.availability != Availability::Available {
+            return &[];
+        }
+        &self.minus
+    }
+
+    /// The `en-US.ftl` key of the text a widget shows while the device does not report the
+    /// metric: "Not reported by this GPU" on a GPU, else "Not reported by this device".
+    pub fn not_reported_key(&self) -> &'static str {
+        if self.kind == DeviceKind::Gpu {
+            KEY_NOT_REPORTED_GPU
+        } else {
+            KEY_NOT_REPORTED_DEVICE
+        }
+    }
+
+    /// The kind of device the source reads.
+    pub fn kind(&self) -> DeviceKind {
+        self.kind
     }
 
     /// The metric's name: the engine's name for the GPU's vendor, "VRAM", "Graphics clock" and
@@ -346,9 +673,9 @@ impl SourceData {
         if !mask.intersects(MASK) {
             return;
         }
-        let series_changed = self
-            .series()
-            .is_some_and(|id| ev.changed_series.binary_search(&id).is_ok())
+        let changed = |id: &SeriesId| ev.changed_series.binary_search(id).is_ok();
+        let series_changed = self.series_list().iter().any(changed)
+            || self.minus_list().iter().any(changed)
             || mask.intersects(ComponentMask::DEVICE_HISTORY);
         let snap = box_snapshot(&hub, cx);
         self.update(&snap, series_changed, cx);
@@ -357,16 +684,25 @@ impl SourceData {
     /// The Overview was held at a time or made live: read the other snapshot.
     fn on_pause(&mut self, cx: &mut Context<Self>) {
         let snap = box_snapshot(&self.hub, cx);
+        self.average = CoreAverage::default();
         self.update(&snap, true, cx);
     }
 
-    /// A new Overview range: new stats.
+    /// A new Overview range, network view, set of hidden network kinds or core smoothing: new
+    /// stats, scale, text or series.
     fn on_settings(&mut self, cx: &mut Context<Self>) {
-        let range = current_range(cx);
-        if range == self.range {
+        let followed = Followed::read(cx);
+        if followed == self.followed {
             return;
         }
-        self.range = range;
+        if followed.hidden_nets != self.followed.hidden_nets {
+            // The network total's series change with the hidden kinds.
+            self.catalog_version = None;
+        }
+        if followed.tau_s != self.followed.tau_s {
+            self.average = CoreAverage::default();
+        }
+        self.followed = followed;
         let snap = box_snapshot(&self.hub, cx);
         self.update(&snap, true, cx);
     }
@@ -390,8 +726,13 @@ impl SourceData {
         let before = self.reading;
         let vendor = self.vendor;
         let device = self.device.clone();
+        let series = self.series.clone();
         self.refresh(snap, stats, cx);
-        if self.reading == before && self.vendor == vendor && self.device == device {
+        if self.reading == before
+            && self.vendor == vendor
+            && self.device == device
+            && self.series == series
+        {
             return;
         }
         self.format_all(cx);
@@ -408,27 +749,117 @@ impl SourceData {
         cx.notify();
     }
 
+    /// Finds the device of the key in the catalog: a present entry whose persistent key is the
+    /// key (or, for a GPU, whose identity gives the key, as phase 1 did).
+    fn resolve_device(&self, snap: &Snapshot) -> Option<Resolved> {
+        let key = self.key.as_deref()?;
+        snap.devices
+            .entries
+            .iter()
+            .filter(|e| e.present)
+            .find(|e| {
+                &*e.persistent_key == key
+                    || DeviceKey::from_identity(&e.identity).is_some_and(|k| &*k.0 == key)
+            })
+            .map(|e| Resolved {
+                idx: e.idx,
+                name: SharedString::from(e.display_name.to_string()),
+            })
+    }
+
+    /// The series of the metric on the resolved device: one per physical core for
+    /// `core_clocks` (the CPU page's Core clocks lines), the engine total for the network
+    /// aggregate (and its hidden kinds in `net_total`), else the metric's series on the device.
+    fn resolve_series(&mut self, snap: &Snapshot, cx: &App) {
+        self.series.clear();
+        self.net_total = None;
+        self.minus.clear();
+        let (Some(idx), Some(of)) = (self.device.as_ref().map(|d| d.idx), self.series_of) else {
+            return;
+        };
+        match of {
+            MetricSeries::PerCore(metric) => {
+                let mut logical = Vec::new();
+                logical_devices(&snap.devices, &mut logical);
+                let lines = core_lines(&snap.system.cpu_topology, &logical);
+                self.series.extend(
+                    lines
+                        .devices
+                        .iter()
+                        .map(|&device| SeriesId { device, metric }),
+                );
+            }
+            _ if self.kind == DeviceKind::Nets => {
+                if cx.has_global::<TlSettings>() {
+                    let perf = &TlSettings::settings(cx).performance;
+                    self.net_total = Some(NetTotal::of(&snap.devices, perf));
+                } else {
+                    self.net_total = Some(NetTotal {
+                        total: Some(idx),
+                        hidden: SmallVec::new(),
+                    });
+                }
+                let ids = of.ids().iter().map(|&metric| SeriesId {
+                    device: idx,
+                    metric,
+                });
+                self.series.extend(ids);
+                if let (Some(n), Some(metric)) = (&self.net_total, of.first()) {
+                    self.minus.extend(n.minus(metric).iter().copied());
+                }
+            }
+            _ => {
+                let ids = of.ids().iter().map(|&metric| SeriesId {
+                    device: idx,
+                    metric,
+                });
+                self.series.extend(ids);
+            }
+        }
+    }
+
+    /// The current value of a smoothed metric: the logical CPU's load averaged over the core
+    /// smoothing's time constant, as the core rows do (UI-PRF-018). The raw value while the
+    /// smoothing is off or the Overview is paused.
+    fn smooth(&mut self, snap: &Snapshot, raw: Metric<f32>, cx: &App) -> Metric<f32> {
+        let tau_s = self.followed.tau_s;
+        let Some(id) = self.series.first().copied() else {
+            return raw;
+        };
+        if tau_s <= 0.0 || paused(cx).is_some() {
+            return raw;
+        }
+        let Some(view) = snap.series.get(id) else {
+            return raw;
+        };
+        self.average.advance(&view.samples, tau_s);
+        match self.average.value {
+            Some(v) => Metric::valid(v),
+            None => raw,
+        }
+    }
+
     /// Resolves the device when the catalog changed and reads the record and the stats.
     fn refresh(&mut self, snap: &Snapshot, stats: bool, cx: &App) {
         if self.catalog_version != Some(snap.devices.version) {
             self.catalog_version = Some(snap.devices.version);
-            self.device = self.key.as_deref().and_then(|key| {
-                snap.devices
-                    .entries
-                    .iter()
-                    .filter(|e| e.present)
-                    .find(|e| DeviceKey::from_identity(&e.identity).is_some_and(|k| &*k.0 == key))
-                    .map(|e| Resolved {
-                        idx: e.idx,
-                        name: SharedString::from(e.display_name.to_string()),
-                    })
-            });
+            self.device = self.resolve_device(snap);
+            self.resolve_series(snap, cx);
+            self.average = CoreAverage::default();
         }
         let idx = self.device.as_ref().map(|d| d.idx);
-        self.vendor = idx.map_or(GpuVendor::Unknown, |i| GpuVendor::of(snap, i));
-        let totals = idx.and_then(|i| gpu_totals(snap, i));
+        self.vendor = match (self.kind, idx) {
+            (DeviceKind::Gpu, Some(i)) => GpuVendor::of(snap, i),
+            _ => GpuVendor::Unknown,
+        };
         let metric = &self.selector.metric;
-        let value = totals.map_or(Metric::default(), |t| reading(metric, t));
+        let (mut value, second) = match idx {
+            Some(i) => box_reading(self.kind, metric, snap, i, self.net_total.as_ref()),
+            None => (Metric::default(), None),
+        };
+        if metric.as_str() == METRIC_CORE_CLOCKS && self.series.is_empty() {
+            value = Metric::with(Validity::Unsupported);
+        }
         let availability = match (self.meta, idx) {
             (None, _) => Availability::Unknown,
             (_, None) => Availability::Gone,
@@ -439,34 +870,77 @@ impl SourceData {
             self.reading.availability = availability;
             return;
         };
+        if meta.smoothed && availability == Availability::Available {
+            value = self.smooth(snap, value, cx);
+        }
         let figures = if availability != Availability::Available {
             None
         } else if stats || self.reading.availability != Availability::Available {
             #[cfg(any(test, feature = "test-hooks"))]
             self.stats_count.set(self.stats_count.get() + 1);
-            let range = current_range(cx);
-            self.range = range;
-            idx.zip(metric.metric())
-                .and_then(|(device, metric)| meta.stats(snap, SeriesId { device, metric }, range))
+            let range = self.followed.range;
+            self.series
+                .first()
+                .and_then(|&id| meta.stats_minus(snap, id, &self.minus, range))
         } else {
             self.reading.figures
         };
+        let on = idx.map(|i| (snap, i));
         self.reading = Reading {
             availability,
             value,
-            bar_max: meta.bar_max(totals),
-            y_scale: meta.y_scale(totals),
-            offered: meta.offered_forms(totals),
+            second,
+            bar_max: meta.bar_max(on),
+            total: meta.value_total(on),
+            y_scale: meta.y_scale(on, self.followed.net),
+            offered: meta.offered_forms(on),
             figures,
         };
     }
 
+    /// The metric's name, by the ADR-019 phase 2 rule: the metric's name on a CPU, memory, an
+    /// aggregate or a GPU; "C{n}" and "C{n} speed" on a logical CPU; on a disk or an adapter
+    /// the device's name for `io` and `traffic`, else "{device} · {metric}". The raw key for a
+    /// key this build does not know.
+    fn format_name(&self, cx: &App) -> SharedString {
+        let metric = &self.selector.metric;
+        let key = match self.kind {
+            DeviceKind::Gpu => metric_name_key(metric, self.vendor),
+            kind => box_metric_name_key(kind, metric),
+        };
+        let Some(key) = key else {
+            return SharedString::from(metric.as_str().to_string());
+        };
+        match self.kind {
+            DeviceKind::CpuLogical => {
+                let n = self.key.as_deref().and_then(cpu_number).unwrap_or_default();
+                tr_args(cx, key, &[("n", FluentValue::from(n))])
+            }
+            DeviceKind::Disk | DeviceKind::Net => {
+                let device = self.device_name().cloned().unwrap_or_default();
+                let whole = matches!(metric.as_str(), METRIC_DISK_IO | METRIC_NET_TRAFFIC);
+                if whole && !device.is_empty() {
+                    return device;
+                }
+                if device.is_empty() {
+                    return tr(cx, key);
+                }
+                tr_args(
+                    cx,
+                    KEY_DEVICE_METRIC,
+                    &[
+                        ("device", FluentValue::from(device.to_string())),
+                        ("metric", FluentValue::from(tr(cx, key).to_string())),
+                    ],
+                )
+            }
+            _ => tr(cx, key),
+        }
+    }
+
     /// The name, value and stats text from the last reading.
     fn format_all(&mut self, cx: &App) {
-        self.name = match metric_name_key(&self.selector.metric, self.vendor) {
-            Some(key) => tr(cx, key),
-            None => SharedString::from(self.selector.metric.as_str().to_string()),
-        };
+        self.name = self.format_name(cx);
         let r = self.reading;
         let Some(meta) = self
             .meta
@@ -476,26 +950,31 @@ impl SourceData {
             self.stats_text = SharedString::default();
             return;
         };
-        self.value_text = if shown(r.value.validity) {
-            // `MetricMeta::write_value` with the denominator this reading took from the record.
+        let net = self.followed.net.format;
+        let no_swap = self.kind == DeviceKind::Memory
+            && self.selector.metric.as_str() == METRIC_MEM_SWAP
+            && shown(r.value.validity)
+            && snap_swap_total_is_zero(r.total);
+        self.value_text = if no_swap {
+            tr(cx, KEY_NO_SWAP)
+        } else if shown(r.value.validity) {
             let mut out = String::new();
-            let net = NetFormat::default();
-            format_value(meta.format, r.value.value, net, &mut out);
-            if let (ValueText::OfTotal, Some(total)) = (meta.value_text, r.bar_max) {
-                out.push_str(" / ");
-                format_value(meta.format, total, net, &mut out);
-            }
+            meta.write_value(r.value.value, r.second, r.total, net, &mut out);
             out.into()
         } else {
             copy_text(r.value.validity, &SharedString::default())
         };
         let format = meta.format;
         self.stats_text = figures_text(&self.figures_words, r.figures, |v, out| {
-            format_value(format, v, NetFormat::default(), out);
+            format_value(format, v, net, out);
         });
     }
 }
 
+/// Whether the swap total a reading took is 0 or unknown, which the box shows as "No swap".
+fn snap_swap_total_is_zero(total: Option<f32>) -> bool {
+    total.is_none_or(|t| t <= 0.0)
+}
 /// The sources of one Overview page, by selector.
 pub struct SourceStore {
     hub: Entity<SnapshotHub>,

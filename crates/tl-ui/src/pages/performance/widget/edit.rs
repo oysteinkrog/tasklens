@@ -47,6 +47,7 @@ use tl_model::layout::{
     WidgetCell, WidgetContent, WidgetOptions, WidgetSetting, default_box_layout, grid_cols,
     overview_kind, reset_to_default,
 };
+use tl_model::layout_boxes::DeviceKind;
 
 use super::container::WidgetContainer;
 use super::grid::{self, Drawn, InnerGrid, SlotDevice};
@@ -895,7 +896,9 @@ impl WidgetEditor {
         let offered = group
             .and_then(|g| g.item(&metric))
             .map(|i| i.offered)
-            .or_else(|| MetricMeta::of(&metric).map(|m| m.forms()))
+            .or_else(|| {
+                MetricMeta::of(DeviceKind::of_key(&source.device), &metric).map(|m| m.forms())
+            })
             .unwrap_or(FormSet::VALUE | FormSet::LABEL);
         let name = group.map(|g| Arc::from(g.name.as_ref())).or_else(|| {
             self.slots
@@ -968,10 +971,12 @@ impl WidgetEditor {
         if !from_source.is_empty() {
             return from_source;
         }
-        w.content
-            .metric_key()
-            .and_then(MetricMeta::of)
-            .map_or(w.forms, |m| m.forms())
+        let meta = w
+            .content
+            .device()
+            .zip(w.content.metric_key())
+            .and_then(|(device, key)| MetricMeta::of(DeviceKind::of(device), key));
+        meta.map_or(w.forms, |m| m.forms())
     }
 
     /// Opens widget `id`'s menu at `position` and selects the widget.

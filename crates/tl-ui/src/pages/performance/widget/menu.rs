@@ -18,10 +18,12 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{App, SharedString, Window};
+use tl_model::ids::DeviceIdx;
 use tl_model::layout::{
     DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
     METRIC_VRAM, MetricKey, WidgetSetting,
 };
+use tl_model::layout_boxes::DeviceKind;
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
@@ -87,10 +89,11 @@ impl SourceGroup {
     }
 }
 
-/// The forms a metric offers: those of its metadata on the device's record, none for an
-/// unknown key.
-fn offered(metric: &MetricKey, totals: Option<&tl_model::system::GpuTotals>) -> FormSet {
-    MetricMeta::of(metric).map_or(FormSet::empty(), |m| m.offered_forms(totals))
+/// The forms a GPU metric offers: those of its metadata on the GPU `idx` of `snap`, none for
+/// an unknown key.
+fn offered(metric: &MetricKey, snap: &Snapshot, idx: DeviceIdx) -> FormSet {
+    MetricMeta::of(DeviceKind::Gpu, metric)
+        .map_or(FormSet::empty(), |m| m.offered_forms(Some((snap, idx))))
 }
 
 /// The sources of the GPUs in `slots` (slot 0 first) on `snap`. A GPU that is not present has
@@ -113,7 +116,7 @@ pub fn source_groups(slots: &[SlotDevice], snap: &Snapshot, cx: &App) -> Vec<Sou
         for (engine, name_key) in grid_engines(vendor, totals, &[] as &[&str]) {
             let metric = MetricKey::engine(engine);
             items.push(SourceItem {
-                offered: offered(&metric, totals),
+                offered: offered(&metric, snap, entry.idx),
                 metric,
                 label: tr(cx, name_key),
                 engine: true,
@@ -126,7 +129,7 @@ pub fn source_groups(slots: &[SlotDevice], snap: &Snapshot, cx: &App) -> Vec<Sou
                     continue;
                 }
                 items.push(SourceItem {
-                    offered: offered(&metric, totals),
+                    offered: offered(&metric, snap, entry.idx),
                     metric,
                     label: tr(cx, name_key),
                     engine: false,

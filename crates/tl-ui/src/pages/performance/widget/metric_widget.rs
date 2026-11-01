@@ -64,7 +64,6 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 const SEP: &str = " · ";
 
 const KEY_NOT_CONNECTED: &str = "perf-widget-not-connected";
-const KEY_NOT_REPORTED: &str = "perf-widget-not-reported";
 const KEY_UNKNOWN: &str = "perf-widget-unknown";
 
 /// The width the first line keeps free in Edit Widgets, from the widget's left edge: the grip
@@ -494,7 +493,7 @@ impl MetricWidget {
         let reason = match availability {
             Availability::Available => SharedString::default(),
             Availability::Gone => tr(cx, KEY_NOT_CONNECTED),
-            Availability::NotReported => tr(cx, KEY_NOT_REPORTED),
+            Availability::NotReported => tr(cx, src.not_reported_key()),
             Availability::Unknown => tr(cx, KEY_UNKNOWN),
         };
         Shown {

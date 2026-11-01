@@ -2697,3 +2697,240 @@ fn overview_widget_edit_keeps_scroll_offset(cx: &mut TestAppContext) {
     let back = r.vcx.read_entity(&c, |c, _| c.scroll_offset());
     assert!((back - px(80.)).abs() < px(0.5), "after Cancel: {back:?}");
 }
+
+// Sources of the CPU, Memory, Disk and Network boxes (tasklens-6swdr.2).
+
+/// A catalog with the CPU package, memory, a disk, an adapter, logical CPU 3 and the disk
+/// and network aggregates at 0 to 6, each with its persistent key, and the two GPUs at 10, 11.
+fn box_catalog(version: u64) -> DeviceCatalog {
+    use tl_model::devices::AggregateKind;
+    let keyed = |idx: u16, identity: DeviceIdentity, name: &str, key: &str| DeviceEntry {
+        persistent_key: Arc::from(key),
+        ..entry(idx, identity, name, true)
+    };
+    let mut entries = vec![
+        keyed(0, DeviceIdentity::CpuPackage, "CPU", "cpu"),
+        keyed(1, DeviceIdentity::Memory, "Memory", "memory"),
+        keyed(
+            2,
+            DeviceIdentity::Disk {
+                major: 259,
+                minor: 0,
+                name: Arc::from("nvme0n1"),
+                wwn_or_serial: Some(Arc::from("S1")),
+            },
+            "nvme0n1",
+            "disk:S1",
+        ),
+        keyed(
+            3,
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex: 2,
+                name: Arc::from("enp5s0"),
+            },
+            "enp5s0",
+            "net:enp5s0",
+        ),
+        keyed(4, DeviceIdentity::CpuLogical { id: 3 }, "CPU 3", "cpu:3"),
+        keyed(
+            5,
+            DeviceIdentity::Aggregate(AggregateKind::Disks),
+            "Disks",
+            "aggregate:disk",
+        ),
+        keyed(
+            6,
+            DeviceIdentity::Aggregate(AggregateKind::Nets),
+            "Network",
+            "aggregate:net",
+        ),
+    ];
+    for i in 7..10 {
+        entries.push(entry(i, DeviceIdentity::CpuPackage, "x", false));
+    }
+    entries.push(entry(GPU_A, gpu_id(1), "Card A", true));
+    entries.push(entry(GPU_B, gpu_id(2), "Card B", true));
+    DeviceCatalog {
+        version,
+        entries: Arc::from(entries),
+    }
+}
+
+/// What a source shows: its availability, name and value text.
+fn shown_of(r: &mut Rig, s: &Entity<SourceData>) -> (Availability, String, String) {
+    r.vcx.read_entity(s, |s, _| {
+        (
+            s.availability(),
+            s.name().to_string(),
+            s.value_text().to_string(),
+        )
+    })
+}
+
+/// Removes the Unicode isolation marks Fluent puts around a placeable.
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
+#[gpui_kit::test]
+fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
+    use tl_model::system::{DiskTotals, LinkState, MemoryTotals, NetTotals};
+    let mut r = open(cx);
+    r.publish(|s| s.devices = Arc::new(box_catalog(2)));
+    r.system(|sys| {
+        sys.cpu.util_pct = Metric::valid(42.0);
+        sys.memory = MemoryTotals {
+            validity: Validity::Valid,
+            total: 32 << 30,
+            used: 8 << 30,
+            ..MemoryTotals::default()
+        };
+        sys.disks = Arc::from([(
+            DeviceIdx(2),
+            DiskTotals {
+                device: DeviceIdx(2),
+                active_pct: Metric::valid(12.0),
+                read_bps: Metric::valid(1_200_000.0),
+                write_bps: Metric::valid(340_000.0),
+                response_ms: Metric::default(),
+                read_total: 0,
+                written_total: 0,
+                capacity: 0,
+                temp_c: Metric::with(Validity::Unsupported),
+            },
+        )]);
+        sys.nets = Arc::from([(
+            DeviceIdx(3),
+            NetTotals {
+                device: DeviceIdx(3),
+                rx_bps: Metric::valid(125_000.0),
+                tx_bps: Metric::valid(0.0),
+                rx_total: 0,
+                tx_total: 0,
+                link_speed_mbps: Metric::valid(1000),
+                state: LinkState::Up,
+            },
+        )]);
+    });
+    let at = |device: &str, metric: &str| selector(DeviceSelector::Key(Arc::from(device)), metric);
+    let store = &mut r.store;
+    let sources: Vec<(SourceSelector, Entity<SourceData>)> = r.vcx.update(|_, cx| {
+        [
+            at("cpu", "total"),
+            at("memory", "used"),
+            at("memory", "swap"),
+            at("disk:S1", "read"),
+            at("disk:S1", "io"),
+            at("disk:S1", "temp"),
+            at("net:enp5s0", "rx"),
+            at("cpu:3", "load"),
+            at("cpu", "fan"),
+            at("cpu", "core_clocks"),
+            at("aggregate:disk", "io"),
+        ]
+        .into_iter()
+        .map(|sel| {
+            let s = store.source(&sel, cx);
+            (sel, s)
+        })
+        .collect()
+    });
+    draw(r.vcx);
+    let mut shown = Vec::new();
+    for (sel, s) in &sources {
+        shown.push((sel.metric.as_str().to_owned(), shown_of(&mut r, s)));
+    }
+    let get = |i: usize| shown[i].1.clone();
+    let fmt = |format, v: f32| {
+        let mut out = String::new();
+        tl_ui::chart::labels::format_value(
+            format,
+            v,
+            tl_ui::chart::labels::NetFormat::default(),
+            &mut out,
+        );
+        out
+    };
+    use tl_ui::chart::ValueFormat;
+
+    let (a, name, value) = get(0);
+    assert_eq!(a, Availability::Available);
+    assert_eq!(name, "Utilization");
+    assert_eq!(value, fmt(ValueFormat::Percent, 42.0));
+
+    let (a, name, value) = get(1);
+    assert_eq!(a, Availability::Available);
+    assert_eq!(name, "In use");
+    let mut of_total = String::new();
+    tl_model::units::bytes_of(&mut of_total, 8 << 30, 32 << 30);
+    assert_eq!(value, of_total, "in use of the total");
+
+    let (_, name, value) = get(2);
+    assert_eq!((name.as_str(), value.as_str()), ("Swap", "No swap"));
+
+    let (a, name, value) = get(3);
+    assert_eq!(a, Availability::Available);
+    assert_eq!(plain(&name), "nvme0n1 · Read");
+    assert_eq!(value, fmt(ValueFormat::RateIec, 1_200_000.0));
+
+    let (_, name, value) = get(4);
+    assert_eq!(name, "nvme0n1", "io names the disk");
+    assert_eq!(
+        value,
+        format!(
+            "R {}  W {}",
+            fmt(ValueFormat::RateIec, 1_200_000.0),
+            fmt(ValueFormat::RateIec, 340_000.0)
+        )
+    );
+
+    // No drive sensor and no SMART temperature: not reported, by "this device".
+    let (a, ..) = get(5);
+    assert_eq!(a, Availability::NotReported);
+    let reason = r
+        .vcx
+        .read_entity(&sources[5].1, |s, _| s.not_reported_key());
+    assert_eq!(reason, "perf-widget-not-reported-device");
+
+    let (a, name, _) = get(6);
+    assert_eq!(a, Availability::Available);
+    assert_eq!(plain(&name), "enp5s0 · Download");
+    let bar = r.vcx.read_entity(&sources[6].1, |s, _| s.bar_fraction());
+    assert_eq!(bar, Some(0.001), "of the link speed in bytes per second");
+
+    // A logical CPU is "C{n}"; with no load series yet it is not reported.
+    let (_, name, _) = get(7);
+    assert_eq!(plain(&name), "C3");
+
+    // An unknown key is kept and shows "Needs a newer tasklens".
+    let (a, name, _) = get(8);
+    assert_eq!((a, name.as_str()), (Availability::Unknown, "fan"));
+
+    // Core clocks without a CPU topology has no line.
+    let (a, name, _) = get(9);
+    assert_eq!(
+        (a, name.as_str()),
+        (Availability::NotReported, "Core clocks")
+    );
+
+    // The disk aggregate reads its series; with none published it is not reported and lists
+    // no series.
+    let list = r
+        .vcx
+        .read_entity(&sources[10].1, |s, _| s.series_list().to_vec());
+    let (a, name, _) = get(10);
+    assert_eq!(name, "Read and write");
+    assert_eq!(a, Availability::NotReported);
+    assert!(list.is_empty());
+    // A GPU source keeps its phase 1 behaviour.
+    let store = &mut r.store;
+    let gpu = r
+        .vcx
+        .update(|_, cx| store.source(&selector(DeviceSelector::Key(key(1)), "vram"), cx));
+    draw(r.vcx);
+    let (a, name, _) = shown_of(&mut r, &gpu);
+    assert_eq!((a, name.as_str()), (Availability::Available, "VRAM"));
+}
