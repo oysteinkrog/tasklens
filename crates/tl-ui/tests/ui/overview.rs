@@ -8346,7 +8346,7 @@ mod page {
         let page = r.page.clone();
         let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
         let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
-        let body = leak_str(container_id(GPU_BOX_CONTAINER));
+        let body = container_id(GPU_BOX_CONTAINER);
         // The placement of widget `id`, in the body, px.
         let placed = |r: &mut Rig, id: u32| {
             r.vcx
@@ -8392,7 +8392,7 @@ mod page {
             // Each placed rectangle is the painted part, from the body's origin. Painted edges
             // snap to whole device pixels, so they may differ from the worked-out ones by
             // less than one.
-            let origin = r.bounds_of(body).origin;
+            let origin = r.bounds_of(body.clone()).origin;
             let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
             let vram = widget_of(&flow, 0, "vram").expect("VRAM widget");
             let vram_part = (vram, String::new());
