@@ -2861,7 +2861,7 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 | `tasklens-lhliq.4` | `widget/metric_widget.rs` (`MetricWidget`), `widget/compose.rs` (`Composition`, minimum sizes, form drop order), `widget/source.rs` (`SourceStore`, `SourceData`, `AvailabilityChanged`) |
 | `tasklens-lhliq.5` | `widget/container.rs` (`WidgetContainer`), `widget/grid.rs` (pure inner grid rules and pinning) |
 | `tasklens-lhliq.6` | `widget/edit.rs` (`LayoutEdit`, the edit toolbar, keys), `widget/menu.rs` (widget menu, Add Widget, the Reset and preset confirmations), `overview/box_menu.rs` ("Edit Widgets…"), `pages/performance/actions.rs` (the actions of UI-PRF-061), `assets/locales/en-US.ftl` (the UI-PRF-061 strings) |
-| `tasklens-lhliq.7` | `overview/gpu_box.rs` (hosts a `WidgetContainer`), `overview/gpu_flow.rs` (new: the GPU presets' flow placement), `overview/mod.rs` (wiring) |
+| `tasklens-lhliq.7` | `overview/gpu_box.rs` (hosts a `WidgetContainer` and draws each flow widget's entity at its 1.1.0 place), `overview/gpu_flow.rs` (new: the GPU presets' flow placement), `overview/mod.rs` (wiring), `widget/metric_widget.rs` (`FlowLook`: a flow widget draws its 1.1.0 part), `widget/container.rs` (a hosted container: the host draws the flow widgets, the values of one line joined by " · ") |
 | `tasklens-lhliq.8` | `crates/tl-model/tests/fixtures/layouts/*.toml` (old GPU box settings), `crates/tl-ui/tests/ui/overview_widgets.rs` (new module of the `ui` test binary), the `perf-overview` bench scenes |
 
 Paths under `widget/` are in `crates/tl-ui/src/pages/performance/widget/`.

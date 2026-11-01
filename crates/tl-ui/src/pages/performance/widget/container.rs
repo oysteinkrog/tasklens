@@ -15,6 +15,13 @@
 //! A layout change compares by widget id: a widget whose id stays keeps its entity and takes
 //! its new settings in place, and only new ids get new entities. A widget that takes no space
 //! (a flow layout leaves out a metric the device does not report) has no entity.
+//!
+//! A hosted container (the GPU box, `set_hosted`) holds the entities of a flow layout but does
+//! not draw them: its host draws each widget in the 1.1.0 part the preset's rules give it
+//! (`MetricWidget`'s `FlowLook`), and the values of one line side by side, joined by " · ". The
+//! host takes the entities with [`WidgetContainer::flow_widget`] and places the widgets again
+//! ([`WidgetContainer::place_again`]) when the set it draws changed. In Edit Widgets, and for a
+//! grid layout, the container draws the widgets itself.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,7 +38,7 @@ use tl_model::demand::Demand;
 use tl_model::layout::{ContainerLayout, DeviceSelector, WidgetCell, WidgetSetting, grid_cols};
 
 use super::grid::{self, InnerGrid, InnerPlacement};
-use super::metric_widget::MetricWidget;
+use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use crate::hub::SnapshotHub;
 use crate::theme::{UiMetrics, metrics};
@@ -93,6 +100,8 @@ pub struct WidgetContainer {
     store: Rc<RefCell<SourceStore>>,
     layout: ContainerLayout,
     flow: Option<FlowPlace>,
+    /// The host draws the widgets of a flow layout outside Edit Widgets.
+    hosted: bool,
     /// The source of every widget of the layout, placed or not, by widget id.
     sources: FxHashMap<u32, Entity<SourceData>>,
     /// One availability subscription per source entity.
@@ -132,6 +141,7 @@ impl WidgetContainer {
             store,
             layout,
             flow: None,
+            hosted: false,
             sources: FxHashMap::default(),
             source_subs: FxHashMap::default(),
             widgets: FxHashMap::default(),
@@ -216,6 +226,54 @@ impl WidgetContainer {
         if self.layout.preset.is_some() && self.relayout(cx) {
             self.notify(cx);
         }
+    }
+
+    /// Whether the host draws the widgets of a flow layout (outside Edit Widgets). It then
+    /// takes their entities with [`Self::flow_widget`].
+    pub fn set_hosted(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.hosted != on {
+            self.hosted = on;
+            self.notify(cx);
+        }
+    }
+
+    /// Whether the host draws the widgets now.
+    pub fn host_draws(&self) -> bool {
+        self.hosted && self.layout.preset.is_some() && self.frozen.is_none()
+    }
+
+    /// The entity of widget `id` of the flow layout the host draws as `look`, created with that
+    /// look when it has none yet. The host then places the widgets again with the ids it drew
+    /// ([`Self::place_again`]), so a widget it no longer draws loses its entity. `None` when the
+    /// layout has no widget `id`.
+    pub fn flow_widget(
+        &mut self,
+        id: u32,
+        look: FlowLook,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<MetricWidget>> {
+        if let Some(widget) = self.widgets.get(&id) {
+            let widget = widget.clone();
+            widget.update(cx, |w, cx| w.set_flow(Some(look), cx));
+            return Some(widget);
+        }
+        let setting = self.layout.widgets.iter().find(|w| w.id == id)?.clone();
+        let source = self.sources.get(&id)?.clone();
+        let hub = self.hub.clone();
+        let widget = cx.new(|cx| MetricWidget::with_flow(setting, source, &hub, Some(look), cx));
+        self.widgets.insert(id, widget.clone());
+        Some(widget)
+    }
+
+    /// The host drew another set of widgets: places them again, which drops the entities of
+    /// the widgets it no longer draws. A hosted flow layout draws nothing here, so this does
+    /// not notify then. Returns whether the placement changed.
+    pub fn place_again(&mut self, cx: &mut Context<Self>) -> bool {
+        let changed = self.relayout(cx);
+        if changed && !self.host_draws() {
+            self.notify(cx);
+        }
+        changed
     }
 
     /// Edit Widgets on or off. While on, the rows keep the height they had when it started, so
@@ -359,6 +417,7 @@ impl WidgetContainer {
             }
         }
         let prefix = devices.len() > 1;
+        let host_draws = self.host_draws();
         for p in &placement.widgets {
             let Some(setting) = self.layout.widgets.iter().find(|w| w.id == p.id).cloned() else {
                 continue;
@@ -373,6 +432,9 @@ impl WidgetContainer {
                     w.set_device_prefix(prefix, cx);
                     w.set_size(area, cx);
                 });
+            } else if host_draws {
+                // The host creates the entity with its look when it draws the widget.
+                continue;
             } else {
                 let hub = self.hub.clone();
                 let widget = cx.new(|cx| {
@@ -409,7 +471,12 @@ impl Render for WidgetContainer {
         .top_0()
         .left_0()
         .size_full();
+        // The host draws a hosted flow layout's widgets.
+        let host_draws = self.host_draws();
         let items = self.placement.widgets.iter().filter_map(|p| {
+            if host_draws {
+                return None;
+            }
             let widget = self.widgets.get(&p.id)?;
             Some(
                 div()

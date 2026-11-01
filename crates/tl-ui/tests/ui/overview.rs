@@ -1152,7 +1152,10 @@ mod boxes {
                     .debug_bounds(Box::leak(core_spark_id(i - 1).into_boxed_str()));
                 let above = above.expect("row above");
                 let step = f32::from(b.top() - above.top());
-                assert!((step - f32::from(row_h)).abs() <= 1., "core {i} one row lower: {step}");
+                assert!(
+                    (step - f32::from(row_h)).abs() <= 1.,
+                    "core {i} one row lower: {step}"
+                );
             }
         }
         // The sparklines are bound to their core's series.
@@ -1233,7 +1236,10 @@ mod boxes {
         let cpu = r.cpu();
         let layout = r.vcx.update(|_, cx| cpu.read(cx).core_layout());
         assert_eq!((layout.cols, layout.rows), (2, 16));
-        assert!(layout.row_h > px(18.), "rows fill the part (D-040): {layout:?}");
+        assert!(
+            layout.row_h > px(18.),
+            "rows fill the part (D-040): {layout:?}"
+        );
         let row_h = layout.row_h;
         let parts = core_cell(&layout, 1.);
         let frame = r.vcx.debug_bounds(CPU_BOX_ID).expect("CPU box drawn");
@@ -2267,6 +2273,80 @@ mod bottom {
             );
         }
         assert_rows_above_axis(&mut r, 5, "160 px body");
+    }
+
+    /// tasklens-lhliq.7, ADR-019 "Flow placement": a collapsed section draws only its busiest
+    /// engine's widget, so the box places its widgets again when another engine becomes the
+    /// busiest, and at no other time. A sample that keeps the busiest engine places nothing
+    /// and keeps every widget entity.
+    #[gpui_kit::test]
+    fn gpu_box_collapsed_places_again_only_for_a_new_busiest(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_flow::engine_widget;
+
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (box_h(152.), 200.));
+        let totals = |gpu: f32, dec: f32| {
+            let mut t = gpu_engines(false);
+            t.util_pct = Metric::valid(gpu);
+            t.dec_pct = Metric::valid(dec);
+            t
+        };
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(25., 50.))]));
+        draw(r.vcx);
+        let (gpu, _, _) = r.boxes();
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let c = g.container().read(cx);
+                let mut ids: Vec<(u32, gpui_kit::EntityId)> = c
+                    .placed_ids()
+                    .iter()
+                    .map(|id| (*id, c.widget(*id).expect("entity").entity_id()))
+                    .collect();
+                ids.sort_by_key(|(id, _)| *id);
+                (
+                    (g.collapsed(), g.busiest_shown()),
+                    c.relayout_count.get(),
+                    ids,
+                )
+            })
+        };
+        let widget = |r: &mut Rig, key: &str| {
+            r.vcx
+                .update(|_, cx| engine_widget(gpu.read(cx).flow(), 0, key))
+                .expect(key)
+        };
+        let (dec, gpu_w) = (widget(&mut r, "dec"), widget(&mut r, "gpu"));
+        let (fit, count, before) = state(&mut r);
+        assert_eq!(fit, (true, true), "152 px body: the busiest engine row");
+        assert!(r.vcx.debug_bounds(leak(engine_row_id(0, "dec"))).is_some());
+        assert!(before.iter().any(|(id, _)| *id == dec), "{before:?}");
+        assert!(!before.iter().any(|(id, _)| *id == gpu_w), "{before:?}");
+
+        // New values, decode still the busiest: nothing is placed again.
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(30., 60.))]));
+        draw(r.vcx);
+        assert_eq!(engine_rows(&mut r)[2].2, "60.0%", "the box took the sample");
+        let (_, same_count, same) = state(&mut r);
+        assert_eq!(
+            same_count, count,
+            "a sample with the same busiest engine places nothing"
+        );
+        assert_eq!(same, before, "and keeps every widget entity");
+
+        // 3D becomes the busiest: the box places its widgets again, once.
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(90., 60.))]));
+        draw(r.vcx);
+        let (fit, moved_count, moved) = state(&mut r);
+        assert_eq!(fit, (true, true));
+        assert_eq!(
+            moved_count,
+            count + 1,
+            "one placement for the new busiest engine"
+        );
+        assert!(moved.iter().any(|(id, _)| *id == gpu_w), "{moved:?}");
+        assert!(!moved.iter().any(|(id, _)| *id == dec), "{moved:?}");
+        assert!(r.vcx.debug_bounds(leak(engine_row_id(0, "gpu"))).is_some());
+        assert!(r.vcx.debug_bounds(leak(engine_row_id(0, "dec"))).is_none());
     }
 
     /// Two GPUs with 2 engines each (3D / Compute and a shared Video Encode/Decode), VRAM and
@@ -8301,6 +8381,134 @@ mod page {
             assert!(r.vcx.update(|_, cx| gpu.read(cx).grid().is_none()));
             // Back to the flow renderer: the box's own parts show again.
             assert!(r.vcx.debug_bounds(leak_str(parts[0].1.clone())).is_some());
+        }
+    }
+
+    /// tasklens-lhliq.7, ADR-019 "Flow placement": the default and each old mode draw every
+    /// part through a `MetricWidget` entity of the box's container. Each part the box draws has
+    /// one entity, in its 1.1.0 look and filling the part's place, with the value its source
+    /// formats; a part the box does not draw has none.
+    #[gpui_kit::test]
+    fn overview_gpu_presets_render_through_widgets(cx: &mut TestAppContext) {
+        use tl_model::layout::DeviceSelector;
+        use tl_ui::pages::performance::overview::gpu_box::{
+            chart_id, engine_cell_id, engine_row_id,
+        };
+        use tl_ui::pages::performance::overview::gpu_flow::{chart_of, engine_widget, widget_of};
+        use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
+        for mode in ["engine_charts", "chart_engines", "chart"] {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "gpu".into(),
+                mode: mode.into(),
+            });
+            draw(r.vcx);
+            let (flow, engines, cells, line_parts, collapsed) = r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let s = &g.sections()[0];
+                let keys: Vec<&'static str> = s.engines.iter().map(|e| e.key).collect();
+                let line = if s.line.is_empty() {
+                    0
+                } else {
+                    s.line.split(" · ").count()
+                };
+                (
+                    g.flow().clone(),
+                    keys,
+                    g.shown_cells(0),
+                    line,
+                    g.collapsed(),
+                )
+            });
+            assert!(!collapsed, "{mode}: room for every part");
+            // (widget, the part it draws)
+            let mut parts: Vec<(u32, String)> = Vec::new();
+            match mode {
+                "engine_charts" => {
+                    assert!(cells >= 2, "{mode}: {cells} cells");
+                    for k in engines.iter().take(cells) {
+                        parts.push((engine_widget(&flow, 0, k).expect(k), engine_cell_id(0, k)));
+                    }
+                }
+                "chart_engines" => {
+                    parts.push((chart_of(&flow, 0).expect("section chart"), chart_id(0)));
+                    for k in &engines {
+                        parts.push((engine_widget(&flow, 0, k).expect(k), engine_row_id(0, k)));
+                    }
+                }
+                _ => parts.push((chart_of(&flow, 0).expect("section chart"), chart_id(0))),
+            }
+            let vram = widget_of(&flow, 0, "vram").expect("VRAM widget");
+            let line = if mode == "chart_engines" {
+                line_parts
+            } else {
+                0
+            };
+
+            // One entity per drawn part: the parts, the VRAM row and the line's values.
+            let placed: Vec<u32> = r
+                .vcx
+                .update(|_, cx| container.read(cx).placed_ids().to_vec());
+            let slot0 = |id: &u32| {
+                flow.widgets
+                    .iter()
+                    .find(|w| w.id == *id)
+                    .is_some_and(|w| w.source.device == DeviceSelector::Slot(0))
+            };
+            let first = placed.iter().filter(|id| slot0(id)).count();
+            assert_eq!(first, parts.len() + 1 + line, "{mode}: {placed:?}");
+            let drawn = r.vcx.update(|_, cx| gpu.read(cx).drawn_widgets());
+            let mut sorted = placed.clone();
+            sorted.sort_unstable();
+            let mut drawn_sorted = drawn.to_vec();
+            drawn_sorted.sort_unstable();
+            assert_eq!(sorted, drawn_sorted, "{mode}: placed is what the box drew");
+
+            // Each part is its widget: the widget's view fills the part, in the mode's look.
+            for (id, part) in parts.iter().chain([&(vram, String::new())]) {
+                assert!(placed.contains(id), "{mode}: widget {id} placed");
+                let (look, renders) = r.vcx.update(|_, cx| {
+                    let w = container.read(cx).widget(*id).expect("entity").read(cx);
+                    let look = match w.flow() {
+                        Some(FlowLook::Cell { .. }) => "cell",
+                        Some(FlowLook::Row { .. }) => "row",
+                        Some(FlowLook::Chart(_)) => "chart",
+                        Some(FlowLook::Text) => "text",
+                        None => "none",
+                    };
+                    (look, w.render_count.get())
+                });
+                assert!(renders > 0, "{mode}: widget {id} rendered");
+                let want = if *id == vram {
+                    "row"
+                } else if Some(*id) == chart_of(&flow, 0) {
+                    "chart"
+                } else if mode == "engine_charts" {
+                    "cell"
+                } else {
+                    "row"
+                };
+                assert_eq!(look, want, "{mode}: widget {id}");
+                if !part.is_empty() {
+                    let at = r.bounds_of(widget_id(*id));
+                    assert_eq!(at, r.bounds_of(part.clone()), "{mode}: {part}");
+                }
+            }
+            // An engine row's value is its source's text, the same as the 1.1.0 row's.
+            if mode == "chart_engines" {
+                let (shown, want) = r.vcx.update(|_, cx| {
+                    let g = gpu.read(cx);
+                    let e = &g.sections()[0].engines[0];
+                    let id = engine_widget(&flow, 0, e.key).expect("engine");
+                    let w = container.read(cx).widget(id).expect("entity").read(cx);
+                    (w.texts()[1].to_string(), e.meter.value.to_string())
+                });
+                assert_eq!(shown, want, "{mode}: engine value");
+            }
         }
     }
 

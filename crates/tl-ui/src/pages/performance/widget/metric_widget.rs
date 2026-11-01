@@ -19,6 +19,12 @@
 //! An unavailable widget shows its name (with the saved device name when the device is gone)
 //! and one centred line: "Not connected", "Not reported by this GPU" or "Needs a newer
 //! tasklens". It comes back by itself when the source does.
+//!
+//! A widget of a flow layout that its host draws (the GPU box presets, `overview/gpu_flow.rs`)
+//! has a [`FlowLook`] instead: it draws the 1.1.0 part at its place (an `engine_charts` cell, a
+//! spark row, the section chart, or its value as plain text), whatever its size. The host gives
+//! the name the preset's row shows and the chart it keeps for the part, so the widget builds no
+//! chart of its own. The value and the bar still come from the widget's source.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -37,12 +43,15 @@ use super::compose::{
     ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose,
 };
 use super::source::{Availability, SourceData};
+use crate::chart::labels::LABEL_ROW;
 use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::overview::fit::fit_text;
+use crate::pages::performance::overview::mem_box::MeterRow;
 use crate::pages::performance::overview::parts::{
-    ChartSettings, Meter, SPARK_GRID, box_chart, chart_section_versions, class_probe, spark_labels,
+    ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
+    spark_labels, spark_row,
 };
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_lg, t_sm, t_xs};
@@ -57,6 +66,8 @@ const KEY_UNKNOWN: &str = "perf-widget-unknown";
 
 /// The class the size probe uses for an unavailable widget, which has no composition.
 const UNAVAILABLE_CLASS: u32 = u32::MAX;
+/// The class of a widget with a [`FlowLook`], which draws the same part at every size.
+const FLOW_CLASS: u32 = u32::MAX - 1;
 
 /// Bar buckets: the bar notifies only when its fill moves by half a percent or more.
 const BAR_BUCKETS: f32 = 200.;
@@ -75,6 +86,51 @@ pub fn part_id(id: u32, part: &str) -> String {
 /// The bar's bucket for `fraction`; `None` without a bar.
 fn bar_bucket(fraction: Option<f32>) -> Option<u16> {
     fraction.map(|f| (f.clamp(0., 1.) * BAR_BUCKETS).round() as u16)
+}
+
+/// How a widget of a host-drawn flow layout draws: the GPU box part of 1.1.0 (ADR-019 "Flow
+/// placement", UI-PRF-017, UI-PRF-019). `label` is the name the preset's row shows (a shared
+/// encode and decode engine has one "Video Encode/Decode" row), and `chart` the chart the host
+/// keeps for the part.
+#[derive(Clone, PartialEq)]
+pub enum FlowLook {
+    /// An `engine_charts` cell: the name and the value on a 16 px line over the chart. The
+    /// chart area has the debug selector `chart_id`.
+    Cell {
+        label: SharedString,
+        chart: Entity<ChartView>,
+        chart_id: SharedString,
+    },
+    /// A spark row (`parts::spark_row`): name, meter, value and the sparkline column; with no
+    /// chart the column stays empty, so the meters line up. `meter` is `parts::meter_fits`.
+    Row {
+        label: SharedString,
+        chart: Option<Entity<ChartView>>,
+        meter: bool,
+    },
+    /// The section chart, alone.
+    Chart(Entity<ChartView>),
+    /// The value alone in the small secondary text, as the temperature and power line draws it.
+    Text,
+}
+
+impl FlowLook {
+    /// The parts the look reads from the source.
+    fn forms(&self) -> FormSet {
+        match self {
+            Self::Cell { .. } => FormSet::LABEL | FormSet::VALUE,
+            Self::Row { .. } => FormSet::LABEL | FormSet::VALUE | FormSet::BAR,
+            Self::Chart(_) => FormSet::empty(),
+            Self::Text => FormSet::VALUE,
+        }
+    }
+
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Cell { label, .. } | Self::Row { label, .. } => label.clone(),
+            Self::Chart(_) | Self::Text => SharedString::default(),
+        }
+    }
 }
 
 /// What the widget shows, compared to tell whether a source change must render it again.
@@ -117,6 +173,8 @@ pub struct MetricWidget {
     chart_key: Option<ChartKey>,
     /// Whether the chart is styled for a Cell (outlined) or a Row (sparkline).
     chart_cell: bool,
+    /// The 1.1.0 part the widget draws, while its host draws its flow layout.
+    flow: Option<FlowLook>,
     /// The widget's size at its last paint, or the size the container gave.
     size: Rc<Cell<Size<Pixels>>>,
     composed: Composed,
@@ -140,6 +198,17 @@ impl MetricWidget {
         hub: &Entity<SnapshotHub>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::with_flow(setting, source, hub, None, cx)
+    }
+
+    /// A widget that draws `flow` (see [`FlowLook`]) from the start, so it builds no chart.
+    pub fn with_flow(
+        setting: WidgetSetting,
+        source: Entity<SourceData>,
+        hub: &Entity<SnapshotHub>,
+        flow: Option<FlowLook>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             setting,
             hub: hub.clone(),
@@ -161,6 +230,7 @@ impl MetricWidget {
             chart: None,
             chart_key: None,
             chart_cell: true,
+            flow,
             size: Rc::new(Cell::new(size(px(0.), px(0.)))),
             composed: Composed {
                 composition: Composition::Row,
@@ -232,6 +302,23 @@ impl MetricWidget {
         self.shown.fraction
     }
 
+    /// The 1.1.0 part the widget draws for its host, if any.
+    pub fn flow(&self) -> Option<&FlowLook> {
+        self.flow.as_ref()
+    }
+
+    /// The host draws the widget's flow layout and gives the part it draws, or `None` when the
+    /// widget draws its composition again. It renders again only when the look changed.
+    pub fn set_flow(&mut self, flow: Option<FlowLook>, cx: &mut Context<Self>) {
+        if self.flow == flow {
+            return;
+        }
+        self.flow = flow;
+        self.shown = self.read_shown(cx);
+        self.sync_chart(cx);
+        self.notify(cx);
+    }
+
     /// New settings for the same widget id (a layout change keeps the entity). A new source
     /// replaces the observed one; the chart is kept when its series and scale stay.
     pub fn set_setting(
@@ -244,6 +331,10 @@ impl MetricWidget {
             return;
         }
         self.setting = setting;
+        // A widget on the grid draws its composition.
+        if self.setting.cell.is_some() {
+            self.flow = None;
+        }
         if self.source != source {
             self._source_sub = cx.observe(&source, Self::on_source);
             self.source = source;
@@ -304,6 +395,9 @@ impl MetricWidget {
     fn read_shown(&self, cx: &App) -> Shown {
         let src = self.source.read(cx);
         let availability = src.availability();
+        if let Some(look) = &self.flow {
+            return self.read_flow(look, src, availability);
+        }
         let forms = self.setting.forms;
         let drawn = if availability == Availability::Available {
             let offered = forms & src.offered_forms();
@@ -376,6 +470,40 @@ impl MetricWidget {
                 .contains(FormSet::CHART)
                 .then(|| src.series())
                 .flatten(),
+        }
+    }
+
+    /// What a widget with `look` shows: the look's name, and the value and bar from the source.
+    /// The part draws whether or not the source is available; an unavailable source has no
+    /// value and no fill.
+    fn read_flow(&self, look: &FlowLook, src: &SourceData, availability: Availability) -> Shown {
+        let kept = look.forms();
+        let fraction = kept
+            .contains(FormSet::BAR)
+            .then(|| src.bar_fraction())
+            .flatten();
+        let bar = bar_bucket(fraction);
+        let fraction = if bar == self.shown.bar {
+            self.shown.fraction
+        } else {
+            fraction
+        };
+        Shown {
+            availability,
+            forms: kept,
+            kept,
+            name: look.label(),
+            value: if kept.contains(FormSet::VALUE) {
+                src.value_text().clone()
+            } else {
+                SharedString::default()
+            },
+            stats: SharedString::default(),
+            bar,
+            fraction,
+            reason: SharedString::default(),
+            // The host's chart: the widget builds none.
+            series: None,
         }
     }
 
@@ -481,7 +609,9 @@ impl MetricWidget {
 
     /// The probe class of the last render.
     fn class(&self) -> u32 {
-        if self.shown.availability == Availability::Available {
+        if self.flow.is_some() {
+            FLOW_CLASS
+        } else if self.shown.availability == Availability::Available {
             self.composed.class()
         } else {
             UNAVAILABLE_CLASS
@@ -490,7 +620,9 @@ impl MetricWidget {
 
     /// The probe class at `area`.
     fn class_at(&self, area: Size<Pixels>, scale: f32) -> u32 {
-        if self.shown.availability == Availability::Available {
+        if self.flow.is_some() {
+            FLOW_CLASS
+        } else if self.shown.availability == Availability::Available {
             compose(self.shown.forms, area, scale).class()
         } else {
             UNAVAILABLE_CLASS
@@ -761,12 +893,113 @@ impl MetricWidget {
     }
 }
 
+impl MetricWidget {
+    /// The 1.1.0 part of `look`. Every part but the text fills the place the host gives.
+    fn flow_part(&self, look: &FlowLook, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+        let (id, s) = (self.setting.id, m.ui_scale);
+        match look {
+            FlowLook::Cell {
+                chart, chart_id, ..
+            } => {
+                // The text style is set first: setting it replaces the nowrap, ellipsis and
+                // colour set before it, and a Side by side cell is narrow enough for a long
+                // name to wrap.
+                let mut name = div();
+                *name.text_style() = t_xs(m);
+                let p = part_id(id, "name");
+                let name = name
+                    .debug_selector(move || p)
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(theme.text_secondary)
+                    .child(self.shown.name.clone());
+                let mut value = div();
+                *value.text_style() = numeric_style(m, m.text.sm);
+                let p = part_id(id, "value");
+                let value = value
+                    .debug_selector(move || p)
+                    .flex()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .text_color(theme.text_primary)
+                    .child(fit_text(self.shown.value.clone()));
+                let chart_id = chart_id.to_string();
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_none()
+                            .items_center()
+                            .gap(m.sp[2])
+                            .h(px(PLOT_LINE * s))
+                            .child(name)
+                            .child(value),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || chart_id)
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(cached(chart)),
+                    )
+                    .into_any_element()
+            }
+            FlowLook::Row { chart, meter, .. } => {
+                let row = MeterRow {
+                    label: self.shown.name.clone(),
+                    value: self.shown.value.clone(),
+                    fraction: self.shown.fraction,
+                    color: theme.graph.gpu_line,
+                };
+                spark_row(&row, chart.as_ref(), *meter, m, theme)
+            }
+            FlowLook::Chart(chart) => div()
+                .relative()
+                .size_full()
+                .child(cached(chart))
+                .into_any_element(),
+            FlowLook::Text => {
+                let mut text = div();
+                *text.text_style() = t_xs(m);
+                let p = part_id(id, "value");
+                text.debug_selector(move || p)
+                    .flex_none()
+                    .h(px(LABEL_ROW * s))
+                    .whitespace_nowrap()
+                    .text_color(theme.text_secondary)
+                    .child(self.shown.value.clone())
+                    .into_any_element()
+            }
+        }
+    }
+}
+
 impl Render for MetricWidget {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        if let Some(look) = self.flow.clone() {
+            let part = self.flow_part(&look, &m, &theme);
+            let id = widget_id(self.setting.id);
+            let root = div().debug_selector(move || id).relative();
+            // The text sizes itself, so the values of one line sit side by side.
+            let root = if look == FlowLook::Text {
+                root.flex_none()
+            } else {
+                root.size_full().overflow_hidden()
+            };
+            return root.child(part).into_any_element();
+        }
         let scale = m.ui_scale;
         let available = self.shown.availability == Availability::Available;
         let forms = self.shown.forms;
@@ -811,5 +1044,6 @@ impl Render for MetricWidget {
             .overflow_hidden()
             .child(body)
             .child(probe)
+            .into_any_element()
     }
 }

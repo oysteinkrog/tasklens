@@ -1,19 +1,28 @@
 //! The GPU box's presets as flow layouts (ADR-019 "Flow placement", UI-PRF-061).
 //!
 //! A flow layout is a list of widgets placed by the rules of its preset: the GPU box modes of
-//! UI-PRF-017, UI-PRF-019 and UI-PRF-059. The GPU box draws a flow layout itself, with those
-//! rules, so the default and every converted old mode look as in 1.1.0. The fixed engine lists
-//! of those rules are replaced by the widget list: a section shows an engine, the VRAM row or
-//! the temperature and power line only when the layout has that widget for the section's slot.
+//! UI-PRF-017, UI-PRF-019 and UI-PRF-059. The fixed engine lists of those rules are replaced by
+//! the widget list: a section shows an engine, the VRAM row or the temperature and power line
+//! only when the layout has that widget for the section's slot.
 //!
-//! While it draws, the box records where each widget's part landed ([`DrawnRects`]). The
-//! [`placer`] hands those rectangles to the box's `WidgetContainer` when Edit Widgets starts, so
-//! the widgets are pinned to the grid exactly where the user saw them.
+//! The GPU box works out the fit rules and gives each widget it shows the place 1.1.0 drew the
+//! part at: an `engine_charts` cell, a spark row, the section chart, or a value on the shared
+//! temperature and power line. Each of those is the widget's own `MetricWidget` entity, which
+//! draws the 1.1.0 part (`FlowLook`); the box draws only what is not a widget (the section
+//! headings, the "+n more" rows and the splitter). A widget the rules leave out takes no space
+//! and has no entity.
+//!
+//! [`DrawnRects`] holds the widgets the box drew in its last render, with the metric each
+//! showed, and the rectangle each was painted at. The [`placer`] places exactly those widgets
+//! in the box's `WidgetContainer`, so the container keeps their entities and drops the others,
+//! and Edit Widgets pins the widgets to the grid where the user saw them. The box places again
+//! only when the set it draws changed: a resize, a layout change, and in the collapsed fit
+//! state (UI-PRF-059) a sample that makes another engine the busiest one.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::{Bounds, IntoElement, Pixels, Point, Styled as _, canvas, point, px};
+use gpui_kit::{Bounds, IntoElement, Pixels, Point, Styled as _, canvas, px};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::layout::{
@@ -100,36 +109,50 @@ pub fn shows_line(layout: &ContainerLayout, slot: usize) -> (bool, bool) {
     )
 }
 
-/// Where the GPU box drew each widget of its flow layout in its last render: the body's origin
-/// and, per widget id, the metric it showed and its bounds, in window px.
+/// The widgets the GPU box drew in its last flow render, and where: the body's origin, per
+/// widget id the metric it showed (in drawing order), and the bounds it was painted at, in
+/// window px.
 #[derive(Default, Debug)]
 pub struct Drawn {
     origin: Point<Pixels>,
-    rects: FxHashMap<u32, (MetricKey, Bounds<Pixels>)>,
+    shown: SmallVec<[(u32, MetricKey); 16]>,
+    rects: FxHashMap<u32, Bounds<Pixels>>,
 }
 
-/// The rectangles of [`Drawn`], shared by the box (which records them) and its placer.
+/// The widgets of [`Drawn`], shared by the box (which records them) and its placer.
 #[derive(Clone, Default, Debug)]
 pub struct DrawnRects(Rc<RefCell<Drawn>>);
 
 impl DrawnRects {
-    /// Forgets the rectangles before a render records new ones.
-    pub fn clear(&self) {
-        self.0.borrow_mut().rects.clear();
+    /// The widgets a render drew, with the metric each showed, in drawing order. Returns
+    /// whether that changed, so the box must place its widgets again.
+    pub fn set_shown(&self, shown: SmallVec<[(u32, MetricKey); 16]>) -> bool {
+        let mut d = self.0.borrow_mut();
+        if d.shown == shown {
+            return false;
+        }
+        d.rects
+            .retain(|id, _| shown.iter().any(|(shown, _)| shown == id));
+        d.shown = shown;
+        true
     }
 
-    /// The bounds of widget `id` in the body, px, as last drawn.
+    /// The bounds of widget `id` in the body, px, as last painted; `None` when the last render
+    /// did not draw it.
     pub fn bounds(&self, id: u32) -> Option<Bounds<Pixels>> {
         let d = self.0.borrow();
-        d.rects.get(&id).map(|(_, b)| Bounds {
+        if !d.shown.iter().any(|(shown, _)| *shown == id) {
+            return None;
+        }
+        d.rects.get(&id).map(|b| Bounds {
             origin: b.origin - d.origin,
             size: b.size,
         })
     }
 
-    /// The ids drawn, in no order.
+    /// The ids drawn, in drawing order.
     pub fn ids(&self) -> SmallVec<[u32; 16]> {
-        self.0.borrow().rects.keys().copied().collect()
+        self.0.borrow().shown.iter().map(|(id, _)| *id).collect()
     }
 
     /// A probe that records the body's origin. It fills its parent, which must be `relative`.
@@ -145,26 +168,13 @@ impl DrawnRects {
         .size_full()
     }
 
-    /// A probe that records widget `id` (showing `metric`) at its parent's bounds, or at the
-    /// part `part` of `parts` equal parts side by side (the temperature and the power draw share
-    /// one line). It fills its parent, which must be `relative`.
-    pub fn probe(
-        &self,
-        id: u32,
-        metric: MetricKey,
-        part: usize,
-        parts: usize,
-    ) -> impl IntoElement + use<> {
+    /// A probe that records widget `id` at its parent's bounds. It fills its parent, which must
+    /// be `relative`.
+    pub fn probe(&self, id: u32) -> impl IntoElement + use<> {
         let me = self.clone();
         canvas(
             move |bounds: Bounds<Pixels>, _, _| {
-                let parts = parts.max(1);
-                let w = bounds.size.width / parts as f32;
-                let b = Bounds {
-                    origin: point(bounds.origin.x + w * part as f32, bounds.origin.y),
-                    size: gpui_kit::size(w, bounds.size.height),
-                };
-                me.0.borrow_mut().rects.insert(id, (metric.clone(), b));
+                me.0.borrow_mut().rects.insert(id, bounds);
             },
             |_, _, _, _| {},
         )
@@ -175,11 +185,11 @@ impl DrawnRects {
     }
 }
 
-/// The placer of the GPU box's flow layouts: each available widget at the rectangle the box
-/// drew it at, when that rectangle was drawn for the same metric. Widgets the box did not draw
-/// (cut by a fit rule, or left out) are not placed. When the box drew none of the layout's
-/// widgets (the layout is not the one it showed, as after Reset in Edit Widgets), the widgets go
-/// in list order (`container::list_flow`).
+/// The placer of the GPU box's flow layouts: the widgets the box drew in its last render, at
+/// the rectangles they were painted at, when the box drew them for the same metric. Widgets the
+/// box did not draw (cut by a fit rule, or left out) are not placed, so they have no entity.
+/// In Edit Widgets, when the box drew none of the layout's widgets (the layout is not the one it
+/// showed, as after Reset), the widgets go in list order (`container::list_flow`).
 pub fn placer(drawn: DrawnRects) -> FlowPlace {
     Rc::new(move |input: &FlowInput<'_>| place(&drawn, input))
 }
@@ -187,26 +197,21 @@ pub fn placer(drawn: DrawnRects) -> FlowPlace {
 fn place(drawn: &DrawnRects, input: &FlowInput<'_>) -> InnerPlacement {
     let d = drawn.0.borrow();
     let mut widgets = Vec::new();
-    for item in input.items {
-        if item.availability != Availability::Available {
-            continue;
-        }
-        let Some((metric, b)) = d.rects.get(&item.setting.id) else {
+    for (id, metric) in &d.shown {
+        let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
             continue;
         };
-        if *metric != item.setting.source.metric {
+        if *metric != item.setting.source.metric || item.availability == Availability::Unknown {
             continue;
         }
-        widgets.push(PlacedWidget {
-            id: item.setting.id,
-            bounds: Bounds {
-                origin: b.origin - d.origin,
-                size: b.size,
-            },
+        let bounds = d.rects.get(id).map_or_else(Bounds::default, |b| Bounds {
+            origin: b.origin - d.origin,
+            size: b.size,
         });
+        widgets.push(PlacedWidget { id: *id, bounds });
     }
     drop(d);
-    if widgets.is_empty() {
+    if widgets.is_empty() && input.frozen.is_some() {
         return list_flow(input);
     }
     let mut placement = grid::place(
@@ -226,6 +231,7 @@ fn place(drawn: &DrawnRects, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::point;
     use tl_model::layout::GPU_BOX_CONTAINER;
 
     use super::*;
@@ -269,12 +275,14 @@ mod tests {
     fn drawn_rects_are_body_relative() {
         let d = DrawnRects::default();
         d.0.borrow_mut().origin = point(px(10.), px(20.));
+        assert!(d.set_shown(smallvec::smallvec![(3, MetricKey::new(METRIC_VRAM))]));
+        assert!(
+            !d.set_shown(smallvec::smallvec![(3, MetricKey::new(METRIC_VRAM))]),
+            "the same set"
+        );
         d.0.borrow_mut().rects.insert(
             3,
-            (
-                MetricKey::new(METRIC_VRAM),
-                Bounds::new(point(px(15.), px(60.)), gpui_kit::size(px(100.), px(18.))),
-            ),
+            Bounds::new(point(px(15.), px(60.)), gpui_kit::size(px(100.), px(18.))),
         );
         assert_eq!(
             d.bounds(3),
@@ -283,7 +291,10 @@ mod tests {
                 gpui_kit::size(px(100.), px(18.))
             ))
         );
-        d.clear();
+        assert_eq!(d.ids().as_slice(), [3]);
+        // A render that does not draw it forgets it.
+        assert!(d.set_shown(SmallVec::new()));
         assert_eq!(d.bounds(3), None);
+        assert!(d.0.borrow().rects.is_empty());
     }
 }
