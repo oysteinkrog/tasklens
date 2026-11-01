@@ -455,7 +455,7 @@ pub struct SourceData {
     series: SmallVec<[SeriesId; 4]>,
     /// The network aggregate's total and hidden kinds, whose series the total leaves out.
     net_total: Option<NetTotal>,
-    /// The hidden kinds' series of the network aggregate's metric, each line's.
+    /// The hidden kinds' series of each line of the network aggregate's metric.
     minus: SmallVec<[SeriesId; 5]>,
     /// The smoothed load of a logical CPU (UI-PRF-018).
     average: CoreAverage,
@@ -583,12 +583,18 @@ impl SourceData {
     }
 
     /// The series a network aggregate source takes away from its total: the per-kind totals of
-    /// the kinds `show_network_*` hides. Empty for every other source.
+    /// the kinds `show_network_*` hides, for each of its lines (download and upload for
+    /// `traffic`). [`Self::minus_of`] picks one line's. Empty for every other source.
     pub fn minus_list(&self) -> &[SeriesId] {
         if self.reading.availability != Availability::Available {
             return &[];
         }
         &self.minus
+    }
+
+    /// The series of [`Self::minus_list`] to take away from `line`: the ones of its metric.
+    pub fn minus_of(&self, line: SeriesId) -> SmallVec<[SeriesId; 5]> {
+        line_minus(self.minus_list(), line)
     }
 
     /// The `en-US.ftl` key of the text a widget shows while the device does not report the
@@ -660,7 +666,7 @@ impl SourceData {
         self.key = key;
         self.catalog_version = None;
         let snap = box_snapshot(&self.hub, cx);
-        self.update(&snap, true, cx);
+        self.update(&snap, true, false, cx);
     }
 
     fn on_snapshot(
@@ -678,18 +684,19 @@ impl SourceData {
             || self.minus_list().iter().any(changed)
             || mask.intersects(ComponentMask::DEVICE_HISTORY);
         let snap = box_snapshot(&hub, cx);
-        self.update(&snap, series_changed, cx);
+        self.update(&snap, series_changed, false, cx);
     }
 
     /// The Overview was held at a time or made live: read the other snapshot.
     fn on_pause(&mut self, cx: &mut Context<Self>) {
         let snap = box_snapshot(&self.hub, cx);
         self.average = CoreAverage::default();
-        self.update(&snap, true, cx);
+        self.update(&snap, true, false, cx);
     }
 
     /// A new Overview range, network view, set of hidden network kinds or core smoothing: new
-    /// stats, scale, text or series.
+    /// stats, scale, text or series. Formats and notifies even when the reading is the same, as
+    /// a new network unit changes the text and new hidden kinds change [`Self::minus_list`].
     fn on_settings(&mut self, cx: &mut Context<Self>) {
         let followed = Followed::read(cx);
         if followed == self.followed {
@@ -704,7 +711,7 @@ impl SourceData {
         }
         self.followed = followed;
         let snap = box_snapshot(&self.hub, cx);
-        self.update(&snap, true, cx);
+        self.update(&snap, true, true, cx);
     }
 
     /// A new language: new name and stats words.
@@ -720,15 +727,16 @@ impl SourceData {
     }
 
     /// Reads `snap`; with `stats`, works the stats out again. Formats and notifies when
-    /// anything a widget shows changed, and emits [`AvailabilityChanged`] on an availability
-    /// change.
-    fn update(&mut self, snap: &Snapshot, stats: bool, cx: &mut Context<Self>) {
+    /// anything a widget shows changed, or always with `force`, and emits
+    /// [`AvailabilityChanged`] on an availability change.
+    fn update(&mut self, snap: &Snapshot, stats: bool, force: bool, cx: &mut Context<Self>) {
         let before = self.reading;
         let vendor = self.vendor;
         let device = self.device.clone();
         let series = self.series.clone();
         self.refresh(snap, stats, cx);
-        if self.reading == before
+        if !force
+            && self.reading == before
             && self.vendor == vendor
             && self.device == device
             && self.series == series
@@ -804,8 +812,10 @@ impl SourceData {
                     metric,
                 });
                 self.series.extend(ids);
-                if let (Some(n), Some(metric)) = (&self.net_total, of.first()) {
-                    self.minus.extend(n.minus(metric).iter().copied());
+                if let Some(n) = &self.net_total {
+                    for &metric in of.ids() {
+                        self.minus.extend(n.minus(metric).iter().copied());
+                    }
                 }
             }
             _ => {
@@ -879,9 +889,11 @@ impl SourceData {
             #[cfg(any(test, feature = "test-hooks"))]
             self.stats_count.set(self.stats_count.get() + 1);
             let range = self.followed.range;
-            self.series
-                .first()
-                .and_then(|&id| meta.stats_minus(snap, id, &self.minus, range))
+            // `self.minus` itself: the reading's availability is still the last one here.
+            self.series.first().and_then(|&id| {
+                let minus = line_minus(&self.minus, id);
+                meta.stats_minus(snap, id, &minus, range)
+            })
         } else {
             self.reading.figures
         };
@@ -969,6 +981,15 @@ impl SourceData {
             format_value(format, v, net, out);
         });
     }
+}
+
+/// The series of `minus` with the metric of `line`.
+fn line_minus(minus: &[SeriesId], line: SeriesId) -> SmallVec<[SeriesId; 5]> {
+    minus
+        .iter()
+        .copied()
+        .filter(|m| m.metric == line.metric)
+        .collect()
 }
 
 /// Whether the swap total a reading took is 0 or unknown, which the box shows as "No swap".

@@ -2934,3 +2934,124 @@ fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
     let (a, name, _) = shown_of(&mut r, &gpu);
     assert_eq!((a, name.as_str()), (Availability::Available, "VRAM"));
 }
+
+/// A new network unit reformats a network source's value with no new reading: the value text
+/// follows the setting and the source notifies.
+#[gpui_kit::test]
+fn overview_widget_net_source_follows_unit(cx: &mut TestAppContext) {
+    use tl_model::settings::NetworkUnit;
+    use tl_model::system::{LinkState, NetTotals};
+    use tl_ui::chart::ValueFormat;
+    use tl_ui::chart::labels::{NetFormat, format_value};
+    let mut r = open(cx);
+    r.publish(|s| s.devices = Arc::new(box_catalog(2)));
+    r.system(|sys| {
+        sys.nets = Arc::from([(
+            DeviceIdx(3),
+            NetTotals {
+                device: DeviceIdx(3),
+                rx_bps: Metric::valid(125_000.0),
+                tx_bps: Metric::valid(0.0),
+                rx_total: 0,
+                tx_total: 0,
+                link_speed_mbps: Metric::valid(1000),
+                state: LinkState::Up,
+            },
+        )]);
+    });
+    let store = &mut r.store;
+    let s = r.vcx.update(|_, cx| {
+        store.source(
+            &selector(DeviceSelector::Key(Arc::from("net:enp5s0")), "rx"),
+            cx,
+        )
+    });
+    draw(r.vcx);
+    let text = |unit| {
+        let mut out = String::new();
+        format_value(
+            ValueFormat::RateNetwork,
+            125_000.0,
+            NetFormat::from(unit),
+            &mut out,
+        );
+        out
+    };
+    let (_, _, before) = shown_of(&mut r, &s);
+    assert_eq!(before, text(NetworkUnit::Bits));
+    let revision = r.vcx.read_entity(&s, |s, _| s.revision());
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.units.network = NetworkUnit::Bytes);
+    });
+    r.vcx.run_until_parked();
+    let (_, _, after) = shown_of(&mut r, &s);
+    assert_ne!(text(NetworkUnit::Bytes), text(NetworkUnit::Bits));
+    assert_eq!(after, text(NetworkUnit::Bytes), "the text follows the unit");
+    assert!(r.vcx.read_entity(&s, |s, _| s.revision()) > revision);
+}
+
+/// The network aggregate's `traffic` takes the hidden kinds away from both lines: its minus
+/// list has the hidden kind's download and upload series, each line picks its own, and showing
+/// the kind again empties the list and notifies.
+#[gpui_kit::test]
+fn overview_widget_net_traffic_minus_both_lines(cx: &mut TestAppContext) {
+    use tl_model::devices::{AggregateKind, NetKind};
+    let mut r = open(cx);
+    let mut catalog = box_catalog(2);
+    let mut entries = catalog.entries.to_vec();
+    entries[7] = DeviceEntry {
+        persistent_key: Arc::from("aggregate:net:virtual"),
+        ..entry(
+            7,
+            DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Virtual)),
+            "Virtual",
+            true,
+        )
+    };
+    catalog.entries = Arc::from(entries);
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = false);
+    });
+    r.publish(|s| s.devices = Arc::new(catalog));
+    let store = &mut r.store;
+    let s = r.vcx.update(|_, cx| {
+        store.source(
+            &selector(DeviceSelector::Key(Arc::from("aggregate:net")), "traffic"),
+            cx,
+        )
+    });
+    draw(r.vcx);
+    let id = |device: u16, metric| SeriesId {
+        device: DeviceIdx(device),
+        metric,
+    };
+    let (a, ..) = shown_of(&mut r, &s);
+    assert_eq!(a, Availability::Available);
+    let (series, minus, rx, tx) = r.vcx.read_entity(&s, |s, _| {
+        let series = s.series_list().to_vec();
+        let rx = s.minus_of(series[0]).to_vec();
+        let tx = s.minus_of(series[1]).to_vec();
+        (series, s.minus_list().to_vec(), rx, tx)
+    });
+    assert_eq!(
+        series,
+        vec![id(6, MetricId::NET_RX), id(6, MetricId::NET_TX)]
+    );
+    assert_eq!(
+        minus,
+        vec![id(7, MetricId::NET_RX), id(7, MetricId::NET_TX)]
+    );
+    assert_eq!(rx, vec![id(7, MetricId::NET_RX)]);
+    assert_eq!(tx, vec![id(7, MetricId::NET_TX)], "upload has its own");
+
+    let revision = r.vcx.read_entity(&s, |s, _| s.revision());
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = true);
+    });
+    r.vcx.run_until_parked();
+    let (minus, after) = r
+        .vcx
+        .read_entity(&s, |s, _| (s.minus_list().to_vec(), s.revision()));
+    assert!(minus.is_empty(), "no kind is hidden");
+    assert!(after > revision, "a new minus list notifies");
+}
