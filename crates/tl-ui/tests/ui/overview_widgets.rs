@@ -2122,11 +2122,12 @@ fn overview_widget_corner_double_click_minimum(cx: &mut TestAppContext) {
     assert_eq!(r.selected(&e), Some(1));
 }
 
-/// Add Widget lists the sources by GPU; choosing one adds and selects the widget.
+/// Add Widget lists the sources by GPU, then "All engines" of each GPU (ADR-019 phase 2);
+/// choosing one adds and selects the widget.
 #[gpui_kit::test]
 fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    let (e, _) = r.editor(four_widgets(), 400., 320.);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
     r.start(&e);
     r.click(&format!("TlButton-{ADD_ID}"));
     let entries = r.menu_entries();
@@ -2136,10 +2137,22 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
         [
             ("Card A".to_owned(), MenuEntryKind::Submenu, false),
             ("Card B".to_owned(), MenuEntryKind::Submenu, false),
+            (String::new(), MenuEntryKind::Separator, false),
+            (
+                "Card A · All engines".to_owned(),
+                MenuEntryKind::Item,
+                false
+            ),
+            (
+                "Card B · All engines".to_owned(),
+                MenuEntryKind::Item,
+                false
+            ),
         ]
     );
     let card_b = r.submenu_entries(&entries[1]);
     let vram = pick(card_b, "VRAM");
+    let engines = pick(entries, "Card A · All engines");
     assert_eq!(vram.kind, MenuEntryKind::Item, "a plain item");
     assert!(!vram.checked);
     r.choose(&e, vram);
@@ -2151,6 +2164,20 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
     assert!(w.cell.is_some());
     assert_eq!(r.selected(&e), Some(5));
+
+    // "All engines" adds a group of Card A's engines as cells, all columns wide.
+    r.choose(&e, engines);
+    let w = r.working_widget(&e, 6).expect("widget 6");
+    let WidgetContent::Group(g) = &w.content else {
+        panic!("a group widget: {w:?}");
+    };
+    assert_eq!(g.members, tl_model::layout::GroupKind::Engines);
+    assert_eq!(g.device, DeviceSelector::Key(key(1)));
+    assert_eq!(g.options.items, tl_model::layout::GroupItems::Cells);
+    assert_eq!(w.device_name.as_deref(), Some("Card A"));
+    assert_eq!(w.cell.map(|c| c.cols), Some(6));
+    assert_eq!(r.selected(&e), Some(6));
+    assert!(r.vcx.read_entity(&c, |c, _| c.group(6).is_some()));
 }
 
 /// Add Widget in a full box puts the widget under the lowest one; the body scrolls so the

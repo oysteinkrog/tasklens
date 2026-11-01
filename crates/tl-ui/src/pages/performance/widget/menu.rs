@@ -7,7 +7,13 @@
 //!   box shows two), "Show >" (check items for the forms the metric offers; the last checked one
 //!   is disabled), "Chart >" while Chart is on (Fill under the line, Dashed line), a separator,
 //!   then "Remove Widget".
-//! - **Add Widget** ([`add_items`]): the same sources as plain items.
+//! - **Add Widget** ([`add_items`]): the same sources as plain items, then a separator and
+//!   "All engines", one item per GPU (a group widget, ADR-019 phase 2).
+//! - **Group widgets** (UI-PRF-061 phase 2): "Source >" lists only the metrics of the group's
+//!   kind ([`group_metrics`]; none for engines), and after "Chart >" come "Items >" (Rows,
+//!   Cells), "Arrange >" with Cells (Automatic, Stack vertically, Side by side) and
+//!   "Show at most >" (All, 4, 8, 16, 32, and the saved number when it is another).
+//!   [`set_group_option`] and [`new_group`] are the edits they make.
 //! - **Confirmations**: Reset in Edit Widgets ([`confirm_reset`]), Reset Box with a grid layout
 //!   ([`confirm_reset_now`]) and a preset over a grid layout ([`confirm_preset`]).
 //!
@@ -20,14 +26,18 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{App, SharedString, Window};
 use tl_model::ids::DeviceIdx;
 use tl_model::layout::{
-    DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
-    METRIC_VRAM, MetricKey, WidgetSetting,
+    ContainerLayout, DeviceSelector, FormSet, GROUP_LIMIT_RANGE, GroupItems, GroupKind,
+    GroupOptions, GroupSelector, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_ENGINE_ANY,
+    METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
-use tl_model::layout_boxes::DeviceKind;
+use tl_model::layout_boxes::{
+    DeviceKind, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE,
+    METRIC_FREQ, METRIC_LOAD, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX,
+};
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
-use super::grid::SlotDevice;
+use super::grid::{self, InnerGrid, SlotDevice};
 use super::meta::MetricMeta;
 use super::source::reading;
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -35,10 +45,11 @@ use crate::components::menu::TlMenu;
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::{
-    PerfWidgetAdd, PerfWidgetRemove, PerfWidgetSetForm, PerfWidgetSetOption, PerfWidgetSetSource,
-    WidgetSource,
+    PerfWidgetAdd, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm, PerfWidgetSetGroup,
+    PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
 };
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
+use crate::pages::performance::overview::layout::Arrange;
 
 /// The device facts after the engines, in menu order, with their name keys.
 const OTHER_METRICS: [(&str, &str); 5] = [
@@ -61,6 +72,174 @@ const FORM_ITEMS: [(FormSet, &str, &str); 5] = [
 /// The chart options of "Chart >": the option name and its name key.
 pub const OPTION_FILL: &str = "fill";
 pub const OPTION_DASHED: &str = "dashed";
+
+/// The group options of [`PerfWidgetSetGroup`].
+pub const GROUP_METRIC: &str = "metric";
+pub const GROUP_ITEMS: &str = "items";
+pub const GROUP_ARRANGE: &str = "arrange";
+pub const GROUP_LIMIT: &str = "limit";
+/// The `limit` value that shows every member.
+pub const LIMIT_ALL: &str = "all";
+/// The numbers of "Show at most >", after "All".
+pub const LIMIT_CHOICES: [u16; 4] = [4, 8, 16, 32];
+
+/// The metrics a group of `kind` lists in "Source >", in menu order, with their name keys:
+/// cores Load and Speed; disks Active time, Read, Write, Read and write; adapters Download,
+/// Upload, Download and upload. An engine group has one metric and lists none.
+pub fn group_metrics(kind: &GroupKind) -> &'static [(&'static str, &'static str)] {
+    match kind {
+        GroupKind::Cores => &[
+            (METRIC_LOAD, "perf-widget-core-load"),
+            (METRIC_FREQ, "perf-widget-core-speed"),
+        ],
+        GroupKind::Disks => &[
+            (METRIC_DISK_ACTIVE, "perf-widget-metric-disk-active"),
+            (METRIC_DISK_READ, "perf-widget-metric-disk-read"),
+            (METRIC_DISK_WRITE, "perf-widget-metric-disk-write"),
+            (METRIC_DISK_IO, "perf-widget-metric-disk-io"),
+        ],
+        GroupKind::Adapters => &[
+            (METRIC_NET_RX, "perf-widget-metric-net-rx"),
+            (METRIC_NET_TX, "perf-widget-metric-net-tx"),
+            (METRIC_NET_TRAFFIC, "perf-widget-metric-net-traffic"),
+        ],
+        GroupKind::Engines | GroupKind::Other(_) => &[],
+    }
+}
+
+/// The kind of device a member of a group of `kind` is.
+fn member_kind(kind: &GroupKind) -> DeviceKind {
+    match kind {
+        GroupKind::Cores => DeviceKind::CpuLogical,
+        GroupKind::Disks => DeviceKind::Disk,
+        GroupKind::Adapters => DeviceKind::Net,
+        GroupKind::Engines => DeviceKind::Gpu,
+        GroupKind::Other(_) => DeviceKind::Other,
+    }
+}
+
+/// The forms `metric` offers on a member of a group of `kind`, from its metadata. An engine
+/// group's `engine:*` offers what every engine offers.
+pub fn group_offered(kind: &GroupKind, metric: &MetricKey) -> FormSet {
+    let metric = if metric.as_str() == METRIC_ENGINE_ANY {
+        MetricKey::new("engine:gpu")
+    } else {
+        metric.clone()
+    };
+    MetricMeta::of(member_kind(kind), &metric).map_or(FormSet::empty(), |m| m.forms())
+}
+
+/// A new group widget (Add Widget, UI-PRF-061 phase 2): Chart, Load bar, Value and Name as Rows
+/// for cores; Chart, Value and Name as Cells for the others; without the forms the metric does
+/// not offer, and with no limit. `name` is the device's name for an engine group.
+pub fn new_group(
+    device: DeviceSelector,
+    members: GroupKind,
+    metric: MetricKey,
+    name: Option<Arc<str>>,
+) -> WidgetSetting {
+    let offered = group_offered(&members, &metric);
+    let (want, items) = match members {
+        GroupKind::Cores => (
+            FormSet::CHART | FormSet::BAR | FormSet::VALUE | FormSet::LABEL,
+            GroupItems::Rows,
+        ),
+        _ => (
+            FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
+            GroupItems::Cells,
+        ),
+    };
+    let forms = want & offered;
+    let forms = if forms.is_empty() {
+        default_forms(offered)
+    } else {
+        forms
+    };
+    let device_name = matches!(members, GroupKind::Engines)
+        .then_some(name)
+        .flatten();
+    WidgetSetting {
+        id: 0,
+        content: WidgetContent::Group(GroupSelector {
+            device,
+            members,
+            metric,
+            options: GroupOptions {
+                limit: None,
+                items,
+                arrange: None,
+            },
+        }),
+        forms,
+        cell: None,
+        options: WidgetOptions::default(),
+        device_name,
+    }
+}
+
+/// Sets group option `option` of group widget `id` to `value` ([`PerfWidgetSetGroup`]): a new
+/// metric keeps the forms it offers (or takes the default forms when none is left), `items`
+/// is `rows` or `cells`, `arrange` an Arrange id (`auto` is no saved value), `limit` [`LIMIT_ALL`]
+/// or a number in `GROUP_LIMIT_RANGE`. The widget then spans at least its new minimum on
+/// `grid`. Returns whether the layout changed.
+pub fn set_group_option(
+    layout: &mut ContainerLayout,
+    id: u32,
+    option: &str,
+    value: &str,
+    grid: &InnerGrid,
+) -> bool {
+    let Some(w) = layout.widgets.iter_mut().find(|w| w.id == id) else {
+        return false;
+    };
+    let WidgetContent::Group(g) = &mut w.content else {
+        return false;
+    };
+    let before = (g.clone(), w.forms);
+    match option {
+        GROUP_METRIC => {
+            let metric = MetricKey::new(value);
+            let offered = group_offered(&g.members, &metric);
+            if offered.is_empty() {
+                return false;
+            }
+            let kept = w.forms & offered;
+            w.forms = if kept.is_empty() {
+                default_forms(offered)
+            } else {
+                kept
+            };
+            g.metric = metric;
+        }
+        GROUP_ITEMS => match GroupItems::from_name(value) {
+            Some(items) => g.options.items = items,
+            None => return false,
+        },
+        GROUP_ARRANGE => match Arrange::from_id(value) {
+            Some(Arrange::Auto) => g.options.arrange = None,
+            Some(a) => g.options.arrange = Some(a.id().to_owned()),
+            None => return false,
+        },
+        GROUP_LIMIT => {
+            g.options.limit = if value == LIMIT_ALL {
+                None
+            } else {
+                match value.parse::<u16>() {
+                    Ok(n) if (GROUP_LIMIT_RANGE.0..=GROUP_LIMIT_RANGE.1).contains(&n) => Some(n),
+                    _ => return false,
+                }
+            };
+        }
+        _ => return false,
+    }
+    if (g.clone(), w.forms) == before {
+        return false;
+    }
+    if let Some(cell) = w.cell {
+        grid::set_cell(layout, id, cell, grid);
+    }
+    true
+}
 
 /// One metric of one GPU in the source list.
 #[derive(Clone, Debug, PartialEq)]
@@ -228,14 +407,131 @@ fn sources(
     menu
 }
 
-/// The Add Widget items: every source of `groups` as a plain item.
+/// The Add Widget items: every source of `groups` as a plain item, then a separator and "All
+/// engines" for each GPU (named by the GPU when the box shows two).
 pub fn add_items(
     menu: TlMenu,
     groups: &Rc<[SourceGroup]>,
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    sources(menu, groups, None, None, window, cx)
+    let mut menu = sources(menu, groups, None, None, window, cx);
+    if groups.is_empty() {
+        return menu;
+    }
+    menu = menu.separator();
+    let all = tr(cx, "perf-widget-group-engines");
+    for group in groups.iter() {
+        let label = if groups.len() == 1 {
+            all.clone()
+        } else {
+            tr_args(
+                cx,
+                "perf-widget-device-metric",
+                &[
+                    ("device", FluentValue::from(group.name.to_string())),
+                    ("metric", FluentValue::from(all.to_string())),
+                ],
+            )
+        };
+        menu = menu.item(
+            label,
+            Box::new(PerfWidgetAddGroup {
+                device: Arc::clone(&group.key),
+                group: Arc::from(GroupKind::Engines.name()),
+                metric: Arc::from(METRIC_ENGINE_ANY),
+            }),
+        );
+    }
+    menu
+}
+
+/// The group items of group widget `id` with selector `g` (UI-PRF-061 phase 2): "Items >",
+/// "Arrange >" with Cells, and "Show at most >".
+fn group_items(
+    menu: TlMenu,
+    id: u32,
+    g: &GroupSelector,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let set = move |option: &str, value: &str| -> Box<dyn gpui_kit::Action> {
+        Box::new(PerfWidgetSetGroup {
+            id,
+            option: Arc::from(option),
+            value: Arc::from(value),
+        })
+    };
+    let items = g.options.items;
+    let rows = tr(cx, "perf-widget-items-rows");
+    let cells = tr(cx, "perf-widget-items-cells");
+    let mut menu = menu.submenu(
+        tr(cx, "perf-widget-items"),
+        window,
+        cx,
+        move |menu, _, _| {
+            menu.radio_item(
+                rows.clone(),
+                items == GroupItems::Rows,
+                set(GROUP_ITEMS, GroupItems::Rows.name()),
+            )
+            .radio_item(
+                cells.clone(),
+                items == GroupItems::Cells,
+                set(GROUP_ITEMS, GroupItems::Cells.name()),
+            )
+        },
+    );
+    if items == GroupItems::Cells {
+        let arrange = g
+            .options
+            .arrange
+            .as_deref()
+            .and_then(Arrange::from_id)
+            .unwrap_or(Arrange::Auto);
+        let labels: Vec<(Arrange, SharedString)> = Arrange::ALL
+            .into_iter()
+            .map(|a| (a, tr(cx, a.label())))
+            .collect();
+        menu = menu.submenu(
+            tr(cx, "perf-overview-arrange"),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                for (a, label) in &labels {
+                    menu =
+                        menu.radio_item(label.clone(), *a == arrange, set(GROUP_ARRANGE, a.id()));
+                }
+                menu
+            },
+        );
+    }
+    let limit = g.options.limit;
+    let all = tr(cx, "perf-widget-limit-all");
+    menu.submenu(
+        tr(cx, "perf-widget-limit"),
+        window,
+        cx,
+        move |menu, _, _| {
+            let mut menu =
+                menu.radio_item(all.clone(), limit.is_none(), set(GROUP_LIMIT, LIMIT_ALL));
+            let mut choices: Vec<u16> = LIMIT_CHOICES.to_vec();
+            if let Some(n) = limit
+                && !choices.contains(&n)
+            {
+                choices.push(n);
+                choices.sort_unstable();
+            }
+            for n in choices {
+                menu = menu.radio_item(
+                    SharedString::from(n.to_string()),
+                    limit == Some(n),
+                    set(GROUP_LIMIT, &n.to_string()),
+                );
+            }
+            menu
+        },
+    )
 }
 
 /// The widget menu of `w`, whose metric offers `offered` (UI-PRF-061 "Widget menu").
@@ -251,15 +547,54 @@ pub fn widget_menu(
     let selected = device_key(w)
         .zip(w.content.metric_key())
         .map(|(k, m)| (Arc::from(k), m.clone()));
-    let source_groups = Rc::clone(groups);
-    let mut menu = menu.submenu(
-        tr(cx, "perf-widget-source"),
-        window,
-        cx,
-        move |menu, window, cx| {
-            sources(menu, &source_groups, Some(id), selected.clone(), window, cx)
-        },
-    );
+    let group = match &w.content {
+        WidgetContent::Group(g) => Some(g.clone()),
+        _ => None,
+    };
+    let mut menu = match &group {
+        // A group lists the metrics of its kind; an engine group has none to pick.
+        Some(g) => {
+            let metrics: Vec<(&'static str, SharedString)> = group_metrics(&g.members)
+                .iter()
+                .map(|(key, name)| (*key, tr(cx, name)))
+                .collect();
+            if metrics.is_empty() {
+                menu
+            } else {
+                let current = g.metric.clone();
+                menu.submenu(
+                    tr(cx, "perf-widget-source"),
+                    window,
+                    cx,
+                    move |mut menu, _, _| {
+                        for (key, label) in &metrics {
+                            menu = menu.radio_item(
+                                label.clone(),
+                                current.as_str() == *key,
+                                Box::new(PerfWidgetSetGroup {
+                                    id,
+                                    option: Arc::from(GROUP_METRIC),
+                                    value: Arc::from(*key),
+                                }),
+                            );
+                        }
+                        menu
+                    },
+                )
+            }
+        }
+        None => {
+            let source_groups = Rc::clone(groups);
+            menu.submenu(
+                tr(cx, "perf-widget-source"),
+                window,
+                cx,
+                move |menu, window, cx| {
+                    sources(menu, &source_groups, Some(id), selected.clone(), window, cx)
+                },
+            )
+        }
+    };
     let forms = w.forms;
     let shown: Vec<(FormSet, &'static str, SharedString)> = FORM_ITEMS
         .iter()
@@ -320,6 +655,9 @@ pub fn widget_menu(
                 )
             },
         );
+    }
+    if let Some(g) = &group {
+        menu = group_items(menu, id, g, window, cx);
     }
     menu.separator()
         .item(tr(cx, "perf-widget-remove"), Box::new(PerfWidgetRemove))
@@ -417,7 +755,111 @@ pub fn confirm_preset(
 
 #[cfg(test)]
 mod tests {
+    use tl_model::layout::{CPU_BOX_CONTAINER, LAYOUT_VERSION, WidgetCell};
+    use tl_model::layout_boxes::{DEVICE_CPU, DEVICE_DISKS};
+
     use super::*;
+
+    fn group_layout(w: WidgetSetting) -> ContainerLayout {
+        ContainerLayout {
+            container: CPU_BOX_CONTAINER.to_owned(),
+            version: LAYOUT_VERSION,
+            preset: None,
+            widgets: vec![WidgetSetting {
+                id: 1,
+                cell: Some(WidgetCell {
+                    col: 0,
+                    row: 0,
+                    cols: 12,
+                    rows: 8,
+                }),
+                ..w
+            }],
+            next_id: 2,
+        }
+    }
+
+    fn options(l: &ContainerLayout) -> (GroupOptions, MetricKey, FormSet) {
+        match &l.widgets[0].content {
+            WidgetContent::Group(g) => (g.options.clone(), g.metric.clone(), l.widgets[0].forms),
+            _ => panic!("a group"),
+        }
+    }
+
+    #[test]
+    fn new_groups_take_their_defaults() {
+        let cpu = DeviceSelector::Key(Arc::from(DEVICE_CPU));
+        let w = new_group(cpu, GroupKind::Cores, MetricKey::new(METRIC_LOAD), None);
+        assert_eq!(
+            w.forms,
+            FormSet::CHART | FormSet::BAR | FormSet::VALUE | FormSet::LABEL
+        );
+        let WidgetContent::Group(g) = &w.content else {
+            panic!("a group");
+        };
+        assert_eq!(g.options.items, GroupItems::Rows);
+        assert_eq!(g.options.limit, None);
+        let disks = DeviceSelector::Key(Arc::from(DEVICE_DISKS));
+        let w = new_group(
+            disks,
+            GroupKind::Disks,
+            MetricKey::new(METRIC_DISK_IO),
+            None,
+        );
+        // Read and write is a pair: no bar, no stats.
+        assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
+        let WidgetContent::Group(g) = &w.content else {
+            panic!("a group");
+        };
+        assert_eq!(g.options.items, GroupItems::Cells);
+        let gpu = DeviceSelector::Key(Arc::from("gpu:GPU-x"));
+        let name = Some(Arc::from("Card A"));
+        let w = new_group(
+            gpu,
+            GroupKind::Engines,
+            MetricKey::new(METRIC_ENGINE_ANY),
+            name,
+        );
+        assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
+        assert_eq!(w.device_name.as_deref(), Some("Card A"));
+    }
+
+    #[test]
+    fn group_options_change_only_known_values() {
+        let cpu = DeviceSelector::Key(Arc::from(DEVICE_CPU));
+        let mut l = group_layout(new_group(
+            cpu,
+            GroupKind::Cores,
+            MetricKey::new(METRIC_LOAD),
+            None,
+        ));
+        let g = InnerGrid::new(750., 12, 1.);
+        assert!(set_group_option(&mut l, 1, GROUP_ITEMS, "cells", &g));
+        assert_eq!(options(&l).0.items, GroupItems::Cells);
+        assert!(
+            !set_group_option(&mut l, 1, GROUP_ITEMS, "cells", &g),
+            "no change"
+        );
+        assert!(!set_group_option(&mut l, 1, GROUP_ITEMS, "piles", &g));
+        assert!(set_group_option(&mut l, 1, GROUP_ARRANGE, "vertical", &g));
+        assert_eq!(options(&l).0.arrange.as_deref(), Some("vertical"));
+        assert!(set_group_option(&mut l, 1, GROUP_ARRANGE, "auto", &g));
+        assert_eq!(options(&l).0.arrange, None);
+        assert!(set_group_option(&mut l, 1, GROUP_LIMIT, "8", &g));
+        assert_eq!(options(&l).0.limit, Some(8));
+        assert!(!set_group_option(&mut l, 1, GROUP_LIMIT, "0", &g));
+        assert!(!set_group_option(&mut l, 1, GROUP_LIMIT, "257", &g));
+        assert!(set_group_option(&mut l, 1, GROUP_LIMIT, LIMIT_ALL, &g));
+        assert_eq!(options(&l).0.limit, None);
+        // Speed keeps the forms it offers.
+        assert!(set_group_option(&mut l, 1, GROUP_METRIC, METRIC_FREQ, &g));
+        assert_eq!(options(&l).1.as_str(), METRIC_FREQ);
+        assert!(!set_group_option(&mut l, 1, GROUP_METRIC, "nonsense", &g));
+        assert!(
+            !set_group_option(&mut l, 2, GROUP_LIMIT, "8", &g),
+            "no widget 2"
+        );
+    }
 
     #[test]
     fn default_forms_follow_the_offered_forms() {

@@ -40,7 +40,7 @@ use tl_model::layout_boxes::DeviceKind;
 use tl_model::snapshot::ComponentMask;
 
 use super::compose::{Composition, group_item_composition};
-use super::group_fill::{GroupFill, group_fill};
+use super::group_fill::{GroupFill, fitted_into, group_fill};
 use super::members::{Members, members};
 use super::meta::MetricMeta;
 use super::metric_widget::{MemberLook, MetricWidget, part_id, widget_id};
@@ -74,6 +74,11 @@ const MEMBERS_MASK: ComponentMask =
 /// counts the items the group made.
 pub fn member_widget_id(group: u32, serial: u32) -> u32 {
     0x8000_0000 | ((group & 0x7fff) << 16) | (serial & 0xffff)
+}
+
+/// The debug selector and element id of group `id`'s scrolling items.
+pub fn scroll_id(id: u32) -> String {
+    format!("perf-widget-{id}-scroll")
 }
 
 /// The group's state after its member list was read.
@@ -481,7 +486,13 @@ impl GroupWidget {
         let forms = self.item_forms();
         let kind = self.items_kind();
         let n = self.items.len() + usize::from(self.hidden > 0);
-        let fill = group_fill(kind, self.arrange(), n, self.inner().size, forms, scale);
+        // Edit Widgets keeps the applied view's columns and item kind inside its margins.
+        let applied = group_fill(kind, self.arrange(), n, self.size, forms, scale);
+        let fill = if self.edit_inset {
+            fitted_into(&applied, self.size, self.inner().size)
+        } else {
+            applied
+        };
         let composition = group_item_composition(kind, forms);
         let edit = self.edit_inset;
         for (i, item) in self.items.iter().enumerate() {
@@ -592,20 +603,23 @@ impl Render for GroupWidget {
             .h(self.fill.content.height)
             .children(items)
             .children(more);
-        let scroll = SharedString::from(format!("perf-widget-{id}-scroll"));
+        let scroll = scroll_id(id);
+        let selector = scroll.clone();
         let body = if self.fill.scrolls_x {
             div()
+                .debug_selector(move || selector)
                 .size_full()
                 .child(content)
                 .overflow_x_scrollbar()
-                .id(scroll)
+                .id(SharedString::from(scroll))
                 .into_any_element()
         } else if self.fill.scrolls {
             div()
+                .debug_selector(move || selector)
                 .size_full()
                 .child(content.w_full())
                 .overflow_y_scrollbar()
-                .id(scroll)
+                .id(SharedString::from(scroll))
                 .into_any_element()
         } else {
             content.into_any_element()

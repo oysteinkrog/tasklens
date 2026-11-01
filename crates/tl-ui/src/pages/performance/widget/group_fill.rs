@@ -178,6 +178,47 @@ pub fn cells_fill(
     }
 }
 
+/// `fill`, made for an area `from`, moved into the area `to` with the same columns, rows and
+/// item kind (Edit Widgets keeps the applied view's fit inside its edit margins, so nothing
+/// jumps). Along a direction that scrolls the items keep their size; along the others they
+/// shrink or grow in proportion.
+pub fn fitted_into(fill: &GroupFill, from: Size<Pixels>, to: Size<Pixels>) -> GroupFill {
+    let ratio = |to: Pixels, from: Pixels| {
+        if from > px(0.) {
+            f32::from(to) / f32::from(from)
+        } else {
+            1.
+        }
+    };
+    let sx = if fill.scrolls_x {
+        1.
+    } else {
+        ratio(to.width, from.width)
+    };
+    let sy = if fill.scrolls {
+        1.
+    } else {
+        ratio(to.height, from.height)
+    };
+    let items = fill
+        .items
+        .iter()
+        .map(|b| {
+            snapped(
+                f32::from(b.left()) * sx,
+                f32::from(b.top()) * sy,
+                f32::from(b.size.width) * sx,
+                f32::from(b.size.height) * sy,
+            )
+        })
+        .collect();
+    GroupFill {
+        items,
+        content: size(fill.content.width * sx, fill.content.height * sy),
+        ..fill.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -282,6 +323,26 @@ mod tests {
         assert!(f.scrolls);
         assert!(f.content.height > px(300.));
         assert!(f.items.iter().all(|b| b.right() <= px(400. - SCROLLBAR_W)));
+    }
+
+    #[test]
+    fn fitted_into_keeps_columns_and_rows() {
+        let f = rows_fill(32, area(750., 480.), rows_forms(), 1.);
+        let g = fitted_into(&f, area(750., 480.), area(736., 476.));
+        assert_eq!(
+            (g.cols, g.rows, g.composition),
+            (f.cols, f.rows, f.composition)
+        );
+        assert!(
+            g.items
+                .iter()
+                .all(|b| b.right() <= px(736.) && b.bottom() <= px(476.))
+        );
+        // Scrolling rows keep their 18 px.
+        let f = rows_fill(128, area(800., 300.), rows_forms(), 1.);
+        let g = fitted_into(&f, area(800., 300.), area(788., 296.));
+        assert_eq!(g.items[0].size.height, px(18.));
+        assert_eq!(g.content.height, f.content.height);
     }
 
     #[test]

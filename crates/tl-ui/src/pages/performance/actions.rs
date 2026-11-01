@@ -152,6 +152,29 @@ pub struct PerfWidgetSetOption {
     pub on: bool,
 }
 
+/// Adds a group widget (Add Widget): the members of group `group` (`cores`, `disks`,
+/// `adapters` or `engines`) of the device `device` (a persistent key), each showing `metric`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetAddGroup {
+    pub device: Arc<str>,
+    pub group: Arc<str>,
+    pub metric: Arc<str>,
+}
+
+/// Sets group option `option` of group widget `id` to `value` (the widget menu's group
+/// items): `metric` (a metric key), `items` (`rows` or `cells`), `arrange` (an Arrange id) or
+/// `limit` (`all` or a number).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetSetGroup {
+    pub id: u32,
+    pub option: Arc<str>,
+    pub value: Arc<str>,
+}
+
 /// Adds the Overview box of `kind` (its `[performance.overview]` name) to the layout.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]

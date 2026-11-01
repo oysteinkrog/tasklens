@@ -66,11 +66,12 @@ pub const ROW_MIN_W: f32 = 48.;
 pub const ROW_DROP_ORDER: [FormSet; 4] =
     [FormSet::STATS, FormSet::BAR, FormSet::CHART, FormSet::LABEL];
 
-/// The three arrangements of UI-PRF-061.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The three arrangements of UI-PRF-061. The default is the fallback, a Row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Composition {
     Cell,
     Tile,
+    #[default]
     Row,
 }
 

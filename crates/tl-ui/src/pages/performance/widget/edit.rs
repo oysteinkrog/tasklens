@@ -61,10 +61,10 @@ use crate::components::tooltip::TlTooltip;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
-    PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetApply, PerfWidgetCancel, PerfWidgetMove,
-    PerfWidgetRemove, PerfWidgetReset, PerfWidgetResize, PerfWidgetSelectNext,
-    PerfWidgetSelectPrev, PerfWidgetSetForm, PerfWidgetSetOption, PerfWidgetSetSource,
-    PerfWidgetUndo, WidgetSource,
+    PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetAddGroup, PerfWidgetApply, PerfWidgetCancel,
+    PerfWidgetMove, PerfWidgetRemove, PerfWidgetReset, PerfWidgetResize, PerfWidgetSelectNext,
+    PerfWidgetSelectPrev, PerfWidgetSetForm, PerfWidgetSetGroup, PerfWidgetSetOption,
+    PerfWidgetSetSource, PerfWidgetUndo, WidgetSource,
 };
 use crate::pages::performance::overview::picked::box_snapshot;
 use crate::settings_global::TlSettings;
@@ -938,6 +938,52 @@ impl WidgetEditor {
         Some(id)
     }
 
+    /// Add Widget's groups: a group widget of the members `group` of `device`, each on
+    /// `metric`, with the defaults of a new group, placed and selected as [`Self::add`] places
+    /// a widget. Returns its id.
+    pub fn add_group(
+        &mut self,
+        device: &str,
+        group: &str,
+        metric: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<u32> {
+        self.edit.as_ref()?;
+        let members = tl_model::layout::GroupKind::from_name(group);
+        let name = self
+            .slots
+            .iter()
+            .find(|s| *s.key == *device)
+            .map(|s| Arc::clone(&s.name));
+        let widget = menu::new_group(
+            DeviceSelector::Key(Arc::from(device)),
+            members,
+            MetricKey::new(metric),
+            name,
+        );
+        let added = Rc::new(Cell::new(None));
+        let out = Rc::clone(&added);
+        self.edit_with(cx, move |l, g| {
+            out.set(Some(grid::insert(l, widget, g)));
+            true
+        });
+        let id = added.get()?;
+        self.select(id, cx);
+        self.show_widget(id, cx);
+        Some(id)
+    }
+
+    /// The group items of the widget menu: group option `option` of widget `id` is `value`.
+    pub fn set_group(
+        &mut self,
+        id: u32,
+        option: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_with(cx, |l, g| menu::set_group_option(l, id, option, value, g))
+    }
+
     /// "Source >": widget `id` shows `source`.
     pub fn set_source(&mut self, id: u32, source: &WidgetSource, cx: &mut Context<Self>) -> bool {
         let (selector, name, offered) = self.resolve(source, cx);
@@ -970,6 +1016,10 @@ impl WidgetEditor {
             .map_or(FormSet::empty(), |s| s.read(cx).offered_forms());
         if !from_source.is_empty() {
             return from_source;
+        }
+        if let WidgetContent::Group(g) = &w.content {
+            let offered = menu::group_offered(&g.members, &g.metric);
+            return if offered.is_empty() { w.forms } else { offered };
         }
         let meta = w
             .content
@@ -1177,6 +1227,14 @@ impl WidgetEditor {
 
     fn on_set_form(&mut self, a: &PerfWidgetSetForm, _: &mut Window, cx: &mut Context<Self>) {
         self.set_form(a.id, &a.form, a.on, cx);
+    }
+
+    fn on_add_group(&mut self, a: &PerfWidgetAddGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_group(&a.device, &a.group, &a.metric, cx);
+    }
+
+    fn on_set_group(&mut self, a: &PerfWidgetSetGroup, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_group(a.id, &a.option, &a.value, cx);
     }
 
     fn on_set_option(&mut self, a: &PerfWidgetSetOption, _: &mut Window, cx: &mut Context<Self>) {
@@ -1451,6 +1509,8 @@ impl WidgetEditor {
             .on_action(cx.listener(Self::on_set_source))
             .on_action(cx.listener(Self::on_set_form))
             .on_action(cx.listener(Self::on_set_option))
+            .on_action(cx.listener(Self::on_add_group))
+            .on_action(cx.listener(Self::on_set_group))
     }
 }
 

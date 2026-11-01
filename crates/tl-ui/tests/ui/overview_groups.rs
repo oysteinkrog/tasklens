@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement as _, Render,
-    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Bounds, Context, Entity, EntityId, IntoElement, ParentElement as _, Pixels,
+    Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, point,
+    px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -30,8 +31,11 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::widget::compose::Composition;
 use tl_ui::pages::performance::widget::container::WidgetContainer;
+use tl_ui::pages::performance::widget::edit::{
+    OUTLINE, WidgetEditor, corner_id, frame_id, gear_id, grip_id,
+};
 use tl_ui::pages::performance::widget::group_widget::{GroupState, GroupWidget};
-use tl_ui::pages::performance::widget::metric_widget::part_id;
+use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
 use tl_ui::pages::performance::widget::source::SourceStore;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -65,6 +69,7 @@ impl Render for Page {
 
 struct Host {
     page: Option<(Entity<Page>, f32, f32)>,
+    editor: Option<(Entity<WidgetEditor>, f32, f32)>,
 }
 
 impl Render for Host {
@@ -77,6 +82,13 @@ impl Render for Host {
                     .w(px(*w))
                     .h(px(*h))
                     .child(p.clone().cached(StyleRefinement::default().size_full()))
+            }))
+            .children(self.editor.iter().map(|(e, w, h)| {
+                div()
+                    .flex_none()
+                    .w(px(*w))
+                    .h(px(*h))
+                    .child(e.clone().cached(StyleRefinement::default().size_full()))
             }))
     }
 }
@@ -200,7 +212,7 @@ struct Rig<'a> {
     _driver: Entity<AnimationDriver>,
 }
 
-fn open(cx: &mut TestAppContext, cores: u16, disks: &[u16]) -> Rig<'_> {
+fn open<'a>(cx: &'a mut TestAppContext, cores: u16, disks: &[u16]) -> Rig<'a> {
     let engine = FakeEngine::new();
     let catalog = catalog(1, cores, disks);
     engine.publish_with(|s| s.devices = Arc::new(catalog));
@@ -228,7 +240,10 @@ fn open(cx: &mut TestAppContext, cores: u16, disks: &[u16]) -> Rig<'_> {
         TlSettings::init(cx);
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let (host, vcx) = cx.add_window_view(|_, _| Host { page: None });
+    let (host, vcx) = cx.add_window_view(|_, _| Host {
+        page: None,
+        editor: None,
+    });
     vcx.simulate_scale_factor_change(1.0);
     let driver = vcx.update(|window, cx| {
         let driver = cx.new(AnimationDriver::new);
@@ -672,4 +687,192 @@ fn overview_group_shares_member_source(cx: &mut TestAppContext) {
         })
         .expect("core 3's item");
     assert_eq!(member_source, single_source);
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// The four edges of `b`, `t` px thick.
+fn ring(b: Bounds<Pixels>, t: f32) -> [Bounds<Pixels>; 4] {
+    let t = px(t);
+    [
+        Bounds::new(b.origin, size(b.size.width, t)),
+        Bounds::new(point(b.left(), b.bottom() - t), size(b.size.width, t)),
+        Bounds::new(b.origin, size(t, b.size.height)),
+        Bounds::new(point(b.right() - t, b.top()), size(t, b.size.height)),
+    ]
+}
+
+/// `a` and `b` share more than a rounding error of area.
+fn covers(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+    let e = px(0.25);
+    a.left() < b.right() - e
+        && b.left() < a.right() - e
+        && a.top() < b.bottom() - e
+        && b.top() < a.bottom() - e
+}
+
+impl Rig<'_> {
+    /// An editor around a container showing `layout`, in a box `w × h` px, drawn.
+    fn editor(
+        &mut self,
+        layout: ContainerLayout,
+        w: f32,
+        h: f32,
+    ) -> (Entity<WidgetEditor>, Entity<WidgetContainer>) {
+        let hub = self.hub.clone();
+        let host = self.host.clone();
+        let id = layout.container.clone();
+        let out = self.vcx.update(|_, cx| {
+            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
+            let c = cx.new(|cx| WidgetContainer::new(id, layout, &hub, store, cx));
+            let e = cx.new(|cx| WidgetEditor::new(c.clone(), &hub, cx));
+            host.update(cx, |host, cx| {
+                host.editor = Some((e.clone(), w, h));
+                cx.notify();
+            });
+            (e, c)
+        });
+        draw(self.vcx);
+        out
+    }
+
+    fn ed<R>(
+        &mut self,
+        e: &Entity<WidgetEditor>,
+        f: impl FnOnce(&mut WidgetEditor, &mut Window, &mut Context<WidgetEditor>) -> R,
+    ) -> R {
+        let out = self
+            .vcx
+            .update(|window, cx| e.update(cx, |e, cx| f(e, window, cx)));
+        draw(self.vcx);
+        out
+    }
+
+    fn set_ui_scale(&mut self, pct: u16) {
+        self.vcx.update(|_, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: pct,
+                ..AppearanceSettings::default()
+            };
+            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+        });
+        draw(self.vcx);
+    }
+
+    /// The bounds of every text of group `id`'s items: their text parts and chart labels, and
+    /// the group's own "+n more" line.
+    fn group_texts(&mut self, g: &Entity<GroupWidget>, id: u32) -> Vec<(String, Bounds<Pixels>)> {
+        let items: Vec<_> = self
+            .vcx
+            .read_entity(g, |g, _| g.items().map(|(_, w)| w.clone()).collect());
+        let mut texts = Vec::new();
+        for item in items {
+            let (member, chart) = self
+                .vcx
+                .read_entity(&item, |w, _| (w.id(), w.chart().cloned()));
+            for part in ["name", "value", "stats"] {
+                if let Some(b) = self.vcx.debug_bounds(leak(part_id(member, part))) {
+                    texts.push((format!("{member:x} {part}"), b));
+                }
+            }
+            if let Some(chart) = chart {
+                texts.extend(self.vcx.read_entity(&chart, |v, _| {
+                    v.label_cache()
+                        .painted
+                        .iter()
+                        .map(|p| (format!("{member:x} {:?}", p.kind), p.bounds()))
+                        .collect::<Vec<_>>()
+                }));
+            }
+        }
+        if let Some(b) = self.vcx.debug_bounds(leak(part_id(id, "more"))) {
+            texts.push(("more".to_owned(), b));
+        }
+        texts
+    }
+}
+
+/// In Edit Widgets no edit decoration (grip, gear, border, outline, resize corner, the
+/// preview's outline) covers any item text of a group, as Rows and as Cells, at scale 1.0, 1.5
+/// and 2.0, selected or not. The items keep the column count and item kind of the applied view.
+#[gpui_kit::test]
+fn overview_group_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
+    let mut r = open(cx, 8, &[0, 1, 2]);
+    let values: Vec<(u16, u64, f32)> = (0..8).map(|n| (n, 1, 40.)).collect();
+    r.core_series(1, &values);
+    let widgets = vec![
+        group_widget(
+            1,
+            cores(GroupItems::Rows, Some(6)),
+            ROWS_FORMS,
+            cell(0, 0, 12, 6),
+        ),
+        group_widget(
+            2,
+            disks(GroupItems::Cells, None),
+            CELL_FORMS,
+            cell(0, 6, 12, 6),
+        ),
+    ];
+    for pct in [100u16, 150, 200] {
+        let scale = f32::from(pct) / 100.;
+        let (e, c) = r.editor(
+            layout(CPU_BOX_CONTAINER, widgets.clone()),
+            720. * scale,
+            640. * scale,
+        );
+        r.set_ui_scale(pct);
+        let applied: Vec<(usize, usize, Composition)> = [1, 2]
+            .into_iter()
+            .map(|id| {
+                let g = r.group(&c, id);
+                r.vcx.read_entity(&g, |g, _| {
+                    (g.fill().cols, g.fill().rows, g.fill().composition)
+                })
+            })
+            .collect();
+        r.ed(&e, |e, window, cx| e.start(window, cx));
+        assert!(r.vcx.read_entity(&e, |e, _| e.is_editing()));
+        for selected in [false, true] {
+            for id in [1u32, 2] {
+                let at = format!("{pct} % group {id} selected {selected}");
+                if selected {
+                    r.ed(&e, |e, _, cx| e.select(id, cx));
+                }
+                let g = r.group(&c, id);
+                let fill = r.vcx.read_entity(&g, |g, _| {
+                    (g.fill().cols, g.fill().rows, g.fill().composition)
+                });
+                assert_eq!(fill, applied[id as usize - 1], "{at}: the fit stays");
+                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
+                    (
+                        "grip".into(),
+                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                    ),
+                    (
+                        "gear".into(),
+                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                    ),
+                    (
+                        "corner".into(),
+                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                    ),
+                ];
+                decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
+                decorations.extend(ring(w, OUTLINE).map(|b| ("outline".to_owned(), b)));
+                let texts = r.group_texts(&g, id);
+                assert!(texts.len() >= 3, "{at}: texts {texts:?}");
+                for (part, b) in &texts {
+                    for (d, db) in &decorations {
+                        assert!(!covers(*db, *b), "{at}: {d} {db:?} on {part} {b:?}");
+                    }
+                }
+            }
+        }
+        r.ed(&e, |e, _, cx| e.cancel(cx));
+    }
 }

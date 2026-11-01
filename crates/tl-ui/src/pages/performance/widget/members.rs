@@ -336,8 +336,10 @@ mod tests {
             keys(&members(&g, &s, None, None, false)),
             ["disk:sda/io", "disk:nvme0n1/io"]
         );
-        let mut p = PerformanceSettings::default();
-        p.device_order = vec!["disk:nvme0n1".into()];
+        let mut p = PerformanceSettings {
+            device_order: vec!["disk:nvme0n1".into()],
+            ..PerformanceSettings::default()
+        };
         assert_eq!(
             keys(&members(&g, &s, Some(&p), None, false)),
             ["disk:nvme0n1/io", "disk:sda/io"]
@@ -354,12 +356,14 @@ mod tests {
         let s = snap(vec![
             net(2, "lo", NetKind::Virtual),
             net(3, "eth0", NetKind::Wired),
-            net(4, "wg0", NetKind::Vpn),
+            net(4, "wg0", NetKind::VpnTunnel),
         ]);
         let g = group(DEVICE_NETS, GroupKind::Adapters, METRIC_NET_TRAFFIC);
-        let mut p = PerformanceSettings::default();
-        p.show_network_vpn = true;
-        p.show_network_virtual = true;
+        let mut p = PerformanceSettings {
+            show_network_vpn: true,
+            show_network_virtual: true,
+            ..PerformanceSettings::default()
+        };
         assert_eq!(
             keys(&members(&g, &s, Some(&p), None, false)),
             ["net:eth0/traffic", "net:wg0/traffic"]
