@@ -500,6 +500,45 @@ fn close_up(cells: &mut [WidgetCell], held: usize, blocks: bool) {
     }
 }
 
+/// Shrinks the widgets of the grid layout `layout` until they end at or above row `rows`
+/// (tasklens-mo5t5: a flow layout pinned for Edit Widgets fits the body under the toolbar).
+/// Each step takes one row from the widget with the most rows above its minimum span on
+/// `grid` (the top one on a tie), and the widgets close up. No widget goes below its minimum
+/// span, so the layout can still end below `rows`. Widths and the order of the widgets stay.
+pub fn fit_rows(layout: &mut ContainerLayout, rows: u16, grid: &InnerGrid) {
+    let index: SmallVec<[usize; 16]> = (0..layout.widgets.len())
+        .filter(|&i| layout.widgets[i].cell.is_some())
+        .collect();
+    let mut cells: SmallVec<[WidgetCell; 16]> = index
+        .iter()
+        .filter_map(|&i| layout.widgets[i].cell)
+        .collect();
+    let mins: SmallVec<[u16; 16]> = index
+        .iter()
+        .map(|&i| grid.widget_min_span(&layout.widgets[i]).1.max(1))
+        .collect();
+    while cells.iter().map(bottom).max().unwrap_or(0) > rows {
+        let pick = (0..cells.len())
+            .filter(|&k| cells[k].rows > mins[k])
+            .max_by_key(|&k| {
+                let c = cells[k];
+                (
+                    c.rows - mins[k],
+                    std::cmp::Reverse(c.row),
+                    std::cmp::Reverse(c.col),
+                )
+            });
+        let Some(k) = pick else {
+            break;
+        };
+        cells[k].rows -= 1;
+        close_up(&mut cells, usize::MAX, false);
+    }
+    for (&i, cell) in index.iter().zip(cells) {
+        layout.widgets[i].cell = Some(cell);
+    }
+}
+
 /// Puts widget `id` of the grid layout `layout` on `target` (a move or a resize), at least its
 /// minimum span on `grid` and inside the columns, and settles the others. Returns whether a
 /// cell changed.
@@ -756,6 +795,39 @@ mod tests {
 
     const CHART: FormSet = FormSet::CHART.union(FormSet::VALUE).union(FormSet::LABEL);
     const ROW: FormSet = FormSet::BAR.union(FormSet::VALUE).union(FormSet::LABEL);
+
+    /// tasklens-mo5t5: a chart over five one-row widgets, ten rows in all, fits eight rows by
+    /// giving the chart's rows above its minimum; the rows under it close up. A layout already
+    /// at its minimums stays as it is.
+    #[test]
+    fn fit_rows_shrinks_to_the_minimum_span() {
+        let g = InnerGrid::new(599., COLS, 1.);
+        let mut cells = vec![(1, CHART, cell(0, 0, 6, 5))];
+        for n in 0u16..4 {
+            cells.push((2 + u32::from(n), ROW, cell(0, 5 + n, 6, 1)));
+        }
+        cells.push((6, ROW, cell(0, 9, 1, 1)));
+        cells.push((7, ROW, cell(1, 9, 1, 1)));
+        let mut l = grid_layout(&cells);
+        let min = g.widget_min_span(&l.widgets[0]).1;
+        assert!(min <= 3, "the chart's minimum is at most 3 rows: {min}");
+        fit_rows(&mut l, 8, &g);
+        let after = cells_of(&l);
+        assert_eq!(after[0].1, cell(0, 0, 6, 3), "the chart gives two rows");
+        for (k, (_, c)) in after.iter().enumerate().skip(1) {
+            assert_eq!(c.rows, 1, "widget {k} keeps its row");
+        }
+        assert_eq!(after[5].1.row, 7);
+        assert_eq!(after[6].1, cell(1, 7, 1, 1), "widths and columns stay");
+        let all: Vec<WidgetCell> = after.iter().map(|(_, c)| *c).collect();
+        assert!(no_overlap(&all));
+        assert_eq!(all.iter().map(bottom).max(), Some(8));
+        // At the minimum nothing can give: the layout stays.
+        let mut tight = grid_layout(&[(1, ROW, cell(0, 0, 6, 1)), (2, ROW, cell(0, 1, 6, 1))]);
+        let before = cells_of(&tight);
+        fit_rows(&mut tight, 1, &g);
+        assert_eq!(cells_of(&tight), before);
+    }
 
     #[test]
     fn inner_grid_cells_at_scale_1() {

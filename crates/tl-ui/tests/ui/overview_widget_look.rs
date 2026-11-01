@@ -1227,10 +1227,11 @@ impl Rig<'_> {
 /// border, selected outline, resize corner, the preview's outline) covers any text of a widget:
 /// its parts, its chart's legend and axis labels, a group member's label and parts, the Memory
 /// by app legend. No text is clipped: each lies inside its widget, and when the box did not
-/// scroll before Edit Widgets, its widgets fit the body under the toolbar, so every text shows
-/// there. The CPU box's Total chart has the Total and Kernel legend at its top left, under the
-/// grip and the gear without the inset; the Memory by app widget filled the box body and was
-/// cut off by the toolbar.
+/// scroll before Edit Widgets, every widget it drew fits the body under the toolbar, so its
+/// texts show there, unless every widget is already at its minimum span (widgets a fit rule
+/// cut go under them and may scroll). The CPU box's Total
+/// chart has the Total and Kernel legend at its top left, under the grip and the gear without
+/// the inset; the Memory by app widget filled the box body and was cut off by the toolbar.
 #[gpui_kit::test]
 fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
     let mut r = open_with(cx, true);
@@ -1251,7 +1252,18 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                     mode: (*preset).into(),
                 });
                 let (container, editor) = r.parts(kind);
-                let scrolled = r.vcx.read_entity(&container, |c, _| c.placement().scrolls);
+                // The widgets the applied view draws. Pinning puts the widgets a fit rule cut
+                // under the lowest one, so only these must fit under the toolbar.
+                // A flow layout can also draw past the body (five charts at 200 %): that cut is
+                // the applied view's own, so it counts as a scroll here.
+                let (scrolled, shown) = r.vcx.read_entity(&container, |c, _| {
+                    let p = c.placement();
+                    let past = p
+                        .widgets
+                        .iter()
+                        .any(|w| w.bounds.bottom() > c.area().height + px(0.5));
+                    (p.scrolls || past, c.placed_ids())
+                });
                 r.page_action(&PerfWidgetEditBox { kind: kind.into() });
                 draw(r.vcx);
                 assert!(
@@ -1261,20 +1273,29 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                 let body = r
                     .bounds(format!("{}-scroll", editor_id(container_id)))
                     .expect("the edit body");
-                let (ids, content_h) = r
-                    .vcx
-                    .read_entity(&container, |c, _| (c.placed_ids(), c.placement().content_h));
+                let ids = r.vcx.read_entity(&container, |c, _| c.placed_ids());
                 assert!(!ids.is_empty(), "{at}: widgets placed");
-                if !scrolled {
-                    assert!(
-                        content_h <= body.size.height + px(0.5),
-                        "{at}: the widgets fit the body under the toolbar: {content_h:?} in {body:?}"
-                    );
-                }
+                // The widgets give rows down to their minimum span to fit; at their minimums
+                // a layout can still be taller than the body, and it scrolls.
+                let at_minimum = r.vcx.read_entity(&container, |c, _| {
+                    let g = c.placement().grid;
+                    c.layout().widgets.iter().all(|w| {
+                        w.cell
+                            .is_none_or(|cell| cell.rows <= g.widget_min_span(w).1.max(1))
+                    })
+                });
                 for id in ids {
                     let w = r
                         .bounds(widget_id(container_id, id))
                         .unwrap_or_else(|| panic!("{at}: widget {id} drawn"));
+                    // A box that did not scroll shows every widget it drew under the toolbar.
+                    let fits = !scrolled && !at_minimum && shown.contains(&id);
+                    if fits {
+                        assert!(
+                            w.bottom() <= body.bottom() + px(0.5),
+                            "{at}: widget {id} {w:?} fits the body under the toolbar {body:?}"
+                        );
+                    }
                     let frame = r.bounds(frame_id(container_id, id)).expect("frame");
                     let mut decorations: Vec<(String, Bounds<Pixels>)> = Vec::new();
                     for (name, sel) in [
@@ -1309,7 +1330,7 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                                 && b.bottom() <= w.bottom() + px(0.5),
                             "{at}: {part} {b:?} is cut off by widget {id} {w:?}"
                         );
-                        if !scrolled {
+                        if fits {
                             assert!(
                                 b.bottom() <= body.bottom() + px(0.5),
                                 "{at}: {part} {b:?} is cut off by the body {body:?}"

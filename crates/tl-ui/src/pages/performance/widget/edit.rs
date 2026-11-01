@@ -666,8 +666,10 @@ impl WidgetEditor {
                 (w.id, how)
             })
             .collect();
-        let mut g = self.edit_grid(cx);
+        let unit_grid = self.edit_grid(cx);
+        let mut g = unit_grid;
         g.unit = g.unit.max(g.row);
+        let mut fit_to = None;
         // A layout that fits the box body pins into at most the rows that fit at the unit in
         // the body under the toolbar, so it fits there too (tasklens-mo5t5). The rows then
         // fill that body (`WidgetContainer::set_view_height`).
@@ -686,8 +688,18 @@ impl WidgetEditor {
             if fits_box && rows > fit {
                 g.unit = (bottom + g.gutter) / fit - g.gutter;
             }
+            if fits_box {
+                fit_to = Some(fit as u16);
+            }
         }
-        grid::pin(layout, &drawn, &self.slots, &g)
+        let mut pinned = grid::pin(layout, &drawn, &self.slots, &g);
+        // Flow rows packed tighter than the grid's row pitch (a 1.2.0 GPU section draws its
+        // 18 px text rows 22 px apart) still pin to more rows: the tall widgets give rows down
+        // to their minimum span, so the box fits under the toolbar where it can.
+        if let Some(rows) = fit_to {
+            grid::fit_rows(&mut pinned, rows, &unit_grid);
+        }
+        pinned
     }
 
     /// The height of the body under the toolbar in Edit Widgets, px: the box body less the
