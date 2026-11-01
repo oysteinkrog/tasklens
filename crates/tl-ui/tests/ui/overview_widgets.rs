@@ -1,5 +1,5 @@
 //! Overview box widgets (UI-PRF-061, ADR-019): the widget entity, its compositions, the
-//! shared source data and the widget container on its inner grid. Run with
+//! shared source data, the widget container on its inner grid and Edit Widgets. Run with
 //! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
+    TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -18,8 +19,11 @@ use tl_model::layout::{
     ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
     PresetSetting, SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
 };
+use tl_model::layout::{convert_old_settings, gpu_box_layout};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot, SystemSnapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
@@ -27,14 +31,19 @@ use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::YScale;
+use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, open_context_menu};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::DeviceKey;
+use tl_ui::pages::performance::actions::{PerfWidgetSetForm, WidgetSource, bind_keys_performance};
 use tl_ui::pages::performance::widget::compose::{
     Composition, cell_min, row_forms, row_min, tile_min,
 };
 use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
-use tl_ui::pages::performance::widget::grid::{self, InnerGrid};
+use tl_ui::pages::performance::widget::edit::{
+    PREVIEW_ID, TOOLBAR_ID, WidgetEditor, default_layout, frame_id, gear_id, grip_id,
+};
+use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
 use tl_ui::pages::performance::widget::source::{
     Availability, AvailabilityChanged, SourceData, SourceStore,
@@ -53,6 +62,8 @@ const GONE: u8 = 0xee;
 struct Host {
     widgets: Vec<(Entity<MetricWidget>, f32, f32)>,
     container: Option<(Entity<Page>, f32, f32)>,
+    /// A widget editor around its container, in a box of its size.
+    editor: Option<(Entity<WidgetEditor>, f32, f32)>,
 }
 
 /// Stands in for the Overview page in the render counts: a cached view that holds the
@@ -93,6 +104,13 @@ impl Render for Host {
                     .w(px(*width))
                     .h(px(*height))
                     .child(c.clone().cached(StyleRefinement::default().size_full()))
+            }))
+            .children(self.editor.iter().map(|(e, width, height)| {
+                div()
+                    .flex_none()
+                    .w(px(*width))
+                    .h(px(*height))
+                    .child(e.clone().cached(StyleRefinement::default().size_full()))
             }))
     }
 }
@@ -253,6 +271,7 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let (host, vcx) = cx.add_window_view(|_, _| Host {
         widgets: Vec::new(),
         container: None,
+        editor: None,
     });
     vcx.simulate_scale_factor_change(1.0);
     let driver = vcx.update(|window, cx| {
@@ -1277,4 +1296,608 @@ fn overview_widget_container_flow_leaves_out_unavailable(cx: &mut TestAppContext
     assert!(!has2, "a widget that takes no space has no entity");
     assert!(demand);
     assert!(r.widget_rect(2).is_none());
+}
+
+// Edit Widgets (UI-PRF-061, ADR-019 "Editing").
+
+fn cell_of(layout: &ContainerLayout, id: u32) -> Option<WidgetCell> {
+    layout.widgets.iter().find(|w| w.id == id)?.cell
+}
+
+fn sorted(mut ids: Vec<(u32, gpui_kit::EntityId)>) -> Vec<(u32, gpui_kit::EntityId)> {
+    ids.sort_by_key(|(id, _)| *id);
+    ids
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn source(n: u8, metric: &str) -> WidgetSource {
+    WidgetSource {
+        device: key(n),
+        metric: Arc::from(metric),
+    }
+}
+
+fn labels(entries: &[MenuEntryInfo]) -> Vec<(String, MenuEntryKind, bool)> {
+    entries
+        .iter()
+        .map(|e| {
+            (
+                e.label.as_deref().unwrap_or("").to_owned(),
+                e.kind,
+                e.checked,
+            )
+        })
+        .collect()
+}
+
+impl Rig<'_> {
+    /// Puts an editor around a container showing `layout` in a box `w × h` px, with GPU A in
+    /// slot 0 and GPU B in slot 1, and draws.
+    fn editor(
+        &mut self,
+        layout: ContainerLayout,
+        w: f32,
+        h: f32,
+    ) -> (Entity<WidgetEditor>, Entity<WidgetContainer>) {
+        let hub = self.hub.clone();
+        let host = self.host.clone();
+        let out = self.vcx.update(|_, cx| {
+            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
+            store.borrow_mut().set_slots(&[key(1), key(2)], cx);
+            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
+            let e = cx.new(|cx| WidgetEditor::new(c.clone(), &hub, cx));
+            e.update(cx, |e, _| {
+                e.set_slots(vec![
+                    SlotDevice {
+                        key: key(1),
+                        name: Arc::from("Card A"),
+                    },
+                    SlotDevice {
+                        key: key(2),
+                        name: Arc::from("Card B"),
+                    },
+                ])
+            });
+            host.update(cx, |host, cx| {
+                host.editor = Some((e.clone(), w, h));
+                cx.notify();
+            });
+            (e, c)
+        });
+        draw(self.vcx);
+        out
+    }
+
+    /// Runs `f` on the editor and draws.
+    fn ed<R>(
+        &mut self,
+        e: &Entity<WidgetEditor>,
+        f: impl FnOnce(&mut WidgetEditor, &mut Window, &mut Context<WidgetEditor>) -> R,
+    ) -> R {
+        let out = self
+            .vcx
+            .update(|window, cx| e.update(cx, |e, cx| f(e, window, cx)));
+        draw(self.vcx);
+        out
+    }
+
+    fn start(&mut self, e: &Entity<WidgetEditor>) {
+        self.ed(e, |e, window, cx| e.start(window, cx));
+        assert!(self.vcx.read_entity(e, |e, _| e.is_editing()));
+    }
+
+    fn working(&mut self, e: &Entity<WidgetEditor>) -> Option<ContainerLayout> {
+        self.vcx
+            .read_entity(e, |e, _| e.edit().and_then(|x| x.working.clone()))
+    }
+
+    fn selected(&mut self, e: &Entity<WidgetEditor>) -> Option<u32> {
+        self.vcx
+            .read_entity(e, |e, _| e.edit().and_then(|x| x.selected))
+    }
+
+    fn shown(&mut self, c: &Entity<WidgetContainer>) -> ContainerLayout {
+        self.vcx.read_entity(c, |c, _| c.layout().clone())
+    }
+
+    fn saved_gpu(&mut self) -> Option<ContainerLayout> {
+        self.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .layouts
+                .known(GPU_BOX_CONTAINER)
+                .cloned()
+        })
+    }
+
+    fn windows(&mut self) -> usize {
+        self.vcx.update(|_, cx| cx.windows().len())
+    }
+
+    /// The entries of the open context menu.
+    fn menu_entries(&mut self) -> Vec<MenuEntryInfo> {
+        let menu = self
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a menu is open");
+        self.vcx
+            .update(|window, cx| menu.read(cx).entries_for_test(window))
+    }
+
+    fn submenu_entries(&mut self, entry: &MenuEntryInfo) -> Vec<MenuEntryInfo> {
+        let sub = entry.submenu.clone().expect("a submenu");
+        self.vcx
+            .update(|window, cx| sub.read(cx).entries_for_test(window))
+    }
+
+    fn press(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>, click_count: usize) {
+        self.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        draw(self.vcx);
+    }
+
+    fn move_to(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        self.vcx
+            .simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::none());
+        draw(self.vcx);
+    }
+
+    fn release(&mut self, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        self.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        draw(self.vcx);
+    }
+}
+
+/// Apply saves the working layout; Apply with no change saves nothing.
+#[gpui_kit::test]
+fn overview_widget_edit_apply_saves(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
+    r.start(&e);
+    assert!(r.vcx.read_entity(&c, |c, _| c.is_editing()));
+    assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_some(), "the edit toolbar");
+    assert!(
+        r.vcx.debug_bounds(leak(frame_id(1))).is_some(),
+        "the chrome"
+    );
+    assert_eq!(r.working(&e), Some(four_widgets()));
+
+    // Nothing changed: nothing is saved.
+    assert!(!r.ed(&e, |e, _, cx| e.apply(cx)));
+    assert_eq!(r.saved_gpu(), None);
+    assert!(!r.vcx.read_entity(&c, |c, _| c.is_editing()));
+    assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_none());
+
+    // The VRAM row moves to the top; Apply saves the layout and the box shows it.
+    r.start(&e);
+    let moved = r.ed(&e, |e, _, cx| {
+        e.select(3, cx);
+        e.move_selected(0, -4, cx)
+    });
+    assert!(moved);
+    let working = r.working(&e).expect("working layout");
+    assert_eq!(cell_of(&working, 3), Some(cell(0, 0, 6, 1)));
+    assert_eq!(r.saved_gpu(), None, "nothing is saved before Apply");
+    assert!(r.ed(&e, |e, _, cx| e.apply(cx)));
+    assert_eq!(r.saved_gpu(), Some(working.clone()));
+    assert_eq!(r.shown(&c), working);
+}
+
+/// Cancel puts the flow layout back unsaved, and every widget keeps its entity.
+#[gpui_kit::test]
+fn overview_widget_edit_cancel_restores(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let slot = |m: &str| selector(DeviceSelector::Slot(0), m);
+    let flow = ContainerLayout {
+        container: GPU_BOX_CONTAINER.to_owned(),
+        version: LAYOUT_VERSION,
+        preset: Some(PresetSetting {
+            id: "chart".to_owned(),
+            arrange: None,
+            split: None,
+        }),
+        widgets: vec![
+            widget(1, slot(&engine_gpu()), CHART_FORMS),
+            widget(2, slot("vram"), ROW_FORMS),
+        ],
+        next_id: 3,
+    };
+    let (e, c) = r.editor(flow.clone(), 400., 320.);
+    let before = sorted(r.entity_ids(&c));
+    assert_eq!(before.len(), 2);
+
+    // Entering pins the flow layout: cells, device keys and names.
+    r.start(&e);
+    let pinned = r.working(&e).expect("pinned");
+    assert!(pinned.preset.is_none());
+    for w in &pinned.widgets {
+        assert!(w.cell.is_some(), "{w:?}");
+        assert_eq!(w.source.device, DeviceSelector::Key(key(1)));
+        assert_eq!(w.device_name.as_deref(), Some("Card A"));
+    }
+    assert_eq!(
+        sorted(r.entity_ids(&c)),
+        before,
+        "pinning keeps the entities"
+    );
+
+    // Move, remove and add, then Cancel.
+    r.ed(&e, |e, _, cx| {
+        e.select(2, cx);
+        assert!(e.move_selected(0, 1, cx));
+        e.select(1, cx);
+        assert!(e.remove_selected(cx));
+    });
+    let added = r.ed(&e, |e, _, cx| e.add(&source(2, "vram"), cx));
+    assert_eq!(added, Some(3));
+    assert_eq!(r.selected(&e), Some(3));
+    r.ed(&e, |e, _, cx| e.cancel(cx));
+    assert_eq!(r.shown(&c), flow);
+    assert!(!r.vcx.read_entity(&c, |c, _| c.is_editing()));
+    assert_eq!(r.saved_gpu(), None);
+    assert_eq!(
+        sorted(r.entity_ids(&c)),
+        before,
+        "Cancel creates no widget entity again"
+    );
+}
+
+/// Undo steps back one action at a time, also over Reset.
+#[gpui_kit::test]
+fn overview_widget_edit_undo(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    assert!(!r.ed(&e, |e, _, cx| e.undo(cx)), "nothing to undo");
+    let start = r.working(&e);
+    r.ed(&e, |e, _, cx| {
+        e.select(3, cx);
+        assert!(e.move_selected(0, -4, cx));
+    });
+    let one = r.working(&e);
+    r.ed(&e, |e, _, cx| assert!(e.remove_selected(cx)));
+    assert!(r.working(&e).is_some_and(|l| l.widgets.len() == 3));
+    assert!(r.ed(&e, |e, _, cx| e.reset_confirmed(cx)));
+    assert_eq!(r.working(&e), None);
+    assert_eq!(r.shown(&c), default_layout(GPU_BOX_CONTAINER));
+
+    assert!(r.ed(&e, |e, _, cx| e.undo(cx)));
+    assert!(r.working(&e).is_some_and(|l| l.widgets.len() == 3));
+    assert!(r.ed(&e, |e, _, cx| e.undo(cx)));
+    assert_eq!(r.working(&e), one);
+    assert!(r.ed(&e, |e, _, cx| e.undo(cx)));
+    assert_eq!(r.working(&e), start);
+    assert_eq!(r.shown(&c), four_widgets());
+    let (changed, can_undo) = r.vcx.read_entity(&e, |e, _| {
+        let edit = e.edit().expect("editing");
+        (edit.changed(), edit.can_undo())
+    });
+    assert!(!changed && !can_undo);
+}
+
+/// The keys of the `PerfWidgetEdit` context.
+#[gpui_kit::test]
+fn overview_widget_edit_keyboard(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    r.vcx.update(|_, cx| bind_keys_performance(cx));
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+
+    // Reading order: 1 and 2 on row 0, then 3, then 4.
+    r.vcx.simulate_keystrokes("tab");
+    draw(r.vcx);
+    assert_eq!(r.selected(&e), Some(1));
+    r.vcx.simulate_keystrokes("tab tab");
+    draw(r.vcx);
+    assert_eq!(r.selected(&e), Some(3));
+    r.vcx.simulate_keystrokes("shift-tab");
+    draw(r.vcx);
+    assert_eq!(r.selected(&e), Some(2));
+
+    // Alt+Left moves widget 2 one column; Alt+Shift+Down makes it one row taller.
+    r.vcx.simulate_keystrokes("alt-left");
+    draw(r.vcx);
+    let working = r.working(&e).expect("working");
+    assert_eq!(cell_of(&working, 2).map(|c| c.col), Some(2));
+    r.vcx.simulate_keystrokes("alt-shift-down");
+    draw(r.vcx);
+    let working = r.working(&e).expect("working");
+    assert_eq!(cell_of(&working, 2).map(|c| c.rows), Some(5));
+
+    // Delete removes it, Ctrl+Z brings it back.
+    r.vcx.simulate_keystrokes("delete");
+    draw(r.vcx);
+    assert_eq!(cell_of(&r.working(&e).expect("working"), 2), None);
+    r.vcx.simulate_keystrokes("ctrl-z");
+    draw(r.vcx);
+    assert_eq!(r.working(&e), Some(working));
+
+    // Esc cancels.
+    r.vcx.simulate_keystrokes("escape");
+    draw(r.vcx);
+    assert!(!r.vcx.read_entity(&e, |e, _| e.is_editing()));
+    assert_eq!(r.shown(&c), four_widgets());
+    assert_eq!(r.saved_gpu(), None);
+
+    // Enter applies.
+    r.start(&e);
+    r.vcx.simulate_keystrokes("tab alt-down enter");
+    draw(r.vcx);
+    assert!(!r.vcx.read_entity(&e, |e, _| e.is_editing()));
+    let saved = r.saved_gpu().expect("saved");
+    assert_eq!(cell_of(&saved, 1).map(|c| c.row), Some(1));
+}
+
+/// Reset asks first; the confirmed Reset puts the default in the working layout.
+#[gpui_kit::test]
+fn overview_widget_reset_asks(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    let windows = r.windows();
+    r.ed(&e, |e, window, cx| e.request_reset(window, cx));
+    assert_eq!(r.windows(), windows + 1, "a confirm dialog opened");
+    assert_eq!(r.working(&e), Some(four_widgets()), "nothing changed yet");
+    assert!(r.ed(&e, |e, _, cx| e.reset_confirmed(cx)));
+    assert_eq!(r.working(&e), None);
+    assert_eq!(r.shown(&c), default_layout(GPU_BOX_CONTAINER));
+}
+
+/// A converted GPU box reset and applied leaves no entry and no old keys, so nothing converts
+/// at the next load and the box shows the built-in default.
+#[gpui_kit::test]
+fn overview_widget_reset_survives_reload(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let converted = r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            let mut layout = OverviewLayoutSetting::grid_default();
+            let gpu = layout
+                .grid
+                .iter_mut()
+                .find(|b| b.kind == "gpu")
+                .expect("a GPU box");
+            gpu.mode = Some("chart_engines".to_owned());
+            gpu.split = Some(0.6);
+            gpu.hidden = vec!["Video Decode".to_owned()];
+            d.settings.performance.overview = Some(layout);
+            assert!(convert_old_settings(&mut d.settings.performance));
+        });
+        gpu_box_layout(&TlSettings::settings(cx).performance)
+    });
+    assert!(converted.preset.is_some());
+    let (e, c) = r.editor(converted, 400., 320.);
+    r.start(&e);
+    assert!(r.ed(&e, |e, _, cx| e.reset_confirmed(cx)));
+    assert!(r.ed(&e, |e, _, cx| e.apply(cx)));
+    assert_eq!(r.shown(&c), default_layout(GPU_BOX_CONTAINER));
+
+    let perf = r
+        .vcx
+        .update(|_, cx| TlSettings::settings(cx).performance.clone());
+    assert!(perf.layouts.entry(GPU_BOX_CONTAINER).is_none());
+    let gpu = perf
+        .overview
+        .as_ref()
+        .and_then(|o| o.grid.iter().find(|b| b.kind == "gpu"))
+        .expect("the GPU box stays on the page");
+    assert_eq!(gpu.mode, None);
+    assert_eq!(gpu.split, None);
+    assert_eq!(gpu.arrange, None);
+    assert!(gpu.hidden.is_empty());
+    let mut reloaded = perf.clone();
+    assert!(!convert_old_settings(&mut reloaded), "nothing converts");
+    assert_eq!(gpu_box_layout(&reloaded), default_layout(GPU_BOX_CONTAINER));
+}
+
+/// The widget menu lists Source, Show and Chart, then Remove Widget; Show lists only the forms
+/// the metric offers; sources list only what the GPU reports.
+#[gpui_kit::test]
+fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let layout = grid_layout(vec![
+        (1, a("vram"), FormSet::all(), cell(0, 0, 6, 4)),
+        (2, a("power"), FormSet::VALUE, cell(0, 4, 6, 1)),
+    ]);
+    let (e, _) = r.editor(layout, 400., 320.);
+    r.start(&e);
+
+    let gear = r.vcx.debug_bounds(leak(gear_id(1))).expect("gear");
+    r.vcx.simulate_click(gear.center(), Modifiers::none());
+    draw(r.vcx);
+    assert_eq!(r.selected(&e), Some(1));
+    let entries = r.menu_entries();
+    let top: Vec<(String, MenuEntryKind)> = labels(&entries)
+        .into_iter()
+        .map(|(l, k, _)| (l, k))
+        .collect();
+    assert_eq!(
+        top,
+        [
+            ("Source".to_owned(), MenuEntryKind::Submenu),
+            ("Show".to_owned(), MenuEntryKind::Submenu),
+            ("Chart".to_owned(), MenuEntryKind::Submenu),
+            (String::new(), MenuEntryKind::Separator),
+            ("Remove Widget".to_owned(), MenuEntryKind::Item),
+        ]
+    );
+    let show = r.submenu_entries(&entries[1]);
+    let show: Vec<(String, bool)> = labels(&show).into_iter().map(|(l, _, c)| (l, c)).collect();
+    assert_eq!(
+        show,
+        [
+            ("Chart".to_owned(), true),
+            ("Load bar".to_owned(), true),
+            ("Value".to_owned(), true),
+            ("Min, average and peak".to_owned(), true),
+            ("Name".to_owned(), true),
+        ]
+    );
+    let chart = r.submenu_entries(&entries[2]);
+    let chart: Vec<(String, bool)> = labels(&chart).into_iter().map(|(l, _, c)| (l, c)).collect();
+    assert_eq!(
+        chart,
+        [
+            ("Fill under the line".to_owned(), true),
+            ("Dashed line".to_owned(), false)
+        ]
+    );
+    // Two GPUs: one submenu each. GPU A reports VRAM and power, not the temperature.
+    let source = r.submenu_entries(&entries[0]);
+    let gpus: Vec<String> = labels(&source).into_iter().map(|(l, _, _)| l).collect();
+    assert_eq!(gpus, ["Card A", "Card B"]);
+    let card_a = r.submenu_entries(&source[0]);
+    let items = labels(&card_a);
+    assert!(items.iter().any(|(l, _, c)| l == "VRAM" && *c), "{items:?}");
+    assert!(
+        items.iter().any(|(l, _, c)| l == "Power draw" && !*c),
+        "{items:?}"
+    );
+    assert!(
+        !items.iter().any(|(l, _, _)| l == "Temperature"),
+        "{items:?}"
+    );
+
+    // Power without a power limit has no bar to offer.
+    r.vcx
+        .update(|window, cx| tl_ui::components::menu::close_context_menu(window, cx));
+    draw(r.vcx);
+    let gear = r.vcx.debug_bounds(leak(gear_id(2))).expect("gear");
+    r.vcx.simulate_click(gear.center(), Modifiers::none());
+    draw(r.vcx);
+    let entries = r.menu_entries();
+    let top: Vec<String> = labels(&entries).into_iter().map(|(l, _, _)| l).collect();
+    assert_eq!(
+        top,
+        ["Source", "Show", "", "Remove Widget"],
+        "no Chart without a chart"
+    );
+    let show = r.submenu_entries(&entries[1]);
+    let show: Vec<String> = labels(&show).into_iter().map(|(l, _, _)| l).collect();
+    assert_eq!(show, ["Chart", "Value", "Min, average and peak", "Name"]);
+}
+
+/// The last checked form is disabled, so the form set is never empty.
+#[gpui_kit::test]
+fn overview_widget_last_form_disabled(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let layout = grid_layout(vec![(2, a("power"), FormSet::VALUE, cell(0, 0, 6, 1))]);
+    let (e, _) = r.editor(layout, 400., 320.);
+    r.start(&e);
+    let gear = r.vcx.debug_bounds(leak(gear_id(2))).expect("gear");
+    r.vcx.simulate_click(gear.center(), Modifiers::none());
+    draw(r.vcx);
+    let entries = r.menu_entries();
+    let show = r.submenu_entries(&entries[1]);
+    let value = labels(&show)
+        .into_iter()
+        .find(|(l, _, _)| l == "Value")
+        .expect("Value");
+    assert_eq!(value.1, MenuEntryKind::Disabled);
+    assert!(value.2, "checked");
+    assert!(!r.ed(&e, |e, _, cx| e.set_form(2, "value", false, cx)));
+
+    // With a second form on, Value can go.
+    r.vcx.update(|window, cx| {
+        let focus = e.read(cx).focus_handle().clone();
+        focus.dispatch_action(
+            &PerfWidgetSetForm {
+                id: 2,
+                form: Arc::from("label"),
+                on: true,
+            },
+            window,
+            cx,
+        );
+    });
+    draw(r.vcx);
+    assert!(r.ed(&e, |e, _, cx| e.set_form(2, "value", false, cx)));
+    let forms = r
+        .working(&e)
+        .and_then(|l| l.widgets.first().map(|w| w.forms));
+    assert_eq!(forms, Some(FormSet::LABEL));
+}
+
+/// A drag by the grip shows the preview of the target cells and drops the widget on them; the
+/// corner resizes; Add Widget places and selects a new widget.
+#[gpui_kit::test]
+fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 320.);
+    r.start(&e);
+    let pitch = r.vcx.read_entity(&c, |c, _| {
+        let g = c.placement().grid;
+        (g.cw + g.gutter, g.row + g.gutter)
+    });
+
+    // Widget 4 (GPU B's value row, the full width) moves to the top by its grip.
+    let grip = r.vcx.debug_bounds(leak(grip_id(4))).expect("grip");
+    let from = grip.center();
+    r.press(from, 1);
+    let to = point(from.x + px(pitch.0 * 3.), from.y - px(pitch.1 * 5.));
+    r.move_to(to);
+    let target = r.vcx.read_entity(&e, |e, _| e.drag_cell());
+    assert_eq!(target.map(|t| (t.col, t.row)), Some((0, 0)), "{target:?}");
+    assert!(r.vcx.debug_bounds(PREVIEW_ID).is_some(), "the preview");
+    assert_eq!(
+        r.working(&e),
+        Some(four_widgets()),
+        "nothing changes before the drop"
+    );
+    r.release(to);
+    assert!(r.vcx.debug_bounds(PREVIEW_ID).is_none());
+    let working = r.working(&e).expect("working");
+    assert_eq!(cell_of(&working, 4).map(|c| c.row), Some(0));
+    let cells: Vec<WidgetCell> = working.widgets.iter().filter_map(|w| w.cell).collect();
+    for (i, a) in cells.iter().enumerate() {
+        for b in &cells[i + 1..] {
+            assert!(!a.overlaps(b), "{a:?} {b:?}");
+        }
+    }
+
+    // The corner of widget 1 makes it one column wider.
+    let corner = r
+        .vcx
+        .debug_bounds(leak(tl_ui::pages::performance::widget::edit::corner_id(1)))
+        .expect("corner");
+    let before = cell_of(&working, 1).expect("cell");
+    let from = corner.center();
+    r.press(from, 1);
+    let to = point(from.x + px(pitch.0), from.y);
+    r.move_to(to);
+    r.release(to);
+    let after = cell_of(&r.working(&e).expect("working"), 1).expect("cell");
+    assert_eq!(after.cols, before.cols + 1, "{before:?} {after:?}");
+
+    // Add Widget: a VRAM widget of GPU B, selected, with Chart, Value and Name.
+    let id = r
+        .ed(&e, |e, _, cx| e.add(&source(2, "vram"), cx))
+        .expect("added");
+    assert_eq!(id, 5);
+    assert_eq!(r.selected(&e), Some(5));
+    let working = r.working(&e).expect("working");
+    let w = working
+        .widgets
+        .iter()
+        .find(|w| w.id == 5)
+        .expect("widget 5");
+    assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
+    assert_eq!(w.source.device, DeviceSelector::Key(key(2)));
+    assert_eq!(w.device_name.as_deref(), Some("Card B"));
+    assert!(w.cell.is_some());
 }

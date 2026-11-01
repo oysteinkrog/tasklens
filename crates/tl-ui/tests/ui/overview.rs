@@ -8076,6 +8076,46 @@ mod page {
                 .is_none()
         );
     }
+
+    /// Edit Layout and Edit Widgets are never on together (UI-PRF-061): starting Edit Widgets
+    /// ends Edit Layout, and Edit Layout does not start while a box is in Edit Widgets.
+    #[gpui_kit::test]
+    fn overview_widget_edit_modes_exclusive(cx: &mut TestAppContext) {
+        use tl_model::layout::GPU_BOX_CONTAINER;
+        use tl_ui::pages::performance::actions::{PerfWidgetCancel, PerfWidgetEditStart};
+        use tl_ui::pages::performance::widget::container::WidgetContainer;
+        use tl_ui::pages::performance::widget::edit::{WidgetEditor, any_editing, default_layout};
+        use tl_ui::pages::performance::widget::source::SourceStore;
+
+        let mut r = open(cx, true, 1200., 900.);
+        // Without a widget editor on the GPU box, the action does nothing.
+        r.edit_layout();
+        r.page_action(&PerfWidgetEditStart);
+        assert!(r.editing());
+
+        let hub = r.hub.clone();
+        let editor = r.vcx.update(|_, cx| {
+            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
+            let layout = default_layout(GPU_BOX_CONTAINER);
+            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
+            cx.new(|cx| WidgetEditor::new(c, &hub, cx))
+        });
+        r.page_action(&PerfWidgetEditStart);
+        assert!(!r.editing(), "Edit Widgets ends Edit Layout");
+        assert!(r.vcx.read_entity(&editor, |e, _| e.is_editing()));
+        assert!(r.vcx.update(|_, cx| any_editing(&hub, cx)));
+
+        r.page_action(&PerfOverviewEditLayout);
+        assert!(!r.editing(), "Edit Layout stays off during Edit Widgets");
+
+        r.vcx.update(|window, cx| {
+            let focus = editor.read(cx).focus_handle().clone();
+            focus.dispatch_action(&PerfWidgetCancel, window, cx);
+        });
+        draw(r.vcx);
+        assert!(!r.vcx.read_entity(&editor, |e, _| e.is_editing()));
+        r.edit_layout();
+    }
 }
 
 /// The Overview page inside `PerformancePage` in the main window, reached through the sidebar
