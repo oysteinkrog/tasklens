@@ -172,7 +172,7 @@ const GPU_ROWS: [(&str, bool, bool); 4] = [
 ];
 
 /// The page's entry, checked as a converted flow layout with ids from 1.
-fn converted<'a>(s: &'a Settings, container: &str, name: &str) -> &'a ContainerLayout {
+fn entry_of<'a>(s: &'a Settings, container: &str, name: &str) -> &'a ContainerLayout {
     let l = s
         .performance
         .layouts
@@ -199,7 +199,7 @@ fn every_cpu_fixture_converts_to_its_preset() {
                 continue;
             }
             assert!(converted, "{name}");
-            let l = converted(&s, "page.cpu", &name);
+            let l = entry_of(&s, "page.cpu", &name);
             assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some(mode));
             assert_eq!(widgets(l), cpu_widgets(mode, secondary), "{name}");
             // Only the CPU page converts.
@@ -218,7 +218,7 @@ fn every_memory_fixture_converts_to_its_preset() {
             continue;
         }
         assert!(converted, "{name}");
-        let l = converted(&s, "page.memory", &name);
+        let l = entry_of(&s, "page.memory", &name);
         assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some(view));
         assert_eq!(widgets(l), memory_widgets(view, swap, bar), "{name}");
         assert_eq!(s.performance.layouts.0.len(), 1, "{name}");
@@ -238,7 +238,7 @@ fn every_gpu_fixture_converts_when_the_page_is_built() {
             continue;
         }
         assert!(built, "{name}");
-        let l = converted(&s, GPU, name);
+        let l = entry_of(&s, GPU, name);
         assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some("default"));
         assert_eq!(widgets(l), gpu_widgets(power, clocks), "{name}");
         // Building the page again converts nothing.
