@@ -3159,7 +3159,11 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
         TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = false);
     });
     r.publish(|s| s.devices = Arc::new(box_catalog(2)));
-    net_series(&mut r, &[1000., 3000., 2000.], &[100., 300., 200.]);
+    net_series(
+        &mut r,
+        &[1_000_000.0, 3_000_000.0, 2_000_000.0],
+        &[100_000.0, 300_000.0, 200_000.0],
+    );
     let sel = selector(DeviceSelector::Key(Arc::from("aggregate:net")), "rx");
     let store = &mut r.store;
     let s = r.vcx.update(|_, cx| store.source(&sel, cx));
@@ -3189,8 +3193,8 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
 
     net_series(
         &mut r,
-        &[1000., 3000., 2000., 5000.],
-        &[100., 300., 200., 500.],
+        &[1_000_000.0, 3_000_000.0, 2_000_000.0, 5_000_000.0],
+        &[100_000.0, 300_000.0, 200_000.0, 500_000.0],
     );
     last = check(&mut r, "new sample", &last);
 
