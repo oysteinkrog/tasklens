@@ -37,6 +37,7 @@ use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQ
 use tl_model::validity::Validity;
 use tracing::{debug, warn};
 
+#[cfg(any(test, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
 use crate::action_tracker::{
     ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
@@ -49,7 +50,6 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args, tr_en};
-#[cfg(any(test, feature = "test-hooks"))]
 use crate::selector::TlSelector;
 use crate::table::TreeTableDelegate;
 use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
