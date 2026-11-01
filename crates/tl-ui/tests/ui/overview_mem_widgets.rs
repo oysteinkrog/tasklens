@@ -40,7 +40,7 @@ use tl_ui::pages::performance::actions::{
 };
 use tl_ui::pages::performance::memory_apps::LEGEND_ID;
 use tl_ui::pages::performance::overview::mem_box::{
-    MEM_APPS_ID, MEM_COMP_CHART_ID, MEM_USED_CHART_ID, MemBox, cell_id, row_id, spark_id,
+    MEM_APPS_ID, MEM_COMP_CHART_ID, MEM_USED_CHART_ID, MemBox, ROWS, cell_id, row_id, spark_id,
 };
 use tl_ui::pages::performance::overview::mem_flow::{
     apps_of, comp_of, row_of, rows_of, used_chart_of,
@@ -530,6 +530,40 @@ fn overview_mem_sample_renders_only_changed_rows(cx: &mut TestAppContext) {
     );
     let rows = r.vcx.update(|_, cx| mem.read(cx).rows());
     assert_eq!(rows[0].value.as_ref(), "30.00 GiB");
+}
+
+/// The render contract with a short body: a row the body leaves out is not placed and has no
+/// entity, so a sample that changes only that row renders nothing, not even the box.
+#[gpui_kit::test]
+fn overview_mem_sample_skips_clipped_rows(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 360.);
+    let mem = r.mem();
+    let container = r.container();
+    let flow = r.flow();
+    let commit = row_of(&flow, ROWS - 1).expect("a row widget");
+    assert!(
+        r.placed(commit).is_none(),
+        "the short body leaves out the Commit row"
+    );
+    let has_entity = |r: &mut Rig| {
+        let container = container.clone();
+        r.vcx
+            .update(|_, cx| container.read(cx).widget(commit).is_some())
+    };
+    assert!(!has_entity(&mut r), "the left-out row has no entity");
+    let count = |r: &mut Rig| {
+        let mem = mem.clone();
+        r.vcx.update(|_, cx| mem.read(cx).notify_count.get())
+    };
+    let before = count(&mut r);
+    r.engine.publish_with(|s| {
+        let sys = Arc::make_mut(&mut s.system);
+        sys.header.version += 1;
+        sys.memory.committed = 30 * GIB;
+    });
+    draw(r.vcx);
+    assert_eq!(count(&mut r), before, "the box does not notify");
+    assert!(!has_entity(&mut r), "no entity is made for the row");
 }
 
 /// UI-PRF-060 on widgets: in `apps` the Memory by app fixed widget draws the box's

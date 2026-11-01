@@ -914,19 +914,30 @@ impl MemBox {
 
     /// The text or meter of the rows in `changed` changed: their widgets draw them, so only
     /// those render again. When the box draws no rows (a grid layout keeps its own sources, and
-    /// `chart` and `apps` show none) nothing renders; before the first flow render places a
-    /// row's widget, the box renders.
+    /// `chart` and `apps` show none) nothing renders. A row with no widget entity renders the
+    /// box only when the box has not drawn it yet: before the first flow render, or when the
+    /// container places it but the box has not made its entity. A row a short body leaves out
+    /// is not placed and shows nothing, so it renders nothing.
     fn notify_rows(&mut self, changed: [bool; ROWS], cx: &mut Context<Self>) {
         if !self.host_draws() || !self.mode.has_rows() || !changed.contains(&true) {
             return;
         }
         let ids = mem_flow::rows_of(&self.flow);
+        let rendered = self.plan.plan().is_some();
         let mut box_too = false;
         for (id, _) in ids.iter().zip(changed).filter(|(_, c)| *c) {
-            let widget = id.and_then(|id| self.container.read(cx).widget(id).cloned());
+            let Some(id) = *id else {
+                // No widget: the box draws the row itself.
+                box_too = true;
+                continue;
+            };
+            let container = self.container.read(cx);
+            let widget = container.widget(id).cloned();
+            let placed = container.placement().bounds(id).is_some();
             match widget {
                 Some(w) => w.update(cx, |w, cx| w.flow_changed(cx)),
-                None => box_too = true,
+                None if !rendered || placed => box_too = true,
+                None => {}
             }
         }
         if box_too {
