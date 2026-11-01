@@ -50,6 +50,7 @@ use crate::components::validity::copy_text;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::overview::fit::fit_text;
+use crate::pages::performance::overview::gpu_flow::line_style;
 use crate::pages::performance::overview::mem_box::MeterRow;
 use crate::pages::performance::overview::parts::{
     ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
@@ -975,8 +976,10 @@ impl MetricWidget {
                 .child(cached(chart))
                 .into_any_element(),
             FlowLook::Text => {
+                // The line's style, with tabular digits: the box places the value at the
+                // width of its shape in this style (tasklens-lhliq.7).
                 let mut text = div();
-                *text.text_style() = t_xs(m);
+                *text.text_style() = line_style(m);
                 let p = part_id(id, "value");
                 text.debug_selector(move || p)
                     .flex_none()

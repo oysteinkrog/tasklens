@@ -18,21 +18,27 @@
 //! those widgets and drops the others, and Edit Widgets pins the widgets to the grid where the
 //! user saw them. The container places again on a resize and a layout change, and the box
 //! asks it to when the plan changed: a new engine list, mode, arrangement or split, and in the
-//! collapsed fit state (UI-PRF-059) a sample that makes another engine the busiest one. No
-//! other sample places anything; the temperature and power line keeps its place while its
-//! values come and go.
+//! collapsed fit state (UI-PRF-059) a sample that makes another engine the busiest one, and a
+//! sample that changes the shape of the temperature and power line. No other sample places
+//! anything.
 //!
 //! Drawing and placement share one function for each rectangle that is not plain flex: the
 //! first chart of a stacked `chart_engines` body with the split moved has the height
 //! [`stacked_chart_h`] gives for the body height at layout, and each value of the line is as
-//! wide as [`line_text_w`] measures its text when the box draws it ([`LineWidths`]), the
-//! " · " between two of them too. A sample that changes a value's text places nothing: the
-//! next placement takes the new widths.
+//! wide as [`line_value_w`] measures its text when the box draws it ([`LineWidths`]), the
+//! " · " between two of them as wide as [`line_text_w`] measures it. The line draws in
+//! [`line_style`], with tabular digits, so a value's width depends only on its shape: which
+//! values show and each value's text with its digits as zeros. The widths are part of the
+//! plan, so a sample that changes the shape (a value appears or goes away, or a value gains or
+//! loses a character, as 9.9 W to 10.0 W) places again, and a sample that keeps it places
+//! nothing (tasklens-lhliq.7, leader decision D).
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::{Bounds, Pixels, Refineable as _, Size, Window, point, px, size};
+use gpui_kit::{
+    Bounds, Pixels, Refineable as _, Size, TextStyleRefinement, Window, point, px, size,
+};
 use smallvec::SmallVec;
 use tl_model::layout::{
     ContainerLayout, DeviceSelector, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
@@ -51,7 +57,7 @@ use super::parts::{MIN_CHART_H, arrange_min_h};
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::pages::performance::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::pages::performance::widget::source::Availability;
-use crate::text::style::t_xs;
+use crate::text::style::numeric_style;
 use crate::theme::UiMetrics;
 
 /// The flow layout of preset `mode` with `arrange`, `split` and the box's hidden engine names
@@ -167,8 +173,9 @@ pub struct PlanSection {
 }
 
 /// What the GPU box shows in a flow layout, apart from the body size: the mode, the parts of
-/// each section and the widget of each part, the split, and the busiest engine. The box makes
-/// it from the engine lists, the layout and the split on each render. [`placer`] works out
+/// each section and the widget of each part, the split, the busiest engine and the widths of
+/// the line values it drew, which depend only on the line's shape. The box makes it from the
+/// engine lists, the layout, the split and the line it drew on each render. [`placer`] works out
 /// every widget's rectangle from it and the container's body size with the same fit rules
 /// the box draws by, so no rectangle comes from a paint.
 #[derive(Clone, PartialEq, Debug)]
@@ -191,6 +198,8 @@ pub struct FlowPlan {
     /// The box's render showed the first section collapsed (UI-PRF-059), so `busiest` decides
     /// which engine row shows.
     pub collapsed: bool,
+    /// The drawn widths of the temperature and power values and of the " · " between them.
+    pub line: LineWidths,
 }
 
 impl FlowPlan {
@@ -212,12 +221,12 @@ impl FlowPlan {
     }
 
     /// Every widget's rectangle in a body of `area`, px from the body's top left corner, in
-    /// drawing order. `line` has the drawn widths of the temperature and power values.
-    pub fn rects(&self, area: Size<Pixels>, line: &LineWidths) -> Vec<(&Part, Bounds<Pixels>)> {
+    /// drawing order.
+    pub fn rects(&self, area: Size<Pixels>) -> Vec<(&Part, Bounds<Pixels>)> {
         let mut out = Vec::new();
         match self.look {
             PlanLook::Cells => self.cell_rects(area, &mut out),
-            PlanLook::Rows | PlanLook::Chart => self.row_rects(area, line, &mut out),
+            PlanLook::Rows | PlanLook::Chart => self.row_rects(area, &mut out),
         }
         out
     }
@@ -287,13 +296,8 @@ impl FlowPlan {
 
     /// `chart_engines` and `chart`: each section's chart, engine rows, VRAM row and line, as
     /// `GpuBox::list_body` lays them out.
-    fn row_rects<'p>(
-        &'p self,
-        area: Size<Pixels>,
-        line: &LineWidths,
-        out: &mut Vec<(&'p Part, Bounds<Pixels>)>,
-    ) {
-        let m = &self.m;
+    fn row_rects<'p>(&'p self, area: Size<Pixels>, out: &mut Vec<(&'p Part, Bounds<Pixels>)>) {
+        let (m, line) = (&self.m, &self.line);
         let (row, gap, section_gap) = spacing(m);
         let with_rows = self.look == PlanLook::Rows;
         let side = self.side_share.filter(|_| with_rows);
@@ -491,12 +495,33 @@ impl LineWidths {
     }
 }
 
-/// The width the line's small text `text` takes when drawn: the window's shaping of it in the
-/// `t_xs` style over the inherited text style, rounded up to a whole px as GPUI's text layout
+/// The style of the temperature and power line, its values and its " · ": the `t_xs` size and
+/// weight with tabular digits (`numeric_style`), so a value's width does not change with its
+/// digits.
+pub fn line_style(m: &UiMetrics) -> TextStyleRefinement {
+    numeric_style(m, m.text.xs)
+}
+
+/// The shape of a line value's text: the text with each digit as a zero. Two texts of one
+/// shape draw at one width in [`line_style`].
+pub fn line_shape(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii_digit() { '0' } else { c })
+        .collect()
+}
+
+/// The width a line value's text takes when drawn: [`line_text_w`] of its [`line_shape`], so it
+/// changes only when the shape does.
+pub fn line_value_w(text: &str, m: &UiMetrics, window: &Window) -> f32 {
+    line_text_w(&line_shape(text), m, window)
+}
+
+/// The width the line's small text `text` takes when drawn: the window's shaping of it in
+/// [`line_style`] over the inherited text style, rounded up to a whole px as GPUI's text layout
 /// rounds a text's width.
 pub fn line_text_w(text: &str, m: &UiMetrics, window: &Window) -> f32 {
     let mut style = window.text_style();
-    style.refine(&t_xs(m));
+    style.refine(&line_style(m));
     let run = style.to_run(text.len());
     let font_size = style.font_size.to_pixels(window.rem_size());
     let w = window
@@ -566,13 +591,12 @@ fn flex_col(items: &[FlexItem], avail: f32, gap: f32) -> SmallVec<[f32; MAX_GPUS
     out
 }
 
-/// What the GPU box placed and drew: the plan of its last flow render, the widgets that
-/// render drew, in drawing order, and the widths of the line values it drew.
+/// What the GPU box placed and drew: the plan of its last flow render and the widgets that
+/// render drew, in drawing order.
 #[derive(Default, Debug)]
 struct PlanState {
     plan: Option<FlowPlan>,
     drawn: SmallVec<[u32; 16]>,
-    line: LineWidths,
 }
 
 /// The [`FlowPlan`] shared by the box (which makes it) and its [`placer`].
@@ -582,8 +606,8 @@ pub struct PlanCell(Rc<RefCell<PlanState>>);
 impl PlanCell {
     /// Takes the plan of a render. Returns whether it can place a widget elsewhere, so the box
     /// must place its widgets again. On a sample only the busiest engine of a collapsed first
-    /// section can do that: a new busiest engine in a section that is not collapsed moves
-    /// nothing.
+    /// section and the shape of the line can do that: a new busiest engine in a section that
+    /// is not collapsed moves nothing.
     pub fn set(&self, plan: FlowPlan) -> bool {
         let mut st = self.0.borrow_mut();
         let changed = match st.plan.as_mut() {
@@ -613,18 +637,6 @@ impl PlanCell {
     pub fn drawn(&self) -> SmallVec<[u32; 16]> {
         self.0.borrow().drawn.clone()
     }
-
-    /// The widths of the line values a render drew. They are not part of the plan: a value's
-    /// text changes on a sample, and a sample places nothing (only the next placement uses
-    /// the new widths).
-    pub fn set_line(&self, line: LineWidths) {
-        self.0.borrow_mut().line = line;
-    }
-
-    /// The widths of the line values the last flow render drew.
-    pub fn line(&self) -> LineWidths {
-        self.0.borrow().line.clone()
-    }
 }
 
 /// The placer of the GPU box's flow layouts: every widget of the box's plan at the rectangle
@@ -643,7 +655,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
         let st = cell.0.borrow();
         let preset = input.layout.preset.as_ref().map(|p| p.id.as_str());
         if let Some(plan) = st.plan.as_ref().filter(|p| preset == Some(p.look.id())) {
-            for ((id, metric), bounds) in plan.rects(input.area, &st.line) {
+            for ((id, metric), bounds) in plan.rects(input.area) {
                 let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
                     continue;
                 };
@@ -744,6 +756,7 @@ mod tests {
             stacked_share: None,
             busiest: 2,
             collapsed: false,
+            line: line_widths(),
         }
     }
 
@@ -756,11 +769,7 @@ mod tests {
     }
 
     fn rects_of(plan: &FlowPlan, w: f32, h: f32) -> Vec<(u32, [f32; 4])> {
-        rects_with(plan, w, h, &line_widths())
-    }
-
-    fn rects_with(plan: &FlowPlan, w: f32, h: f32, line: &LineWidths) -> Vec<(u32, [f32; 4])> {
-        plan.rects(gpui_kit::size(px(w), px(h)), line)
+        plan.rects(gpui_kit::size(px(w), px(h)))
             .into_iter()
             .map(|((id, _), b)| {
                 (
@@ -829,11 +838,14 @@ mod tests {
     /// value starts the line with no " · " before it.
     #[test]
     fn line_value_not_drawn_has_no_width() {
-        let line = LineWidths {
-            values: smallvec::smallvec![(7, 44.)],
-            sep: 9.,
+        let plan = FlowPlan {
+            line: LineWidths {
+                values: smallvec::smallvec![(7, 44.)],
+                sep: 9.,
+            },
+            ..rows_plan()
         };
-        let r = rects_with(&rows_plan(), 400., 300., &line);
+        let r = rects_of(&plan, 400., 300.);
         assert_eq!(r[5], (6, [0., 282., 0., 18.]));
         assert_eq!(r[6], (7, [0., 282., 44., 18.]));
     }
@@ -953,5 +965,56 @@ mod tests {
             cell.set(no_temp),
             "the GPU stopped reporting its temperature"
         );
+    }
+
+    /// A line value's shape is its text with each digit as a zero: values of one shape share
+    /// it, and a value that gains a character has another.
+    #[test]
+    fn line_shape_keeps_only_the_digit_count() {
+        assert_eq!(line_shape("16.5 W"), "00.0 W");
+        assert_eq!(line_shape("17.2 W"), line_shape("16.5 W"));
+        assert_ne!(line_shape("9.9 W"), line_shape("10.0 W"));
+        assert_eq!(line_shape("65 °C"), "00 °C");
+    }
+
+    /// The line draws in the `t_xs` size and weight with tabular digits.
+    #[test]
+    fn line_style_is_t_xs_with_tnum() {
+        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let (line, xs) = (line_style(&m), crate::text::style::t_xs(&m));
+        assert_eq!(line.font_size, xs.font_size);
+        assert_eq!(line.font_weight, xs.font_weight);
+        assert_eq!(line.line_height, xs.line_height);
+        assert_eq!(line.font_family, xs.font_family);
+        assert_eq!(
+            line.font_features.map(|f| f.0.as_slice().to_vec()),
+            Some(vec![("tnum".to_owned(), 1)])
+        );
+    }
+
+    /// The line's widths are part of the plan: a new width (a new shape) places again, the
+    /// same widths place nothing.
+    #[test]
+    fn plan_cell_places_again_when_the_line_shape_changes() {
+        let cell = PlanCell::default();
+        assert!(cell.set(rows_plan()));
+        assert!(!cell.set(rows_plan()), "same shape");
+        let wider = FlowPlan {
+            line: LineWidths {
+                values: smallvec::smallvec![(6, 30.), (7, 50.)],
+                sep: 9.,
+            },
+            ..rows_plan()
+        };
+        assert!(cell.set(wider), "the power value gained a character");
+        let gone = FlowPlan {
+            line: LineWidths {
+                values: smallvec::smallvec![(7, 50.)],
+                sep: 9.,
+            },
+            ..rows_plan()
+        };
+        assert!(cell.set(gone.clone()), "the temperature went away");
+        assert!(!cell.set(gone), "and stays away");
     }
 }

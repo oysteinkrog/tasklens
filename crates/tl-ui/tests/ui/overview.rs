@@ -2349,12 +2349,13 @@ mod bottom {
         assert!(r.vcx.debug_bounds(leak(engine_row_id(0, "dec"))).is_none());
     }
 
-    /// tasklens-lhliq.7, ADR-019 "Flow placement": the temperature and power line keeps its
-    /// place while its values come and go. A sample in which the power draw has no value yet
-    /// leaves the power widget placed, with its entity, and places nothing; the line then
-    /// draws no value. The next value shows in the same place, again without a placement.
+    /// tasklens-lhliq.7, ADR-019 "Flow placement", leader decision D: a line value that comes
+    /// and goes changes the line's shape, so it places once each time. A sample in which the
+    /// power draw has no value yet leaves the power widget placed with no width, with its
+    /// entity, and the line draws no value. The next value of the same shape shows in the same
+    /// place.
     #[gpui_kit::test]
-    fn gpu_box_line_values_place_nothing(cx: &mut TestAppContext) {
+    fn gpu_box_line_values_place_on_shape(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::overview::gpu_flow::widget_of;
 
         let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (box_h(300.), 200.));
@@ -2398,15 +2399,23 @@ mod bottom {
         draw(r.vcx);
         let (line, gone_count, gone_entity, gone_drawn) = state(&mut r);
         assert_eq!(line, "", "the line shows no value");
-        assert_eq!(gone_count, count, "a value going away places nothing");
+        assert_eq!(gone_count, count + 1, "a value going away places once");
         assert_eq!(gone_entity, entity, "the widget keeps its entity");
         assert!(!gone_drawn, "and draws nothing");
+        let gone_at = r
+            .vcx
+            .update(|_, cx| gpu.read(cx).container().read(cx).placement().bounds(power));
+        assert_eq!(
+            gone_at.map(|b| f32::from(b.size.width)),
+            Some(0.),
+            "a place with no width"
+        );
 
         r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), totals(Metric::valid(130.)))]));
         draw(r.vcx);
         let (line, back_count, back_entity, back_drawn) = state(&mut r);
         assert_eq!(line, "130.0 W");
-        assert_eq!(back_count, count, "a value coming back places nothing");
+        assert_eq!(back_count, count + 2, "a value coming back places once");
         assert_eq!(back_entity, entity);
         assert!(back_drawn);
         let back_at = r
@@ -8700,6 +8709,13 @@ mod page {
             (placed, g.drawn_widgets().to_vec())
         });
         assert!(!placed.is_empty(), "{what}: widgets placed");
+        // A line value with no reading keeps a place with no width and is not drawn.
+        let (placed, empty): (Vec<_>, Vec<_>) = placed
+            .into_iter()
+            .partition(|p| f32::from(p.1.size.width) > 0.);
+        for (id, _) in &empty {
+            assert!(!drawn.contains(id), "{what}: widget {id} has no width");
+        }
         let mut placed_ids: Vec<u32> = placed.iter().map(|p| p.0).collect();
         let mut drawn_ids = drawn.clone();
         placed_ids.sort_unstable();
@@ -8772,6 +8788,92 @@ mod page {
                 }
             }
         }
+    }
+
+    /// tasklens-lhliq.7, leader decision D: the temperature and power line draws with tabular
+    /// digits, so a value's width depends only on its shape. A sample that keeps the shape
+    /// places nothing; a value that gains or loses a character, goes away or comes back places
+    /// once. After each sample every widget's drawn bounds are its placed rectangle.
+    #[gpui_kit::test]
+    fn overview_gpu_line_places_on_shape(cx: &mut TestAppContext) {
+        use tl_model::system::Metric;
+        use tl_model::validity::Validity;
+        use tl_ui::pages::performance::overview::gpu_flow::widget_of;
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let publish = |r: &mut Rig, temp: Metric<f32>, power: f32| {
+            r.engine.publish_with(|s| {
+                let sys = Arc::make_mut(&mut s.system);
+                sys.header.version += 1;
+                let mut t = line_record(2);
+                t.temp_c = temp;
+                t.power_w = Metric::valid(power);
+                sys.gpus = Arc::from([(DeviceIdx(2), t)]);
+            });
+            draw(r.vcx);
+        };
+        publish(&mut r, Metric::valid(65.), 120.);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "chart_engines".into(),
+        });
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let (temp, power) = r.vcx.update(|_, cx| {
+            let flow = gpu.read(cx).flow().clone();
+            (
+                widget_of(&flow, 0, "temp").expect("temp"),
+                widget_of(&flow, 0, "power").expect("power"),
+            )
+        });
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let drawn = g.drawn_widgets();
+                (
+                    g.sections()[0].line.to_string(),
+                    g.container().read(cx).relayout_count.get(),
+                    (drawn.contains(&temp), drawn.contains(&power)),
+                )
+            })
+        };
+        let (line, count, drawn) = state(&mut r);
+        assert!(line.ends_with("120.0 W"), "{line}");
+        assert_eq!(drawn, (true, true), "both values drawn");
+        assert_drawn_is_placed(&mut r, &gpu, "start");
+
+        // New values of the same shape: nothing is placed.
+        publish(&mut r, Metric::valid(66.), 121.5);
+        let (line, same, _) = state(&mut r);
+        assert!(line.ends_with("121.5 W"), "{line}");
+        assert_eq!(same, count, "a sample that keeps the shape places nothing");
+        assert_drawn_is_placed(&mut r, &gpu, "same shape");
+
+        // The power value loses a character: one placement.
+        publish(&mut r, Metric::valid(66.), 99.5);
+        let (line, fewer, _) = state(&mut r);
+        assert!(line.ends_with("99.5 W"), "{line}");
+        assert_eq!(fewer, count + 1, "a new character count places once");
+        assert_drawn_is_placed(&mut r, &gpu, "fewer characters");
+
+        // The temperature goes away: one placement, and power starts the line.
+        publish(&mut r, Metric::with(Validity::WarmingUp), 99.5);
+        let (line, gone, drawn) = state(&mut r);
+        assert_eq!(line, "99.5 W");
+        assert_eq!(gone, count + 2, "a value going away places once");
+        assert_eq!(drawn, (false, true));
+        assert_drawn_is_placed(&mut r, &gpu, "temperature gone");
+
+        // It comes back: one placement.
+        publish(&mut r, Metric::valid(70.), 99.5);
+        let (line, back, drawn) = state(&mut r);
+        assert!(
+            line.ends_with("99.5 W") && line.len() > "99.5 W".len(),
+            "{line}"
+        );
+        assert_eq!(back, count + 3, "a value coming back places once");
+        assert_eq!(drawn, (true, true));
+        assert_drawn_is_placed(&mut r, &gpu, "temperature back");
     }
 
     /// tasklens-lhliq.7: with the stacked `chart_engines` split moved, the first chart's

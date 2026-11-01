@@ -71,8 +71,8 @@ use super::cpu_box::value_text;
 use super::fit::fit_text;
 use super::gpu_flow::{
     self, FlowPlan, LineWidths, Part, PlanCell, PlanLook, PlanSection, chart_of, engine_widget,
-    flow_layout, line_text_w, shows_engine, shows_line, shows_vram, stacked_chart_h,
-    stacked_min_second, widget_of,
+    flow_layout, line_style, line_text_w, line_value_w, shows_engine, shows_line, shows_vram,
+    stacked_chart_h, stacked_min_second, widget_of,
 };
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
@@ -1772,9 +1772,10 @@ fn row_slot(m: &UiMetrics) -> Div {
 }
 
 /// The temperature and power line of a section: of the values the GPU reports (`line`, placed
-/// whether known or not), those known now, joined by " · ", in the small secondary text. Each
-/// drawn value's width, and the separator's, come back for the placer, from the same shaping
-/// the text draws with (`gpu_flow::line_text_w`).
+/// whether known or not), those known now, joined by " · ", in the small secondary text with
+/// tabular digits (`gpu_flow::line_style`). Each drawn value's width, and the separator's,
+/// come back for the plan, from the same shaping the text draws with: a value's width is that
+/// of its shape (`gpu_flow::line_value_w`), so it changes only when the shape does.
 fn line_row(
     fd: &mut FlowDraw<'_>,
     line: &[Part],
@@ -1801,7 +1802,7 @@ fn line_row(
         };
         if k > 0 {
             let mut sep = div();
-            *sep.text_style() = t_xs(m);
+            *sep.text_style() = line_style(m);
             row = row.child(
                 sep.flex_none()
                     .whitespace_nowrap()
@@ -1809,26 +1810,26 @@ fn line_row(
                     .child(SEP),
             );
         }
-        let w = line_text_w(widget.read(cx).texts()[1], m, window);
+        let w = line_value_w(widget.read(cx).texts()[1], m, window);
         widths.values.push((*id, w));
         row = row.child(div().flex_none().child(widget));
     }
     (row.into_any_element(), widths)
 }
 
-/// Takes the plan, the widgets and the line widths of a flow render. When the plan can place a
-/// widget elsewhere, the container places its widgets again and keeps only the entities of
-/// those it places.
+/// Takes the plan, the widgets and the line widths of a flow render. The line widths go in the
+/// plan. When the plan can place a widget elsewhere (a new shape of the line included), the
+/// container places its widgets again and keeps only the entities of those it places.
 fn place_plan(
     container: &Entity<WidgetContainer>,
     cell: &PlanCell,
-    plan: FlowPlan,
+    mut plan: FlowPlan,
     drawn: SmallVec<[u32; 16]>,
     line: LineWidths,
     cx: &mut App,
 ) {
     cell.set_drawn(drawn);
-    cell.set_line(line);
+    plan.line = line;
     if cell.set(plan) {
         container.update(cx, |c, cx| {
             c.place_again(cx);
@@ -1901,6 +1902,7 @@ impl GpuBox {
             stacked_share: None,
             busiest: self.sections.first().map_or(0, |s| busiest(&s.engines)),
             collapsed: false,
+            line: LineWidths::default(),
         }
     }
 
