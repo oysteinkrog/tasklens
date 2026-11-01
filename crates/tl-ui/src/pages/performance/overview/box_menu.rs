@@ -13,10 +13,12 @@
 //! [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
 //! new arrangement or the default, the box views follow, and the layout is saved.
 //!
-//! When the GPU box hosts a widget editor (UI-PRF-061), its menu has "Edit Widgets…" above
-//! "Reset Box" ([`PerfWidgetEditStart`]), which ends Edit Layout and starts Edit Widgets. While
-//! the box shows the user's own widgets (a grid layout), "Arrange" and "Engines" are hidden,
-//! a "Layout" item asks before it replaces the widgets, and "Reset Box" asks before it saves.
+//! When a box hosts a widget editor (UI-PRF-061: the GPU box, and from phase 2 the CPU box),
+//! its menu has "Edit Widgets…" above "Reset Box" ([`PerfWidgetEditBox`]; the GPU box also keeps
+//! [`PerfWidgetEditStart`]), which ends Edit Layout and starts Edit Widgets. While the box shows
+//! the user's own widgets (a grid layout), "Arrange", "Engines", "Show power draw", "Power draw
+//! position" and "Show core clocks" are hidden, a "Layout" item asks before it replaces the
+//! widgets, and "Reset Box" asks before it saves.
 
 use gpui_kit::{
     AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement, MouseButton,
@@ -24,7 +26,8 @@ use gpui_kit::{
 };
 
 use smallvec::SmallVec;
-use tl_model::layout::{GPU_BOX_CONTAINER, convert_gpu_box, reset_to_default};
+use tl_model::layout::{CPU_BOX_CONTAINER, GPU_BOX_CONTAINER, reset_to_default};
+use tl_model::layout_boxes::convert_box;
 use tl_model::settings::TimelineClick;
 
 use super::OverviewPage;
@@ -40,7 +43,7 @@ use crate::pages::performance::actions::{
     PerfOverviewEditDone, PerfOverviewResetBox, PerfOverviewSetBoxArrange,
     PerfOverviewSetBoxClocks, PerfOverviewSetBoxEngine, PerfOverviewSetBoxMode,
     PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement, PerfOverviewSetTimelineClick,
-    PerfWidgetEditStart,
+    PerfWidgetEditBox, PerfWidgetEditStart,
 };
 use crate::pages::performance::cpu::PowerState;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
@@ -110,21 +113,41 @@ pub struct BoxMenuTarget {
     /// The CPU box's Core clocks chart, on or off; `None` for any other box.
     pub clocks: Option<bool>,
     pub engines: Vec<(SharedString, bool)>,
-    /// The GPU box hosts a widget editor: the menu offers "Edit Widgets…" (UI-PRF-061).
+    /// The box hosts a widget editor: the menu offers "Edit Widgets…" (UI-PRF-061).
     pub edit_widgets: bool,
-    /// The GPU box shows the user's own widgets (a grid layout): "Arrange" and "Engines" are
-    /// hidden and the "Layout" items are plain items that ask first.
+    /// The box shows the user's own widgets (a grid layout): "Arrange", "Engines" and the CPU
+    /// box's switches are hidden and the "Layout" items are plain items that ask first.
     pub widget_grid: bool,
 }
 
-/// Whether the GPU box's saved layout is a grid layout.
-fn gpu_grid_layout(cx: &App) -> bool {
+/// The widget container of the box of `kind`, when the box is on widgets: the GPU box
+/// (phase 1) and the CPU box (tasklens-6swdr.4). The other boxes join with their beads.
+pub fn widget_container(kind: BoxKind) -> Option<&'static str> {
+    match kind {
+        BoxKind::Gpu => Some(GPU_BOX_CONTAINER),
+        BoxKind::Cpu => Some(CPU_BOX_CONTAINER),
+        _ => None,
+    }
+}
+
+/// The kinds of the boxes on widgets, in page order.
+const WIDGET_BOXES: [BoxKind; 2] = [BoxKind::Cpu, BoxKind::Gpu];
+
+/// Whether `container`'s saved layout is a grid layout.
+fn grid_layout(container: &str, cx: &App) -> bool {
     cx.has_global::<TlSettings>()
         && TlSettings::settings(cx)
             .performance
             .layouts
-            .known(GPU_BOX_CONTAINER)
+            .known(container)
             .is_some_and(|l| l.preset.is_none())
+}
+
+/// The "Edit Widgets…" item's action for the box of `kind`.
+fn edit_action(kind: BoxKind) -> Box<dyn gpui_kit::Action> {
+    Box::new(PerfWidgetEditBox {
+        kind: kind.key().into(),
+    })
 }
 
 /// The box whose title line took the last right-press. The Performance tab clears it when a
@@ -393,6 +416,7 @@ pub fn box_menu(
 ) -> TlMenu {
     let kind = target.kind.key().into();
     let edit_widgets = target.edit_widgets;
+    let box_kind = target.kind;
     let menu = if target.kind == BoxKind::Timeline {
         click_items(menu, hub, window, cx)
     } else {
@@ -405,7 +429,7 @@ pub fn box_menu(
         move |menu, window, cx| mode_items(menu, target.clone(), window, cx),
     );
     let menu = if edit_widgets {
-        menu.item(tr(cx, "perf-widget-edit"), Box::new(PerfWidgetEditStart))
+        menu.item(tr(cx, "perf-widget-edit"), edit_action(box_kind))
     } else {
         menu
     };
@@ -420,9 +444,11 @@ impl OverviewPage {
     /// The box of `kind` with the mode and arrangement its layout shows.
     fn menu_target(&self, kind: BoxKind, cx: &App) -> BoxMenuTarget {
         let config = self.layout.config(kind);
-        let edit_widgets =
-            kind == BoxKind::Gpu && editor_of(&self.hub, GPU_BOX_CONTAINER, cx).is_some();
-        let widget_grid = edit_widgets && gpu_grid_layout(cx);
+        let container = widget_container(kind);
+        let edit_widgets = container.is_some_and(|c| editor_of(&self.hub, c, cx).is_some());
+        let widget_grid = edit_widgets && container.is_some_and(|c| grid_layout(c, cx));
+        // The CPU box's switches edit its flow layout; over a grid layout they are hidden.
+        let cpu = kind == BoxKind::Cpu && !widget_grid;
         let engines = if kind == BoxKind::Gpu && !widget_grid {
             let hidden = self.layout.hidden_gpu();
             self.gpu
@@ -441,62 +467,96 @@ impl OverviewPage {
             kind,
             mode: config.mode.id,
             arrange: config.arrange,
-            power: (kind == BoxKind::Cpu).then(|| (self.cpu.read(cx).power_state(), config.power)),
-            power_placement: (kind == BoxKind::Cpu).then_some(config.power_placement),
-            clocks: (kind == BoxKind::Cpu).then_some(config.clocks),
+            power: cpu.then(|| (self.cpu.read(cx).power_state(), config.power)),
+            power_placement: cpu.then_some(config.power_placement),
+            clocks: cpu.then_some(config.clocks),
             engines,
             edit_widgets,
             widget_grid,
         }
     }
 
-    /// The box in Edit Widgets, if any. Phase 1 has an editor on the GPU box only. The page
-    /// renders again when that editor starts or ends Edit Widgets, so the covers follow.
+    /// The box in Edit Widgets, if any. The page renders again when an editor starts or ends
+    /// Edit Widgets, so the covers follow.
     pub(super) fn widget_edit_box(&mut self, cx: &mut Context<Self>) -> Option<BoxKind> {
-        let editor = editor_of(&self.hub, GPU_BOX_CONTAINER, cx)?;
-        self.watch_widget_editor(&editor, cx);
-        editor.read(cx).is_editing().then_some(BoxKind::Gpu)
+        let mut editing = None;
+        for kind in WIDGET_BOXES {
+            let Some(editor) = widget_container(kind).and_then(|c| editor_of(&self.hub, c, cx))
+            else {
+                continue;
+            };
+            self.watch_widget_editor(&editor, cx);
+            if editing.is_none() && editor.read(cx).is_editing() {
+                editing = Some(kind);
+            }
+        }
+        editing
     }
 
-    /// Listens to `editor`'s start and end. One editor at a time; a new one replaces the old.
+    /// Listens to `editor`'s start and end, once per editor.
     fn watch_widget_editor(&mut self, editor: &Entity<WidgetEditor>, cx: &mut Context<Self>) {
         let id = editor.entity_id();
         if self
-            .widget_edit_sub
-            .as_ref()
-            .is_some_and(|(watched, _)| *watched == id)
+            .widget_edit_subs
+            .iter()
+            .any(|(watched, _)| *watched == id)
         {
             return;
         }
         let sub = cx.subscribe(editor, |this, _, _: &WidgetEditEvent, cx| this.notify(cx));
-        self.widget_edit_sub = Some((id, sub));
+        self.widget_edit_subs.push((id, sub));
     }
 
-    /// `PerfWidgetEditStart`: Edit Layout ends as "Done" ends it, then the GPU box starts Edit
-    /// Widgets. Without a widget editor on the GPU box it does nothing.
+    /// `PerfWidgetEditStart`: the GPU box starts Edit Widgets, as [`Self::start_widget_edit`].
     pub(super) fn on_widget_edit_start(
         &mut self,
         _: &PerfWidgetEditStart,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(editor) = editor_of(&self.hub, GPU_BOX_CONTAINER, cx) else {
+        self.start_widget_edit(BoxKind::Gpu, window, cx);
+    }
+
+    /// `PerfWidgetEditBox`: the box of `kind` starts Edit Widgets, as
+    /// [`Self::start_widget_edit`].
+    pub(super) fn on_widget_edit_box(
+        &mut self,
+        a: &PerfWidgetEditBox,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(kind) = BoxKind::from_key(&a.kind) {
+            self.start_widget_edit(kind, window, cx);
+        }
+    }
+
+    /// Edit Layout ends as "Done" ends it, then the box of `kind` starts Edit Widgets. Without a
+    /// widget editor on that box, or while another box is in Edit Widgets, it does nothing.
+    fn start_widget_edit(&mut self, kind: BoxKind, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = widget_container(kind).and_then(|c| editor_of(&self.hub, c, cx)) else {
             return;
         };
+        if self.widget_edit_box(cx).is_some_and(|k| k != kind) {
+            return;
+        }
         self.watch_widget_editor(&editor, cx);
         if self.is_editing() {
             self.on_edit_done(&PerfOverviewEditDone, window, cx);
         }
-        self.gpu.update(cx, |g, cx| g.prepare_edit(cx));
+        match kind {
+            BoxKind::Gpu => self.gpu.update(cx, |g, cx| g.prepare_edit(cx)),
+            BoxKind::Cpu => self.cpu.update(cx, |b, cx| b.prepare_edit(cx)),
+            _ => {}
+        }
         editor.update(cx, |e, cx| e.start(window, cx));
         self.notify(cx);
     }
 
-    /// "Replace your widgets?" confirmed: the GPU box takes preset `mode`, saved as its flow
-    /// layout and as the old `mode` key.
-    fn replace_gpu_widgets(&mut self, mode: &str, cx: &mut Context<Self>) {
+    /// "Replace your widgets?" confirmed: the box of `kind` takes preset `mode`, saved as its
+    /// flow layout and as the old `mode` key.
+    fn replace_widgets(&mut self, kind: BoxKind, mode: &str, cx: &mut Context<Self>) {
         let mut layout = self.layout.clone();
-        if layout.set_mode(BoxKind::Gpu, mode) {
+        if layout.set_mode(kind, mode) {
             self.set_layout(layout, cx);
             self.save_layout(cx);
         }
@@ -508,16 +568,18 @@ impl OverviewPage {
             let mut entry = perf
                 .overview
                 .as_ref()
-                .and_then(|o| o.grid.iter().find(|e| e.kind == BoxKind::Gpu.key()))
+                .and_then(|o| o.grid.iter().find(|e| e.kind == kind.key()))
                 .cloned()
                 .unwrap_or_default();
             entry.mode = Some(mode.to_owned());
-            perf.layouts.set(convert_gpu_box(&entry));
+            if let Some(flow) = convert_box(kind.key(), &entry) {
+                perf.layouts.set(flow);
+            }
         });
     }
 
-    /// Reset Box: the box's default mode, split, arrangement and no power strip, saved. The
-    /// GPU box also saves its default widget layout (ADR-019 "Saving the default"), so its old
+    /// Reset Box: the box's default mode, split, arrangement and no power strip, saved. A box on
+    /// widgets also saves its default widget layout (ADR-019 "Saving the default"), so its old
     /// keys do not convert again at the next start.
     fn reset_box_now(&mut self, kind: BoxKind, cx: &mut Context<Self>) {
         let mut layout = self.layout.clone();
@@ -525,14 +587,17 @@ impl OverviewPage {
             self.set_layout(layout, cx);
             self.save_layout(cx);
         }
-        if kind != BoxKind::Gpu || !cx.has_global::<TlSettings>() {
+        let Some(container) = widget_container(kind) else {
+            return;
+        };
+        if !cx.has_global::<TlSettings>() {
             return;
         }
         let mut perf = TlSettings::settings(cx).performance.clone();
-        reset_to_default(&mut perf, GPU_BOX_CONTAINER);
+        reset_to_default(&mut perf, container);
         if perf != TlSettings::settings(cx).performance {
             TlSettings::update(cx, |d| {
-                reset_to_default(&mut d.settings.performance, GPU_BOX_CONTAINER);
+                reset_to_default(&mut d.settings.performance, container);
             });
         }
     }
@@ -568,14 +633,16 @@ impl OverviewPage {
         let Some(kind) = BoxKind::from_key(&a.kind) else {
             return;
         };
-        if self.menu_target(kind, cx).widget_grid {
+        if let Some(container) =
+            widget_container(kind).filter(|_| self.menu_target(kind, cx).widget_grid)
+        {
             let Some(mode) = kind.modes().iter().find(|m| *m.id == *a.mode) else {
                 return;
             };
             let (id, label) = (mode.id, tr(cx, mode.label));
             let page = cx.entity().downgrade();
-            confirm_preset(GPU_BOX_CONTAINER, label, window, cx, move |_, cx| {
-                let _ = page.update(cx, |p, cx| p.replace_gpu_widgets(id, cx));
+            confirm_preset(container, label, window, cx, move |_, cx| {
+                let _ = page.update(cx, |p, cx| p.replace_widgets(kind, id, cx));
             });
             return;
         }
@@ -687,7 +754,7 @@ impl OverviewPage {
     }
 
     /// `PerfOverviewResetBox`: the box's default mode, split, arrangement and no power strip,
-    /// saved. Over the user's own widgets in the GPU box it asks first, since they cannot be
+    /// saved. Over the user's own widgets in a box it asks first, since they cannot be
     /// restored.
     pub(super) fn on_reset_box(
         &mut self,
@@ -698,9 +765,11 @@ impl OverviewPage {
         let Some(kind) = BoxKind::from_key(&a.kind) else {
             return;
         };
-        if self.menu_target(kind, cx).widget_grid {
+        if let Some(container) =
+            widget_container(kind).filter(|_| self.menu_target(kind, cx).widget_grid)
+        {
             let page = cx.entity().downgrade();
-            confirm_reset_now(GPU_BOX_CONTAINER, window, cx, move |_, cx| {
+            confirm_reset_now(container, window, cx, move |_, cx| {
                 let _ = page.update(cx, |p, cx| p.reset_box_now(kind, cx));
             });
             return;
@@ -727,7 +796,7 @@ impl OverviewPage {
                     let menu = mode_items(menu, target.clone(), window, cx);
                     if edit_widgets {
                         menu.separator()
-                            .item(tr(cx, "perf-widget-edit"), Box::new(PerfWidgetEditStart))
+                            .item(tr(cx, "perf-widget-edit"), edit_action(kind))
                     } else {
                         menu
                     }

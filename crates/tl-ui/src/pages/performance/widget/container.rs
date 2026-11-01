@@ -20,7 +20,8 @@
 //! A hosted container (the GPU box, `set_hosted`) holds the entities of a flow layout but does
 //! not draw them: its host draws each widget in the 1.1.0 part the preset's rules give it
 //! (`MetricWidget`'s `FlowLook`), and the values of one line side by side, joined by " · ". The
-//! host takes the entities with [`WidgetContainer::flow_widget`]. Its placer works out each
+//! host takes the entities with [`WidgetContainer::flow_widget`], and those of group widgets
+//! with [`WidgetContainer::flow_group`] (the CPU box's core rows and cells). Its placer works out each
 //! widget's rectangle from what the host shows and the body size, and the host asks for a new
 //! placement ([`WidgetContainer::place_again`]) when what it shows changed. In Edit Widgets,
 //! and for a grid layout, the container draws the widgets itself.
@@ -43,7 +44,7 @@ use tl_model::layout::{
 };
 
 use super::grid::{self, InnerGrid, InnerPlacement};
-use super::group_widget::GroupWidget;
+use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use crate::hub::SnapshotHub;
@@ -354,6 +355,33 @@ impl WidgetContainer {
         Some(widget)
     }
 
+    /// The entity of group widget `id` of the flow layout the host draws as `look` (the 1.2.0
+    /// part, `GroupFlowLook`), created with that look when it has none yet, so it makes no
+    /// member items of its own. `None` when the layout has no group widget `id`.
+    pub fn flow_group(
+        &mut self,
+        id: u32,
+        look: GroupFlowLook,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<GroupWidget>> {
+        if let Some(view) = self.widgets.get(&id) {
+            let WidgetView::Group(group) = view else {
+                return None;
+            };
+            let group = group.clone();
+            group.update(cx, |g, cx| g.set_flow_look(Some(look), cx));
+            return Some(group);
+        }
+        let setting = self.layout.widgets.iter().find(|w| w.id == id)?.clone();
+        if !matches!(setting.content, WidgetContent::Group(_)) {
+            return None;
+        }
+        let (hub, store) = (self.hub.clone(), Rc::clone(&self.store));
+        let group = cx.new(|cx| GroupWidget::with_flow_look(setting, &hub, store, Some(look), cx));
+        self.widgets.insert(id, WidgetView::Group(group.clone()));
+        Some(group)
+    }
+
     /// What the host shows changed: places the widgets again, which drops the entities of the
     /// widgets the placer no longer places. A hosted flow layout draws nothing here, so this does
     /// not notify then. Returns whether the placement changed.
@@ -570,11 +598,18 @@ impl WidgetContainer {
             if let WidgetContent::Group(_) = setting.content {
                 if let Some(WidgetView::Group(group)) = self.widgets.get(&p.id) {
                     group.update(cx, |g, cx| {
+                        // Outside a host-drawn flow layout the group draws its own items.
+                        if !host_draws {
+                            g.set_flow_look(None, cx);
+                        }
                         g.set_flow(flow, cx);
                         g.set_setting(setting, cx);
                         g.set_edit_inset(editing, cx);
                         g.set_size(area, cx);
                     });
+                } else if host_draws {
+                    // The host creates the entity with its look when it draws the group.
+                    continue;
                 } else {
                     let (hub, store) = (self.hub.clone(), Rc::clone(&self.store));
                     let group = cx.new(|cx| {

@@ -31,6 +31,7 @@
 
 pub mod box_menu;
 pub mod cpu_box;
+pub mod cpu_flow;
 pub mod disk_box;
 pub mod edit;
 pub mod fit;
@@ -62,7 +63,7 @@ use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{GPU_BOX_CONTAINER, convert_gpu_box};
+use tl_model::layout_boxes::convert_box;
 use tl_model::settings::{OverviewRange, StatusBarPlacement};
 use tl_model::snapshot::ComponentMask;
 
@@ -256,8 +257,8 @@ pub struct OverviewPage {
     _subs: SmallVec<[Subscription; 4]>,
     /// Window focus loss ends a drag, for the window of the last render.
     _activation: Option<Subscription>,
-    /// The widget editor whose start and end re-render the page (UI-PRF-061).
-    widget_edit_sub: Option<(EntityId, Subscription)>,
+    /// The widget editors whose start and end re-render the page (UI-PRF-061).
+    widget_edit_subs: SmallVec<[(EntityId, Subscription); 2]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -403,7 +404,7 @@ impl OverviewPage {
             figures_words: Template::new(cx, "perf-overview-figures", &["min", "avg", "peak"]),
             _subs: subs,
             _activation: None,
-            widget_edit_sub: None,
+            widget_edit_subs: SmallVec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -939,33 +940,37 @@ impl OverviewPage {
         self.notify(cx);
     }
 
-    /// Writes the layout to `[performance.overview]`. A saved flow layout of the GPU box follows
-    /// its mode, arrangement, split and hidden engines (ADR-019 "Flow placement": the box menu
-    /// edits the flow layout entry), since a build with that entry ignores the old keys. A grid
-    /// layout stays as it is.
+    /// Writes the layout to `[performance.overview]`. A saved flow layout of a box on widgets
+    /// (the GPU and CPU boxes) follows its mode, arrangement, split, hidden engines and CPU
+    /// switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
+    /// build with that entry ignores the old keys. A grid layout stays as it is.
     fn save_layout(&self, cx: &mut Context<Self>) {
         if !cx.has_global::<TlSettings>() {
             return;
         }
         let setting = self.layout.to_setting();
-        let flow = TlSettings::settings(cx)
-            .performance
-            .layouts
-            .known(GPU_BOX_CONTAINER)
-            .is_some_and(|l| l.preset.is_some());
-        let gpu = flow.then(|| {
-            let entry = setting
-                .grid
-                .iter()
-                .find(|e| e.kind == BoxKind::Gpu.key())
-                .cloned()
-                .unwrap_or_default();
-            convert_gpu_box(&entry)
-        });
+        let layouts = &TlSettings::settings(cx).performance.layouts;
+        let flows: SmallVec<[_; 2]> = [BoxKind::Gpu, BoxKind::Cpu]
+            .into_iter()
+            .filter_map(|kind| {
+                let container = box_menu::widget_container(kind)?;
+                layouts
+                    .known(container)
+                    .is_some_and(|l| l.preset.is_some())
+                    .then_some(())?;
+                let entry = setting
+                    .grid
+                    .iter()
+                    .find(|e| e.kind == kind.key())
+                    .cloned()
+                    .unwrap_or_default();
+                convert_box(kind.key(), &entry)
+            })
+            .collect();
         TlSettings::update(cx, |d| {
             let perf = &mut d.settings.performance;
             perf.overview = Some(setting);
-            if let Some(layout) = gpu {
+            for layout in flows {
                 perf.layouts.set(layout);
             }
         });
@@ -1254,6 +1259,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_set_box_engine))
             .on_action(cx.listener(Self::on_reset_box))
             .on_action(cx.listener(Self::on_widget_edit_start))
+            .on_action(cx.listener(Self::on_widget_edit_box))
             .on_action(cx.listener(Self::on_set_timeline_click))
     }
 }

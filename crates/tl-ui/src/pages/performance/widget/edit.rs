@@ -43,9 +43,9 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::layout::{
-    ContainerLayout, DeviceSelector, FormSet, LAYOUT_VERSION, MetricKey, SourceSelector,
-    WidgetCell, WidgetContent, WidgetOptions, WidgetSetting, default_box_layout, grid_cols,
-    overview_kind, reset_to_default,
+    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, FormSet, LAYOUT_VERSION, MetricKey,
+    SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting, default_box_layout,
+    grid_cols, overview_kind, reset_to_default,
 };
 use tl_model::layout_boxes::DeviceKind;
 
@@ -878,9 +878,13 @@ impl WidgetEditor {
         self.edit_with(cx, |l, _| remove_widget(l, id))
     }
 
-    /// The sources of the GPUs the box shows, now.
+    /// The sources the box can show, now: the CPU's metrics and logical CPUs in the CPU box,
+    /// else the GPUs the box shows.
     pub fn source_groups(&self, cx: &App) -> Vec<SourceGroup> {
         let snap = box_snapshot(&self.hub, cx);
+        if *self.id == *CPU_BOX_CONTAINER {
+            return menu::cpu_source_groups(&snap, cx);
+        }
         menu::source_groups(&self.slots, &snap, cx)
     }
 
@@ -893,19 +897,30 @@ impl WidgetEditor {
         let metric = MetricKey::new(&source.metric);
         let groups = self.source_groups(cx);
         let group = groups.iter().find(|g| *g.key == *source.device);
-        let offered = group
-            .and_then(|g| g.item(&metric))
+        let offered = groups
+            .iter()
+            .find_map(|g| g.item_on(&source.device, &metric))
             .map(|i| i.offered)
             .or_else(|| {
                 MetricMeta::of(DeviceKind::of_key(&source.device), &metric).map(|m| m.forms())
             })
             .unwrap_or(FormSet::VALUE | FormSet::LABEL);
-        let name = group.map(|g| Arc::from(g.name.as_ref())).or_else(|| {
-            self.slots
-                .iter()
-                .find(|s| *s.key == *source.device)
-                .map(|s| Arc::clone(&s.name))
-        });
+        // A logical CPU is named by its own catalog entry, not by the CPU's.
+        let snap = box_snapshot(&self.hub, cx);
+        let own = snap
+            .devices
+            .entries
+            .iter()
+            .find(|e| *e.persistent_key == *source.device)
+            .map(|e| Arc::clone(&e.display_name));
+        let name = own
+            .or_else(|| group.map(|g| Arc::from(g.name.as_ref())))
+            .or_else(|| {
+                self.slots
+                    .iter()
+                    .find(|s| *s.key == *source.device)
+                    .map(|s| Arc::clone(&s.name))
+            });
         let selector = SourceSelector {
             device: DeviceSelector::Key(Arc::clone(&source.device)),
             metric,

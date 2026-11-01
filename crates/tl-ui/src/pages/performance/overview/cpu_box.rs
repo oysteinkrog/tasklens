@@ -8,9 +8,21 @@
 //! core sparklines plot 1-second means. The total chart and the title value stay raw.
 //!
 //! The box is its own view. It formats its text only when the inputs' hash changes and notifies
-//! only when the text, a core's 1% bucket or a core's 0.1 GHz bucket changed, so an idle tick
-//! renders nothing. The total chart and the core sparklines are cached child views that re-render
-//! for their own series. Pointer movement never notifies.
+//! only when the title text changed, so an idle tick renders nothing. The total chart and the
+//! core sparklines are cached child views that re-render for their own series. Pointer movement
+//! never notifies.
+//!
+//! D-041, ADR-019 phase 2: the modes are presets of the box's widget layout. A preset is a flow
+//! layout (`cpu_flow.rs`): the total chart, the cores group, and the Core clocks chart and the
+//! power draw strip when they are on. Each part is a widget of the box's `WidgetContainer` that
+//! draws its 1.2.0 part at the place the rules above give it: the charts as `MetricWidget`s
+//! with `FlowLook::Chart`, the core rows and the `core_charts` cells as the cores group's
+//! `GroupWidget` with a `GroupFlowLook`. The box keeps the charts, the core rows' model and the
+//! sparklines and hands them to the widgets, so nothing is built twice. When a core's 1% or
+//! 0.1 GHz bucket changes, only the cores group renders again. Each render makes a
+//! `cpu_flow::CpuPlan`, from which the container's placer works out every widget's rectangle.
+//! A grid layout (the user's own widgets, after Apply) is drawn by the box's [`WidgetEditor`]
+//! and its `WidgetContainer`; so is the box while Edit Widgets is on.
 
 use std::cell::{Cell, Ref, RefCell};
 use std::hash::{Hash as _, Hasher as _};
@@ -18,13 +30,15 @@ use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Subscription, Window, div, px, relative, size,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EntityId, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::layout::{CPU_BOX_CONTAINER, ContainerLayout};
 use tl_model::series::Sample;
 use tl_model::settings::{CoreSmoothing, NetworkUnit};
 use tl_model::snapshot::Snapshot;
@@ -33,6 +47,7 @@ use tl_model::validity::Validity;
 use super::super::DeviceKey;
 use super::super::core_clocks::CoreClocks;
 use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
+use super::cpu_flow::{self, CpuFlowKeys, CpuLook, CpuPlan, PlanCell, PlanPower};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{
     Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE, PowerPlacement,
@@ -54,6 +69,11 @@ use crate::chart::{
 use crate::components::validity::copy_text;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::performance::widget::container::WidgetContainer;
+use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::pages::performance::widget::group_widget::GroupFlowLook;
+use crate::pages::performance::widget::metric_widget::FlowLook;
+use crate::pages::performance::widget::source::SourceStore;
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -196,6 +216,11 @@ impl EventEmitter<InnerSplitChanged> for CpuBox {}
 
 /// The box's debug selector.
 pub const CPU_BOX_ID: &str = "perf-overview-box-cpu";
+
+/// The debug selector of the text an empty grid layout shows (UI-PRF-061).
+pub const EMPTY_ID: &str = "perf-overview-cpu-widgets-empty";
+
+const KEY_EMPTY: &str = "perf-widget-empty";
 
 const KEY_TITLE: &str = "perf-card-heading-cpu";
 pub(crate) const KEY_CORE: &str = "perf-overview-core";
@@ -422,8 +447,8 @@ pub struct CpuBox {
     cpu: DeviceIdx,
     total: Entity<ChartView>,
     bars: Rc<RefCell<CoreBarsModel>>,
-    /// One sparkline per entry of `logical`.
-    sparks: Vec<Entity<ChartView>>,
+    /// One sparkline per entry of `logical`, shared with the cores group's flow look.
+    sparks: Rc<[Entity<ChartView>]>,
     /// Logical CPU id to device; `DeviceIdx(u16::MAX)` for an id with no catalog entry.
     logical: Vec<DeviceIdx>,
     /// `CPU_TOTAL` of each entry of `logical`.
@@ -441,7 +466,7 @@ pub struct CpuBox {
     side: bool,
     /// The core grid's size at the last paint, and the layout the last render used.
     grid_size: Rc<Cell<Size<Pixels>>>,
-    grid: CoreBarsLayout,
+    grid: Rc<Cell<CoreBarsLayout>>,
     catalog_version: u64,
     title: SharedString,
     value: SharedString,
@@ -481,11 +506,48 @@ pub struct CpuBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
+    /// The flow layout of the shown preset (ADR-019): which parts the box shows.
+    flow: ContainerLayout,
+    /// The saved grid layout, when the user has one: the editor draws it.
+    saved_grid: Option<ContainerLayout>,
+    /// Edit Widgets is on: the editor draws the body.
+    editing: bool,
+    editor: Entity<WidgetEditor>,
+    container: Entity<WidgetContainer>,
+    /// The plan of the last flow render, which the container's placer reads.
+    plan: PlanCell,
     _subs: [Subscription; 5],
+    _editor_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+}
+
+/// The saved grid layout of the CPU box, if any.
+fn saved_grid(cx: &App) -> Option<ContainerLayout> {
+    if !cx.has_global::<TlSettings>() {
+        return None;
+    }
+    TlSettings::settings(cx)
+        .performance
+        .layouts
+        .known(CPU_BOX_CONTAINER)
+        .filter(|l| l.preset.is_none())
+        .cloned()
+}
+
+/// The keys of the default mode, with nothing switched on.
+fn default_keys() -> CpuFlowKeys<'static> {
+    CpuFlowKeys {
+        mode: MODES[0].id,
+        arrange: Some(Arrange::Auto),
+        split: None,
+        power: false,
+        power_split: None,
+        power_placement: None,
+        clocks: false,
+    }
 }
 
 impl CpuBox {
@@ -499,13 +561,30 @@ impl CpuBox {
         total.update(cx, |v, cx| v.set_hover_link(hover_link.clone(), cx));
         let snap = box_snapshot(hub, cx);
         let grid_size = size(px(0.), px(0.));
+        let flow = cpu_flow::flow_layout(default_keys());
+        let saved = saved_grid(cx);
+        let plan = PlanCell::default();
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::new(hub)));
+            let shown = saved.clone().unwrap_or_else(|| flow.clone());
+            let plan = plan.clone();
+            cx.new(|cx| {
+                let mut c = WidgetContainer::new(CPU_BOX_CONTAINER, shown, hub, store, cx);
+                c.set_flow_placer(Some(cpu_flow::placer(plan)), cx);
+                // The box draws the widgets of its flow layouts in their 1.2.0 parts.
+                c.set_hosted(true, cx);
+                c
+            })
+        };
+        let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
+        let editor_sub = cx.subscribe(&editor, Self::on_widget_edit);
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
             cpu,
             total,
             bars: Rc::default(),
-            sparks: Vec::new(),
+            sparks: Rc::from([]),
             logical: Vec::new(),
             logical_ids: Vec::new(),
             freq_ids: Vec::new(),
@@ -513,7 +592,12 @@ impl CpuBox {
             averages: Vec::new(),
             paused: timeline::paused(cx).is_some(),
             grid_size: Rc::new(Cell::new(grid_size)),
-            grid: core_bars_layout(0, grid_size.width, grid_size.height, 1.),
+            grid: Rc::new(Cell::new(core_bars_layout(
+                0,
+                grid_size.width,
+                grid_size.height,
+                1.,
+            ))),
             catalog_version: u64::MAX,
             title: tr(cx, KEY_TITLE),
             value: SharedString::default(),
@@ -557,6 +641,13 @@ impl CpuBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
+            flow,
+            saved_grid: saved,
+            editing: false,
+            editor,
+            container,
+            plan,
+            _editor_sub: editor_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -592,7 +683,143 @@ impl CpuBox {
 
     /// The core grid layout of the last render.
     pub fn core_layout(&self) -> CoreBarsLayout {
-        self.grid
+        self.grid.get()
+    }
+
+    /// The editor of the box's widgets (Edit Widgets, UI-PRF-061).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The container of the box's widgets.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The flow layout of the shown preset. Its preset keeps the mode, the arrangement, the
+    /// strip's placement and the two switches; the splits are the box's own, so a drag does not
+    /// lay the widgets out again.
+    pub fn flow(&self) -> &ContainerLayout {
+        &self.flow
+    }
+
+    /// The saved grid layout the box shows, if any.
+    pub fn grid(&self) -> Option<&ContainerLayout> {
+        self.saved_grid.as_ref()
+    }
+
+    /// The plan of the last flow render: the parts and their widgets the placer places.
+    pub fn flow_plan(&self) -> Option<CpuPlan> {
+        self.plan.plan()
+    }
+
+    /// The widgets the last flow render drew, in drawing order.
+    pub fn drawn_widgets(&self) -> SmallVec<[u32; 4]> {
+        self.plan.drawn()
+    }
+
+    /// Whether the box draws the parts of its flow layout itself (no grid layout, not editing).
+    fn host_draws(&self) -> bool {
+        !self.editing && self.saved_grid.is_none()
+    }
+
+    /// Gets the container ready for Edit Widgets: with a flow layout it takes the preset's
+    /// widgets that the last render drew, placed where they were drawn, so the editor pins
+    /// them there. A Core clocks chart or a power draw strip the mode does not show is left out,
+    /// as it took no space. With a grid layout the container already holds it.
+    pub fn prepare_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing || self.saved_grid.is_some() {
+            return;
+        }
+        let drawn = self.plan.drawn();
+        let mut layout = self.flow.clone();
+        layout.widgets.retain(|w| drawn.contains(&w.id));
+        self.container.update(cx, |c, cx| {
+            c.set_layout(layout, cx);
+            c.place_again(cx);
+        });
+    }
+
+    /// Edit Widgets started or ended. When it ends, the box shows the saved layout again.
+    fn on_widget_edit(
+        &mut self,
+        _: Entity<WidgetEditor>,
+        ev: &WidgetEditEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            WidgetEditEvent::Started => self.editing = true,
+            WidgetEditEvent::Ended { .. } => {
+                self.editing = false;
+                self.saved_grid = saved_grid(cx);
+                self.show_saved(cx);
+            }
+        }
+        self.notify(cx);
+    }
+
+    /// The container holds the saved grid layout, or the flow layout the box draws.
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        let shown = self.saved_grid.clone().unwrap_or_else(|| self.flow.clone());
+        self.container.update(cx, |c, cx| c.set_layout(shown, cx));
+    }
+
+    /// The saved grid layout came, went or changed: outside Edit Widgets the box shows it.
+    fn sync_grid(&mut self, cx: &mut Context<Self>) {
+        let grid = saved_grid(cx);
+        if grid == self.saved_grid {
+            return;
+        }
+        self.saved_grid = grid;
+        if self.editing {
+            return;
+        }
+        self.show_saved(cx);
+        self.notify(cx);
+    }
+
+    /// The flow layout of the shown mode, arrangement and switches. Returns whether it changed.
+    fn sync_flow(&mut self, cx: &mut Context<Self>) -> bool {
+        let has_arrange = ARRANGE.iter().any(|(id, _)| *id == self.mode.id());
+        let flow = cpu_flow::flow_layout(CpuFlowKeys {
+            mode: self.mode.id(),
+            arrange: has_arrange.then_some(self.arrange),
+            split: None,
+            power: self.power,
+            power_split: None,
+            power_placement: (self.power_placement != PowerPlacement::FullWidth)
+                .then_some(self.power_placement),
+            clocks: self.clocks,
+        });
+        if flow == self.flow {
+            return false;
+        }
+        self.flow = flow;
+        if !self.editing && self.saved_grid.is_none() {
+            self.show_saved(cx);
+        }
+        true
+    }
+
+    fn notify(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A core row's text or bucket changed: the cores group draws the rows, so only it renders
+    /// again. Without a drawn group (a grid layout keeps its own sources) the box does nothing;
+    /// before the first flow render the box renders.
+    fn notify_cores(&mut self, cx: &mut Context<Self>) {
+        if !self.host_draws() {
+            return;
+        }
+        let group = cpu_flow::cores_of(&self.flow)
+            .and_then(|id| self.container.read(cx).group(id).cloned());
+        match group {
+            Some(g) => g.update(cx, |g, cx| g.flow_changed(cx)),
+            None => self.notify(cx),
+        }
     }
 
     /// The title, value and line text.
@@ -616,6 +843,7 @@ impl CpuBox {
     pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
         if arrange != self.arrange {
             self.arrange = arrange;
+            self.sync_flow(cx);
             if matches!(self.mode, CpuMode::ChartCores | CpuMode::CoreCharts) {
                 cx.notify();
             }
@@ -656,6 +884,7 @@ impl CpuBox {
         let mode = CpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            self.sync_flow(cx);
             self.sync_hover(cx);
             cx.notify();
         }
@@ -729,6 +958,7 @@ impl CpuBox {
             let base = clocks_base(&self.settings);
             self.core_clocks = Some(CoreClocks::new(view, base, false, &snap, cx));
         }
+        self.sync_flow(cx);
         self.sync_hover(cx);
         cx.notify();
     }
@@ -800,6 +1030,7 @@ impl CpuBox {
             chart.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
             self.power_chart = Some(chart);
         }
+        changed |= self.sync_flow(cx);
         self.sync_hover(cx);
         if changed {
             cx.notify();
@@ -857,8 +1088,10 @@ impl CpuBox {
         }
         let snap = box_snapshot(&hub, cx);
         let mut changed = false;
+        let mut rows = false;
         if devices {
             changed |= self.sync_devices(&snap, cx);
+            rows |= changed;
         }
         if series && !changed {
             let runs = ChangedRuns::new(&ev.changed_series);
@@ -870,7 +1103,7 @@ impl CpuBox {
                     .chain(&self.freq_ids)
                     .any(|id| runs.contains(*id))
             {
-                changed |= self.sync_bars(&snap);
+                rows |= self.sync_bars(&snap);
             }
         }
         if system {
@@ -886,9 +1119,10 @@ impl CpuBox {
             clocks.sync(&snap, cx);
         }
         if changed {
-            #[cfg(any(test, feature = "test-hooks"))]
-            self.notify_count.set(self.notify_count.get() + 1);
-            cx.notify();
+            self.notify(cx);
+        }
+        if rows {
+            self.notify_cores(cx);
         }
     }
 
@@ -904,9 +1138,8 @@ impl CpuBox {
         let snap = box_snapshot(&self.hub, cx);
         self.sync_bars(&snap);
         self.sync_text(&snap, true);
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.notify_count.set(self.notify_count.get() + 1);
-        cx.notify();
+        self.notify(cx);
+        self.notify_cores(cx);
     }
 
     /// Rebuilds the logical CPU list, the row names and the sparklines when the catalog changed.
@@ -943,17 +1176,21 @@ impl CpuBox {
     /// One sparkline per logical CPU. Keeps the charts of CPUs whose device did not change.
     fn sync_sparks(&mut self, old: &[DeviceIdx], cx: &mut Context<Self>) {
         let theme = current(cx).clone();
-        self.sparks.truncate(self.logical.len());
+        let mut sparks: Vec<Entity<ChartView>> = self.sparks.to_vec();
+        sparks.truncate(self.logical.len());
         for (i, &device) in self.logical.iter().enumerate() {
             let spec = core_spec(device, &self.settings, &theme);
-            if let Some(chart) = self.sparks.get(i) {
+            if let Some(chart) = sparks.get(i) {
                 if old.get(i) != Some(&device) {
                     chart.update(cx, |v, cx| v.set_spec(spec, cx));
                 }
             } else {
                 let chart = spark_chart(spec, ValueFormat::Percent, &self.hub, cx);
-                self.sparks.push(chart);
+                sparks.push(chart);
             }
+        }
+        if sparks[..] != self.sparks[..] {
+            self.sparks = sparks.into();
         }
     }
 
@@ -1036,11 +1273,10 @@ impl CpuBox {
             self.averages.fill(CoreAverage::default());
             let snap = box_snapshot(&self.hub, cx);
             if self.sync_bars(&snap) {
-                #[cfg(any(test, feature = "test-hooks"))]
-                self.notify_count.set(self.notify_count.get() + 1);
-                cx.notify();
+                self.notify_cores(cx);
             }
         }
+        self.sync_grid(cx);
         let versions = chart_section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1092,6 +1328,7 @@ impl CpuBox {
         bars.set_freqs(freqs.into_iter());
         drop(bars);
         cx.notify();
+        self.notify_cores(cx);
     }
 
     fn rebuild_spec(&mut self, cx: &mut Context<Self>) {
@@ -1118,28 +1355,98 @@ impl CpuBox {
     }
 }
 
+/// The widgets a flow render drew, in drawing order.
+type Drawn = SmallVec<[u32; 4]>;
+
+/// "No widgets. Use Edit Widgets to add some.", centred in the body (UI-PRF-061).
+fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
+    let mut text = div();
+    *text.text_style() = t_xs(m);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            text.debug_selector(|| EMPTY_ID.to_owned())
+                .text_color(theme.text_secondary)
+                .child(tr(cx, KEY_EMPTY)),
+        )
+        .into_any_element()
+}
+
+fn cached_full<V: Render>(view: Entity<V>) -> AnyElement {
+    view.cached(StyleRefinement::default().size_full())
+        .into_any_element()
+}
+
 impl CpuBox {
+    /// `chart` filling its part, drawn by widget `id` as `FlowLook::Chart`; the chart itself
+    /// when the layout has no such widget.
+    fn chart_widget(
+        &self,
+        id: Option<u32>,
+        chart: &Entity<ChartView>,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let widget = id.and_then(|id| {
+            let look = FlowLook::Chart(chart.clone());
+            let w = self
+                .container
+                .update(cx, |c, cx| c.flow_widget(id, look, cx))?;
+            drawn.push(id);
+            Some(w)
+        });
+        match widget {
+            Some(w) => cached_full(w),
+            None => cached_full(chart.clone()),
+        }
+    }
+
+    /// The cores group drawing `look`, when the layout has it.
+    fn cores_widget(
+        &self,
+        look: GroupFlowLook,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let id = cpu_flow::cores_of(&self.flow)?;
+        let group = self
+            .container
+            .update(cx, |c, cx| c.flow_group(id, look, cx))?;
+        drawn.push(id);
+        Some(cached_full(group))
+    }
+
     /// The total chart, filling its part.
-    fn chart_part(&self) -> AnyElement {
+    fn chart_part(&self, drawn: &mut Drawn, cx: &mut Context<Self>) -> AnyElement {
+        let id = cpu_flow::total_of(&self.flow);
+        let chart = self.chart_widget(id, &self.total, drawn, cx);
         div()
             .debug_selector(|| CPU_CHART_ID.into())
             .relative()
             .size_full()
-            .child(
-                self.total
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            )
+            .child(chart)
             .into_any_element()
     }
 
     /// The total chart with the Core clocks chart under it when that is shown, on one time
     /// axis: the two take equal shares of the column.
-    fn graph_part(&self, m: &UiMetrics) -> AnyElement {
-        let chart = self.chart_part();
-        let Some(clocks) = self.core_clocks.as_ref().filter(|_| self.clocks_shown()) else {
+    fn graph_part(&self, m: &UiMetrics, drawn: &mut Drawn, cx: &mut Context<Self>) -> AnyElement {
+        let chart = self.chart_part(drawn, cx);
+        let Some(view) = self
+            .core_clocks
+            .as_ref()
+            .filter(|_| self.clocks_shown())
+            .map(|c| c.view().clone())
+        else {
             return chart;
         };
+        let clocks = self.chart_widget(cpu_flow::clocks_of(&self.flow), &view, drawn, cx);
         div()
             .flex()
             .flex_col()
@@ -1153,83 +1460,134 @@ impl CpuBox {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(
-                        clocks
-                            .view()
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
+                    .child(clocks),
             )
             .into_any_element()
     }
 
-    /// The core rows with their sparklines.
-    fn rows_part(&mut self, m: &UiMetrics, cx: &mut Context<Self>) -> AnyElement {
+    /// The core rows with their sparklines, drawn by the cores group.
+    fn rows_part(
+        &mut self,
+        m: &UiMetrics,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let look = GroupFlowLook::CoreRows {
+            bars: Rc::clone(&self.bars),
+            sparks: Rc::clone(&self.sparks),
+            grid_size: Rc::clone(&self.grid_size),
+            layout: Rc::clone(&self.grid),
+        };
+        if let Some(el) = self.cores_widget(look, drawn, cx) {
+            return el;
+        }
         let (rows, grid) = core_board(&self.bars, &self.sparks, &self.grid_size, m, cx.entity_id());
-        self.grid = grid;
+        self.grid.set(grid);
         rows
     }
 
-    /// One filled chart per logical CPU in a grid, each with "C{n}" and the smoothed percent.
-    /// The grid keeps cells at 120 × 60 px at least and scrolls when the rows need more.
+    /// One filled chart per logical CPU, drawn by the cores group.
     fn core_charts_part(
         &self,
         m: &UiMetrics,
         theme: &TlTheme,
+        drawn: &mut Drawn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let n = self.logical.len();
-        let s = m.ui_scale;
-        let gap = px(CORE_CHART_GAP * s);
-        if self.arrange != Arrange::Auto {
-            return self.core_charts_arranged(m, theme, cx);
-        }
-        let (cols, rows) = core_chart_dims(n, self.grid_size.get().width, s);
-        let bars = self.bars.borrow();
-        let mut grid = div()
-            .id(CORE_CHARTS_ID)
-            .debug_selector(|| CORE_CHARTS_ID.into())
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(gap)
-            .overflow_y_scroll();
-        for r in 0..rows {
-            let mut row = div()
-                .flex()
-                .flex_row()
-                .gap(gap)
-                .flex_1()
-                .min_h(px(CORE_CHART_MIN.1 * s))
-                .w_full();
-            for c in 0..cols {
-                let i = r * cols + c;
-                let cell = div().relative().flex_1().min_w_0().h_full();
-                let Some(chart) = self.sparks.get(i).filter(|_| i < n) else {
-                    row = row.child(cell);
-                    continue;
-                };
-                let cell = core_cell(cell, i, chart, &bars, m, theme);
-                row = row.child(cell);
-            }
-            grid = grid.child(row);
-        }
-        drop(bars);
-        div()
-            .relative()
-            .size_full()
-            .child(grid)
-            .child(class_probe(
-                Rc::clone(&self.grid_size),
-                (cols | (rows << 10)) as u32,
-                move |size| {
-                    let (cols, rows) = core_chart_dims(n, size.width, s);
-                    (cols | (rows << 10)) as u32
-                },
+        let look = GroupFlowLook::CoreCells {
+            bars: Rc::clone(&self.bars),
+            sparks: Rc::clone(&self.sparks),
+            grid_size: Rc::clone(&self.grid_size),
+            arrange: self.arrange,
+        };
+        self.cores_widget(look, drawn, cx).unwrap_or_else(|| {
+            core_charts_element(
+                &self.bars,
+                &self.sparks,
+                &self.grid_size,
+                self.arrange,
+                m,
+                theme,
                 cx.entity_id(),
-            ))
-            .into_any_element()
+            )
+        })
     }
+
+    /// The power draw strip, drawn by its widget.
+    fn strip(
+        &self,
+        chart: &Entity<ChartView>,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.chart_widget(cpu_flow::power_of(&self.flow), chart, drawn, cx)
+    }
+}
+
+/// The `core_charts` grid: one filled chart per logical CPU (`sparks`), each with "C{n}" and
+/// the smoothed percent from `bars`. With `arrange` automatic the grid keeps cells at
+/// 120 × 60 px at least and scrolls when the rows need more; otherwise one column or one row.
+/// `grid_size` is the grid's size at the last paint, and `view` renders again when a resize
+/// moves the grid into another class.
+pub(crate) fn core_charts_element(
+    bars: &Rc<RefCell<CoreBarsModel>>,
+    sparks: &[Entity<ChartView>],
+    grid_size: &Rc<Cell<Size<Pixels>>>,
+    arrange: Arrange,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    view: EntityId,
+) -> AnyElement {
+    let n = sparks.len();
+    let s = m.ui_scale;
+    let gap = px(CORE_CHART_GAP * s);
+    if arrange != Arrange::Auto {
+        return core_charts_arranged(bars, sparks, grid_size, arrange, m, theme, view);
+    }
+    let (cols, rows) = core_chart_dims(n, grid_size.get().width, s);
+    let bars = bars.borrow();
+    let mut grid = div()
+        .id(CORE_CHARTS_ID)
+        .debug_selector(|| CORE_CHARTS_ID.into())
+        .size_full()
+        .flex()
+        .flex_col()
+        .gap(gap)
+        .overflow_y_scroll();
+    for r in 0..rows {
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .gap(gap)
+            .flex_1()
+            .min_h(px(CORE_CHART_MIN.1 * s))
+            .w_full();
+        for c in 0..cols {
+            let i = r * cols + c;
+            let cell = div().relative().flex_1().min_w_0().h_full();
+            let Some(chart) = sparks.get(i) else {
+                row = row.child(cell);
+                continue;
+            };
+            row = row.child(core_cell(cell, i, chart, &bars, m, theme));
+        }
+        grid = grid.child(row);
+    }
+    drop(bars);
+    div()
+        .relative()
+        .size_full()
+        .child(grid)
+        .child(class_probe(
+            Rc::clone(grid_size),
+            (cols | (rows << 10)) as u32,
+            move |size| {
+                let (cols, rows) = core_chart_dims(n, size.width, s);
+                (cols | (rows << 10)) as u32
+            },
+            view,
+        ))
+        .into_any_element()
 }
 
 /// The chart of core `i` as `cell`: the name at the top left, the smoothed percent at the top
@@ -1265,54 +1623,55 @@ fn core_cell(
         )
 }
 
-impl CpuBox {
-    /// `core_charts` in one column or one row: every cell an equal share of the grid, at least
-    /// the minimum cell. Cells that do not fit scroll under a scrollbar.
-    fn core_charts_arranged(
-        &self,
-        m: &UiMetrics,
-        theme: &TlTheme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let n = self.logical.len();
-        let s = m.ui_scale;
-        let (arrange, gap) = (self.arrange, px(CORE_CHART_GAP * s));
-        let min = size(px(CORE_CHART_MIN.0 * s), px(CORE_CHART_MIN.1 * s));
-        let bar = px(CORE_GRID_BAR_W * s);
-        let fit = arrange_grid(arrange, n, self.grid_size.get(), min, gap, bar);
-        let bars = self.bars.borrow();
-        let cells = grid_cells(
-            &fit,
-            self.sparks.iter().take(n).enumerate().map(|(i, chart)| {
-                let cell = div()
-                    .relative()
-                    .flex_none()
-                    .w(fit.cell.width)
-                    .h(fit.cell.height);
-                core_cell(cell, i, chart, &bars, m, theme).into_any_element()
-            }),
-            gap,
-            CORE_CHARTS_ID,
-        );
-        drop(bars);
-        div()
-            .relative()
-            .size_full()
-            .child(
-                div()
-                    .debug_selector(|| CORE_CHARTS_ID.into())
-                    .size_full()
-                    .overflow_hidden()
-                    .child(cells),
-            )
-            .child(class_probe(
-                Rc::clone(&self.grid_size),
-                fit.class(),
-                move |size| arrange_grid(arrange, n, size, min, gap, bar).class(),
-                cx.entity_id(),
-            ))
-            .into_any_element()
-    }
+/// `core_charts` in one column or one row: every cell an equal share of the grid, at least
+/// the minimum cell. Cells that do not fit scroll under a scrollbar.
+fn core_charts_arranged(
+    bars: &Rc<RefCell<CoreBarsModel>>,
+    sparks: &[Entity<ChartView>],
+    grid_size: &Rc<Cell<Size<Pixels>>>,
+    arrange: Arrange,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    view: EntityId,
+) -> AnyElement {
+    let n = sparks.len();
+    let s = m.ui_scale;
+    let gap = px(CORE_CHART_GAP * s);
+    let min = size(px(CORE_CHART_MIN.0 * s), px(CORE_CHART_MIN.1 * s));
+    let bar = px(CORE_GRID_BAR_W * s);
+    let fit = arrange_grid(arrange, n, grid_size.get(), min, gap, bar);
+    let bars = bars.borrow();
+    let cells = grid_cells(
+        &fit,
+        sparks.iter().enumerate().map(|(i, chart)| {
+            let cell = div()
+                .relative()
+                .flex_none()
+                .w(fit.cell.width)
+                .h(fit.cell.height);
+            core_cell(cell, i, chart, &bars, m, theme).into_any_element()
+        }),
+        gap,
+        CORE_CHARTS_ID,
+    );
+    drop(bars);
+    div()
+        .relative()
+        .size_full()
+        .child(
+            div()
+                .debug_selector(|| CORE_CHARTS_ID.into())
+                .size_full()
+                .overflow_hidden()
+                .child(cells),
+        )
+        .child(class_probe(
+            Rc::clone(grid_size),
+            fit.class(),
+            move |size| arrange_grid(arrange, n, size, min, gap, bar).class(),
+            view,
+        ))
+        .into_any_element()
 }
 
 impl CpuBox {
@@ -1322,7 +1681,7 @@ impl CpuBox {
     fn with_power_strip(
         &mut self,
         parts: AnyElement,
-        chart: Entity<ChartView>,
+        strip: AnyElement,
         m: &UiMetrics,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1353,7 +1712,7 @@ impl CpuBox {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(chart.cached(StyleRefinement::default().size_full())),
+                    .child(strip),
             )
             .child(self.power_split.probe(Self::power_inner_split, cx))
             .child(self.power_split.gap(
@@ -1365,31 +1724,27 @@ impl CpuBox {
             ))
             .into_any_element()
     }
-}
 
-impl Render for CpuBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.render_count.set(self.render_count.get() + 1);
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
-        self.wide = is_wide(self.width.get(), m.ui_scale);
-        self.side = match self.arrange {
-            Arrange::Auto => self.wide,
-            Arrange::Vertical => false,
-            Arrange::Horizontal => true,
-        };
+    /// The parts of the flow layout at their 1.2.0 places (UI-PRF-017, UI-PRF-019, D-040),
+    /// each drawn by its widget. `drawn` takes the widgets drawn.
+    fn flow_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let m = *m;
         let body: AnyElement = match self.mode {
-            CpuMode::Chart => self.graph_part(&m),
+            CpuMode::Chart => self.graph_part(&m, drawn, cx),
             // The last meter keeps a gap above the "Now" label under the box.
-            CpuMode::Cores => div()
-                .size_full()
-                .pb(m.sp[2])
-                .child(self.rows_part(&m, cx))
-                .into_any_element(),
-            CpuMode::CoreCharts => self.core_charts_part(&m, &theme, cx),
+            CpuMode::Cores => {
+                let rows = self.rows_part(&m, drawn, cx);
+                div().size_full().pb(m.sp[2]).child(rows).into_any_element()
+            }
+            CpuMode::CoreCharts => self.core_charts_part(&m, theme, drawn, cx),
             CpuMode::ChartCores => {
-                let chart = self.graph_part(&m);
+                let chart = self.graph_part(&m, drawn, cx);
                 // Under the graph the strip shares the chart's column and the core rows keep
                 // the body's full height (tasklens-o55.55).
                 let chart = match self
@@ -1397,10 +1752,13 @@ impl Render for CpuBox {
                     .clone()
                     .filter(|_| self.power_under_graph())
                 {
-                    Some(power) => self.with_power_strip(chart, power, &m, cx),
+                    Some(power) => {
+                        let strip = self.strip(&power, drawn, cx);
+                        self.with_power_strip(chart, strip, &m, cx)
+                    }
                     None => chart,
                 };
-                let rows = self.rows_part(&m, cx);
+                let rows = self.rows_part(&m, drawn, cx);
                 // Side by side the core rows keep their 188 px column; stacked they keep the
                 // usual part minimum.
                 let rows_min = if self.side {
@@ -1456,9 +1814,97 @@ impl Render for CpuBox {
             }
         };
         let full_width = self.power_shown() && !self.power_under_graph();
-        let body = match self.power_chart.clone().filter(|_| full_width) {
-            Some(chart) => self.with_power_strip(body, chart, &m, cx),
+        match self.power_chart.clone().filter(|_| full_width) {
+            Some(chart) => {
+                let strip = self.strip(&chart, drawn, cx);
+                self.with_power_strip(body, strip, &m, cx)
+            }
             None => body,
+        }
+    }
+
+    /// The plan of a flow render (ADR-019 "Presets"): the parts the box drew and the widget of
+    /// each, with the splits as the render laid them out.
+    fn make_plan(&self, m: &UiMetrics) -> CpuPlan {
+        let look = match self.mode {
+            CpuMode::ChartCores => CpuLook::ChartCores,
+            CpuMode::Chart => CpuLook::Chart,
+            CpuMode::Cores => CpuLook::Cores,
+            CpuMode::CoreCharts => CpuLook::CoreCharts,
+        };
+        let graph = matches!(self.mode, CpuMode::ChartCores | CpuMode::Chart);
+        let flow = &self.flow;
+        CpuPlan {
+            look,
+            m: *m,
+            side: self.side,
+            share: if self.mode == CpuMode::ChartCores {
+                self.split(m)
+            } else {
+                0.
+            },
+            total: cpu_flow::total_of(flow).filter(|_| graph),
+            cores: cpu_flow::cores_of(flow).filter(|_| self.mode != CpuMode::Chart),
+            clocks: cpu_flow::clocks_of(flow)
+                .filter(|_| self.clocks_shown() && self.core_clocks.is_some()),
+            power: cpu_flow::power_of(flow)
+                .filter(|_| self.power_shown() && self.power_chart.is_some())
+                .map(|id| PlanPower {
+                    id,
+                    parts_share: self
+                        .power_split
+                        .share(SplitAxis::Column, m.sp[5], m.ui_scale),
+                    under_graph: self.power_under_graph(),
+                }),
+        }
+    }
+}
+
+impl Render for CpuBox {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        self.wide = is_wide(self.width.get(), m.ui_scale);
+        self.side = match self.arrange {
+            Arrange::Auto => self.wide,
+            Arrange::Vertical => false,
+            Arrange::Horizontal => true,
+        };
+        let editor = cached_full(self.editor.clone());
+        let body = if !self.host_draws() {
+            // The user's widgets, or Edit Widgets: the editor draws them.
+            let empty = !self.editing
+                && self
+                    .saved_grid
+                    .as_ref()
+                    .is_some_and(|g| g.widgets.is_empty());
+            div()
+                .relative()
+                .size_full()
+                .child(editor)
+                .when(empty, |d| d.child(empty_text(&m, &theme, cx)))
+                .into_any_element()
+        } else {
+            let mut drawn = Drawn::new();
+            let body = self.flow_body(&m, &theme, &mut drawn, cx);
+            let plan = self.make_plan(&m);
+            let ids_changed = self.plan.drawn() != drawn;
+            self.plan.set_drawn(drawn);
+            if self.plan.set(plan) || ids_changed {
+                self.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }
+            // The editor sits under the body with no widgets, so its container knows the body's
+            // size when Edit Widgets starts.
+            div()
+                .relative()
+                .size_full()
+                .child(div().absolute().top_0().left_0().size_full().child(editor))
+                .child(body)
+                .into_any_element()
         };
         box_frame(
             CPU_BOX_ID,

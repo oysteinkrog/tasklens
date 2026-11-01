@@ -3,6 +3,10 @@
 //! - **Sources**: the metrics of every GPU the box can show ([`source_groups`]). Per GPU: the
 //!   engines it reports, in the GPU page's order and with its names, then VRAM, Graphics clock,
 //!   Memory clock, Power draw and Temperature. A metric the GPU does not report is not listed.
+//!   The CPU box lists the CPU's metrics instead ([`cpu_source_groups`], UI-PRF-061 phase 2):
+//!   Utilization, Kernel time, Speed, Temperature, Package power, Core power, Power draw, Core
+//!   clocks and CPU pressure, then a separator and "Core load >" and "Core speed >" with C0 to
+//!   Cn; Add Widget adds "All cores >" (Load, Speed).
 //! - **Widget menu** ([`widget_menu`]): "Source >" (radio items, one submenu per GPU when the
 //!   box shows two), "Show >" (check items for the forms the metric offers; the last checked one
 //!   is disabled), "Chart >" while Chart is on (Fill under the line, Dashed line), a separator,
@@ -31,15 +35,18 @@ use tl_model::layout::{
     METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
 use tl_model::layout_boxes::{
-    DeviceKind, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE,
-    METRIC_FREQ, METRIC_LOAD, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX,
+    CPU_LOGICAL_PREFIX, DEVICE_CPU, DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL,
+    METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE,
+    METRIC_FREQ, METRIC_LOAD, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES,
+    METRIC_POWER_DRAW, METRIC_PRESSURE,
 };
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::grid::{self, InnerGrid, SlotDevice};
+use super::members::{Members, members};
 use super::meta::MetricMeta;
-use super::source::reading;
+use super::source::{box_reading, reading};
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::menu::TlMenu;
 use crate::i18n::{tr, tr_args};
@@ -58,6 +65,20 @@ const OTHER_METRICS: [(&str, &str); 5] = [
     (METRIC_CLOCK_MEM, "perf-widget-metric-clock-mem"),
     (METRIC_POWER, "perf-widget-metric-power"),
     (METRIC_TEMP, "perf-widget-metric-temp"),
+];
+
+/// The CPU package's metrics in the CPU box's "Source >", in menu order, with their name keys
+/// (UI-PRF-061 phase 2).
+const CPU_METRICS: [(&str, &str); 9] = [
+    (METRIC_CPU_TOTAL, "perf-widget-metric-cpu-total"),
+    (METRIC_CPU_KERNEL, "perf-widget-metric-cpu-kernel"),
+    (METRIC_FREQ, "perf-widget-metric-speed"),
+    (METRIC_TEMP, "perf-widget-metric-temp"),
+    (METRIC_POWER, "perf-widget-metric-cpu-power"),
+    (METRIC_POWER_CORES, "perf-widget-metric-cpu-power-cores"),
+    (METRIC_POWER_DRAW, "perf-widget-metric-power"),
+    (METRIC_CORE_CLOCKS, "perf-widget-metric-core-clocks"),
+    (METRIC_PRESSURE, "perf-widget-metric-cpu-pressure"),
 ];
 
 /// The form check items of "Show >", in menu order, with their name keys.
@@ -241,30 +262,68 @@ pub fn set_group_option(
     true
 }
 
-/// One metric of one GPU in the source list.
+/// One metric of one device in the source list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceItem {
     pub metric: MetricKey,
     pub label: SharedString,
-    /// The forms the metric offers on this GPU.
+    /// The forms the metric offers on this device.
     pub offered: FormSet,
     /// An engine; a separator comes between the engines and the other metrics.
     pub engine: bool,
+    /// The item's own device key, when it is not the group's (a logical CPU of the CPU box).
+    pub device: Option<Arc<str>>,
 }
 
-/// The metrics of one GPU the box can show.
+impl SourceItem {
+    /// The device key the item's source names: its own, else `group`'s.
+    fn device_key(&self, group: &SourceGroup) -> Arc<str> {
+        Arc::clone(self.device.as_ref().unwrap_or(&group.key))
+    }
+}
+
+/// A submenu of sources after the group's items and a separator: "Core load >" and
+/// "Core speed >" of the CPU box, each item on its logical CPU.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SourceGroup {
-    /// The GPU's persistent device key.
-    pub key: Arc<str>,
-    pub name: SharedString,
+pub struct SourceSub {
+    pub label: SharedString,
     pub items: Vec<SourceItem>,
 }
 
+/// The group widget Add Widget offers for a device other than a GPU: "All cores >" with one
+/// item per member metric.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupAdd {
+    pub label: SharedString,
+    pub kind: GroupKind,
+    pub metrics: Vec<(MetricKey, SharedString)>,
+}
+
+/// The metrics of one device the box can show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceGroup {
+    /// The device's persistent key.
+    pub key: Arc<str>,
+    pub name: SharedString,
+    pub items: Vec<SourceItem>,
+    /// Submenus after the items (the CPU box's core lists).
+    pub subs: Vec<SourceSub>,
+    /// The group widget Add Widget offers; `None` for a GPU, which offers "All engines".
+    pub add_group: Option<GroupAdd>,
+}
+
 impl SourceGroup {
-    /// The item of `metric`, if the GPU reports it.
+    /// The item of `metric` on `device`, if the device reports it.
+    pub fn item_on(&self, device: &str, metric: &MetricKey) -> Option<&SourceItem> {
+        self.items
+            .iter()
+            .chain(self.subs.iter().flat_map(|s| &s.items))
+            .find(|i| &i.metric == metric && *i.device_key(self) == *device)
+    }
+
+    /// The item of `metric` on the group's own device, if it reports it.
     pub fn item(&self, metric: &MetricKey) -> Option<&SourceItem> {
-        self.items.iter().find(|i| &i.metric == metric)
+        self.item_on(&self.key.clone(), metric)
     }
 }
 
@@ -299,6 +358,7 @@ pub fn source_groups(slots: &[SlotDevice], snap: &Snapshot, cx: &App) -> Vec<Sou
                 metric,
                 label: tr(cx, name_key),
                 engine: true,
+                device: None,
             });
         }
         if let Some(t) = totals {
@@ -312,6 +372,7 @@ pub fn source_groups(slots: &[SlotDevice], snap: &Snapshot, cx: &App) -> Vec<Sou
                     metric,
                     label: tr(cx, name_key),
                     engine: false,
+                    device: None,
                 });
             }
         }
@@ -319,9 +380,117 @@ pub fn source_groups(slots: &[SlotDevice], snap: &Snapshot, cx: &App) -> Vec<Sou
             key: Arc::clone(&slot.key),
             name: SharedString::from(entry.display_name.to_string()),
             items,
+            subs: Vec::new(),
+            add_group: None,
         });
     }
     groups
+}
+
+/// The sources of the CPU box on `snap` (UI-PRF-061 phase 2): the CPU package's metrics it
+/// reports, then "Core load >" and "Core speed >" with every present logical CPU, and "All
+/// cores >" for Add Widget. Empty when the catalog has no CPU package.
+pub fn cpu_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let Some(entry) = snap
+        .devices
+        .entries
+        .iter()
+        .find(|e| e.present && &*e.persistent_key == DEVICE_CPU)
+    else {
+        return Vec::new();
+    };
+    let on = |kind, metric: &MetricKey, idx| {
+        MetricMeta::of(kind, metric)
+            .map_or(FormSet::empty(), |m| m.offered_forms(Some((snap, idx))))
+    };
+    let mut items = Vec::new();
+    for (key, name_key) in CPU_METRICS {
+        let metric = MetricKey::new(key);
+        let (value, _) = box_reading(DeviceKind::Cpu, &metric, snap, entry.idx, None);
+        if value.validity == Validity::Unsupported {
+            continue;
+        }
+        items.push(SourceItem {
+            offered: on(DeviceKind::Cpu, &metric, entry.idx),
+            metric,
+            label: tr(cx, name_key),
+            engine: false,
+            device: None,
+        });
+    }
+    // The present logical CPUs in the cores group's order, as their own sources.
+    let cores = GroupSelector {
+        device: DeviceSelector::Key(Arc::from(DEVICE_CPU)),
+        members: GroupKind::Cores,
+        metric: MetricKey::new(METRIC_LOAD),
+        options: GroupOptions::default(),
+    };
+    let logical: Vec<(Arc<str>, DeviceIdx, i64)> = match members(&cores, snap, None, None, false) {
+        Members::List(list) => list
+            .into_iter()
+            .filter_map(|s| {
+                let DeviceSelector::Key(key) = s.device else {
+                    return None;
+                };
+                let n = key.strip_prefix(CPU_LOGICAL_PREFIX)?.parse::<i64>().ok()?;
+                let idx = snap
+                    .devices
+                    .entries
+                    .iter()
+                    .find(|e| e.present && *e.persistent_key == *key)?
+                    .idx;
+                Some((key, idx, n))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let sub = |metric: &str, label_key: &str, name_key: &str| SourceSub {
+        label: tr(cx, label_key),
+        items: logical
+            .iter()
+            .map(|(key, idx, n)| {
+                let metric = MetricKey::new(metric);
+                SourceItem {
+                    offered: on(DeviceKind::CpuLogical, &metric, *idx),
+                    metric,
+                    label: tr_args(cx, name_key, &[("n", FluentValue::from(*n))]),
+                    engine: false,
+                    device: Some(Arc::clone(key)),
+                }
+            })
+            .collect(),
+    };
+    let subs = if logical.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            sub(
+                METRIC_LOAD,
+                "perf-widget-core-load",
+                "perf-widget-metric-core",
+            ),
+            sub(
+                METRIC_FREQ,
+                "perf-widget-core-speed",
+                "perf-widget-metric-core-speed",
+            ),
+        ]
+    };
+    let add_group = GroupAdd {
+        label: tr(cx, "perf-widget-group-cores"),
+        kind: GroupKind::Cores,
+        metrics: group_metrics(&GroupKind::Cores)
+            .iter()
+            .map(|(key, name)| (MetricKey::new(key), tr(cx, name)))
+            .collect(),
+    };
+    vec![SourceGroup {
+        key: Arc::from(DEVICE_CPU),
+        name: SharedString::from(entry.display_name.to_string()),
+        items,
+        subs,
+        add_group: Some(add_group),
+    }]
 }
 
 /// The forms a new widget on a metric that offers `offered` shows: Chart, Value and Name with a
@@ -350,7 +519,9 @@ fn source_items(
     mut menu: TlMenu,
     group: &SourceGroup,
     id: Option<u32>,
-    selected: Option<&MetricKey>,
+    selected: Option<&(Arc<str>, MetricKey)>,
+    window: &mut Window,
+    cx: &mut App,
 ) -> TlMenu {
     let mut engines = false;
     for item in &group.items {
@@ -358,20 +529,47 @@ fn source_items(
             menu = menu.separator();
         }
         engines = item.engine;
-        let source = WidgetSource {
-            device: Arc::clone(&group.key),
-            metric: Arc::from(item.metric.as_str()),
-        };
-        menu = match id {
-            Some(id) => menu.radio_item(
-                item.label.clone(),
-                selected == Some(&item.metric),
-                Box::new(PerfWidgetSetSource { id, source }),
-            ),
-            None => menu.item(item.label.clone(), Box::new(PerfWidgetAdd { source })),
-        };
+        menu = source_item(menu, group, item, id, selected);
+    }
+    if !group.subs.is_empty() {
+        menu = menu.separator();
+    }
+    for (k, sub) in group.subs.iter().enumerate() {
+        let group = group.clone();
+        let selected = selected.cloned();
+        menu = menu.submenu(sub.label.clone(), window, cx, move |mut menu, _, _| {
+            for item in &group.subs[k].items {
+                menu = source_item(menu, &group, item, id, selected.as_ref());
+            }
+            menu
+        });
     }
     menu
+}
+
+/// One source item: a radio item that sets widget `id`'s source (`selected` marks the widget's
+/// own), or a plain Add Widget item when `id` is `None`.
+fn source_item(
+    menu: TlMenu,
+    group: &SourceGroup,
+    item: &SourceItem,
+    id: Option<u32>,
+    selected: Option<&(Arc<str>, MetricKey)>,
+) -> TlMenu {
+    let device = item.device_key(group);
+    let checked = selected.is_some_and(|(k, m)| *k == device && *m == item.metric);
+    let source = WidgetSource {
+        device,
+        metric: Arc::from(item.metric.as_str()),
+    };
+    match id {
+        Some(id) => menu.radio_item(
+            item.label.clone(),
+            checked,
+            Box::new(PerfWidgetSetSource { id, source }),
+        ),
+        None => menu.item(item.label.clone(), Box::new(PerfWidgetAdd { source })),
+    }
 }
 
 /// The source list: flat with one GPU, one submenu per GPU (named by the GPU) with two.
@@ -385,30 +583,22 @@ fn sources(
     cx: &mut App,
 ) -> TlMenu {
     if groups.len() == 1 {
-        let metric = selected
-            .as_ref()
-            .filter(|(k, _)| *k == groups[0].key)
-            .map(|(_, m)| m);
-        return source_items(menu, &groups[0], id, metric);
+        return source_items(menu, &groups[0], id, selected.as_ref(), window, cx);
     }
     let mut menu = menu;
     for (i, group) in groups.iter().enumerate() {
         let groups = Rc::clone(groups);
         let selected = selected.clone();
-        menu = menu.submenu(group.name.clone(), window, cx, move |menu, _, _| {
-            let group = &groups[i];
-            let metric = selected
-                .as_ref()
-                .filter(|(k, _)| *k == group.key)
-                .map(|(_, m)| m);
-            source_items(menu, group, id, metric)
+        menu = menu.submenu(group.name.clone(), window, cx, move |menu, window, cx| {
+            source_items(menu, &groups[i], id, selected.as_ref(), window, cx)
         });
     }
     menu
 }
 
 /// The Add Widget items: every source of `groups` as a plain item, then a separator and "All
-/// engines" for each GPU (named by the GPU when the box shows two).
+/// engines" for each GPU (named by the GPU when the box shows two), or the device's own group
+/// ("All cores >" with Load and Speed in the CPU box).
 pub fn add_items(
     menu: TlMenu,
     groups: &Rc<[SourceGroup]>,
@@ -420,6 +610,26 @@ pub fn add_items(
         return menu;
     }
     menu = menu.separator();
+    // A device with its own group ("All cores >"): one item per member metric.
+    if let Some(add) = groups
+        .iter()
+        .find_map(|g| g.add_group.clone().map(|a| (g.key.clone(), a)))
+    {
+        let (device, add) = add;
+        return menu.submenu(add.label.clone(), window, cx, move |mut menu, _, _| {
+            for (metric, label) in &add.metrics {
+                menu = menu.item(
+                    label.clone(),
+                    Box::new(PerfWidgetAddGroup {
+                        device: Arc::clone(&device),
+                        group: Arc::from(add.kind.name()),
+                        metric: Arc::from(metric.as_str()),
+                    }),
+                );
+            }
+            menu
+        });
+    }
     let all = tr(cx, "perf-widget-group-engines");
     for group in groups.iter() {
         let label = if groups.len() == 1 {
@@ -667,6 +877,7 @@ pub fn widget_menu(
 fn box_name(container: &str, cx: &App) -> SharedString {
     match container {
         tl_model::layout::GPU_BOX_CONTAINER => tr(cx, "perf-overview-box-gpu"),
+        tl_model::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
         other => SharedString::from(other.to_string()),
     }
 }

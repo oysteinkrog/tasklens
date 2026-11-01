@@ -21,8 +21,15 @@
 //!
 //! When the group's own device is gone (a GPU) it shows "Not connected"; with no members,
 //! "None found"; for a group kind this build does not know, "Needs a newer tasklens".
+//!
+//! A group of a flow layout that its host draws (the CPU box presets, `overview/cpu_flow.rs`)
+//! has a [`GroupFlowLook`] instead: it draws the 1.2.0 part (the core rows of D-040 with their
+//! clock column, or the `core_charts` cells) from the model and sparklines the host keeps, and
+//! makes no member items and takes no member sources of its own. The host updates the model on
+//! a sample and notifies only this group ([`GroupWidget::flow_changed`]) when a row's text or
+//! bucket changed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
@@ -45,9 +52,12 @@ use super::members::{Members, members};
 use super::meta::MetricMeta;
 use super::metric_widget::{MemberLook, MetricWidget, part_id, widget_id};
 use super::source::SourceStore;
+use crate::chart::ChartView;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::performance::overview::cpu_box::core_charts_element;
 use crate::pages::performance::overview::layout::Arrange;
+use crate::pages::performance::overview::parts::{CoreBarsLayout, CoreBarsModel, core_board};
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::timeline::OverviewPause;
 use crate::settings_global::TlSettings;
@@ -97,6 +107,75 @@ pub enum GroupState {
     Unknown,
 }
 
+/// How a group widget of a host-drawn flow layout draws: the CPU box part of 1.2.0 (ADR-019
+/// "Presets", UI-PRF-019). The host keeps the core rows' model (smoothed load, clock, names) and
+/// one sparkline per logical CPU, and hands them in; the group draws them.
+#[derive(Clone)]
+pub enum GroupFlowLook {
+    /// The core rows (`parts::core_board`): name, sparkline, meter, percent and clock, filling
+    /// the height (D-040). `layout` takes the layout the last render used; `grid_size` is the
+    /// rows' size at the last paint.
+    CoreRows {
+        bars: Rc<RefCell<CoreBarsModel>>,
+        sparks: Rc<[Entity<ChartView>]>,
+        grid_size: Rc<Cell<Size<Pixels>>>,
+        layout: Rc<Cell<CoreBarsLayout>>,
+    },
+    /// The `core_charts` cells: one filled chart per logical CPU, placed as `arrange` says.
+    CoreCells {
+        bars: Rc<RefCell<CoreBarsModel>>,
+        sparks: Rc<[Entity<ChartView>]>,
+        grid_size: Rc<Cell<Size<Pixels>>>,
+        arrange: Arrange,
+    },
+}
+
+impl PartialEq for GroupFlowLook {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::CoreRows {
+                    bars,
+                    sparks,
+                    grid_size,
+                    layout,
+                },
+                Self::CoreRows {
+                    bars: b,
+                    sparks: s,
+                    grid_size: g,
+                    layout: l,
+                },
+            ) => {
+                Rc::ptr_eq(bars, b)
+                    && sparks[..] == s[..]
+                    && Rc::ptr_eq(grid_size, g)
+                    && Rc::ptr_eq(layout, l)
+            }
+            (
+                Self::CoreCells {
+                    bars,
+                    sparks,
+                    grid_size,
+                    arrange,
+                },
+                Self::CoreCells {
+                    bars: b,
+                    sparks: s,
+                    grid_size: g,
+                    arrange: a,
+                },
+            ) => {
+                Rc::ptr_eq(bars, b)
+                    && sparks[..] == s[..]
+                    && Rc::ptr_eq(grid_size, g)
+                    && arrange == a
+            }
+            _ => false,
+        }
+    }
+}
+
 /// One shown member.
 struct Item {
     selector: SourceSelector,
@@ -119,6 +198,8 @@ pub struct GroupWidget {
     hidden: usize,
     /// The items the group made, for their ids.
     serial: u32,
+    /// The 1.2.0 part the group draws, while its host draws its flow layout.
+    flow_look: Option<GroupFlowLook>,
     /// Edit Widgets is on: the items keep the edit margins free.
     edit_inset: bool,
     size: Size<Pixels>,
@@ -144,6 +225,29 @@ impl GroupWidget {
         flow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::build(setting, hub, store, flow, None, cx)
+    }
+
+    /// A group of a flow layout that draws `look` (see [`GroupFlowLook`]) from the start, so it
+    /// makes no member items.
+    pub fn with_flow_look(
+        setting: WidgetSetting,
+        hub: &Entity<SnapshotHub>,
+        store: Rc<RefCell<SourceStore>>,
+        look: Option<GroupFlowLook>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(setting, hub, store, true, look, cx)
+    }
+
+    fn build(
+        setting: WidgetSetting,
+        hub: &Entity<SnapshotHub>,
+        store: Rc<RefCell<SourceStore>>,
+        flow: bool,
+        flow_look: Option<GroupFlowLook>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             setting,
             hub: hub.clone(),
@@ -154,6 +258,7 @@ impl GroupWidget {
             items: Vec::new(),
             hidden: 0,
             serial: 0,
+            flow_look,
             edit_inset: false,
             size: size(px(0.), px(0.)),
             scale: metrics(cx).ui_scale,
@@ -238,6 +343,35 @@ impl GroupWidget {
         self.format_texts(cx);
         self.relayout(cx);
         self.notify(cx);
+    }
+
+    /// The 1.2.0 part the group draws for its host, if any.
+    pub fn flow_look(&self) -> Option<&GroupFlowLook> {
+        self.flow_look.as_ref()
+    }
+
+    /// The host draws the group's flow layout and gives the part it draws, or `None` when the
+    /// group draws its own items again. Items are made or dropped to match, and the group
+    /// renders again only when the look changed.
+    pub fn set_flow_look(&mut self, look: Option<GroupFlowLook>, cx: &mut Context<Self>) {
+        if self.flow_look == look {
+            return;
+        }
+        let had = self.flow_look.is_some();
+        self.flow_look = look;
+        if had != self.flow_look.is_some() {
+            self.sync_items(cx);
+            self.format_texts(cx);
+            self.relayout(cx);
+        }
+        self.notify(cx);
+    }
+
+    /// The host changed what its look draws (a row's text or bucket): one render of this group.
+    pub fn flow_changed(&mut self, cx: &mut Context<Self>) {
+        if self.flow_look.is_some() {
+            self.notify(cx);
+        }
     }
 
     /// Whether the widget is in a flow layout.
@@ -370,8 +504,12 @@ impl GroupWidget {
         true
     }
 
-    /// The members the group shows: the first `limit` of the list.
+    /// The members the group shows: the first `limit` of the list. None while the host draws
+    /// the group's look: the host's model holds the values then.
     fn shown(&self) -> &[SourceSelector] {
+        if self.flow_look.is_some() {
+            return &[];
+        }
         let limit = self
             .group()
             .and_then(|g| g.options.limit)
@@ -421,7 +559,11 @@ impl GroupWidget {
     /// take the group's forms and options, new ones get entities, gone ones drop theirs.
     fn sync_items(&mut self, cx: &mut Context<Self>) {
         let shown: Vec<SourceSelector> = self.shown().to_vec();
-        self.hidden = self.list.len() - shown.len();
+        self.hidden = if self.flow_look.is_some() {
+            0
+        } else {
+            self.list.len() - shown.len()
+        };
         let mut old = std::mem::take(&mut self.items);
         let mut items = Vec::with_capacity(shown.len());
         for selector in shown {
@@ -533,6 +675,28 @@ impl Render for GroupWidget {
             .relative()
             .size_full()
             .overflow_hidden();
+        if let Some(look) = &self.flow_look {
+            let view = cx.entity_id();
+            let part = match look {
+                GroupFlowLook::CoreRows {
+                    bars,
+                    sparks,
+                    grid_size,
+                    layout,
+                } => {
+                    let (rows, grid) = core_board(bars, sparks, grid_size, &m, view);
+                    layout.set(grid);
+                    rows
+                }
+                GroupFlowLook::CoreCells {
+                    bars,
+                    sparks,
+                    grid_size,
+                    arrange,
+                } => core_charts_element(bars, sparks, grid_size, *arrange, &m, &theme, view),
+            };
+            return root.child(part);
+        }
         if !matches!(self.state, GroupState::Members { .. }) {
             let mut name = String::new();
             if self.state == GroupState::Gone

@@ -209,7 +209,7 @@ fn newest(snap: &Snapshot, id: SeriesId) -> Metric<f32> {
 /// The current reading of `metric` on the device `idx` of `kind`, and the second line's value
 /// of a pair. Each value comes from the record the box shows it from today. `Unsupported` when
 /// the device does not report it, or the key is unknown.
-fn box_reading(
+pub(super) fn box_reading(
     kind: DeviceKind,
     metric: &MetricKey,
     snap: &Snapshot,

@@ -898,6 +898,7 @@ perf-widget-not-reported-device = Not reported by this device
 perf-widget-unknown = Needs a newer tasklens
 perf-widget-empty = No widgets. Use Edit Widgets to add some.
 perf-widget-group-none = None found
+perf-widget-group-cores = All cores
 perf-widget-group-engines = All engines
 perf-widget-core-load = Core load
 perf-widget-core-speed = Core speed

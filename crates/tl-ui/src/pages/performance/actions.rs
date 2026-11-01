@@ -175,6 +175,15 @@ pub struct PerfWidgetSetGroup {
     pub value: Arc<str>,
 }
 
+/// Starts Edit Widgets on the Overview box of `kind` (its `[performance.overview]` name): the
+/// "Edit Widgets…" item of that box's menu and gear (UI-PRF-061 phase 2).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetEditBox {
+    pub kind: Arc<str>,
+}
+
 /// Adds the Overview box of `kind` (its `[performance.overview]` name) to the layout.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
