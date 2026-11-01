@@ -193,7 +193,7 @@ impl WidgetContainer {
     /// widget. A container with no placed widget asks for nothing.
     pub fn demand_part(&self) -> Demand {
         Demand {
-            gpus: !self.widgets.is_empty(),
+            gpus: !self.placement.widgets.is_empty(),
             ..Demand::default()
         }
     }
@@ -343,8 +343,11 @@ impl WidgetContainer {
         };
         let mut changed = placement != self.placement;
         let before = self.widgets.len();
+        // In Edit Widgets a widget that leaves the layout keeps its entity, so Cancel or Undo
+        // creates none again (ADR-019 "Editing"). It goes when editing ends.
+        let editing = self.frozen.is_some();
         self.widgets
-            .retain(|id, _| placement.widgets.iter().any(|p| p.id == *id));
+            .retain(|id, _| editing || placement.widgets.iter().any(|p| p.id == *id));
         changed |= self.widgets.len() != before;
         // The name gets the GPU's name in front when the box shows widgets of two devices.
         let mut devices: SmallVec<[&DeviceSelector; 2]> = SmallVec::new();

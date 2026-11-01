@@ -28,6 +28,8 @@ pub const PERFORMANCE_EDIT_CONTEXT: &str = "PerformanceEdit";
 pub const PERFORMANCE_SUMMARY_CONTEXT: &str = "PerformanceSummary";
 /// Key context of the Overview page while Edit Layout mode is on (UI-PRF-018).
 pub const PERFORMANCE_OVERVIEW_EDIT_CONTEXT: &str = "PerformanceOverviewEdit";
+/// Key context of a box in Edit Widgets (UI-PRF-061).
+pub const PERF_WIDGET_EDIT_CONTEXT: &str = "PerfWidgetEdit";
 
 gpui_kit::actions!(
     tasklens,
@@ -64,8 +66,91 @@ gpui_kit::actions!(
         PerfOverviewResetLayout,
         /// Hides the focused Overview box (Delete in Edit Layout mode).
         PerfOverviewHideBox,
+        /// Starts Edit Widgets on the GPU box ("Edit Widgets…" in the box menu, UI-PRF-061).
+        PerfWidgetEditStart,
+        /// Saves the edited widgets and ends Edit Widgets (Apply, Enter).
+        PerfWidgetApply,
+        /// Ends Edit Widgets without saving (Cancel, Esc).
+        PerfWidgetCancel,
+        /// Steps back one widget edit (Undo, Ctrl+Z).
+        PerfWidgetUndo,
+        /// Asks, then puts the box's default widgets in the working layout (Reset).
+        PerfWidgetReset,
+        /// Selects the next widget in reading order (Tab).
+        PerfWidgetSelectNext,
+        /// Selects the previous widget in reading order (Shift+Tab).
+        PerfWidgetSelectPrev,
+        /// Removes the selected widget (Delete, "Remove Widget").
+        PerfWidgetRemove,
     ]
 );
+
+/// A widget source in a `PerfWidget*` action: a device's persistent key and a metric key
+/// (ADR-019 "Metric keys").
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct WidgetSource {
+    pub device: Arc<str>,
+    pub metric: Arc<str>,
+}
+
+/// Moves the selected widget one cell left or right (`dx`), or up or down (`dy`).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetMove {
+    pub dx: i8,
+    pub dy: i8,
+}
+
+/// Shrinks (−1) or grows (1) the selected widget by one cell at its right edge (`dw`) or
+/// bottom edge (`dh`).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetResize {
+    pub dw: i8,
+    pub dh: i8,
+}
+
+/// Adds a widget on `source` (Add Widget).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetAdd {
+    pub source: WidgetSource,
+}
+
+/// Widget `id` shows `source` (the widget menu's "Source" items).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetSetSource {
+    pub id: u32,
+    pub source: WidgetSource,
+}
+
+/// Turns form `form` (`chart`, `bar`, `value`, `stats` or `label`) of widget `id` on or off
+/// (the widget menu's "Show" items).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetSetForm {
+    pub id: u32,
+    pub form: Arc<str>,
+    pub on: bool,
+}
+
+/// Turns chart option `option` (`fill` or `dashed`) of widget `id` on or off (the widget
+/// menu's "Chart" items).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetSetOption {
+    pub id: u32,
+    pub option: Arc<str>,
+    pub on: bool,
+}
 
 /// Adds the Overview box of `kind` (its `[performance.overview]` name) to the layout.
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
@@ -523,5 +608,25 @@ pub fn bind_keys_performance(cx: &mut App) {
         KeyBinding::new("alt-shift-right", resize_box(1, 0), overview_edit),
         KeyBinding::new("alt-shift-up", resize_box(0, -1), overview_edit),
         KeyBinding::new("alt-shift-down", resize_box(0, 1), overview_edit),
+    ]);
+
+    let widget_edit = Some(PERF_WIDGET_EDIT_CONTEXT);
+    let move_widget = |dx, dy| PerfWidgetMove { dx, dy };
+    let resize_widget = |dw, dh| PerfWidgetResize { dw, dh };
+    cx.bind_keys([
+        KeyBinding::new("tab", PerfWidgetSelectNext, widget_edit),
+        KeyBinding::new("shift-tab", PerfWidgetSelectPrev, widget_edit),
+        KeyBinding::new("alt-left", move_widget(-1, 0), widget_edit),
+        KeyBinding::new("alt-right", move_widget(1, 0), widget_edit),
+        KeyBinding::new("alt-up", move_widget(0, -1), widget_edit),
+        KeyBinding::new("alt-down", move_widget(0, 1), widget_edit),
+        KeyBinding::new("alt-shift-left", resize_widget(-1, 0), widget_edit),
+        KeyBinding::new("alt-shift-right", resize_widget(1, 0), widget_edit),
+        KeyBinding::new("alt-shift-up", resize_widget(0, -1), widget_edit),
+        KeyBinding::new("alt-shift-down", resize_widget(0, 1), widget_edit),
+        KeyBinding::new("delete", PerfWidgetRemove, widget_edit),
+        KeyBinding::new("ctrl-z", PerfWidgetUndo, widget_edit),
+        KeyBinding::new("enter", PerfWidgetApply, widget_edit),
+        KeyBinding::new("escape", PerfWidgetCancel, widget_edit),
     ]);
 }

@@ -1130,11 +1130,14 @@ impl DevicePage for OverviewPage {
         let placement = status_bar::placement(cx);
         let words: SmallVec<[SharedString; 4]> =
             STATUS_BAR_ITEMS.iter().map(|(_, k)| tr(cx, k)).collect();
-        menu.item(
-            tr(cx, "perf-overview-edit-layout"),
-            Box::new(PerfOverviewEditLayout),
-        )
-        .submenu(
+        // Edit Layout is off while a box is in Edit Widgets (UI-PRF-061).
+        let edit_layout = tr(cx, "perf-overview-edit-layout");
+        let menu = if crate::pages::performance::widget::edit::any_editing(&self.hub, cx) {
+            menu.item_disabled(edit_layout, None)
+        } else {
+            menu.item(edit_layout, Box::new(PerfOverviewEditLayout))
+        };
+        menu.submenu(
             tr(cx, "perf-overview-status-bar"),
             window,
             cx,
@@ -1222,6 +1225,7 @@ impl OverviewPage {
             .on_action(cx.listener(Self::on_set_box_clocks))
             .on_action(cx.listener(Self::on_set_box_engine))
             .on_action(cx.listener(Self::on_reset_box))
+            .on_action(cx.listener(Self::on_widget_edit_start))
             .on_action(cx.listener(Self::on_set_timeline_click))
     }
 }

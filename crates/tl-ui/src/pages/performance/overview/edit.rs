@@ -433,6 +433,10 @@ impl OverviewPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Edit Layout is off while a box is in Edit Widgets (UI-PRF-061).
+        if crate::pages::performance::widget::edit::any_editing(&self.hub, cx) {
+            return;
+        }
         if self.edit.is_none() {
             let grid = self.placement.grid;
             let row = if grid.scale > 0. {
