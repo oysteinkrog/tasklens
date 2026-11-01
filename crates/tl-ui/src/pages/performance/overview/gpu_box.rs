@@ -56,7 +56,7 @@ use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
-    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
+    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
 };
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
