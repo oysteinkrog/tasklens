@@ -302,12 +302,6 @@ pub(crate) fn pick(cx: &mut VisualTestContext, prefix: &str, range: OverviewRang
     click(cx, item);
 }
 
-/// The drop-down's menu closed (after a refused click on a disabled item).
-pub(crate) fn close_menu(cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("escape");
-    draw(cx);
-}
-
 pub(crate) fn set_range(r: &mut Rig, range: OverviewRange) {
     r.vcx.update(|_, cx| {
         TlSettings::update(cx, |d| d.settings.performance.overview_range = range);
