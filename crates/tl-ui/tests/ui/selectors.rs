@@ -1,15 +1,38 @@
 //! Debug selectors (tasklens-6swdr.11, ADR-019). Every tl-ui debug selector goes through
 //! `tl_ui::selector::TlSelector`, so a test can count how many painted elements share one.
 //! GPUI keeps one `debug_bounds` entry per selector, so a second element with the same selector
-//! hides the first from every test that looks it up.
+//! hides the first from every test that looks it up. The page sweeps here check the Processes
+//! tab and each Performance resource page; the Overview sweep is
+//! `overview::page::overview_widget_selectors_unique_on_the_page`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, div,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
+use tl_model::client::EngineClient;
+use tl_model::command::Tab;
+use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+use tl_model::ids::{DeviceIdx, NodeId};
+use tl_model::process::ProcessRecord;
+use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+use tl_model::table::{ProcessTableView, TableRow};
+use tl_model::validity::Validity;
+use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+use tl_ui::components::kv_grid;
+use tl_ui::demand::{DemandAggregator, GlobalDemand};
+use tl_ui::hub::{GlobalHub, SnapshotHub};
+use tl_ui::i18n::init_strings;
+use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::selector::{TlSelector as _, tag_frame, untag_frame};
+use tl_ui::settings_global::TlSettings;
+use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::window::main::{self as shell, MainWindow, main_window_view, open_main_window};
+
+use crate::common::{key, record};
 
 /// Every selector the window of `vcx` paints in one frame, with how many elements painted it.
 /// The frame renders every view fresh, so cached views count too (see `tl_ui::selector`).
@@ -115,4 +138,218 @@ fn assert_none_drawn_twice_names_the_repeats(cx: &mut TestAppContext) {
     let (_, vcx) = cx.add_window_view(|_, _| Twice);
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     assert_none_drawn_twice(vcx, "Twice");
+}
+
+fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+    DeviceEntry {
+        idx: DeviceIdx(idx),
+        identity,
+        generation: 0,
+        display_name: Arc::from("device"),
+        present: true,
+        parent: None,
+        persistent_key: Arc::from(""),
+        net_kind,
+        hot_c: None,
+    }
+}
+
+/// CPU, memory, a GPU, two disks and a wired interface.
+fn catalog() -> Vec<DeviceEntry> {
+    let disk = |idx: u16, name: &str| DeviceIdentity::Disk {
+        major: 8,
+        minor: idx.into(),
+        name: Arc::from(name),
+        wwn_or_serial: None,
+    };
+    vec![
+        entry(0, DeviceIdentity::CpuPackage, None),
+        entry(1, DeviceIdentity::Memory, None),
+        entry(
+            2,
+            DeviceIdentity::Gpu {
+                uuid: [0; 16],
+                pci_bus_id: Arc::from("0000:2d:00.0"),
+            },
+            None,
+        ),
+        entry(3, disk(3, "sda"), None),
+        entry(4, disk(4, "sdb"), None),
+        entry(
+            5,
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex: 2,
+                name: Arc::from("eth0"),
+            },
+            Some(NetKind::Wired),
+        ),
+    ]
+}
+
+/// The resource pages the sweep opens, by sidebar key.
+const PAGES: [&str; 6] = [
+    "cpu",
+    "memory",
+    "gpu:pci:0000:2d:00.0",
+    "disk:sda",
+    "disk:sdb",
+    "net:eth0",
+];
+
+struct Rig<'a> {
+    main: Entity<MainWindow>,
+    engine: Arc<FakeEngine>,
+    vcx: &'a mut VisualTestContext,
+}
+
+fn draw(vcx: &mut VisualTestContext) {
+    for _ in 0..2 {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+    }
+}
+
+/// The real main window at 1200 × 900, with the real Processes and Performance pages.
+fn open(cx: &mut TestAppContext) -> Rig<'_> {
+    let mut settings = Settings::default();
+    settings.motion.tab_switch_ms = 0;
+    let engine = FakeEngine::new();
+    engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: 1,
+            entries: Arc::from(catalog()),
+        });
+    });
+    let client: Arc<dyn EngineClient> = engine.clone();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        init_strings(cx, "en-US");
+        kv_grid::init(cx);
+        tl_ui::table::actions::bind_keys_table(cx);
+        cx.set_global(EngineGlobal(Arc::clone(&client)));
+        cx.set_global(BootSettings {
+            settings,
+            state: UiState::default(),
+            persist: None,
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        tl_ui::action_tracker::install(Arc::clone(&client), Some(hub.clone()), cx);
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        cx.set_global(GlobalHub(hub));
+        cx.set_global(GlobalDemand(demand));
+        tl_ui::components::toast::init(cx);
+        tl_ui::actions::bind_keys_global(cx);
+        tl_ui::components::menu::bind_keys(cx);
+        tl_ui::pages::performance::actions::bind_keys_performance(cx);
+        cx.set_global(StartOptions::default());
+        tl_ui::window::menubar::init(cx);
+        shell::init(cx);
+    });
+    let handle = cx.update(open_main_window).expect("the main window opens");
+    let vcx = VisualTestContext::from_window(handle.into(), cx).into_mut();
+    vcx.simulate_scale_factor_change(1.0);
+    vcx.simulate_resize(size(px(1200.), px(900.)));
+    vcx.update(|window, _| window.activate_window());
+    draw(vcx);
+    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+    Rig { main, engine, vcx }
+}
+
+fn select_tab(r: &mut Rig, tab: Tab) {
+    r.vcx
+        .dispatch_action(tl_ui::actions::SelectTab(tab as usize));
+    draw(r.vcx);
+}
+
+/// Six sleeping processes, one row each.
+fn publish_processes(engine: &FakeEngine) {
+    let records: Vec<ProcessRecord> = (10..16).map(record).collect();
+    let rows: Vec<TableRow> = (10..16u32)
+        .enumerate()
+        .map(|(i, pid)| TableRow {
+            node: NodeId::Process(key(pid)),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(i as u32),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        })
+        .collect();
+    engine.publish_with(|s| {
+        s.table = Arc::new(ProcessTableView {
+            query_generation: 1,
+            header: ComponentHeader {
+                version: s.table.header.version + 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: rows.into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: records.into(),
+            ..ProcessSnapshot::default()
+        });
+    });
+}
+
+/// The Processes tab with its minigraph cards and six process rows draws no selector twice.
+#[gpui_kit::test]
+fn processes_tab_draws_no_selector_twice(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select_tab(&mut r, Tab::Processes);
+    publish_processes(&r.engine);
+    draw(r.vcx);
+    let drawn = assert_none_drawn_twice(r.vcx, "Processes");
+    assert!(drawn.contains_key("ProcessesPage"), "the page is drawn");
+    let named = |prefix: &str| drawn.keys().filter(|k| k.starts_with(prefix)).count();
+    assert!(
+        named("MinigraphCard-") >= 6,
+        "the minigraph cards are drawn: {drawn:?}"
+    );
+    assert!(
+        named("TlNameCell") >= 6,
+        "the six rows are drawn: {drawn:?}"
+    );
+}
+
+/// Each Performance resource page draws no selector twice.
+#[gpui_kit::test]
+fn performance_pages_draw_no_selector_twice(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    select_tab(&mut r, Tab::Performance);
+    let page = r
+        .vcx
+        .read_entity(&r.main, |m, _| {
+            m.page_entity::<PerformancePage>(Tab::Performance)
+        })
+        .expect("PerformancePage built");
+    for k in PAGES {
+        let key = DeviceKey(Arc::from(k));
+        r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar.update(cx, |s, cx| s.select(key.clone(), cx));
+        });
+        draw(r.vcx);
+        let selected = r
+            .vcx
+            .update(|_, cx| page.read(cx).selected().map(|k| k.0.to_string()));
+        assert_eq!(selected.as_deref(), Some(k), "{k} selected");
+        assert_none_drawn_twice(r.vcx, k);
+    }
 }

@@ -9278,310 +9278,22 @@ mod page {
         BoxKind::Timeline,
     ];
 
-    /// One debug selector a box of the page can draw.
-    #[derive(Clone, Debug)]
-    struct PageSel {
-        kind: BoxKind,
-        /// The top-level widget of the box's container it belongs to; `None` for the box.
-        widget: Option<u32>,
-        name: &'static str,
-        /// It must lie inside its box when drawn. Group members scroll out of the box, and the
-        /// edit handles reach past its edge, so only their names and owners count.
-        inside: bool,
-        /// A group member: its id is new when its group is made again.
-        member: bool,
-    }
-
-    /// Every box-level and widget-level debug selector of the page's boxes, Edit Layout and
-    /// Edit Widgets included, with its owner. GPUI 0.3.7 keeps one map entry per selector and
-    /// has no public list of the drawn ones, so the sweep names the selectors from the same
-    /// helpers the boxes use and proves each drawn one has a single owner by taking the owner
-    /// away ([`assert_box_owns`], [`assert_widget_owns`]).
-    fn page_selectors(r: &mut Rig) -> Vec<PageSel> {
-        use tl_ui::pages::performance::overview::edge_id;
-        use tl_ui::pages::performance::overview::edit::grip_id as box_grip_id;
-        use tl_ui::pages::performance::overview::parts::{
-            body_id, figures_id, title_icon_id, title_line_id, title_name_id, title_row_id,
-            title_value_id,
-        };
-        use tl_ui::pages::performance::widget::container::{
-            container_id, scroll_id as body_scroll_id,
-        };
-        use tl_ui::pages::performance::widget::edit::{
-            corner_id as widget_corner_id, editor_id, frame_id, gear_id as widget_gear_id,
-            grip_id as widget_grip_id, outline_id,
-        };
-        use tl_ui::pages::performance::widget::group_widget::scroll_id as group_scroll_id;
-        use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
-        const PARTS: [&str; 7] = ["name", "value", "stats", "bar", "chart", "reason", "more"];
-        fn push(
-            out: &mut Vec<PageSel>,
-            kind: BoxKind,
-            widget: Option<u32>,
-            name: String,
-            inside: bool,
-            member: bool,
-        ) {
-            out.push(PageSel {
-                kind,
-                widget,
-                name: leak_str(name),
-                inside,
-                member,
-            });
-        }
-        fn push_widget(
-            out: &mut Vec<PageSel>,
-            kind: BoxKind,
-            c: &str,
-            top: u32,
-            id: u32,
-            member: bool,
-        ) {
-            push(out, kind, Some(top), widget_id(c, id), !member, member);
-            for part in PARTS {
-                push(out, kind, Some(top), part_id(c, id, part), !member, member);
-            }
-        }
-        let boxes = widget_boxes(r);
-        r.vcx.update(|_, cx| {
-            let mut out = Vec::new();
-            for (kind, container, _) in &boxes {
-                let kind = *kind;
-                let b = box_id(kind);
-                for name in [
-                    b.to_owned(),
-                    title_row_id(b),
-                    title_value_id(b),
-                    title_line_id(b),
-                    title_name_id(b),
-                    title_icon_id(b),
-                    figures_id(b),
-                    body_id(b),
-                ] {
-                    push(&mut out, kind, None, name, true, false);
-                }
-                let container = container.read(cx);
-                let c = container.id().to_string();
-                for name in [
-                    corner_id(kind),
-                    title_handle_id(kind),
-                    hide_button_id(kind),
-                    box_grip_id(kind),
-                    gear_id(kind),
-                    edge_id(kind),
-                    container_id(&c),
-                    body_scroll_id(&c),
-                    editor_id(&c),
-                ] {
-                    push(&mut out, kind, None, name, false, false);
-                }
-                for w in &container.layout().widgets {
-                    let top = w.id;
-                    push_widget(&mut out, kind, &c, top, top, false);
-                    for name in [
-                        frame_id(&c, top),
-                        widget_grip_id(&c, top),
-                        widget_gear_id(&c, top),
-                        widget_corner_id(&c, top),
-                        outline_id(&c, top),
-                    ] {
-                        push(&mut out, kind, Some(top), name, false, false);
-                    }
-                    if let Some(g) = container.group(top) {
-                        push(
-                            &mut out,
-                            kind,
-                            Some(top),
-                            group_scroll_id(&c, top),
-                            true,
-                            false,
-                        );
-                        for (_, item) in g.read(cx).items() {
-                            push_widget(&mut out, kind, &c, top, item.read(cx).id(), true);
-                        }
-                    }
-                }
-            }
-            out
-        })
-    }
-
     fn drawn(r: &mut Rig, name: &'static str) -> bool {
         r.vcx.debug_bounds(name).is_some()
     }
 
-    /// No two selectors of the page have one name.
-    fn assert_names_unique(sels: &[PageSel], what: &str) {
-        let mut seen = std::collections::HashMap::new();
-        for s in sels {
-            if let Some(first) = seen.insert(s.name, (s.kind, s.widget)) {
-                panic!(
-                    "{what}: {} names a part of {first:?} and of {:?}",
-                    s.name,
-                    (s.kind, s.widget)
-                );
-            }
-        }
-    }
-
-    /// Each drawn selector that must lie in its box does, and each box the page places draws
-    /// at least one widget root.
-    fn assert_drawn_inside(r: &mut Rig, sels: &[PageSel], what: &str) {
-        // A body that scrolls moves its widgets up by its offset, and the ones below the fold
-        // reach past the box's bottom.
-        let scrolled: std::collections::HashMap<BoxKind, Option<gpui_kit::Pixels>> =
-            widget_boxes(r)
-                .into_iter()
-                .map(|(kind, c, _)| {
-                    let scroll = r.vcx.update(|_, cx| {
-                        let c = c.read(cx);
-                        c.placement().scrolls.then(|| c.scroll_offset())
-                    });
-                    (kind, scroll)
-                })
-                .collect();
-        let mut roots = std::collections::HashMap::<BoxKind, usize>::new();
-        for s in sels.iter().filter(|s| s.inside) {
-            let Some(b) = r.vcx.debug_bounds(s.name) else {
-                continue;
-            };
-            let (kind, name) = (s.kind, s.name);
-            let frame = r
-                .vcx
-                .debug_bounds(box_id(kind))
-                .unwrap_or_else(|| panic!("{what}: {name} drawn, {kind:?} box not drawn"));
-            let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| a >= b - px(1.);
-            let scroll = scrolled.get(&kind).copied().flatten();
-            let top = b.top() + scroll.unwrap_or(px(0.));
-            assert!(
-                near(b.left(), frame.left())
-                    && near(top, frame.top())
-                    && near(frame.right(), b.right())
-                    && (scroll.is_some() || near(frame.bottom(), b.bottom())),
-                "{what}: {name} at {b:?} (scrolled {scroll:?}) is outside the {kind:?} box {frame:?}"
-            );
-            if s.widget.is_some() && name.ends_with(|c: char| c.is_ascii_digit()) {
-                *roots.entry(kind).or_default() += 1;
-            }
-        }
-        for (kind, _, _) in widget_boxes(r) {
-            if drawn(r, box_id(kind)) {
-                assert!(
-                    roots.get(&kind).copied().unwrap_or(0) > 0,
-                    "{what}: the {kind:?} box draws no widget: {roots:?}"
-                );
-            }
-        }
-    }
-
-    /// The drawn selectors of `kind`'s box go with the box when the layout hides it, so no
-    /// other part of the page draws one of them, and come back with it.
-    fn assert_box_owns(r: &mut Rig, kind: BoxKind, sels: &[PageSel], what: &str) {
-        let mine: Vec<&PageSel> = sels
-            .iter()
-            .filter(|s| s.kind == kind && r.vcx.debug_bounds(s.name).is_some())
-            .collect();
-        assert!(!mine.is_empty(), "{what}: the {kind:?} box draws selectors");
-        let before = r.saved();
-        let mut hidden = r.layout().to_setting();
-        hidden.grid.retain(|b| b.kind != kind.key());
-        let set = |r: &mut Rig, setting: Option<OverviewLayoutSetting>| {
-            r.vcx.update(|_, cx| {
-                TlSettings::update(cx, |d| d.settings.performance.overview = setting);
-            });
-            draw(r.vcx);
-        };
-        set(r, Some(hidden));
-        assert!(!drawn(r, box_id(kind)), "{what}: the {kind:?} box hidden");
-        for s in &mine {
-            assert!(
-                !drawn(r, s.name),
-                "{what}: {} is still drawn with the {kind:?} box hidden, so another part has \
-                 the same selector",
-                s.name
-            );
-        }
-        set(r, before);
-        for s in mine.iter().filter(|s| !s.member) {
-            assert!(
-                drawn(r, s.name),
-                "{what}: {} back with the {kind:?} box",
-                s.name
-            );
-        }
-    }
-
-    /// The drawn selectors of top-level widget `top` go when its container's layout leaves it
-    /// out, so no other part of the page draws one of them, and come back with it.
-    fn assert_widget_owns(
-        r: &mut Rig,
-        kind: BoxKind,
-        container: &Entity<tl_ui::pages::performance::widget::container::WidgetContainer>,
-        top: u32,
-        sels: &[PageSel],
-        what: &str,
-    ) {
-        let mine: Vec<&PageSel> = sels
-            .iter()
-            .filter(|s| s.kind == kind && s.widget == Some(top))
-            .filter(|s| r.vcx.debug_bounds(s.name).is_some())
-            .collect();
-        let layout = r.vcx.read_entity(container, |c, _| c.layout().clone());
-        let mut without = layout.clone();
-        without.widgets.retain(|w| w.id != top);
-        r.vcx
-            .update(|_, cx| container.update(cx, |c, cx| c.set_layout(without, cx)));
-        draw(r.vcx);
-        for s in &mine {
-            assert!(
-                !drawn(r, s.name),
-                "{what}: {} is still drawn without widget {top} of the {kind:?} box, so another \
-                 part has the same selector",
-                s.name
-            );
-        }
-        r.vcx
-            .update(|_, cx| container.update(cx, |c, cx| c.set_layout(layout, cx)));
-        draw(r.vcx);
-        for s in mine.iter().filter(|s| !s.member) {
-            assert!(
-                drawn(r, s.name),
-                "{what}: {} back with widget {top} of the {kind:?} box",
-                s.name
-            );
-        }
-    }
-
-    /// The whole page check: the six boxes are drawn, every selector name is unique, each drawn
-    /// one lies in its box, and each drawn one has one owner: its box and, with `widgets`, its
-    /// widget.
-    fn assert_page_selectors(r: &mut Rig, widgets: bool, what: &str) {
-        let sels = page_selectors(r);
-        assert_names_unique(&sels, what);
+    /// The whole page check: the six boxes are drawn and no selector is drawn twice
+    /// (tasklens-6swdr.11, [`crate::selectors::assert_none_drawn_twice`]).
+    fn assert_page_selectors(r: &mut Rig, what: &str) {
         for kind in SIX_BOXES {
             assert!(drawn(r, box_id(kind)), "{what}: the {kind:?} box is drawn");
         }
-        assert_drawn_inside(r, &sels, what);
-        let boxes = widget_boxes(r);
-        for (kind, _, _) in &boxes {
-            assert_box_owns(r, *kind, &sels, what);
-        }
-        if widgets {
-            for (kind, container, _) in &boxes {
-                let tops: Vec<u32> = r.vcx.read_entity(container, |c, _| {
-                    c.layout().widgets.iter().map(|w| w.id).collect()
-                });
-                for top in tops {
-                    assert_widget_owns(r, *kind, container, top, &sels, what);
-                }
-            }
-        }
+        crate::selectors::assert_none_drawn_twice(r.vcx, what);
     }
 
-    /// In Edit Widgets of `kind`'s box: every placed widget draws its frame, grip, gear and
-    /// corner, a selected one its outline, and Remove Widget takes all of the widget's drawn
-    /// selectors off the page; Undo brings them back.
+    /// In Edit Widgets of `kind`'s box: no selector is drawn twice, every placed widget draws
+    /// its frame, grip, gear and corner, a selected one its outline, and Remove Widget takes
+    /// the widget and its edit parts off the page; Undo brings them back.
     fn assert_edit_selectors(
         r: &mut Rig,
         kind: BoxKind,
@@ -9592,22 +9304,22 @@ mod page {
             corner_id as widget_corner_id, frame_id, gear_id as widget_gear_id,
             grip_id as widget_grip_id, outline_id,
         };
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
         let what = format!("{kind:?} Edit Widgets");
-        let sels = page_selectors(r);
-        assert_names_unique(&sels, &what);
-        assert_drawn_inside(r, &sels, &what);
+        assert_page_selectors(r, &what);
         let (c, placed) = r.vcx.read_entity(container, |c, _| {
             (c.id().to_string(), c.placed_ids().to_vec())
         });
         assert!(!placed.is_empty(), "{what}: widgets placed");
         for &id in &placed {
-            for name in [
+            let parts = [
                 frame_id(&c, id),
                 widget_grip_id(&c, id),
                 widget_gear_id(&c, id),
                 widget_corner_id(&c, id),
-            ] {
-                let name = leak_str(name);
+            ]
+            .map(leak_str);
+            for name in parts {
                 assert!(drawn(r, name), "{what}: {name} drawn");
             }
             r.vcx
@@ -9615,12 +9327,11 @@ mod page {
             draw(r.vcx);
             let outline = leak_str(outline_id(&c, id));
             assert!(drawn(r, outline), "{what}: {outline} drawn");
-            let sels = page_selectors(r);
-            let mine: Vec<&'static str> = sels
-                .iter()
-                .filter(|s| s.kind == kind && s.widget == Some(id) && !s.member)
-                .map(|s| s.name)
-                .filter(|&name| r.vcx.debug_bounds(name).is_some())
+            let root = leak_str(widget_id(&c, id));
+            let mine: Vec<&'static str> = parts
+                .into_iter()
+                .chain([outline, root])
+                .filter(|&name| drawn(r, name))
                 .collect();
             assert!(
                 r.vcx
@@ -9631,8 +9342,7 @@ mod page {
             for &name in &mine {
                 assert!(
                     !drawn(r, name),
-                    "{what}: {name} is still drawn without widget {id}, so another part has \
-                     the same selector"
+                    "{what}: {name} is still drawn without widget {id}"
                 );
             }
             assert!(
@@ -9647,11 +9357,10 @@ mod page {
         }
     }
 
-    /// tasklens-6swdr.10, ADR-019: widget ids repeat across containers, so every widget-level
-    /// debug selector has the container id. The whole Overview at 1200 × 900, every box on its
-    /// default widgets, in Edit Widgets, with one added widget each, and in Edit Layout: all six
-    /// boxes are drawn, every selector of the page's boxes is unique, and each drawn one leaves
-    /// the page with its own box or widget, so no other part draws it.
+    /// tasklens-6swdr.10 and 6swdr.11, ADR-019: widget ids repeat across containers, so every
+    /// widget-level debug selector has the container id. The whole Overview at 1200 × 900,
+    /// every box on its default widgets, in Edit Widgets, with one added widget each, and in
+    /// Edit Layout: all six boxes are drawn and no selector of the window is drawn twice.
     #[gpui_kit::test]
     fn overview_widget_selectors_unique_on_the_page(cx: &mut TestAppContext) {
         use tl_ui::pages::performance::actions::{PerfWidgetEditBox, WidgetSource};
@@ -9693,7 +9402,7 @@ mod page {
             sys.gpus = Arc::from([(DeviceIdx(2), gpu_record(2))]);
         });
         draw(r.vcx);
-        assert_page_selectors(&mut r, true, "default");
+        assert_page_selectors(&mut r, "default");
 
         // Every one of the six boxes gets Edit Widgets and one added widget.
         let boxes = widget_boxes(&mut r);
@@ -9743,7 +9452,7 @@ mod page {
             );
             added.push((kind, leak_str(widget_id(&c, id))));
         }
-        assert_page_selectors(&mut r, true, "one added widget per box");
+        assert_page_selectors(&mut r, "one added widget per box");
         for (kind, name) in added {
             assert!(
                 drawn(&mut r, name),
@@ -9759,7 +9468,7 @@ mod page {
                 assert!(drawn(&mut r, name), "Edit Layout: {name} drawn");
             }
         }
-        assert_page_selectors(&mut r, false, "Edit Layout");
+        assert_page_selectors(&mut r, "Edit Layout");
     }
 }
 
@@ -10145,7 +9854,7 @@ mod wired {
         assert!(overview(&mut r).is_none(), "built on first visit only");
         // The Overview card is the first card: sp4 (8 px) below the sidebar top.
         let panel = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("the sidebar");
-        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let card = r.vcx.debug_bounds("perf-card:cpu").expect("a card");
         let at = gpui_kit::point(
             card.center().x,
             panel.top() + px(8.) + card.size.height / 2.,
