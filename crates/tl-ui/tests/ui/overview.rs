@@ -8849,7 +8849,8 @@ mod wired {
         use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
         use tl_ui::pages::performance::widget::source::SourceStore;
 
-        let mut r = open(cx);
+        // Every card on, so the Overview shows the GPU box.
+        let mut r = open_with(cx, true);
         select(&mut r, OVERVIEW_KEY);
         let page = overview(&mut r).expect("an OverviewPage");
         let editor = r.vcx.update(|_, cx| {
