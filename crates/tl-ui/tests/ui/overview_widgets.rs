@@ -3145,7 +3145,8 @@ fn net_series(r: &mut Rig, rx: &[f32], tx: &[f32]) {
 
 /// ADR-019 "Entities and data flow": a source compares its whole state, so every way an input
 /// can change notifies its widgets, and what it shows then equals a source built fresh for the
-/// same snapshot and settings. Steps: a new sample, a hidden network kind plugged in with the
+/// same snapshot and settings. The source is the network aggregate's download, which has stats
+/// and a minus list. Steps: a new sample, a hidden network kind plugged in with the
 /// traffic unchanged (only the minus list changes), a new network unit, new hidden kinds, a new
 /// language and a pause.
 #[gpui_kit::test]
@@ -3159,7 +3160,7 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     });
     r.publish(|s| s.devices = Arc::new(box_catalog(2)));
     net_series(&mut r, &[1000., 3000., 2000.], &[100., 300., 200.]);
-    let sel = selector(DeviceSelector::Key(Arc::from("aggregate:net")), "traffic");
+    let sel = selector(DeviceSelector::Key(Arc::from("aggregate:net")), "rx");
     let store = &mut r.store;
     let s = r.vcx.update(|_, cx| store.source(&sel, cx));
     draw(r.vcx);
@@ -3212,16 +3213,10 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     assert_eq!(last.2, value, "the traffic is unchanged");
     assert_eq!(
         last.5,
-        vec![
-            SeriesId {
-                device: DeviceIdx(7),
-                metric: MetricId::NET_RX
-            },
-            SeriesId {
-                device: DeviceIdx(7),
-                metric: MetricId::NET_TX
-            },
-        ]
+        vec![SeriesId {
+            device: DeviceIdx(7),
+            metric: MetricId::NET_RX
+        }]
     );
 
     r.vcx.update(|_, cx| {
@@ -3240,13 +3235,14 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         tl_ui::i18n::set_test_catalogue(
             cx,
-            "perf-widget-metric-net-traffic = <traffic>\n\
+            "perf-widget-metric-net-rx = <download>\n\
              perf-overview-figures = lo {$min} mid {$avg} hi {$peak}\n",
         );
     });
     draw(r.vcx);
     last = check(&mut r, "language", &last);
-    assert_eq!(last.1, "<traffic>");
+    assert_eq!(last.1, "<download>");
+    assert!(last.3.starts_with("lo "), "stats words: {}", last.3);
 
     r.vcx.update(|_, cx| {
         set_paused(
