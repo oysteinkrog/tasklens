@@ -9,7 +9,9 @@
 //! A counter offers no bar and no stats.
 //!
 //! A key is looked up with its device's kind ([`DeviceKind`]), so `temp` and `power` can mean a
-//! CPU or a GPU metric. The denominators and scales that depend on the device read the snapshot
+//! CPU, a GPU, a fan or a battery metric. Phase 3 adds the keys the device pages show
+//! (ADR-019 "Metric metadata added in phase 3"), each with its menu label and the value text a
+//! page container shows ([`MetricMeta::menu_label`], [`MetricMeta::page_value`]). The denominators and scales that depend on the device read the snapshot
 //! ([`DeviceFact`]): the GPU record, the memory totals, an adapter's link speed, the CPU
 //! inventory. This module does no drawing and keeps no state.
 
@@ -23,6 +25,13 @@ use tl_model::layout_boxes::{
     METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION,
     METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX,
     METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE,
+};
+use tl_model::layout_pages::{
+    METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_DIRTY,
+    METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PERCENT,
+    METRIC_PHYSICAL, METRIC_PWM, METRIC_RESPONSE, METRIC_RPM, METRIC_SIGNAL, METRIC_SPEED,
+    METRIC_TOTAL_READ, METRIC_TOTAL_RX, METRIC_TOTAL_TX, METRIC_TOTAL_WRITTEN, METRIC_UTIL,
+    METRIC_VRAM_SHARED,
 };
 use tl_model::settings::OverviewRange;
 use tl_model::snapshot::Snapshot;
@@ -48,6 +57,8 @@ pub enum Unit {
     Megahertz,
     Watts,
     Celsius,
+    Rpm,
+    Milliseconds,
 }
 
 /// A gauge is a reading at each sample (busy percent, VRAM in use). A counter only grows
@@ -95,6 +106,13 @@ pub enum ScaleRule {
     /// The Network page's Throughput rule: the adapter's link speed (bits per second, the
     /// device fact) unless `network_dynamic_scale` is on, else auto (`throughput_scale`).
     Network(DeviceFact),
+    /// `YScale::Commit` of the device fact, so the axis passes 100% of the limit when commit
+    /// does; `YScale::StickyUp` with no maximum when the device does not report it.
+    Commit(DeviceFact),
+    /// `YScale::Stacked` of the present logical CPUs (UI-PRF-023 "All cores stacked").
+    StackedLogical,
+    /// `YScale::Symmetric`: battery power, charge above the zero line and discharge below.
+    Symmetric,
 }
 
 /// How the stats form works out its figures over the box range.
@@ -125,6 +143,18 @@ pub enum ValueText {
     ReadWrite,
     /// Download and upload of a pair, "↓ 1.4 Mbps  ↑ 220 kbps".
     DownUp,
+    /// The sum of a pair's two values, "12.3 MiB/s": a disk's read + write and an adapter's
+    /// download + upload on a page (UI-PRF-029, UI-PRF-031).
+    Sum,
+    /// The value as a percent of its total, one decimal: commit of the commit limit, "69.0%".
+    PercentOfTotal,
+    /// A percent and the second value in RPM, "0% (0 RPM)": the GPU fan.
+    PercentRpm,
+    /// Milliseconds with two decimals, "0.42 ms", as the disk page's Details row.
+    Milliseconds,
+    /// The Wi-Fi signal, "-52 dBm (78%)", or "78%" when the adapter gives no dBm (the second
+    /// value), as the adapter page's Details row.
+    Signal,
     /// The metric has no value form (Core clocks).
     None,
 }
@@ -140,6 +170,14 @@ pub enum Lines {
     Stacked,
     /// One line per physical core (Core clocks).
     PerCore,
+    /// One line per present logical CPU, at alpha max(1/n, 0.08) and no fill, or stacked
+    /// filled bands (UI-PRF-023 "All cores overlaid" and "All cores stacked").
+    PerLogical { stacked: bool },
+    /// The Physical memory chart (UI-PRF-026): in use filled, committed dashed, modified as a
+    /// 1 px line at 0.6.
+    Physical,
+    /// The Fan speed chart (UI-PRF-034): RPM filled, PWM dashed on its own 0 to 100 axis.
+    RpmPwm,
     /// No series: the value comes from the device record only, so there is no chart and there
     /// are no stats (disk temperature).
     NoSeries,
@@ -160,6 +198,12 @@ pub struct MetricMeta {
     /// and the chart plots 1-second means, as the core rows and their sparklines do. Only the
     /// logical CPU's `load` is smoothed.
     pub smoothed: bool,
+    /// The `en-US.ftl` key of the Source and Add Widget item text when it differs from the
+    /// name, so two keys never share an item text (ADR-019 phase 3).
+    pub menu_label: Option<&'static str>,
+    /// The value text in a page container, when it differs from [`Self::value_text`] (the
+    /// page format of ADR-019 phase 3 "Page style").
+    pub page_value: Option<ValueText>,
 }
 
 /// A value when it is shown: valid or stale.
@@ -194,6 +238,34 @@ fn gpu_power_max(snap: &Snapshot, idx: DeviceIdx) -> Option<f32> {
 
 fn gpu_slowdown_temp(snap: &Snapshot, idx: DeviceIdx) -> Option<f32> {
     gpu(snap, idx, |t| t.info.slowdown_temp_c)
+}
+
+fn gpu_shared_total(snap: &Snapshot, idx: DeviceIdx) -> Option<f32> {
+    gpu(snap, idx, |t| shown(t.shared_total).map(|v| v as f32))
+}
+
+/// The summed dedicated memory of every GPU, the Aggregate graphics page's Memory total.
+fn gpu_mem_sum(snap: &Snapshot, _: DeviceIdx) -> Option<f32> {
+    let totals = snap
+        .system
+        .gpus
+        .iter()
+        .filter_map(|(_, t)| shown(t.mem_total));
+    let mut sum = None;
+    for v in totals {
+        *sum.get_or_insert(0.0) += v as f32;
+    }
+    sum
+}
+
+/// A fan's `fan<n>_max` in RPM, when the chip reports it.
+fn fan_max(snap: &Snapshot, idx: DeviceIdx) -> Option<f32> {
+    snap.system
+        .sensors
+        .iter()
+        .find(|(i, _)| *i == idx)
+        .and_then(|(_, r)| r.fan_max_rpm)
+        .map(|v| v as f32)
 }
 
 /// The processor's maximum clock from the inventory, as the CPU page's Clock graph uses it.
@@ -266,17 +338,28 @@ pub const PERCENT: MetricMeta = MetricMeta {
     stats: StatsRule::MinAvgPeak,
     lines: Lines::One,
     smoothed: false,
+    menu_label: None,
+    page_value: None,
 };
 
 /// Every GPU engine: `engine:<key>` for each key of `GpuEngine::key`. One decimal, as the GPU
-/// box's spark rows show it.
-pub const GPU_ENGINE: MetricMeta = PERCENT;
+/// box's spark rows and the GPU page show it.
+pub const GPU_ENGINE: MetricMeta = MetricMeta {
+    page_value: Some(ValueText::Plain),
+    ..PERCENT
+};
 
-/// A percent gauge shown as a whole percent ("42%"): CPU `total`, `kernel` and `pressure`,
-/// memory `pressure`, disk `active`.
+/// A percent gauge shown as a whole percent ("42%"): CPU `pressure` and memory `pressure`.
 pub const WHOLE_PERCENT: MetricMeta = MetricMeta {
     value_text: ValueText::WholePercent,
     ..PERCENT
+};
+
+/// CPU `total` and `kernel`, disk `active`: a whole percent in a box, one decimal on a page
+/// ("18.6%", UI-PRF-024, UI-PRF-029).
+pub const PAGE_PERCENT: MetricMeta = MetricMeta {
+    page_value: Some(ValueText::Plain),
+    ..WHOLE_PERCENT
 };
 
 /// `vram`: VRAM in use, of the card's total.
@@ -307,12 +390,13 @@ pub const GPU_CLOCK_MEM: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `power` on a GPU: the power draw.
+/// `power` on a GPU: the power draw. On a page with its limit, "31.9 / 300 W" (UI-PRF-032).
 pub const GPU_POWER: MetricMeta = MetricMeta {
     unit: Unit::Watts,
     format: ValueFormat::Watts,
     scale: ScaleRule::StickyUp(gpu_power_max),
     bar: BarMax::Total(gpu_power_max),
+    page_value: Some(ValueText::OfTotal),
     ..PERCENT
 };
 
@@ -392,10 +476,12 @@ pub const MEM_PART: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `swap`: swap in use, of the swap total. "No swap" without swap.
+/// `swap`: swap in use, of the swap total. "No swap" without swap. A page shows the bytes in
+/// use, "1.20 GiB" (UI-PRF-026).
 pub const MEM_SWAP: MetricMeta = MetricMeta {
     scale: ScaleRule::FixedTotal(swap_total),
     bar: BarMax::Total(swap_total),
+    page_value: Some(ValueText::Part),
     ..MEM_PART
 };
 
@@ -429,6 +515,7 @@ pub const DISK_RATE: MetricMeta = MetricMeta {
 /// the `disk_charts` cells.
 pub const DISK_IO: MetricMeta = MetricMeta {
     value_text: ValueText::ReadWrite,
+    page_value: Some(ValueText::Sum),
     stats: StatsRule::None,
     lines: Lines::Pair {
         second_dashed: true,
@@ -461,12 +548,194 @@ pub const NET_RATE: MetricMeta = MetricMeta {
 /// line, one scale, as the `combined` chart.
 pub const NET_TRAFFIC: MetricMeta = MetricMeta {
     value_text: ValueText::DownUp,
+    page_value: Some(ValueText::Sum),
     bar: BarMax::None,
     stats: StatsRule::None,
     lines: Lines::Pair {
         second_dashed: false,
     },
     ..NET_RATE
+};
+
+// ---- Phase 3: the keys the device pages add (ADR-019 "Metric metadata added in phase 3") ----
+
+/// `cores_overlaid` of the CPU: every logical CPU's load, one line each. Chart and name only.
+pub const CORES_OVERLAID: MetricMeta = MetricMeta {
+    value_text: ValueText::None,
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::PerLogical { stacked: false },
+    ..PERCENT
+};
+
+/// `cores_stacked` of the CPU: the same as stacked bands, on a `Stacked(n)` scale.
+pub const CORES_STACKED: MetricMeta = MetricMeta {
+    scale: ScaleRule::StackedLogical,
+    lines: Lines::PerLogical { stacked: true },
+    ..CORES_OVERLAID
+};
+
+/// `freq` and `freq_max` of the CPU: the speed and the fastest core's clock, "4631 MHz" on a
+/// page too (UI-PRF-025).
+pub const CPU_FREQ_PAGE: MetricMeta = MetricMeta {
+    page_value: Some(ValueText::Plain),
+    ..CPU_FREQ
+};
+
+/// `clock` of the CPU: the speed filled and the fastest core dashed (UI-PRF-025). The value is
+/// the speed.
+pub const CPU_CLOCK: MetricMeta = MetricMeta {
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::Pair {
+        second_dashed: true,
+    },
+    ..CPU_FREQ_PAGE
+};
+
+/// `physical` of memory: in use, committed and modified in one chart (UI-PRF-026). The value
+/// is in use alone, "34.68 GiB".
+pub const MEM_PHYSICAL: MetricMeta = MetricMeta {
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::Physical,
+    ..MEM_PART
+};
+
+/// `commit_pct` of memory: committed memory as a percent of the commit limit, "69.0%". The
+/// axis passes 100% when commit does; the bar stops at full.
+pub const MEM_COMMIT_PCT: MetricMeta = MetricMeta {
+    value_text: ValueText::PercentOfTotal,
+    scale: ScaleRule::Commit(commit_limit),
+    menu_label: Some("perf-widget-menu-commit-pct"),
+    ..MEM_COMMIT
+};
+
+/// `dirty` of memory: modified memory, "120.00 MiB".
+pub const MEM_DIRTY: MetricMeta = MetricMeta {
+    value_text: ValueText::Plain,
+    scale: ScaleRule::StickyUpOpen,
+    bar: BarMax::None,
+    ..MEM_PART
+};
+
+/// `memory` of a GPU: dedicated memory filled and shared memory dashed, "2.80 GiB / 15.92 GiB".
+pub const GPU_MEMORY: MetricMeta = MetricMeta {
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::Pair {
+        second_dashed: true,
+    },
+    menu_label: Some("perf-widget-menu-gpu-memory"),
+    ..GPU_VRAM
+};
+
+/// `vram_shared` of a GPU: shared memory in use, of the shared total.
+pub const GPU_VRAM_SHARED: MetricMeta = MetricMeta {
+    scale: ScaleRule::FixedTotal(gpu_shared_total),
+    bar: BarMax::Total(gpu_shared_total),
+    ..GPU_VRAM
+};
+
+/// `clocks` of a GPU: graphics clock filled and memory clock dashed, "1905 / 3105 MHz" as the
+/// 1.3.0 Clocks chart (UI-PRF-032).
+pub const GPU_CLOCKS: MetricMeta = MetricMeta {
+    value_text: ValueText::OfTotal,
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::Pair {
+        second_dashed: true,
+    },
+    ..GPU_CLOCK_GFX
+};
+
+/// `fan` of a GPU: its fan speed from the record, "0% (0 RPM)". Bar, value and name.
+pub const GPU_FAN: MetricMeta = MetricMeta {
+    value_text: ValueText::PercentRpm,
+    stats: StatsRule::None,
+    lines: Lines::NoSeries,
+    ..PERCENT
+};
+
+/// `response` of a disk: average response time from the record, "0.42 ms". Value and name.
+pub const DISK_RESPONSE: MetricMeta = MetricMeta {
+    unit: Unit::Milliseconds,
+    format: ValueFormat::Count,
+    value_text: ValueText::Milliseconds,
+    scale: ScaleRule::StickyUpOpen,
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::NoSeries,
+    ..PERCENT
+};
+
+/// `total_read`, `total_written`, `total_rx` and `total_tx`: a running total from the record,
+/// "812.40 GiB". A counter: value and name.
+pub const RUNNING_TOTAL: MetricMeta = MetricMeta {
+    unit: Unit::Bytes,
+    format: ValueFormat::Bytes,
+    scale: ScaleRule::StickyUpOpen,
+    kind: MetricKind::Counter,
+    bar: BarMax::None,
+    stats: StatsRule::None,
+    lines: Lines::NoSeries,
+    ..PERCENT
+};
+
+/// `signal` of an adapter: the Wi-Fi signal, "-52 dBm (78%)". The value is the percent, so
+/// the bar is out of 100. Bar, value and name.
+pub const NET_SIGNAL: MetricMeta = MetricMeta {
+    value_text: ValueText::Signal,
+    stats: StatsRule::None,
+    lines: Lines::NoSeries,
+    ..PERCENT
+};
+
+/// `rpm` of a fan, "1200 RPM", on a scale up to `fan<n>_max` when the chip reports it.
+pub const FAN_RPM: MetricMeta = MetricMeta {
+    unit: Unit::Rpm,
+    format: ValueFormat::Rpm,
+    scale: ScaleRule::StickyUp(fan_max),
+    bar: BarMax::Total(fan_max),
+    ..PERCENT
+};
+
+/// `speed` of a fan: RPM filled and PWM dashed (UI-PRF-034). The value is the RPM.
+pub const FAN_SPEED: MetricMeta = MetricMeta {
+    stats: StatsRule::None,
+    lines: Lines::RpmPwm,
+    ..FAN_RPM
+};
+
+/// `pwm` of a fan, "45%".
+pub const FAN_PWM: MetricMeta = WHOLE_PERCENT;
+
+/// `temp` of a fan: its paired sensor, "45 °C". Without a paired sensor the widget shows "-".
+pub const FAN_TEMP: MetricMeta = MetricMeta {
+    unit: Unit::Celsius,
+    format: ValueFormat::Celsius,
+    scale: ScaleRule::StickyTemp,
+    bar: BarMax::None,
+    ..PERCENT
+};
+
+/// `power` of a battery, "-12.4 W": charge above the zero line, discharge below.
+pub const BATTERY_POWER: MetricMeta = MetricMeta {
+    unit: Unit::Watts,
+    format: ValueFormat::Watts,
+    scale: ScaleRule::Symmetric,
+    bar: BarMax::None,
+    ..PERCENT
+};
+
+/// `util` of the GPU aggregate, `percent` of a battery: a percent with one decimal.
+pub const PAGE_PLAIN_PERCENT: MetricMeta = GPU_ENGINE;
+
+/// `memory` of the GPU aggregate: the summed memory, of the summed total.
+pub const GPU_MEMORY_SUM: MetricMeta = MetricMeta {
+    scale: ScaleRule::FixedTotal(gpu_mem_sum),
+    bar: BarMax::Total(gpu_mem_sum),
+    ..GPU_VRAM
 };
 
 /// A denominator that can fill a bar: finite and above 0.
@@ -503,12 +772,21 @@ impl MetricMeta {
                     METRIC_CLOCK_MEM => &GPU_CLOCK_MEM,
                     METRIC_POWER => &GPU_POWER,
                     METRIC_TEMP => &GPU_TEMP,
+                    METRIC_GPU_MEMORY => &GPU_MEMORY,
+                    METRIC_VRAM_SHARED => &GPU_VRAM_SHARED,
+                    METRIC_GPU_CLOCKS => &GPU_CLOCKS,
+                    METRIC_FAN => &GPU_FAN,
                     _ => return None,
                 }
             }
             DeviceKind::Cpu => match k {
-                METRIC_CPU_TOTAL | METRIC_CPU_KERNEL | METRIC_PRESSURE => &WHOLE_PERCENT,
-                METRIC_FREQ => &CPU_FREQ,
+                METRIC_CPU_TOTAL | METRIC_CPU_KERNEL => &PAGE_PERCENT,
+                METRIC_PRESSURE => &WHOLE_PERCENT,
+                METRIC_FREQ => &CPU_FREQ_PAGE,
+                METRIC_CORES_OVERLAID => &CORES_OVERLAID,
+                METRIC_CORES_STACKED => &CORES_STACKED,
+                METRIC_CLOCK => &CPU_CLOCK,
+                METRIC_FREQ_MAX => &CPU_FREQ_PAGE,
                 METRIC_TEMP => &CPU_TEMP,
                 METRIC_POWER | METRIC_POWER_CORES => &CPU_POWER,
                 METRIC_POWER_DRAW => &CPU_POWER_DRAW,
@@ -526,18 +804,44 @@ impl MetricMeta {
                 METRIC_MEM_COMMIT => &MEM_COMMIT,
                 METRIC_PRESSURE => &WHOLE_PERCENT,
                 METRIC_MEM_COMPOSITION => &MEM_COMPOSITION,
+                METRIC_PHYSICAL => &MEM_PHYSICAL,
+                METRIC_COMMIT_PCT => &MEM_COMMIT_PCT,
+                METRIC_DIRTY => &MEM_DIRTY,
                 _ => return None,
             },
             DeviceKind::Disk | DeviceKind::Disks => match k {
-                METRIC_DISK_ACTIVE => &WHOLE_PERCENT,
+                METRIC_DISK_ACTIVE => &PAGE_PERCENT,
                 METRIC_DISK_READ | METRIC_DISK_WRITE => &DISK_RATE,
                 METRIC_DISK_IO => &DISK_IO,
                 METRIC_TEMP if kind == DeviceKind::Disk => &DISK_TEMP,
+                METRIC_RESPONSE if kind == DeviceKind::Disk => &DISK_RESPONSE,
+                METRIC_TOTAL_READ | METRIC_TOTAL_WRITTEN if kind == DeviceKind::Disk => {
+                    &RUNNING_TOTAL
+                }
                 _ => return None,
             },
             DeviceKind::Net | DeviceKind::Nets => match k {
                 METRIC_NET_RX | METRIC_NET_TX => &NET_RATE,
                 METRIC_NET_TRAFFIC => &NET_TRAFFIC,
+                METRIC_TOTAL_RX | METRIC_TOTAL_TX if kind == DeviceKind::Net => &RUNNING_TOTAL,
+                METRIC_SIGNAL if kind == DeviceKind::Net => &NET_SIGNAL,
+                _ => return None,
+            },
+            DeviceKind::Fan => match k {
+                METRIC_SPEED => &FAN_SPEED,
+                METRIC_RPM => &FAN_RPM,
+                METRIC_PWM => &FAN_PWM,
+                METRIC_TEMP => &FAN_TEMP,
+                _ => return None,
+            },
+            DeviceKind::Battery => match k {
+                METRIC_POWER => &BATTERY_POWER,
+                METRIC_PERCENT => &PAGE_PLAIN_PERCENT,
+                _ => return None,
+            },
+            DeviceKind::AggregateGpu => match k {
+                METRIC_UTIL => &PAGE_PLAIN_PERCENT,
+                METRIC_GPU_MEMORY => &GPU_MEMORY_SUM,
                 _ => return None,
             },
             DeviceKind::Other => return None,
@@ -549,8 +853,21 @@ impl MetricMeta {
     pub fn is_multi(&self) -> bool {
         matches!(
             self.lines,
-            Lines::Pair { .. } | Lines::Stacked | Lines::PerCore
+            Lines::Pair { .. }
+                | Lines::Stacked
+                | Lines::PerCore
+                | Lines::PerLogical { .. }
+                | Lines::Physical
+                | Lines::RpmPwm
         )
+    }
+
+    /// The value text in a page container ([`Self::page_value`]) or in a box.
+    pub fn value_text_in(&self, page: bool) -> ValueText {
+        match self.page_value {
+            Some(text) if page => text,
+            _ => self.value_text,
+        }
     }
 
     /// Whether the metric has a series to chart and to take stats from.
@@ -607,16 +924,37 @@ impl MetricMeta {
         }
     }
 
-    /// The total the [`ValueText::OfTotal`] text names: the bar's denominator, else the
-    /// scale's total. `None` for the other value texts.
+    /// The total the [`ValueText::OfTotal`] and [`ValueText::PercentOfTotal`] texts name, in
+    /// a box or on a page: the bar's denominator, else the scale's total or hardware maximum.
+    /// `None` for the other value texts.
     pub fn value_total(&self, on: On<'_>) -> Option<f32> {
-        if !matches!(self.value_text, ValueText::OfTotal | ValueText::Part) {
+        let names_total = |t: ValueText| {
+            matches!(
+                t,
+                ValueText::OfTotal | ValueText::Part | ValueText::PercentOfTotal
+            )
+        };
+        if !names_total(self.value_text) && !self.page_value.is_some_and(names_total) {
             return None;
         }
         match (self.bar, self.scale) {
-            (BarMax::Total(f), _) | (_, ScaleRule::FixedTotal(f)) => fact(f, on),
+            (BarMax::Total(f), _)
+            | (_, ScaleRule::FixedTotal(f) | ScaleRule::StickyUp(f) | ScaleRule::Commit(f)) => {
+                fact(f, on)
+            }
             (BarMax::Fixed(max), _) => usable(max),
             _ => None,
+        }
+    }
+
+    /// The format of the stats figures: a percent of `total` for
+    /// [`ValueText::PercentOfTotal`] (commit as a percent of the limit), else [`Self::format`].
+    pub fn stats_format(&self, total: Option<f32>) -> ValueFormat {
+        match total {
+            Some(total) if self.value_text == ValueText::PercentOfTotal => ValueFormat::PercentOf {
+                total: total as u64,
+            },
+            _ => self.format,
         }
     }
 
@@ -652,6 +990,15 @@ impl MetricMeta {
                 let unit = net.format.unit;
                 throughput_scale(net.dynamic_scale, fact(f, on), unit)
             }
+            ScaleRule::Commit(f) => match fact(f, on) {
+                Some(limit) => YScale::Commit(limit),
+                None => YScale::StickyUp { hw_max: None },
+            },
+            ScaleRule::StackedLogical => {
+                let n = on.map_or(0, |(snap, _)| logical_count(snap));
+                YScale::Stacked(n.max(1))
+            }
+            ScaleRule::Symmetric => YScale::Symmetric,
         }
     }
 
@@ -667,11 +1014,24 @@ impl MetricMeta {
         net: NetFormat,
         out: &mut String,
     ) {
+        self.write_value_as(self.value_text, value, second, total, net, out);
+    }
+
+    /// [`Self::write_value`] in the value text `text` ([`Self::value_text_in`]).
+    pub fn write_value_as(
+        &self,
+        text: ValueText,
+        value: f32,
+        second: Option<f32>,
+        total: Option<f32>,
+        net: NetFormat,
+        out: &mut String,
+    ) {
+        use std::fmt::Write as _;
         let one = |v: f32, out: &mut String| format_value(self.format, v, net, out);
-        match self.value_text {
+        match text {
             ValueText::Plain | ValueText::Part => one(value, out),
             ValueText::WholePercent => {
-                use std::fmt::Write as _;
                 let _ = write!(out, "{}%", crate::components::progress::bucket(value));
             }
             ValueText::OfTotal => {
@@ -692,6 +1052,32 @@ impl MetricMeta {
                 if let Some(second) = second {
                     out.push_str(b);
                     one(second, out);
+                }
+            }
+            ValueText::Sum => one(value + second.unwrap_or(0.0), out),
+            ValueText::PercentOfTotal => match total {
+                Some(total) => {
+                    let pct = (value / total * 100.0).max(0.0);
+                    format_value(ValueFormat::Percent, pct, net, out);
+                }
+                None => one(value, out),
+            },
+            ValueText::PercentRpm => {
+                let _ = write!(out, "{}%", value.round().max(0.0) as u32);
+                if let Some(rpm) = second {
+                    let _ = write!(out, " ({} RPM)", rpm.round().max(0.0) as u32);
+                }
+            }
+            ValueText::Milliseconds => tl_model::units::response_ms(out, f64::from(value)),
+            ValueText::Signal => {
+                let pct = value.round().clamp(0.0, 100.0) as u32;
+                match second {
+                    Some(dbm) => {
+                        let _ = write!(out, "{} dBm ({pct}%)", dbm.round() as i32);
+                    }
+                    None => {
+                        let _ = write!(out, "{pct}%");
+                    }
                 }
             }
             ValueText::None => {}
@@ -725,6 +1111,23 @@ impl MetricMeta {
             figures_minus(snap, &[(id, minus)], range)
         }
     }
+}
+
+/// The number of present logical CPUs in the catalog.
+fn logical_count(snap: &Snapshot) -> u16 {
+    let n = snap
+        .devices
+        .entries
+        .iter()
+        .filter(|e| e.present)
+        .filter(|e| {
+            matches!(
+                e.identity,
+                tl_model::devices::DeviceIdentity::CpuLogical { .. }
+            )
+        })
+        .count();
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]
@@ -859,7 +1262,7 @@ mod tests {
             );
         }
         assert!(gpu_meta(&MetricKey::new("engine:nope")).is_none());
-        assert!(gpu_meta(&MetricKey::new("fan")).is_none());
+        assert!(gpu_meta(&MetricKey::new("nope")).is_none());
     }
 
     #[test]
@@ -1356,5 +1759,215 @@ mod tests {
             text(DeviceKind::Cpu, METRIC_POWER_DRAW, 35.2, 20.0),
             rate(ValueFormat::Watts, 35.2)
         );
+    }
+
+    // ---- Phase 3: the device pages (ADR-019 "Phase 3") ----
+
+    #[test]
+    fn every_phase_3_key_has_metadata() {
+        use tl_model::layout_pages::PAGE_METRICS;
+        for (kind, key) in PAGE_METRICS {
+            let key = MetricKey::new(key);
+            let meta = MetricMeta::of(kind, &key)
+                .unwrap_or_else(|| panic!("{kind:?} {key:?} has metadata"));
+            let series = metric_series(kind, &key).expect("series");
+            assert_eq!(meta.is_multi(), series.is_multi(), "{kind:?} {key:?}");
+            assert_eq!(
+                meta.lines == Lines::NoSeries,
+                series.first().is_none(),
+                "{kind:?} {key:?}"
+            );
+            assert!(meta.forms().contains(FormSet::LABEL), "{kind:?} {key:?}");
+            assert!(!meta.smoothed, "{kind:?} {key:?}");
+        }
+        // The phase 1 and phase 2 keys keep their metadata on the new kinds' neighbours.
+        assert!(MetricMeta::of(DeviceKind::Fan, &MetricKey::new(METRIC_VRAM)).is_none());
+        assert!(MetricMeta::of(DeviceKind::Disks, &MetricKey::new(METRIC_RESPONSE)).is_none());
+        assert!(MetricMeta::of(DeviceKind::Nets, &MetricKey::new(METRIC_SIGNAL)).is_none());
+        assert!(MetricMeta::of(DeviceKind::Gpu, &MetricKey::new(METRIC_UTIL)).is_none());
+    }
+
+    #[test]
+    fn phase_3_forms_match_the_adr() {
+        let at = |kind, key: &str| MetricMeta::of(kind, &MetricKey::new(key)).expect("known");
+        let all = FormSet::all();
+        let cl = FormSet::CHART | FormSet::LABEL;
+        let cvl = cl | FormSet::VALUE;
+        let vl = FormSet::VALUE | FormSet::LABEL;
+        let bvl = vl | FormSet::BAR;
+        let cases = [
+            (DeviceKind::Cpu, METRIC_CORES_OVERLAID, cl),
+            (DeviceKind::Cpu, METRIC_CORES_STACKED, cl),
+            (DeviceKind::Cpu, METRIC_CLOCK, cvl),
+            (DeviceKind::Cpu, METRIC_FREQ_MAX, all),
+            (DeviceKind::Memory, METRIC_PHYSICAL, cvl),
+            (DeviceKind::Memory, METRIC_COMMIT_PCT, all),
+            (DeviceKind::Memory, METRIC_DIRTY, all - FormSet::BAR),
+            (DeviceKind::Gpu, METRIC_GPU_MEMORY, cvl),
+            (DeviceKind::Gpu, METRIC_VRAM_SHARED, all),
+            (DeviceKind::Gpu, METRIC_GPU_CLOCKS, cvl),
+            (DeviceKind::Gpu, METRIC_FAN, bvl),
+            (DeviceKind::Disk, METRIC_RESPONSE, vl),
+            (DeviceKind::Disk, METRIC_TOTAL_READ, vl),
+            (DeviceKind::Disk, METRIC_TOTAL_WRITTEN, vl),
+            (DeviceKind::Net, METRIC_TOTAL_RX, vl),
+            (DeviceKind::Net, METRIC_TOTAL_TX, vl),
+            (DeviceKind::Net, METRIC_SIGNAL, bvl),
+            (DeviceKind::Fan, METRIC_SPEED, cvl),
+            (DeviceKind::Fan, METRIC_RPM, all),
+            (DeviceKind::Fan, METRIC_PWM, all),
+            (DeviceKind::Fan, METRIC_TEMP, all - FormSet::BAR),
+            (DeviceKind::Battery, METRIC_POWER, all - FormSet::BAR),
+            (DeviceKind::Battery, METRIC_PERCENT, all),
+            (DeviceKind::AggregateGpu, METRIC_UTIL, all),
+            (DeviceKind::AggregateGpu, METRIC_GPU_MEMORY, all),
+        ];
+        for (kind, key, forms) in cases {
+            assert_eq!(at(kind, key).forms(), forms, "{kind:?} {key}");
+        }
+        // Totals are counters; the others are gauges.
+        for key in [METRIC_TOTAL_READ, METRIC_TOTAL_WRITTEN] {
+            assert_eq!(at(DeviceKind::Disk, key).kind, MetricKind::Counter);
+        }
+        assert_eq!(at(DeviceKind::Fan, METRIC_RPM).kind, MetricKind::Gauge);
+        // Menu labels where two keys would share an item text.
+        assert_eq!(
+            at(DeviceKind::Memory, METRIC_COMMIT_PCT).menu_label,
+            Some("perf-widget-menu-commit-pct")
+        );
+        assert_eq!(
+            at(DeviceKind::Gpu, METRIC_GPU_MEMORY).menu_label,
+            Some("perf-widget-menu-gpu-memory")
+        );
+        assert_eq!(at(DeviceKind::Gpu, METRIC_VRAM).menu_label, None);
+        // Scales.
+        assert_eq!(
+            at(DeviceKind::Battery, METRIC_POWER).y_scale(None, net()),
+            YScale::Symmetric
+        );
+        assert_eq!(
+            at(DeviceKind::Cpu, METRIC_CORES_STACKED).y_scale(None, net()),
+            YScale::Stacked(1)
+        );
+    }
+
+    #[test]
+    fn page_value_text() {
+        let at = |kind, key: &str| MetricMeta::of(kind, &MetricKey::new(key)).expect("known");
+        let text = |meta: &MetricMeta, page: bool, v: f32, second: Option<f32>, total| {
+            let mut out = String::new();
+            let t = meta.value_text_in(page);
+            meta.write_value_as(t, v, second, total, NetFormat::default(), &mut out);
+            out
+        };
+        let fmt = |format, v: f32| {
+            let mut out = String::new();
+            format_value(format, v, NetFormat::default(), &mut out);
+            out
+        };
+        // One decimal on a page, a whole percent in a box.
+        let total = at(DeviceKind::Cpu, METRIC_CPU_TOTAL);
+        assert_eq!(text(total, false, 18.6, None, None), "18%");
+        assert_eq!(
+            text(total, true, 18.6, None, None),
+            fmt(ValueFormat::Percent, 18.6)
+        );
+        let active = at(DeviceKind::Disk, METRIC_DISK_ACTIVE);
+        assert_eq!(
+            text(active, true, 3.4, None, None),
+            fmt(ValueFormat::Percent, 3.4)
+        );
+        // Read + write and download + upload on a page.
+        let io = at(DeviceKind::Disk, METRIC_DISK_IO);
+        assert_eq!(
+            text(io, true, 1_000_000.0, Some(500_000.0), None),
+            fmt(ValueFormat::RateIec, 1_500_000.0)
+        );
+        assert!(text(io, false, 1.0, Some(2.0), None).starts_with("R "));
+        let traffic = at(DeviceKind::Net, METRIC_NET_TRAFFIC);
+        assert_eq!(
+            text(traffic, true, 150_000.0, Some(37_500.0), None),
+            fmt(ValueFormat::RateNetwork, 187_500.0)
+        );
+        // GPU power with its limit on a page.
+        let snap = with_gpu(full_gpu());
+        let gpu = Some((&snap, DEV));
+        let power = at(DeviceKind::Gpu, METRIC_POWER);
+        let limit = power.value_total(gpu);
+        assert_eq!(limit, Some(320.0));
+        assert_eq!(
+            text(power, true, 31.9, None, limit),
+            format!(
+                "{} / {}",
+                fmt(ValueFormat::Watts, 31.9),
+                fmt(ValueFormat::Watts, 320.0)
+            )
+        );
+        assert_eq!(
+            text(power, false, 31.9, None, limit),
+            fmt(ValueFormat::Watts, 31.9)
+        );
+        // GPU clocks name the graphics maximum.
+        let clocks = at(DeviceKind::Gpu, METRIC_GPU_CLOCKS);
+        assert_eq!(clocks.value_total(gpu), Some(2520.0));
+        // Commit as a percent of the limit; its stats too.
+        let commit = at(DeviceKind::Memory, METRIC_COMMIT_PCT);
+        assert_eq!(text(commit, false, 69.0, None, Some(100.0)), "69.0%");
+        assert_eq!(
+            commit.stats_format(Some(40.0)),
+            ValueFormat::PercentOf { total: 40 }
+        );
+        assert_eq!(
+            at(DeviceKind::Memory, METRIC_DIRTY).stats_format(Some(1.0)),
+            ValueFormat::Bytes
+        );
+        // Record values.
+        let fan = at(DeviceKind::Gpu, METRIC_FAN);
+        assert_eq!(text(fan, false, 0.0, Some(0.0), None), "0% (0 RPM)");
+        assert_eq!(text(fan, false, 41.6, None, None), "42%");
+        let signal = at(DeviceKind::Net, METRIC_SIGNAL);
+        assert_eq!(text(signal, true, 78.0, Some(-52.0), None), "-52 dBm (78%)");
+        assert_eq!(text(signal, true, 78.0, None, None), "78%");
+        let response = at(DeviceKind::Disk, METRIC_RESPONSE);
+        let mut ms = String::new();
+        units::response_ms(&mut ms, 0.42);
+        assert_eq!(text(response, true, 0.42, None, None), ms);
+        assert_eq!(
+            text(at(DeviceKind::Fan, METRIC_PWM), true, 45.4, None, None),
+            "45%"
+        );
+    }
+
+    #[test]
+    fn phase_3_facts() {
+        let gib = 1024.0 * 1024.0 * 1024.0;
+        let mut a = full_gpu();
+        a.shared_total = Metric::valid(8 << 30);
+        let mut b = full_gpu();
+        b.mem_total = Metric::valid(8 << 30);
+        let snap = snap_with(|s| s.gpus = Arc::from([(DEV, a), (DeviceIdx(2), b)]));
+        let on = Some((&snap, DEV));
+        let shared =
+            MetricMeta::of(DeviceKind::Gpu, &MetricKey::new(METRIC_VRAM_SHARED)).expect("shared");
+        assert_eq!(shared.bar_max(on), Some(8.0 * gib));
+        let sum = MetricMeta::of(DeviceKind::AggregateGpu, &MetricKey::new(METRIC_GPU_MEMORY))
+            .expect("sum");
+        assert_eq!(sum.bar_max(Some((&snap, DeviceIdx(9)))), Some(24.0 * gib));
+        assert_eq!(sum.y_scale(on, net()), YScale::FixedTotal(24.0 * gib));
+        // Commit's axis is the commit limit.
+        let mem = snap_with(|s| {
+            s.memory = MemoryTotals {
+                validity: Validity::Valid,
+                commit_limit: 40 << 30,
+                ..MemoryTotals::default()
+            };
+        });
+        let commit =
+            MetricMeta::of(DeviceKind::Memory, &MetricKey::new(METRIC_COMMIT_PCT)).expect("commit");
+        assert_eq!(
+            commit.y_scale(Some((&mem, DEV)), net()),
+            YScale::Commit(40.0 * gib)
+        );
+        assert_eq!(commit.value_total(Some((&mem, DEV))), Some(40.0 * gib));
     }
 }

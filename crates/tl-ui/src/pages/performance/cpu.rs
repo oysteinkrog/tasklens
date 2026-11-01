@@ -91,10 +91,10 @@ pub const SECONDARY_ID: &str = "perf-cpu-secondary";
 pub const SECONDARY_TIP_ID: &str = "perf-cpu-secondary-tip";
 
 /// Lowest line alpha in the overlaid mode (PERF-029).
-const OVERLAID_MIN_ALPHA: f32 = 0.08;
+pub(crate) const OVERLAID_MIN_ALPHA: f32 = 0.08;
 /// Band alphas in the stacked mode, alternating. No document gives a per-band colour step, so
 /// every band is `cpu_fill` and the alpha alternates (plan open item 7).
-const STACKED_ALPHAS: [f32; 2] = [0.85, 0.70];
+pub(crate) const STACKED_ALPHAS: [f32; 2] = [0.85, 0.70];
 
 const KEY_OVERALL: &str = "perf-cpu-mode-overall";
 const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";

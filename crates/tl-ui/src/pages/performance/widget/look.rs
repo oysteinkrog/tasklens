@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{App, Hsla, white};
+use gpui_kit::{App, Hsla, px, white};
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{MetricId, SeriesId};
 use tl_model::layout::WidgetOptions;
@@ -33,6 +33,8 @@ use super::meta::Lines;
 use crate::chart::{ChartLabels, ChartSeries, LegendStyle, ValueFormat};
 use crate::i18n::tr;
 use crate::pages::performance::core_clocks::clock_series;
+use crate::pages::performance::cpu::{OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
+use crate::pages::performance::memory::DIRTY_ALPHA;
 use crate::pages::performance::overview::cpu_box::SPARK_MEAN_NS;
 use crate::pages::performance::overview::mem_box::row_colors;
 use crate::pages::performance::overview::net_box::UPLOAD_TINT;
@@ -94,7 +96,11 @@ pub fn accent(kind: DeviceKind, metric: &str, theme: &TlTheme) -> Accent {
         },
         DeviceKind::Disk | DeviceKind::Disks => (g.disk_line, g.disk_fill),
         DeviceKind::Net | DeviceKind::Nets => (g.net_line, g.net_fill),
-        DeviceKind::Gpu | DeviceKind::Other => (g.gpu_line, g.gpu_fill),
+        DeviceKind::Gpu
+        | DeviceKind::AggregateGpu
+        | DeviceKind::Fan
+        | DeviceKind::Battery
+        | DeviceKind::Other => (g.gpu_line, g.gpu_fill),
     };
     Accent { line, fill }
 }
@@ -235,6 +241,74 @@ impl ChartLook {
             Lines::PerCore => {
                 let devices: SmallVec<[_; 16]> = self.series.iter().map(|s| s.device).collect();
                 (clock_series(&devices, accent.line), false)
+            }
+            Lines::PerLogical { stacked: false } => {
+                // One line per logical CPU at max(1/n, 0.08), no fill (UI-PRF-023).
+                let n = self.series.len().max(1) as f32;
+                let line = Hsla {
+                    a: (1.0 / n).max(OVERLAID_MIN_ALPHA),
+                    ..accent.line
+                };
+                let out = self
+                    .series
+                    .iter()
+                    .map(|&id| ChartSeries {
+                        id,
+                        line,
+                        ..ChartSeries::default()
+                    })
+                    .collect();
+                (out, false)
+            }
+            Lines::PerLogical { stacked: true } => {
+                let out = self
+                    .series
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &id)| ChartSeries {
+                        id,
+                        fill: Some(Hsla {
+                            a: STACKED_ALPHAS[k % 2],
+                            ..accent.fill
+                        }),
+                        line: accent.line,
+                        ..ChartSeries::default()
+                    })
+                    .collect();
+                (out, true)
+            }
+            Lines::Physical => {
+                // In use filled, committed dashed, modified as a faint 1 px line (UI-PRF-026).
+                let mut out: SmallVec<[ChartSeries; 4]> = smallvec![self.line(first, accent, true)];
+                if let Some(&commit) = self.series.get(1) {
+                    out.push(ChartSeries {
+                        dashed: true,
+                        ..self.line(commit, accent, false)
+                    });
+                }
+                if let Some(&dirty) = self.series.get(2) {
+                    out.push(ChartSeries {
+                        line: Hsla {
+                            a: accent.line.a * DIRTY_ALPHA,
+                            ..accent.line
+                        },
+                        line_width: px(1.),
+                        ..self.line(dirty, accent, false)
+                    });
+                }
+                (out, false)
+            }
+            Lines::RpmPwm => {
+                // RPM filled and PWM dashed (UI-PRF-034). The fan page bead gives PWM its own
+                // 0 to 100 axis.
+                let mut out: SmallVec<[ChartSeries; 4]> = smallvec![self.line(first, accent, true)];
+                if let Some(&pwm) = self.series.get(1) {
+                    out.push(ChartSeries {
+                        dashed: true,
+                        ..self.line(pwm, accent, false)
+                    });
+                }
+                (out, false)
             }
         }
     }

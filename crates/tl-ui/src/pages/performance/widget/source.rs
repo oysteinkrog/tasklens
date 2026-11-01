@@ -14,7 +14,9 @@
 //!
 //! A source reads the record its box shows the value from today (ADR-019 phase 2): the GPU
 //! record, the CPU and memory totals, a disk's or an adapter's record, and for a logical CPU,
-//! the disk aggregate and the network aggregate the newest sample of the series. A metric with
+//! the disk aggregate and the network aggregate the newest sample of the series. The phase 3
+//! keys read what their 1.3.0 page shows: a fan's sensor record, an adapter's Wi-Fi details,
+//! and for a battery and the GPU aggregate the newest sample of the series. A metric with
 //! two or more lines (`power_draw`, `core_clocks`, `composition`, `io`, `traffic`) is one source
 //! with a list of series ([`SourceData::series_list`]). The source reads the Overview's snapshot
 //! (`box_snapshot`), so it follows the timeline's pause like the boxes do.
@@ -27,6 +29,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
     DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
@@ -39,6 +42,13 @@ use tl_model::layout_boxes::{
     METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX, METRIC_NET_TRAFFIC,
     METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE, MetricSeries,
     metric_series,
+};
+use tl_model::layout_pages::{
+    METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_DIRTY,
+    METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PERCENT,
+    METRIC_PHYSICAL, METRIC_PWM, METRIC_RESPONSE, METRIC_RPM, METRIC_SIGNAL, METRIC_SPEED,
+    METRIC_TOTAL_READ, METRIC_TOTAL_RX, METRIC_TOTAL_TX, METRIC_TOTAL_WRITTEN, METRIC_UTIL,
+    METRIC_VRAM_SHARED,
 };
 use tl_model::settings::OverviewRange;
 use tl_model::snapshot::{ComponentMask, Snapshot};
@@ -61,6 +71,7 @@ use crate::pages::performance::overview::cpu_box::CoreAverage;
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::range::{Figures, current_range, figures_text};
 use crate::pages::performance::overview::timeline::{OverviewPause, paused};
+use crate::pages::performance::sensors::{default_sensor, sensor_device};
 use crate::settings_global::TlSettings;
 
 /// The name of VRAM.
@@ -138,6 +149,10 @@ pub fn metric_name_key(metric: &MetricKey, vendor: GpuVendor) -> Option<&'static
         METRIC_CLOCK_MEM => Some("perf-widget-metric-clock-mem"),
         METRIC_POWER => Some("perf-widget-metric-power"),
         METRIC_TEMP => Some("perf-widget-metric-temp"),
+        METRIC_GPU_MEMORY => Some("perf-widget-metric-gpu-memory"),
+        METRIC_VRAM_SHARED => Some("perf-widget-metric-vram-shared"),
+        METRIC_GPU_CLOCKS => Some("perf-widget-metric-gpu-clocks"),
+        METRIC_FAN => Some("perf-widget-metric-fan"),
         _ => None,
     }
 }
@@ -179,6 +194,28 @@ pub fn box_metric_name_key(kind: DeviceKind, metric: &MetricKey) -> Option<&'sta
         (DeviceKind::Net | DeviceKind::Nets, METRIC_NET_TRAFFIC) => {
             "perf-widget-metric-net-traffic"
         }
+        // Phase 3 (UI-PRF-061 "Phase 3" strings).
+        (DeviceKind::Cpu, METRIC_CORES_OVERLAID) => "perf-widget-metric-cores-overlaid",
+        (DeviceKind::Cpu, METRIC_CORES_STACKED) => "perf-widget-metric-cores-stacked",
+        (DeviceKind::Cpu, METRIC_CLOCK) => "perf-widget-metric-clock",
+        (DeviceKind::Cpu, METRIC_FREQ_MAX) => "perf-widget-metric-freq-max",
+        (DeviceKind::Memory, METRIC_PHYSICAL) => "perf-widget-metric-physical",
+        (DeviceKind::Memory, METRIC_COMMIT_PCT) => "perf-widget-metric-commit-pct",
+        (DeviceKind::Memory, METRIC_DIRTY) => "perf-widget-metric-dirty",
+        (DeviceKind::Disk, METRIC_RESPONSE) => "perf-widget-metric-response",
+        (DeviceKind::Disk, METRIC_TOTAL_READ) => "perf-widget-metric-total-read",
+        (DeviceKind::Disk, METRIC_TOTAL_WRITTEN) => "perf-widget-metric-total-written",
+        (DeviceKind::Net, METRIC_TOTAL_RX) => "perf-widget-metric-total-rx",
+        (DeviceKind::Net, METRIC_TOTAL_TX) => "perf-widget-metric-total-tx",
+        (DeviceKind::Net, METRIC_SIGNAL) => "perf-widget-metric-signal",
+        (DeviceKind::Fan, METRIC_SPEED) => "perf-widget-metric-fan",
+        (DeviceKind::Fan, METRIC_RPM) => "perf-widget-metric-rpm",
+        (DeviceKind::Fan, METRIC_PWM) => "perf-widget-metric-pwm",
+        (DeviceKind::Fan, METRIC_TEMP) => "perf-widget-metric-temp",
+        (DeviceKind::Battery, METRIC_POWER) => "perf-widget-metric-battery-power",
+        (DeviceKind::Battery, METRIC_PERCENT) => "perf-widget-metric-battery-percent",
+        (DeviceKind::AggregateGpu, METRIC_UTIL) => "perf-widget-metric-util",
+        (DeviceKind::AggregateGpu, METRIC_GPU_MEMORY) => "perf-widget-metric-gpu-memory",
         _ => return None,
     };
     Some(key)
@@ -220,9 +257,27 @@ pub(super) fn box_reading(
     let one = |m: Metric<f32>| (m, None);
     let pair = |a: Metric<f32>, b: Metric<f32>| (a, shown(b.validity).then_some(b.value));
     let key = metric.as_str();
+    let series = |metric| {
+        newest(
+            snap,
+            SeriesId {
+                device: idx,
+                metric,
+            },
+        )
+    };
     match kind {
         DeviceKind::Gpu => {
-            one(gpu_totals(snap, idx).map_or(Metric::default(), |t| reading(metric, t)))
+            let Some(t) = gpu_totals(snap, idx) else {
+                return one(Metric::default());
+            };
+            let second = match key {
+                METRIC_GPU_MEMORY => as_f32(t.shared_used, |v| v as f32),
+                METRIC_GPU_CLOCKS => as_f32(t.clock_mem_mhz, |v| v as f32),
+                METRIC_FAN => as_f32(t.fan_rpm, |v| v as f32),
+                _ => return one(reading(metric, t)),
+            };
+            pair(reading(metric, t), second)
         }
         DeviceKind::Cpu => {
             let c = &snap.system.cpu;
@@ -235,8 +290,16 @@ pub(super) fn box_reading(
                 METRIC_POWER_CORES => one(c.core_power_w),
                 METRIC_POWER_DRAW => pair(c.package_power_w, c.core_power_w),
                 METRIC_PRESSURE => one(c.psi_some_pct),
-                // No value: available while a core reports a clock (see `refresh`).
-                METRIC_CORE_CLOCKS => one(Metric::valid(0.0)),
+                METRIC_CLOCK => pair(
+                    as_f32(c.freq_mhz, |v| v as f32),
+                    series(MetricId::CPU_CLOCK_MAX),
+                ),
+                METRIC_FREQ_MAX => one(series(MetricId::CPU_CLOCK_MAX)),
+                // No value: available while a core reports a clock, or while a logical CPU is
+                // present (see `refresh`).
+                METRIC_CORE_CLOCKS | METRIC_CORES_OVERLAID | METRIC_CORES_STACKED => {
+                    one(Metric::valid(0.0))
+                }
                 _ => unsupported,
             }
         }
@@ -264,11 +327,12 @@ pub(super) fn box_reading(
                 validity: m.validity,
             };
             match key {
-                METRIC_MEM_USED | METRIC_MEM_COMPOSITION => one(bytes(m.used)),
+                METRIC_MEM_USED | METRIC_MEM_COMPOSITION | METRIC_PHYSICAL => one(bytes(m.used)),
+                METRIC_MEM_COMMIT | METRIC_COMMIT_PCT => one(bytes(m.committed)),
+                METRIC_DIRTY => one(bytes(m.dirty)),
                 METRIC_MEM_CACHED => one(bytes(m.cached)),
                 METRIC_MEM_AVAILABLE => one(bytes(m.available)),
                 METRIC_MEM_SWAP => one(bytes(m.swap_total.saturating_sub(m.swap_free))),
-                METRIC_MEM_COMMIT => one(bytes(m.committed)),
                 METRIC_PRESSURE => one(m.psi_some_pct),
                 _ => unsupported,
             }
@@ -292,6 +356,9 @@ pub(super) fn box_reading(
                     .and_then(|(_, details)| details.smart_temp_c)
                     .map_or(Metric::with(Validity::Unsupported), Metric::valid)),
                 METRIC_TEMP => one(d.temp_c),
+                METRIC_RESPONSE => one(d.response_ms),
+                METRIC_TOTAL_READ => one(Metric::valid(d.read_total as f32)),
+                METRIC_TOTAL_WRITTEN => one(Metric::valid(d.written_total as f32)),
                 _ => unsupported,
             }
         }
@@ -322,9 +389,52 @@ pub(super) fn box_reading(
                 METRIC_NET_RX => one(as_f32_64(n.rx_bps)),
                 METRIC_NET_TX => one(as_f32_64(n.tx_bps)),
                 METRIC_NET_TRAFFIC => pair(as_f32_64(n.rx_bps), as_f32_64(n.tx_bps)),
+                METRIC_TOTAL_RX => one(Metric::valid(n.rx_total as f32)),
+                METRIC_TOTAL_TX => one(Metric::valid(n.tx_total as f32)),
+                // The Wi-Fi signal percent, and its dBm when nl80211 gives it. A wired
+                // adapter does not report it.
+                METRIC_SIGNAL => {
+                    let wifi = snap
+                        .device_details
+                        .nets
+                        .iter()
+                        .find(|(i, _)| *i == idx)
+                        .and_then(|(_, d)| d.wifi.as_ref());
+                    match wifi {
+                        Some(w) => (
+                            Metric::valid(f32::from(w.signal_pct)),
+                            w.signal_dbm.map(|d| d as f32),
+                        ),
+                        None => unsupported,
+                    }
+                }
                 _ => unsupported,
             }
         }
+        DeviceKind::Fan => {
+            let record = snap.system.sensors.iter().find(|(i, _)| *i == idx);
+            let Some((_, r)) = record else {
+                return (Metric::with(Validity::Missing), None);
+            };
+            match key {
+                METRIC_SPEED => pair(r.value, r.pwm_pct),
+                METRIC_RPM => one(r.value),
+                METRIC_PWM => one(r.pwm_pct),
+                // The paired sensor's reading: `refresh` reads it from its series.
+                METRIC_TEMP => one(Metric::with(Validity::Missing)),
+                _ => unsupported,
+            }
+        }
+        DeviceKind::Battery => match key {
+            METRIC_POWER => one(series(MetricId::BATTERY_POWER)),
+            METRIC_PERCENT => one(series(MetricId::BATTERY_PCT)),
+            _ => unsupported,
+        },
+        DeviceKind::AggregateGpu => match key {
+            METRIC_UTIL => one(series(MetricId::GPU_UTIL)),
+            METRIC_GPU_MEMORY => one(series(MetricId::GPU_MEM)),
+            _ => unsupported,
+        },
         DeviceKind::Nets => {
             // The Network box's counted total: the engine total less the hidden kinds.
             let total = |metric| match net.and_then(|n| n.newest(snap, metric)) {
@@ -362,8 +472,10 @@ pub fn reading(metric: &MetricKey, t: &GpuTotals) -> Metric<f32> {
         };
     }
     match metric.as_str() {
-        METRIC_VRAM => as_f32(t.mem_used, |v| v as f32),
-        METRIC_CLOCK_GFX => as_f32(t.clock_gfx_mhz, |v| v as f32),
+        METRIC_VRAM | METRIC_GPU_MEMORY => as_f32(t.mem_used, |v| v as f32),
+        METRIC_VRAM_SHARED => as_f32(t.shared_used, |v| v as f32),
+        METRIC_FAN => t.fan_pct,
+        METRIC_CLOCK_GFX | METRIC_GPU_CLOCKS => as_f32(t.clock_gfx_mhz, |v| v as f32),
         METRIC_CLOCK_MEM => as_f32(t.clock_mem_mhz, |v| v as f32),
         METRIC_POWER => t.power_w,
         METRIC_TEMP => t.temp_c,
@@ -406,10 +518,14 @@ struct Followed {
     hidden_nets: SmallVec<[tl_model::devices::NetKind; 5]>,
     /// The core smoothing's time constant in seconds; 0 is off.
     tau_s: f32,
+    /// A fan `temp` source: the sensor the fan's `[fans]` entry names (UI-PRF-034).
+    fan_temp: Option<String>,
 }
 
 impl Followed {
-    fn read(cx: &App) -> Self {
+    /// The settings a source follows. `fan` is the fan's key of a fan `temp` source, whose
+    /// sensor choice it follows too.
+    fn read(cx: &App, fan: Option<&str>) -> Self {
         let range = current_range(cx);
         let Some(settings) = cx
             .try_global::<TlSettings>()
@@ -420,8 +536,12 @@ impl Followed {
                 net: NetView::default(),
                 hidden_nets: SmallVec::new(),
                 tau_s: 0.0,
+                fan_temp: None,
             };
         };
+        let fan_temp = fan
+            .and_then(|key| settings.fans.get(key))
+            .and_then(|f| f.temp.clone());
         let p = &settings.performance;
         Self {
             range,
@@ -431,6 +551,7 @@ impl Followed {
             },
             hidden_nets: crate::net_totals::hidden_kinds(p).collect(),
             tau_s: p.overview_core_smoothing.tau_s(),
+            fan_temp,
         }
     }
 }
@@ -504,6 +625,7 @@ impl SourceData {
         let kind = DeviceKind::of(&selector.device);
         let meta = MetricMeta::of(kind, &selector.metric);
         let series_of = metric_series(kind, &selector.metric);
+        let followed = Followed::read(cx, paired_key(series_of, key.as_deref()));
         let mut this = Self {
             hub: hub.clone(),
             selector,
@@ -519,7 +641,7 @@ impl SourceData {
                 net_total: None,
                 minus: SmallVec::new(),
                 vendor: GpuVendor::Unknown,
-                followed: Followed::read(cx),
+                followed,
                 reading: Reading {
                     availability: Availability::Gone,
                     value: Metric::default(),
@@ -719,14 +841,18 @@ impl SourceData {
     /// stats, scale, text or series. The settings are part of the state, so a change of them
     /// formats and notifies even when the reading is the same.
     fn on_settings(&mut self, cx: &mut Context<Self>) {
-        let followed = Followed::read(cx);
+        let fan = paired_key(self.series_of, self.state.key.as_deref());
+        let followed = Followed::read(cx, fan);
         if followed == self.state.followed {
             return;
         }
         let snap = box_snapshot(&self.hub, cx);
         self.update(&snap, true, cx, |this, _| {
-            if followed.hidden_nets != this.state.followed.hidden_nets {
-                // The network total's series change with the hidden kinds.
+            if followed.hidden_nets != this.state.followed.hidden_nets
+                || followed.fan_temp != this.state.followed.fan_temp
+            {
+                // The network total's series change with the hidden kinds, a fan
+                // temperature's with its sensor.
                 this.catalog_version = None;
             }
             if followed.tau_s != this.state.followed.tau_s {
@@ -809,6 +935,37 @@ impl SourceData {
             return;
         };
         match of {
+            MetricSeries::PerLogical(metric) => {
+                // Every present logical CPU, by CPU number (UI-PRF-023).
+                let mut logical: SmallVec<[(u32, DeviceIdx); 32]> = snap
+                    .devices
+                    .entries
+                    .iter()
+                    .filter(|e| e.present)
+                    .filter_map(|e| match e.identity {
+                        DeviceIdentity::CpuLogical { id } => Some((u32::from(id), e.idx)),
+                        _ => None,
+                    })
+                    .collect();
+                logical.sort_unstable_by_key(|(id, _)| *id);
+                self.state.series.extend(
+                    logical
+                        .iter()
+                        .map(|&(_, device)| SeriesId { device, metric }),
+                );
+            }
+            MetricSeries::Paired(metric) => {
+                // A fan's temperature: the sensor its `[fans]` entry names, else its default
+                // pairing (PERF-077). No sensor: no series.
+                let fan = self.state.key.as_deref().unwrap_or_default();
+                let sensor = match self.state.followed.fan_temp.as_deref() {
+                    Some(s) => sensor_device(snap, s),
+                    None => default_sensor(snap, fan).and_then(|s| sensor_device(snap, &s)),
+                };
+                if let Some(device) = sensor {
+                    self.state.series.push(SeriesId { device, metric });
+                }
+            }
             MetricSeries::PerCore(metric) => {
                 let mut logical = Vec::new();
                 logical_devices(&snap.devices, &mut logical);
@@ -893,8 +1050,21 @@ impl SourceData {
             Some(i) => box_reading(self.kind, metric, snap, i, self.state.net_total.as_ref()),
             None => (Metric::default(), None),
         };
-        if metric.as_str() == METRIC_CORE_CLOCKS && self.state.series.is_empty() {
-            value = Metric::with(Validity::Unsupported);
+        match self.series_of {
+            Some(MetricSeries::PerCore(_) | MetricSeries::PerLogical(_))
+                if self.state.series.is_empty() =>
+            {
+                value = Metric::with(Validity::Unsupported);
+            }
+            // A fan's temperature: the paired sensor's newest sample; "-" without a sensor.
+            Some(MetricSeries::Paired(_)) if idx.is_some() => {
+                value = self
+                    .state
+                    .series
+                    .first()
+                    .map_or(Metric::with(Validity::Missing), |&id| newest(snap, id));
+            }
+            _ => {}
         }
         let availability = match (self.meta, idx) {
             (None, _) => Availability::Unknown,
@@ -1007,11 +1177,19 @@ impl SourceData {
         } else {
             copy_text(r.value.validity, &SharedString::default())
         };
-        let format = meta.format;
+        let format = meta.stats_format(r.total);
         self.stats_text = figures_text(&self.figures_words, r.figures, |v, out| {
             format_value(format, v, net, out);
         });
     }
+}
+
+/// The fan key of a fan `temp` source, whose sensor choice the source follows; `None` for every
+/// other source.
+fn paired_key(series_of: Option<MetricSeries>, key: Option<&str>) -> Option<&str> {
+    matches!(series_of, Some(MetricSeries::Paired(_)))
+        .then_some(key)
+        .flatten()
 }
 
 /// The series of `minus` with the metric of `line`.

@@ -167,12 +167,24 @@ pub fn group_item_min(items: GroupItems, forms: FormSet) -> Size<f32> {
 }
 
 /// The smallest fixed widget of `kind`, logical px (ADR-019 "Fixed widgets"): Processes and
-/// Timeline at their box body's kind minimum, Memory by app where its legend shows.
+/// Timeline at their box body's kind minimum, Memory by app where its legend shows, and the
+/// page parts at the minimums of the ADR-019 phase 3 fixed widget table.
 pub fn fixed_min(kind: &FixedWidget) -> Size<f32> {
     match kind {
         FixedWidget::Processes => size(256., 192.),
         FixedWidget::Timeline => size(376., 92.),
         FixedWidget::MemoryByApp => size(160., 100.),
+        FixedWidget::Details
+        | FixedWidget::MemoryCompressed
+        | FixedWidget::SwapDevices
+        | FixedWidget::MemoryModules
+        | FixedWidget::DiskPartitions => size(360., 74.),
+        FixedWidget::CpuCoreGrid | FixedWidget::GpuEngineGrid => size(120., 112.),
+        FixedWidget::CpuCoreBoard => size(200., 60.),
+        FixedWidget::MemoryBar => size(160., 44.),
+        FixedWidget::GpuDisplays => size(360., 48.),
+        FixedWidget::NetSettings => size(160., 24.),
+        FixedWidget::BatteryHistory => size(200., 80.),
         FixedWidget::Other(_) => row_min(FormSet::LABEL),
     }
 }

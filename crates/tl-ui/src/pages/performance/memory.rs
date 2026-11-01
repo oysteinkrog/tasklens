@@ -123,7 +123,7 @@ pub const SWAP_TABLE_ID: &str = "perf-mem-swap-table";
 pub const SWAP_TABLE_MAX_ROWS: usize = 8;
 
 /// Alpha of the dirty-bytes line against `mem_line`.
-const DIRTY_ALPHA: f32 = 0.6;
+pub(crate) const DIRTY_ALPHA: f32 = 0.6;
 
 /// The page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]
