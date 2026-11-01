@@ -8934,7 +8934,10 @@ mod wired {
             .y;
         assert!(scrolled < top, "the page scrolled: {top:?} to {scrolled:?}");
 
-        // Cancel ends Edit Widgets; the covers go and the box menu opens again.
+        // Cancel ends Edit Widgets; the covers go and the box menu opens again. The full
+        // height puts the CPU title line back in view.
+        r.vcx.simulate_resize(size(px(1600.), px(1000.)));
+        draw(r.vcx);
         r.vcx
             .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
         draw(r.vcx);
