@@ -8856,7 +8856,7 @@ mod wired {
         draw(r.vcx);
         let page = overview(&mut r).expect("an OverviewPage");
         let editor = r.vcx.update(|_, cx| {
-            let hub = page.read(cx).hub().expect("a hub").clone();
+            let hub = page.read(cx).hub().clone();
             let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
             let layout = default_layout(GPU_BOX_CONTAINER);
             let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
