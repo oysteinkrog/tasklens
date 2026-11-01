@@ -668,7 +668,38 @@ impl WidgetEditor {
             .collect();
         let mut g = self.edit_grid(cx);
         g.unit = g.unit.max(g.row);
+        // A layout that fits the box body pins into at most the rows that fit at the unit in
+        // the body under the toolbar, so it fits there too (tasklens-mo5t5). The rows then
+        // fill that body (`WidgetContainer::set_view_height`).
+        if let Some(body_h) = self.edit_body_h(cx) {
+            let bottom = drawn
+                .iter()
+                .filter_map(|(_, how)| match how {
+                    Drawn::At(b) => Some(f32::from(b.bottom())),
+                    _ => None,
+                })
+                .fold(0., f32::max);
+            let unit = grid::grid_unit(&self.id) * g.scale;
+            let fit = ((body_h + g.gutter) / (unit + g.gutter)).floor().max(1.);
+            let rows = ((bottom + g.gutter) / (g.unit + g.gutter)).round();
+            let fits_box = bottom <= f32::from(c.area().height) + 0.5;
+            if fits_box && rows > fit {
+                g.unit = (bottom + g.gutter) / fit - g.gutter;
+            }
+        }
         grid::pin(layout, &drawn, &self.slots, &g)
+    }
+
+    /// The height of the body under the toolbar in Edit Widgets, px: the box body less the
+    /// toolbar. `None` for a device page, whose rows never fill (its toolbar sits outside the
+    /// container's body), and before the container has a size.
+    fn edit_body_h(&self, cx: &App) -> Option<f32> {
+        if !grid::grid_fills(&self.id) {
+            return None;
+        }
+        let h = f32::from(self.container.read(cx).area().height);
+        let body = h - TOOLBAR_H * metrics(cx).ui_scale;
+        (h > 0. && body > 0.).then_some(body)
     }
 
     /// Starts Edit Widgets: a flow layout is pinned to the grid, the rows hold their height and
@@ -693,9 +724,15 @@ impl WidgetEditor {
         // The body keeps the offset the applied view had.
         let offset = self.container.read(cx).scroll_offset();
         self.scroll.set_offset(point(px(0.), -offset));
+        let body_h = self.edit_body_h(cx);
         self.container.update(cx, |c, cx| {
             c.set_editing(true, cx);
             c.set_layout(working.clone(), cx);
+            // The rows fill the body under the toolbar from the first frame; the body's
+            // measured height follows after it.
+            if let Some(h) = body_h {
+                c.set_view_height(px(h), cx);
+            }
         });
         self.shown_before = Some(shown);
         self.edit = Some(LayoutEdit::new(self.id.to_string(), before, Some(working)));

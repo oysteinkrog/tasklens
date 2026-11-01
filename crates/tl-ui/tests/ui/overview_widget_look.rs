@@ -10,21 +10,23 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, Hsla, IntoElement, ParentElement as _,
-    Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Bounds, Context, Entity, Focusable as _, Hsla, IntoElement,
+    ParentElement as _, Pixels, Render, StyleRefinement, Styled as _, TestAppContext,
+    VisualTestContext, Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, WidgetContent, WidgetSetting, reset_to_default,
+    CPU_BOX_CONTAINER, ContainerLayout, GPU_BOX_CONTAINER, WidgetContent, WidgetSetting,
+    reset_to_default,
 };
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{
     AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
 };
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
-use tl_model::system::{DiskTotals, LinkState, Metric, NetTotals};
+use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
@@ -36,16 +38,19 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::actions::{PerfOverviewSetBoxMode, PerfWidgetEditBox};
+use tl_ui::pages::performance::memory_apps;
 use tl_ui::pages::performance::overview::cpu_box::core_chart_id;
 use tl_ui::pages::performance::overview::mem_box::MemRowsRef;
 use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell};
 use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui::pages::performance::overview::{disk_box, net_box};
+use tl_ui::pages::performance::overview::{disk_box, net_box, timeline};
 use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::widget::container::WidgetContainer;
-use tl_ui::pages::performance::widget::edit::WidgetEditor;
+use tl_ui::pages::performance::widget::edit::{
+    WidgetEditor, corner_id, editor_id, frame_id, gear_id, grip_id,
+};
 use tl_ui::pages::performance::widget::group_widget::GroupFlowLook;
-use tl_ui::pages::performance::widget::metric_widget::{FlowLook, part_id};
+use tl_ui::pages::performance::widget::metric_widget::{FlowLook, part_id, widget_id};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -53,6 +58,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 const CORE0: u16 = 100;
 const CORES: u16 = 4;
 const GIB: u64 = 1 << 30;
+/// The GPU's device index, when the rig has one.
+const GPU: u16 = 7;
 /// sda and sdb: device index, read and write in bytes per second.
 const DISKS: [(u16, f64, f64); 2] = [(3, 1_000_000., 300_000.), (4, 200_000., 40_000.)];
 
@@ -152,6 +159,46 @@ fn catalog() -> DeviceCatalog {
     }
 }
 
+/// A GPU at `device` at 25% busy with 4 of 16 GiB VRAM used, drawing 120 W.
+fn gpu_totals(device: u16) -> GpuTotals {
+    GpuTotals {
+        device: DeviceIdx(device),
+        util_pct: Metric::valid(25.),
+        mem_util_pct: Metric::default(),
+        mem_used: Metric::valid(4 * GIB),
+        mem_total: Metric::valid(16 * GIB),
+        shared_used: Metric::default(),
+        shared_total: Metric::default(),
+        mem_reserved: Metric::default(),
+        enc_pct: Metric::valid(0.),
+        dec_pct: Metric::valid(0.),
+        enc_sessions: Metric::default(),
+        enc_dec_shared: false,
+        temp_c: Metric::valid(52.),
+        temp_edge_c: Metric::default(),
+        temp_junction_c: Metric::default(),
+        temp_mem_c: Metric::default(),
+        power_w: Metric::valid(120.),
+        power_limit_w: Metric::default(),
+        clock_gfx_mhz: Metric::default(),
+        clock_mem_mhz: Metric::default(),
+        fan_pct: Metric::default(),
+        pcie_rx_bps: Metric::default(),
+        pcie_tx_bps: Metric::default(),
+        engines: Default::default(),
+        throttling: Default::default(),
+        fdinfo_partial: false,
+        energy_since_boot: Metric::default(),
+        clock_video_mhz: Metric::default(),
+        pstate: Metric::default(),
+        clock_event_reasons: Metric::default(),
+        fan_rpm: Metric::default(),
+        pcie_gen: Metric::default(),
+        pcie_width: Metric::default(),
+        info: Arc::default(),
+    }
+}
+
 /// One series with one valid sample of `v`.
 fn series(device: u16, metric: MetricId, v: f32, version: u64) -> Arc<SeriesView> {
     Arc::new(SeriesView {
@@ -176,10 +223,32 @@ struct Rig<'a> {
 /// The Overview page at 1920 × 1200 with every box, the kernel line on, memory totals, one
 /// sample per core of load (41.7%) and clock (3.94 GHz, BogoMIPS), and each disk's and eth0's rates.
 fn open(cx: &mut TestAppContext) -> Rig<'_> {
+    open_with(cx, false)
+}
+
+/// [`open`], with `gpu` one GPU at `GPU` too, so the Overview shows its GPU box.
+fn open_with(cx: &mut TestAppContext, gpu: bool) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
-        s.devices = Arc::new(catalog());
+        let mut devices = catalog();
+        if gpu {
+            let mut entries = devices.entries.to_vec();
+            entries.push(entry(
+                GPU,
+                DeviceIdentity::Gpu {
+                    uuid: [7; 16],
+                    pci_bus_id: Arc::from("0000:07:00.0"),
+                },
+                "gpu:card",
+                None,
+            ));
+            devices.entries = Arc::from(entries);
+        }
+        s.devices = Arc::new(devices);
         let sys = Arc::make_mut(&mut s.system);
+        if gpu {
+            sys.gpus = Arc::from([(DeviceIdx(GPU), gpu_totals(GPU))]);
+        }
         sys.header.version += 1;
         sys.header.validity = Validity::Valid;
         sys.memory.validity = Validity::Valid;
@@ -472,6 +541,10 @@ impl Rig<'_> {
                 }
                 "processes" => {
                     let b = p.procs_frame().expect("a Top processes box").read(cx);
+                    (b.container().clone(), b.editor().clone())
+                }
+                "gpu" => {
+                    let b = p.gpu_box().read(cx);
                     (b.container().clone(), b.editor().clone())
                 }
                 _ => {
@@ -991,4 +1064,264 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
             }
         }
     }
+}
+
+/// Every box with its presets for the Edit Widgets sweep: the phase 2 boxes and the GPU box.
+const EDIT_BOXES: [(&str, &str, &[&str]); 7] = [
+    BOXES[0],
+    BOXES[1],
+    BOXES[2],
+    BOXES[3],
+    BOXES[4],
+    BOXES[5],
+    (
+        "gpu",
+        GPU_BOX_CONTAINER,
+        &["engine_charts", "chart_engines", "chart"],
+    ),
+];
+
+/// The text parts of a widget or a group member, by debug selector suffix.
+const TEXT_PARTS: [&str; 5] = ["name", "value", "stats", "clock", "reason"];
+
+/// The outer `w` px of `b` as four rectangles: top, bottom, left and right.
+fn ring(b: Bounds<Pixels>, w: f32) -> [Bounds<Pixels>; 4] {
+    let w = px(w);
+    [
+        Bounds::new(b.origin, size(b.size.width, w)),
+        Bounds::new(point(b.left(), b.bottom() - w), size(b.size.width, w)),
+        Bounds::new(b.origin, size(w, b.size.height)),
+        Bounds::new(point(b.right() - w, b.top()), size(w, b.size.height)),
+    ]
+}
+
+/// Whether `a` and `b` share more than a hairline.
+fn covers(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+    let eps = px(0.01);
+    a.left() < b.right() - eps
+        && b.left() < a.right() - eps
+        && a.top() < b.bottom() - eps
+        && b.top() < a.bottom() - eps
+}
+
+/// The labels chart `c` painted at the last frame, named after `who`.
+fn chart_texts(c: &ChartView, who: &str) -> Vec<(String, Bounds<Pixels>)> {
+    c.label_cache()
+        .painted
+        .iter()
+        .map(|p| (format!("{who} {:?}", p.kind), p.bounds()))
+        .collect()
+}
+
+impl Rig<'_> {
+    fn set_ui_scale(&mut self, pct: u16) {
+        self.vcx.update(|_, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: pct,
+                ..AppearanceSettings::default()
+            };
+            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+        });
+        draw(self.vcx);
+    }
+
+    /// The text parts drawn with debug selectors `part_id(container_id, id, part)`.
+    fn parts_of(
+        &mut self,
+        container_id: &str,
+        id: u32,
+        who: &str,
+    ) -> Vec<(String, Bounds<Pixels>)> {
+        let mut out = Vec::new();
+        for part in TEXT_PARTS.iter().chain(&["more"]) {
+            if let Some(b) = self.bounds(part_id(container_id, id, part))
+                && b.size.width > px(0.)
+                && b.size.height > px(0.)
+            {
+                out.push((format!("{who} {part}"), b));
+            }
+        }
+        out
+    }
+
+    /// Every text widget `id` of `container` draws in Edit Widgets: a widget's text parts and
+    /// chart labels; each group member's; the Memory by app legend rows and chart labels; the
+    /// timeline's tick and marker rows.
+    fn edit_texts(
+        &mut self,
+        container: &Entity<WidgetContainer>,
+        container_id: &str,
+        id: u32,
+    ) -> Vec<(String, Bounds<Pixels>)> {
+        let (widget, group, fixed) = self.vcx.update(|_, cx| {
+            let c = container.read(cx);
+            (
+                c.widget(id).cloned(),
+                c.group(id).cloned(),
+                c.fixed(id).is_some(),
+            )
+        });
+        let mut texts = self.parts_of(container_id, id, &format!("widget {id}"));
+        if let Some(w) = widget {
+            texts.extend(self.vcx.update(|_, cx| {
+                w.read(cx)
+                    .chart()
+                    .map(|c| chart_texts(c.read(cx), &format!("widget {id}")))
+                    .unwrap_or_default()
+            }));
+        }
+        if let Some(g) = group {
+            let members: Vec<_> = self
+                .vcx
+                .update(|_, cx| g.read(cx).items().map(|(_, w)| w.clone()).collect());
+            for member in members {
+                let (member_id, labels) = self.vcx.update(|_, cx| {
+                    let w = member.read(cx);
+                    let who = format!("widget {id} member {:x}", w.id());
+                    (
+                        w.id(),
+                        w.chart()
+                            .map(|c| chart_texts(c.read(cx), &who))
+                            .unwrap_or_default(),
+                    )
+                });
+                texts.extend(self.parts_of(
+                    container_id,
+                    member_id,
+                    &format!("widget {id} member {member_id:x}"),
+                ));
+                texts.extend(labels);
+            }
+        }
+        if fixed {
+            for n in 0..64 {
+                if let Some(b) = self.bounds(format!("{}-{n}", memory_apps::LEGEND_ID)) {
+                    texts.push((format!("by app legend row {n}"), b));
+                }
+            }
+            let page = self.page.clone();
+            texts.extend(self.vcx.update(|_, cx| {
+                page.read(cx)
+                    .mem_box()
+                    .read(cx)
+                    .apps()
+                    .filter(|_| container_id == "overview.memory")
+                    .map(|a| chart_texts(a.read(cx).chart().read(cx), "by app chart"))
+                    .unwrap_or_default()
+            }));
+            for row in [timeline::TICK_ROW_ID, timeline::MARKER_ROW_ID] {
+                if container_id == "overview.timeline"
+                    && let Some(b) = self.bounds(row.to_owned())
+                    && b.size.height > px(0.)
+                {
+                    texts.push((row.to_owned(), b));
+                }
+            }
+        }
+        texts
+    }
+}
+
+/// tasklens-mo5t5: in Edit Widgets, for every preset of every box (CPU, Memory, Disk, Network,
+/// GPU, Top processes and Timeline) at scale 1.0, 1.5 and 2.0, no edit decoration (grip, gear,
+/// border, selected outline, resize corner, the preview's outline) covers any text of a widget:
+/// its parts, its chart's legend and axis labels, a group member's label and parts, the Memory
+/// by app legend. No text is clipped: each lies inside its widget, and when the box did not
+/// scroll before Edit Widgets, its widgets fit the body under the toolbar, so every text shows
+/// there. The CPU box's Total chart has the Total and Kernel legend at its top left, under the
+/// grip and the gear without the inset; the Memory by app widget filled the box body and was
+/// cut off by the toolbar.
+#[gpui_kit::test]
+fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
+    let mut r = open_with(cx, true);
+    let mut legends = 0;
+    for pct in [100u16, 150, 200] {
+        r.set_ui_scale(pct);
+        for (kind, container_id, presets) in EDIT_BOXES {
+            for preset in presets {
+                let at = format!("{pct} % {kind} {preset}");
+                r.vcx.update(|_, cx| {
+                    TlSettings::update(cx, |d| {
+                        reset_to_default(&mut d.settings.performance, container_id)
+                    })
+                });
+                draw(r.vcx);
+                r.page_action(&PerfOverviewSetBoxMode {
+                    kind: kind.into(),
+                    mode: (*preset).into(),
+                });
+                let (container, editor) = r.parts(kind);
+                let scrolled = r.vcx.read_entity(&container, |c, _| c.placement().scrolls);
+                r.page_action(&PerfWidgetEditBox { kind: kind.into() });
+                draw(r.vcx);
+                assert!(
+                    r.vcx.read_entity(&editor, |e, _| e.is_editing()),
+                    "{at}: Edit Widgets"
+                );
+                let body = r
+                    .bounds(format!("{}-scroll", editor_id(container_id)))
+                    .expect("the edit body");
+                let (ids, content_h) = r
+                    .vcx
+                    .read_entity(&container, |c, _| (c.placed_ids(), c.placement().content_h));
+                assert!(!ids.is_empty(), "{at}: widgets placed");
+                if !scrolled {
+                    assert!(
+                        content_h <= body.size.height + px(0.5),
+                        "{at}: the widgets fit the body under the toolbar: {content_h:?} in {body:?}"
+                    );
+                }
+                for id in ids {
+                    let w = r
+                        .bounds(widget_id(container_id, id))
+                        .unwrap_or_else(|| panic!("{at}: widget {id} drawn"));
+                    let frame = r.bounds(frame_id(container_id, id)).expect("frame");
+                    let mut decorations: Vec<(String, Bounds<Pixels>)> = Vec::new();
+                    for (name, sel) in [
+                        ("grip", grip_id(container_id, id)),
+                        ("gear", gear_id(container_id, id)),
+                        ("corner", corner_id(container_id, id)),
+                    ] {
+                        let b = r
+                            .bounds(sel)
+                            .unwrap_or_else(|| panic!("{at}: widget {id} {name}"));
+                        decorations.push((name.to_owned(), b));
+                    }
+                    decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
+                    // The selected outline and a drag's preview lie in the widget's outer 2 px.
+                    decorations.extend(ring(w, 2.).map(|b| ("outline".to_owned(), b)));
+                    let texts = r.edit_texts(&container, container_id, id);
+                    legends += texts
+                        .iter()
+                        .filter(|(n, _)| n.contains("Legend") || n.contains("legend row"))
+                        .count();
+                    for (part, b) in &texts {
+                        for (d, db) in &decorations {
+                            assert!(
+                                !covers(*db, *b),
+                                "{at}: widget {id} {d} {db:?} covers {part} {b:?}"
+                            );
+                        }
+                        assert!(
+                            b.left() >= w.left() - px(0.5)
+                                && b.right() <= w.right() + px(0.5)
+                                && b.top() >= w.top() - px(0.5)
+                                && b.bottom() <= w.bottom() + px(0.5),
+                            "{at}: {part} {b:?} is cut off by widget {id} {w:?}"
+                        );
+                        if !scrolled {
+                            assert!(
+                                b.bottom() <= body.bottom() + px(0.5),
+                                "{at}: {part} {b:?} is cut off by the body {body:?}"
+                            );
+                        }
+                    }
+                }
+                r.vcx
+                    .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
+                draw(r.vcx);
+            }
+        }
+    }
+    assert!(legends > 0, "the sweep saw chart legends");
 }

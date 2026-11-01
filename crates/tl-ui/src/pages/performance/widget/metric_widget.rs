@@ -1223,6 +1223,13 @@ impl MetricWidget {
         let (id, s) = (self.setting.id, m.ui_scale);
         let mut el = div().flex().flex_col().size_full();
         let mut lead = self.lead(s);
+        // With no text line above it, the chart's legend is the first text line. In Edit
+        // Widgets the chart then starts under the grip and the gear, as the page style Cell
+        // does, so they cover none of its legend (tasklens-mo5t5).
+        let text_first = forms.intersects(FormSet::LABEL | FormSet::VALUE | FormSet::STATS);
+        if lead > px(0.) && !text_first && forms.contains(FormSet::CHART) {
+            el = el.pt(px(super::edit::HANDLE * s - EDIT_EDGE));
+        }
         if forms.intersects(FormSet::LABEL | FormSet::VALUE) {
             let mut header = div()
                 .flex()

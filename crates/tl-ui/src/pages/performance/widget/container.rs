@@ -550,14 +550,44 @@ impl WidgetContainer {
     }
 
     /// The height of the editor's body, which decides the scroll while editing (see `view_h`).
+    /// The editor's body is the box body less the edit toolbar, so a new height fills the rows
+    /// to it once more by the Fill rule (D-037) and holds that height: a layout that fit the
+    /// box body fits under the toolbar too, and no widget loses its bottom text to the scroll
+    /// (tasklens-mo5t5). The body keeps its height during a drag, so cells do not move then.
     pub fn set_view_height(&mut self, h: Pixels, cx: &mut Context<Self>) {
         if self.view_h == Some(h) || self.frozen.is_none() {
             return;
         }
         self.view_h = Some(h);
+        if let Some(row) = self.edit_row(h) {
+            self.frozen = Some(row);
+        }
         if self.relayout(cx) {
             self.notify(cx);
         }
+    }
+
+    /// The row height, logical px, that fills an editor body `h` px tall with the layout's
+    /// rows, at least the unit. `None` for a container whose rows never fill (a device page)
+    /// and for a layout with no placed rows.
+    fn edit_row(&self, h: Pixels) -> Option<f32> {
+        let container: &str = &self.layout.container;
+        if !grid::grid_fills(container) || self.layout.preset.is_some() {
+            return None;
+        }
+        let rows = self
+            .layout
+            .widgets
+            .iter()
+            .filter_map(|w| w.cell)
+            .map(|c| c.row.saturating_add(c.rows))
+            .max()
+            .filter(|&r| r > 0)?;
+        let scale = if self.scale > 0. { self.scale } else { 1. };
+        let gutter = grid::grid_gutter(container) * scale;
+        let free = f32::from(h) - f32::from(rows - 1) * gutter;
+        let row = (free / f32::from(rows)) / scale;
+        Some(row.max(grid::grid_unit(container)))
     }
 
     /// How far the body is scrolled down, logical px: 0 when the rows fit the body.
