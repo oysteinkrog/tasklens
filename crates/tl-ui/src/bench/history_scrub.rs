@@ -47,6 +47,7 @@ use super::stats::{
 use super::synth::{BenchRng, SEED};
 use crate::anim::AnimationDriver;
 use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::host::HostContext;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::history::HistoryPage;
 use crate::window::main::APP_ID;
@@ -560,7 +561,8 @@ impl ScrubView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
-        let page = cx.new(|cx| ProcessesPage::new(window, cx));
+        let host = HostContext::local(cx);
+        let page = cx.new(|cx| ProcessesPage::new(&host, window, cx));
         Self { page, driver }
     }
 
