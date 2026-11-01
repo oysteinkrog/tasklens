@@ -454,25 +454,24 @@ fn overview_range_switch_is_a_drop_down(cx: &mut TestAppContext) {
             "{range:?} in the open menu"
         );
     }
-    // The button shows the saved range: the label text is in the keyed state of the switch.
-    let shown = |r: &mut Rig| -> Option<String> {
-        r.vcx.update(|window, cx| {
-            let state = window.use_keyed_state(
-                gpui_kit::ElementId::Name(STATUS_SWITCH.into()),
-                cx,
-                |_, _| -> tl_ui::components::select::TlSelectState {
-                    unreachable!("the state exists")
-                },
-            );
-            state.read(cx).selected_value().map(|v| v.to_string())
-        })
+    // The button shows the saved range: its width follows the label ("5 min" is wider than
+    // "24 h", which is wider than "1 h" and "7 d"), and it follows a change made elsewhere.
+    let width =
+        |r: &mut Rig| -> f32 { f32::from(r.vcx.debug_bounds(trigger).expect("button").size.width) };
+    let (w_1m, w_24h, w_1h) = {
+        set_range(&mut r, OverviewRange::M1);
+        let a = width(&mut r);
+        set_range(&mut r, OverviewRange::H24);
+        let b = width(&mut r);
+        set_range(&mut r, OverviewRange::H1);
+        (a, b, width(&mut r))
     };
-    assert_eq!(shown(&mut r).as_deref(), Some("1m"));
-    pick(r.vcx, STATUS_SWITCH, OverviewRange::M5);
-    assert_eq!(shown(&mut r).as_deref(), Some("5m"));
-    // Set from elsewhere (the page menu, a key), the button follows.
+    assert!(w_1m > w_24h && w_24h > w_1h, "{w_1m} {w_24h} {w_1h}");
+    set_range(&mut r, OverviewRange::M1);
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::H24);
+    assert_eq!(width(&mut r), w_24h, "the button shows 24 h after the pick");
     set_range(&mut r, OverviewRange::D7);
-    assert_eq!(shown(&mut r).as_deref(), Some("7d"));
+    assert_eq!(width(&mut r), w_1h, "7 d is as wide as 1 h");
 }
 
 /// The button is as wide as its label, the chevron and the padding, with no 160 px minimum: at
