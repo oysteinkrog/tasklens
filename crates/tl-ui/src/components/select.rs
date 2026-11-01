@@ -617,11 +617,12 @@ fn popup(
     let bounds = st.trigger_bounds;
     let filter = st.filter.clone().filter(|_| filterable && st.filtering);
     // Copied out so the rows can take `cx` for their tooltip state.
-    let (items, highlight, selected, scroll) = (
+    let (items, highlight, selected, scroll, popup_focus) = (
         st.items.clone(),
         st.highlight,
         st.selected,
         st.scroll.clone(),
+        st.popup_focus.clone(),
     );
 
     let rows: Vec<_> = visible
@@ -786,7 +787,7 @@ fn popup(
         let (up, down, enter, typed) = (state.clone(), state.clone(), state.clone(), state.clone());
         let on_change = on_change.clone();
         panel
-            .track_focus(&st.popup_focus)
+            .track_focus(&popup_focus)
             .on_action(move |_: &SelectUp, _, cx| up.update(cx, |st, cx| st.step(false, cx)))
             .on_action(move |_: &SelectDown, _, cx| down.update(cx, |st, cx| st.step(true, cx)))
             .on_action(move |_: &Confirm, window, cx| {
