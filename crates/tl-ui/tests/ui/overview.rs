@@ -9364,6 +9364,40 @@ mod page {
         use tl_ui::pages::performance::actions::{PerfWidgetEditBox, WidgetSource};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        // The rig's catalog with the persistent keys the engine gives, and a GPU record, so
+        // each box resolves its devices and Add Widget offers sources in every box.
+        r.engine.publish_with(|s| {
+            let mut catalog = catalog(true);
+            catalog.version = s.devices.version + 1;
+            let entries: Vec<DeviceEntry> = catalog
+                .entries
+                .iter()
+                .cloned()
+                .map(|mut e| {
+                    e.persistent_key = match &e.identity {
+                        DeviceIdentity::CpuPackage => Arc::from("cpu"),
+                        DeviceIdentity::Memory => Arc::from("memory"),
+                        DeviceIdentity::Gpu { .. } => Arc::from("gpu:0101"),
+                        DeviceIdentity::Disk { name, .. } => Arc::from(format!("disk:{name}")),
+                        DeviceIdentity::Net { name, .. } => Arc::from(format!("net:{name}")),
+                        DeviceIdentity::Aggregate(AggregateKind::Disks) => {
+                            Arc::from("aggregate:disk")
+                        }
+                        DeviceIdentity::Aggregate(AggregateKind::Nets) => {
+                            Arc::from("aggregate:net")
+                        }
+                        DeviceIdentity::CpuLogical { id } => Arc::from(format!("cpu:{id}")),
+                        _ => Arc::clone(&e.persistent_key),
+                    };
+                    e
+                })
+                .collect();
+            catalog.entries = Arc::from(entries);
+            s.devices = Arc::new(catalog);
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.gpus = Arc::from([(DeviceIdx(2), gpu_record(2))]);
+        });
         draw(r.vcx);
         assert_widget_selectors_unique(&mut r, "default");
 
@@ -9380,11 +9414,13 @@ mod page {
             );
             let source = r.vcx.update(|_, cx| {
                 let groups = editor.read(cx).source_groups(cx);
-                let group = groups
+                let (group, item) = groups
                     .iter()
-                    .find(|g| !g.items.is_empty())
-                    .unwrap_or_else(|| panic!("{kind:?}: a source"));
-                let item = &group.items[0];
+                    .find_map(|g| {
+                        let sub = g.subs.iter().flat_map(|s| s.items.iter());
+                        g.items.iter().chain(sub).next().map(|i| (g, i))
+                    })
+                    .unwrap_or_else(|| panic!("{kind:?}: a source in {groups:?}"));
                 WidgetSource {
                     device: item.device.clone().unwrap_or_else(|| group.key.clone()),
                     metric: item.metric.0.clone(),
