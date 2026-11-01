@@ -1,9 +1,10 @@
 //! A widget draws the same in a flow layout, in Edit Widgets and in a grid layout
 //! (tasklens-6swdr.12, ADR-019 "Flow placement" and "Inner grid"). For each phase 2 box and each
 //! preset, the sweep reads what every widget of the flow layout draws, enters Edit Widgets,
-//! applies with no change, and checks that every widget kept its accent colour, its chart's
-//! series count and legend, its value text, a core row's clock column, and its forms and
-//! options. Run with `--features test-hooks`.
+//! applies with no change (the flow layout stays), saves the pinned layout as a grid layout, and
+//! checks each time that every widget kept its accent colour, its chart's series count and
+//! legend, its value text, a core row's clock column, and its forms and options. Run with
+//! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
@@ -19,7 +20,9 @@ use tl_model::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, WidgetContent, WidgetSetting, reset_to_default,
 };
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -164,7 +167,7 @@ struct Rig<'a> {
     _driver: Entity<AnimationDriver>,
 }
 
-/// The Overview page at 1920 × 1200 with the kernel line on, memory totals and one sample per
+/// The Overview page at 1920 × 1200 with every box, the kernel line on, memory totals and one sample per
 /// core of load (41.7%) and clock (3.94 GHz).
 fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let engine = FakeEngine::new();
@@ -187,6 +190,16 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         for id in 0..CORES {
             views.push(series(CORE0 + id, MetricId::CPU_TOTAL, 41.7, version));
             views.push(series(CORE0 + id, MetricId::CPU_FREQ, 3940.0, version));
+        }
+        // The disk and network totals, so their widgets have a series to draw.
+        for (device, metric, v) in [
+            (50, MetricId::DISK_READ, 1_200_000.0),
+            (50, MetricId::DISK_WRITE, 340_000.0),
+            (50, MetricId::DISK_ACTIVE, 12.0),
+            (51, MetricId::NET_RX, 180_000.0),
+            (51, MetricId::NET_TX, 27_000.0),
+        ] {
+            views.push(series(device, metric, v, version));
         }
         views.sort_by_key(|v| v.id);
         s.series = Arc::new(SeriesSet {
@@ -215,6 +228,10 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         settings.motion.smooth_graphs = false;
         settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
         settings.performance.cpu_kernel = true;
+        // Every box, the Top processes box too.
+        settings.performance.overview = Some(OverviewLayoutSetting::with_top_procs(
+            settings.performance.overview_row_unit_px,
+        ));
         cx.set_global(BootSettings {
             settings,
             state: UiState::default(),
@@ -604,9 +621,9 @@ fn masked(grid: &Look, flow: &Look) -> Look {
 }
 
 /// tasklens-6swdr.12: for each phase 2 box (CPU, Memory, Disk, Network, Top processes and
-/// Timeline) and each preset, entering Edit Widgets and applying with no change keeps every
-/// widget's accent, series count, legend, value text and core clock column, and its forms and
-/// options. The CPU box has the kernel line on, so its total chart has two series and the
+/// Timeline) and each preset, Edit Widgets, Apply with no change and the pinned layout saved as
+/// a grid layout keep every widget's accent, series count, legend, value text and core clock
+/// column, and its forms and options. The CPU box has the kernel line on, so its total chart has two series and the
 /// Total and Kernel legend in both layouts; its core rows show "41%" and "3.9 GHz".
 #[gpui_kit::test]
 fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
@@ -637,8 +654,20 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                 "{kind} {preset}: Edit Widgets"
             );
             let edit = r.looks(&container, container_id);
+            let pinned = r
+                .vcx
+                .update(|_, cx| editor.read(cx).working_layout(cx))
+                .expect("Edit Widgets pins the flow layout");
+            // Apply with no change saves nothing: the box shows its flow layout again.
             let saved = r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx)));
-            assert!(saved, "{kind} {preset}: Apply saves the pinned layout");
+            assert!(!saved, "{kind} {preset}: nothing changed, nothing saved");
+            draw(r.vcx);
+            let (container, _) = r.parts(kind);
+            let applied = r.looks(&container, container_id);
+            // The pinned layout saved as the box's grid layout, as an Apply after a move does.
+            r.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.performance.layouts.set(pinned))
+            });
             draw(r.vcx);
             let (container, _) = r.parts(kind);
             let grid = r.looks(&container, container_id);
@@ -654,7 +683,11 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                 "{kind} {preset}: a grid layout"
             );
 
-            for (stage, after) in [("Edit Widgets", &edit), ("Apply", &grid)] {
+            for (stage, after) in [
+                ("Edit Widgets", &edit),
+                ("Apply", &applied),
+                ("grid layout", &grid),
+            ] {
                 for (setting, look) in &flow {
                     let Some((s, l)) = after.iter().find(|(s, _)| s.id == setting.id) else {
                         panic!("{kind} {preset} {stage}: widget {} is gone", setting.id);
