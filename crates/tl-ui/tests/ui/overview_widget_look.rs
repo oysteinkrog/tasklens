@@ -973,7 +973,8 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                 let accent = match kind {
                     "cpu" => Some(graph.cpu_line),
                     "disk" => Some(graph.disk_line),
-                    "net" => Some(graph.net_line),
+                    // The Upload widget draws the lighter upload line, as the Upload chart.
+                    "net" if metric != "tx" => Some(graph.net_line),
                     _ => None,
                 };
                 if let Some(accent) = accent {
