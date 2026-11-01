@@ -11,6 +11,12 @@
 //! 24 h and 7 d read the device metric history, which the page asks for with
 //! [`page_history_request`]. A chart whose series that history does not hold stays on its live
 //! window ([`live_range_ns`]) and shows [`live_only_note`] (crw.105).
+//!
+//! A page whose body is a widget container (ADR-019 phase 3, [`DevicePage::widget_editor`])
+//! keeps its header row at the top and only the body under it scrolls: the container's widget
+//! editor fills the rest of the page, with the edit toolbar between the header and the body in
+//! Edit Widgets. The graph area, the Details grid and the blocks are the container's widgets
+//! then; [`page_body`] draws the Details grid of the 1.3.0 frame for the Details widget.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -54,6 +60,7 @@ use crate::pages::performance::overview::parts::title_value_style;
 use crate::pages::performance::overview::range::{
     PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
+use crate::pages::performance::widget::edit::WidgetEditor;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, t_sm};
@@ -303,6 +310,11 @@ pub trait DevicePage: 'static {
     fn details_value_suffix(&self) -> Option<DetailsValuePrefix> {
         None
     }
+    /// The editor around the page's widget container, when the page's body is one (ADR-019
+    /// phase 3). `None` keeps the 1.3.0 frame.
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        None
+    }
     /// Called with true when the page becomes the shown page and false when it stops being
     /// shown (R-229; E25-010 wires the calls).
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -519,6 +531,35 @@ impl DevicePageFrame<'_> {
                     .child(page_range_switch(PAGE_SWITCH, &range_words, page.hub(), cx)),
             );
 
+        if let Some(editor) = page.widget_editor() {
+            // The header stays; the widget container under it scrolls (ADR-019 phase 3).
+            return v_flex()
+                .min_w(px(PAGE_MIN_W * s))
+                .size_full()
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(PAGE_PAD * s))
+                        .pt(px(PAGE_PAD * s))
+                        .child(header),
+                )
+                .child(div().flex_none().h(m.sp[4]))
+                .child(
+                    div()
+                        .tl_selector(|| PAGE_BODY_ID.into())
+                        .flex_1()
+                        .min_h_0()
+                        .px(px(PAGE_PAD * s))
+                        .child(
+                            editor
+                                .clone()
+                                .cached(gpui_kit::StyleRefinement::default().size_full()),
+                        ),
+                )
+                .id(ElementId::Name(SharedString::from(key.0.clone())))
+                .into_any_element();
+        }
+
         let graph_area = div()
             .id(GRAPH_AREA_ID)
             .tl_selector(|| GRAPH_AREA_ID.into())
@@ -530,15 +571,6 @@ impl DevicePageFrame<'_> {
             })
             .child(page.graphs(window, cx));
 
-        let heading = div()
-            .tl_selector(|| "perf-page-details-heading".into())
-            .flex()
-            .items_center()
-            .h(px(DETAILS_HEADING_H * s))
-            .map_text(label_style(m, m.text.md, FontWeight::MEDIUM))
-            .text_color(theme.text_primary)
-            .child(details_heading);
-
         // The page menu (UI-PRF-015) opens from the page panel of `PerformancePage`.
         v_flex()
             .min_w(px(PAGE_MIN_W * s))
@@ -547,24 +579,7 @@ impl DevicePageFrame<'_> {
             .child(div().h(m.sp[4]))
             .child(graph_area)
             .child(div().h(px(DETAILS_GAP * s)))
-            .child(heading)
-            .child(div().h(m.sp[4]))
-            .child({
-                let mut grid = render_details(page.details(), m, cx);
-                if let Some(focus) = page.details_link_focus() {
-                    grid = grid.link_focus(focus);
-                }
-                if let Some(prefix) = page.details_value_prefix() {
-                    grid = grid.value_prefix(move |n, w, cx| prefix(n, w, cx));
-                }
-                if let Some(suffix) = page.details_value_suffix() {
-                    grid = grid.value_suffix(move |n, w, cx| suffix(n, w, cx));
-                }
-                match page.details_link_click() {
-                    Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),
-                    None => grid,
-                }
-            })
+            .child(details_part(page, details_heading, m, theme, cx))
             .children(
                 page.blocks(window, cx)
                     .into_iter()
@@ -575,6 +590,65 @@ impl DevicePageFrame<'_> {
             .size_full()
             .into_any_element()
     }
+}
+
+/// The debug selector of a widget page's body, under its header.
+pub const PAGE_BODY_ID: &str = "perf-page-body";
+
+/// The "Details" heading, `sp4` and the Details grid of `page`, with its link values, prefixes
+/// and suffixes (UI-PRF-020, UI-PRF-021): the 1.3.0 frame draws it under the graph area, and
+/// the Details widget of a widget page draws it in its `DetailsView`.
+pub fn details_part(
+    page: &dyn DevicePage,
+    heading: SharedString,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    cx: &App,
+) -> AnyElement {
+    let s = m.ui_scale;
+    let heading = div()
+        .tl_selector(|| "perf-page-details-heading".into())
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(DETAILS_HEADING_H * s))
+        .map_text(label_style(m, m.text.md, FontWeight::MEDIUM))
+        .text_color(theme.text_primary)
+        .child(heading);
+    let mut grid = render_details(page.details(), m, cx);
+    if let Some(focus) = page.details_link_focus() {
+        grid = grid.link_focus(focus);
+    }
+    if let Some(prefix) = page.details_value_prefix() {
+        grid = grid.value_prefix(move |n, w, cx| prefix(n, w, cx));
+    }
+    if let Some(suffix) = page.details_value_suffix() {
+        grid = grid.value_suffix(move |n, w, cx| suffix(n, w, cx));
+    }
+    let grid = match page.details_link_click() {
+        Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),
+        None => grid,
+    };
+    v_flex()
+        .w_full()
+        .child(heading)
+        .child(div().flex_none().h(m.sp[4]))
+        .child(grid)
+        .into_any_element()
+}
+
+/// The Details draw of the widget page `page`: [`details_part`] from the page's model, for its
+/// `DetailsView`. `None` once the page is gone.
+pub fn details_draw<P: DevicePage + Render>(
+    page: WeakEntity<P>,
+) -> crate::pages::performance::widget::details_widget::DetailsDraw {
+    Rc::new(move |_window: &mut Window, cx: &mut App| {
+        let page = page.upgrade()?;
+        let heading = page_words(cx).details.clone();
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        Some(details_part(page.read(cx), heading, &m, &theme, cx))
+    })
 }
 
 /// The sidebar whose cards give the page headers their values (UI-PRF-058). Set by

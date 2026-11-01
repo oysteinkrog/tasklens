@@ -66,8 +66,13 @@ gpui_kit::actions!(
         PerfOverviewResetLayout,
         /// Hides the focused Overview box (Delete in Edit Layout mode).
         PerfOverviewHideBox,
-        /// Starts Edit Widgets on the GPU box ("Edit Widgets…" in the box menu, UI-PRF-061).
+        /// Starts Edit Widgets on the GPU box ("Edit Widgets…" in the box menu, UI-PRF-061), or
+        /// on the device page it is dispatched on ("Edit Widgets…" in the page menu, ADR-019
+        /// phase 3).
         PerfWidgetEditStart,
+        /// Asks, then saves the default widgets of the device page it is dispatched on ("Reset
+        /// Page" in the page menu, ADR-019 phase 3).
+        PerfWidgetResetPage,
         /// Saves the edited widgets and ends Edit Widgets (Apply, Enter).
         PerfWidgetApply,
         /// Ends Edit Widgets without saving (Cancel, Esc).

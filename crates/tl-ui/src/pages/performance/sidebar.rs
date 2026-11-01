@@ -14,6 +14,11 @@
 //! selection, the keys and the demand. Each change starts one timer that ends its animations;
 //! nothing runs while no card moves. With animations off the change is at once. Edit mode
 //! (E24-013) is a later bead.
+//!
+//! Select Pages and Edit Widgets exclude each other (ADR-019 phase 3): while a page or box of
+//! the window is in Edit Widgets, the pencil and the card menu's "Select Pages" are disabled and
+//! `PerfEnterEditMode` does nothing; starting Edit Widgets ends Select Pages as "Done" does
+//! ([`DeviceSidebar::end_select_pages`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -51,7 +56,8 @@ use super::card::{
     CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard, StaleTimer,
     card_chart_grid, card_chart_labels, card_words, update_card_lines,
 };
-use super::menu::card_menu;
+use super::menu::card_menu_in;
+use super::widget::edit::{WidgetEditMode, any_editing};
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, fan_connected, initial_selection,
     is_visible, sidebar_order, tray_available, type_number, visible_rows,
@@ -597,6 +603,8 @@ impl DeviceSidebar {
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // Edit Widgets started or ended somewhere: the pencil follows.
+        subs.push(cx.observe_global::<WidgetEditMode>(|_, cx| cx.notify()));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -1345,7 +1353,7 @@ impl DeviceSidebar {
     }
 
     fn enter_edit_mode(&mut self, cx: &mut Context<Self>) {
-        if self.edit_mode {
+        if self.edit_mode || any_editing(&self.hub, cx) {
             return;
         }
         self.edit_generation += 1;
@@ -1385,6 +1393,16 @@ impl DeviceSidebar {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Ends Select Pages as "Done" does: a page or box starts Edit Widgets.
+    pub fn end_select_pages(&mut self, cx: &mut Context<Self>) {
+        self.leave_edit_mode(cx);
+    }
+
+    /// The hub of the sidebar's host.
+    pub fn hub(&self) -> &Entity<SnapshotHub> {
+        &self.hub
     }
 
     fn on_enter_edit(&mut self, _: &PerfEnterEditMode, _: &mut Window, cx: &mut Context<Self>) {
@@ -1704,9 +1722,10 @@ impl DeviceSidebar {
         let (key, count) = (key.clone(), self.live().count());
         let hidden = !self.index.contains_key(&key);
         let edit_mode = self.edit_mode;
+        let editing = any_editing(&self.hub, cx);
         TlMenu::build(window, cx, action_context, move |menu, _, cx| {
             let tray = tray_available(cx);
-            card_menu(menu, &key, count, hidden, edit_mode, tray, cx)
+            card_menu_in(menu, &key, count, hidden, edit_mode, tray, editing, cx)
         })
     }
 
@@ -1871,6 +1890,7 @@ impl Render for DeviceSidebar {
             .collect();
 
         let edit_present = self.edit_mode || self.edit_leaving;
+        let widgets_editing = any_editing(&self.hub, cx);
         // The earliest stale deadline of a Valid edit card value.
         let mut edit_stale_at: Option<u64> = None;
         // The charts of the edit cards that draw no graph.
@@ -2277,6 +2297,7 @@ impl Render for DeviceSidebar {
                             .size(TlButtonSize::Sm)
                             .icon(TlIcon::Pencil)
                             .tooltip(self.edit_words.tip.clone())
+                            .disabled(widgets_editing)
                             .action(Box::new(PerfEnterEditMode)),
                     ),
                 )

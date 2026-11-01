@@ -45,9 +45,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    relative, size,
 };
 use tl_model::ids::SeriesId;
 use tl_model::layout::{FormSet, WidgetSetting};
@@ -67,6 +68,7 @@ use crate::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale
 use crate::components::validity::copy_text;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
+use crate::pages::performance::actions::PerfShowMiniWindow;
 use crate::pages::performance::overview::fit::fit_text;
 use crate::pages::performance::overview::gpu_flow::line_style;
 use crate::pages::performance::overview::mem_box::{
@@ -1617,13 +1619,26 @@ impl Render for MetricWidget {
         } else {
             body
         };
-        div()
+        let root = div()
             .tl_selector(move || id)
             .relative()
             .size_full()
             .overflow_hidden()
             .child(body)
-            .child(probe)
-            .into_any_element()
+            .child(probe);
+        // A double-click on a page chart opens the mini window, as the 1.3.0 graph area does
+        // (ADR-019 phase 3 "Double-click"). Not in Edit Widgets.
+        if self.page && !self.edit_inset && self.chart.is_some() {
+            let el_id = SharedString::from(widget_id(&self.container, self.setting.id));
+            return root
+                .id(el_id)
+                .on_click(|ev, window, cx| {
+                    if ev.click_count() == 2 {
+                        window.dispatch_action(Box::new(PerfShowMiniWindow), cx);
+                    }
+                })
+                .into_any_element();
+        }
+        root.into_any_element()
     }
 }

@@ -28,7 +28,11 @@
 //!   [`set_group_option`] and [`new_group`] are the edits they make. A fixed widget's menu has
 //!   only "Remove Widget".
 //! - **Confirmations**: Reset in Edit Widgets ([`confirm_reset`]), Reset Box with a grid layout
-//!   ([`confirm_reset_now`]) and a preset over a grid layout ([`confirm_preset`]).
+//!   ([`confirm_reset_now`]) and a preset over a grid layout ([`confirm_preset`]). A device
+//!   page asks "Reset the {$page} page?" ([`confirm_reset_page`]).
+//! - **Device pages** (ADR-019 phase 3 "Source lists"): "Source >" and Add Widget list the
+//!   metrics of the page's own device ([`page_source_groups`]), then the page parts it does not
+//!   hold yet, Details first.
 //!
 //! The items dispatch the `PerfWidget*` actions to the editor's focus handle.
 
@@ -823,21 +827,46 @@ fn sources(
 pub fn add_items(
     menu: TlMenu,
     groups: &Rc<[SourceGroup]>,
-    fixed: Option<FixedAdd>,
+    fixed: &[FixedAdd],
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
     let menu = sources(menu, groups, None, None, window, cx);
-    let menu = group_adds(menu, groups, window, cx);
-    match fixed {
-        Some(add) => menu.separator().item(
-            add.label,
+    let mut menu = group_adds(menu, groups, window, cx);
+    if !fixed.is_empty() {
+        menu = menu.separator();
+    }
+    for add in fixed {
+        menu = menu.item(
+            add.label.clone(),
             Box::new(PerfWidgetAddFixed {
                 fixed: Arc::clone(&add.name),
             }),
-        ),
-        None => menu,
+        );
     }
+    menu
+}
+
+/// The sources of the device page `container` on `snap` (ADR-019 phase 3 "Source lists"): the
+/// metrics of the page's own device, from the box lists, with no group (only the CPU and GPU
+/// pages offer one, added by their page beads). A page kind whose page bead has not come yet
+/// lists nothing.
+pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let Some(key) = tl_model::layout_pages::page_key(container) else {
+        return Vec::new();
+    };
+    let groups = match DeviceKind::of_key(key) {
+        DeviceKind::Disk | DeviceKind::Disks => disk_source_groups(snap, cx),
+        _ => Vec::new(),
+    };
+    groups
+        .into_iter()
+        .filter(|g| *g.key == *key)
+        .map(|g| SourceGroup {
+            add_group: None,
+            ..g
+        })
+        .collect()
 }
 
 /// The group items of Add Widget after a separator: the device's own group, or "All engines"
@@ -852,8 +881,15 @@ fn group_adds(
     if groups.is_empty() {
         return menu;
     }
-    // Memory has no group to add.
-    if groups.iter().all(|g| &*g.key == DEVICE_MEMORY) {
+    // Memory and a device page other than CPU and GPU have no group to add.
+    let no_group = groups.iter().all(|g| {
+        g.add_group.is_none()
+            && !matches!(
+                DeviceKind::of_key(&g.key),
+                DeviceKind::Gpu | DeviceKind::Other
+            )
+    });
+    if groups.iter().all(|g| &*g.key == DEVICE_MEMORY) || no_group {
         return menu;
     }
     menu = menu.separator();
@@ -1172,6 +1208,31 @@ pub fn confirm_reset(
         tr(cx, "perf-widget-reset-confirm"),
     )
     .heading(title);
+    open(dialog, window, cx, on_ok);
+}
+
+/// "Reset the {$page} page?" of a device page (UI-PRF-061 phase 3): in Edit Widgets (`now`
+/// false) the working layout goes back to the default, which Undo can still bring back until
+/// Apply; from "Reset Page" (`now`) the default is saved at once.
+pub fn confirm_reset_page(
+    page: SharedString,
+    now: bool,
+    window: &mut Window,
+    cx: &mut App,
+    on_ok: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    let title = tr_args(
+        cx,
+        "perf-widget-reset-page-title",
+        &[("page", FluentValue::from(page.to_string()))],
+    );
+    let body = if now {
+        "perf-widget-reset-page-now-body"
+    } else {
+        "perf-widget-reset-page-body"
+    };
+    let dialog =
+        TlDialog::confirm(tr(cx, body), tr(cx, "perf-widget-reset-confirm")).heading(title);
     open(dialog, window, cx, on_ok);
 }
 

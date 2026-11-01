@@ -1,6 +1,11 @@
 //! Performance tab menus (docs/ui/performance.md UI-PRF-014, UI-PRF-015; PERF-002, PERF-007,
 //! PERF-010, PERF-011, PERF-016): the card menu of a sidebar card, and the page menu of a device
 //! page, which a summary tile also opens.
+//!
+//! A device page whose body is a widget container (ADR-019 phase 3) starts its own items with
+//! "Edit Widgets…" and "Reset Page", then a separator. While a page or box of the window is in
+//! Edit Widgets, "Select Pages", "Graph Summary View" and the other containers' "Edit
+//! Widgets…" are disabled.
 
 use std::sync::Arc;
 
@@ -10,9 +15,10 @@ use tl_model::settings::OverviewRange;
 use super::actions::{
     PerfAddTrayGraph, PerfCopyDeviceInfo, PerfCopyValue, PerfEnterEditMode, PerfJumpToType,
     PerfSetGraphRange, PerfSetOverviewRange, PerfSetPageVisible, PerfToggleGpuEngine,
-    PerfToggleSummaryMode,
+    PerfToggleSummaryMode, PerfWidgetEditStart, PerfWidgetResetPage,
 };
 use super::page::DevicePage;
+use super::widget::edit::{any_editing, saved_layout};
 use super::{DeviceKey, DeviceKind};
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
@@ -29,10 +35,37 @@ pub fn card_menu(
     tray_available: Option<bool>,
     cx: &App,
 ) -> TlMenu {
-    let mut menu = menu.item(
-        tr(cx, "perf-menu-select-pages"),
-        Box::new(PerfEnterEditMode),
-    );
+    card_menu_in(
+        menu,
+        key,
+        visible_count,
+        hidden,
+        edit_mode,
+        tray_available,
+        false,
+        cx,
+    )
+}
+
+/// [`card_menu`], with "Select Pages" disabled while a page or box of the window is in Edit
+/// Widgets (`widgets_editing`, ADR-019 phase 3).
+#[allow(clippy::too_many_arguments)]
+pub fn card_menu_in(
+    menu: TlMenu,
+    key: &DeviceKey,
+    visible_count: usize,
+    hidden: bool,
+    edit_mode: bool,
+    tray_available: Option<bool>,
+    widgets_editing: bool,
+    cx: &App,
+) -> TlMenu {
+    let select = tr(cx, "perf-menu-select-pages");
+    let mut menu = if widgets_editing {
+        menu.item_disabled(select, None)
+    } else {
+        menu.item(select, Box::new(PerfEnterEditMode))
+    };
     let hide = tr(cx, "perf-menu-hide-page");
     menu = if visible_count <= 1 {
         menu.item_disabled(hide, Some(tr(cx, "perf-toast-last-page")))
@@ -149,7 +182,9 @@ pub fn page_menu(
         None => menu,
     };
     let overview = &*page.key().0 == super::overview::OVERVIEW_KEY;
-    let menu = page_menu_common(menu, ctx, overview, window, cx).separator();
+    let editing = page.hub().is_some_and(|hub| any_editing(hub, cx));
+    let menu = page_menu_common_in(menu, ctx, overview, editing, window, cx).separator();
+    let menu = widget_items(menu, page, editing, cx);
     // `TlMenu` drops a doubled or trailing separator, so a page with no items leaves one.
     let menu = page.menu_items(menu, window, cx).separator();
     let menu = match ctx.view_types {
@@ -157,6 +192,29 @@ pub fn page_menu(
         None => menu,
     };
     tray_item(menu, page.key(), ctx.tray_available, cx)
+}
+
+/// "Edit Widgets…" and "Reset Page" of a page whose body is a widget container, then a
+/// separator (ADR-019 phase 3 "Editing a page"). "Edit Widgets…" is disabled while a container
+/// of the window is in Edit Widgets, "Reset Page" while the page has no entry.
+fn widget_items(menu: TlMenu, page: &dyn DevicePage, editing: bool, cx: &App) -> TlMenu {
+    let Some(editor) = page.widget_editor() else {
+        return menu;
+    };
+    let container = editor.read(cx).container().read(cx).id().clone();
+    let edit = tr(cx, "perf-widget-edit");
+    let menu = if editing {
+        menu.item_disabled(edit, None)
+    } else {
+        menu.item(edit, Box::new(PerfWidgetEditStart))
+    };
+    let reset = tr(cx, "perf-widget-reset-page");
+    let menu = if saved_layout(&container, cx).is_some() && !editing {
+        menu.item(reset, Box::new(PerfWidgetResetPage))
+    } else {
+        menu.item_disabled(reset, None)
+    };
+    menu.separator()
 }
 
 /// "View >": one item per type that jumps to its first visible device; a type with no visible
@@ -201,16 +259,29 @@ pub fn page_menu_common(
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
+    page_menu_common_in(menu, ctx, overview, false, window, cx)
+}
+
+/// [`page_menu_common`], with "Graph Summary View" disabled while a page or box of the window
+/// is in Edit Widgets (`editing`).
+fn page_menu_common_in(
+    menu: TlMenu,
+    ctx: &PageMenuCtx,
+    overview: bool,
+    editing: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
     let (range_s, long) = (ctx.range_s, ctx.ranges_long_enabled);
     let later = tr(cx, "perf-later-version");
     let words: Vec<SharedString> = RANGES.iter().map(|(_, k)| tr(cx, k)).collect();
-    let menu = menu
-        .item(tr(cx, "perf-menu-copy"), Box::new(PerfCopyDeviceInfo))
-        .check_item(
-            tr(cx, "perf-menu-summary"),
-            ctx.summary_on,
-            Box::new(PerfToggleSummaryMode),
-        );
+    let menu = menu.item(tr(cx, "perf-menu-copy"), Box::new(PerfCopyDeviceInfo));
+    let summary = tr(cx, "perf-menu-summary");
+    let menu = if editing {
+        menu.item_disabled(summary, None)
+    } else {
+        menu.check_item(summary, ctx.summary_on, Box::new(PerfToggleSummaryMode))
+    };
     if overview {
         let current = super::overview::range::current_range(cx);
         let words: Vec<SharedString> = super::overview::range::SWITCH_KEYS

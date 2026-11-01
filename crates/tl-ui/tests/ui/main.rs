@@ -50,6 +50,7 @@ mod overview_timeline;
 mod overview_widget_look;
 mod overview_widgets;
 mod page_range;
+mod page_widgets;
 mod performance;
 mod process_cells;
 mod process_menu;

@@ -24,6 +24,11 @@
 //! Entering Edit Widgets on a flow layout pins it into a grid layout (`grid::pin`). The
 //! container keeps the entities of widgets whose id stays, so Cancel creates none again.
 //!
+//! A device page hosts an editor too (ADR-019 phase 3): its toolbar sits between the page
+//! header and the body, its Add Widget lists the page's own device and the page parts it does
+//! not hold yet (Details first), and its Reset asks with the page's name. At most one container
+//! of a window is in Edit Widgets: [`WidgetEditor::start`] does nothing while another is.
+//!
 //! Render contract (UI-PRF-017, UI-PRF-019): the editor never listens to samples. It renders on
 //! an edit action, a drag step and a container layout change while editing.
 
@@ -46,11 +51,13 @@ use tl_model::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FixedWidget, FormSet,
     LAYOUT_VERSION, MEMORY_BOX_CONTAINER, MetricKey, NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER,
     SourceSelector, TIMELINE_BOX_CONTAINER, WidgetCell, WidgetContent, WidgetOptions,
-    WidgetSetting, default_box_layout, grid_cols, overview_kind, reset_to_default,
+    WidgetSetting, default_box_layout, overview_kind, reset_to_default,
 };
 use tl_model::layout_boxes::DeviceKind;
+use tl_model::layout_pages::default_page_layout;
 
 use super::container::WidgetContainer;
+use super::fixed_widget::PAGE_FIXED_NAMES;
 use super::grid::{self, Drawn, InnerGrid, SlotDevice};
 use super::menu::{self, OPTION_DASHED, OPTION_FILL, SourceGroup};
 use super::meta::MetricMeta;
@@ -139,9 +146,12 @@ pub fn corner_id(container: &str, id: u32) -> String {
 }
 
 /// The built-in default layout of `container`, which no entry stands for: the Overview box's
-/// default preset, else no widgets.
+/// default preset, a device page's default flow layout, else no widgets.
 pub fn default_layout(container: &str) -> ContainerLayout {
     if let Some(layout) = overview_kind(container).and_then(default_box_layout) {
+        return layout;
+    }
+    if let Some(layout) = default_page_layout(container) {
         return layout;
     }
     ContainerLayout {
@@ -154,7 +164,7 @@ pub fn default_layout(container: &str) -> ContainerLayout {
 }
 
 /// The saved entry of `container`; `None` when there is none (the built-in default).
-fn saved_layout(container: &str, cx: &App) -> Option<ContainerLayout> {
+pub fn saved_layout(container: &str, cx: &App) -> Option<ContainerLayout> {
     cx.has_global::<TlSettings>()
         .then(|| {
             TlSettings::settings(cx)
@@ -464,6 +474,18 @@ struct WidgetEditors(Vec<(EntityId, SharedString, WeakEntity<WidgetEditor>)>);
 
 impl Global for WidgetEditors {}
 
+/// Bumped each time a container starts or ends Edit Widgets, so views that follow the mode (the
+/// sidebar's Select Pages) can observe it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WidgetEditMode(pub u64);
+
+impl Global for WidgetEditMode {}
+
+fn bump_edit_mode(cx: &mut App) {
+    let next = cx.try_global::<WidgetEditMode>().map_or(1, |g| g.0 + 1);
+    cx.set_global(WidgetEditMode(next));
+}
+
 /// The editor of `container` on the page of `hub`.
 pub fn editor_of(
     hub: &Entity<SnapshotHub>,
@@ -498,6 +520,10 @@ pub struct WidgetEditor {
     focus: FocusHandle,
     /// The GPUs in slot 0 and slot 1, for pinning a flow layout and for the source lists.
     slots: Vec<SlotDevice>,
+    /// A device page's header type word ("Aggregate storage"), for its Reset dialog.
+    page_name: Option<SharedString>,
+    /// The page parts the page can show now; Add Widget lists the ones it does not hold.
+    page_parts: Vec<FixedWidget>,
     edit: Option<LayoutEdit>,
     /// The layout the container showed when editing started; Cancel puts it back.
     shown_before: Option<ContainerLayout>,
@@ -538,6 +564,8 @@ impl WidgetEditor {
             hub: hub.clone(),
             focus: cx.focus_handle(),
             slots: Vec::new(),
+            page_name: None,
+            page_parts: Vec::new(),
             edit: None,
             shown_before: None,
             drag: None,
@@ -582,6 +610,21 @@ impl WidgetEditor {
         self.slots = slots;
     }
 
+    /// A device page's header type word, which its Reset dialog names.
+    pub fn set_page_name(&mut self, name: SharedString) {
+        self.page_name = Some(name);
+    }
+
+    /// The page parts the page can show now, in the order Add Widget lists them.
+    pub fn set_page_parts(&mut self, parts: Vec<FixedWidget>) {
+        self.page_parts = parts;
+    }
+
+    /// Whether the editor serves a device page.
+    fn is_page(&self) -> bool {
+        grid::is_page(&self.id)
+    }
+
     /// The grid the edit actions use: the container's cells now.
     fn edit_grid(&self, cx: &App) -> InnerGrid {
         let c = self.container.read(cx);
@@ -589,11 +632,7 @@ impl WidgetEditor {
         if g.cols > 0 && g.cw > 0. {
             g
         } else {
-            InnerGrid::new(
-                f32::from(c.area().width),
-                grid_cols(&self.id),
-                metrics(cx).ui_scale,
-            )
+            InnerGrid::of(&self.id, f32::from(c.area().width), metrics(cx).ui_scale)
         }
     }
 
@@ -628,10 +667,15 @@ impl WidgetEditor {
     /// Starts Edit Widgets: a flow layout is pinned to the grid, the rows hold their height and
     /// the editor takes the keys.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus, cx);
         if self.edit.is_some() {
+            window.focus(&self.focus, cx);
             return;
         }
+        // At most one container of the window is in Edit Widgets.
+        if any_editing(&self.hub, cx) {
+            return;
+        }
+        window.focus(&self.focus, cx);
         let shown = self.container.read(cx).layout().clone();
         let working = if shown.preset.is_some() {
             self.pinned(&shown, cx)
@@ -649,6 +693,7 @@ impl WidgetEditor {
         self.shown_before = Some(shown);
         self.edit = Some(LayoutEdit::new(self.id.to_string(), before, Some(working)));
         self.drag = None;
+        bump_edit_mode(cx);
         cx.emit(WidgetEditEvent::Started);
         cx.notify();
     }
@@ -700,6 +745,7 @@ impl WidgetEditor {
             c.set_editing(false, cx);
             c.set_scroll_offset(offset);
         });
+        bump_edit_mode(cx);
         cx.emit(WidgetEditEvent::Ended { applied });
         cx.notify();
     }
@@ -779,9 +825,13 @@ impl WidgetEditor {
             return;
         }
         let this = cx.entity().downgrade();
-        menu::confirm_reset(&self.id, window, cx, move |_, cx| {
+        let on_ok = move |_: &mut Window, cx: &mut App| {
             let _ = this.update(cx, |e, cx| e.reset_confirmed(cx));
-        });
+        };
+        match (&self.page_name, self.is_page()) {
+            (Some(name), true) => menu::confirm_reset_page(name.clone(), false, window, cx, on_ok),
+            _ => menu::confirm_reset(&self.id, window, cx, on_ok),
+        }
     }
 
     /// The confirmed Reset: the working copy becomes the default. Undo brings it back.
@@ -895,6 +945,9 @@ impl WidgetEditor {
     /// GPUs the box shows.
     pub fn source_groups(&self, cx: &App) -> Vec<SourceGroup> {
         let snap = box_snapshot(&self.hub, cx);
+        if self.is_page() {
+            return menu::page_source_groups(&self.id, &snap, cx);
+        }
         if *self.id == *PROCESSES_BOX_CONTAINER {
             return menu::cpu_source_groups(&snap, cx);
         }
@@ -918,6 +971,32 @@ impl WidgetEditor {
             return menu::net_source_groups(&snap, cx);
         }
         menu::source_groups(&self.slots, &snap, cx)
+    }
+
+    /// The fixed widgets Add Widget offers: on a device page the parts the page can show and
+    /// does not hold yet, Details first (ADR-019 phase 3 "Source lists"); in a box
+    /// [`Self::fixed_add`].
+    pub fn fixed_adds(&self, cx: &App) -> Vec<menu::FixedAdd> {
+        if !self.is_page() {
+            return self.fixed_add(cx).into_iter().collect();
+        }
+        let Some(layout) = self.working_layout(cx) else {
+            return Vec::new();
+        };
+        PAGE_FIXED_NAMES
+            .iter()
+            .filter(|(kind, _)| kind.allowed_in(&self.id) && self.page_parts.contains(kind))
+            .filter(|(kind, _)| {
+                !layout
+                    .widgets
+                    .iter()
+                    .any(|w| matches!(&w.content, WidgetContent::Fixed(f) if f == kind))
+            })
+            .map(|(kind, key)| menu::FixedAdd {
+                name: Arc::from(kind.name()),
+                label: tr(cx, key),
+            })
+            .collect()
     }
 
     /// The fixed widget Add Widget offers: the one the box allows (Memory by app in the Memory
@@ -944,7 +1023,7 @@ impl WidgetEditor {
     pub fn add_fixed(&mut self, name: &str, cx: &mut Context<Self>) -> Option<u32> {
         self.edit.as_ref()?;
         let kind = FixedWidget::from_name(name);
-        if self.fixed_add(cx).is_none_or(|a| *a.name != *kind.name()) {
+        if !self.fixed_adds(cx).iter().any(|a| *a.name == *kind.name()) {
             return None;
         }
         let widget = WidgetSetting {
@@ -1160,9 +1239,9 @@ impl WidgetEditor {
             position
         };
         let groups: Rc<[SourceGroup]> = self.source_groups(cx).into();
-        let fixed = self.fixed_add(cx);
+        let fixed: Rc<[menu::FixedAdd]> = self.fixed_adds(cx).into();
         let menu = TlMenu::build(window, cx, self.focus.clone(), move |menu, window, cx| {
-            menu::add_items(menu, &groups, fixed.clone(), window, cx)
+            menu::add_items(menu, &groups, &fixed, window, cx)
         });
         open_context_menu_at(at, window, cx, menu);
     }

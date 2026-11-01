@@ -8,34 +8,50 @@
 //! for the aggregate itself. A page exists only with two or more members (see `build_page`).
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version.
+//!
+//! The Aggregate storage page is the first page whose body is a widget container (ADR-019
+//! phase 3, `tasklens-hzire.3`); the Aggregate graphics page follows in `tasklens-hzire.9`.
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, Entity, EntityId, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Div, Entity, EntityId,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId};
+use tl_model::layout::{
+    ContainerLayout, FixedWidget, WidgetSetting, container_layout, reset_to_default,
+};
+use tl_model::layout_pages::page_container;
 use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::system::Metric;
 use tl_model::units;
 use tl_model::validity::Validity;
 
+use super::actions::{PerfWidgetEditStart, PerfWidgetResetPage};
 use super::details::{Fallback, KeyValueModel};
-use super::disk::{
-    self, KIND_KEYS, PageSettings, health_state, kind_key, section_versions, transfer_spec,
-};
+use super::disk::{self, KIND_KEYS, PageSettings, kind_key, section_versions};
 use super::gpu;
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_words,
+    DevicePage, DevicePageFrame, GRAPH_H_STACKED, PerfSidebar, details_draw, header_text,
+    page_history_request, page_words,
 };
+use super::page_flow::{column_flow, default_part};
+use super::widget::container::WidgetContainer;
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::{WidgetEditor, any_editing, default_layout, saved_layout};
+use super::widget::fixed_widget::FixedContent;
+use super::widget::menu::confirm_reset_page;
+use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{ChartLabels, ChartSeries, ChartView, ValueAlign, ValueFormat, YScale};
 use crate::components::menu::TlMenu;
@@ -384,27 +400,49 @@ fn send_demand(
 
 // ---- Aggregate storage page ----
 
-/// The Aggregate storage page.
+/// The Aggregate storage page. Its body is one widget container (ADR-019 phase 3,
+/// `tasklens-hzire.3`): by default the Active time and Transfer rate charts and the Details
+/// widget, in the 1.3.0 places (`page_flow::column_flow`). Edit Widgets changes them; the page
+/// keeps the header and the Details model, and hands the model's rows to its `DetailsView`.
+///
+/// Render contract: the page renders on a header change, a range change and a layout change,
+/// never because of a sample. A Details value change notifies only the `DetailsView`.
 pub struct AggregateDiskPage {
     key: DeviceKey,
     row: DeviceRow,
-    active: Entity<ChartView>,
-    transfer: Entity<ChartView>,
+    /// The container id, `page.aggregate:disk`.
+    container_id: SharedString,
     details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
-    style_version: u64,
-    words: disk::Words,
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
     is_active: bool,
     window: Option<AnyWindowHandle>,
     focus: FocusHandle,
-    _subs: SmallVec<[Subscription; 4]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
+}
+
+/// The strings version, `None` without strings (tests).
+fn strings_version(cx: &App) -> Option<u64> {
+    cx.try_global::<Strings>().map(|s| s.strings_version)
+}
+
+/// The layout `container` shows now: its saved entry, else its built-in default.
+fn page_layout(container: &str, cx: &App) -> ContainerLayout {
+    cx.has_global::<TlSettings>()
+        .then(|| container_layout(&TlSettings::settings(cx).performance, container))
+        .flatten()
+        .unwrap_or_else(|| default_layout(container))
 }
 
 impl AggregateDiskPage {
@@ -415,44 +453,65 @@ impl AggregateDiskPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let mut words = disk::Words::default();
-        words.refresh(cx);
+        let container_id = SharedString::from(page_container(&key.0));
 
-        let idx = row.idx;
-        let active = {
-            let (spec, labels) = (
-                disk::active_spec(idx, &settings, &theme),
-                disk::active_labels(&words),
-            );
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let mut details = disk_model();
+        details.refresh_strings(cx);
+        update_disk_rows(&mut details, &snap);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(cx.weak_entity());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let natural = details_view.read(cx).natural_height();
+        let content: FixedContent = {
+            let view: AnyView = details_view.clone().into();
+            Rc::new(move |kind: &FixedWidget, _: &mut App| {
+                matches!(kind, FixedWidget::Details).then(|| view.clone())
             })
         };
-        let transfer = {
-            let (spec, labels) = (
-                transfer_spec(idx, &settings, &theme),
-                disk::transfer_labels(&words),
-            );
-            cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap);
-                // The value is read plus write.
-                view.set_value_sum(true, cx);
-                view
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                let place = column_flow(Rc::new(move |w: &WidgetSetting| {
+                    Some(default_part(w, &natural))
+                }));
+                c.set_flow_placer(Some(place), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(vec![FixedWidget::Details]);
+                e
             })
         };
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
-        subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // The Details grid got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -461,14 +520,14 @@ impl AggregateDiskPage {
         let mut this = Self {
             key,
             row,
-            active,
-            transfer,
-            details: disk_model(),
+            container_id,
+            details,
+            details_view,
+            container,
+            editor,
             header: (SharedString::default(), SharedString::default()),
             settings,
             settings_versions: section_versions(cx),
-            style_version: metrics(cx).style_version,
-            words,
             hub,
             demand,
             id,
@@ -478,17 +537,31 @@ impl AggregateDiskPage {
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
         this
     }
 
-    pub fn active_chart(&self) -> &Entity<ChartView> {
-        &self.active
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
     }
 
-    pub fn transfer_chart(&self) -> &Entity<ChartView> {
-        &self.transfer
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The container id, `page.aggregate:disk`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
     }
 
     /// The page is the shown page (`set_active`).
@@ -496,21 +569,30 @@ impl AggregateDiskPage {
         self.is_active
     }
 
-    /// This page's demand part while it is active: disks, and the device metric history at
-    /// 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// This page's demand part while it is active: disks, the device metric history at 1 h,
+    /// 24 h and 7 d, and what the placed widgets read.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             disks: true,
             device_history_range: page_history_request(self.settings.range_ns()),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if self.is_active {
-            send_demand(&self.demand, self.id, self.window, self.demand_part(), cx);
+            let part = self.demand_part(cx);
+            send_demand(&self.demand, self.id, self.window, part, cx);
         }
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
     }
 
     fn on_snapshot(
@@ -523,46 +605,61 @@ impl AggregateDiskPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the header, the rows and the chart state up to date with the components in
-    /// `mask`. Notifies only when something the page draws changed.
+    /// Brings the header and the Details rows up to date with the components in `mask`. Only
+    /// a header change renders the page; a row change goes to the Details view.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
-        let mut changed = false;
-        if mask.contains(ComponentMask::HEALTH) {
-            let state = health_state(snap);
-            for chart in [&self.active, &self.transfer] {
-                let state = state.clone();
-                chart.update(cx, |v, cx| v.set_state(state, cx));
-            }
-        }
         if mask.intersects(
             ComponentMask::SYSTEM
                 | ComponentMask::HEALTH
                 | ComponentMask::DEVICE_DETAILS
                 | ComponentMask::DEVICES,
-        ) {
-            changed |= update_disk_rows(&mut self.details, snap);
+        ) && update_disk_rows(&mut self.details, snap)
+        {
+            self.sync_details(cx);
         }
-        if mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY)) {
-            changed |= self.sync_header(snap, cx);
+        if mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY))
+            && self.sync_header(snap, cx)
+        {
+            self.notify(cx);
         }
-        if changed {
-            cx.notify();
+        // The aggregate went away: an edit ends as Cancel does.
+        if mask.contains(ComponentMask::DEVICES)
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
     /// The header from the catalog. True when it changed.
-    fn sync_header(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let Some(header) = header_of(DeviceKind::AggregateDisk, self.row.idx, snap, cx) else {
             return false;
         };
         if header == self.header {
             return false;
         }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         self.header = header;
         true
     }
 
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        // A saved layout (Apply, Reset Page) shows when the page is not in Edit Widgets.
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -572,49 +669,99 @@ impl AggregateDiskPage {
         if new != self.settings {
             let range_moved = new.range_ns() != self.settings.range_ns();
             self.settings = new;
-            self.rebuild_specs(cx);
             if range_moved {
                 // The header switch shows the new range.
                 self.send_demand(cx);
-                cx.notify();
+                self.notify(cx);
             }
         }
     }
 
-    fn rebuild_specs(&self, cx: &mut App) {
-        let (idx, s) = (self.row.idx, self.settings);
-        let theme = current(cx).clone();
-        let active = disk::active_spec(idx, &s, &theme);
-        let transfer = transfer_spec(idx, &s, &theme);
-        self.active.update(cx, |v, cx| v.set_spec(active, cx));
-        self.transfer.update(cx, |v, cx| v.set_spec(transfer, cx));
-    }
-
-    /// A new theme: the charts take the new colours.
-    fn sync_style(&mut self, cx: &mut Context<Self>) {
-        let version = metrics(cx).style_version;
-        if version == self.style_version {
-            return;
-        }
-        self.style_version = version;
-        self.rebuild_specs(cx);
-        cx.notify();
-    }
-
-    /// New strings: the chart labels and the header.
+    /// New strings: the Details words and the header.
     fn sync_words(&mut self, cx: &mut Context<Self>) {
-        if !self.words.refresh(cx) {
-            return;
-        }
-        let (active, transfer) = (
-            disk::active_labels(&self.words),
-            disk::transfer_labels(&self.words),
-        );
-        self.active.update(cx, |v, cx| v.set_labels(active, cx));
-        self.transfer.update(cx, |v, cx| v.set_labels(transfer, cx));
+        self.details.refresh_strings(cx);
+        self.sync_details(cx);
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_header(&snap, cx);
-        cx.notify();
+        self.notify(cx);
+    }
+
+    /// "Edit Widgets…" in the page menu: Select Pages ends as "Done" ends it, then the page
+    /// starts Edit Widgets. Nothing while another container of the window is in it.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
+    }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+    }
+}
+
+/// Starts Edit Widgets on a device page's `editor`: the sidebar of the same window leaves
+/// Select Pages first (ADR-019 phase 3 "Select Pages and Edit Layout").
+pub fn start_page_edit(
+    editor: &Entity<WidgetEditor>,
+    hub: &Entity<SnapshotHub>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if any_editing(hub, cx) {
+        return;
+    }
+    let sidebar = cx
+        .try_global::<PerfSidebar>()
+        .and_then(|s| s.0.upgrade())
+        .filter(|s| s.read(cx).hub() == hub);
+    if let Some(sidebar) = sidebar {
+        sidebar.update(cx, |s, cx| s.end_select_pages(cx));
+    }
+    editor.update(cx, |e, cx| e.start(window, cx));
+}
+
+/// "Reset Page": the default of page `container` is saved at once. With a grid layout it asks
+/// first, since the user's widgets cannot come back. Nothing while the page has no entry.
+pub fn reset_page(container: &str, page: SharedString, window: &mut Window, cx: &mut App) {
+    let Some(saved) = saved_layout(container, cx) else {
+        return;
+    };
+    let container: Arc<str> = Arc::from(container);
+    let save = move |_: &mut Window, cx: &mut App| {
+        if cx.has_global::<TlSettings>() {
+            TlSettings::update(cx, |d| {
+                reset_to_default(&mut d.settings.performance, &container);
+            });
+        }
+    };
+    if saved.preset.is_some() {
+        save(window, cx);
+    } else {
+        confirm_reset_page(page, true, window, cx, save);
+    }
+}
+
+/// Adds the records `part` asks for to `demand`.
+fn add_demand(demand: &mut Demand, part: &Demand) {
+    demand.memory |= part.memory;
+    demand.disks |= part.disks;
+    demand.nets |= part.nets;
+    demand.gpus |= part.gpus;
+    demand.sensors |= part.sensors;
+    demand.cpu_fast |= part.cpu_fast;
+    demand.process_top |= part.process_top;
+    demand.device_timeline |= part.device_timeline;
+    if !demand.cpu.wants_total() {
+        demand.cpu = part.cpu;
     }
 }
 
@@ -635,15 +782,9 @@ impl DevicePage for AggregateDiskPage {
         SmallVec::new()
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let h = GRAPH_H_STACKED * m.ui_scale;
-        v_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(chart_box(DISK_ACTIVE_ID, &self.active, h))
-            .child(chart_box(DISK_TRANSFER_ID, &self.transfer, h))
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
@@ -664,6 +805,10 @@ impl DevicePage for AggregateDiskPage {
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         SmallVec::new()
+    }
+
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {
@@ -696,17 +841,21 @@ impl Render for AggregateDiskPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        div().size_full().track_focus(&self.focus).child(
-            DevicePageFrame {
-                page: self,
-                m: &m,
-                theme: &theme,
-            }
-            .render(window, cx),
-        )
+        div()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
+            .child(
+                DevicePageFrame {
+                    page: self,
+                    m: &m,
+                    theme: &theme,
+                }
+                .render(window, cx),
+            )
     }
 }
 
