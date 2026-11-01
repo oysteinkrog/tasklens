@@ -2838,6 +2838,7 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 - **Shrink** (the box gets smaller): the layout does not change. Spans are kept, the body scrolls vertically, and compositions drop forms.
 - **Scale**: the unit, gutter and every minimum are logical px times `ui_scale` (ADR-009). Spans do not change with the scale.
 - No two widgets overlap after any action (proptest over random action sequences).
+- **Edit mode**: no edit decoration (grip, gear, border, selected outline, resize corner, placement preview) covers any text of any widget, and the body scrolls exactly as in the applied view: the wheel scrolls it over the widgets, and entering Edit Widgets keeps the scroll offset. UI-PRF-061 "Edit chrome" gives the margins a widget keeps free.
 
 **Editing** (`tl-ui/src/pages/performance/widget/edit.rs` and `menu.rs`). Editing the boxes on the page (Edit Layout, UI-PRF-018 and UI-PRF-056) and editing the widgets in one box (Edit Widgets, UI-PRF-061) are separate modes, and at most one is on. Starting Edit Widgets ends Edit Layout as "Done" does. Edit Layout is disabled while a box is in Edit Widgets.
 

@@ -12,7 +12,9 @@
 //! - the 32 px edit toolbar, always one line: Add Widget, Undo and Reset as icon buttons with
 //!   tooltips at the left, Cancel (icon) and Apply at the right;
 //! - the edit chrome over each widget: a 1 px divider border (2 px accent when selected), the
-//!   grip and the gear at the top left and the resize corner at the bottom right;
+//!   grip and the gear at the top left and the resize corner at the bottom right. The widget
+//!   keeps its text clear of all of it (`MetricWidget::set_edit_inset`), and the chrome lets
+//!   the wheel through, so the body scrolls as in the applied view;
 //! - the placement preview of a drag: an accent outline of the target cells, the widget at its
 //!   old place dimmed, and the other widgets where the drop puts them;
 //! - the keys of the `PerfWidgetEdit` context (Tab, Alt+arrows, Alt+Shift+arrows, Delete,
@@ -75,6 +77,8 @@ pub const TOOLBAR_H: f32 = 32.;
 pub const HANDLE: f32 = 16.;
 /// The resize corner, logical px.
 pub const CORNER: f32 = 10.;
+/// The selected widget's outline and the preview's outline, px at every scale.
+pub const OUTLINE: f32 = 2.;
 /// The corner mark's stroke, logical px.
 const MARK: f32 = 1.5;
 /// The pointer moves this far before a press becomes a drag, logical px.
@@ -111,6 +115,11 @@ pub fn grip_id(id: u32) -> String {
 /// The debug selector of widget `id`'s gear.
 pub fn gear_id(id: u32) -> String {
     format!("perf-widget-edit-gear-{id}")
+}
+
+/// The debug selector of the selected widget `id`'s outline.
+pub fn outline_id(id: u32) -> String {
+    format!("perf-widget-edit-outline-{id}")
 }
 
 /// The debug selector of widget `id`'s resize corner.
@@ -547,6 +556,11 @@ impl WidgetEditor {
         self.edit.as_ref()
     }
 
+    /// How far the body is scrolled down in Edit Widgets, logical px.
+    pub fn scroll_offset(&self) -> Pixels {
+        -self.scroll.offset().y
+    }
+
     /// The cells a drag in progress lands on.
     pub fn drag_cell(&self) -> Option<WidgetCell> {
         self.drag.as_ref().and_then(WidgetDrag::target)
@@ -614,6 +628,9 @@ impl WidgetEditor {
             shown.clone()
         };
         let before = saved_layout(&self.id, cx);
+        // The body keeps the offset the applied view had.
+        let offset = self.container.read(cx).scroll_offset();
+        self.scroll.set_offset(point(px(0.), -offset));
         self.container.update(cx, |c, cx| {
             c.set_editing(true, cx);
             c.set_layout(working.clone(), cx);
@@ -665,9 +682,12 @@ impl WidgetEditor {
     fn finish(&mut self, shown: ContainerLayout, applied: bool, cx: &mut Context<Self>) {
         self.drag = None;
         self.shown_before = None;
+        // The applied view goes on at the offset the edit ended at.
+        let offset = -self.scroll.offset().y;
         self.container.update(cx, |c, cx| {
             c.set_layout(shown, cx);
             c.set_editing(false, cx);
+            c.set_scroll_offset(offset);
         });
         cx.emit(WidgetEditEvent::Ended { applied });
         cx.notify();
@@ -1316,8 +1336,9 @@ impl WidgetEditor {
                 .id(SharedString::from(corner_id(id)))
                 .debug_selector(move || corner_id(id))
                 .absolute()
-                .right_0()
-                .bottom_0()
+                // In the widget's corner, as the grip is in its top left.
+                .right(px(-1.))
+                .bottom(px(-1.))
                 .size(px(CORNER * s))
                 .cursor_nwse_resize()
                 .tooltip(TlTooltip::text(tr(cx, "perf-widget-resize")).build())
@@ -1347,8 +1368,9 @@ impl WidgetEditor {
                 .h(b.size.height)
                 .border_1()
                 .border_color(theme.divider)
-                // The widget content stays live but takes no pointer input.
-                .occlude()
+                // The widget content stays live but takes no pointer input. The wheel still
+                // scrolls the body.
+                .block_mouse_except_scroll()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1374,11 +1396,14 @@ impl WidgetEditor {
                     d.child(div().absolute().inset_0().bg(theme.window_bg.opacity(DIM)))
                 })
                 .when(selected, |d| {
+                    // Over the frame's border: the outline takes the widget's outer 2 px,
+                    // which the widget keeps free of text.
                     d.child(
                         div()
+                            .debug_selector(move || outline_id(id))
                             .absolute()
-                            .inset_0()
-                            .border_2()
+                            .inset(px(-1.))
+                            .border(px(OUTLINE))
                             .border_color(theme.accent),
                     )
                 })
@@ -1397,7 +1422,7 @@ impl WidgetEditor {
                     .top(b.top())
                     .w(b.size.width)
                     .h(b.size.height)
-                    .border_2()
+                    .border(px(OUTLINE))
                     .border_color(theme.accent)
                     .opacity(PREVIEW_OPACITY)
                     .into_any_element(),

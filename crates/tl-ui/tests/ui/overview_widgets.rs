@@ -8,9 +8,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
-    TestAppContext, VisualTestContext, Window, div, point, px, size,
+    AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString,
+    StyleRefinement, Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div,
+    point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -42,8 +43,8 @@ use tl_ui::pages::performance::widget::compose::{
 };
 use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
 use tl_ui::pages::performance::widget::edit::{
-    ADD_ID, APPLY_ID, CANCEL_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, UNDO_ID, WidgetEditor,
-    corner_id, default_layout, editor_id, frame_id, gear_id, grip_id,
+    ADD_ID, APPLY_ID, CANCEL_ID, OUTLINE, PREVIEW_ID, RESET_ID, TOOLBAR_ID, UNDO_ID, WidgetEditor,
+    corner_id, default_layout, editor_id, frame_id, gear_id, grip_id, outline_id,
 };
 use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
@@ -2310,13 +2311,76 @@ fn compositions() -> ContainerLayout {
     ])
 }
 
-/// In Edit Widgets the grip and the gear cover no text of their widget, and every widget lies
-/// inside the body's content area: the outline is drawn inside the cell and the scrollbar's
-/// width stays free, as in the applied view (tasklens-lhliq.11).
+/// The four strips of a `t` px ring along the inside of `b`.
+fn ring(b: Bounds<Pixels>, t: f32) -> [Bounds<Pixels>; 4] {
+    let t = px(t);
+    [
+        Bounds::new(b.origin, size(b.size.width, t)),
+        Bounds::new(point(b.left(), b.bottom() - t), size(b.size.width, t)),
+        Bounds::new(b.origin, size(t, b.size.height)),
+        Bounds::new(point(b.right() - t, b.top()), size(t, b.size.height)),
+    ]
+}
+
+/// `a` and `b` share more than a rounding error of area.
+fn covers(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+    let e = px(0.25);
+    a.left() < b.right() - e
+        && b.left() < a.right() - e
+        && a.top() < b.bottom() - e
+        && b.top() < a.bottom() - e
+}
+
+impl Rig<'_> {
+    /// The bounds of every text widget `id` draws: its text parts and its chart's labels.
+    fn widget_texts(
+        &mut self,
+        c: &Entity<WidgetContainer>,
+        id: u32,
+    ) -> Vec<(String, Bounds<Pixels>)> {
+        let mut texts = Vec::new();
+        for part in ["name", "value", "stats", "reason"] {
+            if let Some(b) = self.vcx.debug_bounds(leak(part_id(id, part))) {
+                texts.push((part.to_owned(), b));
+            }
+        }
+        let chart = self.vcx.read_entity(c, |c, cx| {
+            c.widget(id).and_then(|w| w.read(cx).chart().cloned())
+        });
+        if let Some(chart) = chart {
+            texts.extend(self.vcx.read_entity(&chart, |v, _| {
+                v.label_cache()
+                    .painted
+                    .iter()
+                    .map(|p| (format!("{:?}", p.kind), p.bounds()))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        texts
+    }
+
+    /// One mouse wheel step of `dy` px (negative scrolls down) at `at`, and draws.
+    fn wheel(&mut self, at: gpui_kit::Point<Pixels>, dy: f32) {
+        self.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        draw(self.vcx);
+    }
+}
+
+/// In Edit Widgets no edit decoration covers any text of its widget: not the grip, the gear,
+/// the 1 px border, the selected outline, the resize corner or the placement preview, for every
+/// composition at scale 1.0, 1.5 and 2.0, with the widget selected and not. Every widget also
+/// lies inside the body's content area: the outline is drawn inside the cell and the
+/// scrollbar's width stays free, as in the applied view (tasklens-lhliq.11, tasklens-lhliq.12).
 #[gpui_kit::test]
-fn overview_widget_edit_chrome_covers_no_text_and_fits_the_body(cx: &mut TestAppContext) {
+fn overview_widget_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
     let mut r = open(cx);
     let (e, c) = r.editor(compositions(), 420., 360.);
+    let mut previews = 0;
     for pct in [100u16, 150, 200] {
         r.set_ui_scale(pct);
         r.start(&e);
@@ -2340,44 +2404,166 @@ fn overview_widget_edit_chrome_covers_no_text_and_fits_the_body(cx: &mut TestApp
             } else {
                 px(0.)
             };
-        for id in 1u32..=8 {
-            let at = format!("{pct} % widget {id}");
-            let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
-            assert!(
-                w.left() >= scroll.left() - px(0.5) && w.right() <= right + px(0.5),
-                "{at}: {w:?} outside the body content {scroll:?} (right edge {right:?})"
-            );
-            let gear = r.vcx.debug_bounds(leak(gear_id(id))).expect("gear");
-            let grip = r.vcx.debug_bounds(leak(grip_id(id))).expect("grip");
-            let mut texts = Vec::new();
-            for part in ["name", "value", "stats", "reason"] {
-                if let Some(b) = r.vcx.debug_bounds(leak(part_id(id, part))) {
-                    texts.push((part.to_owned(), b));
+        let used: Vec<Composition> = (1u32..=8)
+            .filter_map(|id| {
+                r.vcx.read_entity(&c, |c, cx| {
+                    c.widget(id).map(|w| w.read(cx).composed().composition)
+                })
+            })
+            .collect();
+        for k in [Composition::Cell, Composition::Tile, Composition::Row] {
+            assert!(used.contains(&k), "{pct} %: no {k:?} in {used:?}");
+        }
+        for selected in [false, true] {
+            for id in 1u32..=8 {
+                let at = format!("{pct} % widget {id} selected {selected}");
+                if selected {
+                    r.ed(&e, |e, _, cx| e.select(id, cx));
                 }
-            }
-            let chart = r.vcx.read_entity(&c, |c, cx| {
-                c.widget(id).and_then(|w| w.read(cx).chart().cloned())
-            });
-            if let Some(chart) = chart {
-                for (k, b) in r.vcx.read_entity(&chart, |v, _| {
-                    [LabelKind::AxisMax, LabelKind::Heading, LabelKind::Value]
-                        .into_iter()
-                        .filter_map(|k| v.label_cache().painted(k))
-                        .map(|p| (format!("{:?}", p.kind), p.bounds()))
-                        .collect::<Vec<_>>()
-                }) {
-                    texts.push((k, b));
-                }
-            }
-            for (part, b) in texts {
-                assert!(!gear.intersects(&b), "{at}: gear {gear:?} on {part} {b:?}");
-                assert!(!grip.intersects(&b), "{at}: grip {grip:?} on {part} {b:?}");
+                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
                 assert!(
-                    b.right() <= w.right() + px(0.5),
-                    "{at}: {part} {b:?} is cut off by the widget {w:?}"
+                    w.left() >= scroll.left() - px(0.5) && w.right() <= right + px(0.5),
+                    "{at}: {w:?} outside the body content {scroll:?} (right edge {right:?})"
                 );
+                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
+                    (
+                        "grip".into(),
+                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                    ),
+                    (
+                        "gear".into(),
+                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                    ),
+                    (
+                        "corner".into(),
+                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                    ),
+                ];
+                decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
+                let outline = r.vcx.debug_bounds(leak(outline_id(id)));
+                assert_eq!(outline.is_some(), selected, "{at}: the outline shows");
+                if let Some(o) = outline {
+                    decorations.extend(ring(o, OUTLINE).map(|b| ("outline".to_owned(), b)));
+                }
+                // A drag that lands on the widget's own cells previews them.
+                decorations.extend(ring(w, OUTLINE).map(|b| ("preview".to_owned(), b)));
+                let texts = r.widget_texts(&c, id);
+                let grip = decorations[0].1;
+                if selected && scroll.contains(&grip.center()) {
+                    let from = grip.center();
+                    r.press(from, 1);
+                    r.move_to(point(from.x + px(6.), from.y));
+                    let preview = r.vcx.debug_bounds(PREVIEW_ID).expect("preview");
+                    decorations.extend(ring(preview, OUTLINE).map(|b| ("drag".to_owned(), b)));
+                    r.release(from);
+                    previews += 1;
+                }
+                for (part, b) in &texts {
+                    assert!(
+                        b.right() <= w.right() + px(0.5),
+                        "{at}: {part} {b:?} is cut off by the widget {w:?}"
+                    );
+                    for (d, db) in &decorations {
+                        assert!(!covers(*db, *b), "{at}: {d} {db:?} on {part} {b:?}");
+                    }
+                }
             }
         }
         r.ed(&e, |e, _, cx| e.cancel(cx));
     }
+    assert!(previews >= 3, "the real drag preview ran: {previews}");
+}
+
+/// The mouse wheel scrolls the Edit Widgets body over a widget and over its chrome, by the same
+/// amount as in the applied view (tasklens-lhliq.12).
+#[gpui_kit::test]
+fn overview_widget_edit_wheel_scrolls(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(compositions(), 420., 160.);
+    let applied = r
+        .vcx
+        .debug_bounds(leak(scroll_id(GPU_BOX_CONTAINER)))
+        .expect("the applied body scrolls");
+    r.wheel(applied.center(), -40.);
+    let off = r.vcx.read_entity(&c, |c, _| c.scroll_offset());
+    assert!((off - px(40.)).abs() < px(0.5), "applied view: {off:?}");
+    r.start(&e);
+    let body = r
+        .vcx
+        .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+        .expect("body");
+    let top = |r: &mut Rig<'_>| {
+        r.vcx
+            .debug_bounds(leak(widget_id(8)))
+            .expect("widget")
+            .top()
+    };
+    let before = top(&mut r);
+    // Over a widget.
+    r.wheel(body.center(), -40.);
+    let off = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
+    assert!((off - px(80.)).abs() < px(0.5), "edit view: {off:?}");
+    assert!(
+        (before - top(&mut r) - px(40.)).abs() < px(0.5),
+        "the widgets moved up 40 px"
+    );
+    // Over a gear and over the selected widget's outline.
+    r.ed(&e, |e, _, cx| e.select(4, cx));
+    let gear = (1u32..=8)
+        .filter_map(|id| r.vcx.debug_bounds(leak(gear_id(id))))
+        .find(|g| body.contains(&g.center()))
+        .expect("a gear in view");
+    r.wheel(gear.center(), -10.);
+    let off = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
+    assert!((off - px(90.)).abs() < px(0.5), "over a gear: {off:?}");
+    let outline = r.vcx.debug_bounds(leak(outline_id(4))).expect("outline");
+    r.wheel(point(outline.center().x, outline.top() + px(1.)), 10.);
+    let off = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
+    assert!((off - px(80.)).abs() < px(0.5), "over the outline: {off:?}");
+}
+
+/// Entering Edit Widgets keeps the body's scroll offset, and Cancel keeps the offset the edit
+/// ended at (tasklens-lhliq.12).
+#[gpui_kit::test]
+fn overview_widget_edit_keeps_scroll_offset(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(compositions(), 420., 160.);
+    let applied = r
+        .vcx
+        .debug_bounds(leak(scroll_id(GPU_BOX_CONTAINER)))
+        .expect("the applied body scrolls");
+    r.wheel(applied.center(), -60.);
+    let before = r.vcx.read_entity(&c, |c, _| c.scroll_offset());
+    assert!(
+        (before - px(60.)).abs() < px(0.5),
+        "applied view: {before:?}"
+    );
+    let shown = r
+        .vcx
+        .debug_bounds(leak(widget_id(8)))
+        .expect("widget")
+        .top()
+        - applied.top();
+    r.start(&e);
+    let after = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
+    assert!((after - before).abs() < px(0.5), "{after:?} vs {before:?}");
+    let body = r
+        .vcx
+        .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+        .expect("body");
+    let top = r
+        .vcx
+        .debug_bounds(leak(widget_id(8)))
+        .expect("widget")
+        .top()
+        - body.top();
+    assert!(
+        (top - shown).abs() < px(0.5),
+        "widget 8 sits where it sat: {top:?} vs {shown:?}"
+    );
+    r.wheel(body.center(), -20.);
+    r.ed(&e, |e, _, cx| e.cancel(cx));
+    let back = r.vcx.read_entity(&c, |c, _| c.scroll_offset());
+    assert!((back - px(80.)).abs() < px(0.5), "after Cancel: {back:?}");
 }

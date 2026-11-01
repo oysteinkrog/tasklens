@@ -41,7 +41,7 @@ use tl_model::validity::Validity;
 
 use super::compose::{
     CELL_BAR_PAD, CELL_HEADER_H, CELL_STATS_H, Composed, Composition, ROW_BAR_MIN_W, ROW_GAP,
-    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose,
+    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose, row_forms,
 };
 use super::source::{Availability, SourceData};
 use crate::chart::labels::LABEL_ROW;
@@ -67,9 +67,13 @@ const KEY_NOT_CONNECTED: &str = "perf-widget-not-connected";
 const KEY_NOT_REPORTED: &str = "perf-widget-not-reported";
 const KEY_UNKNOWN: &str = "perf-widget-unknown";
 
-/// The width the first line keeps free in Edit Widgets: the grip and the gear, each
-/// `edit::HANDLE` wide, logical px.
+/// The width the first line keeps free in Edit Widgets, from the widget's left edge: the grip
+/// and the gear, each `edit::HANDLE` wide, logical px.
 const EDIT_INSET: f32 = 2. * super::edit::HANDLE;
+/// The edge every part keeps free in Edit Widgets, px at every scale: the selected outline.
+const EDIT_EDGE: f32 = super::edit::OUTLINE;
+/// The right edge every part keeps free in Edit Widgets, logical px: the resize corner.
+const EDIT_RIGHT: f32 = super::edit::CORNER;
 
 /// The class the size probe uses for an unavailable widget, which has no composition.
 const UNAVAILABLE_CLASS: u32 = u32::MAX;
@@ -354,8 +358,9 @@ impl MetricWidget {
         self.notify(cx);
     }
 
-    /// Edit Widgets on or off. While on, the first text line starts right of the edit grip and
-    /// gear, so the chrome covers no text (UI-PRF-061).
+    /// Edit Widgets on or off. While on, the parts keep the outline's 2 px free on every side
+    /// and the resize corner's width free on the right, and the first text line starts right of
+    /// the edit grip and gear, so the chrome covers no text (UI-PRF-061).
     pub fn set_edit_inset(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.edit_inset == on {
             return;
@@ -364,9 +369,14 @@ impl MetricWidget {
         self.notify(cx);
     }
 
-    /// The left margin of the first text line: the grip and the gear in Edit Widgets, else 0.
+    /// The left margin of the first text line: the grip and the gear in Edit Widgets, past the
+    /// edge the parts keep free, else 0.
     fn lead(&self, s: f32) -> Pixels {
-        px(if self.edit_inset { EDIT_INSET * s } else { 0. })
+        px(if self.edit_inset {
+            EDIT_INSET * s - EDIT_EDGE
+        } else {
+            0.
+        })
     }
 
     /// Puts the GPU's name in front of the metric's name, when the box shows two GPUs.
@@ -437,7 +447,13 @@ impl MetricWidget {
         let kept = if drawn.is_empty() {
             drawn
         } else {
-            compose(drawn, self.size.get(), metrics(cx).ui_scale).forms
+            compose_at(
+                drawn,
+                self.size.get(),
+                metrics(cx).ui_scale,
+                self.edit_inset,
+            )
+            .forms
         };
         let device = match availability {
             Availability::Gone => self
@@ -654,10 +670,37 @@ impl MetricWidget {
         if self.flow.is_some() {
             FLOW_CLASS
         } else if self.shown.availability == Availability::Available {
-            compose(self.shown.forms, area, scale).class()
+            compose_at(self.shown.forms, area, scale, self.edit_inset).class()
         } else {
             UNAVAILABLE_CLASS
         }
+    }
+}
+
+/// The composition of `forms` at `area`. In Edit Widgets (`edit`) a Row drops its parts by the
+/// width left inside the edit margins, so no part reaches under the resize corner; the
+/// composition itself is the applied view's.
+fn compose_at(forms: FormSet, area: Size<Pixels>, scale: f32, edit: bool) -> Composed {
+    let composed = compose(forms, area, scale);
+    if !edit || composed.composition != Composition::Row {
+        return composed;
+    }
+    let s = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    // Without a name the whole line starts right of the grip and the gear.
+    let lead = if forms.contains(FormSet::LABEL) {
+        0.
+    } else {
+        EDIT_INSET * s - EDIT_EDGE
+    };
+    let inner = f32::from(area.width) - 2. * EDIT_EDGE - EDIT_RIGHT * s - lead;
+    // Whatever is left must hold the value, which a Row never drops (`compose::row_forms`).
+    Composed {
+        composition: Composition::Row,
+        forms: row_forms(composed.forms, inner.max(0.) / s),
     }
 }
 
@@ -834,22 +877,22 @@ impl MetricWidget {
     /// sparkline grow with a taller row; the text stays centred.
     fn row(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
         let (id, s) = (self.setting.id, m.ui_scale);
+        let lead = self.lead(s);
         let mut el = div()
             .flex()
             .flex_row()
             .items_center()
             .size_full()
             .gap(px(ROW_GAP * s));
-        let mut lead = self.lead(s);
-        if forms.contains(FormSet::LABEL) {
+        if !forms.contains(FormSet::LABEL) {
+            // In Edit Widgets the line starts right of the grip and the gear.
+            el = el.pl(lead);
+        } else {
             let name = self.shown.name.clone();
             // The name column carries its own trailing space (`compose::row_parts_w`).
-            el = el.child(
-                div().flex_none().w(px((ROW_NAME_W - ROW_GAP) * s)).child(
-                    text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary)
-                        .ml(std::mem::take(&mut lead)),
-                ),
-            );
+            el = el.child(div().flex_none().w(px((ROW_NAME_W - ROW_GAP) * s)).child(
+                text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary).ml(lead),
+            ));
         }
         let bar = forms.contains(FormSet::BAR);
         if bar {
@@ -863,7 +906,6 @@ impl MetricWidget {
             let mut v = v
                 .debug_selector(move || p)
                 .min_w(px(ROW_VALUE_W * s))
-                .ml(std::mem::take(&mut lead))
                 .flex()
                 .justify_end()
                 .whitespace_nowrap()
@@ -1034,7 +1076,7 @@ impl Render for MetricWidget {
         let available = self.shown.availability == Availability::Available;
         let forms = self.shown.forms;
         let body = if available {
-            self.composed = compose(forms, self.size.get(), scale);
+            self.composed = compose_at(forms, self.size.get(), scale, self.edit_inset);
             // The size probe asked for this render after a resize changed the kept forms:
             // read the parts that are now kept.
             if self.composed.forms != self.shown.kept {
@@ -1054,12 +1096,13 @@ impl Render for MetricWidget {
         };
         let class = self.class();
         let view = cx.entity_id();
+        let edit = self.edit_inset;
         let probe = class_probe(
             Rc::clone(&self.size),
             class,
             move |area| {
                 if available {
-                    compose(forms, area, scale).class()
+                    compose_at(forms, area, scale, edit).class()
                 } else {
                     UNAVAILABLE_CLASS
                 }
@@ -1067,6 +1110,18 @@ impl Render for MetricWidget {
             view,
         );
         let id = widget_id(self.setting.id);
+        // In Edit Widgets the parts keep clear of the outline and the resize corner.
+        let body = if self.edit_inset {
+            div()
+                .size_full()
+                .pt(px(EDIT_EDGE))
+                .pl(px(EDIT_EDGE))
+                .pb(px(EDIT_EDGE))
+                .pr(px(EDIT_RIGHT * scale))
+                .child(body)
+        } else {
+            body
+        };
         div()
             .debug_selector(move || id)
             .relative()

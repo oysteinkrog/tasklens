@@ -30,8 +30,9 @@ use std::rc::Rc;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, canvas, div, px, size,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, Size,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
+    div, point, px, size,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -118,6 +119,9 @@ pub struct WidgetContainer {
     /// as its rows then, so this is the height that decides whether the rows scroll and keep the
     /// scrollbar's width free, as in the applied view.
     view_h: Option<Pixels>,
+    /// The scroll position of the body when the rows are taller than it. Edit Widgets starts at
+    /// this offset and hands its own back when it ends.
+    scroll: ScrollHandle,
     /// The UI scale of the last placement.
     scale: f32,
     _metrics_sub: Subscription,
@@ -154,6 +158,7 @@ impl WidgetContainer {
             area: size(px(0.), px(0.)),
             frozen: None,
             view_h: None,
+            scroll: ScrollHandle::new(),
             scale: metrics(cx).ui_scale,
             _metrics_sub: cx.observe_global::<UiMetrics>(Self::on_metrics),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -309,6 +314,21 @@ impl WidgetContainer {
         if self.relayout(cx) {
             self.notify(cx);
         }
+    }
+
+    /// How far the body is scrolled down, logical px: 0 when the rows fit the body.
+    pub fn scroll_offset(&self) -> Pixels {
+        if self.placement.scrolls {
+            -self.scroll.offset().y
+        } else {
+            px(0.)
+        }
+    }
+
+    /// Scrolls the body `y` px down. The paint clamps it to the rows.
+    pub fn set_scroll_offset(&mut self, y: Pixels) {
+        let at: Point<Pixels> = point(px(0.), -y.max(px(0.)));
+        self.scroll.set_offset(at);
     }
 
     /// The area the placement runs on: while editing, as tall as the editor's body.
@@ -520,25 +540,29 @@ impl Render for WidgetContainer {
             )
         });
         let id = container_id(&self.id);
-        let body = if self.placement.scrolls {
+        // In Edit Widgets the editor's body scrolls, and the container is as tall as its rows.
+        let body = if self.placement.scrolls && self.frozen.is_none() {
             let scroll = scroll_id(&self.id);
             let selector = scroll.clone();
             div()
                 .size_full()
+                .relative()
                 .debug_selector(move || selector)
                 .child(
                     div()
+                        .id(SharedString::from(scroll))
                         .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
                         .child(
                             div()
                                 .relative()
                                 .w_full()
                                 .h(self.placement.content_h)
                                 .children(items),
-                        )
-                        .overflow_y_scrollbar()
-                        .id(SharedString::from(scroll)),
+                        ),
                 )
+                .vertical_scrollbar(&self.scroll)
                 .into_any_element()
         } else {
             div()
