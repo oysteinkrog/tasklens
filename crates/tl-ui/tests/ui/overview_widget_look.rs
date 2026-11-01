@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, Focusable as _, Hsla, IntoElement,
-    ParentElement as _, Pixels, Render, StyleRefinement, Styled as _, TestAppContext,
-    VisualTestContext, Window, div, point, px, size,
+    AppContext as _, Bounds, Context, Entity, Focusable as _, Hsla, IntoElement, Modifiers,
+    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, StyleRefinement,
+    Styled as _, TestAppContext, TouchPhase, VisualTestContext, Window, div, point, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
@@ -26,12 +26,13 @@ use tl_model::settings::{
     AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
 };
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
-use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
+use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemGroupBand, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::ChartView;
+use tl_ui::chart::labels::LabelKind;
 use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
@@ -1113,7 +1114,185 @@ fn chart_texts(c: &ChartView, who: &str) -> Vec<(String, Bounds<Pixels>)> {
         .collect()
 }
 
+/// The memory groups the Edit Widgets sweep publishes: (device, key, name, MiB). p0 and p1,
+/// "Other apps", "Shared and kernel" and its part "Shared memory", which is all of it, so the
+/// older-data band is 0 and left out. The legend lists p1, p0, "Other apps", then under a
+/// divider "Shared memory" as its last row, as in the 1.3.0 screenshot.
+const MEM_GROUPS: [(u16, &str, &str, f32); 5] = [
+    (60, "exe:p0", "p0", 3.),
+    (61, "exe:p1", "p1", 2.),
+    (62, "other", "Other apps", 1.),
+    (63, "shared", "Shared and kernel", 2.),
+    (64, "k:shmem", "Shared memory", 2.),
+];
+
+/// The name of the Memory by app legend row the 1.3.0 Edit Widgets lost at the bottom.
+const SHARED_MEMORY: &str = "Shared memory";
+
+/// Whether `b` lies inside `outer`, to half a pixel.
+fn inside(b: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
+    let eps = px(0.5);
+    b.left() >= outer.left() - eps
+        && b.right() <= outer.right() + eps
+        && b.top() >= outer.top() - eps
+        && b.bottom() <= outer.bottom() + eps
+}
+
 impl Rig<'_> {
+    /// Publishes [`MEM_GROUPS`] with 60 one-second samples each, beside the rig's devices and
+    /// series, so the Memory by app chart has bands, a legend and a time axis.
+    fn publish_mem_groups(&mut self) {
+        const PERIOD: u64 = 1_000_000_000;
+        const MIB: f32 = 1_048_576.;
+        let now = now_boot_ns();
+        self._engine.publish_with(|s| {
+            let mut devices = (*s.devices).clone();
+            let mut entries = devices.entries.to_vec();
+            for &(idx, key, name, _) in &MEM_GROUPS {
+                let mut e = entry(
+                    idx,
+                    DeviceIdentity::MemGroup {
+                        key: Arc::from(key),
+                    },
+                    &format!("memgroup:{key}"),
+                    None,
+                );
+                e.display_name = Arc::from(name);
+                entries.push(e);
+            }
+            devices.entries = Arc::from(entries);
+            devices.version += 1;
+            s.devices = Arc::new(devices);
+            let version = s.series.header.version + 1;
+            let mut views: Vec<Arc<SeriesView>> = s.series.series.iter().cloned().collect();
+            for &(idx, _, _, mib) in &MEM_GROUPS {
+                views.push(Arc::new(SeriesView {
+                    id: SeriesId {
+                        device: DeviceIdx(idx),
+                        metric: MetricId::MEM_GROUP,
+                    },
+                    version,
+                    period_ns: PERIOD,
+                    samples: (0..60u64)
+                        .map(|k| Sample::valid(now - (59 - k) * PERIOD, mib * MIB))
+                        .collect::<Vec<_>>()
+                        .into(),
+                }));
+            }
+            views.sort_by_key(|v| v.id);
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..s.series.header
+                },
+                series: views.into(),
+                slow: Arc::clone(&s.series.slow),
+            });
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.memory.groups = Arc::new(
+                MEM_GROUPS
+                    .iter()
+                    .filter(|(_, key, _, _)| key.starts_with("exe:"))
+                    .map(|&(idx, key, name, _)| MemGroupBand {
+                        key: Arc::from(key),
+                        name: Arc::from(name),
+                        process_count: 2,
+                        device: DeviceIdx(idx),
+                        wine: None,
+                    })
+                    .collect(),
+            );
+        });
+        draw(self.vcx);
+    }
+
+    /// One mouse wheel step of `dy` px (negative scrolls down) at `at`, and draws.
+    fn wheel(&mut self, at: gpui_kit::Point<Pixels>, dy: f32) {
+        self.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        draw(self.vcx);
+    }
+
+    /// The Memory by app chart's time axis labels painted at the last frame.
+    fn by_app_ticks(&mut self) -> Vec<Bounds<Pixels>> {
+        let page = self.page.clone();
+        self.vcx.update(|_, cx| {
+            page.read(cx)
+                .mem_box()
+                .read(cx)
+                .apps()
+                .map(|a| {
+                    a.read(cx)
+                        .chart()
+                        .read(cx)
+                        .label_cache()
+                        .painted
+                        .iter()
+                        .filter(|p| matches!(p.kind, LabelKind::XTick(_)))
+                        .map(|p| p.bounds())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// The bounds of the Memory by app legend row named `name`, when the legend draws it.
+    fn by_app_row(&mut self, name: &str) -> Option<Bounds<Pixels>> {
+        let page = self.page.clone();
+        let row = self.vcx.update(|_, cx| {
+            let apps = page.read(cx).mem_box().read(cx).apps()?.read(cx);
+            let bands = apps.bands();
+            memory_apps::legend_order(bands)
+                .iter()
+                .position(|&i| bands[i].name.as_ref() == name)
+        })?;
+        self.bounds(format!("{}-{row}", memory_apps::LEGEND_ID))
+    }
+
+    /// Scrolls the edit body `body_sel` with the mouse wheel until the text `name` of widget
+    /// `id` lies inside it, as a user does to read it, or the body scrolls no further. Returns
+    /// the text's bounds (`None` when it is no longer drawn) and the body's.
+    fn scroll_to_text(
+        &mut self,
+        container: &Entity<WidgetContainer>,
+        container_id: &str,
+        id: u32,
+        name: &str,
+        body_sel: &str,
+    ) -> (Option<Bounds<Pixels>>, Bounds<Pixels>) {
+        let mut last = None;
+        for _ in 0..8 {
+            let body = self.bounds(body_sel.to_owned()).expect("the edit body");
+            let text = self
+                .edit_texts(container, container_id, id)
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b);
+            let Some(b) = text.filter(|b| !inside(*b, body) && last != Some(*b)) else {
+                return (text, body);
+            };
+            last = Some(b);
+            let dy = if b.bottom() > body.bottom() {
+                f32::from(body.bottom() - b.bottom()) - 1.
+            } else {
+                f32::from(body.top() - b.top()) + 1.
+            };
+            self.wheel(body.center(), dy);
+        }
+        let body = self.bounds(body_sel.to_owned()).expect("the edit body");
+        let text = self
+            .edit_texts(container, container_id, id)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| b);
+        (text, body)
+    }
+
     fn set_ui_scale(&mut self, pct: u16) {
         self.vcx.update(|_, cx| {
             let appearance = AppearanceSettings {
@@ -1194,10 +1373,19 @@ impl Rig<'_> {
             }
         }
         if fixed {
+            // The by app legend is the Memory box's: another box's fixed widget does not
+            // own the rows the Memory box draws beside it.
             for n in 0..64 {
-                if let Some(b) = self.bounds(format!("{}-{n}", memory_apps::LEGEND_ID)) {
+                if container_id == "overview.memory"
+                    && let Some(b) = self.bounds(format!("{}-{n}", memory_apps::LEGEND_ID))
+                {
                     texts.push((format!("by app legend row {n}"), b));
                 }
+            }
+            if container_id == "overview.memory"
+                && let Some(b) = self.bounds(format!("{}-more", memory_apps::LEGEND_ID))
+            {
+                texts.push(("by app legend more".to_owned(), b));
             }
             let page = self.page.clone();
             texts.extend(self.vcx.update(|_, cx| {
@@ -1226,16 +1414,19 @@ impl Rig<'_> {
 /// GPU, Top processes and Timeline) at scale 1.0, 1.5 and 2.0, no edit decoration (grip, gear,
 /// border, selected outline, resize corner, the preview's outline) covers any text of a widget:
 /// its parts, its chart's legend and axis labels, a group member's label and parts, the Memory
-/// by app legend. No text is clipped: each lies inside its widget, and when the box did not
-/// scroll before Edit Widgets, every widget it drew fits the body under the toolbar, so its
-/// texts show there, unless every widget is already at its minimum span (widgets a fit rule
-/// cut go under them and may scroll). The CPU box's Total
-/// chart has the Total and Kernel legend at its top left, under the grip and the gear without
-/// the inset; the Memory by app widget filled the box body and was cut off by the toolbar.
+/// by app legend and time axis. No text is clipped, for every widget placed, with no exception:
+/// each text lies inside its widget, and inside the body under the toolbar, at once or after
+/// the user scrolls the body to it with the wheel. The Memory by app widget keeps its time axis
+/// (as many ticks as the applied view) and its last legend row "Shared memory", both in the
+/// body under the toolbar with no scroll. The CPU box's Total chart has the Total and Kernel
+/// legend at its top left, under the grip and the gear without the inset; the Memory by app
+/// widget filled the box body and was cut off by the toolbar.
 #[gpui_kit::test]
 fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
     let mut r = open_with(cx, true);
+    r.publish_mem_groups();
     let mut legends = 0;
+    let mut scrolled_to = 0;
     for pct in [100u16, 150, 200] {
         r.set_ui_scale(pct);
         for (kind, container_id, presets) in EDIT_BOXES {
@@ -1252,50 +1443,54 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                     mode: (*preset).into(),
                 });
                 let (container, editor) = r.parts(kind);
-                // The widgets the applied view draws. Pinning puts the widgets a fit rule cut
-                // under the lowest one, so only these must fit under the toolbar.
-                // A flow layout can also draw past the body (five charts at 200 %): that cut is
-                // the applied view's own, so it counts as a scroll here.
-                let (scrolled, shown) = r.vcx.read_entity(&container, |c, _| {
-                    let p = c.placement();
-                    let past = p
-                        .widgets
-                        .iter()
-                        .any(|w| w.bounds.bottom() > c.area().height + px(0.5));
-                    (p.scrolls || past, c.placed_ids())
-                });
+                let by_app = kind == "memory" && *preset == "apps";
+                // The applied view's time axis and last legend row, which Edit Widgets keeps.
+                let applied_ticks = if by_app {
+                    let ticks = r.by_app_ticks();
+                    assert!(!ticks.is_empty(), "{at}: the applied view has a time axis");
+                    assert!(
+                        r.by_app_row(SHARED_MEMORY).is_some(),
+                        "{at}: the applied legend shows {SHARED_MEMORY}"
+                    );
+                    ticks.len()
+                } else {
+                    0
+                };
                 r.page_action(&PerfWidgetEditBox { kind: kind.into() });
                 draw(r.vcx);
                 assert!(
                     r.vcx.read_entity(&editor, |e, _| e.is_editing()),
                     "{at}: Edit Widgets"
                 );
-                let body = r
-                    .bounds(format!("{}-scroll", editor_id(container_id)))
-                    .expect("the edit body");
+                let body_sel = format!("{}-scroll", editor_id(container_id));
+                if by_app {
+                    let body = r.bounds(body_sel.clone()).expect("the edit body");
+                    let ticks = r.by_app_ticks();
+                    assert_eq!(
+                        ticks.len(),
+                        applied_ticks,
+                        "{at}: the by app chart keeps its time axis in Edit Widgets"
+                    );
+                    for t in &ticks {
+                        assert!(
+                            inside(*t, body),
+                            "{at}: time axis label {t:?} shows in the body {body:?}"
+                        );
+                    }
+                    let row = r
+                        .by_app_row(SHARED_MEMORY)
+                        .unwrap_or_else(|| panic!("{at}: the legend shows {SHARED_MEMORY}"));
+                    assert!(
+                        inside(row, body),
+                        "{at}: the {SHARED_MEMORY} row {row:?} shows in the body {body:?}"
+                    );
+                }
                 let ids = r.vcx.read_entity(&container, |c, _| c.placed_ids());
                 assert!(!ids.is_empty(), "{at}: widgets placed");
-                // The widgets give rows down to their minimum span to fit; at their minimums
-                // a layout can still be taller than the body, and it scrolls.
-                let at_minimum = r.vcx.read_entity(&container, |c, _| {
-                    let g = c.placement().grid;
-                    c.layout().widgets.iter().all(|w| {
-                        w.cell
-                            .is_none_or(|cell| cell.rows <= g.widget_min_span(w).1.max(1))
-                    })
-                });
                 for id in ids {
                     let w = r
                         .bounds(widget_id(container_id, id))
                         .unwrap_or_else(|| panic!("{at}: widget {id} drawn"));
-                    // A box that did not scroll shows every widget it drew under the toolbar.
-                    let fits = !scrolled && !at_minimum && shown.contains(&id);
-                    if fits {
-                        assert!(
-                            w.bottom() <= body.bottom() + px(0.5),
-                            "{at}: widget {id} {w:?} fits the body under the toolbar {body:?}"
-                        );
-                    }
                     let frame = r.bounds(frame_id(container_id, id)).expect("frame");
                     let mut decorations: Vec<(String, Bounds<Pixels>)> = Vec::new();
                     for (name, sel) in [
@@ -1324,18 +1519,29 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                             );
                         }
                         assert!(
-                            b.left() >= w.left() - px(0.5)
-                                && b.right() <= w.right() + px(0.5)
-                                && b.top() >= w.top() - px(0.5)
-                                && b.bottom() <= w.bottom() + px(0.5),
+                            inside(*b, w),
                             "{at}: {part} {b:?} is cut off by widget {id} {w:?}"
                         );
-                        if fits {
-                            assert!(
-                                b.bottom() <= body.bottom() + px(0.5),
-                                "{at}: {part} {b:?} is cut off by the body {body:?}"
-                            );
+                    }
+                    // Every text shows in the body under the toolbar, at once or after the
+                    // wheel scrolls the body to it.
+                    let mut now = texts.clone();
+                    let mut body = r.bounds(body_sel.clone()).expect("the edit body");
+                    for (part, _) in &texts {
+                        let shown = now.iter().find(|(n, _)| n == part).map(|(_, b)| *b);
+                        if shown.is_some_and(|b| inside(b, body)) {
+                            continue;
                         }
+                        let (b, after) =
+                            r.scroll_to_text(&container, container_id, id, part, &body_sel);
+                        let b = b.unwrap_or_else(|| panic!("{at}: {part} still drawn"));
+                        assert!(
+                            inside(b, after),
+                            "{at}: {part} {b:?} is cut off by the body {after:?}"
+                        );
+                        scrolled_to += 1;
+                        now = r.edit_texts(&container, container_id, id);
+                        body = after;
                     }
                 }
                 r.vcx
@@ -1345,4 +1551,5 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
         }
     }
     assert!(legends > 0, "the sweep saw chart legends");
+    eprintln!("texts the sweep scrolled to: {scrolled_to}");
 }
