@@ -536,14 +536,19 @@ fn overview_mem_sample_renders_only_changed_rows(cx: &mut TestAppContext) {
 /// entity, so a sample that changes only that row renders nothing, not even the box.
 #[gpui_kit::test]
 fn overview_mem_sample_skips_clipped_rows(cx: &mut TestAppContext) {
-    let mut r = open(cx, 1200., 360.);
+    // Below 720 px the boxes stack at their minimum height (220 px for Memory), and the text
+    // part is too narrow for one-line rows: four two-line rows fit, Commit does not.
+    let mut r = open(cx, 400., 900.);
     let mem = r.mem();
     let container = r.container();
     let flow = r.flow();
+    let placed: Vec<_> = (0..ROWS)
+        .map(|i| r.placed(row_of(&flow, i).expect("a row widget")))
+        .collect();
     let commit = row_of(&flow, ROWS - 1).expect("a row widget");
     assert!(
-        r.placed(commit).is_none(),
-        "the short body leaves out the Commit row"
+        placed[0].is_some() && placed[ROWS - 1].is_none(),
+        "the short body leaves out the Commit row: {placed:?}"
     );
     let has_entity = |r: &mut Rig| {
         let container = container.clone();
