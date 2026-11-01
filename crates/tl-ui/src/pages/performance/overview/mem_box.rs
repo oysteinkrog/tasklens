@@ -312,11 +312,13 @@ pub struct MemRows {
 }
 
 /// How the box lays its rows out on its last render: on one line (`wide`, else two), and in
-/// `rows` the text part's share of the row beside the sparkline.
+/// `rows` the text part's share of the row beside the sparkline. `width` is the body width the
+/// share was worked out for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowGeom {
     pub wide: bool,
     pub share: f32,
+    pub width: Pixels,
 }
 
 /// The box's [`MemRows`] and [`RowGeom`], shared with its widgets. Two are equal when they are
@@ -679,6 +681,7 @@ impl MemBox {
             Rc::new(Cell::new(RowGeom {
                 wide: true,
                 share: MODES[0].split.unwrap_or_default(),
+                width: px(0.),
             })),
         );
         let flow = mem_flow::flow_layout(default_keys());
@@ -1674,8 +1677,8 @@ impl MemBox {
     /// The five rows in a column that shares the body height. A row that does not fit whole
     /// is left out, top first (UI-PRF-017). With `share`, each row's sparkline sits beside it,
     /// the text part taking that share. The rows' widgets read `wide` and `share` from the row
-    /// geometry, which a change of either sets here; a share change (a splitter drag) renders
-    /// them again, a width change moves them and so renders them.
+    /// geometry set here. A new body width resizes them, which renders them; a new share at
+    /// the same width (a splitter drag) renders them here.
     fn rows_column(
         &mut self,
         wide: bool,
@@ -1687,9 +1690,10 @@ impl MemBox {
         let geom = RowGeom {
             wide,
             share: share.unwrap_or(self.model.1.get().share),
+            width: self.body.get().width,
         };
         let old = self.model.1.replace(geom);
-        if old.share != geom.share {
+        if old.share != geom.share && old.width == geom.width {
             self.notify_rows([true; ROWS], cx);
         }
         let mut rows = whole_rows().size_full().gap(m.sp[2]);
