@@ -1163,9 +1163,9 @@ impl OverviewPage {
     /// (UI-PRF-055), and "Back to live" while held at a time (UI-PRF-057), at the right end.
     /// The page has no title row: the sidebar names the page (tasklens-o55.54). `None` when the
     /// row would be empty, so the boxes start right under the top strip.
-    fn range_header(&self, cx: &App) -> Option<AnyElement> {
+    fn range_header(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
         let switch = (!self.bar_on_overview)
-            .then(|| range::range_switch(range::HEADER_SWITCH, Some(&self.hub), cx));
+            .then(|| range::range_switch(range::HEADER_SWITCH, Some(&self.hub), window, cx));
         let live = self.paused.is_some().then(|| {
             div()
                 .tl_selector(|| timeline::BACK_TO_LIVE_ID.into())
@@ -1492,7 +1492,7 @@ impl Render for OverviewPage {
             .children(boxes)
             .children(gaps)
             .children(overlays);
-        let header = self.range_header(cx).map(|h| match widget_edit {
+        let header = self.range_header(window, cx).map(|h| match widget_edit {
             Some(_) => div()
                 .relative()
                 .flex_none()

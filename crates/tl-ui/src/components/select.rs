@@ -38,6 +38,7 @@ use gpui_kit::{
 
 use super::icons::{TlIcon, icon};
 use super::input::{TlInputSize, TlTextInput};
+use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::selector::TlSelector;
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
@@ -80,6 +81,10 @@ pub fn bind_keys(cx: &mut App) {
 pub struct TlSelectItem {
     pub value: SharedString,
     pub label: SharedString,
+    /// A disabled item is listed dimmed. It cannot be highlighted or picked.
+    pub disabled: bool,
+    /// Shown on hover over the item (the reason a disabled item is disabled).
+    pub tooltip: Option<SharedString>,
 }
 
 impl TlSelectItem {
@@ -87,7 +92,19 @@ impl TlSelectItem {
         Self {
             value: value.into(),
             label: label.into(),
+            disabled: false,
+            tooltip: None,
         }
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
     }
 }
 
@@ -214,7 +231,9 @@ impl TlSelectState {
         }
         self.open = true;
         self.filtering = filterable && self.filter.is_some();
-        self.highlight = self.selected.or((!self.items.is_empty()).then_some(0));
+        self.highlight = self
+            .selected
+            .or_else(|| self.items.iter().position(|i| !i.disabled));
         self.scroll_to_highlight(cx);
         cx.notify();
     }
@@ -243,7 +262,11 @@ impl TlSelectState {
 
     /// Moves the highlight one visible item up or down, wrapping.
     fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let visible = self.visible(cx);
+        let visible: Vec<usize> = self
+            .visible(cx)
+            .into_iter()
+            .filter(|&ix| !self.items[ix].disabled)
+            .collect();
         let n = visible.len();
         if n == 0 {
             return;
@@ -273,7 +296,7 @@ impl TlSelectState {
         for step in 1..=n {
             let pos = start.map_or(step - 1, |s| (s + step) % n);
             let ix = visible[pos];
-            if self.items[ix].label.to_lowercase().starts_with(&ch) {
+            if !self.items[ix].disabled && self.items[ix].label.to_lowercase().starts_with(&ch) {
                 self.highlight = Some(ix);
                 self.scroll_to_highlight(cx);
                 cx.notify();
@@ -291,7 +314,9 @@ impl TlSelectState {
 
     /// Commits the highlighted item when it is listed. With no match there is nothing to commit.
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<SharedString> {
-        let ix = self.highlight.filter(|h| self.visible(cx).contains(h))?;
+        let ix = self
+            .highlight
+            .filter(|&h| !self.items[h].disabled && self.visible(cx).contains(&h))?;
         Some(self.commit(ix, window, cx))
     }
 }
@@ -326,6 +351,7 @@ pub struct TlSelect {
     disabled: bool,
     on_change: Option<ChangeHandler>,
     combo: bool,
+    compact: bool,
     aria_label: Option<SharedString>,
 }
 
@@ -338,8 +364,16 @@ impl TlSelect {
             disabled: false,
             on_change: None,
             combo: false,
+            compact: false,
             aria_label: None,
         }
+    }
+
+    /// No minimum trigger width: the trigger is the label, the chevron and the padding. For a
+    /// control in a header or status bar. Each item's selector is `<id>-<value>`.
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     /// A fixed trigger width. Without it the trigger fits its label, at least 160 × ui_scale.
@@ -454,7 +488,7 @@ impl RenderOnce for TlSelect {
             .items_center()
             .gap(m.sp[3])
             .h(s(TRIGGER_HEIGHT))
-            .min_w(s(TRIGGER_MIN_WIDTH))
+            .when(!self.compact, |d| d.min_w(s(TRIGGER_MIN_WIDTH)))
             .when_some(self.width, |d, w| d.w(w))
             .px(m.sp[4])
             .rounded(m.radius_small)
@@ -491,7 +525,7 @@ impl RenderOnce for TlSelect {
                     .child(chevron),
             );
 
-        let popup = open.then(|| popup(&self.id, &state, filterable, &on_change, cx));
+        let popup = open.then(|| popup(&self.id, &state, filterable, &on_change, window, cx));
 
         let on_open_change = {
             let state = state.clone();
@@ -572,6 +606,7 @@ fn popup(
     state: &Entity<TlSelectState>,
     filterable: bool,
     on_change: &Option<ChangeHandler>,
+    window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
     let theme = current(cx).clone();
@@ -599,8 +634,12 @@ fn popup(
             let hover_state = state.clone();
             let click_state = state.clone();
             let on_change = on_change.clone();
-            div()
-                .id(("item", ix))
+            let disabled = item.disabled;
+            let row_id = ElementId::from(("item", ix));
+            let selector = format!("{id}-{}", item.value);
+            let mut row = div()
+                .id(row_id.clone())
+                .tl_selector(move || selector.clone())
                 .flex()
                 .flex_none()
                 .items_center()
@@ -608,20 +647,23 @@ fn popup(
                 .h(s(ITEM_HEIGHT))
                 .px(m.sp[4])
                 .text_color(theme.text_primary)
-                .when(highlighted, |d| d.bg(theme.menu_hover))
-                .on_hover(move |hovered, _, cx| {
-                    if *hovered {
-                        hover_state.update(cx, |st, cx| {
-                            if st.highlight != Some(ix) {
-                                st.highlight = Some(ix);
-                                cx.notify();
-                            }
-                        });
-                    }
-                })
-                .on_click(move |_, window, cx| {
-                    let value = click_state.update(cx, |st, cx| st.commit(ix, window, cx));
-                    fire(Some(value), &on_change, window, cx);
+                .when(disabled, |d| d.opacity(0.5))
+                .when(highlighted && !disabled, |d| d.bg(theme.menu_hover))
+                .when(!disabled, |d| {
+                    d.on_hover(move |hovered, _, cx| {
+                        if *hovered {
+                            hover_state.update(cx, |st, cx| {
+                                if st.highlight != Some(ix) {
+                                    st.highlight = Some(ix);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    })
+                    .on_click(move |_, window, cx| {
+                        let value = click_state.update(cx, |st, cx| st.commit(ix, window, cx));
+                        fire(Some(value), &on_change, window, cx);
+                    })
                 })
                 .child(label)
                 .child(
@@ -629,8 +671,19 @@ fn popup(
                         .flex_none()
                         .when(!checked, |d| d.invisible())
                         .child(icon(TlIcon::Check, m.icon.xs, theme.text_primary)),
-                )
-                .into_any_element()
+                );
+            if let Some(text) = item.tooltip.clone() {
+                let hover = HoverTooltip::state((row_id, "hover-tooltip"), window, cx);
+                row = HoverTooltip::attach(
+                    &hover,
+                    row,
+                    DELAY_CONTROL,
+                    TlTooltip::text(text).build(),
+                    window,
+                    cx,
+                );
+            }
+            row.into_any_element()
         })
         .collect();
 

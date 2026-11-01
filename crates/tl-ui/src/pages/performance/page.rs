@@ -528,7 +528,13 @@ impl DevicePageFrame<'_> {
                 div()
                     .tl_selector(|| RANGE_ID.into())
                     .flex_none()
-                    .child(page_range_switch(PAGE_SWITCH, &range_words, page.hub(), cx)),
+                    .child(page_range_switch(
+                        PAGE_SWITCH,
+                        &range_words,
+                        page.hub(),
+                        window,
+                        cx,
+                    )),
             );
 
         if let Some(editor) = page.widget_editor() {

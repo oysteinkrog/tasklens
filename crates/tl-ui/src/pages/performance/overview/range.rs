@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, App, ElementId, Entity, IntoElement, ParentElement as _, SharedString, Styled as _,
-    div,
+    Window, div,
 };
 use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
@@ -31,7 +31,7 @@ use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 
 use super::timeline::{self, Paused};
 use crate::chart::view::{derived_view, find_tiered};
-use crate::components::button::{TlButton, TlButtonKind};
+use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::net_totals::hist_minus;
@@ -48,10 +48,15 @@ pub const SWITCH_KEYS: [&str; 5] = [
     "perf-overview-range-7d",
 ];
 
-/// The debug selector of the switch segment for `range` in the switch `prefix`
-/// (`perf-overview-range-1h`).
+/// The debug selector of the menu item for `range` in the switch `prefix`
+/// (`perf-overview-range-1h`). The menu is open only after a click on [`trigger_id`].
 pub fn segment_id(prefix: &str, range: OverviewRange) -> String {
     format!("{prefix}-{}", range.key())
+}
+
+/// The debug selector of the drop-down button of the switch `prefix`.
+pub fn trigger_id(prefix: &str) -> String {
+    format!("TlSelect-{prefix}")
 }
 
 /// The prefix of the switch in the Overview header.
@@ -112,38 +117,43 @@ pub fn history_kept(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> bool {
         .device_metrics
 }
 
-/// The segmented switch: one segment per range, the current one on. A click saves the range.
-/// While paused, a range the history cannot serve at the picked time is disabled with "Not kept
-/// at this resolution" (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are
-/// disabled with "Device history is off" (UI-PRF-060).
+/// The range switch: a compact drop-down (`TlSelect`) that shows the current range, with the
+/// five ranges as menu items. Picking one saves the range. While paused, a range the history
+/// cannot serve at the picked time is disabled with "Not kept at this resolution"
+/// (UI-PRF-057). With `history.device_metrics` off, 24 h and 7 d are disabled with "Device
+/// history is off" (UI-PRF-060).
 pub fn range_switch(
     prefix: &'static str,
     hub: Option<&Entity<SnapshotHub>>,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let words = SwitchWords::build(|key| tr(cx, key));
-    switch(prefix, timeline::paused(cx), &words, hub, cx)
+    switch(prefix, timeline::paused(cx), &words, hub, window, cx)
 }
 
-/// The switch in a device page header: the same segments, but the Overview's pause does not
+/// The switch in a device page header: the same drop-down, but the Overview's pause does not
 /// apply, since the device pages always draw up to now. `words` come translated from the
 /// shared page words, so a frame does no lookups.
 pub fn page_range_switch(
     prefix: &'static str,
     words: &SwitchWords,
     hub: Option<&Entity<SnapshotHub>>,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    switch(prefix, None, words, hub, cx)
+    switch(prefix, None, words, hub, window, cx)
 }
 
-/// The switch words: the segment labels in [`OverviewRange::ALL`] order and the two tooltips of
-/// a disabled segment.
+/// The switch words: the item labels in [`OverviewRange::ALL`] order, the two tooltips of a
+/// disabled item and the accessible name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitchWords {
     pub labels: [SharedString; 5],
     pub history_off: SharedString,
     pub not_kept: SharedString,
+    /// The accessible name of the drop-down.
+    pub aria_label: SharedString,
 }
 
 impl SwitchWords {
@@ -153,6 +163,7 @@ impl SwitchWords {
             labels: SWITCH_KEYS.map(&t),
             history_off: t("perf-overview-range-history-off"),
             not_kept: t("perf-overview-range-not-kept"),
+            aria_label: t("perf-overview-range-aria"),
         }
     }
 }
@@ -162,33 +173,51 @@ fn switch(
     paused: Option<Paused>,
     words: &SwitchWords,
     hub: Option<&Entity<SnapshotHub>>,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let current = current_range(cx);
     let now = timeline::now_realtime_ns();
     let kept = history_kept(hub, cx);
-    let mut row = div().flex().flex_row().flex_none();
-    for (range, label) in OverviewRange::ALL.into_iter().zip(&words.labels) {
-        let id = segment_id(prefix, range);
-        let stored = kept || !matches!(range, OverviewRange::H24 | OverviewRange::D7);
-        let servable = paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
-        let mut button = TlButton::new(
-            ElementId::Name(segment_id(prefix, range).into()),
-            TlButtonKind::Segment {
-                on: range == current,
-            },
-        )
-        .label(label.clone())
-        .disabled(!stored || !servable)
-        .on_click(move |_, _, cx| set_range(range, cx));
-        if !stored {
-            button = button.tooltip(words.history_off.clone());
-        } else if !servable {
-            button = button.tooltip(words.not_kept.clone());
+    let items: Vec<TlSelectItem> = OverviewRange::ALL
+        .into_iter()
+        .zip(&words.labels)
+        .map(|(range, label)| {
+            let stored = kept || !matches!(range, OverviewRange::H24 | OverviewRange::D7);
+            let servable = paused.is_none_or(|p| timeline::servable(range, now - p.at_realtime_ns));
+            let mut item =
+                TlSelectItem::new(range.key(), label.clone()).disabled(!stored || !servable);
+            if !stored {
+                item = item.tooltip(words.history_off.clone());
+            } else if !servable {
+                item = item.tooltip(words.not_kept.clone());
+            }
+            item
+        })
+        .collect();
+    let state = window.use_keyed_state(ElementId::Name(prefix.into()), cx, |_, cx| {
+        TlSelectState::new(items.clone(), Some(current.key()), cx)
+    });
+    state.update(cx, |st, cx| {
+        if st.items() != items.as_slice() {
+            st.set_items(items, cx);
         }
-        row = row.child(div().tl_selector(move || id.clone()).child(button));
-    }
-    row.into_any_element()
+        st.set_selected_value(current.key(), cx);
+    });
+    div()
+        .tl_selector(move || prefix.into())
+        .flex_none()
+        .child(
+            TlSelect::new(ElementId::Name(prefix.into()), &state)
+                .compact()
+                .aria_label(words.aria_label.clone())
+                .on_change(|value, _, cx| {
+                    if let Some(range) = OverviewRange::ALL.into_iter().find(|r| r.key() == value) {
+                        set_range(range, cx);
+                    }
+                }),
+        )
+        .into_any_element()
 }
 
 /// What a device box shows for the range.
