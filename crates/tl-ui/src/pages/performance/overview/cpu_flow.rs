@@ -225,8 +225,15 @@ impl CpuPlan {
                     None => chart,
                 };
                 self.graph(graph, &mut out);
+                // Stacked, the rows keep the gap above the "Now" label; side by side they do
+                // not.
                 if let Some(id) = self.cores {
-                    out.push((id, self.rows_rect(rows)));
+                    let rows = if self.side {
+                        rows
+                    } else {
+                        self.rows_rect(rows)
+                    };
+                    out.push((id, rows));
                 }
             }
         }
@@ -457,7 +464,7 @@ mod tests {
         let pad = f32::from(p.m.sp[2]);
         let r = rects_of(&p, 1000., 400.);
         assert_eq!(r[0], (1, [0., 0., 400., 400.]));
-        assert_eq!(r[1], (2, [400. + gutter, 0., 600. - gutter, 400. - pad]));
+        assert_eq!(r[1], (2, [400. + gutter, 0., 600. - gutter, 400.]));
         let stacked = CpuPlan { side: false, ..p };
         let r = rects_of(&stacked, 400., 1000.);
         assert_eq!(r[0], (1, [0., 0., 400., 400.]));
@@ -494,7 +501,7 @@ mod tests {
         let r = rects_of(&p, 1000., 400.);
         assert_eq!(r[0], (4, [0., 200. + gap, 400., 200. - gap]));
         assert_eq!(r[1], (1, [0., 0., 400., 200.]));
-        assert_eq!(r[2].1[3], 400. - f32::from(p.m.sp[2]));
+        assert_eq!(r[2].1[3], 400.);
     }
 
     #[test]

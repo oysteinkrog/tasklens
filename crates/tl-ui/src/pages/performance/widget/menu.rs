@@ -423,7 +423,11 @@ pub fn cpu_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
         device: DeviceSelector::Key(Arc::from(DEVICE_CPU)),
         members: GroupKind::Cores,
         metric: MetricKey::new(METRIC_LOAD),
-        options: GroupOptions::default(),
+        options: GroupOptions {
+            limit: None,
+            items: GroupItems::Rows,
+            arrange: None,
+        },
     };
     let logical: Vec<(Arc<str>, DeviceIdx, i64)> = match members(&cores, snap, None, None, false) {
         Members::List(list) => list
