@@ -817,9 +817,7 @@ fn masked_widget(grid: &WidgetLook, flow: &WidgetLook) -> WidgetLook {
 #[gpui_kit::test]
 fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    let graph = r
-        .vcx
-        .update(|_, cx| tl_ui::theme::current(cx).graph.clone());
+    let graph = r.vcx.update(|_, cx| tl_ui::theme::current(cx).graph);
     for (kind, container_id, presets) in BOXES {
         for preset in presets {
             // Back to the built-in flow layout, then the preset.
