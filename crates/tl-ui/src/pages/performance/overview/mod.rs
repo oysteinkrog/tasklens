@@ -40,6 +40,7 @@ pub mod gpu_flow;
 pub mod inner_split;
 pub mod layout;
 pub mod mem_box;
+pub mod mem_flow;
 pub mod net_box;
 pub mod parts;
 pub mod picked;
@@ -73,7 +74,7 @@ use self::edit::EditState;
 use self::gpu_box::GpuBox;
 use self::inner_split::{InnerSplitChanged, hit_selector};
 use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place_rows};
-use self::mem_box::MemBox;
+use self::mem_box::{MemAppsPlaced, MemBox};
 use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::range::{RangeText, history_request};
@@ -208,6 +209,9 @@ pub struct OverviewPage {
     row_unit: f32,
     cpu: Entity<CpuBox>,
     mem: Entity<MemBox>,
+    /// The Memory box shows Memory by app (`MemBox::apps_placed`): the page asks for the
+    /// process sweep while the box is placed (UI-PRF-060).
+    mem_apps: bool,
     gpu: Entity<GpuBox>,
     disk: Entity<DiskBox>,
     net: Entity<NetBox>,
@@ -347,6 +351,11 @@ impl OverviewPage {
         subs.push(cx.subscribe(&cpu, Self::on_cpu_split));
         subs.push(cx.subscribe(&cpu, Self::on_cpu_power_split));
         subs.push(cx.subscribe(&mem, Self::on_mem_split));
+        subs.push(cx.subscribe(&mem, |this, _, ev: &MemAppsPlaced, cx| {
+            this.mem_apps = ev.0;
+            this.send_demand(cx);
+        }));
+        let mem_apps = mem.read(cx).apps_placed();
         subs.push(cx.subscribe(&gpu, Self::on_gpu_split));
         subs.push(cx.subscribe(&disk, Self::on_disk_split));
         subs.push(cx.subscribe(&net, Self::on_net_split));
@@ -372,6 +381,7 @@ impl OverviewPage {
             area: size(px(0.), px(0.)),
             cpu,
             mem,
+            mem_apps,
             gpu,
             disk,
             net,
@@ -422,7 +432,8 @@ impl OverviewPage {
     pub fn demand_part(&self) -> Demand {
         let (paused, at) = self.paused.unzip();
         Demand {
-            process_top: self.procs.is_some() || mem_apps(&self.layout),
+            process_top: self.procs.is_some()
+                || (self.layout.has(BoxKind::Memory) && self.mem_apps),
             device_history_range: history_request(self.range, paused, at.unwrap_or(0)),
             device_timeline: self.layout.has(BoxKind::Timeline),
             any_surface_visible: true,
@@ -793,7 +804,8 @@ impl OverviewPage {
     fn set_layout(&mut self, layout: OverviewLayout, cx: &mut Context<Self>) {
         let procs = layout.has(BoxKind::TopProcs);
         let timeline_moved = layout.has(BoxKind::Timeline) != self.layout.has(BoxKind::Timeline);
-        let mem_apps_moved = mem_apps(&layout) != mem_apps(&self.layout);
+        // Memory by app coming or going inside the box reaches the page as `MemAppsPlaced`.
+        let mem_apps_moved = layout.has(BoxKind::Memory) != self.layout.has(BoxKind::Memory);
         let split = layout.split(BoxKind::Cpu);
         let cpu_arrange = layout.arrange(BoxKind::Cpu);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
@@ -941,7 +953,7 @@ impl OverviewPage {
     }
 
     /// Writes the layout to `[performance.overview]`. A saved flow layout of a box on widgets
-    /// (the GPU and CPU boxes) follows its mode, arrangement, split, hidden engines and CPU
+    /// (the GPU, CPU and Memory boxes) follows its mode, arrangement, split, hidden engines and CPU
     /// switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
     /// build with that entry ignores the old keys. A grid layout stays as it is.
     fn save_layout(&self, cx: &mut Context<Self>) {
@@ -950,7 +962,7 @@ impl OverviewPage {
         }
         let setting = self.layout.to_setting();
         let layouts = &TlSettings::settings(cx).performance.layouts;
-        let flows: SmallVec<[_; 2]> = [BoxKind::Gpu, BoxKind::Cpu]
+        let flows: SmallVec<[_; 3]> = [BoxKind::Gpu, BoxKind::Cpu, BoxKind::Memory]
             .into_iter()
             .filter_map(|kind| {
                 let container = box_menu::widget_container(kind)?;
@@ -1436,9 +1448,4 @@ impl Render for OverviewPage {
         let root = root.children(header).children(toolbar).child(body);
         Self::with_actions(root, cx).into_any_element()
     }
-}
-
-/// Whether the Memory box is placed and shows "By app" (UI-PRF-060).
-fn mem_apps(layout: &OverviewLayout) -> bool {
-    layout.has(BoxKind::Memory) && layout.config(BoxKind::Memory).mode.id == mem_box::APPS_MODE
 }

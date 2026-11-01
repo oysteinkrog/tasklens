@@ -8608,6 +8608,8 @@ mod page {
                         Some(FlowLook::Row { .. }) => "row",
                         Some(FlowLook::Chart(_)) => "chart",
                         Some(FlowLook::Text) => "text",
+                        Some(FlowLook::MemRow { .. }) => "mem row",
+                        Some(FlowLook::MemCell { .. }) => "mem cell",
                         None => "none",
                     };
                     (look, w.render_count.get())

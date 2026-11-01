@@ -163,6 +163,15 @@ pub struct PerfWidgetAddGroup {
     pub metric: Arc<str>,
 }
 
+/// Adds a fixed widget (Add Widget): the fixed kind `fixed` (`memory_by_app`), which the box
+/// allows once.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfWidgetAddFixed {
+    pub fixed: Arc<str>,
+}
+
 /// Sets group option `option` of group widget `id` to `value` (the widget menu's group
 /// items): `metric` (a metric key), `items` (`rows` or `cells`), `arrange` (an Arrange id) or
 /// `limit` (`all` or a number).

@@ -43,9 +43,9 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, FormSet, LAYOUT_VERSION, MetricKey,
-    SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting, default_box_layout,
-    grid_cols, overview_kind, reset_to_default,
+    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, FixedWidget, FormSet, LAYOUT_VERSION,
+    MEMORY_BOX_CONTAINER, MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
+    WidgetSetting, default_box_layout, grid_cols, overview_kind, reset_to_default,
 };
 use tl_model::layout_boxes::DeviceKind;
 
@@ -61,10 +61,10 @@ use crate::components::tooltip::TlTooltip;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::pages::performance::actions::{
-    PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetAddGroup, PerfWidgetApply, PerfWidgetCancel,
-    PerfWidgetMove, PerfWidgetRemove, PerfWidgetReset, PerfWidgetResize, PerfWidgetSelectNext,
-    PerfWidgetSelectPrev, PerfWidgetSetForm, PerfWidgetSetGroup, PerfWidgetSetOption,
-    PerfWidgetSetSource, PerfWidgetUndo, WidgetSource,
+    PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup,
+    PerfWidgetApply, PerfWidgetCancel, PerfWidgetMove, PerfWidgetRemove, PerfWidgetReset,
+    PerfWidgetResize, PerfWidgetSelectNext, PerfWidgetSelectPrev, PerfWidgetSetForm,
+    PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, PerfWidgetUndo, WidgetSource,
 };
 use crate::pages::performance::overview::picked::box_snapshot;
 use crate::settings_global::TlSettings;
@@ -72,6 +72,11 @@ use crate::theme::{current, metrics};
 
 /// The most undo steps an edit keeps.
 pub const UNDO_LIMIT: usize = 100;
+
+/// The fixed widgets Add Widget offers, each in its own box, with their name keys
+/// (UI-PRF-061 phase 2).
+const FIXED_ADDS: [(FixedWidget, &str); 1] =
+    [(FixedWidget::MemoryByApp, "perf-widget-fixed-by-app")];
 /// The edit toolbar's height, logical px.
 pub const TOOLBAR_H: f32 = 32.;
 /// The grip and the gear, logical px. The gear sits right of the grip.
@@ -879,13 +884,62 @@ impl WidgetEditor {
     }
 
     /// The sources the box can show, now: the CPU's metrics and logical CPUs in the CPU box,
-    /// else the GPUs the box shows.
+    /// the memory metrics in the Memory box, else the GPUs the box shows.
     pub fn source_groups(&self, cx: &App) -> Vec<SourceGroup> {
         let snap = box_snapshot(&self.hub, cx);
         if *self.id == *CPU_BOX_CONTAINER {
             return menu::cpu_source_groups(&snap, cx);
         }
+        if *self.id == *MEMORY_BOX_CONTAINER {
+            return menu::mem_source_groups(&snap, cx);
+        }
         menu::source_groups(&self.slots, &snap, cx)
+    }
+
+    /// The fixed widget Add Widget offers: the one the box allows (Memory by app in the Memory
+    /// box), while the working layout has none.
+    pub fn fixed_add(&self, cx: &App) -> Option<menu::FixedAdd> {
+        let (kind, key) = FIXED_ADDS
+            .iter()
+            .find(|(kind, _)| kind.container() == Some(&*self.id))?;
+        let layout = self.working_layout(cx)?;
+        let has = layout
+            .widgets
+            .iter()
+            .any(|w| matches!(&w.content, WidgetContent::Fixed(f) if f == kind));
+        (!has).then(|| menu::FixedAdd {
+            name: Arc::from(kind.name()),
+            label: tr(cx, key),
+        })
+    }
+
+    /// Add Widget's fixed item: the fixed widget `name` (`memory_by_app`), placed and selected
+    /// as [`Self::add`] places a widget. Nothing when the box does not allow it or already has
+    /// it. Returns its id.
+    pub fn add_fixed(&mut self, name: &str, cx: &mut Context<Self>) -> Option<u32> {
+        self.edit.as_ref()?;
+        let kind = FixedWidget::from_name(name);
+        if self.fixed_add(cx).is_none_or(|a| *a.name != *kind.name()) {
+            return None;
+        }
+        let widget = WidgetSetting {
+            id: 0,
+            content: WidgetContent::Fixed(kind),
+            forms: FormSet::empty(),
+            cell: None,
+            options: WidgetOptions::default(),
+            device_name: None,
+        };
+        let added = Rc::new(Cell::new(None));
+        let out = Rc::clone(&added);
+        self.edit_with(cx, move |l, g| {
+            out.set(Some(grid::insert(l, widget, g)));
+            true
+        });
+        let id = added.get()?;
+        self.select(id, cx);
+        self.show_widget(id, cx);
+        Some(id)
     }
 
     /// The selector, device name and offered forms of `source`.
@@ -1081,8 +1135,9 @@ impl WidgetEditor {
             position
         };
         let groups: Rc<[SourceGroup]> = self.source_groups(cx).into();
+        let fixed = self.fixed_add(cx);
         let menu = TlMenu::build(window, cx, self.focus.clone(), move |menu, window, cx| {
-            menu::add_items(menu, &groups, window, cx)
+            menu::add_items(menu, &groups, fixed.clone(), window, cx)
         });
         open_context_menu_at(at, window, cx, menu);
     }
@@ -1246,6 +1301,10 @@ impl WidgetEditor {
 
     fn on_add_group(&mut self, a: &PerfWidgetAddGroup, _: &mut Window, cx: &mut Context<Self>) {
         self.add_group(&a.device, &a.group, &a.metric, cx);
+    }
+
+    fn on_add_fixed(&mut self, a: &PerfWidgetAddFixed, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_fixed(&a.fixed, cx);
     }
 
     fn on_set_group(&mut self, a: &PerfWidgetSetGroup, _: &mut Window, cx: &mut Context<Self>) {
@@ -1525,6 +1584,7 @@ impl WidgetEditor {
             .on_action(cx.listener(Self::on_set_form))
             .on_action(cx.listener(Self::on_set_option))
             .on_action(cx.listener(Self::on_add_group))
+            .on_action(cx.listener(Self::on_add_fixed))
             .on_action(cx.listener(Self::on_set_group))
     }
 }

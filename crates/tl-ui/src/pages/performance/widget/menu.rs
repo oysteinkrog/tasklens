@@ -6,18 +6,21 @@
 //!   The CPU box lists the CPU's metrics instead ([`cpu_source_groups`], UI-PRF-061 phase 2):
 //!   Utilization, Kernel time, Speed, Temperature, Package power, Core power, Power draw, Core
 //!   clocks and CPU pressure, then a separator and "Core load >" and "Core speed >" with C0 to
-//!   Cn; Add Widget adds "All cores >" (Load, Speed).
+//!   Cn; Add Widget adds "All cores >" (Load, Speed). The Memory box lists In use, Cached,
+//!   Available, Swap, Commit, Memory pressure and Memory composition ([`mem_source_groups`]).
 //! - **Widget menu** ([`widget_menu`]): "Source >" (radio items, one submenu per GPU when the
 //!   box shows two), "Show >" (check items for the forms the metric offers; the last checked one
 //!   is disabled), "Chart >" while Chart is on (Fill under the line, Dashed line), a separator,
 //!   then "Remove Widget".
 //! - **Add Widget** ([`add_items`]): the same sources as plain items, then a separator and
-//!   "All engines", one item per GPU (a group widget, ADR-019 phase 2).
+//!   "All engines", one item per GPU (a group widget, ADR-019 phase 2), and a separator and the
+//!   fixed widget the box allows while it has none ("Memory by app" in the Memory box).
 //! - **Group widgets** (UI-PRF-061 phase 2): "Source >" lists only the metrics of the group's
 //!   kind ([`group_metrics`]; none for engines), and after "Chart >" come "Items >" (Rows,
 //!   Cells), "Arrange >" with Cells (Automatic, Stack vertically, Side by side) and
 //!   "Show at most >" (All, 4, 8, 16, 32, and the saved number when it is another).
-//!   [`set_group_option`] and [`new_group`] are the edits they make.
+//!   [`set_group_option`] and [`new_group`] are the edits they make. A fixed widget's menu has
+//!   only "Remove Widget".
 //! - **Confirmations**: Reset in Edit Widgets ([`confirm_reset`]), Reset Box with a grid layout
 //!   ([`confirm_reset_now`]) and a preset over a grid layout ([`confirm_preset`]).
 //!
@@ -35,10 +38,11 @@ use tl_model::layout::{
     METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
 use tl_model::layout_boxes::{
-    CPU_LOGICAL_PREFIX, DEVICE_CPU, DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL,
-    METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE,
-    METRIC_FREQ, METRIC_LOAD, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES,
-    METRIC_POWER_DRAW, METRIC_PRESSURE,
+    CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_MEMORY, DeviceKind, METRIC_CORE_CLOCKS,
+    METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
+    METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED,
+    METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX,
+    METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE,
 };
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
@@ -52,8 +56,8 @@ use crate::components::menu::TlMenu;
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::{
-    PerfWidgetAdd, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm, PerfWidgetSetGroup,
-    PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
+    PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm,
+    PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
 };
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
 use crate::pages::performance::overview::layout::Arrange;
@@ -79,6 +83,18 @@ const CPU_METRICS: [(&str, &str); 9] = [
     (METRIC_POWER_DRAW, "perf-widget-metric-power"),
     (METRIC_CORE_CLOCKS, "perf-widget-metric-core-clocks"),
     (METRIC_PRESSURE, "perf-widget-metric-cpu-pressure"),
+];
+
+/// The memory metrics in the Memory box's "Source >", in menu order, with their name keys
+/// (UI-PRF-061 phase 2).
+const MEM_METRICS: [(&str, &str); 7] = [
+    (METRIC_MEM_USED, "perf-overview-mem-used"),
+    (METRIC_MEM_CACHED, "perf-overview-mem-cached"),
+    (METRIC_MEM_AVAILABLE, "perf-overview-mem-available"),
+    (METRIC_MEM_SWAP, "perf-overview-mem-swap"),
+    (METRIC_MEM_COMMIT, "perf-overview-mem-commit"),
+    (METRIC_PRESSURE, "perf-widget-metric-mem-pressure"),
+    (METRIC_MEM_COMPOSITION, "perf-widget-metric-mem-composition"),
 ];
 
 /// The form check items of "Show >", in menu order, with their name keys.
@@ -497,6 +513,50 @@ pub fn cpu_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     }]
 }
 
+/// The sources of the Memory box on `snap` (UI-PRF-061 phase 2): the memory metrics it
+/// reports. Empty when the catalog has no memory device.
+pub fn mem_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let Some(entry) = snap
+        .devices
+        .entries
+        .iter()
+        .find(|e| e.present && &*e.persistent_key == DEVICE_MEMORY)
+    else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for (key, name_key) in MEM_METRICS {
+        let metric = MetricKey::new(key);
+        let (value, _) = box_reading(DeviceKind::Memory, &metric, snap, entry.idx, None);
+        if value.validity == Validity::Unsupported {
+            continue;
+        }
+        items.push(SourceItem {
+            offered: MetricMeta::of(DeviceKind::Memory, &metric).map_or(FormSet::empty(), |m| {
+                m.offered_forms(Some((snap, entry.idx)))
+            }),
+            metric,
+            label: tr(cx, name_key),
+            engine: false,
+            device: None,
+        });
+    }
+    vec![SourceGroup {
+        key: Arc::from(DEVICE_MEMORY),
+        name: SharedString::from(entry.display_name.to_string()),
+        items,
+        subs: Vec::new(),
+        add_group: None,
+    }]
+}
+
+/// The fixed widget Add Widget offers: its kind's name as written and its menu label.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FixedAdd {
+    pub name: Arc<str>,
+    pub label: SharedString,
+}
+
 /// The forms a new widget on a metric that offers `offered` shows: Chart, Value and Name with a
 /// chart, else Load bar, Value and Name, each only when offered.
 pub fn default_forms(offered: FormSet) -> FormSet {
@@ -602,15 +662,42 @@ fn sources(
 
 /// The Add Widget items: every source of `groups` as a plain item, then a separator and "All
 /// engines" for each GPU (named by the GPU when the box shows two), or the device's own group
-/// ("All cores >" with Load and Speed in the CPU box).
+/// ("All cores >" with Load and Speed in the CPU box), then a separator and `fixed`, the fixed
+/// widget the box allows while it has none ("Memory by app").
 pub fn add_items(
+    menu: TlMenu,
+    groups: &Rc<[SourceGroup]>,
+    fixed: Option<FixedAdd>,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let menu = sources(menu, groups, None, None, window, cx);
+    let menu = group_adds(menu, groups, window, cx);
+    match fixed {
+        Some(add) => menu.separator().item(
+            add.label,
+            Box::new(PerfWidgetAddFixed {
+                fixed: Arc::clone(&add.name),
+            }),
+        ),
+        None => menu,
+    }
+}
+
+/// The group items of Add Widget after a separator: the device's own group, or "All engines"
+/// for each GPU. Nothing for a device without a group (memory).
+fn group_adds(
     menu: TlMenu,
     groups: &Rc<[SourceGroup]>,
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    let mut menu = sources(menu, groups, None, None, window, cx);
+    let mut menu = menu;
     if groups.is_empty() {
+        return menu;
+    }
+    // Memory has no group to add.
+    if groups.iter().all(|g| &*g.key == DEVICE_MEMORY) {
         return menu;
     }
     menu = menu.separator();
@@ -761,6 +848,10 @@ pub fn widget_menu(
     let selected = device_key(w)
         .zip(w.content.metric_key())
         .map(|(k, m)| (Arc::from(k), m.clone()));
+    if matches!(w.content, WidgetContent::Fixed(_)) {
+        // A fixed widget has no source, forms or options: only "Remove Widget".
+        return menu.item(tr(cx, "perf-widget-remove"), Box::new(PerfWidgetRemove));
+    }
     let group = match &w.content {
         WidgetContent::Group(g) => Some(g.clone()),
         _ => None,
@@ -882,6 +973,7 @@ fn box_name(container: &str, cx: &App) -> SharedString {
     match container {
         tl_model::layout::GPU_BOX_CONTAINER => tr(cx, "perf-overview-box-gpu"),
         tl_model::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
+        tl_model::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
         other => SharedString::from(other.to_string()),
     }
 }

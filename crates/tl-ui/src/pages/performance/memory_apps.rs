@@ -19,9 +19,12 @@
 //! The Memory page puts "Groups shown" in its context menu.
 //!
 //! The chart sits on the Memory page ([`AppsPlace::Page`]) or in the Overview Memory box
-//! ([`AppsPlace::Overview`], mode `apps`). In the box it draws over the box range, and at 1 h,
-//! 24 h and 7 d, or while the Overview is held at a time, it reads the device metric history as
-//! the other box charts do; the ranking and the legend values then read the same history. On the
+//! ([`AppsPlace::Overview`]). In the box the Memory by app fixed widget draws it
+//! (`widget/fixed_widget.rs`, ADR-019 "Fixed widgets"), in the `apps` preset or among the user's
+//! own widgets; the box keeps one chart for both. In the box it draws over the box range, and
+//! at 1 h, 24 h and 7 d, or while the Overview is held at a time, it reads the device metric
+//! history as the other box charts do; the ranking and the legend values then read the same
+//! history. On the
 //! page it draws over the shared range and reads the history at 1 h, 24 h and 7 d. The legend
 //! sits at the right, or below the chart when the body is narrower than
 //! [`LEGEND_BELOW_W`].

@@ -3,9 +3,10 @@
 //! A [`WidgetContainer`] holds the widgets of one box or page. It places them: a grid layout on
 //! its inner snap grid (`grid.rs`), a flow layout with the placer its host gives (the GPU box
 //! presets, `overview/gpu_flow.rs`), or without one in list order on the grid. It keeps a map
-//! from widget id to its view, a [`MetricWidget`] or a [`GroupWidget`], and a [`SourceData`] for
-//! every metric widget of the layout, from the page's [`SourceStore`]. A group widget takes its
-//! members' sources from the same store itself.
+//! from widget id to its view, a [`MetricWidget`], a [`GroupWidget`] or a [`FixedWidgetView`],
+//! and a [`SourceData`] for every metric widget of the layout, from the page's [`SourceStore`].
+//! A group widget takes its members' sources from the same store itself. A fixed widget draws
+//! the content view its host gives ([`WidgetContainer::set_fixed_content`]).
 //!
 //! Render contract (UI-PRF-017, UI-PRF-019): samples go to the widgets only. The container
 //! listens to its sources for [`AvailabilityChanged`] and to nothing else on a sample, so it
@@ -20,8 +21,9 @@
 //! A hosted container (the GPU box, `set_hosted`) holds the entities of a flow layout but does
 //! not draw them: its host draws each widget in the 1.1.0 part the preset's rules give it
 //! (`MetricWidget`'s `FlowLook`), and the values of one line side by side, joined by " · ". The
-//! host takes the entities with [`WidgetContainer::flow_widget`], and those of group widgets
-//! with [`WidgetContainer::flow_group`] (the CPU box's core rows and cells). Its placer works out each
+//! host takes the entities with [`WidgetContainer::flow_widget`], those of group widgets
+//! with [`WidgetContainer::flow_group`] (the CPU box's core rows and cells), and those of fixed
+//! widgets with [`WidgetContainer::flow_fixed`] (Memory by app). Its placer works out each
 //! widget's rectangle from what the host shows and the body size, and the host asks for a new
 //! placement ([`WidgetContainer::place_again`]) when what it shows changed. In Edit Widgets,
 //! and for a grid layout, the container draws the widgets itself.
@@ -40,9 +42,11 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
 use tl_model::layout::{
-    ContainerLayout, DeviceSelector, GroupKind, WidgetCell, WidgetContent, WidgetSetting, grid_cols,
+    ContainerLayout, DeviceSelector, FixedWidget, GroupKind, WidgetCell, WidgetContent,
+    WidgetSetting, grid_cols,
 };
 
+use super::fixed_widget::{FixedContent, FixedWidgetView};
 use super::grid::{self, InnerGrid, InnerPlacement};
 use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
@@ -85,6 +89,7 @@ pub type FlowPlace = Rc<dyn Fn(&FlowInput<'_>) -> InnerPlacement>;
 pub enum WidgetView {
     Metric(Entity<MetricWidget>),
     Group(Entity<GroupWidget>),
+    Fixed(Entity<FixedWidgetView>),
 }
 
 impl WidgetView {
@@ -92,6 +97,7 @@ impl WidgetView {
         match self {
             WidgetView::Metric(w) => w.clone().into(),
             WidgetView::Group(g) => g.clone().into(),
+            WidgetView::Fixed(f) => f.clone().into(),
         }
     }
 
@@ -101,20 +107,21 @@ impl WidgetView {
             (self, content),
             (WidgetView::Metric(_), WidgetContent::Metric(_))
                 | (WidgetView::Group(_), WidgetContent::Group(_))
+                | (WidgetView::Fixed(_), WidgetContent::Fixed(_))
         )
     }
 }
 
-/// The availability of a widget with no source of its own: a group is shown unless its kind is
-/// unknown to this build (its members come and go inside it); a fixed widget is not drawn here
-/// yet (tasklens-6swdr.8).
+/// The availability of a widget with no source of its own: a group or a fixed widget is shown
+/// unless its kind is unknown to this build (a group's members come and go inside it).
 fn content_availability(content: &WidgetContent) -> Availability {
     match content {
         WidgetContent::Group(g) if matches!(g.members, GroupKind::Other(_)) => {
             Availability::Unknown
         }
-        WidgetContent::Group(_) => Availability::Available,
-        WidgetContent::Metric(_) | WidgetContent::Fixed(_) => Availability::Gone,
+        WidgetContent::Fixed(FixedWidget::Other(_)) => Availability::Unknown,
+        WidgetContent::Group(_) | WidgetContent::Fixed(_) => Availability::Available,
+        WidgetContent::Metric(_) => Availability::Gone,
     }
 }
 
@@ -146,6 +153,8 @@ pub struct WidgetContainer {
     flow: Option<FlowPlace>,
     /// The host draws the widgets of a flow layout outside Edit Widgets.
     hosted: bool,
+    /// The content views the host gives its fixed widgets.
+    fixed_content: Option<FixedContent>,
     /// The source of every widget of the layout, placed or not, by widget id.
     sources: FxHashMap<u32, Entity<SourceData>>,
     /// One availability subscription per source entity.
@@ -193,6 +202,7 @@ impl WidgetContainer {
             layout,
             flow: None,
             hosted: false,
+            fixed_content: None,
             sources: FxHashMap::default(),
             source_subs: FxHashMap::default(),
             widgets: FxHashMap::default(),
@@ -241,7 +251,7 @@ impl WidgetContainer {
     pub fn widget(&self, id: u32) -> Option<&Entity<MetricWidget>> {
         match self.widgets.get(&id)? {
             WidgetView::Metric(w) => Some(w),
-            WidgetView::Group(_) => None,
+            WidgetView::Group(_) | WidgetView::Fixed(_) => None,
         }
     }
 
@@ -249,7 +259,15 @@ impl WidgetContainer {
     pub fn group(&self, id: u32) -> Option<&Entity<GroupWidget>> {
         match self.widgets.get(&id)? {
             WidgetView::Group(g) => Some(g),
-            WidgetView::Metric(_) => None,
+            WidgetView::Metric(_) | WidgetView::Fixed(_) => None,
+        }
+    }
+
+    /// The entity of fixed widget `id`, while it takes space.
+    pub fn fixed(&self, id: u32) -> Option<&Entity<FixedWidgetView>> {
+        match self.widgets.get(&id)? {
+            WidgetView::Fixed(f) => Some(f),
+            WidgetView::Metric(_) | WidgetView::Group(_) => None,
         }
     }
 
@@ -269,21 +287,25 @@ impl WidgetContainer {
     }
 
     /// The part of the page's demand this container adds: the GPU records while it places a
-    /// widget, and the records of the members of the groups it places (fast CPU samples for
-    /// cores, as the core rows ask). A container with no placed widget asks for nothing.
+    /// widget, the records of the members of the groups it places (fast CPU samples for
+    /// cores, as the core rows ask), and the process sweep while it places Memory by app. A
+    /// container with no placed widget asks for nothing.
     pub fn demand_part(&self) -> Demand {
         let mut demand = Demand {
             gpus: !self.placement.widgets.is_empty(),
             ..Demand::default()
         };
         for p in &self.placement.widgets {
-            let Some(WidgetContent::Group(g)) = self
+            let content = self
                 .layout
                 .widgets
                 .iter()
                 .find(|w| w.id == p.id)
-                .map(|w| &w.content)
-            else {
+                .map(|w| &w.content);
+            if let Some(WidgetContent::Fixed(FixedWidget::MemoryByApp)) = content {
+                demand.process_top = true;
+            }
+            let Some(WidgetContent::Group(g)) = content else {
                 continue;
             };
             match g.members {
@@ -314,6 +336,24 @@ impl WidgetContainer {
         if self.layout.preset.is_some() && self.relayout(cx) {
             self.notify(cx);
         }
+    }
+
+    /// The content views of the fixed widgets: the host keeps them (Memory by app in the Memory
+    /// box) and the fixed widgets draw them, in a flow or a grid layout alike.
+    pub fn set_fixed_content(&mut self, content: Option<FixedContent>, cx: &mut Context<Self>) {
+        self.fixed_content = content;
+        if self.relayout(cx) {
+            self.notify(cx);
+        }
+    }
+
+    /// The content view the host gives fixed kind `kind`.
+    fn content_of(&self, kind: &WidgetContent, cx: &mut Context<Self>) -> Option<AnyView> {
+        let WidgetContent::Fixed(kind) = kind else {
+            return None;
+        };
+        let content = self.fixed_content.clone()?;
+        content(kind, cx)
     }
 
     /// Whether the host draws the widgets of a flow layout (outside Edit Widgets). It then
@@ -380,6 +420,29 @@ impl WidgetContainer {
         let group = cx.new(|cx| GroupWidget::with_flow_look(setting, &hub, store, Some(look), cx));
         self.widgets.insert(id, WidgetView::Group(group.clone()));
         Some(group)
+    }
+
+    /// The entity of fixed widget `id` of the flow layout the host draws, created when it has
+    /// none yet. `None` when the layout has no fixed widget `id`.
+    pub fn flow_fixed(
+        &mut self,
+        id: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<FixedWidgetView>> {
+        if let Some(view) = self.widgets.get(&id) {
+            let WidgetView::Fixed(fixed) = view else {
+                return None;
+            };
+            return Some(fixed.clone());
+        }
+        let setting = self.layout.widgets.iter().find(|w| w.id == id)?.clone();
+        if !matches!(setting.content, WidgetContent::Fixed(_)) {
+            return None;
+        }
+        let content = self.content_of(&setting.content, cx);
+        let fixed = cx.new(|_| FixedWidgetView::new(setting, content));
+        self.widgets.insert(id, WidgetView::Fixed(fixed.clone()));
+        Some(fixed)
     }
 
     /// What the host shows changed: places the widgets again, which drops the entities of the
@@ -487,8 +550,8 @@ impl WidgetContainer {
     fn sync_sources(&mut self, cx: &mut Context<Self>) {
         let mut sources = FxHashMap::default();
         for w in &self.layout.widgets {
-            // Group and fixed widgets get their views from their own beads (tasklens-6swdr.3,
-            // .8); until then they take no space here.
+            // Group and fixed widgets have no source of their own: a group takes its members'
+            // sources itself, and a fixed widget draws its host's content.
             let Some(selector) = w.content.metric() else {
                 continue;
             };
@@ -594,6 +657,27 @@ impl WidgetContainer {
             {
                 self.widgets.remove(&p.id);
                 changed = true;
+            }
+            if let WidgetContent::Fixed(_) = setting.content {
+                let content = self.content_of(&setting.content, cx);
+                if let Some(WidgetView::Fixed(fixed)) = self.widgets.get(&p.id) {
+                    fixed.update(cx, |f, cx| {
+                        f.set_setting(setting, content, cx);
+                        f.set_edit_inset(editing, cx);
+                    });
+                } else if host_draws {
+                    // The host creates the entity when it draws the widget.
+                    continue;
+                } else {
+                    let fixed = cx.new(|cx| {
+                        let mut f = FixedWidgetView::new(setting, content);
+                        f.set_edit_inset(editing, cx);
+                        f
+                    });
+                    self.widgets.insert(p.id, WidgetView::Fixed(fixed));
+                    changed = true;
+                }
+                continue;
             }
             if let WidgetContent::Group(_) = setting.content {
                 if let Some(WidgetView::Group(group)) = self.widgets.get(&p.id) {

@@ -13,8 +13,21 @@
 //! touch it. It formats its text only when the memory totals' hash changes. Each sparkline is a
 //! cached child view that re-renders for its own series; its spec is rebuilt only when its scale
 //! total changes. Pointer movement never notifies.
+//!
+//! D-041, ADR-019 phase 2: the modes are presets of the box's widget layout. A preset is a flow
+//! layout (`mem_flow.rs`): the five rows, the used chart, the composition chart, the `charts`
+//! cells or Memory by app. Each part is a widget of the box's `WidgetContainer` that draws its
+//! 1.2.0 part at the place the rules above give it: a row or a `charts` cell as a
+//! `MetricWidget` with `FlowLook::MemRow` or `FlowLook::MemCell`, the charts with
+//! `FlowLook::Chart`, and Memory by app as a `FixedWidgetView`. The box keeps the rows' model
+//! ([`MemRows`]), the charts and the memory-by-app chart and hands them to the widgets, so
+//! nothing is built twice. When a row's text or meter changes, only that row's widget renders
+//! again; the box renders only when its title value changes. Each render makes a
+//! `mem_flow::MemPlan`, from which the container's placer works out every widget's rectangle.
+//! A grid layout (the user's own widgets, after Apply) is drawn by the box's [`WidgetEditor`]
+//! and its `WidgetContainer`; so is the box while Edit Widgets is on.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,12 +35,13 @@ use std::sync::Arc;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, px, relative, size,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::layout::{ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::MemoryTotals;
@@ -40,6 +54,7 @@ use super::cpu_box::value_text;
 use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
+use super::mem_flow::{self, MemFlowKeys, MemLook, MemPlan, PlanCell};
 use super::parts::{
     ChartSettings, GridFit, Meter, SPARK_GRID, SPARK_W, arrange_grid, box_chart, box_frame,
     chart_section_versions, class_probe, edit_chrome, grid_cells, spark_chart,
@@ -54,8 +69,13 @@ use crate::chart::{
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::pages::performance::widget::container::WidgetContainer;
+use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::pages::performance::widget::fixed_widget::FixedContent;
+use crate::pages::performance::widget::metric_widget::FlowLook;
+use crate::pages::performance::widget::source::SourceStore;
 use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_sm};
+use crate::text::style::{numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The box's debug selector.
@@ -112,6 +132,9 @@ pub const MEM_USED_CHART_ID: &str = "perf-overview-memory-used-chart";
 pub const MEM_COMP_CHART_ID: &str = "perf-overview-memory-comp-chart";
 /// The debug selector of the memory-by-app part in `apps`.
 pub const MEM_APPS_ID: &str = "perf-overview-memory-apps";
+/// The debug selector of "No widgets. Use Edit Widgets to add some." (UI-PRF-061).
+pub const EMPTY_ID: &str = "perf-overview-memory-widgets-empty";
+const KEY_EMPTY: &str = "perf-widget-empty";
 
 /// The narrowest text part of `rows`, logical px (UI-PRF-019).
 const TEXT_PART_MIN_W: f32 = 128.;
@@ -167,6 +190,30 @@ impl MemMode {
             Self::Apps => MODES[4].id,
         }
     }
+
+    /// Whether the mode draws the five rows (as rows or as `charts` cells).
+    fn has_rows(self) -> bool {
+        matches!(self, Self::Rows | Self::ChartRows | Self::Charts)
+    }
+
+    fn look(self) -> MemLook {
+        match self {
+            Self::Rows => MemLook::Rows,
+            Self::ChartRows => MemLook::ChartRows,
+            Self::Chart => MemLook::Chart,
+            Self::Charts => MemLook::Charts,
+            Self::Apps => MemLook::Apps,
+        }
+    }
+}
+
+/// The keys of the default mode.
+fn default_keys() -> MemFlowKeys<'static> {
+    MemFlowKeys {
+        mode: MODES[0].id,
+        arrange: None,
+        split: None,
+    }
 }
 
 /// Maps the body size to the layout class the probe compares with the render's.
@@ -177,7 +224,7 @@ impl EventEmitter<InnerSplitChanged> for MemBox {}
 
 const KEY_TITLE: &str = "perf-card-heading-memory";
 /// The rows in order: In use, Cached, Available, Swap, Commit.
-const ROWS: usize = 5;
+pub const ROWS: usize = 5;
 const KEY_ROWS: [&str; ROWS] = [
     "perf-overview-mem-used",
     "perf-overview-mem-cached",
@@ -254,6 +301,32 @@ pub struct MeterRow {
     pub fraction: Option<f32>,
     pub color: Hsla,
 }
+
+/// The five rows' text and meters (UI-PRF-017): what the box formats on a sample, shared with
+/// the row and cell widgets of its flow layouts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemRows {
+    pub rows: [MeterRow; ROWS],
+    /// The percent column of each row; empty when unknown.
+    pub percents: [SharedString; ROWS],
+}
+
+/// The box's [`MemRows`], shared with its widgets. Two are equal when they are the same model.
+#[derive(Clone, Debug)]
+pub struct MemRowsRef(pub Rc<RefCell<MemRows>>);
+
+impl PartialEq for MemRowsRef {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The Memory box shows Memory by app, or stopped showing it: the page asks for the process
+/// sweep while it does (UI-PRF-060).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MemAppsPlaced(pub bool);
+
+impl EventEmitter<MemAppsPlaced> for MemBox {}
 
 /// The series of each row, in row order.
 const ROW_METRICS: [MetricId; ROWS] = [
@@ -474,8 +547,10 @@ pub struct MemBox {
     comp_chart: Entity<ChartView>,
     /// One chart per row for `charts`.
     cell_charts: [Entity<ChartView>; ROWS],
-    /// The memory-by-app chart of `apps`, made the first time the box shows it.
-    apps: Option<Entity<MemoryAppsChart>>,
+    /// The memory-by-app chart, made the first time the box or one of its widgets shows it.
+    apps: Rc<OnceCell<Entity<MemoryAppsChart>>>,
+    /// Whether the box shows Memory by app now ([`MemAppsPlaced`]).
+    apps_placed: bool,
     mode: MemMode,
     /// How `chart_rows` places its two parts and `charts` its cells (D-027).
     arrange: Arrange,
@@ -483,9 +558,8 @@ pub struct MemBox {
     spark_split: InnerSplit,
     /// The gap between the chart and the rows (`chart_rows`).
     chart_split: InnerSplit,
-    rows: [MeterRow; ROWS],
-    /// The percent column of each row; empty when unknown.
-    percents: [SharedString; ROWS],
+    /// The rows' text and meters, shared with the row and cell widgets.
+    model: MemRowsRef,
     /// The totals the sparkline specs were built for.
     totals: Totals,
     title: SharedString,
@@ -498,11 +572,60 @@ pub struct MemBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
+    /// The flow layout of the shown preset (ADR-019): which parts the box shows.
+    flow: ContainerLayout,
+    /// The saved grid layout, when the user has one: the editor draws it.
+    saved_grid: Option<ContainerLayout>,
+    /// Edit Widgets is on: the editor draws the body.
+    editing: bool,
+    editor: Entity<WidgetEditor>,
+    container: Entity<WidgetContainer>,
+    /// The plan of the last flow render, which the container's placer reads.
+    plan: PlanCell,
     _subs: [Subscription; 5],
+    _widget_subs: [Subscription; 2],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+}
+
+/// The saved grid layout of the Memory box, if any.
+fn saved_grid(cx: &App) -> Option<ContainerLayout> {
+    if !cx.has_global::<TlSettings>() {
+        return None;
+    }
+    TlSettings::settings(cx)
+        .performance
+        .layouts
+        .known(MEMORY_BOX_CONTAINER)
+        .filter(|l| l.preset.is_none())
+        .cloned()
+}
+
+/// The memory-by-app chart in `cell`, made in its Overview place the first time it is asked for.
+fn apps_chart(
+    cell: &OnceCell<Entity<MemoryAppsChart>>,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut App,
+) -> Entity<MemoryAppsChart> {
+    if let Some(chart) = cell.get() {
+        return chart.clone();
+    }
+    let hub = hub.clone();
+    let chart = cx.new(|cx| MemoryAppsChart::new_in(hub, AppsPlace::Overview, cx));
+    cell.get_or_init(|| chart).clone()
+}
+
+/// The content of the box's fixed widgets: Memory by app draws the box's memory-by-app chart.
+fn fixed_content(
+    cell: Rc<OnceCell<Entity<MemoryAppsChart>>>,
+    hub: Entity<SnapshotHub>,
+) -> FixedContent {
+    Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
+        FixedWidget::MemoryByApp => Some(apps_chart(&cell, &hub, cx).into()),
+        _ => None,
+    })
 }
 
 impl MemBox {
@@ -538,6 +661,34 @@ impl MemBox {
             fraction: None,
             color: colors[i],
         });
+        let model = MemRowsRef(Rc::new(RefCell::new(MemRows {
+            rows,
+            percents: Default::default(),
+        })));
+        let flow = mem_flow::flow_layout(default_keys());
+        let saved = saved_grid(cx);
+        let plan = PlanCell::default();
+        let apps: Rc<OnceCell<Entity<MemoryAppsChart>>> = Rc::default();
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::new(hub)));
+            let shown = saved.clone().unwrap_or_else(|| flow.clone());
+            let plan = plan.clone();
+            let content = fixed_content(Rc::clone(&apps), hub.clone());
+            cx.new(|cx| {
+                let mut c = WidgetContainer::new(MEMORY_BOX_CONTAINER, shown, hub, store, cx);
+                c.set_flow_placer(Some(mem_flow::placer(plan)), cx);
+                c.set_fixed_content(Some(content), cx);
+                // The box draws the widgets of its flow layouts in their 1.2.0 parts.
+                c.set_hosted(true, cx);
+                c
+            })
+        };
+        let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
+        let widget_subs = [
+            cx.subscribe(&editor, Self::on_widget_edit),
+            // The editor's layout changes reach the container: Memory by app may come or go.
+            cx.observe(&container, |this, _, cx| this.sync_apps(cx)),
+        ];
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
@@ -546,7 +697,8 @@ impl MemBox {
             used_chart,
             comp_chart,
             cell_charts,
-            apps: None,
+            apps,
+            apps_placed: false,
             mode: MemMode::Rows,
             arrange: Arrange::Auto,
             spark_split: InnerSplit::new(
@@ -562,8 +714,7 @@ impl MemBox {
                 MODES[1].split.unwrap_or_default(),
             )
             .with_mins(PART_MIN, PART_MIN),
-            rows,
-            percents: Default::default(),
+            model,
             totals,
             title: tr(cx, KEY_TITLE),
             value: SharedString::default(),
@@ -580,22 +731,188 @@ impl MemBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
+            flow,
+            saved_grid: saved,
+            editing: false,
+            editor,
+            container,
+            plan,
+            _widget_subs: widget_subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         this.sync_text(&snap.system.memory, true, cx);
+        this.sync_apps(cx);
         this
     }
 
-    pub fn rows(&self) -> &[MeterRow; ROWS] {
-        &self.rows
+    /// The five rows as shown.
+    pub fn rows(&self) -> [MeterRow; ROWS] {
+        self.model.0.borrow().rows.clone()
     }
 
     /// The percent column of each row ("" when unknown).
-    pub fn percents(&self) -> &[SharedString; ROWS] {
-        &self.percents
+    pub fn percents(&self) -> [SharedString; ROWS] {
+        self.model.0.borrow().percents.clone()
+    }
+
+    /// The editor of the box's widgets (Edit Widgets, UI-PRF-061).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The container of the box's widgets.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The flow layout of the shown preset. Its preset keeps the mode and the arrangement; the
+    /// split is the box's own, so a drag does not lay the widgets out again.
+    pub fn flow(&self) -> &ContainerLayout {
+        &self.flow
+    }
+
+    /// The saved grid layout the box shows, if any.
+    pub fn grid(&self) -> Option<&ContainerLayout> {
+        self.saved_grid.as_ref()
+    }
+
+    /// The plan of the last flow render: the parts and their widgets the placer places.
+    pub fn flow_plan(&self) -> Option<MemPlan> {
+        self.plan.plan()
+    }
+
+    /// The widgets the last flow render drew, in drawing order.
+    pub fn drawn_widgets(&self) -> SmallVec<[u32; 6]> {
+        self.plan.drawn()
+    }
+
+    /// Whether the box shows Memory by app now: in the `apps` preset, or as a widget of the
+    /// user's layout or of Edit Widgets.
+    pub fn apps_placed(&self) -> bool {
+        self.apps_placed
+    }
+
+    /// Whether the box draws the parts of its flow layout itself (no grid layout, not editing).
+    fn host_draws(&self) -> bool {
+        !self.editing && self.saved_grid.is_none()
+    }
+
+    /// Gets the container ready for Edit Widgets: with a flow layout it takes the preset's
+    /// widgets that the last render drew, placed where they were drawn, so the editor pins
+    /// them there. With a grid layout the container already holds it.
+    pub fn prepare_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing || self.saved_grid.is_some() {
+            return;
+        }
+        let drawn = self.plan.drawn();
+        let mut layout = self.flow.clone();
+        layout.widgets.retain(|w| drawn.contains(&w.id));
+        self.container.update(cx, |c, cx| {
+            c.set_layout(layout, cx);
+            c.place_again(cx);
+        });
+    }
+
+    /// Edit Widgets started or ended. When it ends, the box shows the saved layout again.
+    fn on_widget_edit(
+        &mut self,
+        _: Entity<WidgetEditor>,
+        ev: &WidgetEditEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            WidgetEditEvent::Started => self.editing = true,
+            WidgetEditEvent::Ended { .. } => {
+                self.editing = false;
+                self.saved_grid = saved_grid(cx);
+                self.show_saved(cx);
+            }
+        }
+        self.sync_apps(cx);
+        self.notify(cx);
+    }
+
+    /// The container holds the saved grid layout, or the flow layout the box draws.
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        let shown = self.saved_grid.clone().unwrap_or_else(|| self.flow.clone());
+        self.container.update(cx, |c, cx| c.set_layout(shown, cx));
+    }
+
+    /// The saved grid layout came, went or changed: outside Edit Widgets the box shows it.
+    fn sync_grid(&mut self, cx: &mut Context<Self>) {
+        let grid = saved_grid(cx);
+        if grid == self.saved_grid {
+            return;
+        }
+        self.saved_grid = grid;
+        if self.editing {
+            return;
+        }
+        self.show_saved(cx);
+        self.sync_apps(cx);
+        self.notify(cx);
+    }
+
+    /// The flow layout of the shown mode and arrangement. Returns whether it changed.
+    fn sync_flow(&mut self, cx: &mut Context<Self>) -> bool {
+        let has_arrange = ARRANGE.iter().any(|(id, _)| *id == self.mode.id());
+        let flow = mem_flow::flow_layout(MemFlowKeys {
+            mode: self.mode.id(),
+            arrange: has_arrange.then_some(self.arrange),
+            split: None,
+        });
+        if flow == self.flow {
+            return false;
+        }
+        self.flow = flow;
+        if self.host_draws() {
+            self.show_saved(cx);
+        }
+        true
+    }
+
+    /// Whether Memory by app is shown changed: the page asks for the process sweep while it is.
+    fn sync_apps(&mut self, cx: &mut Context<Self>) {
+        let placed = if self.host_draws() {
+            self.mode == MemMode::Apps && mem_flow::apps_of(&self.flow).is_some()
+        } else {
+            mem_flow::apps_of(self.container.read(cx).layout()).is_some()
+        };
+        if placed != self.apps_placed {
+            self.apps_placed = placed;
+            cx.emit(MemAppsPlaced(placed));
+        }
+    }
+
+    fn notify(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// The text or meter of the rows in `changed` changed: their widgets draw them, so only
+    /// those render again. When the box draws no rows (a grid layout keeps its own sources, and
+    /// `chart` and `apps` show none) nothing renders; before the first flow render places a
+    /// row's widget, the box renders.
+    fn notify_rows(&mut self, changed: [bool; ROWS], cx: &mut Context<Self>) {
+        if !self.host_draws() || !self.mode.has_rows() || !changed.contains(&true) {
+            return;
+        }
+        let ids = mem_flow::rows_of(&self.flow);
+        let mut box_too = false;
+        for (id, _) in ids.iter().zip(changed).filter(|(_, c)| *c) {
+            let widget = id.and_then(|id| self.container.read(cx).widget(id).cloned());
+            match widget {
+                Some(w) => w.update(cx, |w, cx| w.flow_changed(cx)),
+                None => box_too = true,
+            }
+        }
+        if box_too {
+            self.notify(cx);
+        }
     }
 
     /// One sparkline per row, in row order.
@@ -613,18 +930,18 @@ impl MemBox {
         let mode = MemMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
-            if mode == MemMode::Apps && self.apps.is_none() {
-                let hub = self.hub.clone();
-                self.apps =
-                    Some(cx.new(|cx| MemoryAppsChart::new_in(hub, AppsPlace::Overview, cx)));
+            if mode == MemMode::Apps {
+                apps_chart(&self.apps, &self.hub, cx);
             }
-            cx.notify();
+            self.sync_flow(cx);
+            self.sync_apps(cx);
+            self.notify(cx);
         }
     }
 
-    /// The memory-by-app chart, once the box has shown `apps`.
+    /// The memory-by-app chart, once the box or one of its widgets has shown it.
     pub fn apps(&self) -> Option<&Entity<MemoryAppsChart>> {
-        self.apps.as_ref()
+        self.apps.get()
     }
 
     /// The shown mode's split as the box lays it out, after the clamps: the text part's share in
@@ -649,8 +966,9 @@ impl MemBox {
     pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
         if arrange != self.arrange {
             self.arrange = arrange;
+            self.sync_flow(cx);
             if matches!(self.mode, MemMode::ChartRows | MemMode::Charts) {
-                cx.notify();
+                self.notify(cx);
             }
         }
     }
@@ -710,7 +1028,8 @@ impl MemBox {
         out.push('\t');
         out.push_str(&self.value);
         out.push('\n');
-        for (row, pct) in self.rows.iter().zip(&self.percents) {
+        let model = self.model.0.borrow();
+        for (row, pct) in model.rows.iter().zip(&model.percents) {
             out.push_str(&row.label);
             out.push('\t');
             out.push_str(&row.value);
@@ -755,9 +1074,7 @@ impl MemBox {
             self.rebuild_specs(cx);
         }
         if mask.contains(ComponentMask::SYSTEM) && self.sync_text(&snap.system.memory, false, cx) {
-            #[cfg(any(test, feature = "test-hooks"))]
-            self.notify_count.set(self.notify_count.get() + 1);
-            cx.notify();
+            self.notify(cx);
         }
     }
 
@@ -771,7 +1088,9 @@ impl MemBox {
     }
 
     /// The value, rows and percents when the totals changed, or always with `force`; new
-    /// sparkline specs when a scale total changed. True when the text was formatted again.
+    /// sparkline specs when a scale total changed. The widgets of the rows whose text or meter
+    /// changed render again ([`Self::notify_rows`]). True when the box's own text (the title
+    /// value) changed, or with `force`, so the box must render.
     fn sync_text(&mut self, mem: &MemoryTotals, force: bool, cx: &mut Context<Self>) -> bool {
         let mut h = FxHasher::default();
         mem.validity.hash(&mut h);
@@ -799,7 +1118,7 @@ impl MemBox {
         }
         let valid = matches!(mem.validity, Validity::Valid | Validity::Stale);
         let unit = NetworkUnit::default();
-        self.value = value_text(mem.validity, |out| {
+        let value = value_text(mem.validity, |out| {
             format_value(
                 ValueFormat::PercentOf { total: mem.total },
                 mem.used as f32,
@@ -807,6 +1126,9 @@ impl MemBox {
                 out,
             );
         });
+        let title_changed = value != self.value;
+        self.value = value;
+        let mut next = self.model.0.borrow().clone();
         let swap_used = mem.swap_total.saturating_sub(mem.swap_free);
         let parts = [
             (mem.used, mem.total),
@@ -816,8 +1138,8 @@ impl MemBox {
             (mem.committed, mem.commit_limit),
         ];
         for (i, (part, whole)) in parts.into_iter().enumerate() {
-            let row = &mut self.rows[i];
-            let pct = &mut self.percents[i];
+            let row = &mut next.rows[i];
+            let pct = &mut next.percents[i];
             if valid && i == SWAP && whole == 0 {
                 row.value = tr(cx, KEY_NO_SWAP);
                 row.fraction = None;
@@ -837,11 +1159,26 @@ impl MemBox {
                 None => SharedString::default(),
             };
         }
-        true
+        self.set_rows(next, cx);
+        title_changed || force
     }
 
-    /// Applies the chart settings when one of their sections changed.
+    /// Takes `next` as the rows' model and renders the widgets of the rows that changed.
+    fn set_rows(&mut self, next: MemRows, cx: &mut Context<Self>) {
+        let changed: [bool; ROWS] = {
+            let old = self.model.0.borrow();
+            std::array::from_fn(|i| {
+                old.rows[i] != next.rows[i] || old.percents[i] != next.percents[i]
+            })
+        };
+        *self.model.0.borrow_mut() = next;
+        self.notify_rows(changed, cx);
+    }
+
+    /// Applies the chart settings when one of their sections changed, and shows a saved grid
+    /// layout that came, went or changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        self.sync_grid(cx);
         let versions = chart_section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -863,9 +1200,11 @@ impl MemBox {
         }
         self.style_version = version;
         let colors = row_colors(current(cx));
-        for (row, color) in self.rows.iter_mut().zip(colors) {
+        let mut next = self.model.0.borrow().clone();
+        for (row, color) in next.rows.iter_mut().zip(colors) {
             row.color = color;
         }
+        self.set_rows(next, cx);
         self.rebuild_specs(cx);
         cx.notify();
     }
@@ -878,9 +1217,11 @@ impl MemBox {
         }
         self.strings_version = version;
         self.title = tr(cx, KEY_TITLE);
-        for (row, key) in self.rows.iter_mut().zip(KEY_ROWS) {
+        let mut next = self.model.0.borrow().clone();
+        for (row, key) in next.rows.iter_mut().zip(KEY_ROWS) {
             row.label = tr(cx, key);
         }
+        self.set_rows(next, cx);
         let labels = comp_labels(cx);
         self.comp_chart.update(cx, |v, cx| v.set_labels(labels, cx));
         // "No swap" is translated too.
@@ -966,7 +1307,7 @@ pub fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
 }
 
 /// The height of a text row, logical px before `ui_scale`: one line, or two when not `wide`.
-fn row_min_h(wide: bool, s: f32) -> gpui_kit::Pixels {
+pub(super) fn row_min_h(wide: bool, s: f32) -> gpui_kit::Pixels {
     px(if wide { LABEL_ROW } else { 2. * LABEL_ROW } * s)
 }
 
@@ -1065,7 +1406,7 @@ fn cell_min(m: &UiMetrics) -> Size<Pixels> {
 
 /// The `charts` grid for the five cells in `body`, placed as `arrange` says (`arrange_grid`).
 /// Before the first paint the body is empty and the fit is one column or one row.
-fn charts_fit(arrange: Arrange, body: Size<Pixels>, m: &UiMetrics) -> GridFit {
+pub(super) fn charts_fit(arrange: Arrange, body: Size<Pixels>, m: &UiMetrics) -> GridFit {
     arrange_grid(
         arrange,
         ROWS,
@@ -1076,13 +1417,13 @@ fn charts_fit(arrange: Arrange, body: Size<Pixels>, m: &UiMetrics) -> GridFit {
     )
 }
 
-/// A `charts` cell of `cell` px: the header with the row's name, value and percent over its chart.
+/// A `charts` cell, filling its place: the header with the row's name, value and percent over
+/// its chart.
 fn chart_cell(
     i: usize,
     row: &MeterRow,
     percent: &SharedString,
     chart: &Entity<ChartView>,
-    cell: Size<Pixels>,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
@@ -1121,9 +1462,7 @@ fn chart_cell(
         .debug_selector(move || cell_id(i))
         .flex()
         .flex_col()
-        .flex_none()
-        .w(cell.width)
-        .h(cell.height)
+        .size_full()
         .overflow_hidden()
         .gap(m.sp[2])
         .child(
@@ -1149,85 +1488,249 @@ fn chart_cell(
         .into_any_element()
 }
 
+/// Row `index` of `rows` as a row widget draws it (`FlowLook::MemRow`), filling its place: the
+/// text and meter part, on one line when `wide`, and in `rows` its sparkline beside it with the
+/// text part taking `share` of the width, as the two columns of 1.2.0 drew them.
+pub(crate) fn mem_row_part(
+    rows: &MemRows,
+    index: usize,
+    wide: bool,
+    spark: Option<&(Entity<ChartView>, f32)>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    let text = text_row(
+        &rows.rows[index],
+        &rows.percents[index],
+        index,
+        wide,
+        m,
+        theme,
+    );
+    let Some((chart, share)) = spark else {
+        return div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(text)
+            .into_any_element();
+    };
+    div()
+        .flex()
+        .flex_row()
+        .size_full()
+        .gap(m.sp[5])
+        // The text part gives way when the row is narrower than its share.
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_shrink(1.)
+                .min_w_0()
+                .w(relative(*share))
+                .h_full()
+                .child(text),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(spark_cell(chart, index, wide, m)),
+        )
+        .into_any_element()
+}
+
+/// Row `index` of `rows` as a `charts` cell widget draws it (`FlowLook::MemCell`), filling its
+/// place.
+pub(crate) fn mem_cell_part(
+    rows: &MemRows,
+    index: usize,
+    chart: &Entity<ChartView>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) -> AnyElement {
+    chart_cell(
+        index,
+        &rows.rows[index],
+        &rows.percents[index],
+        chart,
+        m,
+        theme,
+    )
+}
+
+/// The widgets a flow render drew, in drawing order.
+type Drawn = SmallVec<[u32; 6]>;
+
+/// "No widgets. Use Edit Widgets to add some.", centred in the body (UI-PRF-061).
+fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
+    let mut text = div();
+    *text.text_style() = t_xs(m);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            text.debug_selector(|| EMPTY_ID.to_owned())
+                .text_color(theme.text_secondary)
+                .child(tr(cx, KEY_EMPTY)),
+        )
+        .into_any_element()
+}
+
+fn cached_full<V: Render>(view: Entity<V>) -> AnyElement {
+    view.cached(StyleRefinement::default().size_full())
+        .into_any_element()
+}
+
 impl MemBox {
-    /// `charts`: one chart per row that fills the body in one column, one row or a grid. Cells
-    /// that do not fit scroll under a scrollbar.
-    fn charts_body(&mut self, m: &UiMetrics, theme: &TlTheme) -> (AnyElement, GridFit) {
-        let fit = charts_fit(self.arrange, self.body.get(), m);
-        let cells = grid_cells(
-            &fit,
-            (0..ROWS).map(|i| {
-                chart_cell(
-                    i,
-                    &self.rows[i],
-                    &self.percents[i],
-                    &self.cell_charts[i],
-                    fit.cell,
-                    m,
-                    theme,
-                )
-            }),
-            m.sp[2],
-            CHARTS_GRID_ID,
+    /// `look` drawn by widget `id`, filling its part; `fallback` when the layout has no such
+    /// widget.
+    fn widget_part(
+        &self,
+        id: Option<u32>,
+        look: FlowLook,
+        fallback: impl FnOnce() -> AnyElement,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let widget = id.and_then(|id| {
+            let w = self
+                .container
+                .update(cx, |c, cx| c.flow_widget(id, look, cx))?;
+            drawn.push(id);
+            Some(w)
+        });
+        match widget {
+            Some(w) => cached_full(w),
+            None => fallback(),
+        }
+    }
+
+    /// Row `i`'s widget in a column of rows: it shares the column's height and is at least one
+    /// line (two when not `wide`) high. `spark` is the sparkline beside it in `rows`.
+    fn row_slot(
+        &self,
+        i: usize,
+        wide: bool,
+        spark: Option<(Entity<ChartView>, f32)>,
+        m: &UiMetrics,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = current(cx).clone();
+        let look = FlowLook::MemRow {
+            rows: self.model.clone(),
+            index: i,
+            wide,
+            spark: spark.clone(),
+        };
+        let model = self.model.clone();
+        let id = mem_flow::row_of(&self.flow, i);
+        let part = self.widget_part(
+            id,
+            look,
+            || mem_row_part(&model.0.borrow(), i, wide, spark.as_ref(), m, &theme),
+            drawn,
+            cx,
         );
-        let body = div()
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(row_min_h(wide, m.ui_scale))
+            .child(part)
+            .into_any_element()
+    }
+
+    /// The five rows in a column that shares the body height. A row that does not fit whole
+    /// is left out, top first (UI-PRF-017). `sparks` puts each row's sparkline beside it, the
+    /// text part taking that share.
+    fn rows_column(
+        &self,
+        wide: bool,
+        sparks: Option<f32>,
+        m: &UiMetrics,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows = whole_rows().size_full().gap(m.sp[2]);
+        for i in 0..ROWS {
+            let spark = sparks.map(|share| (self.sparks[i].clone(), share));
+            rows = rows.child(self.row_slot(i, wide, spark, m, drawn, cx));
+        }
+        rows.into_any_element()
+    }
+
+    /// `charts`: one chart cell widget per row that fills the body in one column, one row or a
+    /// grid. Cells that do not fit scroll under a scrollbar.
+    fn charts_body(
+        &self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        drawn: &mut Drawn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let fit = charts_fit(self.arrange, self.body.get(), m);
+        let mut cells: SmallVec<[AnyElement; ROWS]> = SmallVec::new();
+        for i in 0..ROWS {
+            let look = FlowLook::MemCell {
+                rows: self.model.clone(),
+                index: i,
+                chart: self.cell_charts[i].clone(),
+            };
+            let model = self.model.clone();
+            let chart = self.cell_charts[i].clone();
+            let id = mem_flow::row_of(&self.flow, i);
+            let part = self.widget_part(
+                id,
+                look,
+                || mem_cell_part(&model.0.borrow(), i, &chart, m, theme),
+                drawn,
+                cx,
+            );
+            cells.push(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(fit.cell.width)
+                    .h(fit.cell.height)
+                    .child(part)
+                    .into_any_element(),
+            );
+        }
+        let cells = grid_cells(&fit, cells, m.sp[2], CHARTS_GRID_ID);
+        div()
             .debug_selector(|| CHARTS_GRID_ID.into())
             .relative()
             .size_full()
             .overflow_hidden()
             .child(cells)
-            .into_any_element();
-        (body, fit)
-    }
-
-    /// The five text rows in a column that shares the body height. A row that does not fit whole
-    /// is left out, top first (UI-PRF-017).
-    fn text_rows(&self, wide: bool, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
-        whole_rows()
-            .size_full()
-            .gap(m.sp[2])
-            .children(
-                self.rows
-                    .iter()
-                    .zip(&self.percents)
-                    .enumerate()
-                    .map(|(i, (r, p))| text_row(r, p, i, wide, m, theme)),
-            )
             .into_any_element()
     }
 
-    /// `rows`: the text part, the splitter and the sparkline column.
+    /// `rows`: the rows with their sparklines, the splitter between the two columns.
     fn rows_body(
         &mut self,
         m: &UiMetrics,
-        theme: &TlTheme,
         wide: bool,
+        drawn: &mut Drawn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let share = self.split(m);
-        let text = self.text_rows(wide, m, theme);
-        let sparks = whole_rows().size_full().gap(m.sp[2]).children(
-            self.sparks
-                .iter()
-                .enumerate()
-                .map(|(i, c)| spark_cell(c, i, wide, m)),
-        );
+        let rows = self.rows_column(wide, Some(share), m, drawn, cx);
         div()
             .relative()
-            .flex()
-            .flex_row()
             .size_full()
-            .gap(m.sp[5])
-            // The text part gives way when the body is narrower than its share.
-            .child(
-                div()
-                    .flex_shrink(1.)
-                    .min_w_0()
-                    .w(relative(share))
-                    .h_full()
-                    .child(text),
-            )
-            .child(div().flex_1().min_w_0().h_full().child(sparks))
+            .child(rows)
             .child(self.spark_split.probe(Self::spark_inner_split, cx))
             .child(self.spark_split.gap(
                 SplitAxis::Row,
@@ -1244,11 +1747,20 @@ impl MemBox {
         &mut self,
         wide: bool,
         m: &UiMetrics,
-        theme: &TlTheme,
+        drawn: &mut Drawn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let share = self.split(m);
         let side = self.arrange == Arrange::Horizontal;
+        let used = self.used_chart.clone();
+        let fallback = used.clone();
+        let chart_part = self.widget_part(
+            mem_flow::used_chart_of(&self.flow),
+            FlowLook::Chart(used),
+            move || cached_full(fallback),
+            drawn,
+            cx,
+        );
         // The chart gives way when the body is lower or narrower than its share.
         let chart = div()
             .debug_selector(|| MEM_USED_CHART_ID.into())
@@ -1256,11 +1768,7 @@ impl MemBox {
             .flex_shrink(1.)
             .min_h_0()
             .min_w_0()
-            .child(
-                self.used_chart
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            );
+            .child(chart_part);
         let chart = if side {
             chart.w(relative(share)).h_full()
         } else {
@@ -1274,9 +1782,10 @@ impl MemBox {
         } else {
             frame.flex_col()
         };
+        let column = self.rows_column(wide, None, m, drawn, cx);
         frame
             .child(chart)
-            .child(rows.child(self.text_rows(wide, m, theme)))
+            .child(rows.child(column))
             .child(self.chart_split.probe(Self::chart_inner_split, cx))
             .child(self.chart_split.gap(
                 self.chart_axis(),
@@ -1286,6 +1795,80 @@ impl MemBox {
                 cx,
             ))
             .into_any_element()
+    }
+
+    /// `chart`: the composition chart filling the body.
+    fn chart_body(&self, drawn: &mut Drawn, cx: &mut Context<Self>) -> AnyElement {
+        let comp = self.comp_chart.clone();
+        let fallback = comp.clone();
+        let part = self.widget_part(
+            mem_flow::comp_of(&self.flow),
+            FlowLook::Chart(comp),
+            move || cached_full(fallback),
+            drawn,
+            cx,
+        );
+        div()
+            .debug_selector(|| MEM_COMP_CHART_ID.into())
+            .relative()
+            .size_full()
+            .child(part)
+            .into_any_element()
+    }
+
+    /// `apps`: Memory by app filling the body, drawn by its fixed widget.
+    fn apps_body(&self, drawn: &mut Drawn, cx: &mut Context<Self>) -> AnyElement {
+        let fixed = mem_flow::apps_of(&self.flow).and_then(|id| {
+            let f = self.container.update(cx, |c, cx| c.flow_fixed(id, cx))?;
+            drawn.push(id);
+            Some(f)
+        });
+        let part = match fixed {
+            Some(f) => Some(cached_full(f)),
+            None => self.apps.get().cloned().map(cached_full),
+        };
+        div()
+            .debug_selector(|| MEM_APPS_ID.into())
+            .relative()
+            .size_full()
+            .children(part)
+            .into_any_element()
+    }
+
+    /// The plan of a flow render (ADR-019 "Presets"): the parts the box drew and the widget of
+    /// each, with the split and the row height class as the render laid them out.
+    fn make_plan(&self, wide: bool, m: &UiMetrics) -> MemPlan {
+        let flow = &self.flow;
+        let rows = if self.mode.has_rows() {
+            mem_flow::rows_of(flow)
+        } else {
+            [None; ROWS]
+        };
+        MemPlan {
+            look: self.mode.look(),
+            m: *m,
+            side: self.mode == MemMode::ChartRows && self.arrange == Arrange::Horizontal,
+            share: if self.mode == MemMode::ChartRows {
+                self.split(m)
+            } else {
+                0.
+            },
+            wide: wide || !matches!(self.mode, MemMode::Rows | MemMode::ChartRows),
+            arrange: if self.mode == MemMode::Charts {
+                self.arrange
+            } else {
+                Arrange::Auto
+            },
+            rows,
+            chart: match self.mode {
+                MemMode::ChartRows => mem_flow::used_chart_of(flow),
+                MemMode::Chart => mem_flow::comp_of(flow),
+                _ => None,
+            },
+            apps: (self.mode == MemMode::Apps)
+                .then(|| mem_flow::apps_of(flow))
+                .flatten(),
+        }
     }
 }
 
@@ -1333,26 +1916,46 @@ impl Render for MemBox {
                 )
             }
         };
-        let inner: AnyElement = match self.mode {
-            MemMode::Rows => self.rows_body(&m, &theme, class == 1, cx),
-            MemMode::ChartRows => self.chart_rows_body(class == 1, &m, &theme, cx),
-            MemMode::Charts => self.charts_body(&m, &theme).0,
-            MemMode::Chart => div()
-                .debug_selector(|| MEM_COMP_CHART_ID.into())
+        let editor = cached_full(self.editor.clone());
+        let inner: AnyElement = if !self.host_draws() {
+            // The user's widgets, or Edit Widgets: the editor draws them.
+            let empty = !self.editing
+                && self
+                    .saved_grid
+                    .as_ref()
+                    .is_some_and(|g| g.widgets.is_empty());
+            div()
                 .relative()
                 .size_full()
-                .child(
-                    self.comp_chart
-                        .clone()
-                        .cached(StyleRefinement::default().size_full()),
-                )
-                .into_any_element(),
-            MemMode::Apps => div()
-                .debug_selector(|| MEM_APPS_ID.into())
+                .child(editor)
+                .when(empty, |d| d.child(empty_text(&m, &theme, cx)))
+                .into_any_element()
+        } else {
+            let wide = class == 1;
+            let mut drawn = Drawn::new();
+            let body: AnyElement = match self.mode {
+                MemMode::Rows => self.rows_body(&m, wide, &mut drawn, cx),
+                MemMode::ChartRows => self.chart_rows_body(wide, &m, &mut drawn, cx),
+                MemMode::Charts => self.charts_body(&m, &theme, &mut drawn, cx),
+                MemMode::Chart => self.chart_body(&mut drawn, cx),
+                MemMode::Apps => self.apps_body(&mut drawn, cx),
+            };
+            let plan = self.make_plan(wide, &m);
+            let ids_changed = self.plan.drawn() != drawn;
+            self.plan.set_drawn(drawn);
+            if self.plan.set(plan) || ids_changed {
+                self.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }
+            // The editor sits under the body with no widgets, so its container knows the body's
+            // size when Edit Widgets starts.
+            div()
                 .relative()
                 .size_full()
-                .children(self.apps.clone())
-                .into_any_element(),
+                .child(div().absolute().top_0().left_0().size_full().child(editor))
+                .child(body)
+                .into_any_element()
         };
         let body = div()
             .debug_selector(|| MEM_BODY_ID.into())

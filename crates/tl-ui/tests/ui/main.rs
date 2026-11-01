@@ -41,6 +41,7 @@ mod net_page;
 mod overview;
 mod overview_cpu_widgets;
 mod overview_groups;
+mod overview_mem_widgets;
 mod overview_range;
 mod overview_timeline;
 mod overview_widgets;

@@ -9,11 +9,13 @@
 //! confirmations.
 //!
 //! Phase 2 adds group widgets: `members` lists a group's members, `group_fill` lays its items
-//! out and `group_widget` is the group entity.
+//! out and `group_widget` is the group entity. `fixed_widget` is a widget with content of its
+//! own (Memory by app).
 
 pub mod compose;
 pub mod container;
 pub mod edit;
+pub mod fixed_widget;
 pub mod grid;
 pub mod group_fill;
 pub mod group_widget;

@@ -25,6 +25,11 @@
 //! spark row, the section chart, or its value as plain text), whatever its size. The host gives
 //! the name the preset's row shows and the chart it keeps for the part, so the widget builds no
 //! chart of its own. The value and the bar still come from the widget's source.
+//!
+//! The Memory box's flow looks (`FlowLook::MemRow` and `FlowLook::MemCell`, `overview/mem_flow.rs`)
+//! draw a 1.2.0 row or `charts` cell from the rows' model the box keeps, as the cores group
+//! draws the core rows. The box updates the model on a sample and notifies only the widgets of
+//! the rows that changed ([`MetricWidget::flow_changed`]).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -52,7 +57,9 @@ use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::overview::fit::fit_text;
 use crate::pages::performance::overview::gpu_flow::line_style;
-use crate::pages::performance::overview::mem_box::MeterRow;
+use crate::pages::performance::overview::mem_box::{
+    MemRowsRef, MeterRow, mem_cell_part, mem_row_part,
+};
 use crate::pages::performance::overview::parts::{
     ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
     spark_labels, spark_row,
@@ -123,6 +130,22 @@ pub enum FlowLook {
     Chart(Entity<ChartView>),
     /// The value alone in the small secondary text, as the temperature and power line draws it.
     Text,
+    /// A Memory box row (UI-PRF-017): row `index`'s label, value, meter and percent from the
+    /// box's model, on one line when `wide` (else two). In `rows` the row's sparkline sits
+    /// beside it (`spark`), the text part taking the given share of the width.
+    MemRow {
+        rows: MemRowsRef,
+        index: usize,
+        wide: bool,
+        spark: Option<(Entity<ChartView>, f32)>,
+    },
+    /// A `charts` cell of the Memory box (D-029): row `index`'s name, value and percent over
+    /// its chart.
+    MemCell {
+        rows: MemRowsRef,
+        index: usize,
+        chart: Entity<ChartView>,
+    },
 }
 
 impl FlowLook {
@@ -131,7 +154,8 @@ impl FlowLook {
         match self {
             Self::Cell { .. } => FormSet::LABEL | FormSet::VALUE,
             Self::Row { .. } => FormSet::LABEL | FormSet::VALUE | FormSet::BAR,
-            Self::Chart(_) => FormSet::empty(),
+            // The Memory looks read the box's model, not the source.
+            Self::Chart(_) | Self::MemRow { .. } | Self::MemCell { .. } => FormSet::empty(),
             Self::Text => FormSet::VALUE,
         }
     }
@@ -139,7 +163,9 @@ impl FlowLook {
     fn label(&self) -> SharedString {
         match self {
             Self::Cell { label, .. } | Self::Row { label, .. } => label.clone(),
-            Self::Chart(_) | Self::Text => SharedString::default(),
+            Self::Chart(_) | Self::Text | Self::MemRow { .. } | Self::MemCell { .. } => {
+                SharedString::default()
+            }
         }
     }
 }
@@ -344,6 +370,14 @@ impl MetricWidget {
         self.shown = self.read_shown(cx);
         self.sync_chart(cx);
         self.notify(cx);
+    }
+
+    /// The host changed what its look draws (a Memory row's text or meter): one render of this
+    /// widget. Without a look nothing happens.
+    pub fn flow_changed(&mut self, cx: &mut Context<Self>) {
+        if self.flow.is_some() {
+            self.notify(cx);
+        }
     }
 
     /// New settings for the same widget id (a layout change keeps the entity). A new source
@@ -1077,6 +1111,15 @@ impl MetricWidget {
                 .size_full()
                 .child(cached(chart))
                 .into_any_element(),
+            FlowLook::MemRow {
+                rows,
+                index,
+                wide,
+                spark,
+            } => mem_row_part(&rows.0.borrow(), *index, *wide, spark.as_ref(), m, theme),
+            FlowLook::MemCell { rows, index, chart } => {
+                mem_cell_part(&rows.0.borrow(), *index, chart, m, theme)
+            }
             FlowLook::Text => {
                 // The line's style, with tabular digits: the box places the value at the
                 // width of its shape in this style (tasklens-lhliq.7).
