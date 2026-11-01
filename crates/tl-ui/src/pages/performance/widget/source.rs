@@ -273,7 +273,6 @@ pub(super) fn box_reading(
             };
             let second = match key {
                 METRIC_GPU_MEMORY => as_f32(t.shared_used, |v| v as f32),
-                METRIC_GPU_CLOCKS => as_f32(t.clock_mem_mhz, |v| v as f32),
                 METRIC_FAN => as_f32(t.fan_rpm, |v| v as f32),
                 _ => return one(reading(metric, t)),
             };

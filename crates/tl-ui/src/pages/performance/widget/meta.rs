@@ -637,8 +637,9 @@ pub const GPU_VRAM_SHARED: MetricMeta = MetricMeta {
     ..GPU_VRAM
 };
 
-/// `clocks` of a GPU: graphics clock filled and memory clock dashed, "1905 / 3105 MHz" as the
-/// 1.3.0 Clocks chart (UI-PRF-032).
+/// `clocks` of a GPU: graphics clock filled and memory clock dashed, as the 1.3.0 Clocks chart
+/// (UI-PRF-032). The value is the graphics clock of its hardware maximum, "1905 / 3105 MHz", as
+/// the UI-PRF-033 Clock speed row; the memory clock is the dashed line only.
 pub const GPU_CLOCKS: MetricMeta = MetricMeta {
     value_text: ValueText::OfTotal,
     bar: BarMax::None,
@@ -1907,9 +1908,18 @@ mod tests {
             text(power, false, 31.9, None, limit),
             fmt(ValueFormat::Watts, 31.9)
         );
-        // GPU clocks name the graphics maximum.
+        // GPU clocks: the graphics clock of the graphics maximum, as the UI-PRF-033 Clock
+        // speed row "1905 / 3105 MHz". The memory clock is not in the text.
         let clocks = at(DeviceKind::Gpu, METRIC_GPU_CLOCKS);
-        assert_eq!(clocks.value_total(gpu), Some(2520.0));
+        let clocks_max = clocks.value_total(gpu);
+        assert_eq!(clocks_max, Some(2520.0));
+        let clocks_text = format!(
+            "{} / {}",
+            fmt(ValueFormat::Mhz, 1905.0),
+            fmt(ValueFormat::Mhz, 2520.0)
+        );
+        assert_eq!(text(clocks, false, 1905.0, None, clocks_max), clocks_text);
+        assert_eq!(text(clocks, true, 1905.0, None, clocks_max), clocks_text);
         // Commit as a percent of the limit; its stats too.
         let commit = at(DeviceKind::Memory, METRIC_COMMIT_PCT);
         assert_eq!(text(commit, false, 69.0, None, Some(100.0)), "69.0%");
