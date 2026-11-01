@@ -2065,8 +2065,10 @@ hidden_gpu_engines = []        # engine keys
 memory_composition = true
 memory_swap_graph = true
 memory_view = "usage"          # usage | apps; the Memory page flow preset (UI-PRF-060)
-# The page keys above are not converted (ADR-019 phase 3): a page without a [[performance.layouts]] entry builds its flow
-#   layout from them in memory; a page with an entry ignores them, except cpu_kernel, cpu_board_sort and hidden_gpu_engines.
+# ADR-019 phase 3: cpu_graph_mode, cpu_secondary_graph, memory_view, memory_swap_graph, memory_composition and
+#   gpu_optional_graphs are old keys. A page converts them once into its [[performance.layouts]] entry when one is off its
+#   default: page.cpu and page.memory at load, each page.gpu:<id> when its page is first built. They stay in the file for
+#   1.3.0; a page with an entry ignores them. cpu_kernel, cpu_board_sort, hidden_gpu_engines stay live in every layout.
 show_disks = true
 show_gpus = true
 show_fans = true
@@ -2116,7 +2118,7 @@ next_id = 1                    # the id the next new widget takes; only grows, r
 #   "memory_bar", "memory_compressed", "swap_devices", "memory_modules" (page.memory); "disk_partitions" (page.disk:*); "net_settings" (page.net:*);
 #   "battery_history" (page.bat:*)
 # Grid columns: overview.cpu, overview.processes, overview.timeline 12; overview.memory, overview.gpu, overview.disk, overview.net 6; every page.* 12.
-# Page entries are written as version 2. A reset of a page removes its entry only; the page keys stay.
+# Page entries are written as version 2. A reset of a page removes its entry and sets its kind's old keys to their defaults.
 # The first save after a converted load copies settings.toml to settings.toml.pre-layouts-v2 once (pre-layouts-v1 from 1.2.0 is left alone) (ADR-019).
 # A reset to the default removes the entry and the old keys its box converts from: GPU mode, split, arrange, hidden; CPU mode, split, arrange,
 #   power, power_split, power_placement, clocks; Memory, Disk and Net mode, split, arrange (ADR-019).
