@@ -67,6 +67,10 @@ const KEY_NOT_CONNECTED: &str = "perf-widget-not-connected";
 const KEY_NOT_REPORTED: &str = "perf-widget-not-reported";
 const KEY_UNKNOWN: &str = "perf-widget-unknown";
 
+/// The width the first line keeps free in Edit Widgets: the grip and the gear, each
+/// `edit::HANDLE` wide, logical px.
+const EDIT_INSET: f32 = 2. * super::edit::HANDLE;
+
 /// The class the size probe uses for an unavailable widget, which has no composition.
 const UNAVAILABLE_CLASS: u32 = u32::MAX;
 /// The class of a widget with a [`FlowLook`], which draws the same part at every size.
@@ -171,6 +175,8 @@ pub struct MetricWidget {
     source: Entity<SourceData>,
     /// Whether the name has the GPU's name in front (the box shows two GPUs).
     device_prefix: bool,
+    /// Edit Widgets is on: the first line keeps the grip and the gear's width free at its start.
+    edit_inset: bool,
     shown: Shown,
     chart: Option<Entity<ChartView>>,
     chart_key: Option<ChartKey>,
@@ -218,6 +224,7 @@ impl MetricWidget {
             _source_sub: cx.observe(&source, Self::on_source),
             source,
             device_prefix: false,
+            edit_inset: false,
             shown: Shown {
                 availability: Availability::Gone,
                 forms: FormSet::empty(),
@@ -345,6 +352,21 @@ impl MetricWidget {
         self.shown = self.read_shown(cx);
         self.sync_chart(cx);
         self.notify(cx);
+    }
+
+    /// Edit Widgets on or off. While on, the first text line starts right of the edit grip and
+    /// gear, so the chrome covers no text (UI-PRF-061).
+    pub fn set_edit_inset(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.edit_inset == on {
+            return;
+        }
+        self.edit_inset = on;
+        self.notify(cx);
+    }
+
+    /// The left margin of the first text line: the grip and the gear in Edit Widgets, else 0.
+    fn lead(&self, s: f32) -> Pixels {
+        px(if self.edit_inset { EDIT_INSET * s } else { 0. })
     }
 
     /// Puts the GPU's name in front of the metric's name, when the box shows two GPUs.
@@ -723,6 +745,7 @@ impl MetricWidget {
     fn cell(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
         let (id, s) = (self.setting.id, m.ui_scale);
         let mut el = div().flex().flex_col().size_full();
+        let mut lead = self.lead(s);
         if forms.intersects(FormSet::LABEL | FormSet::VALUE) {
             let mut header = div()
                 .flex()
@@ -730,6 +753,7 @@ impl MetricWidget {
                 .flex_none()
                 .items_center()
                 .gap(m.sp[2])
+                .ml(std::mem::take(&mut lead))
                 .h(px(CELL_HEADER_H * s));
             if forms.contains(FormSet::LABEL) {
                 let name = self.shown.name.clone();
@@ -761,6 +785,7 @@ impl MetricWidget {
             el = el.child(
                 text_part(part_id(id, "stats"), stats, t_xs(m), theme.text_secondary)
                     .flex_none()
+                    .ml(std::mem::take(&mut lead))
                     .h(px(CELL_STATS_H * s)),
             );
         }
@@ -774,25 +799,22 @@ impl MetricWidget {
     fn tile(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
         let (id, s) = (self.setting.id, m.ui_scale);
         let mut el = div().flex().flex_col().size_full();
+        let lead = self.lead(s);
         if forms.contains(FormSet::LABEL) {
             let name = self.shown.name.clone();
-            el = el.child(text_part(
-                part_id(id, "name"),
-                name,
-                t_sm(m),
-                theme.text_secondary,
-            ));
+            el = el.child(
+                text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary).ml(lead),
+            );
         }
         if forms.contains(FormSet::VALUE) {
             let mut style = t_lg(m);
             style.font_features = numeric_style(m, m.text.lg).font_features;
             let value = self.shown.value.clone();
-            el = el.child(text_part(
-                part_id(id, "value"),
-                value,
-                style,
-                theme.text_primary,
-            ));
+            el = el.child(
+                // The name line can be a pixel shorter than the gear, so the value keeps clear
+                // of the gear too.
+                text_part(part_id(id, "value"), value, style, theme.text_primary).ml(lead),
+            );
         }
         if forms.contains(FormSet::STATS) {
             let stats = self.shown.stats.clone();
@@ -818,19 +840,15 @@ impl MetricWidget {
             .items_center()
             .size_full()
             .gap(px(ROW_GAP * s));
+        let mut lead = self.lead(s);
         if forms.contains(FormSet::LABEL) {
             let name = self.shown.name.clone();
             // The name column carries its own trailing space (`compose::row_parts_w`).
             el = el.child(
-                div()
-                    .flex_none()
-                    .w(px((ROW_NAME_W - ROW_GAP) * s))
-                    .child(text_part(
-                        part_id(id, "name"),
-                        name,
-                        t_sm(m),
-                        theme.text_secondary,
-                    )),
+                div().flex_none().w(px((ROW_NAME_W - ROW_GAP) * s)).child(
+                    text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary)
+                        .ml(std::mem::take(&mut lead)),
+                ),
             );
         }
         let bar = forms.contains(FormSet::BAR);
@@ -845,6 +863,7 @@ impl MetricWidget {
             let mut v = v
                 .debug_selector(move || p)
                 .min_w(px(ROW_VALUE_W * s))
+                .ml(std::mem::take(&mut lead))
                 .flex()
                 .justify_end()
                 .whitespace_nowrap()

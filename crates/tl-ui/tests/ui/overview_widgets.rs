@@ -2283,3 +2283,101 @@ fn overview_widget_edit_gear_clear_of_chart_labels(cx: &mut TestAppContext) {
         }
     }
 }
+
+/// One widget of each composition in a 6-column grid, for the edit-mode layout checks.
+fn compositions() -> ContainerLayout {
+    let a = |m: &str| selector(DeviceSelector::Key(key(1)), m);
+    let tile = FormSet::LABEL | FormSet::VALUE | FormSet::STATS | FormSet::BAR;
+    grid_layout(vec![
+        (1, a(&engine_gpu()), FormSet::all(), cell(0, 0, 3, 4)),
+        (2, a("vram"), tile, cell(3, 0, 3, 3)),
+        (3, a("vram"), ROW_FORMS, cell(3, 3, 3, 1)),
+        (4, a("vram"), ROW_FORMS, cell(0, 4, 6, 1)),
+        (
+            5,
+            a("vram"),
+            FormSet::VALUE | FormSet::LABEL,
+            cell(0, 5, 6, 1),
+        ),
+        (6, a("vram"), FormSet::VALUE, cell(0, 6, 3, 1)),
+        (
+            7,
+            a("vram"),
+            FormSet::LABEL | FormSet::STATS,
+            cell(3, 6, 3, 1),
+        ),
+        (8, a(&engine_gpu()), CHART_FORMS, cell(0, 7, 6, 3)),
+    ])
+}
+
+/// In Edit Widgets the grip and the gear cover no text of their widget, and every widget lies
+/// inside the body's content area: the outline is drawn inside the cell and the scrollbar's
+/// width stays free, as in the applied view (tasklens-lhliq.11).
+#[gpui_kit::test]
+fn overview_widget_edit_chrome_covers_no_text_and_fits_the_body(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(compositions(), 420., 360.);
+    for pct in [100u16, 150, 200] {
+        r.set_ui_scale(pct);
+        r.start(&e);
+        draw(r.vcx);
+        draw(r.vcx);
+        let scale = f32::from(pct) / 100.;
+        let scroll = r
+            .vcx
+            .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+            .expect("body");
+        // The rows are taller than the body: the body scrolls, so the scrollbar's width is free.
+        let content_h = r.vcx.read_entity(&c, |c, _| c.placement().content_h);
+        let scrolls = content_h > scroll.size.height + px(0.5);
+        assert!(
+            pct != 200 || scrolls,
+            "the 200 % case must scroll to cover the scrollbar"
+        );
+        let right = scroll.right()
+            - if scrolls {
+                px(grid::SCROLLBAR_W * scale)
+            } else {
+                px(0.)
+            };
+        for id in 1u32..=8 {
+            let at = format!("{pct} % widget {id}");
+            let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+            assert!(
+                w.left() >= scroll.left() - px(0.5) && w.right() <= right + px(0.5),
+                "{at}: {w:?} outside the body content {scroll:?} (right edge {right:?})"
+            );
+            let gear = r.vcx.debug_bounds(leak(gear_id(id))).expect("gear");
+            let grip = r.vcx.debug_bounds(leak(grip_id(id))).expect("grip");
+            let mut texts = Vec::new();
+            for part in ["name", "value", "stats", "reason"] {
+                if let Some(b) = r.vcx.debug_bounds(leak(part_id(id, part))) {
+                    texts.push((part.to_owned(), b));
+                }
+            }
+            let chart = r.vcx.read_entity(&c, |c, cx| {
+                c.widget(id).and_then(|w| w.read(cx).chart().cloned())
+            });
+            if let Some(chart) = chart {
+                for (k, b) in r.vcx.read_entity(&chart, |v, _| {
+                    [LabelKind::AxisMax, LabelKind::Heading, LabelKind::Value]
+                        .into_iter()
+                        .filter_map(|k| v.label_cache().painted(k))
+                        .map(|p| (format!("{:?}", p.kind), p.bounds()))
+                        .collect::<Vec<_>>()
+                }) {
+                    texts.push((k, b));
+                }
+            }
+            for (part, b) in texts {
+                assert!(!gear.intersects(&b), "{at}: gear {gear:?} on {part} {b:?}");
+                assert!(!grip.intersects(&b), "{at}: grip {grip:?} on {part} {b:?}");
+                assert!(
+                    b.right() <= w.right() + px(0.5),
+                    "{at}: {part} {b:?} is cut off by the widget {w:?}"
+                );
+            }
+        }
+        r.ed(&e, |e, _, cx| e.cancel(cx));
+    }
+}

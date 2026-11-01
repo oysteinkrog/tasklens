@@ -1270,8 +1270,9 @@ impl WidgetEditor {
                 .id(SharedString::from(grip_id(id)))
                 .debug_selector(move || grip_id(id))
                 .absolute()
-                .left_0()
-                .top_0()
+                // The frame's 1 px border puts the padding box inside the widget.
+                .left(px(-1.))
+                .top(px(-1.))
                 .size(px(HANDLE * s))
                 .cursor_grab()
                 .tooltip(TlTooltip::text(tr(cx, "perf-widget-grip")).build())
@@ -1294,12 +1295,22 @@ impl WidgetEditor {
                 div()
                     .debug_selector(move || gear_id(id))
                     .absolute()
-                    .top_0()
+                    .top(px(-1.))
                     // Right of the grip, clear of the chart's scale label in the top right.
-                    .left(px(HANDLE * s))
+                    .left(px(HANDLE * s - 1.))
+                    // As big as the grip: the button is 20 px at scale 1, so its edge ring is
+                    // clipped, and the gear covers no more than the first line.
+                    .size(px(HANDLE * s))
+                    .overflow_hidden()
                     // A press on the gear is not the start of a drag.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(button)
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(-2. * s))
+                            .top(px(-2. * s))
+                            .child(button),
+                    )
             };
             let corner = div()
                 .id(SharedString::from(corner_id(id)))
@@ -1444,6 +1455,9 @@ impl Render for WidgetEditor {
                     cx.defer(move |cx| {
                         let _ = this.update(cx, |e, cx| {
                             let body = (size.width, size.height);
+                            // The container scrolls by the body's height, not its own.
+                            e.container
+                                .update(cx, |c, cx| c.set_view_height(size.height, cx));
                             if e.body.get() != body {
                                 e.body.set(body);
                                 cx.notify();

@@ -114,6 +114,10 @@ pub struct WidgetContainer {
     area: Size<Pixels>,
     /// The drawn row height Edit Widgets holds, logical px.
     frozen: Option<f32>,
+    /// The height of the editor's body while Edit Widgets runs. The container itself is as tall
+    /// as its rows then, so this is the height that decides whether the rows scroll and keep the
+    /// scrollbar's width free, as in the applied view.
+    view_h: Option<Pixels>,
     /// The UI scale of the last placement.
     scale: f32,
     _metrics_sub: Subscription,
@@ -149,6 +153,7 @@ impl WidgetContainer {
             placement: InnerPlacement::default(),
             area: size(px(0.), px(0.)),
             frozen: None,
+            view_h: None,
             scale: metrics(cx).ui_scale,
             _metrics_sub: cx.observe_global::<UiMetrics>(Self::on_metrics),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -282,6 +287,7 @@ impl WidgetContainer {
         if on == self.frozen.is_some() {
             return;
         }
+        self.view_h = None;
         self.frozen = on.then(|| {
             let g = self.placement.grid;
             if g.scale > 0. && g.row > 0. {
@@ -292,6 +298,25 @@ impl WidgetContainer {
         });
         self.relayout(cx);
         self.notify(cx);
+    }
+
+    /// The height of the editor's body, which decides the scroll while editing (see `view_h`).
+    pub fn set_view_height(&mut self, h: Pixels, cx: &mut Context<Self>) {
+        if self.view_h == Some(h) || self.frozen.is_none() {
+            return;
+        }
+        self.view_h = Some(h);
+        if self.relayout(cx) {
+            self.notify(cx);
+        }
+    }
+
+    /// The area the placement runs on: while editing, as tall as the editor's body.
+    fn place_area(&self) -> Size<Pixels> {
+        match (self.frozen, self.view_h) {
+            (Some(_), Some(h)) => size(self.area.width, h),
+            _ => self.area,
+        }
     }
 
     fn notify(&mut self, cx: &mut Context<Self>) {
@@ -370,7 +395,7 @@ impl WidgetContainer {
             grid::place(
                 &cells,
                 grid_cols(&self.layout.container),
-                self.area,
+                self.place_area(),
                 scale,
                 self.frozen,
             )
@@ -390,7 +415,7 @@ impl WidgetContainer {
             let input = FlowInput {
                 layout: &self.layout,
                 items: &items,
-                area: self.area,
+                area: self.place_area(),
                 scale,
                 frozen: self.frozen,
             };
@@ -430,6 +455,7 @@ impl WidgetContainer {
                 widget.update(cx, |w, cx| {
                     w.set_setting(setting, source, cx);
                     w.set_device_prefix(prefix, cx);
+                    w.set_edit_inset(editing, cx);
                     w.set_size(area, cx);
                 });
             } else if host_draws {
@@ -440,6 +466,7 @@ impl WidgetContainer {
                 let widget = cx.new(|cx| {
                     let mut w = MetricWidget::new(setting, source, &hub, cx);
                     w.set_device_prefix(prefix, cx);
+                    w.set_edit_inset(editing, cx);
                     w.set_size(area, cx);
                     w
                 });
