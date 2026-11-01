@@ -894,7 +894,7 @@ fn overview_group_edit_decorations_cover_no_empty_text(cx: &mut TestAppContext) 
         },
     };
     let mut gone = group_widget(2, engines, CELL_FORMS, cell(3, 0, 3, 1));
-    gone.device_name = Some("Old GPU".to_owned());
+    gone.device_name = Some(Arc::from("Old GPU"));
     let widgets = vec![
         group_widget(
             1,
