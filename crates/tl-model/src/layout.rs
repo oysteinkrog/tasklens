@@ -2245,6 +2245,66 @@ mod tests {
         }
     }
 
+    /// Phase 2 migration fixtures: every old mode of every converting box, with each arrange
+    /// value and each split, converts to a flow layout whose preset is that mode, has widgets,
+    /// and converts the same way on a second load. The CPU box also converts every mix of
+    /// `power` and `clocks`.
+    #[test]
+    fn every_old_mode_converts_to_its_preset() {
+        for (kind, modes) in OVERVIEW_BOX_MODES {
+            if matches!(kind, "processes" | "timeline") {
+                continue;
+            }
+            let container = overview_container(kind);
+            for mode in modes {
+                for arrange in OVERVIEW_ARRANGES {
+                    let keys = format!("mode = \"{mode}\", arrange = \"{arrange}\", split = 0.35");
+                    let (s, changed) = load(&box_entry(kind, &keys));
+                    let what = format!("{kind} {mode} {arrange}");
+                    assert!(changed.contains(&LAYOUTS_CONVERTED_KEY), "{what}");
+                    let l = known(&s, &container);
+                    let p = l.preset.as_ref().unwrap_or_else(|| panic!("{what}: flow"));
+                    assert_eq!(p.id, *mode, "{what}");
+                    assert_eq!(p.arrange.as_deref(), Some(arrange), "{what}");
+                    assert_eq!(p.split, Some(0.35), "{what}");
+                    assert!(!l.widgets.is_empty(), "{what}");
+                    if kind != "gpu" {
+                        assert_eq!(l.version, LAYOUT_VERSION, "{what}");
+                    }
+                    let (back, changed) = reload(&s);
+                    assert!(changed.is_empty(), "{what}: {changed:?}");
+                    assert_eq!(back, s, "{what}");
+                }
+                // No old key beyond the mode: the preset is the mode's, with its defaults.
+                let (s, _) = load(&box_entry(kind, &format!("mode = \"{mode}\"")));
+                let p = known(&s, &container).preset.clone().expect("flow");
+                assert_eq!((p.id.as_str(), p.split, p.arrange), (*mode, None, None));
+            }
+        }
+        for mode in ["chart_cores", "chart", "cores", "core_charts"] {
+            for (power, clocks) in [(false, false), (true, false), (false, true), (true, true)] {
+                let keys = format!("mode = \"{mode}\", power = {power}, clocks = {clocks}");
+                let (s, _) = load(&box_entry("cpu", &keys));
+                let l = known(&s, CPU_BOX_CONTAINER);
+                let keys: Vec<_> = l
+                    .widgets
+                    .iter()
+                    .filter_map(|w| w.content.metric_key().map(MetricKey::as_str))
+                    .collect();
+                assert_eq!(
+                    keys.contains(&"core_clocks"),
+                    clocks,
+                    "{mode} {power} {clocks}"
+                );
+                assert_eq!(
+                    keys.contains(&"power_draw"),
+                    power,
+                    "{mode} {power} {clocks}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn processes_and_timeline_never_convert() {
         for kind in ["processes", "timeline"] {

@@ -588,6 +588,50 @@ fn overview_group_hotplug_keeps_entity(cx: &mut TestAppContext) {
     assert_eq!(r.vcx.read_entity(&c, |c, _| c.placement().clone()), cells);
 }
 
+/// Logical CPUs going offline and coming back (phase 2 hotplug gate): the cores group keeps
+/// its entity and cells, the other cores keep their items and order, the container does not
+/// notify, and with no cores left the group shows "None found".
+#[gpui_kit::test]
+fn overview_group_cores_offline_keeps_entity(cx: &mut TestAppContext) {
+    let mut r = open(cx, 4, &[]);
+    let w = group_widget(
+        1,
+        cores(GroupItems::Cells, None),
+        CELL_FORMS,
+        cell(0, 0, 12, 8),
+    );
+    let c = r.container(layout(CPU_BOX_CONTAINER, vec![w]), 600., 400.);
+    let g = r.group(&c, 1);
+    let before = r.items(&g);
+    assert_eq!(before.len(), 4);
+    let cells = r.vcx.read_entity(&c, |c, _| c.placement().clone());
+    let container_notifies = r.container_notifies(&c);
+
+    // Two logical CPUs go offline.
+    r.publish_catalog(catalog(2, 2, &[]));
+    assert_eq!(r.group(&c, 1).entity_id(), g.entity_id());
+    let fewer = r.items(&g);
+    assert_eq!(fewer, before[..2].to_vec());
+    assert_eq!(r.vcx.read_entity(&c, |c, _| c.placement().clone()), cells);
+    assert_eq!(r.container_notifies(&c), container_notifies);
+
+    // They come back: the kept cores keep their items.
+    r.publish_catalog(catalog(3, 4, &[]));
+    let back = r.items(&g);
+    assert_eq!(back.len(), 4);
+    assert_eq!(&back[..2], &before[..2]);
+    assert_eq!(r.group(&c, 1).entity_id(), g.entity_id());
+
+    // No cores at all: "None found", the widget keeps its cells.
+    r.publish_catalog(catalog(4, 0, &[]));
+    assert_eq!(
+        r.vcx.read_entity(&g, |g, _| g.state()),
+        GroupState::NoneFound
+    );
+    assert_eq!(r.group(&c, 1).entity_id(), g.entity_id());
+    assert_eq!(r.vcx.read_entity(&c, |c, _| c.placement().clone()), cells);
+}
+
 /// A sample on one core notifies only that core's item. The group widgets, the other items,
 /// the container and the page do not notify, and no entity is made or dropped.
 #[gpui_kit::test]
