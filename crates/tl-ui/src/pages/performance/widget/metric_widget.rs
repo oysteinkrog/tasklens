@@ -16,6 +16,9 @@
 //! `compose.rs`) from its forms and the size of its last paint. A resize renders it again only
 //! when the composition or the forms it keeps change.
 //!
+//! On a device page the chart shows "Failed" with the collector's error while the collector of
+//! its kind has failed, as the 1.3.0 page charts did (`SourceData::chart_state`).
+//!
 //! An unavailable widget shows its name (with the saved device name when the device is gone)
 //! and one centred line: "Not connected", "Not reported by this GPU" or "Needs a newer
 //! tasklens". It comes back by itself when the source does.
@@ -730,7 +733,20 @@ impl MetricWidget {
         })
     }
 
+    /// Brings the chart up to date with the source: its spec and labels ([`Self::sync_spec`])
+    /// and the state it shows over its data (a failed collector on a device page,
+    /// `SourceData::chart_state`). True when a chart was made or dropped. A new state renders
+    /// only the chart, and a new chart takes the state before its first paint.
     fn sync_chart(&mut self, cx: &mut Context<Self>) -> bool {
+        let made = self.sync_spec(cx);
+        if let Some(chart) = &self.chart {
+            let state = self.source.read(cx).chart_state();
+            chart.update(cx, |v, cx| v.set_state(state, cx));
+        }
+        made
+    }
+
+    fn sync_spec(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(key) = self.chart_key(cx) else {
             self.chart_key = None;
             return self.chart.take().is_some();

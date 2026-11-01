@@ -30,6 +30,7 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::devices::DeviceIdentity;
+use tl_model::health::{SourceId, SourceState as CollectorState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{
     DeviceSelector, FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP,
@@ -56,8 +57,8 @@ use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::validity::Validity;
 
 use super::meta::{MetricMeta, NetView};
-use crate::chart::YScale;
 use crate::chart::labels::{NetFormat, format_value};
+use crate::chart::{ChartState, YScale};
 use crate::components::validity::copy_text;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
@@ -99,7 +100,8 @@ const MASK: ComponentMask = ComponentMask(
         | ComponentMask::DEVICES.0
         | ComponentMask::DEVICE_HISTORY.0
         | ComponentMask::INVENTORY.0
-        | ComponentMask::DEVICE_DETAILS.0,
+        | ComponentMask::DEVICE_DETAILS.0
+        | ComponentMask::HEALTH.0,
 );
 
 /// Whether a source can be shown, and if not, why (UI-PRF-061 "Unavailable widget").
@@ -579,6 +581,9 @@ struct SourceState {
     /// The source serves a device page: the value is written in the page format
     /// (`MetricMeta::value_text_in`, ADR-019 phase 3).
     page: bool,
+    /// On a device page, the error of the collector of the source's kind while it has failed
+    /// ([`failed_of`]). Always `None` in an Overview box, which shows no failed state.
+    failed: Option<SharedString>,
 }
 
 /// One source in use: its device, its current value and its stats over the Overview range.
@@ -656,6 +661,7 @@ impl SourceData {
                 },
                 strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
                 page: false,
+                failed: None,
             },
             name: SharedString::default(),
             value_text: SharedString::default(),
@@ -795,6 +801,16 @@ impl SourceData {
     /// The forms the metric offers on this device (`MetricMeta::offered_forms`).
     pub fn offered_forms(&self) -> FormSet {
         self.state.reading.offered
+    }
+
+    /// The state a chart of the source shows over its data: Failed with the collector's error
+    /// while the collector of the source's kind has failed on a device page (the 1.3.0 pages'
+    /// `health_state`), else Live. The chart works out WarmingUp and Stale itself.
+    pub fn chart_state(&self) -> ChartState {
+        match &self.state.failed {
+            Some(error) => ChartState::Failed(error.clone()),
+            None => ChartState::Live,
+        }
     }
 
     /// Bumped each time the source notifies.
@@ -1046,6 +1062,12 @@ impl SourceData {
     /// stats are worked out again with `stats`, and after a new lookup, whose series or minus
     /// list may differ.
     fn refresh(&mut self, snap: &Snapshot, mut stats: bool, cx: &App) {
+        // The collector's health is read live, as the 1.3.0 pages read it.
+        self.state.failed = if self.state.page {
+            failed_of(self.kind, self.hub.read(cx).current())
+        } else {
+            None
+        };
         if self.catalog_version != Some(snap.devices.version) {
             self.catalog_version = Some(snap.devices.version);
             self.state.device = self.resolve_device(snap);
@@ -1219,6 +1241,27 @@ fn line_minus(minus: &[SeriesId], line: SeriesId) -> SmallVec<[SeriesId; 5]> {
 fn snap_swap_total_is_zero(total: Option<f32>) -> bool {
     total.is_none_or(|t| t <= 0.0)
 }
+/// The error of the collector that reads devices of `kind` while it has failed, as the 1.3.0
+/// CPU, Memory, Disk and Network pages show it on their charts (`health_state`). `None` while it
+/// runs, and for a kind whose page shows another state: the GPU pages show their probe state
+/// (`gpu::probe_chart_state`), and fans, batteries and other keys have no failed chart.
+fn failed_of(kind: DeviceKind, snap: &Snapshot) -> Option<SharedString> {
+    let source = match kind {
+        DeviceKind::Cpu | DeviceKind::CpuLogical => SourceId::Cpu,
+        DeviceKind::Memory => SourceId::Memory,
+        DeviceKind::Disk | DeviceKind::Disks => SourceId::Disk,
+        DeviceKind::Net | DeviceKind::Nets => SourceId::Net,
+        DeviceKind::Gpu
+        | DeviceKind::AggregateGpu
+        | DeviceKind::Fan
+        | DeviceKind::Battery
+        | DeviceKind::Other => return None,
+    };
+    let h = snap.health.get(source);
+    (h.state == CollectorState::Failed)
+        .then(|| SharedString::from(h.last_error.as_deref().unwrap_or_default().to_owned()))
+}
+
 /// The sources of one Overview page or one device page, by selector.
 pub struct SourceStore {
     hub: Entity<SnapshotHub>,

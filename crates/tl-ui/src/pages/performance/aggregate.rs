@@ -606,7 +606,9 @@ impl AggregateDiskPage {
     }
 
     /// Brings the header and the Details rows up to date with the components in `mask`. Only
-    /// a header change renders the page; a row change goes to the Details view.
+    /// a header change renders the page; a row change goes to the Details view. A failed disk
+    /// collector reaches the chart widgets through their sources (`SourceData::chart_state`),
+    /// so a chart added in Edit Widgets shows "Failed" too.
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         if mask.intersects(
             ComponentMask::SYSTEM

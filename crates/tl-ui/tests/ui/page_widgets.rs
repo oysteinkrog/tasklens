@@ -16,6 +16,7 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
+use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::layout::{FixedWidget, WidgetContent};
 use tl_model::layout_boxes::{DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ};
@@ -27,6 +28,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
+use tl_ui::chart::{ChartState, ChartView};
 use tl_ui::components::kv_grid;
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
@@ -346,6 +348,64 @@ impl Rig<'_> {
         editor
     }
 
+    /// The chart entities of the metric widgets `ids`.
+    fn charts<const N: usize>(&mut self, ids: [u32; N]) -> [Entity<ChartView>; N] {
+        let container = self.container();
+        self.vcx.update(|_, cx| {
+            let c = container.read(cx);
+            ids.map(|id| {
+                c.widget(id)
+                    .and_then(|w| w.read(cx).chart().cloned())
+                    .expect("a chart widget")
+            })
+        })
+    }
+
+    /// The disk collector's health.
+    fn set_disk_health(&mut self, state: SourceState, error: Option<&str>) {
+        self.engine.publish_with(|s| {
+            let h = Arc::make_mut(&mut s.health);
+            h.version += 1;
+            h.sources[SourceId::Disk.index()] = SourceHealth {
+                state,
+                last_error: error.map(Arc::from),
+                ..SourceHealth::default()
+            };
+        });
+        draw(self.vcx);
+    }
+
+    /// New disk totals (sda reads `read` MiB/s) and new aggregate series: Active time at
+    /// `active` percent and the read rate at twice `read`, as the two disks' sum.
+    fn publish_sample(&mut self, read: f64, active: f32) {
+        self.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.disks = Arc::from([
+                (DeviceIdx(DISKS[0].0), totals(DISKS[0].0, read)),
+                (DeviceIdx(DISKS[1].0), totals(DISKS[1].0, 1.)),
+            ]);
+            let version = sys.header.version;
+            let views: Vec<_> = [
+                (MetricId::DISK_ACTIVE, active),
+                (MetricId::DISK_READ, ((read + 1.) * MIB) as f32),
+                (MetricId::DISK_WRITE, 0.),
+            ]
+            .into_iter()
+            .map(|(metric, v)| series(metric, v, version))
+            .collect();
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: views.into(),
+                slow: Arc::from([]),
+            });
+        });
+        draw(self.vcx);
+    }
+
     /// New disk totals: sda reads `read` MiB/s.
     fn publish_read(&mut self, read: f64) {
         self.engine.publish_with(|s| {
@@ -430,13 +490,19 @@ fn page_widget_details_rows_match_grid(cx: &mut TestAppContext) {
     assert!(!hidden && !value.is_empty(), "{value:?}");
 }
 
-/// A sample renders no page and no container, keeps every widget entity, and a Details value
-/// change notifies only the Details view.
+/// The render contract (UI-PRF-017, UI-PRF-019, ADR-019) on the page. A sample that changes
+/// nothing shown renders nothing: not the page, the container, a widget, a chart or Details. A
+/// sample that moves the charts' series and a Details value: the page and the container never
+/// notify and place nothing, no widget entity is made or dropped, the two charts render with
+/// the new series, and only the Details view notifies of the page's own parts. GPUI marks the
+/// ancestors of a notifying view dirty (crw.34, no GPUI fork), so the page and the container
+/// may render at most once in that frame, with fixed work only.
 #[gpui_kit::test]
 fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
     let mut r = open(cx, 1200., 900.);
     let (page, container, details) = (r.page.clone(), r.container(), r.details());
     let (active, io) = (r.metric_id(METRIC_DISK_ACTIVE), r.metric_id(METRIC_DISK_IO));
+    let charts = r.charts([active, io]);
     let entities = |r: &mut Rig| {
         let container = container.clone();
         r.vcx.update(|_, cx| {
@@ -444,7 +510,7 @@ fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
             [active, io].map(|id| c.widget(id).map(|w| w.entity_id()))
         })
     };
-    let counts = |r: &mut Rig| {
+    let notifies = |r: &mut Rig| {
         let (page, container, details) = (page.clone(), container.clone(), details.clone());
         r.vcx.update(|_, cx| {
             [
@@ -455,20 +521,103 @@ fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
             ]
         })
     };
+    let renders = |r: &mut Rig| {
+        let (page, container, details) = (page.clone(), container.clone(), details.clone());
+        let charts = charts.clone();
+        r.vcx.update(|_, cx| {
+            [
+                page.read(cx).render_count.get(),
+                container.read(cx).render_count.get(),
+                details.read(cx).render_count.get(),
+                charts[0].read(cx).render_count.get(),
+                charts[1].read(cx).render_count.get(),
+            ]
+        })
+    };
     let before_entities = entities(&mut r);
     assert!(before_entities.iter().all(Option::is_some));
-    let before = counts(&mut r);
-    r.publish_read(7.);
-    let after = counts(&mut r);
-    assert_eq!(after[0], before[0], "the page does not notify");
-    assert_eq!(after[1], before[1], "the container does not notify");
-    assert_eq!(after[2], before[2], "the container places nothing");
-    assert_eq!(after[3], before[3] + 1, "the Details view notifies once");
+
+    // A sample that changes nothing shown renders nothing.
+    let (n0, r0) = (notifies(&mut r), renders(&mut r));
+    r.publish_read(1.);
+    assert_eq!(notifies(&mut r), n0, "an unchanged sample notifies nothing");
+    assert_eq!(renders(&mut r), r0, "an unchanged sample renders nothing");
+
+    // New series for both charts and a new Read rate in Details.
+    let versions = |r: &mut Rig| {
+        let charts = charts.clone();
+        r.vcx.update(|_, cx| {
+            charts.clone().map(|c| {
+                c.read(cx)
+                    .resolved()
+                    .iter()
+                    .map(|s| s.as_ref().map(|s| s.version))
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    let v0 = versions(&mut r);
+    r.publish_sample(7., 55.);
+    let (n1, r1) = (notifies(&mut r), renders(&mut r));
+    assert_ne!(versions(&mut r), v0, "the charts hold the new series");
+    assert_eq!(n1[0], n0[0], "the page does not notify");
+    assert_eq!(n1[1], n0[1], "the container does not notify");
+    assert_eq!(n1[2], n0[2], "the container places nothing");
+    assert_eq!(n1[3], n0[3] + 1, "the Details view notifies once");
+    assert!(r1[0] - r0[0] <= 1, "page renders {}", r1[0] - r0[0]);
+    assert!(r1[1] - r0[1] <= 1, "container renders {}", r1[1] - r0[1]);
+    assert!(
+        r1[3] > r0[3],
+        "the Active time chart renders the new series"
+    );
+    assert!(
+        r1[4] > r0[4],
+        "the Transfer rate chart renders the new series"
+    );
     assert_eq!(entities(&mut r), before_entities, "same widget entities");
-    // A sample that changes no row notifies nothing.
-    let before = counts(&mut r);
+    assert_eq!(r.charts([active, io]), charts, "same chart entities");
+
+    // The same sample again renders nothing.
+    let (n2, r2) = (notifies(&mut r), renders(&mut r));
     r.publish_read(7.);
-    assert_eq!(counts(&mut r), before);
+    assert_eq!(notifies(&mut r), n2);
+    assert_eq!(renders(&mut r), r2);
+}
+
+/// A failed disk collector shows "Failed" with its error on every chart of the page, as the
+/// 1.3.0 page did, also on a chart added in Edit Widgets, and the charts go back to live when
+/// the collector runs again.
+#[gpui_kit::test]
+fn page_widget_charts_failed_on_source_failure(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let ids = [r.metric_id(METRIC_DISK_ACTIVE), r.metric_id(METRIC_DISK_IO)];
+    r.set_disk_health(SourceState::Failed, Some("EIO"));
+    let failed = ChartState::Failed("EIO".into());
+    for chart in r.charts(ids) {
+        assert_eq!(r.vcx.read_entity(&chart, |v, _| v.state.clone()), failed);
+    }
+    // A chart added while the collector has failed starts failed.
+    let editor = r.edit();
+    let added = r
+        .vcx
+        .update(|_, cx| {
+            editor.update(cx, |e, cx| {
+                e.add(&source(DEVICE_DISKS, METRIC_DISK_READ), cx)
+            })
+        })
+        .expect("added");
+    assert!(r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))));
+    draw(r.vcx);
+    let [chart] = r.charts([added]);
+    assert_eq!(r.vcx.read_entity(&chart, |v, _| v.state.clone()), failed);
+    // The collector runs again: every chart is live.
+    r.set_disk_health(SourceState::Running, None);
+    for chart in r.charts([ids[0], ids[1], added]) {
+        assert_eq!(
+            r.vcx.read_entity(&chart, |v, _| v.state.clone()),
+            ChartState::Live
+        );
+    }
 }
 
 /// The header stays at the top and the body under it scrolls; at a small window the body is
