@@ -3035,9 +3035,13 @@ mod drawn_text {
         record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         let painted = take_painted_texts();
+        let glyphs: Vec<String> = crate::selectors::drawn_selectors(&mut vcx)
+            .into_keys()
+            .filter(|k| k.starts_with("TlCell-glyph"))
+            .collect();
         assert!(
-            vcx.debug_bounds("TlCell-glyph").is_none(),
-            "no cell of a current row draws a validity glyph"
+            glyphs.is_empty(),
+            "no cell of a current row draws a validity glyph: {glyphs:?}"
         );
 
         // Each painted cell, found by its x, holds the delegate's value for its column. Name is

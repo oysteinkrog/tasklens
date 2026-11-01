@@ -1209,7 +1209,9 @@ fn page_validity(p: &mut PageCx) -> Vec<AnyElement> {
                 .items_center()
                 .px(p.m.sp[3])
                 .when_selected(selected, p.t.row_selected)
-                .child(glyph(validity, &value, selected, &p.m, &p.t))
+                .child(glyph(validity, &value, selected, &p.m, &p.t, || {
+                    format!("-{name}-{selected}")
+                }))
                 .into_any_element()
         });
         out.push(p.row(name, cells));

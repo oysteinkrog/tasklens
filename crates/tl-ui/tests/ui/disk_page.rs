@@ -780,10 +780,13 @@ fn partition_usage_bar(cx: &mut TestAppContext) {
     assert!(!bad[7].2, "no bar when statvfs failed");
 
     let m = r.vcx.update(|_, cx| *metrics(cx));
-    let track = r.vcx.debug_bounds("TlCell-bar").expect("bar track drawn");
+    let track = r
+        .vcx
+        .debug_bounds("TlCell-bar-0-part-usage")
+        .expect("bar track drawn");
     let fill = r
         .vcx
-        .debug_bounds("TlCell-bar-fill")
+        .debug_bounds("TlCell-bar-fill-0-part-usage")
         .expect("bar fill drawn");
     assert_eq!(track.size.height, px(12. * m.ui_scale));
     let want = track.size.width.as_f32() * 0.421;
@@ -791,7 +794,10 @@ fn partition_usage_bar(cx: &mut TestAppContext) {
         (fill.size.width.as_f32() - want).abs() < 1.0,
         "fill {fill:?} track {track:?}"
     );
-    let text = r.vcx.debug_bounds("TlCell-bar-text").expect("text box");
+    let text = r
+        .vcx
+        .debug_bounds("TlCell-bar-text-0-part-usage")
+        .expect("text box");
     assert!(
         (track.size.width.as_f32() + text.size.width.as_f32()) < 140. * m.ui_scale,
         "track plus text fit the 140 px cell"

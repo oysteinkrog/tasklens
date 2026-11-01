@@ -1146,14 +1146,19 @@ pub fn box_shadow(theme: &TlTheme, ui_scale: f32) -> Option<BoxShadow> {
 
 /// The 1 px inner highlight of a box: a ring just inside the accent frame, white at 6%. It is
 /// laid over the box and takes no pointer events.
-fn box_highlight(m: &UiMetrics) -> Div {
+fn box_highlight(box_id: &str, m: &UiMetrics) -> Div {
     div()
         .absolute()
         .inset_0()
         .border_1()
         .border_color(gpui_kit::white().alpha(HIGHLIGHT_ALPHA))
         .rounded((m.radius_card - px(1.)).max(px(0.)))
-        .tl_selector(|| "BoxHighlight".into())
+        .tl_selector(|| highlight_id(box_id))
+}
+
+/// The debug selector of a box's inner highlight ring: the box id with `-highlight`.
+pub fn highlight_id(box_id: &str) -> String {
+    format!("{box_id}-highlight")
 }
 
 /// Alpha of the inner highlight ring.
@@ -1313,7 +1318,7 @@ pub fn box_frame(
                 ),
         )
         // Last, so the ring paints over the title row and the body.
-        .child(box_highlight(m))
+        .child(box_highlight(id, m))
 }
 
 /// Box widths from here up put the chart and its side part next to each other; narrower boxes

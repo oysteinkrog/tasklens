@@ -696,10 +696,10 @@ impl MinigraphCard {
 
 impl MinigraphCard {
     /// The value at the top right: the number in `text_primary`; `No match` and `Ended` in
-    /// `text_secondary`; the `TlValidityGlyph` lock when Restricted.
+    /// `text_secondary`; the `TlValidityGlyph` lock icon when Restricted.
     fn value_element(&self, m: &UiMetrics, t: &TlTheme) -> gpui_kit::Div {
         let el = div()
-            .tl_selector(|| "MinigraphCard-value".into())
+            .tl_selector(|| format!("MinigraphCard-{}-value", self.id.0))
             .flex_none()
             .whitespace_nowrap();
         match self.state {
@@ -711,7 +711,7 @@ impl MinigraphCard {
                 match glyph_parts(Validity::Restricted, &self.value, false, t) {
                     (GlyphContent::Lock, color) => el.child(
                         div()
-                            .tl_selector(|| "TlValidityGlyph-lock".into())
+                            .tl_selector(|| format!("MinigraphCard-{}-lock", self.id.0))
                             .flex()
                             .items_center()
                             .child(icon(TlIcon::Lock, m.icon.xs, color)),
@@ -749,7 +749,7 @@ impl Render for MinigraphCard {
             // The home slot while the card follows the pointer: 1 px accent dashed outline.
             return div()
                 .id(("MinigraphCard", u64::from(self.id.0)))
-                .tl_selector(|| "MinigraphCard-home".into())
+                .tl_selector(|| format!("MinigraphCard-{}-home", self.id.0))
                 .w(px(MINI_CARD_W * s))
                 .h(px(MINI_CARD_H * s))
                 .border_1()
@@ -779,7 +779,7 @@ impl Render for MinigraphCard {
                 // A press on the label text starts no drag (UI-PRF-043).
                 div()
                     .id("MinigraphCard-label")
-                    .tl_selector(|| "MinigraphCard-label".into())
+                    .tl_selector(|| format!("MinigraphCard-{}-label", self.id.0))
                     .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .whitespace_nowrap()
                     .overflow_hidden()
@@ -789,7 +789,7 @@ impl Render for MinigraphCard {
             .child(self.value_element(&m, t));
         let card = div()
             .id(("MinigraphCard", u64::from(self.id.0)))
-            .tl_selector(|| "MinigraphCard".into())
+            .tl_selector(|| format!("MinigraphCard-{}", self.id.0))
             .relative()
             .w(px(MINI_CARD_W * s))
             .h(px(MINI_CARD_H * s))

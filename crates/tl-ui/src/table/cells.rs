@@ -137,9 +137,40 @@ pub struct CellCtx<'a> {
     pub theme: &'a TlTheme,
     pub selected: bool,
     pub width: Pixels,
+    /// Where the cell sits; it ends the cell's debug selectors.
+    pub at: CellAt,
+}
+
+/// Where a cell sits. A window draws each debug selector once (ADR-019), so the selectors of a
+/// table cell end with its row and column: `TlCell-numeric-3-cpu`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CellAt {
+    /// Outside a table, for example a test that draws one cell: plain selectors.
+    #[default]
+    Alone,
+    /// Row `ix` of the table view, column `col` (its `key()`): selectors end with `-{ix}-{col}`.
+    Row(usize, &'static str),
+    /// The header total of column `col`: selectors end with `-total-{col}`.
+    Total(&'static str),
+}
+
+impl CellAt {
+    /// The end of the cell's debug selectors.
+    pub fn suffix(self) -> String {
+        match self {
+            CellAt::Alone => String::new(),
+            CellAt::Row(ix, col) => format!("-{ix}-{col}"),
+            CellAt::Total(col) => format!("-total-{col}"),
+        }
+    }
 }
 
 impl CellCtx<'_> {
+    /// The debug selector `name` of this cell: `name` with [`CellAt::suffix`].
+    pub fn sel(&self, name: &str) -> String {
+        format!("{name}{}", self.at.suffix())
+    }
+
     /// `text_primary`, or `text_selected_primary` on a selected row.
     pub fn primary(&self) -> Hsla {
         if self.selected {
@@ -166,7 +197,7 @@ impl CellCtx<'_> {
 pub fn text_cell(text: SharedString, ctx: &CellCtx, truncated: Rc<Cell<bool>>) -> Div {
     debug_assert_clean(&text);
     cell_box(t_base(ctx.m), ctx)
-        .tl_selector(|| "TlCell-text".into())
+        .tl_selector(|| ctx.sel("TlCell-text"))
         .text_color(ctx.primary())
         .text_ellipsis()
         .child(CellText::new(
@@ -183,7 +214,7 @@ pub fn text_cell(text: SharedString, ctx: &CellCtx, truncated: Rc<Cell<bool>>) -
 pub fn path_cell(text: SharedString, ctx: &CellCtx) -> Div {
     debug_assert_clean(&text);
     cell_box(t_base(ctx.m), ctx)
-        .tl_selector(|| "TlCell-path".into())
+        .tl_selector(|| ctx.sel("TlCell-path"))
         .text_color(ctx.primary())
         .child(CellText::new(text, Align::Start, Fit::Clip, None))
 }
@@ -238,14 +269,14 @@ pub fn value_cell(
         ColumnKind::Text => {
             debug_assert_clean(&text);
             cell_box(t_base(ctx.m), ctx)
-                .tl_selector(|| "TlCell-text".into())
+                .tl_selector(|| ctx.sel("TlCell-text"))
                 .text_color(ctx.primary())
                 .text_ellipsis()
         }
         ColumnKind::Path => {
             debug_assert_clean(&text);
             cell_box(t_base(ctx.m), ctx)
-                .tl_selector(|| "TlCell-path".into())
+                .tl_selector(|| ctx.sel("TlCell-path"))
                 .text_color(ctx.primary())
         }
         ColumnKind::Numeric => {
@@ -255,7 +286,7 @@ pub fn value_cell(
                 ctx.primary()
             };
             cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-                .tl_selector(|| "TlCell-numeric".into())
+                .tl_selector(|| ctx.sel("TlCell-numeric"))
                 .text_color(color)
         }
     };
@@ -267,7 +298,7 @@ pub fn value_cell(
         };
         if let Some(color) = cell_colors(look, ctx.selected, stale, ctx.theme).dot {
             let d = div()
-                .tl_selector(|| "TlCell-dot".into())
+                .tl_selector(|| ctx.sel("TlCell-dot"))
                 .flex_none()
                 .size(px(8.0 * ctx.m.ui_scale))
                 .rounded_full()
@@ -281,13 +312,13 @@ pub fn value_cell(
     if let Some(fraction) = out.bar {
         let scale = ctx.m.ui_scale;
         let fill = div()
-            .tl_selector(|| "TlCell-bar-fill".into())
+            .tl_selector(|| ctx.sel("TlCell-bar-fill"))
             .h_full()
             .w(relative(fraction.clamp(0., 1.)))
             .bg(ctx.theme.accent);
         cell = cell.child(
             div()
-                .tl_selector(|| "TlCell-bar".into())
+                .tl_selector(|| ctx.sel("TlCell-bar"))
                 .flex_1()
                 .min_w(px(0.))
                 .h(px(BAR_H * scale))
@@ -306,7 +337,7 @@ pub fn value_cell(
         };
         cell = cell.child(
             div()
-                .tl_selector(|| "TlCell-prefix".into())
+                .tl_selector(|| ctx.sel("TlCell-prefix"))
                 .flex_none()
                 .text_color(color)
                 .child(prefix.clone()),
@@ -322,7 +353,7 @@ pub fn value_cell(
         // The bar takes the rest of the cell; the text keeps a width of its own.
         return cell.child(
             div()
-                .tl_selector(|| "TlCell-bar-text".into())
+                .tl_selector(|| ctx.sel("TlCell-bar-text"))
                 .flex_none()
                 .w(px(BAR_TEXT_W * ctx.m.ui_scale))
                 .child(text),
@@ -336,21 +367,29 @@ pub fn value_cell(
 /// ([`cell_background`]).
 pub fn glyph_cell(validity: Validity, value_text: &SharedString, ctx: &CellCtx) -> Div {
     cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-        .tl_selector(|| "TlCell-glyph".into())
-        .child(glyph(validity, value_text, ctx.selected, ctx.m, ctx.theme))
+        .tl_selector(|| ctx.sel("TlCell-glyph"))
+        .child(glyph(
+            validity,
+            value_text,
+            ctx.selected,
+            ctx.m,
+            ctx.theme,
+            || ctx.at.suffix(),
+        ))
 }
 
 /// [`glyph_cell`] for a left-aligned (text or path) column: the glyph sits at the left padding
 /// edge, where the text it replaces starts.
 pub fn glyph_cell_start(validity: Validity, value_text: &SharedString, ctx: &CellCtx) -> Div {
     cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-        .tl_selector(|| "TlCell-glyph".into())
+        .tl_selector(|| ctx.sel("TlCell-glyph"))
         .child(glyph_start(
             validity,
             value_text,
             ctx.selected,
             ctx.m,
             ctx.theme,
+            || ctx.at.suffix(),
         ))
 }
 
@@ -987,7 +1026,7 @@ pub fn paint_name_cell(
     let mut root = div();
     *root.text_style() = t_base(m);
     root = root
-        .tl_selector(|| "TlNameCell".into())
+        .tl_selector(|| ctx.sel("TlNameCell"))
         .relative()
         .w(ctx.width)
         .h_full()
@@ -1091,7 +1130,7 @@ pub fn paint_name_cell(
     };
     let text_gap = if flat && !has_icon { px(0.) } else { gap };
     let primary_el = div()
-        .tl_selector(|| "TlNameCell-primary".into())
+        .tl_selector(|| ctx.sel("TlNameCell-primary"))
         .ml(text_gap)
         .min_w_0()
         .flex_shrink(1.)
@@ -1129,7 +1168,7 @@ pub fn paint_name_cell(
             primary_el = primary_el.flex_shrink(0.);
             secondary_el = Some(
                 div()
-                    .tl_selector(|| "TlNameCell-secondary".into())
+                    .tl_selector(|| ctx.sel("TlNameCell-secondary"))
                     .ml(px(NAME_SECONDARY_GAP * s))
                     .min_w_0()
                     .flex_shrink(1.)
@@ -1190,7 +1229,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
     let m = ctx.m;
     let s = m.ui_scale;
     let mut root = div()
-        .tl_selector(|| "TlGroupHeaderCell".into())
+        .tl_selector(|| ctx.sel("TlGroupHeaderCell"))
         .relative()
         .w(ctx.width)
         .h_full()
@@ -1230,17 +1269,17 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
         .items_center()
         .overflow_hidden()
         .child(
-            text.tl_selector(|| "TlGroupHeaderCell-label".into())
+            text.tl_selector(|| ctx.sel("TlGroupHeaderCell-label"))
                 .min_w_0()
                 .flex_shrink(1.)
                 .text_ellipsis()
                 .text_color(ctx.theme.text_primary)
                 .child(cell.primary),
         );
-    for (name, _tip) in cell.glyphs {
+    for (j, (name, _tip)) in cell.glyphs.into_iter().enumerate() {
         row = row.child(
             svg()
-                .tl_selector(|| "TlGroupHeaderCell-glyph".into())
+                .tl_selector(|| format!("{}-{j}", ctx.sel("TlGroupHeaderCell-glyph")))
                 .path(name.path())
                 .size(m.icon.sm)
                 .flex_none()
@@ -1251,7 +1290,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
     if let Some(secondary) = cell.secondary {
         row = row.child(
             div()
-                .tl_selector(|| "TlGroupHeaderCell-secondary".into())
+                .tl_selector(|| ctx.sel("TlGroupHeaderCell-secondary"))
                 .ml(m.sp[3])
                 .min_w_0()
                 .flex_shrink(1.)
@@ -1320,6 +1359,7 @@ mod tests {
             theme: &theme,
             selected: false,
             width: px(120.),
+            at: CellAt::Alone,
         };
         let _ = text_cell("bell\u{7}".into(), &ctx, Rc::default());
     }

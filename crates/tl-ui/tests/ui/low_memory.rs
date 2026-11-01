@@ -1036,7 +1036,10 @@ fn lowmem_end_task_no_confirmation(cx: &mut TestAppContext) {
     assert!(vcx.debug_bounds("TlDialog").is_none());
     // The button shows loading while the request runs.
     assert!(vcx.read(|cx| view.read(cx).is_ending(RowId::Process(key(30, 300)))));
-    assert!(vcx.debug_bounds("TlButton-spinner").is_some());
+    assert!(
+        vcx.debug_bounds("TlButton-LowMemEndTask-0-spinner")
+            .is_some()
+    );
 
     // A second click while in flight sends nothing more.
     click(&mut vcx, "LowMemEndTask-0");

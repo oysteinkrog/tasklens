@@ -277,6 +277,7 @@ fn conn_row_kernel_owner(cx: &mut TestAppContext) {
             theme: &theme,
             selected: false,
             width: px(180.),
+            at: tl_ui::table::cells::CellAt::Alone,
         };
         assert_eq!(name_look(flags, &ctx), (theme.text_secondary, 1.0));
     });
@@ -3576,9 +3577,13 @@ mod drawn_text {
         record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         let painted = take_painted_texts();
+        let glyphs: Vec<String> = crate::selectors::drawn_selectors(&mut vcx)
+            .into_keys()
+            .filter(|k| k.starts_with("TlCell-glyph"))
+            .collect();
         assert!(
-            vcx.debug_bounds("TlCell-glyph").is_none(),
-            "no cell of a current row draws a validity glyph"
+            glyphs.is_empty(),
+            "no cell of a current row draws a validity glyph: {glyphs:?}"
         );
 
         // The one row's painted text by column, left to right. Process is the Name cell.

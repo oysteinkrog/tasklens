@@ -1818,7 +1818,7 @@ impl RenderOnce for DeviceCard {
             };
             text = text.child(
                 div()
-                    .tl_selector(|| "perf-card-value-row".into())
+                    .tl_selector(|| format!("perf-card-value-row:{}", key.0))
                     .flex()
                     .flex_none()
                     .items_center()
@@ -1880,7 +1880,7 @@ impl RenderOnce for DeviceCard {
         let hover = theme.row_hover;
         let mut card = h_flex()
             .id(id)
-            .tl_selector(|| "perf-card".into())
+            .tl_selector(|| format!("perf-card:{}", key.0))
             .relative()
             .flex_none()
             .w(self.width)
@@ -1938,7 +1938,7 @@ struct LineSpec<'a> {
     key: &'a DeviceKey,
     /// The line in row selectors: "perf-card-row:{key}:{name}:{row}".
     name: &'static str,
-    /// The selector of the whole line.
+    /// The selector of the whole line, before ":{key}".
     selector: &'static str,
     /// Row height, scaled.
     height: f32,
@@ -1963,7 +1963,7 @@ fn line_rows(
         color,
     } = spec;
     let mut col = div()
-        .tl_selector(move || selector.into())
+        .tl_selector(|| format!("{selector}:{}", key.0))
         .flex()
         .flex_col()
         .flex_none()
@@ -1981,14 +1981,15 @@ fn line_rows(
             .whitespace_nowrap();
         let text = &row.text;
         let mut start = 0usize;
-        for &at in &row.locks {
+        for (j, &at) in row.locks.iter().enumerate() {
             let at = usize::from(at).min(text.len());
             if at > start {
                 el = el.child(SharedString::from(text[start..at].to_owned()));
             }
+            let lock_key = key.0.clone();
             el = el.child(
                 div()
-                    .tl_selector(|| "perf-card-lock".into())
+                    .tl_selector(move || format!("perf-card-lock:{lock_key}:{name}:{i}:{j}"))
                     .flex_none()
                     .child(icon(TlIcon::Lock, m.icon.xs, color)),
             );

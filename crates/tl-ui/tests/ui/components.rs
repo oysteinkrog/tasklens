@@ -549,14 +549,15 @@ mod display {
                         .debug_selector(move || CELLS[i].into())
                         .flex_none()
                         .w(px(CELL_WIDTH))
-                        .child(glyph(validity, &value, false, &m, &theme))
+                        .child(glyph(validity, &value, false, &m, &theme, move || {
+                            format!("-{i}")
+                        }))
                 });
                 vec![div().flex().flex_row().children(cells).into_any_element()]
             }
         });
 
-        // Bounds of a selector drawn more than once are the last one's, so each state in turn
-        // goes into the last cell and is measured there.
+        // Each state in turn goes into the last cell and is measured there.
         for (k, &validity) in ALL.iter().enumerate() {
             shift.set(k + 1);
             cx.update(|window, _| window.refresh());
@@ -580,16 +581,16 @@ mod display {
             }
 
             let last = cells[6];
-            let glyph = cx.debug_bounds("TlValidityGlyph").expect("glyph drawn");
+            let glyph = cx.debug_bounds("TlValidityGlyph-6").expect("glyph drawn");
             assert_eq!(
                 (glyph.left(), glyph.right()),
                 (last.left(), last.right()),
                 "{validity:?}: the glyph fills its cell"
             );
             let inner = if validity == Validity::Restricted {
-                "TlValidityGlyph-lock"
+                "TlValidityGlyph-lock-6"
             } else {
-                "TlValidityGlyph-text"
+                "TlValidityGlyph-text-6"
             };
             let inner = cx.debug_bounds(inner).expect("glyph content drawn");
             assert_eq!(

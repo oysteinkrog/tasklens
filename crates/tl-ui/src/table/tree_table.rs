@@ -46,8 +46,9 @@ use crate::table::actions::{
     ResizeColumnsToFit, SelectAll, SortByColumn, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
 };
 use crate::table::cells::{
-    CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
-    guide_quads, icon_px, name_indent, paint_group_header_cell, paint_name_cell, value_cell,
+    CellAt, CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background,
+    cell_text_color, guide_quads, icon_px, name_indent, paint_group_header_cell, paint_name_cell,
+    value_cell,
 };
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
@@ -857,11 +858,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         );
 
         if kind == RowKind::GroupHeader {
-            row = row.tl_selector(|| "TlTreeTable-group-row".into());
+            row = row.tl_selector(|| format!("TlTreeTable-group-row-{ix}"));
             if ix > 0 {
                 row = row.child(
                     div()
-                        .tl_selector(|| "TlTreeTable-group-line".into())
+                        .tl_selector(|| format!("TlTreeTable-group-line-{ix}"))
                         .absolute()
                         .top_0()
                         .left_0()
@@ -882,6 +883,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     theme,
                     selected: false,
                     width: f.total_width - x,
+                    at: CellAt::Row(ix, visible[pos].key()),
                 };
                 let name = self.delegate.name_cell(ix);
                 let cell = paint_group_header_cell(name, self.delegate.row_expandable(ix), &ctx);
@@ -913,6 +915,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 theme,
                 selected,
                 width,
+                at: CellAt::Row(ix, col.key()),
             };
             if Some(col) == name_col {
                 let mut name = self.delegate.name_cell(ix);
@@ -963,7 +966,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 if let Some(expanded) = expandable {
                     let left = x + name_indent(depth, m.ui_scale);
                     row = row.child(
-                        self.chevron_hit(id, expanded, left, hovered, row_key, m, window, cx),
+                        self.chevron_hit(ix, id, expanded, left, hovered, row_key, m, window, cx),
                     );
                 }
                 continue;
@@ -1069,6 +1072,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     #[allow(clippy::too_many_arguments)]
     fn chevron_hit(
         &self,
+        ix: usize,
         id: D::RowId,
         expanded: bool,
         left: Pixels,
@@ -1080,7 +1084,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     ) -> Div {
         let s = m.ui_scale;
         let hit = div()
-            .tl_selector(|| "TlTreeTable-chevron".into())
+            .tl_selector(|| format!("TlTreeTable-chevron-{ix}"))
             .absolute()
             .top_0()
             .left(left - px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s))

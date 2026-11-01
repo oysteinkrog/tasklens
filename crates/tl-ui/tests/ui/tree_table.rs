@@ -86,6 +86,7 @@ impl Render for Host {
             theme: &theme,
             selected: self.selected,
             width: self.width,
+            at: tl_ui::table::cells::CellAt::Alone,
         };
         let cell = (self.cell)(&ctx, window, cx);
         div().size(px(400.)).child(
@@ -240,6 +241,7 @@ fn selected_row_uses_selected_text_colours(cx: &mut TestAppContext) {
         theme: &theme,
         selected: true,
         width: px(80.),
+        at: tl_ui::table::cells::CellAt::Alone,
     };
     assert_eq!(ctx.primary(), theme.text_selected_primary);
     assert_eq!(ctx.secondary(), theme.text_selected_secondary);
@@ -282,6 +284,7 @@ fn no_heat_on_glyph_cells() {
         theme: &theme,
         selected: false,
         width: px(80.),
+        at: tl_ui::table::cells::CellAt::Alone,
     };
     let failed = CellOut {
         validity: Validity::Failed,
@@ -759,7 +762,7 @@ fn name_weight_draws_the_name_at_500() {
             ..TDelegate::new(rows)
         };
         let (_, vcx) = open_table(&mut cx, d, 600., 200.);
-        vcx.debug_bounds("TlNameCell-primary")
+        vcx.debug_bounds("TlNameCell-primary-0-name")
             .expect("the Name text")
             .size
             .width
@@ -782,9 +785,9 @@ fn zebra_on_flattened_index_and_group_band() {
     });
     // Zebra on the flattened index (processes.md:285): the group header takes index 0.
     assert_eq!(fills, vec![theme.header, theme.row_alt, theme.list_bg]);
-    assert!(vcx.debug_bounds("TlGroupHeaderCell").is_some());
+    assert!(vcx.debug_bounds("TlGroupHeaderCell-0-name").is_some());
     assert!(
-        vcx.debug_bounds("TlTreeTable-group-line").is_none(),
+        vcx.debug_bounds("TlTreeTable-group-line-0").is_none(),
         "no top line on row 0"
     );
 }
@@ -872,16 +875,16 @@ fn group_header_band_has_top_line_and_name_only() {
     redraw(vcx);
     let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
     let line = vcx
-        .debug_bounds("TlTreeTable-group-line")
+        .debug_bounds("TlTreeTable-group-line-5")
         .expect("top line on the group row");
     assert_eq!(line.top(), body.top());
     assert!(line.size.height <= px(1.));
-    assert!(vcx.debug_bounds("TlGroupHeaderCell").is_some());
+    assert!(vcx.debug_bounds("TlGroupHeaderCell-5-name").is_some());
     assert!(
-        vcx.debug_bounds("TlCell-numeric").is_none(),
+        vcx.debug_bounds("TlCell-numeric-5-cpu").is_none(),
         "no metric cell"
     );
-    assert!(vcx.debug_bounds("TlNameCell").is_none());
+    assert!(vcx.debug_bounds("TlNameCell-5-name").is_none());
 }
 
 #[test]
@@ -893,8 +896,10 @@ fn name_cell_indent_by_depth() {
         ..plain(1)
     };
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![deep]), 600., 100.);
-    let cell = vcx.debug_bounds("TlNameCell").expect("name cell");
-    let text = vcx.debug_bounds("TlNameCell-primary").expect("primary");
+    let cell = vcx.debug_bounds("TlNameCell-0-name").expect("name cell");
+    let text = vcx
+        .debug_bounds("TlNameCell-primary-0-name")
+        .expect("primary");
     // R-190: pad 20, indent 20 per level, gap 6, chevron 16, gap 6, icon 16, gap 6.
     assert_eq!(
         text.left() - cell.left(),
@@ -907,8 +912,10 @@ fn name_cell_indent_by_depth() {
         ..plain(1)
     };
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![app]), 600., 100.);
-    let cell = vcx.debug_bounds("TlNameCell").expect("name cell");
-    let text = vcx.debug_bounds("TlNameCell-primary").expect("primary");
+    let cell = vcx.debug_bounds("TlNameCell-0-name").expect("name cell");
+    let text = vcx
+        .debug_bounds("TlNameCell-primary-0-name")
+        .expect("primary");
     // R-190: an app row at depth 0 has its text at 78.
     assert_eq!(text.left() - cell.left(), px(78.));
 }
@@ -949,7 +956,10 @@ fn line_canvases(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelega
 fn connector_lines_only_when_enabled() {
     let mut cx = cosmic_cx();
     let (table, vcx) = open_table(&mut cx, parent_child(false), 600., 100.);
-    assert!(vcx.debug_bounds("TlNameCell").is_some(), "rows drawn");
+    assert!(
+        vcx.debug_bounds("TlNameCell-1-name").is_some(),
+        "rows drawn"
+    );
     assert!(guides(vcx, &table).is_empty());
     assert_eq!(
         line_canvases(vcx, &table),
@@ -979,7 +989,7 @@ fn connector_lines_skip_group_headers() {
     let mut cx = cosmic_cx();
     let (table, vcx) = open_table(&mut cx, d, 600., 100.);
     assert!(
-        vcx.debug_bounds("TlTreeTable-group-row").is_some(),
+        vcx.debug_bounds("TlTreeTable-group-row-0").is_some(),
         "rows drawn"
     );
     assert!(guides(vcx, &table).is_empty());
@@ -1054,7 +1064,7 @@ fn horizontal_scrollbar_only_on_overflow() {
     let label = vcx
         .debug_bounds("TlTreeTableHeader-label-cpu")
         .expect("cpu label");
-    let cell = vcx.debug_bounds("TlCell-numeric").expect("cpu cell");
+    let cell = vcx.debug_bounds("TlCell-numeric-2-cpu").expect("cpu cell");
     assert_eq!(label.left(), cell.left());
 
     vcx.update(|_, cx| {
@@ -1068,7 +1078,7 @@ fn horizontal_scrollbar_only_on_overflow() {
         .debug_bounds("TlTreeTableHeader-label-cpu")
         .expect("cpu label after scroll");
     let cell2 = vcx
-        .debug_bounds("TlCell-numeric")
+        .debug_bounds("TlCell-numeric-2-cpu")
         .expect("cpu cell after scroll");
     assert_eq!(label2.left(), label.left() - px(200.));
     assert_eq!(cell2.left(), cell.left() - px(200.));
@@ -1106,7 +1116,7 @@ fn last_column_clears_the_vertical_scrollbar_at_full_right_scroll() {
     );
     scroll_x(vcx, &table, 400. + SCROLLBAR_W);
     let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
-    let cell = vcx.debug_bounds("TlCell-numeric").expect("cpu cell");
+    let cell = vcx.debug_bounds("TlCell-numeric-2-cpu").expect("cpu cell");
     assert!(
         cell.right() <= body.right() - px(SCROLLBAR_W),
         "last column ends at {:?}, scrollbar starts at {:?}",
@@ -1127,7 +1137,9 @@ fn group_label_stays_at_the_viewport_edge_while_scrolling_sideways() {
     );
     scroll_x(vcx, &table, 200.);
     let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
-    let label = vcx.debug_bounds("TlGroupHeaderCell").expect("group label");
+    let label = vcx
+        .debug_bounds("TlGroupHeaderCell-0-name")
+        .expect("group label");
     assert_eq!(label.left(), body.left());
 }
 
@@ -1197,8 +1209,8 @@ fn stale_row_dims_metric_cells() {
         ..plain(1)
     };
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![row]), 600., 100.);
-    assert!(vcx.debug_bounds("TlNameCell").is_some());
-    assert!(vcx.debug_bounds("TlCell-numeric").is_some());
+    assert!(vcx.debug_bounds("TlNameCell-0-name").is_some());
+    assert!(vcx.debug_bounds("TlCell-numeric-0-cpu").is_some());
 }
 
 #[test]
@@ -1571,7 +1583,7 @@ fn chevron_tooltip_on_hovered_row() {
     let rows = vec![node(1, 0, Some(false)), node(2, 0, Some(true))];
     let (_, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 300.);
     // One hit area per row with a chevron.
-    assert!(vcx.debug_bounds("TlTreeTable-chevron").is_some());
+    assert!(vcx.debug_bounds("TlTreeTable-chevron-1").is_some());
     // Row 0's chevron hit area spans x 24..44.
     hover_at(vcx, 34., HEADER_H + 14.);
     hover_at(vcx, 34., HEADER_H + 14.);
@@ -3012,7 +3024,10 @@ fn separators_off_by_default() {
     let mut cx = cosmic_cx();
     let rows = (0..3).map(plain).collect();
     let (table, vcx) = open_table(&mut cx, five_columns(rows), 600., 200.);
-    assert!(vcx.debug_bounds("TlCell-numeric").is_some(), "rows drawn");
+    assert!(
+        vcx.debug_bounds("TlCell-numeric-0-pid").is_some(),
+        "rows drawn"
+    );
     assert!(separators(vcx, &table).is_empty());
 }
 
@@ -3058,7 +3073,7 @@ fn separators_move_with_horizontal_scroll() {
     let (table, vcx) = open_table(&mut cx, five_columns(vec![plain(0)]), 300., 200.);
     separators_on(vcx, &table);
     let before = separators(vcx, &table);
-    let cell = vcx.debug_bounds("TlCell-numeric").expect("pid cell");
+    let cell = vcx.debug_bounds("TlCell-numeric-0-pid").expect("pid cell");
     vcx.update(|_, cx| {
         let handle = table.read(cx).scroll_handle();
         ScrollbarHandle::set_offset(&handle, point(px(-100.), px(0.)));
@@ -3067,7 +3082,7 @@ fn separators_move_with_horizontal_scroll() {
     redraw(vcx);
     let after = separators(vcx, &table);
     let cell2 = vcx
-        .debug_bounds("TlCell-numeric")
+        .debug_bounds("TlCell-numeric-0-pid")
         .expect("pid cell after scroll");
     assert_eq!(cell2.left(), cell.left() - px(100.));
     assert_eq!(after.len(), before.len());
@@ -3160,7 +3175,7 @@ fn cell_dot_paints_dot() {
         }
         let (_, vcx) = open_table(&mut cx, d, 600., 200.);
         let (theme, m) = vcx.update(|_, cx| (current(cx).clone(), *metrics(cx)));
-        let dot = vcx.debug_bounds("TlCell-dot");
+        let dot = vcx.debug_bounds("TlCell-dot-0-cpu");
         let fills = (
             quads_filled(vcx, theme.status.danger),
             quads_filled(vcx, theme.status.danger.opacity(STALE_DOT_ALPHA)),
@@ -3179,7 +3194,10 @@ fn cell_dot_paints_dot() {
 
     let mut cx = cosmic_cx();
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
-    assert!(vcx.debug_bounds("TlCell-dot").is_none(), "no dots set");
+    assert!(
+        vcx.debug_bounds("TlCell-dot-0-cpu").is_none(),
+        "no dots set"
+    );
 }
 
 #[test]
@@ -3189,15 +3207,20 @@ fn cell_bar_paints_fill() {
     d.bars.push((1, ColumnId::Cpu, 0.5));
     let (_, vcx) = open_table(&mut cx, d, 600., 200.);
     let (theme, m) = vcx.update(|_, cx| (current(cx).clone(), *metrics(cx)));
-    let track = vcx.debug_bounds("TlCell-bar").expect("track drawn");
-    let fill = vcx.debug_bounds("TlCell-bar-fill").expect("fill drawn");
+    let track = vcx.debug_bounds("TlCell-bar-0-cpu").expect("track drawn");
+    let fill = vcx
+        .debug_bounds("TlCell-bar-fill-0-cpu")
+        .expect("fill drawn");
     assert_eq!(track.size.height, px(12. * m.ui_scale));
     assert!((fill.size.width.as_f32() - track.size.width.as_f32() / 2.).abs() < 1.0);
     assert_eq!(quads_filled(vcx, theme.accent), 1, "one accent fill");
 
     let mut cx = cosmic_cx();
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![plain(1)]), 600., 200.);
-    assert!(vcx.debug_bounds("TlCell-bar").is_none(), "no bars set");
+    assert!(
+        vcx.debug_bounds("TlCell-bar-0-cpu").is_none(),
+        "no bars set"
+    );
 }
 
 #[test]
@@ -3210,6 +3233,7 @@ fn selected_text_color_kept_on_selected_row() {
         theme: &theme,
         selected,
         width: px(80.),
+        at: tl_ui::table::cells::CellAt::Alone,
     };
     let out = CellOut {
         text_color: Some(danger),
@@ -3245,10 +3269,14 @@ fn group_row_draws_glyph_and_secondary() {
     }];
     let (_, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 200.);
     let m = vcx.update(|_, cx| *metrics(cx));
-    let label = vcx.debug_bounds("TlGroupHeaderCell-label").expect("label");
-    let glyph = vcx.debug_bounds("TlGroupHeaderCell-glyph").expect("glyph");
+    let label = vcx
+        .debug_bounds("TlGroupHeaderCell-label-0-name")
+        .expect("label");
+    let glyph = vcx
+        .debug_bounds("TlGroupHeaderCell-glyph-0-name-0")
+        .expect("glyph");
     let secondary = vcx
-        .debug_bounds("TlGroupHeaderCell-secondary")
+        .debug_bounds("TlGroupHeaderCell-secondary-0-name")
         .expect("secondary");
     assert_eq!(glyph.size.width, m.icon.sm);
     assert!(glyph.origin.x >= label.origin.x + label.size.width);
@@ -3256,6 +3284,12 @@ fn group_row_draws_glyph_and_secondary() {
 
     let mut cx = cosmic_cx();
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![group(10)]), 600., 200.);
-    assert!(vcx.debug_bounds("TlGroupHeaderCell-glyph").is_none());
-    assert!(vcx.debug_bounds("TlGroupHeaderCell-secondary").is_none());
+    assert!(
+        vcx.debug_bounds("TlGroupHeaderCell-glyph-0-name-0")
+            .is_none()
+    );
+    assert!(
+        vcx.debug_bounds("TlGroupHeaderCell-secondary-0-name")
+            .is_none()
+    );
 }

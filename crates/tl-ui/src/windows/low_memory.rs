@@ -1081,7 +1081,9 @@ impl LowMemoryWindow {
             *text.text_style() = numeric_style(m, m.text.sm);
             text.child(row.memory_text.clone()).into_any_element()
         } else {
-            glyph(row.validity, &row.memory_text, selected, m, theme)
+            glyph(row.validity, &row.memory_text, selected, m, theme, || {
+                format!("-LowMemMemory-{i}")
+            })
         };
 
         let id = row.id;

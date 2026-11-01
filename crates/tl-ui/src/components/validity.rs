@@ -146,15 +146,19 @@ pub fn tooltip_text(validity: Validity, ctx: &GlyphCtx) -> Option<SharedString> 
 }
 
 /// The cell content without a tooltip: one right-aligned numeric text run, or the lock icon
-/// centred vertically. It fills the cell width.
+/// centred vertically. It fills the cell width. `sfx` ends its debug selectors
+/// (`TlValidityGlyph{sfx}`, `TlValidityGlyph-text{sfx}`, `TlValidityGlyph-lock{sfx}`), so a
+/// window with several glyphs draws each selector once (ADR-019); it runs only in builds that
+/// keep debug selectors.
 pub fn glyph(
     validity: Validity,
     value_text: &SharedString,
     selected: bool,
     m: &UiMetrics,
     theme: &TlTheme,
+    sfx: impl Fn() -> String,
 ) -> AnyElement {
-    base(validity, value_text, selected, false, m, theme).into_any_element()
+    base(validity, value_text, selected, false, m, theme, sfx).into_any_element()
 }
 
 /// [`glyph`] at the start (left) of the cell, for a left-aligned column, so the glyph sits where
@@ -165,12 +169,14 @@ pub fn glyph_start(
     selected: bool,
     m: &UiMetrics,
     theme: &TlTheme,
+    sfx: impl Fn() -> String,
 ) -> AnyElement {
-    base(validity, value_text, selected, true, m, theme).into_any_element()
+    base(validity, value_text, selected, true, m, theme, sfx).into_any_element()
 }
 
 /// [`glyph`] with the validity tooltip after [`DELAY_CONTROL`], through [`HoverTooltip`]. `id`
-/// must be unique among the cell's siblings. Valid cells get no tooltip.
+/// must be unique among the cell's siblings, and its selectors end with `-{id}`. Valid cells get
+/// no tooltip.
 #[allow(clippy::too_many_arguments)]
 pub fn glyph_with_tooltip(
     id: impl Into<ElementId>,
@@ -184,9 +190,11 @@ pub fn glyph_with_tooltip(
     cx: &mut App,
 ) -> AnyElement {
     let id = id.into();
-    let cell = base(validity, value_text, selected, false, m, theme)
-        .relative()
-        .id(id.clone());
+    let cell = base(validity, value_text, selected, false, m, theme, || {
+        format!("-{id}")
+    })
+    .relative()
+    .id(id.clone());
     if validity.is_valid() {
         return cell.into_any_element();
     }
@@ -211,9 +219,12 @@ fn base(
     start: bool,
     m: &UiMetrics,
     theme: &TlTheme,
+    sfx: impl Fn() -> String,
 ) -> gpui_kit::Div {
     let (content, color) = glyph_parts(validity, value_text, selected, theme);
-    let cell = h_flex().tl_selector(|| "TlValidityGlyph".into()).w_full();
+    let cell = h_flex()
+        .tl_selector(|| format!("TlValidityGlyph{}", sfx()))
+        .w_full();
     let mut cell = if start {
         cell.justify_start()
     } else {
@@ -222,13 +233,13 @@ fn base(
     *cell.text_style() = numeric_style(m, m.base_text);
     let inner = match content {
         GlyphContent::Text(text) => div()
-            .tl_selector(|| "TlValidityGlyph-text".into())
+            .tl_selector(|| format!("TlValidityGlyph-text{}", sfx()))
             .flex_none()
             .whitespace_nowrap()
             .text_color(color)
             .child(text),
         GlyphContent::Lock => div()
-            .tl_selector(|| "TlValidityGlyph-lock".into())
+            .tl_selector(|| format!("TlValidityGlyph-lock{}", sfx()))
             .flex_none()
             .child(icon(TlIcon::Lock, m.icon.xs, color)),
     };
@@ -389,12 +400,12 @@ mod tests {
             });
             cx.run_until_parked();
             let selector = if validity == Validity::Restricted {
-                "TlValidityGlyph-lock"
+                "TlValidityGlyph-lock-cell"
             } else {
-                "TlValidityGlyph-text"
+                "TlValidityGlyph-text-cell"
             };
             let inner = cx.debug_bounds(selector).expect("glyph drawn");
-            let cell = cx.debug_bounds("TlValidityGlyph").expect("cell drawn");
+            let cell = cx.debug_bounds("TlValidityGlyph-cell").expect("cell drawn");
             assert!(
                 inner.size.width <= template,
                 "{validity:?}: {:?} > {template:?}",

@@ -414,7 +414,8 @@ impl RenderOnce for TlButton {
                 )
             });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
-            let mut text_el = div().tl_selector(|| "TlButton-label".into());
+            let id = &self.id;
+            let mut text_el = div().tl_selector(|| format!("TlButton-{id}-label"));
             *text_el.text_style() = text;
             content = content.child(text_el.whitespace_nowrap().child(label));
         }
@@ -486,9 +487,10 @@ impl RenderOnce for TlButton {
             })
             .child(content)
             .when(self.loading, |b| {
+                let id = &self.id;
                 b.child(
                     div()
-                        .tl_selector(|| "TlButton-spinner".into())
+                        .tl_selector(|| format!("TlButton-{id}-spinner"))
                         .absolute()
                         .inset_0()
                         .flex()
@@ -741,7 +743,7 @@ mod tests {
                 .into_any_element()
         });
         let before = bounds(cx, "TlButton-apply");
-        assert!(cx.debug_bounds("TlButton-spinner").is_none());
+        assert!(cx.debug_bounds("TlButton-apply-spinner").is_none());
 
         cx.update(|_, cx| {
             view.update(cx, |host, cx| {
@@ -757,7 +759,7 @@ mod tests {
         });
         let after = bounds(cx, "TlButton-apply");
         assert_eq!(after.size, before.size, "the width is kept");
-        let spinner = bounds(cx, "TlButton-spinner");
+        let spinner = bounds(cx, "TlButton-apply-spinner");
         assert_eq!(
             spinner.center(),
             after.center(),
@@ -892,7 +894,7 @@ mod tests {
         press(cx, "enter");
         assert_eq!(hits.get(), 1);
 
-        let label = bounds(cx, "TlButton-label");
+        let label = bounds(cx, "TlButton-mode-label");
         let caret = bounds(cx, "TlButton-mode-trailing-icon");
         assert!(
             caret.left() >= label.right(),

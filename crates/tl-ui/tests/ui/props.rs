@@ -4848,8 +4848,14 @@ mod window {
         assert!(b.loading);
         // The label stays visible: the button is not in TlButton's loading mode, which hides
         // its content, and the spinner sits beside it.
-        assert!(vcx.debug_bounds("TlButton-spinner").is_none());
-        assert!(vcx.debug_bounds("TlButton-label").is_some());
+        assert!(
+            vcx.debug_bounds("TlButton-PropsAccessButton-spinner")
+                .is_none()
+        );
+        assert!(
+            vcx.debug_bounds("TlButton-PropsAccessButton-label")
+                .is_some()
+        );
         let button = vcx
             .debug_bounds("TlButton-PropsAccessButton")
             .expect("button bounds");
@@ -5164,7 +5170,7 @@ mod threads {
             .debug_bounds("TlTreeTableHeader-label-name")
             .expect("Name header drawn");
         let cell = cx
-            .debug_bounds("TlNameCell-primary")
+            .debug_bounds("TlNameCell-primary-0-name")
             .expect("Name cell drawn");
         // The header label box includes its 8 px left padding; the text starts inside it.
         let off = (cell.left() - (header.left() + px(8.))).abs();

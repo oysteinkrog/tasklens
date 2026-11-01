@@ -1626,6 +1626,7 @@ mod paint {
                 theme: &theme,
                 selected: self.st.selected,
                 width: px(120.),
+                at: tl_ui::table::cells::CellAt::Alone,
             };
             let col = process_column(self.col);
             let cell = value_cell(kind(col), self.text.clone(), &self.out, Rc::default(), &ctx);
@@ -1945,6 +1946,7 @@ mod paint {
             theme: &theme,
             selected: false,
             width: px(120.),
+            at: tl_ui::table::cells::CellAt::Alone,
         };
         assert_eq!(cell_text_color(&exited, &paint), Some(theme.text_secondary));
 
@@ -2002,6 +2004,7 @@ mod paint {
             theme: &t,
             selected: st.selected,
             width: px(120.),
+            at: tl_ui::table::cells::CellAt::Alone,
         };
         let filled = CellOut {
             bits: out.bits,
@@ -2196,6 +2199,7 @@ mod name_cell {
                 theme: &theme,
                 selected: false,
                 width: self.width,
+                at: tl_ui::table::cells::CellAt::Alone,
             };
             let cell = match &self.cell {
                 Cell::Name(make) => render_name_cell(
@@ -2440,6 +2444,7 @@ mod name_cell {
                 theme: &theme,
                 selected,
                 width: px(400.),
+                at: tl_ui::table::cells::CellAt::Alone,
             };
             assert_eq!(name_look(gone, &ctx), (ctx.secondary(), STALE_OPACITY));
             assert_eq!(name_look(live, &ctx), (ctx.primary(), 1.0));
@@ -3463,6 +3468,7 @@ mod highlight {
                 theme: &theme,
                 selected: false,
                 width: px(200.),
+                at: tl_ui::table::cells::CellAt::Alone,
             };
             let flags = t.delegate.row_flags(1);
             assert!(flags.has(RowFlags::EXITED));
@@ -4135,7 +4141,9 @@ mod row_tooltip {
         vcx.update(|window, _| window.activate_window());
         redraw(&mut vcx);
 
-        let name = vcx.debug_bounds("TlNameCell").expect("the row's Name cell");
+        let name = vcx
+            .debug_bounds("TlNameCell-0-name")
+            .expect("the row's Name cell");
         // The first move sets the hovered row, the second makes its tooltips ready, the third
         // starts the delay.
         for _ in 0..3 {
@@ -4282,7 +4290,7 @@ mod live {
 
     fn prefix_drawn(vcx: &mut VisualTestContext) -> bool {
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        vcx.debug_bounds("TlCell-prefix").is_some()
+        vcx.debug_bounds("TlCell-prefix-0-cpu").is_some()
     }
 
     fn cell(
@@ -4331,6 +4339,7 @@ mod live {
                 theme: &theme,
                 selected: false,
                 width: px(100.),
+                at: tl_ui::table::cells::CellAt::Alone,
             };
             cell_text_color(&child, &ctx)
         });
@@ -4423,7 +4432,7 @@ mod live {
         assert!(cell(vcx, &table, 0, ColumnId::Cpu).suffix.is_none());
         // The table draws the row with both suffixes.
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(vcx.debug_bounds("TlCell-numeric").is_some());
+        assert!(vcx.debug_bounds("TlCell-numeric-0-pid").is_some());
     }
 
     /// Both pseudo rows as the engine sends them (PROC-012), with names the UI must not show:
@@ -4525,7 +4534,7 @@ mod live {
         }
         // The table draws both rows with their icons.
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(vcx.debug_bounds("TlNameCell").is_some());
+        assert!(vcx.debug_bounds("TlNameCell-1-name").is_some());
     }
 
     /// PROC-012: a pseudo row shows `n/a` in every column it has no data for. Interrupts has
@@ -4695,7 +4704,7 @@ mod live {
         let secondary = vcx.update(|_, cx| table.read(cx).delegate.name_cell(0).secondary);
         assert_eq!(secondary.as_deref(), Some("Mozilla Firefox - Inbox"));
         vcx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(vcx.debug_bounds("TlNameCell-secondary").is_some());
+        assert!(vcx.debug_bounds("TlNameCell-secondary-0-name").is_some());
 
         let (table, vcx) = open(
             cx,

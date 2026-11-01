@@ -45,7 +45,7 @@ use crate::selector::TlSelector;
 use crate::table::actions::{
     HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SetColumnResize, SortByColumn,
 };
-use crate::table::cells::{CellCtx, glyph_cell, numeric_cell};
+use crate::table::cells::{CellAt, CellCtx, glyph_cell, numeric_cell};
 use crate::table::columns::{ColumnAlign, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::tree_table::{ColumnResizeMode, TableSort};
 use crate::table::tree_table::{HEADER_H_ONE, HEADER_H_TWO, HeaderLines};
@@ -544,6 +544,7 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             theme: self.theme,
             selected: false,
             width: cell.w,
+            at: CellAt::Total(cell.id.key()),
         };
         let line = if matches!(validity, Validity::Valid | Validity::Stale) {
             numeric_cell(text.clone(), validity, self.state.clip_sink.clone(), &ctx)

@@ -817,13 +817,15 @@ mod card {
         r.publish_processes(cx, vec![root, record(10, "code", None)]);
         let (card, mut vcx) = r.card(cx, process(4242), Vec::new());
         assert_eq!(state_of(&card, &mut vcx).0, CardState::Restricted);
-        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_some());
+        let lock = lock_of(&card, &mut vcx);
+        assert!(vcx.debug_bounds(lock).is_some());
 
         // Another column of the same process reads a field that is readable.
         let memory = mini_col(process(4242), GraphColumn::Memory);
         let (card, mut vcx) = r.card_entry(cx, memory, Vec::new());
         assert_eq!(state_of(&card, &mut vcx).0, CardState::Live);
-        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_none());
+        let lock = lock_of(&card, &mut vcx);
+        assert!(vcx.debug_bounds(lock).is_none());
 
         // A name card with one restricted member is Restricted.
         let mut other = record(12, "code", None);
@@ -832,7 +834,14 @@ mod card {
         let name = mini(MinigraphSource::Name(Arc::from("code")));
         let (card, mut vcx) = r.card_entry(cx, name, Vec::new());
         assert_eq!(state_of(&card, &mut vcx).0, CardState::Restricted);
-        assert!(vcx.debug_bounds("TlValidityGlyph-lock").is_some());
+        let lock = lock_of(&card, &mut vcx);
+        assert!(vcx.debug_bounds(lock).is_some());
+    }
+
+    /// The selector of `card`'s lock glyph.
+    fn lock_of(card: &Entity<MinigraphCard>, vcx: &mut VisualTestContext) -> &'static str {
+        let id = vcx.read_entity(card, |c, _| c.id.0);
+        Box::leak(format!("MinigraphCard-{id}-lock").into_boxed_str())
     }
 
     /// Embeds the card cached, as the panel does: the window's root re-renders on every draw.
@@ -2159,6 +2168,12 @@ mod panel {
         })
     }
 
+    /// The selector of the CPU card's home outline.
+    fn cpu_home(r: &mut Rig) -> &'static str {
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        Box::leak(format!("MinigraphCard-{}-home", cpu.0).into_boxed_str())
+    }
+
     fn reordered() -> Vec<(MinigraphSource, u16)> {
         vec![
             (MinigraphSource::Memory, 0),
@@ -2180,8 +2195,9 @@ mod panel {
         // Memory and Disk shift right by one slot; the stored layout stays until the drop.
         assert_eq!(preview(&mut r), reordered());
         assert_eq!(r.attached(), before);
+        let outline = cpu_home(&mut r);
         assert_eq!(
-            r.vcx.debug_bounds("MinigraphCard-home"),
+            r.vcx.debug_bounds(outline),
             Some(home),
             "the outline stays at the home slot"
         );
@@ -2218,7 +2234,8 @@ mod panel {
         assert_eq!(preview(&mut r), reordered());
         assert_eq!(r.attached(), before);
         assert!(r.vcx.debug_bounds("MinigraphDragGhost").is_some());
-        assert_eq!(r.vcx.debug_bounds("MinigraphCard-home"), Some(home));
+        let outline = cpu_home(&mut r);
+        assert_eq!(r.vcx.debug_bounds(outline), Some(home));
     }
 
     #[gpui_kit::test]
@@ -3149,8 +3166,14 @@ mod mounted {
             [true, false, false, false, false, false],
             "CPU has the tooltip"
         );
-        assert!(vcx.debug_bounds("MinigraphCard-label").is_some());
-        assert!(vcx.debug_bounds("MinigraphCard-value").is_some());
+        let first = vcx.update(|_, cx| {
+            let panel = MinigraphPanel::global(cx).expect("panel");
+            panel.read(cx).cards()[0].0.0
+        });
+        for part in ["label", "value"] {
+            let name = Box::leak(format!("MinigraphCard-{first}-{part}").into_boxed_str());
+            assert!(vcx.debug_bounds(name).is_some(), "{name} drawn");
+        }
     }
 
     /// The anchor's Hide graph: dispatched from the window on Memory.

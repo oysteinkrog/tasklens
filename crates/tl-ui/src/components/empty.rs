@@ -267,7 +267,10 @@ mod tests {
         let (cx, _) = host(cx, true);
         assert!(cx.debug_bounds("TlEmptyState-text").is_some(), "text shows");
         assert!(cx.debug_bounds(BUTTON).is_some(), "button shows");
-        assert!(cx.debug_bounds("TlButton-label").is_some());
+        assert!(
+            cx.debug_bounds("TlButton-TlEmptyState-clear-filter-label")
+                .is_some()
+        );
     }
 
     #[gpui_kit::test]

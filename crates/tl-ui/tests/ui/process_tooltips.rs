@@ -628,7 +628,7 @@ fn hovered_memory_cell_shows_its_tooltip_at_600ms(cx: &mut TestAppContext) {
     redraw(&mut vcx);
 
     let name = vcx
-        .debug_bounds("TlNameCell")
+        .debug_bounds("TlNameCell-1-name")
         .expect("the process row's Name cell");
     let x = vcx.update(|_, cx| {
         let layout = table.read(cx).delegate.columns();
@@ -639,7 +639,7 @@ fn hovered_memory_cell_shows_its_tooltip_at_600ms(cx: &mut TestAppContext) {
             .expect("Memory is visible by default");
         layout.offsets()[pos] + layout.width(ColumnId::Memory) / 2.
     });
-    // `debug_bounds` keeps the last Name cell drawn, the process row's; the app row is above.
+    // Row 1 is the process row; the app row is above.
     let at = gpui_kit::point(name.left() + x, name.center().y - name.size.height);
     // The first move sets the hovered row, the second makes its tooltips ready, the third
     // starts the delay.

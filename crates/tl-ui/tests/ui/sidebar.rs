@@ -216,7 +216,7 @@ fn net_lines(state: LinkState) -> CardLines {
 #[gpui_kit::test]
 fn card_has_no_device_icon(cx: &mut TestAppContext) {
     let (_host, cx) = open(cx, net_lines(LinkState::Up));
-    let card = cx.debug_bounds("perf-card").expect("card");
+    let card = cx.debug_bounds("perf-card:net:enp38s0").expect("card");
     let graph = cx
         .debug_bounds("perf-card-graph:net:enp38s0")
         .expect("graph");
@@ -231,7 +231,7 @@ fn card_has_no_device_icon(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn card_layout_and_click(cx: &mut TestAppContext) {
     let (host, cx) = open(cx, net_lines(LinkState::Up));
-    let card = cx.debug_bounds("perf-card").expect("card");
+    let card = cx.debug_bounds("perf-card:net:enp38s0").expect("card");
     assert_eq!(card.size.width, px(CARD_W));
     assert_eq!(card.size.height, px(84.));
     let graph = cx
@@ -249,10 +249,14 @@ fn card_layout_and_click(cx: &mut TestAppContext) {
         .debug_bounds("perf-card-text:net:enp38s0")
         .expect("text column");
     assert_eq!(text.left() - graph.right(), px(10.), "graph to text gap");
-    let heights: Vec<_> = ["perf-card-heading", "perf-card-line1", "perf-card-line2"]
-        .iter()
-        .map(|s| cx.debug_bounds(s).expect("line").size.height)
-        .collect();
+    let heights: Vec<_> = [
+        "perf-card-heading:net:enp38s0",
+        "perf-card-line1:net:enp38s0",
+        "perf-card-line2:net:enp38s0",
+    ]
+    .iter()
+    .map(|s| cx.debug_bounds(s).expect("line").size.height)
+    .collect();
     // "↓ 1.2 Mbps ↑ 0.3 Mbps" does not fit one row: line 2 wraps, and the card keeps 80 px.
     assert_eq!(heights, [px(18.), px(16.), px(32.)]);
     for (line, rows) in [("heading", 1), ("line1", 1), ("line2", 2)] {
@@ -340,7 +344,7 @@ fn card_long_gpu_name_wraps_then_ends_in_ellipsis(cx: &mut TestAppContext) {
     );
     assert_eq!(prepared.height, px(84.));
 
-    let card = cx.debug_bounds("perf-card").expect("card");
+    let card = cx.debug_bounds("perf-card:net:enp38s0").expect("card");
     assert_eq!(card.size, gpui_kit::size(px(236.), px(84.)));
     let text = cx
         .debug_bounds("perf-card-text:net:enp38s0")
@@ -363,7 +367,7 @@ fn card_disconnected_opacity(cx: &mut TestAppContext) {
     let card = cx.read_entity(&host, |h, _| h.card());
     assert_eq!(card.opacity(), 0.6);
     assert_eq!(card.line2_color(&theme), theme.text_secondary);
-    assert!(cx.debug_bounds("perf-card-line2").is_some());
+    assert!(cx.debug_bounds("perf-card-line2:net:enp38s0").is_some());
 
     let card = DeviceCard {
         lines: connected,
@@ -438,8 +442,12 @@ fn card_value_glyph_for_restricted(cx: &mut TestAppContext) {
     assert_eq!(&lines.line2_locks[..], &[lines.line2.len() as u16]);
 
     let (_, cx) = open(cx, lines);
-    let line2 = cx.debug_bounds("perf-card-line2").expect("line 2");
-    let lock = cx.debug_bounds("perf-card-lock").expect("lock glyph");
+    let line2 = cx
+        .debug_bounds("perf-card-line2:net:enp38s0")
+        .expect("line 2");
+    let lock = cx
+        .debug_bounds("perf-card-lock:net:enp38s0:line2:0:0")
+        .expect("lock glyph");
     assert!(
         line2.contains(&lock.center()),
         "the lock sits in line 2: {line2:?} {lock:?}"
@@ -465,7 +473,7 @@ fn card_selected_and_focus_outlines(cx: &mut TestAppContext) {
 
     // Selected: one 2 px outline inside the card bounds, no focus ring.
     set(cx, true, false, false);
-    let card = cx.debug_bounds("perf-card").expect("card");
+    let card = cx.debug_bounds("perf-card:net:enp38s0").expect("card");
     let border = cx
         .debug_bounds("perf-card-selected")
         .expect("selected border");
@@ -979,7 +987,7 @@ mod sidebar {
         assert_eq!((cards, rows), (9, 10));
         assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 2");
         // 260 px less sp4 padding on each side.
-        let card = r.vcx.debug_bounds("perf-card").expect("card");
+        let card = r.vcx.debug_bounds("perf-card:cpu").expect("card");
         assert_eq!(card.size.width, px(244.));
         assert_eq!(card.left(), px(8.));
         assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
@@ -1148,7 +1156,7 @@ mod sidebar {
         draw(r.vcx);
         draw(r.vcx);
 
-        let card = r.vcx.debug_bounds("perf-card").expect("card");
+        let card = r.vcx.debug_bounds("perf-card:cpu").expect("card");
         assert_eq!(card.size.width, px(236.), "252 less sp4 on each side");
         let keys = keys(&mut r);
         assert_eq!(keys.len(), 9);
@@ -2835,7 +2843,7 @@ mod sidebar {
         });
         assert_eq!(opacity, 0.6);
         assert!(r.vcx.debug_bounds("perf-edit-row-disk:sdb").is_some());
-        let card = r.vcx.debug_bounds("perf-card").expect("edit card");
+        let card = r.vcx.debug_bounds("perf-card:disk:sdb").expect("edit card");
         // The narrow edit card wraps its text, so it may grow past the least height.
         assert!(card.size.height >= px(80.), "{card:?}");
     }
@@ -3511,7 +3519,7 @@ mod sidebar {
         let mut r = open(cx, nine(), with_overview(), saved("cpu"));
         draw(r.vcx);
         // The Overview card is the first card; the list starts at sp4 (8 px).
-        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let card = r.vcx.debug_bounds("perf-card:cpu").expect("a card");
         let at = gpui_kit::point(card.center().x, px(8.) + card.size.height / 2.);
         right_click(r.vcx, at);
         draw(r.vcx);
@@ -3598,9 +3606,9 @@ mod sidebar {
     fn right_click_keeps_selection(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
         assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
-        // `debug_bounds` keeps the last card drawn; every card has the same size. The list
+        // Every card has the same size. The list
         // starts at sp4 (8 px), and the second card (memory) is one card and a gap lower.
-        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let card = r.vcx.debug_bounds("perf-card:cpu").expect("a card");
         let h = card.size.height;
         let at = gpui_kit::point(card.center().x, px(8.) + h + px(8.) + h / 2.);
         right_click(r.vcx, at);

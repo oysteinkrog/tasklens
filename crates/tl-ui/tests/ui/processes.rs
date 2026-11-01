@@ -844,7 +844,7 @@ mod delegate {
         assert!(want.0.contains("37"), "{want:?}");
         assert_eq!(drawn, [want.0], "only the current row paints a GPU value");
         assert!(
-            vcx.debug_bounds("TlCell-glyph").is_some(),
+            vcx.debug_bounds("TlCell-glyph-1-gpu").is_some(),
             "the warming-up GPU cell draws its glyph"
         );
     }
@@ -922,7 +922,7 @@ mod delegate {
             "the two current rows paint a number, the warming-up row paints none"
         );
         assert!(
-            vcx.debug_bounds("TlCell-glyph").is_some(),
+            vcx.debug_bounds("TlCell-glyph-2-network").is_some(),
             "the warming-up Network cell draws its glyph"
         );
     }
@@ -1600,11 +1600,13 @@ mod page {
         assert_eq!(validity, Validity::WarmingUp);
         assert!(o.vcx.debug_bounds("TlTreeTableHeader-total-cpu").is_some());
         assert!(
-            o.vcx.debug_bounds("TlValidityGlyph-text").is_some(),
+            o.vcx
+                .debug_bounds("TlValidityGlyph-text-total-cpu")
+                .is_some(),
             "… drawn"
         );
         assert!(o.vcx.debug_bounds("TlTreeTable-empty").is_none());
-        assert!(o.vcx.debug_bounds("TlNameCell").is_none());
+        assert!(o.vcx.debug_bounds("TlNameCell-0-name").is_none());
     }
 
     #[gpui_kit::test]
@@ -3396,7 +3398,7 @@ mod filter {
         let q = super::sent(&r.engine).pop().expect("a query");
         assert_eq!(q.filter.as_ref(), "", "Clear filter cleared the filter");
         assert!(
-            r.vcx.debug_bounds("TlTreeTable-group-row").is_none(),
+            r.vcx.debug_bounds("TlTreeTable-group-row-0").is_none(),
             "no group header row"
         );
     }

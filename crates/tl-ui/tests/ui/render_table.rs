@@ -528,10 +528,12 @@ fn name_column_60px_ellipsis_and_tooltip() {
         d.tips[0] = Some(TlTooltip::text(LONG_NAME).view(cx));
         d
     });
-    let cell = vcx.debug_bounds("TlNameCell").expect("Name cell drawn");
+    let cell = vcx
+        .debug_bounds("TlNameCell-1-name")
+        .expect("Name cell drawn");
     assert_eq!(cell.size.width, px(NARROW_NAME_W));
     let primary = vcx
-        .debug_bounds("TlNameCell-primary")
+        .debug_bounds("TlNameCell-primary-1-name")
         .expect("primary text drawn");
     assert!(
         primary.right() <= cell.right(),
@@ -652,13 +654,17 @@ fn rtl_name_in_ltr_cell() {
     );
     // The text fits, and the CPU cell keeps its x.
     let primary = vcx
-        .debug_bounds("TlNameCell-primary")
+        .debug_bounds("TlNameCell-primary-1-name")
         .expect("primary text drawn");
-    let cell = vcx.debug_bounds("TlNameCell").expect("Name cell drawn");
+    let cell = vcx
+        .debug_bounds("TlNameCell-1-name")
+        .expect("Name cell drawn");
     assert!(
         primary.right() <= cell.right() - px(8.),
         "{primary:?} in {cell:?}"
     );
-    let cpu = vcx.debug_bounds("TlCell-numeric").expect("CPU cell drawn");
+    let cpu = vcx
+        .debug_bounds("TlCell-numeric-1-cpu")
+        .expect("CPU cell drawn");
     assert_eq!(cpu.origin.x, cell.origin.x + px(RTL_NAME_W));
 }
