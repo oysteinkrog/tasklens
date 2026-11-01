@@ -97,9 +97,10 @@ pub fn member_widget_id(group: u32, serial: u32) -> u32 {
     0x8000_0000 | ((group & 0x7fff) << 16) | (serial & 0xffff)
 }
 
-/// The debug selector and element id of group `id`'s scrolling items.
-pub fn scroll_id(id: u32) -> String {
-    format!("perf-widget-{id}-scroll")
+/// The debug selector and element id of the scrolling items of group `id` in container
+/// `container`.
+pub fn scroll_id(container: &str, id: u32) -> String {
+    format!("perf-widget-{container}-{id}-scroll")
 }
 
 /// The group's state after its member list was read.
@@ -248,6 +249,8 @@ struct Item {
 /// One group widget of a container.
 pub struct GroupWidget {
     setting: WidgetSetting,
+    /// The id of the container the widget is in, for its own and its items' debug selectors.
+    container: SharedString,
     hub: Entity<SnapshotHub>,
     store: Rc<RefCell<SourceStore>>,
     /// The widget is in a flow layout, where `hidden_gpu_engines` applies to engines.
@@ -279,31 +282,34 @@ pub struct GroupWidget {
 }
 
 impl GroupWidget {
-    /// A group widget for `setting` (whose content is a group), its members' sources from the
-    /// page's `store`. `flow` says the widget is in a flow layout.
+    /// A group widget for `setting` (whose content is a group) in container `container`, its
+    /// members' sources from the page's `store`. `flow` says the widget is in a flow layout.
     pub fn new(
+        container: SharedString,
         setting: WidgetSetting,
         hub: &Entity<SnapshotHub>,
         store: Rc<RefCell<SourceStore>>,
         flow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(setting, hub, store, flow, None, cx)
+        Self::build(container, setting, hub, store, flow, None, cx)
     }
 
     /// A group of a flow layout that draws `look` (see [`GroupFlowLook`]) from the start, so it
     /// makes no member items.
     pub fn with_flow_look(
+        container: SharedString,
         setting: WidgetSetting,
         hub: &Entity<SnapshotHub>,
         store: Rc<RefCell<SourceStore>>,
         look: Option<GroupFlowLook>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(setting, hub, store, true, look, cx)
+        Self::build(container, setting, hub, store, true, look, cx)
     }
 
     fn build(
+        container: SharedString,
         setting: WidgetSetting,
         hub: &Entity<SnapshotHub>,
         store: Rc<RefCell<SourceStore>>,
@@ -313,6 +319,7 @@ impl GroupWidget {
     ) -> Self {
         let mut this = Self {
             setting,
+            container,
             hub: hub.clone(),
             store,
             flow,
@@ -645,8 +652,9 @@ impl GroupWidget {
                     let id = member_widget_id(self.setting.id, self.serial);
                     let setting = self.item_setting(id, &selector);
                     let source = self.store.borrow_mut().source(&selector, cx);
-                    let hub = self.hub.clone();
-                    let widget = cx.new(|cx| MetricWidget::new(setting, source, &hub, cx));
+                    let (hub, container) = (self.hub.clone(), self.container.clone());
+                    let widget =
+                        cx.new(|cx| MetricWidget::new(container, setting, source, &hub, cx));
                     Item { selector, widget }
                 }
             };
@@ -732,7 +740,8 @@ impl Render for GroupWidget {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let id = self.setting.id;
-        let root_id = widget_id(id);
+        let container = self.container.clone();
+        let root_id = widget_id(&container, id);
         let root = div()
             .debug_selector(move || root_id)
             .relative()
@@ -783,7 +792,7 @@ impl Render for GroupWidget {
             let line = |part: &str, text: SharedString| {
                 let mut el = div();
                 *el.text_style() = t_sm(&m);
-                let p = part_id(id, part);
+                let p = part_id(&container, id, part);
                 el.debug_selector(move || p)
                     .max_w_full()
                     .overflow_hidden()
@@ -830,7 +839,7 @@ impl Render for GroupWidget {
             .map(|b| {
                 let mut el = div();
                 *el.text_style() = t_sm(&m);
-                let p = part_id(id, "more");
+                let p = part_id(&container, id, "more");
                 let el = el
                     .debug_selector(move || p)
                     .absolute()
@@ -857,7 +866,7 @@ impl Render for GroupWidget {
             .h(self.fill.content.height)
             .children(items)
             .children(more);
-        let scroll = scroll_id(id);
+        let scroll = scroll_id(&container, id);
         let selector = scroll.clone();
         let body = if self.fill.scrolls_x {
             div()

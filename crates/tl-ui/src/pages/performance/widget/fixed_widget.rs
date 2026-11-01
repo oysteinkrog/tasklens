@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use gpui_kit::{
     AnyView, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StyleRefinement, Styled as _, Window, div, px,
+    SharedString, StyleRefinement, Styled as _, Window, div, px,
 };
 use tl_model::layout::{FixedWidget, WidgetSetting};
 
@@ -47,6 +47,8 @@ const KEY_UNKNOWN: &str = "perf-widget-unknown";
 /// One fixed widget of a container.
 pub struct FixedWidgetView {
     setting: WidgetSetting,
+    /// The id of the container the widget is in, for its debug selectors.
+    container: SharedString,
     content: Option<AnyView>,
     /// Edit Widgets is on: the content keeps the edit chrome's margins free.
     edit_inset: bool,
@@ -57,10 +59,11 @@ pub struct FixedWidgetView {
 }
 
 impl FixedWidgetView {
-    /// A fixed widget for `setting` drawing `content`.
-    pub fn new(setting: WidgetSetting, content: Option<AnyView>) -> Self {
+    /// A fixed widget for `setting` in container `container` drawing `content`.
+    pub fn new(container: SharedString, setting: WidgetSetting, content: Option<AnyView>) -> Self {
         Self {
             setting,
+            container,
             content,
             edit_inset: false,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -126,7 +129,7 @@ impl Render for FixedWidgetView {
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let id = self.setting.id;
-        let root_id = widget_id(id);
+        let root_id = widget_id(&self.container, id);
         let mut body = div().relative().size_full();
         if self.edit_inset {
             body = body
@@ -146,7 +149,7 @@ impl Render for FixedWidgetView {
                 let theme = current(cx).clone();
                 let mut line = div();
                 *line.text_style() = t_sm(&m);
-                let p = part_id(id, "reason");
+                let p = part_id(&self.container, id, "reason");
                 body.flex().items_center().justify_center().child(
                     line.debug_selector(move || p)
                         .max_w_full()

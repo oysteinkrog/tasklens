@@ -112,29 +112,29 @@ pub fn editor_id(id: &str) -> String {
     format!("perf-widget-editor-{id}")
 }
 
-/// The debug selector of widget `id`'s edit frame.
-pub fn frame_id(id: u32) -> String {
-    format!("perf-widget-edit-frame-{id}")
+/// The debug selector of the edit frame of widget `id` in container `container`.
+pub fn frame_id(container: &str, id: u32) -> String {
+    format!("perf-widget-edit-frame-{container}-{id}")
 }
 
-/// The debug selector of widget `id`'s grip.
-pub fn grip_id(id: u32) -> String {
-    format!("perf-widget-edit-grip-{id}")
+/// The debug selector of the grip of widget `id` in container `container`.
+pub fn grip_id(container: &str, id: u32) -> String {
+    format!("perf-widget-edit-grip-{container}-{id}")
 }
 
-/// The debug selector of widget `id`'s gear.
-pub fn gear_id(id: u32) -> String {
-    format!("perf-widget-edit-gear-{id}")
+/// The debug selector of the gear of widget `id` in container `container`.
+pub fn gear_id(container: &str, id: u32) -> String {
+    format!("perf-widget-edit-gear-{container}-{id}")
 }
 
-/// The debug selector of the selected widget `id`'s outline.
-pub fn outline_id(id: u32) -> String {
-    format!("perf-widget-edit-outline-{id}")
+/// The debug selector of the outline of the selected widget `id` in container `container`.
+pub fn outline_id(container: &str, id: u32) -> String {
+    format!("perf-widget-edit-outline-{container}-{id}")
 }
 
-/// The debug selector of widget `id`'s resize corner.
-pub fn corner_id(id: u32) -> String {
-    format!("perf-widget-edit-corner-{id}")
+/// The debug selector of the resize corner of widget `id` in container `container`.
+pub fn corner_id(container: &str, id: u32) -> String {
+    format!("perf-widget-edit-corner-{container}-{id}")
 }
 
 /// The built-in default layout of `container`, which no entry stands for: the Overview box's
@@ -1438,6 +1438,7 @@ impl WidgetEditor {
         let mut out = SmallVec::new();
         let container = self.container.read(cx);
         let placement = container.placement().clone();
+        let cid = container.id().clone();
         let this = cx.entity().downgrade();
         let dragged = self
             .drag
@@ -1448,9 +1449,14 @@ impl WidgetEditor {
             let id = p.id;
             let b = p.bounds;
             let selected = edit.selected == Some(id);
+            let grip_sel = grip_id(&cid, id);
+            let gear_sel = gear_id(&cid, id);
+            let corner_sel = corner_id(&cid, id);
+            let frame_sel = frame_id(&cid, id);
+            let outline_cid = cid.clone();
             let grip = div()
-                .id(SharedString::from(grip_id(id)))
-                .debug_selector(move || grip_id(id))
+                .id(SharedString::from(grip_sel.clone()))
+                .debug_selector(move || grip_sel)
                 .absolute()
                 // The frame's 1 px border puts the padding box inside the widget.
                 .left(px(-1.))
@@ -1465,17 +1471,18 @@ impl WidgetEditor {
                 );
             let gear = {
                 let this = this.clone();
-                let button = TlButton::new(SharedString::from(gear_id(id)), TlButtonKind::Ghost)
-                    .size(TlButtonSize::Xs)
-                    .icon(TlIcon::Settings2)
-                    .icon_size(px(HANDLE * s))
-                    .tooltip(tr(cx, "perf-widget-settings"))
-                    .on_click(move |ev, window, cx| {
-                        let at = ev.position();
-                        let _ = this.update(cx, |e, cx| e.open_widget_menu(id, at, window, cx));
-                    });
+                let button =
+                    TlButton::new(SharedString::from(gear_sel.clone()), TlButtonKind::Ghost)
+                        .size(TlButtonSize::Xs)
+                        .icon(TlIcon::Settings2)
+                        .icon_size(px(HANDLE * s))
+                        .tooltip(tr(cx, "perf-widget-settings"))
+                        .on_click(move |ev, window, cx| {
+                            let at = ev.position();
+                            let _ = this.update(cx, |e, cx| e.open_widget_menu(id, at, window, cx));
+                        });
                 div()
-                    .debug_selector(move || gear_id(id))
+                    .debug_selector(move || gear_sel)
                     .absolute()
                     .top(px(-1.))
                     // Right of the grip, clear of the chart's scale label in the top right.
@@ -1495,8 +1502,8 @@ impl WidgetEditor {
                     )
             };
             let corner = div()
-                .id(SharedString::from(corner_id(id)))
-                .debug_selector(move || corner_id(id))
+                .id(SharedString::from(corner_sel.clone()))
+                .debug_selector(move || corner_sel)
                 .absolute()
                 // In the widget's corner, as the grip is in its top left.
                 .right(px(-1.))
@@ -1521,8 +1528,8 @@ impl WidgetEditor {
                         .border_color(theme.text_secondary),
                 );
             let frame = div()
-                .id(SharedString::from(frame_id(id)))
-                .debug_selector(move || frame_id(id))
+                .id(SharedString::from(frame_sel.clone()))
+                .debug_selector(move || frame_sel)
                 .absolute()
                 .left(b.left())
                 .top(b.top())
@@ -1562,7 +1569,7 @@ impl WidgetEditor {
                     // which the widget keeps free of text.
                     d.child(
                         div()
-                            .debug_selector(move || outline_id(id))
+                            .debug_selector(move || outline_id(&outline_cid, id))
                             .absolute()
                             .inset(px(-1.))
                             .border(px(OUTLINE))

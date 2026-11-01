@@ -98,15 +98,16 @@ const FLOW_CLASS: u32 = u32::MAX - 1;
 /// Bar buckets: the bar notifies only when its fill moves by half a percent or more.
 const BAR_BUCKETS: f32 = 200.;
 
-/// The debug selector of widget `id`'s root.
-pub fn widget_id(id: u32) -> String {
-    format!("perf-widget-{id}")
+/// The debug selector of the root of widget `id` in container `container` (ADR-019: widget
+/// ids repeat across containers, so every widget selector has the container id).
+pub fn widget_id(container: &str, id: u32) -> String {
+    format!("perf-widget-{container}-{id}")
 }
 
-/// The debug selector of a part of widget `id`: "name", "value", "stats", "bar", "chart" or
-/// "reason" (the unavailable line).
-pub fn part_id(id: u32, part: &str) -> String {
-    format!("perf-widget-{id}-{part}")
+/// The debug selector of a part of widget `id` in container `container`: "name", "value",
+/// "stats", "bar", "chart" or "reason" (the unavailable line).
+pub fn part_id(container: &str, id: u32, part: &str) -> String {
+    format!("perf-widget-{container}-{id}-{part}")
 }
 
 /// The bar's bucket for `fraction`; `None` without a bar.
@@ -239,6 +240,8 @@ struct ChartKey {
 /// One widget of a container.
 pub struct MetricWidget {
     setting: WidgetSetting,
+    /// The id of the container the widget is in, for its debug selectors.
+    container: SharedString,
     hub: Entity<SnapshotHub>,
     source: Entity<SourceData>,
     /// Whether the name has the GPU's name in front (the box shows two GPUs).
@@ -270,18 +273,21 @@ pub struct MetricWidget {
 }
 
 impl MetricWidget {
-    /// A widget for `setting` on `source` (from the page's `SourceStore`).
+    /// A widget for `setting` on `source` (from the page's `SourceStore`) in container
+    /// `container`.
     pub fn new(
+        container: SharedString,
         setting: WidgetSetting,
         source: Entity<SourceData>,
         hub: &Entity<SnapshotHub>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_flow(setting, source, hub, None, cx)
+        Self::with_flow(container, setting, source, hub, None, cx)
     }
 
     /// A widget that draws `flow` (see [`FlowLook`]) from the start, so it builds no chart.
     pub fn with_flow(
+        container: SharedString,
         setting: WidgetSetting,
         source: Entity<SourceData>,
         hub: &Entity<SnapshotHub>,
@@ -290,6 +296,7 @@ impl MetricWidget {
     ) -> Self {
         let mut this = Self {
             setting,
+            container,
             hub: hub.clone(),
             _source_sub: cx.observe(&source, Self::on_source),
             source,
@@ -871,7 +878,7 @@ fn value_style(m: &UiMetrics, size: Pixels) -> gpui_kit::TextStyleRefinement {
 
 impl MetricWidget {
     fn meter(&self, id: u32, theme: &TlTheme) -> gpui_kit::Div {
-        let p = part_id(id, "bar");
+        let p = part_id(&self.container, id, "bar");
         div().debug_selector(move || p).w_full().child(Meter {
             fraction: self.shown.fraction,
             color: theme.graph.gpu_line,
@@ -879,7 +886,7 @@ impl MetricWidget {
     }
 
     fn chart_part(&self, id: u32) -> gpui_kit::Div {
-        let p = part_id(id, "chart");
+        let p = part_id(&self.container, id, "chart");
         let mut el = div().debug_selector(move || p).relative();
         if let Some(chart) = &self.chart {
             el = el.child(cached(chart));
@@ -904,16 +911,21 @@ impl MetricWidget {
             if forms.contains(FormSet::LABEL) {
                 let name = self.shown.name.clone();
                 header = header.child(
-                    text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary)
-                        .flex_1()
-                        .min_w_0(),
+                    text_part(
+                        part_id(&self.container, id, "name"),
+                        name,
+                        t_sm(m),
+                        theme.text_secondary,
+                    )
+                    .flex_1()
+                    .min_w_0(),
                 );
             } else {
                 header = header.child(div().flex_1());
             }
             if forms.contains(FormSet::VALUE) {
                 let value = self.shown.value.clone();
-                let p = part_id(id, "value");
+                let p = part_id(&self.container, id, "value");
                 let mut v = div();
                 *v.text_style() = value_style(m, m.text.sm);
                 header = header.child(
@@ -929,10 +941,15 @@ impl MetricWidget {
         if forms.contains(FormSet::STATS) {
             let stats = self.shown.stats.clone();
             el = el.child(
-                text_part(part_id(id, "stats"), stats, t_xs(m), theme.text_secondary)
-                    .flex_none()
-                    .ml(std::mem::take(&mut lead))
-                    .h(px(CELL_STATS_H * s)),
+                text_part(
+                    part_id(&self.container, id, "stats"),
+                    stats,
+                    t_xs(m),
+                    theme.text_secondary,
+                )
+                .flex_none()
+                .ml(std::mem::take(&mut lead))
+                .h(px(CELL_STATS_H * s)),
             );
         }
         if forms.contains(FormSet::BAR) {
@@ -949,7 +966,13 @@ impl MetricWidget {
         if forms.contains(FormSet::LABEL) {
             let name = self.shown.name.clone();
             el = el.child(
-                text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary).ml(lead),
+                text_part(
+                    part_id(&self.container, id, "name"),
+                    name,
+                    t_sm(m),
+                    theme.text_secondary,
+                )
+                .ml(lead),
             );
         }
         if forms.contains(FormSet::VALUE) {
@@ -959,14 +982,25 @@ impl MetricWidget {
             el = el.child(
                 // The name line can be a pixel shorter than the gear, so the value keeps clear
                 // of the gear too.
-                text_part(part_id(id, "value"), value, style, theme.text_primary).ml(lead),
+                text_part(
+                    part_id(&self.container, id, "value"),
+                    value,
+                    style,
+                    theme.text_primary,
+                )
+                .ml(lead),
             );
         }
         if forms.contains(FormSet::STATS) {
             let stats = self.shown.stats.clone();
             el = el.child(
-                text_part(part_id(id, "stats"), stats, t_xs(m), theme.text_secondary)
-                    .h(px(TILE_STATS_H * s)),
+                text_part(
+                    part_id(&self.container, id, "stats"),
+                    stats,
+                    t_xs(m),
+                    theme.text_secondary,
+                )
+                .h(px(TILE_STATS_H * s)),
             );
         }
         el = el.child(div().flex_1());
@@ -993,9 +1027,17 @@ impl MetricWidget {
         } else {
             let name = self.shown.name.clone();
             // The name column carries its own trailing space (`compose::row_parts_w`).
-            el = el.child(div().flex_none().w(px((ROW_NAME_W - ROW_GAP) * s)).child(
-                text_part(part_id(id, "name"), name, t_sm(m), theme.text_secondary).ml(lead),
-            ));
+            el = el.child(
+                div().flex_none().w(px((ROW_NAME_W - ROW_GAP) * s)).child(
+                    text_part(
+                        part_id(&self.container, id, "name"),
+                        name,
+                        t_sm(m),
+                        theme.text_secondary,
+                    )
+                    .ml(lead),
+                ),
+            );
         }
         let bar = forms.contains(FormSet::BAR);
         if bar {
@@ -1003,7 +1045,7 @@ impl MetricWidget {
         }
         if forms.contains(FormSet::VALUE) {
             let value = self.shown.value.clone();
-            let p = part_id(id, "value");
+            let p = part_id(&self.container, id, "value");
             let mut v = div();
             *v.text_style() = numeric_style(m, m.text.sm);
             let mut v = v
@@ -1023,9 +1065,14 @@ impl MetricWidget {
         if forms.contains(FormSet::STATS) {
             let stats = self.shown.stats.clone();
             el = el.child(
-                text_part(part_id(id, "stats"), stats, t_xs(m), theme.text_secondary)
-                    .flex_none()
-                    .max_w(px(ROW_STATS_W * s)),
+                text_part(
+                    part_id(&self.container, id, "stats"),
+                    stats,
+                    t_xs(m),
+                    theme.text_secondary,
+                )
+                .flex_none()
+                .max_w(px(ROW_STATS_W * s)),
             );
         }
         if forms.contains(FormSet::CHART) {
@@ -1052,13 +1099,13 @@ impl MetricWidget {
             .justify_center()
             .size_full()
             .child(text_part(
-                part_id(id, "name"),
+                part_id(&self.container, id, "name"),
                 name,
                 t_sm(m),
                 theme.text_secondary,
             ))
             .child(text_part(
-                part_id(id, "reason"),
+                part_id(&self.container, id, "reason"),
                 reason,
                 t_sm(m),
                 theme.text_secondary,
@@ -1086,7 +1133,7 @@ impl MetricWidget {
                 // name to wrap.
                 let mut name = div();
                 *name.text_style() = t_xs(m);
-                let p = part_id(id, "name");
+                let p = part_id(&self.container, id, "name");
                 let name = name
                     .debug_selector(move || p)
                     .flex_1()
@@ -1098,7 +1145,7 @@ impl MetricWidget {
                     .child(self.shown.name.clone());
                 let mut value = div();
                 *value.text_style() = numeric_style(m, m.text.sm);
-                let p = part_id(id, "value");
+                let p = part_id(&self.container, id, "value");
                 let value = value
                     .debug_selector(move || p)
                     .flex()
@@ -1167,7 +1214,7 @@ impl MetricWidget {
                 // width of its shape in this style (tasklens-lhliq.7).
                 let mut text = div();
                 *text.text_style() = line_style(m);
-                let p = part_id(id, "value");
+                let p = part_id(&self.container, id, "value");
                 text.debug_selector(move || p)
                     .flex_none()
                     .h(px(LABEL_ROW * s))
@@ -1188,7 +1235,7 @@ impl Render for MetricWidget {
         let theme = current(cx).clone();
         if let Some(look) = self.flow.clone() {
             let part = self.flow_part(&look, &m, &theme, window, cx);
-            let id = widget_id(self.setting.id);
+            let id = widget_id(&self.container, self.setting.id);
             let root = div().debug_selector(move || id).relative();
             // The text sizes itself, so the values of one line sit side by side.
             let root = if look == FlowLook::Text {
@@ -1236,7 +1283,7 @@ impl Render for MetricWidget {
             },
             view,
         );
-        let id = widget_id(self.setting.id);
+        let id = widget_id(&self.container, self.setting.id);
         // In Edit Widgets the parts keep clear of the outline and the resize corner.
         let body = if self.edit_inset {
             div()

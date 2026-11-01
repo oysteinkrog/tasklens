@@ -433,8 +433,9 @@ impl WidgetContainer {
         }
         let setting = self.layout.widgets.iter().find(|w| w.id == id)?.clone();
         let source = self.sources.get(&id)?.clone();
-        let hub = self.hub.clone();
-        let widget = cx.new(|cx| MetricWidget::with_flow(setting, source, &hub, Some(look), cx));
+        let (hub, container) = (self.hub.clone(), self.id.clone());
+        let widget =
+            cx.new(|cx| MetricWidget::with_flow(container, setting, source, &hub, Some(look), cx));
         self.widgets.insert(id, WidgetView::Metric(widget.clone()));
         Some(widget)
     }
@@ -460,8 +461,9 @@ impl WidgetContainer {
         if !matches!(setting.content, WidgetContent::Group(_)) {
             return None;
         }
-        let (hub, store) = (self.hub.clone(), Rc::clone(&self.store));
-        let group = cx.new(|cx| GroupWidget::with_flow_look(setting, &hub, store, Some(look), cx));
+        let (hub, store, container) = (self.hub.clone(), Rc::clone(&self.store), self.id.clone());
+        let group = cx
+            .new(|cx| GroupWidget::with_flow_look(container, setting, &hub, store, Some(look), cx));
         self.widgets.insert(id, WidgetView::Group(group.clone()));
         Some(group)
     }
@@ -484,7 +486,8 @@ impl WidgetContainer {
             return None;
         }
         let content = self.content_of(&setting.content, cx);
-        let fixed = cx.new(|_| FixedWidgetView::new(setting, content));
+        let container = self.id.clone();
+        let fixed = cx.new(|_| FixedWidgetView::new(container, setting, content));
         self.widgets.insert(id, WidgetView::Fixed(fixed.clone()));
         Some(fixed)
     }
@@ -714,8 +717,9 @@ impl WidgetContainer {
                     // The host creates the entity when it draws the widget.
                     continue;
                 } else {
+                    let container = self.id.clone();
                     let fixed = cx.new(|cx| {
-                        let mut f = FixedWidgetView::new(setting, content);
+                        let mut f = FixedWidgetView::new(container, setting, content);
                         f.set_edit_inset(editing, cx);
                         f
                     });
@@ -741,8 +745,9 @@ impl WidgetContainer {
                     continue;
                 } else {
                     let (hub, store) = (self.hub.clone(), Rc::clone(&self.store));
+                    let container = self.id.clone();
                     let group = cx.new(|cx| {
-                        let mut g = GroupWidget::new(setting, &hub, store, flow, cx);
+                        let mut g = GroupWidget::new(container, setting, &hub, store, flow, cx);
                         g.set_edit_inset(editing, cx);
                         g.set_size(area, cx);
                         g
@@ -766,9 +771,9 @@ impl WidgetContainer {
                 // The host creates the entity with its look when it draws the widget.
                 continue;
             } else {
-                let hub = self.hub.clone();
+                let (hub, container) = (self.hub.clone(), self.id.clone());
                 let widget = cx.new(|cx| {
-                    let mut w = MetricWidget::new(setting, source, &hub, cx);
+                    let mut w = MetricWidget::new(container, setting, source, &hub, cx);
                     w.set_device_prefix(prefix, cx);
                     w.set_edit_inset(editing, cx);
                     w.set_size(area, cx);
