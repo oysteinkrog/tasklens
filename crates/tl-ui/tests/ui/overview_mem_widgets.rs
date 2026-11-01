@@ -55,8 +55,6 @@ use tl_ui::testing::fake_engine::FakeEngine;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: f32 = 1024. * 1024.;
-/// The memory device's index.
-const MEMORY: DeviceIdx = DeviceIdx(1);
 
 struct Host {
     page: Entity<OverviewPage>,
