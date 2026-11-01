@@ -8851,9 +8851,6 @@ mod wired {
 
         let mut r = open(cx);
         select(&mut r, OVERVIEW_KEY);
-        // A short window, so the page scrolls.
-        r.vcx.simulate_resize(size(px(1600.), px(420.)));
-        draw(r.vcx);
         let page = overview(&mut r).expect("an OverviewPage");
         let editor = r.vcx.update(|_, cx| {
             let hub = page.read(cx).hub().clone();
@@ -8915,7 +8912,11 @@ mod wired {
             assert!(!open, "a right-click at {at:?} opens no menu");
         }
 
-        // The wheel over a covered box still scrolls the page.
+        // The wheel over a covered box still scrolls the page. A short window, so it scrolls.
+        r.vcx.simulate_resize(size(px(1600.), px(420.)));
+        draw(r.vcx);
+        let cpu = r.vcx.debug_bounds(CPU_BOX_ID).expect("the CPU box");
+        assert!(r.vcx.debug_bounds(cover(BoxKind::Cpu)).is_some());
         let top = cpu.origin.y;
         r.vcx.simulate_event(ScrollWheelEvent {
             position: cpu.center(),
