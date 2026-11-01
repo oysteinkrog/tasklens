@@ -33,6 +33,7 @@ pub mod box_menu;
 pub mod cpu_box;
 pub mod cpu_flow;
 pub mod disk_box;
+pub mod disk_flow;
 pub mod edit;
 pub mod fit;
 pub mod gpu_box;
@@ -953,8 +954,8 @@ impl OverviewPage {
     }
 
     /// Writes the layout to `[performance.overview]`. A saved flow layout of a box on widgets
-    /// (the GPU, CPU and Memory boxes) follows its mode, arrangement, split, hidden engines and CPU
-    /// switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
+    /// (the GPU, CPU, Memory and Disk boxes) follows its mode, arrangement, split, hidden engines
+    /// and CPU switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
     /// build with that entry ignores the old keys. A grid layout stays as it is.
     fn save_layout(&self, cx: &mut Context<Self>) {
         if !cx.has_global::<TlSettings>() {
@@ -962,7 +963,7 @@ impl OverviewPage {
         }
         let setting = self.layout.to_setting();
         let layouts = &TlSettings::settings(cx).performance.layouts;
-        let flows: SmallVec<[_; 3]> = [BoxKind::Gpu, BoxKind::Cpu, BoxKind::Memory]
+        let flows: SmallVec<[_; 4]> = [BoxKind::Gpu, BoxKind::Cpu, BoxKind::Memory, BoxKind::Disk]
             .into_iter()
             .filter_map(|kind| {
                 let container = box_menu::widget_container(kind)?;

@@ -22,12 +22,14 @@
 //! When the group's own device is gone (a GPU) it shows "Not connected"; with no members,
 //! "None found"; for a group kind this build does not know, "Needs a newer tasklens".
 //!
-//! A group of a flow layout that its host draws (the CPU box presets, `overview/cpu_flow.rs`)
-//! has a [`GroupFlowLook`] instead: it draws the 1.2.0 part (the core rows of D-040 with their
-//! clock column, or the `core_charts` cells) from the model and sparklines the host keeps, and
-//! makes no member items and takes no member sources of its own. The host updates the model on
-//! a sample and notifies only this group ([`GroupWidget::flow_changed`]) when a row's text or
-//! bucket changed.
+//! A group of a flow layout that its host draws (the CPU box presets, `overview/cpu_flow.rs`,
+//! and the Disk box presets, `overview/disk_flow.rs`) has a [`GroupFlowLook`] instead: it draws
+//! the 1.2.0 part (the core rows of D-040 with their clock column, the `core_charts` cells, the
+//! disk sections or the `disk_charts` cells) from the model and charts the host keeps, and makes
+//! no member items and takes no member sources of its own. The host updates the model on a
+//! sample and notifies only this group ([`GroupWidget::flow_changed`]) when a row's text or
+//! bucket changed. The disk sections work out their busiest-first expansion and "+n more" in
+//! this group's render, so an activity change renders this group only.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -56,6 +58,9 @@ use crate::chart::ChartView;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::overview::cpu_box::core_charts_element;
+use crate::pages::performance::overview::disk_box::{
+    DiskModel, disk_cells_element, disk_rows_element,
+};
 use crate::pages::performance::overview::layout::Arrange;
 use crate::pages::performance::overview::parts::{CoreBarsLayout, CoreBarsModel, core_board};
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
@@ -128,6 +133,21 @@ pub enum GroupFlowLook {
         grid_size: Rc<Cell<Size<Pixels>>>,
         arrange: Arrange,
     },
+    /// The disk sections of the Disk box's `rows` (`disk_box::disk_rows_element`): the label
+    /// part takes `share` of the width, and the sections the body does not fit collapse to
+    /// their headers, the busiest expanded first. `body` is the body's size at the last paint.
+    DiskRows {
+        model: Rc<RefCell<DiskModel>>,
+        body: Rc<Cell<Size<Pixels>>>,
+        share: f32,
+    },
+    /// The `disk_charts` cells (`disk_box::disk_cells_element`): one read and write chart per
+    /// disk, placed as `arrange` says, only whole cells.
+    DiskCells {
+        model: Rc<RefCell<DiskModel>>,
+        body: Rc<Cell<Size<Pixels>>>,
+        arrange: Arrange,
+    },
 }
 
 impl PartialEq for GroupFlowLook {
@@ -171,6 +191,26 @@ impl PartialEq for GroupFlowLook {
                     && Rc::ptr_eq(grid_size, g)
                     && arrange == a
             }
+            (
+                Self::DiskRows { model, body, share },
+                Self::DiskRows {
+                    model: m,
+                    body: b,
+                    share: s,
+                },
+            ) => Rc::ptr_eq(model, m) && Rc::ptr_eq(body, b) && share == s,
+            (
+                Self::DiskCells {
+                    model,
+                    body,
+                    arrange,
+                },
+                Self::DiskCells {
+                    model: m,
+                    body: b,
+                    arrange: a,
+                },
+            ) => Rc::ptr_eq(model, m) && Rc::ptr_eq(body, b) && arrange == a,
             _ => false,
         }
     }
@@ -694,6 +734,14 @@ impl Render for GroupWidget {
                     grid_size,
                     arrange,
                 } => core_charts_element(bars, sparks, grid_size, *arrange, &m, &theme, view),
+                GroupFlowLook::DiskRows { model, body, share } => {
+                    disk_rows_element(model, body, *share, &m, &theme, view)
+                }
+                GroupFlowLook::DiskCells {
+                    model,
+                    body,
+                    arrange,
+                } => disk_cells_element(model, body, *arrange, &m, &theme, view),
             };
             return root.child(part);
         }

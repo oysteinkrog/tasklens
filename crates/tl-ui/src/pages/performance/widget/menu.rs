@@ -8,6 +8,9 @@
 //!   clocks and CPU pressure, then a separator and "Core load >" and "Core speed >" with C0 to
 //!   Cn; Add Widget adds "All cores >" (Load, Speed). The Memory box lists In use, Cached,
 //!   Available, Swap, Commit, Memory pressure and Memory composition ([`mem_source_groups`]).
+//!   The Disk box lists one submenu per shown disk (Active time, Read, Write, Read and write,
+//!   Temperature) and "All disks >" (the same but Temperature, of the disk total); Add Widget
+//!   adds "All disks >" (Active time, Read, Write, Read and write) ([`disk_source_groups`]).
 //! - **Widget menu** ([`widget_menu`]): "Source >" (radio items, one submenu per GPU when the
 //!   box shows two), "Show >" (check items for the forms the metric offers; the last checked one
 //!   is disabled), "Chart >" while Chart is on (Fill under the line, Dashed line), a separator,
@@ -38,7 +41,7 @@ use tl_model::layout::{
     METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
 use tl_model::layout_boxes::{
-    CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_MEMORY, DeviceKind, METRIC_CORE_CLOCKS,
+    CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_DISKS, DEVICE_MEMORY, DeviceKind, METRIC_CORE_CLOCKS,
     METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
     METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED,
     METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX,
@@ -61,6 +64,7 @@ use crate::pages::performance::actions::{
 };
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
 use crate::pages::performance::overview::layout::Arrange;
+use crate::settings_global::TlSettings;
 
 /// The device facts after the engines, in menu order, with their name keys.
 const OTHER_METRICS: [(&str, &str); 5] = [
@@ -95,6 +99,16 @@ const MEM_METRICS: [(&str, &str); 7] = [
     (METRIC_MEM_COMMIT, "perf-overview-mem-commit"),
     (METRIC_PRESSURE, "perf-widget-metric-mem-pressure"),
     (METRIC_MEM_COMPOSITION, "perf-widget-metric-mem-composition"),
+];
+
+/// The disk metrics in the Disk box's "Source >", in menu order, with their name keys
+/// (UI-PRF-061 phase 2). The disk total lists the first four: it has no temperature.
+const DISK_METRICS: [(&str, &str); 5] = [
+    (METRIC_DISK_ACTIVE, "perf-widget-metric-disk-active"),
+    (METRIC_DISK_READ, "perf-widget-metric-disk-read"),
+    (METRIC_DISK_WRITE, "perf-widget-metric-disk-write"),
+    (METRIC_DISK_IO, "perf-widget-metric-disk-io"),
+    (METRIC_TEMP, "perf-widget-metric-temp"),
 ];
 
 /// The form check items of "Show >", in menu order, with their name keys.
@@ -550,6 +564,90 @@ pub fn mem_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     }]
 }
 
+/// The sources of the Disk box on `snap` (UI-PRF-061 phase 2): one group per disk the box
+/// shows (the whole disks of the visible sidebar cards, in sidebar order, named as the catalog
+/// names them) with the metrics it reports, then "All disks" with the disk total's metrics and
+/// "All disks >" for Add Widget. Without a disk-total device only the disks are listed.
+pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let perf = cx
+        .try_global::<TlSettings>()
+        .map(|_| &TlSettings::settings(cx).performance);
+    let items = |kind: DeviceKind, idx: DeviceIdx, metrics: &[(&str, &str)]| {
+        metrics
+            .iter()
+            .filter_map(|(key, name_key)| {
+                let metric = MetricKey::new(key);
+                let (value, _) = box_reading(kind, &metric, snap, idx, None);
+                if value.validity == Validity::Unsupported {
+                    return None;
+                }
+                Some(SourceItem {
+                    offered: MetricMeta::of(kind, &metric)
+                        .map_or(FormSet::empty(), |m| m.offered_forms(Some((snap, idx)))),
+                    metric,
+                    label: tr(cx, name_key),
+                    engine: false,
+                    device: None,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let disks = GroupSelector {
+        device: DeviceSelector::Key(Arc::from(DEVICE_DISKS)),
+        members: GroupKind::Disks,
+        metric: MetricKey::new(METRIC_DISK_IO),
+        options: GroupOptions {
+            limit: None,
+            items: GroupItems::Cells,
+            arrange: None,
+        },
+    };
+    let mut groups = Vec::new();
+    for s in members(&disks, snap, perf, None, false).list() {
+        let DeviceSelector::Key(key) = &s.device else {
+            continue;
+        };
+        let Some(entry) = snap.devices.entries.iter().filter(|e| e.present).find(|e| {
+            *e.persistent_key == **key
+                || DeviceKey::from_identity(&e.identity).is_some_and(|k| *k.0 == **key)
+        }) else {
+            continue;
+        };
+        groups.push(SourceGroup {
+            key: Arc::clone(key),
+            name: SharedString::from(entry.display_name.to_string()),
+            items: items(DeviceKind::Disk, entry.idx, &DISK_METRICS),
+            subs: Vec::new(),
+            add_group: None,
+        });
+    }
+    let Some(total) = snap
+        .devices
+        .entries
+        .iter()
+        .find(|e| e.present && &*e.persistent_key == DEVICE_DISKS)
+    else {
+        return groups;
+    };
+    let all = tr(cx, "perf-widget-group-disks");
+    let add_group = GroupAdd {
+        label: all.clone(),
+        kind: GroupKind::Disks,
+        metrics: group_metrics(&GroupKind::Disks)
+            .iter()
+            .map(|(key, name)| (MetricKey::new(key), tr(cx, name)))
+            .collect(),
+    };
+    groups.push(SourceGroup {
+        key: Arc::from(DEVICE_DISKS),
+        name: all,
+        items: items(DeviceKind::Disks, total.idx, &DISK_METRICS[..4]),
+        subs: Vec::new(),
+        add_group: Some(add_group),
+    });
+    groups
+}
+
 /// The fixed widget Add Widget offers: its kind's name as written and its menu label.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FixedAdd {
@@ -974,6 +1072,7 @@ fn box_name(container: &str, cx: &App) -> SharedString {
         tl_model::layout::GPU_BOX_CONTAINER => tr(cx, "perf-overview-box-gpu"),
         tl_model::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
         tl_model::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
+        tl_model::layout::DISK_BOX_CONTAINER => tr(cx, "perf-overview-box-disks"),
         other => SharedString::from(other.to_string()),
     }
 }

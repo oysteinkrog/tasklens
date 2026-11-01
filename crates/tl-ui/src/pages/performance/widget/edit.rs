@@ -43,9 +43,9 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, FixedWidget, FormSet, LAYOUT_VERSION,
-    MEMORY_BOX_CONTAINER, MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
-    WidgetSetting, default_box_layout, grid_cols, overview_kind, reset_to_default,
+    CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FixedWidget, FormSet,
+    LAYOUT_VERSION, MEMORY_BOX_CONTAINER, MetricKey, SourceSelector, WidgetCell, WidgetContent,
+    WidgetOptions, WidgetSetting, default_box_layout, grid_cols, overview_kind, reset_to_default,
 };
 use tl_model::layout_boxes::DeviceKind;
 
@@ -884,7 +884,8 @@ impl WidgetEditor {
     }
 
     /// The sources the box can show, now: the CPU's metrics and logical CPUs in the CPU box,
-    /// the memory metrics in the Memory box, else the GPUs the box shows.
+    /// the memory metrics in the Memory box, the shown disks and the disk total in the Disk box,
+    /// else the GPUs the box shows.
     pub fn source_groups(&self, cx: &App) -> Vec<SourceGroup> {
         let snap = box_snapshot(&self.hub, cx);
         if *self.id == *CPU_BOX_CONTAINER {
@@ -892,6 +893,9 @@ impl WidgetEditor {
         }
         if *self.id == *MEMORY_BOX_CONTAINER {
             return menu::mem_source_groups(&snap, cx);
+        }
+        if *self.id == *DISK_BOX_CONTAINER {
+            return menu::disk_source_groups(&snap, cx);
         }
         menu::source_groups(&self.slots, &snap, cx)
     }

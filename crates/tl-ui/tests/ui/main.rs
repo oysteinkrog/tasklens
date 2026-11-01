@@ -40,6 +40,7 @@ mod minigraphs;
 mod net_page;
 mod overview;
 mod overview_cpu_widgets;
+mod overview_disk_widgets;
 mod overview_groups;
 mod overview_mem_widgets;
 mod overview_range;

@@ -13,8 +13,8 @@
 //! [`PerfOverviewResetBox`], which the page handles here: the layout takes the new mode, the
 //! new arrangement or the default, the box views follow, and the layout is saved.
 //!
-//! When a box hosts a widget editor (UI-PRF-061: the GPU box, and from phase 2 the CPU and
-//! Memory boxes),
+//! When a box hosts a widget editor (UI-PRF-061: the GPU box, and from phase 2 the CPU, Memory
+//! and Disk boxes),
 //! its menu has "Edit Widgets…" above "Reset Box" ([`PerfWidgetEditBox`]; the GPU box also keeps
 //! [`PerfWidgetEditStart`]), which ends Edit Layout and starts Edit Widgets. While the box shows
 //! the user's own widgets (a grid layout), "Arrange", "Engines", "Show power draw", "Power draw
@@ -28,7 +28,8 @@ use gpui_kit::{
 
 use smallvec::SmallVec;
 use tl_model::layout::{
-    CPU_BOX_CONTAINER, GPU_BOX_CONTAINER, MEMORY_BOX_CONTAINER, reset_to_default,
+    CPU_BOX_CONTAINER, DISK_BOX_CONTAINER, GPU_BOX_CONTAINER, MEMORY_BOX_CONTAINER,
+    reset_to_default,
 };
 use tl_model::layout_boxes::convert_box;
 use tl_model::settings::TimelineClick;
@@ -124,19 +125,20 @@ pub struct BoxMenuTarget {
 }
 
 /// The widget container of the box of `kind`, when the box is on widgets: the GPU box
-/// (phase 1), the CPU box (tasklens-6swdr.4) and the Memory box (tasklens-6swdr.5). The other
-/// boxes join with their beads.
+/// (phase 1), the CPU box (tasklens-6swdr.4), the Memory box (tasklens-6swdr.5) and the Disk
+/// box (tasklens-6swdr.6). The other boxes join with their beads.
 pub fn widget_container(kind: BoxKind) -> Option<&'static str> {
     match kind {
         BoxKind::Gpu => Some(GPU_BOX_CONTAINER),
         BoxKind::Cpu => Some(CPU_BOX_CONTAINER),
         BoxKind::Memory => Some(MEMORY_BOX_CONTAINER),
+        BoxKind::Disk => Some(DISK_BOX_CONTAINER),
         _ => None,
     }
 }
 
 /// The kinds of the boxes on widgets, in page order.
-const WIDGET_BOXES: [BoxKind; 3] = [BoxKind::Cpu, BoxKind::Memory, BoxKind::Gpu];
+const WIDGET_BOXES: [BoxKind; 4] = [BoxKind::Cpu, BoxKind::Memory, BoxKind::Gpu, BoxKind::Disk];
 
 /// Whether `container`'s saved layout is a grid layout.
 fn grid_layout(container: &str, cx: &App) -> bool {
@@ -552,6 +554,7 @@ impl OverviewPage {
             BoxKind::Gpu => self.gpu.update(cx, |g, cx| g.prepare_edit(cx)),
             BoxKind::Cpu => self.cpu.update(cx, |b, cx| b.prepare_edit(cx)),
             BoxKind::Memory => self.mem.update(cx, |b, cx| b.prepare_edit(cx)),
+            BoxKind::Disk => self.disk.update(cx, |b, cx| b.prepare_edit(cx)),
             _ => {}
         }
         editor.update(cx, |e, cx| e.start(window, cx));
