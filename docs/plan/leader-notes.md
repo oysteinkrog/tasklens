@@ -1073,3 +1073,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-11-01: lhliq.7 decision: old GPU modes render through widgets via flow placement; collapsed box may re-place only when the busiest engine changes.
 - 2026-11-01: lhliq.7 requeued: drawing and placement must share one function; sweep test drawn bounds == placed rect for every mode at two sizes.
 - 2026-11-01: lhliq.7 line decision D: tnum digits; re-place only when the line's shape (values present, character counts) changes.
+- 2026-11-01: lhliq.8 bench gate: compare HEAD with v1.1.0 under the same load (within 10%), not absolute budgets on a loaded desktop; 144 Hz check not verifiable here.
