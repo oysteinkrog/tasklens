@@ -41,8 +41,8 @@ use tl_ui::pages::performance::widget::compose::{
 };
 use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
 use tl_ui::pages::performance::widget::edit::{
-    ADD_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, WidgetEditor, corner_id, default_layout, frame_id,
-    gear_id, grip_id,
+    ADD_ID, PREVIEW_ID, RESET_ID, TOOLBAR_ID, WidgetEditor, corner_id, default_layout, editor_id,
+    frame_id, gear_id, grip_id,
 };
 use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
@@ -2143,4 +2143,54 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     assert_eq!(w.forms, FormSet::CHART | FormSet::VALUE | FormSet::LABEL);
     assert!(w.cell.is_some());
     assert_eq!(r.selected(&e), Some(5));
+}
+
+/// Add Widget in a full box puts the widget under the lowest one; the body scrolls so the
+/// widget lies inside the visible body (ADR-019 "Insert").
+#[gpui_kit::test]
+fn overview_widget_add_scrolls_new_widget_into_view(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, c) = r.editor(four_widgets(), 400., 250.);
+    r.start(&e);
+    let id = r
+        .ed(&e, |e, _, cx| e.add(&source(2, "vram"), cx))
+        .expect("added");
+    draw(r.vcx);
+    let body_after = r
+        .vcx
+        .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+        .expect("scrolling body");
+    let below = r.vcx.read_entity(&c, |c, _| {
+        c.placement().bounds(id).map(|b| f32::from(b.bottom()))
+    });
+    assert!(
+        below.is_some_and(|b| b > f32::from(body_after.size.height)),
+        "the widget starts below the visible body, so the body had to scroll: {below:?}"
+    );
+    let w = r
+        .vcx
+        .debug_bounds(leak(widget_id(id)))
+        .expect("the new widget is drawn");
+    assert!(
+        w.top() >= body_after.top() - px(0.5) && w.bottom() <= body_after.bottom() + px(0.5),
+        "widget {w:?} lies inside the body {body_after:?}"
+    );
+}
+
+/// A widget taller than the body shows its top.
+#[gpui_kit::test]
+fn overview_widget_add_taller_than_body_shows_top(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let (e, _) = r.editor(four_widgets(), 176., 172.);
+    r.start(&e);
+    let id = r
+        .ed(&e, |e, _, cx| e.add(&source(2, "vram"), cx))
+        .expect("added");
+    draw(r.vcx);
+    let body = r
+        .vcx
+        .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+        .expect("scrolling body");
+    let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("drawn");
+    assert!((w.top() - body.top()).abs() <= px(0.5), "{w:?} {body:?}");
 }

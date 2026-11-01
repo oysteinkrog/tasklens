@@ -34,9 +34,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle, Global,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, WeakEntity, Window, canvas, div,
-    prelude::FluentBuilder as _, px,
+    point, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::layout::{
@@ -486,6 +486,8 @@ pub struct WidgetEditor {
     drag: Option<WidgetDrag>,
     /// The body size at the last paint.
     body: Cell<(Pixels, Pixels)>,
+    /// The scroll position of the editor's body.
+    scroll: ScrollHandle,
     add_bounds: Rc<Cell<Bounds<Pixels>>>,
     _container_sub: gpui_kit::Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -522,6 +524,7 @@ impl WidgetEditor {
             shown_before: None,
             drag: None,
             body: Cell::new((px(0.), px(0.))),
+            scroll: ScrollHandle::new(),
             add_bounds: Rc::new(Cell::new(Bounds::default())),
             _container_sub: sub,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -793,9 +796,13 @@ impl WidgetEditor {
         let Some(id) = self.selected() else {
             return false;
         };
-        self.edit_with(cx, |l, g| {
+        let moved = self.edit_with(cx, |l, g| {
             grid::moved_by(l, id, dx, dy).is_some_and(|t| grid::set_cell(l, id, t, g))
-        })
+        });
+        if moved {
+            self.show_widget(id, cx);
+        }
+        moved
     }
 
     /// Alt+Shift+arrow keys: the selected widget grows or shrinks one cell at its right or
@@ -804,9 +811,44 @@ impl WidgetEditor {
         let Some(id) = self.selected() else {
             return false;
         };
-        self.edit_with(cx, |l, g| {
+        let grown = self.edit_with(cx, |l, g| {
             grid::grown_by(l, id, dw, dh).is_some_and(|t| grid::set_cell(l, id, t, g))
-        })
+        });
+        if grown {
+            self.show_widget(id, cx);
+        }
+        grown
+    }
+
+    /// Scrolls the body the least that shows widget `id` fully (ADR-019 "Insert"); a widget
+    /// taller than the body shows its top. The offset is clamped to the content at paint.
+    fn show_widget(&mut self, id: u32, cx: &mut Context<Self>) {
+        let (top, bottom, content) = {
+            let c = self.container.read(cx);
+            let Some(b) = c.placement().bounds(id) else {
+                return;
+            };
+            (
+                f32::from(b.top()),
+                f32::from(b.bottom()),
+                f32::from(c.placement().content_h),
+            )
+        };
+        let view = f32::from(self.body.get().1);
+        if view <= 0. || content <= view {
+            return;
+        }
+        let shown = -f32::from(self.scroll.offset().y);
+        let target = if top < shown || bottom - top > view {
+            top
+        } else if bottom > shown + view {
+            bottom - view
+        } else {
+            return;
+        };
+        let target = target.clamp(0., content - view);
+        self.scroll.set_offset(point(px(0.), px(-target)));
+        cx.notify();
     }
 
     /// Delete and "Remove Widget": the selected widget goes.
@@ -871,6 +913,7 @@ impl WidgetEditor {
         });
         let id = added.get()?;
         self.select(id, cx);
+        self.show_widget(id, cx);
         Some(id)
     }
 
@@ -1057,6 +1100,7 @@ impl WidgetEditor {
                     edit.push(Some(preview));
                 }
                 self.show_working(cx);
+                self.show_widget(drag.id, cx);
             }
             None => self.show_working(cx),
         }
@@ -1437,6 +1481,7 @@ impl Render for WidgetEditor {
         .absolute()
         .inset_0();
         let scroll = SharedString::from(format!("{}-scroll", editor_id(&self.id)));
+        let scroll_selector = scroll.to_string();
         let body = div()
             .relative()
             .flex_1()
@@ -1444,22 +1489,28 @@ impl Render for WidgetEditor {
             .w_full()
             .child(measure)
             .child(
-                div().size_full().child(
-                    div()
-                        .size_full()
-                        .child(
-                            div().relative().w_full().h(inner_h).child(container).child(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .size_full()
-                                    .children(chrome),
+                div()
+                    .size_full()
+                    .relative()
+                    .debug_selector(move || scroll_selector)
+                    .child(
+                        div()
+                            .id(scroll)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(
+                                div().relative().w_full().h(inner_h).child(container).child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .size_full()
+                                        .children(chrome),
+                                ),
                             ),
-                        )
-                        .overflow_y_scrollbar()
-                        .id(scroll),
-                ),
+                    )
+                    .vertical_scrollbar(&self.scroll),
             );
         Self::with_actions(root, cx)
             .key_context(PERF_WIDGET_EDIT_CONTEXT)
