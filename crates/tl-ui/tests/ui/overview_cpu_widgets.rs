@@ -170,6 +170,8 @@ fn open(cx: &mut TestAppContext, cores: u16, w: f32, h: f32) -> Rig<'_> {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
+        // Raw core values: two samples a few ms apart barely move a smoothed bar.
+        settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
         cx.set_global(BootSettings {
             settings,
             state: UiState::default(),

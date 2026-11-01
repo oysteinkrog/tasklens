@@ -413,14 +413,14 @@ mod tests {
         let l = flow_layout(CpuFlowKeys {
             power: true,
             clocks: true,
-            power_split: Some(0.3),
+            power_split: Some(0.25),
             power_placement: Some(PowerPlacement::UnderGraph),
             ..keys("chart_cores")
         });
         let (clocks, power) = (clocks_of(&l).expect("clocks"), power_of(&l).expect("power"));
         assert!(clocks < power, "Core clocks first, then the strip");
         let preset = l.preset.as_ref().expect("a flow layout");
-        assert_eq!(preset.power_split, Some(0.3));
+        assert_eq!(preset.power_split, Some(0.25));
         assert_eq!(preset.power_placement.as_deref(), Some("under_graph"));
     }
 

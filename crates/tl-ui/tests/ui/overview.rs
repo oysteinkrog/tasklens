@@ -489,6 +489,7 @@ mod boxes {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::overview::cpu_box::{CPU_BOX_ID, CpuBox};
+    use tl_ui::pages::performance::overview::cpu_flow::cores_of;
     use tl_ui::pages::performance::overview::mem_box::{MEM_BOX_ID, MemBox};
     use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell, core_spark_id};
     use tl_ui::settings_global::TlSettings;
@@ -746,14 +747,18 @@ mod boxes {
             self.vcx.read_entity(&self.host, |h, _| h.mem.clone())
         }
 
-        /// (render, notify) of the CPU box, then of the Memory box.
+        /// (render, notify) of the CPU box, then of the Memory box. The CPU notify counts the
+        /// box and its cores group: a core sample notifies only the group that draws the rows.
         fn counts(&mut self) -> [u32; 4] {
             let (cpu, mem) = (self.cpu(), self.mem());
             self.vcx.update(|_, cx| {
                 let (c, m) = (cpu.read(cx), mem.read(cx));
+                let cores = cores_of(c.flow())
+                    .and_then(|id| c.container().read(cx).group(id).cloned())
+                    .map_or(0, |g| g.read(cx).notify_count.get());
                 [
                     c.render_count.get(),
-                    c.notify_count.get(),
+                    c.notify_count.get() + cores,
                     m.render_count.get(),
                     m.notify_count.get(),
                 ]
@@ -7531,6 +7536,9 @@ mod page {
             ("Show core clocks", false),
             ("", false),
             ("Arrange", false),
+            // The CPU box is on widgets (UI-PRF-061): its gear ends with Edit Widgets.
+            ("", false),
+            ("Edit Widgets…", false),
         ]
         .map(|(l, c)| (l.to_owned(), c))
         .into();
@@ -9095,8 +9103,9 @@ mod page {
             container: GPU_BOX_CONTAINER.to_owned(),
             version: LAYOUT_VERSION_GPU_ONLY,
             preset: None,
+            // An id the CPU box's preset does not use: widget selectors are not per box.
             widgets: vec![WidgetSetting {
-                id: 1,
+                id: 40,
                 content: WidgetContent::Metric(SourceSelector {
                     device: DeviceSelector::Key(key),
                     metric: MetricKey::new("vram"),
@@ -9111,7 +9120,7 @@ mod page {
                 options: WidgetOptions::default(),
                 device_name: None,
             }],
-            next_id: 2,
+            next_id: 41,
         };
         let stored = |r: &mut Rig| {
             r.vcx.update(|_, cx| {
@@ -9127,7 +9136,7 @@ mod page {
             TlSettings::update(cx, |d| d.settings.performance.layouts.set(saved));
         });
         draw(r.vcx);
-        let widget = leak_str(widget_id(1));
+        let widget = leak_str(widget_id(40));
         assert!(r.vcx.debug_bounds(widget).is_some(), "drawn before");
 
         // The GPU is unplugged: the box is gone, the layout is not.
@@ -9770,13 +9779,15 @@ mod wired {
             .debug_bounds(Box::leak(title_row_id(CPU_BOX_ID).into_boxed_str()))
             .expect("the CPU title line");
 
-        // Right-click on the title line: Layout, Reset Box, a separator, then the page menu.
+        // Right-click on the title line: Layout, Edit Widgets (the CPU box is on widgets),
+        // Reset Box, a separator, then the page menu.
         mouse(r.vcx, MouseButton::Right, title.center());
         let (labels, modes) = open_menu(&mut r);
         assert_eq!(
-            labels[..4],
+            labels[..5],
             [
                 (MenuEntryKind::Submenu, "Layout".to_owned()),
+                (MenuEntryKind::Item, "Edit Widgets…".to_owned()),
                 (MenuEntryKind::Item, "Reset Box".to_owned()),
                 (MenuEntryKind::Separator, String::new()),
                 (MenuEntryKind::Item, "Copy".to_owned()),
@@ -9830,7 +9841,7 @@ mod wired {
         draw(r.vcx);
         assert_eq!(cpu_split(&mut r), Some(0.6));
         mouse(r.vcx, MouseButton::Right, title.center());
-        r.vcx.simulate_keystrokes("down down enter");
+        r.vcx.simulate_keystrokes("down down down enter");
         draw(r.vcx);
         assert_eq!(cpu_split(&mut r), Some(0.4));
         assert_eq!(saved(&mut r), Some(OverviewLayoutSetting::grid_default()));
@@ -9860,9 +9871,10 @@ mod wired {
         mouse(r.vcx, MouseButton::Right, handle.center());
         let (labels, modes) = open_menu(&mut r);
         assert_eq!(
-            labels[..3],
+            labels[..4],
             [
                 (MenuEntryKind::Submenu, "Layout".to_owned()),
+                (MenuEntryKind::Item, "Edit Widgets…".to_owned()),
                 (MenuEntryKind::Item, "Reset Box".to_owned()),
                 (MenuEntryKind::Separator, String::new()),
             ]
