@@ -621,7 +621,11 @@ pub fn core_bars_layout_marked(
     // The fewest columns for those rows, so no column is left empty.
     let cols = n.div_ceil(rows);
     // Rows that fit grow to fill the part's height (D-040); scrolling rows keep their pitch.
-    let row_h = if scrolls { row_h } else { row_h.max(h / rows as f32) };
+    let row_h = if scrolls {
+        row_h
+    } else {
+        row_h.max(h / rows as f32)
+    };
     let cell_w = ((w - gap * (cols - 1) as f32) / cols as f32).max(0.);
     let fit = if cell_w >= (CORE_FULL_W + mark_w) * scale {
         CoreCellFit::Full
@@ -728,11 +732,7 @@ pub fn core_sparks(
     let inset = px(CORE_SPARK_INSET * s);
     let tail = px(CORE_SPARK_TAIL_W * s);
     for r in 0..l.rows {
-        let row = div()
-            .flex()
-            .flex_row()
-            .w_full()
-            .gap(px(CELL_GAP * s));
+        let row = div().flex().flex_row().w_full().gap(px(CELL_GAP * s));
         // Rows that fill the height share it, so they follow the part inside one layout class.
         let mut row = if l.scrolls {
             row.flex_none().h(l.row_h)
