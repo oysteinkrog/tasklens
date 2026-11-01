@@ -6,8 +6,7 @@
 //! The rates and totals sum the present interfaces other than `lo` whose class the
 //! `show_network_*` settings show. The charts and peaks read the engine's total of every class
 //! minus the per-class totals of the hidden classes (`NetTotal`, tasklens-q4x76.22). The box formats its
-//! text only when the inputs' hash changes and notifies only then. Pointer movement never
-//! notifies.
+//! text only when the inputs' hash changes. Pointer movement never notifies.
 //!
 //! UI-PRF-019 gives the box four modes. `stacked` (the default) is Download over Upload with a
 //! horizontal splitter. `columns` is the Download and Upload columns above with a vertical
@@ -16,24 +15,39 @@
 //! `adapter_charts` is a grid of one combined chart per counted adapter, in cells of at least
 //! 200 × 80 px. The adapter charts are built when the mode is shown and when the set of counted
 //! adapters changes, never per tick.
+//!
+//! D-041, ADR-019 phase 2: the modes are presets of the box's widget layout. A preset is a flow
+//! layout (`net_flow.rs`): the `rx` and `tx` widgets of the counted total in `stacked` and
+//! `columns`, the `traffic` widget in `combined`, and the adapters group in `adapter_charts`.
+//! Each widget draws its 1.2.0 part from the [`NetModel`] the box keeps (rates, peaks, totals,
+//! adapter cells and "+n more") and the charts the box keeps: the Download and Upload parts
+//! with `FlowLook::NetDirection`, the `combined` body with `FlowLook::NetCombined`, and the
+//! adapter cells with `GroupFlowLook::NetCells`, which works out the whole cells that fit in
+//! its own render. On a sample the box notifies only the widgets whose text changed, and itself
+//! only when the busiest adapter on its title line changed. The box draws the title line and
+//! the splitter between the Download and Upload parts. A grid layout (the user's own widgets,
+//! after Apply) is drawn by the box's [`WidgetEditor`] and its `WidgetContainer`; so is the box
+//! while Edit Widgets is on.
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, App, Context, Div, Entity, EventEmitter, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, px, relative, size, white,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EntityId, EventEmitter, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
+    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    relative, size, white,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::{DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::layout::{ContainerLayout, NET_BOX_CONTAINER};
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::snapshot::Snapshot;
 use tl_model::units;
@@ -46,6 +60,7 @@ use super::disk_box::more_line;
 use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
+use super::net_flow::{self, NetFlowKeys, NetLook, NetPlan, PlanCell};
 use super::parts::{
     ChartSettings, ListFit, PLOT_LINE, box_chart, box_frame, chart_section_versions, class_probe,
     edit_chrome, grid_cells, list_fit,
@@ -62,6 +77,11 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::net_totals::NetTotal;
+use crate::pages::performance::widget::container::WidgetContainer;
+use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::pages::performance::widget::group_widget::GroupFlowLook;
+use crate::pages::performance::widget::metric_widget::FlowLook;
+use crate::pages::performance::widget::source::SourceStore;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::derived::blend_over;
@@ -138,6 +158,9 @@ pub const UP_RATE_ID: &str = "perf-overview-net-up-rate";
 /// The debug selector of the `combined` chart.
 pub const COMBINED_CHART_ID: &str = "perf-overview-net-combined-chart";
 
+/// The debug selector of "No widgets. Use Edit Widgets to add some." (UI-PRF-061).
+pub const EMPTY_ID: &str = "perf-overview-net-widgets-empty";
+
 /// The most adapter charts the box builds; the rest count into "+n more".
 pub const MAX_ADAPTER_CELLS: usize = 16;
 
@@ -169,6 +192,15 @@ impl NetMode {
             Self::AdapterCharts => MODES[3].id,
         }
     }
+
+    fn look(self) -> NetLook {
+        match self {
+            Self::Stacked => NetLook::Stacked,
+            Self::Columns => NetLook::Columns,
+            Self::Combined => NetLook::Combined,
+            Self::AdapterCharts => NetLook::AdapterCharts,
+        }
+    }
 }
 
 /// The page saves the share the box ended a drag or a double-click on.
@@ -197,6 +229,7 @@ const KEY_TOTAL: &str = "perf-overview-net-total";
 const KEY_WITH_PEAK: &str = "perf-overview-net-with-peak";
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_RANGE: &str = "perf-net-heading-throughput";
+const KEY_EMPTY: &str = "perf-widget-empty";
 
 /// The upload line: the network colour blended with white, as the sidebar draws it.
 const UPLOAD_TINT: f32 = 0.3;
@@ -485,12 +518,63 @@ fn total_version(snap: &Snapshot, total: &NetTotal, metric: MetricId) -> u64 {
 }
 
 /// One `adapter_charts` cell: an interface, its name, its rates and its chart.
-struct AdapterCell {
+pub struct AdapterCell {
     idx: DeviceIdx,
     name: SharedString,
     /// "1.2 Mbps / 3.4 Mbps": download, then upload.
     rates: SharedString,
     chart: Entity<ChartView>,
+}
+
+/// What the Download and Upload parts, the `combined` body and the `adapter_charts` cells show,
+/// kept by the box and drawn by the widgets' flow looks, and what the last render of the cells
+/// showed. Index 0 is Download, 1 is Upload.
+#[derive(Default)]
+pub struct NetModel {
+    /// The Download and Upload words.
+    pub words: [SharedString; 2],
+    /// The summed rates.
+    pub rates: [SharedString; 2],
+    /// ", peak 4.4 Mbps" after each rate; empty while there is no peak.
+    pub peaks: [SharedString; 2],
+    /// The summed totals since boot, which the rate lines' tooltips show.
+    pub totals: [SharedString; 2],
+    /// "Total (since boot)".
+    pub total_word: SharedString,
+    /// The counted adapters' cells, built only while `adapter_charts` is the mode.
+    adapters: Vec<AdapterCell>,
+    /// Counted adapters past `MAX_ADAPTER_CELLS`.
+    extra: usize,
+    /// "+n more" by the number of cells shown, empty when every counted adapter shows.
+    more_texts: SmallVec<[SharedString; 17]>,
+    /// How many `adapter_charts` cells the last render showed.
+    pub cells: usize,
+}
+
+impl NetModel {
+    /// The "+n more" text for `shown` cells shown.
+    fn more_text(&self, shown: usize) -> SharedString {
+        self.more_texts.get(shown).cloned().unwrap_or_default()
+    }
+}
+
+/// The box's [`NetModel`], shared with the widgets that draw it. Two refs are equal when they
+/// share the model.
+#[derive(Clone, Default)]
+pub struct NetModelRef(pub Rc<RefCell<NetModel>>);
+
+impl PartialEq for NetModelRef {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What a text sync changed: the Download and Upload rate lines the widgets draw, and the
+/// busiest adapter on the title line.
+#[derive(Clone, Copy, Default)]
+struct Synced {
+    parts: [bool; 2],
+    title: bool,
 }
 
 /// The Network box.
@@ -509,35 +593,22 @@ pub struct NetBox {
     stack_split: InnerSplit,
     /// The gap between the Download and Upload columns (`columns`).
     col_split: InnerSplit,
-    /// The counted adapters' cells, built only while `adapter_charts` is the mode.
-    adapters: Vec<AdapterCell>,
-    /// Counted adapters past `MAX_ADAPTER_CELLS`.
-    extra: usize,
-    /// How many cells the last `adapter_charts` render showed.
-    cells: usize,
+    /// The parts' text and the adapter cells, shared with the widgets that draw them.
+    model: NetModelRef,
+    /// The body size of the last paint, for the fit of the adapter cells.
     body: Rc<StdCell<Size<Pixels>>>,
-    down_text: SharedString,
-    up_text: SharedString,
-    down_total: SharedString,
-    up_total: SharedString,
     down_peak: Option<f32>,
     up_peak: Option<f32>,
-    down_peak_text: SharedString,
-    up_peak_text: SharedString,
-    /// ", peak 4.4 Mbps" after each rate; empty while there is no peak.
-    down_peak_part: SharedString,
-    up_peak_part: SharedString,
+    /// The download and upload peaks alone, as the copy text gives them.
+    peak_texts: [SharedString; 2],
     /// The ", peak {peak}" text.
     with_peak: Template,
     /// The busiest adapter's name, the title line.
     adapter: SharedString,
     peak_word: SharedString,
-    total_word: SharedString,
     /// The last seen version of the aggregate download and upload series.
     peak_versions: [u64; 2],
     title: SharedString,
-    down_word: SharedString,
-    up_word: SharedString,
     /// The engine's total and the hidden classes' totals the charts and peaks take away.
     total: NetTotal,
     /// The first visible network card, which the title opens (crw.44).
@@ -551,11 +622,44 @@ pub struct NetBox {
     settings_versions: [u64; 4],
     style_version: u64,
     strings_version: u64,
+    /// The flow layout of the shown preset (ADR-019): which widgets the box shows.
+    flow: ContainerLayout,
+    /// The saved grid layout, when the user has one: the editor draws it.
+    saved_grid: Option<ContainerLayout>,
+    /// Edit Widgets is on: the editor draws the body.
+    editing: bool,
+    editor: Entity<WidgetEditor>,
+    container: Entity<WidgetContainer>,
+    /// The plan of the last flow render, which the container's placer reads.
+    plan: PlanCell,
     _subs: [Subscription; 5],
+    _editor_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+}
+
+/// The saved grid layout of the Network box, if any.
+fn saved_grid(cx: &App) -> Option<ContainerLayout> {
+    if !cx.has_global::<TlSettings>() {
+        return None;
+    }
+    TlSettings::settings(cx)
+        .performance
+        .layouts
+        .known(NET_BOX_CONTAINER)
+        .filter(|l| l.preset.is_none())
+        .cloned()
+}
+
+/// The keys of the default mode.
+fn default_keys() -> NetFlowKeys<'static> {
+    NetFlowKeys {
+        mode: MODES[0].id,
+        arrange: None,
+        split: None,
+    }
 }
 
 impl NetBox {
@@ -586,6 +690,28 @@ impl NetBox {
             hub,
             cx,
         );
+        let model = NetModelRef(Rc::new(RefCell::new(NetModel {
+            words: [tr(cx, KEY_DOWNLOAD), tr(cx, KEY_UPLOAD)],
+            total_word: tr(cx, KEY_TOTAL),
+            ..NetModel::default()
+        })));
+        let flow = net_flow::flow_layout(default_keys());
+        let saved = saved_grid(cx);
+        let plan = PlanCell::default();
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::new(hub)));
+            let shown = saved.clone().unwrap_or_else(|| flow.clone());
+            let plan = plan.clone();
+            cx.new(|cx| {
+                let mut c = WidgetContainer::new(NET_BOX_CONTAINER, shown, hub, store, cx);
+                c.set_flow_placer(Some(net_flow::placer(plan)), cx);
+                // The box draws the widgets of its flow layouts in their 1.2.0 parts.
+                c.set_hosted(true, cx);
+                c
+            })
+        };
+        let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
+        let editor_sub = cx.subscribe(&editor, Self::on_widget_edit);
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
@@ -604,28 +730,16 @@ impl NetBox {
                 NET_SPLITTER_LINE_ID,
                 MODES[1].split.unwrap_or_default(),
             ),
-            adapters: Vec::new(),
-            extra: 0,
-            cells: 0,
+            model,
             body: Rc::new(StdCell::new(size(px(0.), px(0.)))),
-            down_text: SharedString::default(),
-            up_text: SharedString::default(),
-            down_total: SharedString::default(),
-            up_total: SharedString::default(),
             down_peak: None,
             up_peak: None,
-            down_peak_text: SharedString::default(),
-            up_peak_text: SharedString::default(),
-            down_peak_part: SharedString::default(),
-            up_peak_part: SharedString::default(),
+            peak_texts: Default::default(),
             with_peak: Template::new(cx, KEY_WITH_PEAK, &["peak"]),
             adapter: SharedString::default(),
             peak_word: tr(cx, KEY_PEAK),
-            total_word: tr(cx, KEY_TOTAL),
             peak_versions: [0; 2],
             title: tr(cx, KEY_TITLE),
-            down_word: tr(cx, KEY_DOWNLOAD),
-            up_word: tr(cx, KEY_UPLOAD),
             total,
             target: None,
             catalog_version: snap.devices.version,
@@ -643,6 +757,13 @@ impl NetBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
+            flow,
+            saved_grid: saved,
+            editing: false,
+            editor,
+            container,
+            plan,
+            _editor_sub: editor_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -651,6 +772,181 @@ impl NetBox {
         this.sync_peaks(&snap, true);
         this.sync_text(&snap, true);
         this
+    }
+
+    /// The editor of the box's widgets (Edit Widgets, UI-PRF-061).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The container of the box's widgets.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The flow layout of the shown preset. Its preset keeps the mode and, for
+    /// `adapter_charts`, the arrangement; the split is the box's own, so a drag does not lay
+    /// the widgets out again.
+    pub fn flow(&self) -> &ContainerLayout {
+        &self.flow
+    }
+
+    /// The saved grid layout the box shows, if any.
+    pub fn grid(&self) -> Option<&ContainerLayout> {
+        self.saved_grid.as_ref()
+    }
+
+    /// The plan of the last flow render: the widgets the placer places.
+    pub fn flow_plan(&self) -> Option<NetPlan> {
+        self.plan.plan()
+    }
+
+    /// The shared model the widgets of the flow layout draw.
+    pub fn model(&self) -> &NetModelRef {
+        &self.model
+    }
+
+    /// Whether the box draws the widgets of its flow layout itself (no grid layout, not
+    /// editing).
+    fn host_draws(&self) -> bool {
+        !self.editing && self.saved_grid.is_none()
+    }
+
+    /// Gets the container ready for Edit Widgets: with a flow layout it takes the preset's
+    /// widgets that the last render drew, placed where they were drawn, so the editor pins them
+    /// there. With a grid layout the container already holds it.
+    pub fn prepare_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing || self.saved_grid.is_some() {
+            return;
+        }
+        let drawn = self.plan.drawn();
+        let mut layout = self.flow.clone();
+        layout.widgets.retain(|w| drawn.contains(&w.id));
+        self.container.update(cx, |c, cx| {
+            c.set_layout(layout, cx);
+            c.place_again(cx);
+        });
+    }
+
+    /// Edit Widgets started or ended. When it ends, the box shows the saved layout again.
+    fn on_widget_edit(
+        &mut self,
+        _: Entity<WidgetEditor>,
+        ev: &WidgetEditEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            WidgetEditEvent::Started => self.editing = true,
+            WidgetEditEvent::Ended { .. } => {
+                self.editing = false;
+                self.saved_grid = saved_grid(cx);
+                self.show_saved(cx);
+            }
+        }
+        self.notify(cx);
+    }
+
+    /// The container holds the saved grid layout, or the flow layout the box draws.
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        let shown = self.saved_grid.clone().unwrap_or_else(|| self.flow.clone());
+        self.container.update(cx, |c, cx| c.set_layout(shown, cx));
+    }
+
+    /// The saved grid layout came, went or changed: outside Edit Widgets the box shows it.
+    fn sync_grid(&mut self, cx: &mut Context<Self>) {
+        let grid = saved_grid(cx);
+        if grid == self.saved_grid {
+            return;
+        }
+        self.saved_grid = grid;
+        if self.editing {
+            return;
+        }
+        self.show_saved(cx);
+        self.notify(cx);
+    }
+
+    /// The flow layout of the shown mode, and of the arrangement for `adapter_charts`. Returns
+    /// whether it changed.
+    fn sync_flow(&mut self, cx: &mut Context<Self>) -> bool {
+        let flow = net_flow::flow_layout(NetFlowKeys {
+            mode: self.mode.id(),
+            arrange: (self.mode == NetMode::AdapterCharts).then_some(self.arrange),
+            split: None,
+        });
+        if flow == self.flow {
+            return false;
+        }
+        self.flow = flow;
+        if self.host_draws() {
+            self.show_saved(cx);
+        }
+        true
+    }
+
+    fn notify(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// The Download (`parts[0]`) or Upload (`parts[1]`) rate line changed: the widgets that
+    /// draw them render again, and nothing else. When the box draws no rate lines (a grid layout
+    /// keeps its own sources, `adapter_charts` shows none) nothing renders; before the first
+    /// flow render makes a widget's entity, the box renders.
+    fn notify_parts(&mut self, parts: [bool; 2], cx: &mut Context<Self>) {
+        if !self.host_draws() || parts == [false, false] {
+            return;
+        }
+        let ids: SmallVec<[Option<u32>; 2]> = match self.mode {
+            NetMode::Stacked | NetMode::Columns => {
+                let ids = [net_flow::down_of(&self.flow), net_flow::up_of(&self.flow)];
+                ids.into_iter()
+                    .zip(parts)
+                    .filter_map(|(id, changed)| changed.then_some(id))
+                    .collect()
+            }
+            NetMode::Combined => smallvec![net_flow::traffic_of(&self.flow)],
+            NetMode::AdapterCharts => return,
+        };
+        let widgets: SmallVec<[_; 2]> = ids
+            .iter()
+            .map(|id| id.and_then(|id| self.container.read(cx).widget(id).cloned()))
+            .collect();
+        if widgets.iter().any(Option::is_none) {
+            self.notify(cx);
+            return;
+        }
+        for w in widgets.into_iter().flatten() {
+            w.update(cx, |w, cx| w.flow_changed(cx));
+        }
+    }
+
+    /// The adapter cells changed: the adapters group draws them, so only it renders again.
+    /// Outside `adapter_charts` and with a grid layout nothing renders; before the first flow
+    /// render makes the group's entity, the box renders.
+    fn notify_adapters(&mut self, cx: &mut Context<Self>) {
+        if !self.host_draws() || self.mode != NetMode::AdapterCharts {
+            return;
+        }
+        let group = net_flow::adapters_of(&self.flow)
+            .and_then(|id| self.container.read(cx).group(id).cloned());
+        match group {
+            Some(g) => g.update(cx, |g, cx| g.flow_changed(cx)),
+            None => self.notify(cx),
+        }
+    }
+
+    /// Renders what a text sync and an adapter sync changed: the box for its title line, the
+    /// widgets of the rate lines, and the adapters group.
+    fn notify_changed(&mut self, synced: Synced, adapters: bool, cx: &mut Context<Self>) {
+        if synced.title {
+            self.notify(cx);
+        }
+        self.notify_parts(synced.parts, cx);
+        if adapters {
+            self.notify_adapters(cx);
+        }
     }
 
     /// The shown mode's id.
@@ -669,9 +965,12 @@ impl NetBox {
             let snap = box_snapshot(&self.hub, cx);
             self.sync_adapters(&snap, cx);
         } else {
-            self.adapters.clear();
-            self.extra = 0;
+            let mut model = self.model.0.borrow_mut();
+            model.adapters.clear();
+            model.extra = 0;
+            model.more_texts.clear();
         }
+        self.sync_flow(cx);
         cx.notify();
     }
 
@@ -715,7 +1014,13 @@ impl NetBox {
 
     /// The interface indexes of the `adapter_charts` cells, in catalog order.
     pub fn adapter_idxs(&self) -> Vec<DeviceIdx> {
-        self.adapters.iter().map(|a| a.idx).collect()
+        self.model
+            .0
+            .borrow()
+            .adapters
+            .iter()
+            .map(|a| a.idx)
+            .collect()
     }
 
     /// How `adapter_charts` places its cells.
@@ -728,6 +1033,7 @@ impl NetBox {
     pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
         if arrange != self.arrange {
             self.arrange = arrange;
+            self.sync_flow(cx);
             if self.mode == NetMode::AdapterCharts {
                 cx.notify();
             }
@@ -736,7 +1042,7 @@ impl NetBox {
 
     /// How many `adapter_charts` cells the last render showed.
     pub fn cells(&self) -> usize {
-        self.cells
+        self.model.0.borrow().cells
     }
 
     pub fn down_chart(&self) -> &Entity<ChartView> {
@@ -748,14 +1054,15 @@ impl NetBox {
     }
 
     /// Download rate, upload rate, download peak, upload peak, download total, upload total.
-    pub fn texts(&self) -> [&SharedString; 6] {
+    pub fn texts(&self) -> [SharedString; 6] {
+        let model = self.model.0.borrow();
         [
-            &self.down_text,
-            &self.up_text,
-            &self.down_peak_text,
-            &self.up_peak_text,
-            &self.down_total,
-            &self.up_total,
+            model.rates[0].clone(),
+            model.rates[1].clone(),
+            self.peak_texts[0].clone(),
+            self.peak_texts[1].clone(),
+            model.totals[0].clone(),
+            model.totals[1].clone(),
         ]
     }
 
@@ -766,31 +1073,19 @@ impl NetBox {
         out.push('\t');
         out.push_str(&self.adapter);
         out.push('\n');
-        for (word, rate, peak, total) in [
-            (
-                &self.down_word,
-                &self.down_text,
-                &self.down_peak_text,
-                &self.down_total,
-            ),
-            (
-                &self.up_word,
-                &self.up_text,
-                &self.up_peak_text,
-                &self.up_total,
-            ),
-        ] {
-            out.push_str(word);
+        let model = self.model.0.borrow();
+        for i in 0..2 {
+            out.push_str(&model.words[i]);
             out.push('\t');
-            out.push_str(rate);
+            out.push_str(&model.rates[i]);
             out.push('\t');
             out.push_str(&self.peak_word);
             out.push(' ');
-            out.push_str(peak);
+            out.push_str(&self.peak_texts[i]);
             out.push('\t');
-            out.push_str(&self.total_word);
+            out.push_str(&model.total_word);
             out.push(' ');
-            out.push_str(total);
+            out.push_str(&model.totals[i]);
             out.push('\n');
         }
     }
@@ -829,7 +1124,11 @@ impl NetBox {
         let theme = current(cx).clone();
         let hub = self.hub.clone();
         let range = tr(cx, KEY_RANGE);
-        let mut old = std::mem::take(&mut self.adapters);
+        let (mut old, old_extra) = {
+            let mut model = self.model.0.borrow_mut();
+            (std::mem::take(&mut model.adapters), model.extra)
+        };
+        let mut adapters = Vec::new();
         let mut changed = false;
         let mut total = 0;
         for (idx, n) in snap.system.nets.iter() {
@@ -837,7 +1136,7 @@ impl NetBox {
                 continue;
             }
             total += 1;
-            if self.adapters.len() == MAX_ADAPTER_CELLS {
+            if adapters.len() == MAX_ADAPTER_CELLS {
                 continue;
             }
             let name: SharedString = adapter_name(snap, *idx).unwrap_or("").to_owned().into();
@@ -871,13 +1170,40 @@ impl NetBox {
                     }
                 }
             };
-            self.adapters.push(cell);
+            adapters.push(cell);
         }
         changed |= !old.is_empty();
-        let extra = total - self.adapters.len();
-        changed |= extra != self.extra;
-        self.extra = extra;
+        let extra = total - adapters.len();
+        changed |= extra != old_extra;
+        let shown_max = adapters.len();
+        {
+            let mut model = self.model.0.borrow_mut();
+            model.adapters = adapters;
+            model.extra = extra;
+        }
+        if changed || self.model.0.borrow().more_texts.len() != shown_max + 1 {
+            self.sync_more_texts(cx);
+        }
         changed
+    }
+
+    /// "+n more" for each number of cells shown.
+    fn sync_more_texts(&mut self, cx: &mut Context<Self>) {
+        let (rows, total) = {
+            let model = self.model.0.borrow();
+            (model.adapters.len(), model.adapters.len() + model.extra)
+        };
+        let texts: SmallVec<[SharedString; 17]> = (0..=rows)
+            .map(|shown| {
+                let n = total - shown;
+                if n == 0 {
+                    SharedString::default()
+                } else {
+                    tr_args(cx, KEY_MORE, &[("n", FluentValue::from(n))])
+                }
+            })
+            .collect();
+        self.model.0.borrow_mut().more_texts = texts;
     }
 
     /// Takes the range figures the page worked out (UI-PRF-055). Notifies
@@ -920,12 +1246,9 @@ impl NetBox {
             }
         }
         let peaks = mask.contains(ComponentMask::SERIES) && self.sync_peaks(&snap, false);
-        let text = self.sync_text(&snap, peaks);
-        if self.sync_adapters(&snap, cx) || text {
-            #[cfg(any(test, feature = "test-hooks"))]
-            self.notify_count.set(self.notify_count.get() + 1);
-            cx.notify();
-        }
+        let synced = self.sync_text(&snap, peaks);
+        let adapters = self.sync_adapters(&snap, cx);
+        self.notify_changed(synced, adapters, cx);
     }
 
     /// The page was held at a time or made live: the rates, peaks and adapters read the other
@@ -936,15 +1259,15 @@ impl NetBox {
         self.sync_peaks(&snap, true);
         self.sync_text(&snap, true);
         self.sync_adapters(&snap, cx);
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.notify_count.set(self.notify_count.get() + 1);
-        cx.notify();
+        self.notify(cx);
+        self.notify_parts([true; 2], cx);
+        self.notify_adapters(cx);
     }
 
-    /// The rates and totals when their inputs changed, or always with `force`. True when the
-    /// text was formatted again. While paused the totals since boot are "-": the history does
-    /// not keep them.
-    fn sync_text(&mut self, snap: &Snapshot, force: bool) -> bool {
+    /// The rates and totals when their inputs changed, or always with `force`. Says whether
+    /// the rate lines' text or the title line changed. While paused the totals since boot are
+    /// "-": the history does not keep them.
+    fn sync_text(&mut self, snap: &Snapshot, force: bool) -> Synced {
         let s = sums(snap, &self.net);
         let mut h = FxHasher::default();
         h.write_u64(s.rx.to_bits());
@@ -964,7 +1287,7 @@ impl NetBox {
         self.net.auto_scale.hash(&mut h);
         let bits = h.finish();
         if !force && bits == self.text_bits {
-            return false;
+            return Synced::default();
         }
         self.text_bits = bits;
         let unit = NetFormat {
@@ -983,8 +1306,7 @@ impl NetBox {
                 format_value(ValueFormat::RateNetwork, v as f32, unit, out);
             })
         };
-        self.down_text = rate(s.rx_ok, s.rx);
-        self.up_text = rate(s.tx_ok, s.tx);
+        let rates = [rate(s.rx_ok, s.rx), rate(s.tx_ok, s.tx)];
         let peak_text = |p: Option<f32>| {
             let validity = if p.is_some() {
                 Validity::Valid
@@ -997,8 +1319,7 @@ impl NetBox {
                 format_value(ValueFormat::RateNetwork, p.unwrap_or(0.), unit, out);
             })
         };
-        self.down_peak_text = peak_text(self.down_peak);
-        self.up_peak_text = peak_text(self.up_peak);
+        self.peak_texts = [peak_text(self.down_peak), peak_text(self.up_peak)];
         let part = |p: Option<f32>, text: &SharedString| {
             let mut out = String::new();
             if p.is_some() {
@@ -1006,12 +1327,10 @@ impl NetBox {
             }
             SharedString::from(out)
         };
-        let (down_part, up_part) = (
-            part(self.down_peak, &self.down_peak_text),
-            part(self.up_peak, &self.up_peak_text),
-        );
-        self.down_peak_part = down_part;
-        self.up_peak_part = up_part;
+        let peaks = [
+            part(self.down_peak, &self.peak_texts[0]),
+            part(self.up_peak, &self.peak_texts[1]),
+        ];
         let paused = self.paused;
         let size = |bytes: u64| {
             if paused {
@@ -1021,14 +1340,30 @@ impl NetBox {
             units::bytes(&mut out, bytes);
             SharedString::from(out)
         };
-        self.down_total = size(s.rx_total);
-        self.up_total = size(s.tx_total);
-        self.adapter = adapter.to_owned().into();
-        true
+        let totals = [size(s.rx_total), size(s.tx_total)];
+        let parts = {
+            let mut model = self.model.0.borrow_mut();
+            let changed = [0, 1].map(|i| {
+                model.rates[i] != rates[i]
+                    || model.peaks[i] != peaks[i]
+                    || model.totals[i] != totals[i]
+            });
+            model.rates = rates;
+            model.peaks = peaks;
+            model.totals = totals;
+            changed
+        };
+        let title = *self.adapter != *adapter;
+        if title {
+            self.adapter = adapter.to_owned().into();
+        }
+        Synced { parts, title }
     }
 
-    /// Applies the chart, unit and interface class settings when one of their sections changed.
+    /// Applies the chart, unit and interface class settings when one of their sections changed,
+    /// and shows a saved grid layout that came, went or changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        self.sync_grid(cx);
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1052,15 +1387,12 @@ impl NetBox {
         if new_total {
             self.sync_peaks(&snap, true);
         }
-        let text = self.sync_text(&snap, false);
-        if self.sync_adapters(&snap, cx) || text {
-            #[cfg(any(test, feature = "test-hooks"))]
-            self.notify_count.set(self.notify_count.get() + 1);
-            cx.notify();
-        }
+        let synced = self.sync_text(&snap, false);
+        let adapters = self.sync_adapters(&snap, cx);
+        self.notify_changed(synced, adapters, cx);
     }
 
-    /// A new theme or UI scale: new chart colours, and the rows draw in the new style.
+    /// A new theme or UI scale: new chart colours, and the parts draw in the new style.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
         let version = metrics(cx).style_version;
         if version == self.style_version {
@@ -1069,6 +1401,8 @@ impl NetBox {
         self.style_version = version;
         self.rebuild_specs(cx);
         cx.notify();
+        self.notify_parts([true; 2], cx);
+        self.notify_adapters(cx);
     }
 
     /// A new language: new title, words, the Peak and Total labels and the peak text.
@@ -1079,22 +1413,37 @@ impl NetBox {
         }
         self.strings_version = version;
         self.title = tr(cx, KEY_TITLE);
-        self.down_word = tr(cx, KEY_DOWNLOAD);
-        self.up_word = tr(cx, KEY_UPLOAD);
+        {
+            let (down, up, total) = (tr(cx, KEY_DOWNLOAD), tr(cx, KEY_UPLOAD), tr(cx, KEY_TOTAL));
+            let mut model = self.model.0.borrow_mut();
+            model.words = [down, up];
+            model.total_word = total;
+        }
         self.peak_word = tr(cx, KEY_PEAK);
-        self.total_word = tr(cx, KEY_TOTAL);
         self.with_peak = Template::new(cx, KEY_WITH_PEAK, &["peak"]);
         let range = tr(cx, KEY_RANGE);
-        for v in [self.down.clone(), self.up.clone(), self.combined.clone()]
-            .into_iter()
-            .chain(self.adapters.iter().map(|a| a.chart.clone()))
-        {
+        let views: SmallVec<[Entity<ChartView>; 8]> =
+            [self.down.clone(), self.up.clone(), self.combined.clone()]
+                .into_iter()
+                .chain(
+                    self.model
+                        .0
+                        .borrow()
+                        .adapters
+                        .iter()
+                        .map(|a| a.chart.clone()),
+                )
+                .collect();
+        for v in views {
             let labels = chart_labels(range.clone());
             v.update(cx, |v, cx| v.set_labels(labels, cx));
         }
+        self.sync_more_texts(cx);
         let snap = box_snapshot(&self.hub, cx);
         self.sync_text(&snap, true);
         cx.notify();
+        self.notify_parts([true; 2], cx);
+        self.notify_adapters(cx);
     }
 
     fn rebuild_specs(&mut self, cx: &mut Context<Self>) {
@@ -1106,14 +1455,17 @@ impl NetBox {
             &theme,
         );
         self.combined.update(cx, |v, cx| v.set_spec(pair, cx));
-        for a in &self.adapters {
-            let spec = pair_spec(
-                Drawn::interface(a.idx),
-                self.net.unit,
-                &self.settings,
-                &theme,
-            );
-            a.chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        let cells: SmallVec<[(DeviceIdx, Entity<ChartView>); 8]> = self
+            .model
+            .0
+            .borrow()
+            .adapters
+            .iter()
+            .map(|a| (a.idx, a.chart.clone()))
+            .collect();
+        for (idx, chart) in cells {
+            let spec = pair_spec(Drawn::interface(idx), self.net.unit, &self.settings, &theme);
+            chart.update(cx, |v, cx| v.set_spec(spec, cx));
         }
         for (view, upload) in [(self.down.clone(), false), (self.up.clone(), true)] {
             let spec = chart_spec(
@@ -1344,20 +1696,212 @@ fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlThem
         .into_any_element()
 }
 
+/// The Download (`upload` false) or Upload rate line of `model`, with its peak and its total in
+/// the tooltip.
+fn model_rate_line(
+    model: &NetModel,
+    upload: bool,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let i = usize::from(upload);
+    let line = RateLine {
+        id: if upload { UP_RATE_ID } else { DOWN_RATE_ID },
+        word: &model.words[i],
+        rate: &model.rates[i],
+        peak: &model.peaks[i],
+        total_word: &model.total_word,
+        total: &model.totals[i],
+    };
+    rate_line(line, m, theme, window, cx)
+}
+
+/// One direction's part of `stacked` and `columns` (UI-PRF-017): its rate line right over its
+/// chart. The Download and Upload widgets draw it (`FlowLook::NetDirection`).
+pub(crate) fn net_direction_element(
+    model: &NetModelRef,
+    upload: bool,
+    chart: &Entity<ChartView>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let line = model_rate_line(&model.0.borrow(), upload, m, theme, window, cx);
+    column(line, chart)
+}
+
+/// `combined`: the two rate lines side by side over one chart with both lines. The traffic
+/// widget draws it (`FlowLook::NetCombined`).
+pub(crate) fn net_combined_element(
+    model: &NetModelRef,
+    chart: &Entity<ChartView>,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (down, up) = {
+        let md = model.0.borrow();
+        (
+            model_rate_line(&md, false, m, theme, window, cx),
+            model_rate_line(&md, true, m, theme, window, cx),
+        )
+    };
+    let half = |line| div().flex().flex_col().flex_1().min_w_0().child(line);
+    whole_rows()
+        .size_full()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .gap(m.sp[5])
+                .child(half(down))
+                .child(half(up)),
+        )
+        .child(
+            div()
+                .debug_selector(|| COMBINED_CHART_ID.into())
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(chart.clone().cached(StyleRefinement::default().size_full())),
+        )
+        .into_any_element()
+}
+
+/// `adapter_charts`: one combined chart per counted adapter of `model` that fill `body` in one
+/// column, one row or a grid, as `arrange` says. Only whole cells show; the adapters left out
+/// join "+n more" (UI-PRF-059). The number of cells shown is stored in `model`; `view` renders
+/// again when a resize changes the fit. The adapters group draws it (`GroupFlowLook::NetCells`).
+pub(crate) fn net_cells_element(
+    model: &NetModelRef,
+    body: &Rc<StdCell<Size<Pixels>>>,
+    arrange: Arrange,
+    m: &UiMetrics,
+    theme: &TlTheme,
+    view: EntityId,
+) -> AnyElement {
+    let mut guard = model.0.borrow_mut();
+    let md = &mut *guard;
+    let rows = md.adapters.len();
+    let total = rows + md.extra;
+    let fit = charts_fit(arrange, body.get(), rows, total, m);
+    md.cells = fit.shown;
+    let cells = grid_cells(
+        &fit.grid,
+        md.adapters
+            .iter()
+            .take(fit.shown)
+            .map(|a| chart_cell(a, fit.grid.cell, m, theme)),
+        m.sp[2],
+        GRID_ID,
+    );
+    // A "+n more" line that does not fit whole is left out (UI-PRF-017).
+    let mut el = whole_rows().relative().size_full().gap(m.sp[2]).child(
+        div()
+            .debug_selector(|| GRID_ID.into())
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .child(cells),
+    );
+    let more = md.more_text(fit.shown);
+    if !more.is_empty() {
+        el = el.child(more_line(more, m, theme));
+    }
+    let probe_m = *m;
+    el.child(class_probe(
+        Rc::clone(body),
+        fit.class(),
+        move |b| charts_fit(arrange, b, rows, total, &probe_m).class(),
+        view,
+    ))
+    .into_any_element()
+}
+
+/// "No widgets. Use Edit Widgets to add some.", centred in the body (UI-PRF-061).
+fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
+    let mut text = div();
+    *text.text_style() = t_xs(m);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            text.debug_selector(|| EMPTY_ID.to_owned())
+                .text_color(theme.text_secondary)
+                .child(tr(cx, KEY_EMPTY)),
+        )
+        .into_any_element()
+}
+
+fn cached_full<V: Render>(view: Entity<V>) -> AnyElement {
+    view.cached(StyleRefinement::default().size_full())
+        .into_any_element()
+}
+
+/// The widgets a flow render drew: the Download part (or the one widget that fills the body)
+/// and the Upload part.
+type Slots = [Option<u32>; 2];
+
 impl NetBox {
-    /// `stacked`: the Download part, the splitter and the Upload part, each the full width.
-    fn stacked_body(
+    /// The Download or Upload part, drawn by its widget when the layout has it.
+    fn direction(
         &mut self,
+        upload: bool,
+        slots: &mut Slots,
         m: &UiMetrics,
         theme: &TlTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.cells = 0;
+        let chart = if upload { &self.up } else { &self.down }.clone();
+        let id = if upload {
+            net_flow::up_of(&self.flow)
+        } else {
+            net_flow::down_of(&self.flow)
+        };
+        let look = FlowLook::NetDirection {
+            model: self.model.clone(),
+            upload,
+            chart: chart.clone(),
+        };
+        let widget = id.and_then(|id| {
+            self.container
+                .update(cx, |c, cx| c.flow_widget(id, look, cx))
+                .map(|w| (id, w))
+        });
+        match widget {
+            Some((id, w)) => {
+                slots[usize::from(upload)] = Some(id);
+                cached_full(w)
+            }
+            None => net_direction_element(&self.model, upload, &chart, m, theme, window, cx),
+        }
+    }
+
+    /// `stacked`: the Download part, the splitter and the Upload part, each the full width.
+    fn stacked_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        slots: &mut Slots,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let share = self.split(m);
-        let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
-        let down = column(down_line, &self.down);
-        let up = column(up_line, &self.up);
+        let down = self.direction(false, slots, m, theme, window, cx);
+        let up = self.direction(true, slots, m, theme, window, cx);
         div()
             .relative()
             .flex()
@@ -1401,14 +1945,13 @@ impl NetBox {
         &mut self,
         m: &UiMetrics,
         theme: &TlTheme,
+        slots: &mut Slots,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.cells = 0;
         let share = self.split(m);
-        let [down_line, up_line] = self.rate_lines(m, theme, window, cx);
-        let down = column(down_line, &self.down);
-        let up = column(up_line, &self.up);
+        let down = self.direction(false, slots, m, theme, window, cx);
+        let up = self.direction(true, slots, m, theme, window, cx);
         div()
             .relative()
             .flex()
@@ -1433,128 +1976,65 @@ impl NetBox {
             .into_any_element()
     }
 
-    /// The Download and Upload rate lines, each with its peak and its total in the tooltip.
-    fn rate_lines(
-        &self,
-        m: &UiMetrics,
-        theme: &TlTheme,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> [AnyElement; 2] {
-        let down = RateLine {
-            id: DOWN_RATE_ID,
-            word: &self.down_word,
-            rate: &self.down_text,
-            peak: &self.down_peak_part,
-            total_word: &self.total_word,
-            total: &self.down_total,
-        };
-        let up = RateLine {
-            id: UP_RATE_ID,
-            word: &self.up_word,
-            rate: &self.up_text,
-            peak: &self.up_peak_part,
-            total_word: &self.total_word,
-            total: &self.up_total,
-        };
-        [
-            rate_line(down, m, theme, window, cx),
-            rate_line(up, m, theme, window, cx),
-        ]
-    }
-
-    /// `combined`: the two rate lines side by side over one chart with both lines.
+    /// `combined`: the two rate lines over one chart, drawn by the traffic widget.
     fn combined_body(
         &mut self,
         m: &UiMetrics,
         theme: &TlTheme,
+        slots: &mut Slots,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.cells = 0;
-        let [down, up] = self.rate_lines(m, theme, window, cx);
-        let half = |line| div().flex().flex_col().flex_1().min_w_0().child(line);
-        whole_rows()
-            .size_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_none()
-                    .gap(m.sp[5])
-                    .child(half(down))
-                    .child(half(up)),
-            )
-            .child(
-                div()
-                    .debug_selector(|| COMBINED_CHART_ID.into())
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(
-                        self.combined
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// The "+n more" text for `shown` cells shown, empty when every counted adapter shows.
-    fn more_text(&self, shown: usize, cx: &Context<Self>) -> SharedString {
-        let n = self.adapters.len() + self.extra - shown;
-        if n == 0 {
-            SharedString::default()
-        } else {
-            tr_args(cx, KEY_MORE, &[("n", FluentValue::from(n))])
+        let look = FlowLook::NetCombined {
+            model: self.model.clone(),
+            chart: self.combined.clone(),
+        };
+        let widget = net_flow::traffic_of(&self.flow).and_then(|id| {
+            self.container
+                .update(cx, |c, cx| c.flow_widget(id, look, cx))
+                .map(|w| (id, w))
+        });
+        match widget {
+            Some((id, w)) => {
+                slots[0] = Some(id);
+                cached_full(w)
+            }
+            None => net_combined_element(&self.model, &self.combined, m, theme, window, cx),
         }
     }
 
-    /// `adapter_charts`: one combined chart per counted adapter in one column, one row or a
-    /// grid. Only whole cells show; the adapters left out join "+n more" (UI-PRF-059).
+    /// `adapter_charts`: the cells, drawn by the adapters group.
     fn charts_body(
         &mut self,
         m: &UiMetrics,
         theme: &TlTheme,
+        slots: &mut Slots,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = self.adapters.len();
-        let total = rows + self.extra;
-        let arrange = self.arrange;
-        let fit = charts_fit(arrange, self.body.get(), rows, total, m);
-        self.cells = fit.shown;
-        let cells = grid_cells(
-            &fit.grid,
-            self.adapters
-                .iter()
-                .take(fit.shown)
-                .map(|a| chart_cell(a, fit.grid.cell, m, theme)),
-            m.sp[2],
-            GRID_ID,
-        );
-        // A "+n more" line that does not fit whole is left out (UI-PRF-017).
-        let mut body = whole_rows().relative().size_full().gap(m.sp[2]).child(
-            div()
-                .debug_selector(|| GRID_ID.into())
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .overflow_hidden()
-                .child(cells),
-        );
-        let more = self.more_text(fit.shown, cx);
-        if !more.is_empty() {
-            body = body.child(more_line(more, m, theme));
+        let look = GroupFlowLook::NetCells {
+            model: self.model.clone(),
+            body: Rc::clone(&self.body),
+            arrange: self.arrange,
+        };
+        let group = net_flow::adapters_of(&self.flow).and_then(|id| {
+            self.container
+                .update(cx, |c, cx| c.flow_group(id, look, cx))
+                .map(|g| (id, g))
+        });
+        match group {
+            Some((id, g)) => {
+                slots[0] = Some(id);
+                cached_full(g)
+            }
+            None => net_cells_element(
+                &self.model,
+                &self.body,
+                self.arrange,
+                m,
+                theme,
+                cx.entity_id(),
+            ),
         }
-        let probe_m = *m;
-        body.child(class_probe(
-            Rc::clone(&self.body),
-            fit.class(),
-            move |b| charts_fit(arrange, b, rows, total, &probe_m).class(),
-            cx.entity_id(),
-        ))
-        .into_any_element()
     }
 }
 
@@ -1564,11 +2044,56 @@ impl Render for NetBox {
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let body = match self.mode {
-            NetMode::Stacked => self.stacked_body(&m, &theme, window, cx),
-            NetMode::Columns => self.columns_body(&m, &theme, window, cx),
-            NetMode::Combined => self.combined_body(&m, &theme, window, cx),
-            NetMode::AdapterCharts => self.charts_body(&m, &theme, cx),
+        let editor = cached_full(self.editor.clone());
+        let body = if !self.host_draws() {
+            // The user's widgets, or Edit Widgets: the editor draws them.
+            let empty = !self.editing
+                && self
+                    .saved_grid
+                    .as_ref()
+                    .is_some_and(|g| g.widgets.is_empty());
+            div()
+                .relative()
+                .size_full()
+                .child(editor)
+                .when(empty, |d| d.child(empty_text(&m, &theme, cx)))
+                .into_any_element()
+        } else {
+            if self.mode != NetMode::AdapterCharts {
+                self.model.0.borrow_mut().cells = 0;
+            }
+            let mut slots: Slots = [None, None];
+            let body = match self.mode {
+                NetMode::Stacked => self.stacked_body(&m, &theme, &mut slots, window, cx),
+                NetMode::Columns => self.columns_body(&m, &theme, &mut slots, window, cx),
+                NetMode::Combined => self.combined_body(&m, &theme, &mut slots, window, cx),
+                NetMode::AdapterCharts => self.charts_body(&m, &theme, &mut slots, cx),
+            };
+            let gap = match self.mode {
+                NetMode::Stacked => m.sp[STACK_GAP],
+                NetMode::Columns => m.sp[5],
+                _ => px(0.),
+            };
+            let plan = NetPlan {
+                look: self.mode.look(),
+                share: self.split(&m),
+                gap: f32::from(gap),
+                first: slots[0],
+                second: slots[1],
+            };
+            if self.plan.set(plan) {
+                self.container.update(cx, |c, cx| {
+                    c.place_again(cx);
+                });
+            }
+            // The editor sits under the body with no widgets, so its container knows the body's
+            // size when Edit Widgets starts.
+            div()
+                .relative()
+                .size_full()
+                .child(div().absolute().top_0().left_0().size_full().child(editor))
+                .child(body)
+                .into_any_element()
         };
         box_frame(
             NET_BOX_ID,

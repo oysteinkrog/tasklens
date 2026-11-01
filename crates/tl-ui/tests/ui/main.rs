@@ -43,6 +43,7 @@ mod overview_cpu_widgets;
 mod overview_disk_widgets;
 mod overview_groups;
 mod overview_mem_widgets;
+mod overview_net_widgets;
 mod overview_range;
 mod overview_timeline;
 mod overview_widgets;

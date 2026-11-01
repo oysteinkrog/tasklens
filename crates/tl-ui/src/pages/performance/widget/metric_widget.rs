@@ -30,6 +30,11 @@
 //! draw a 1.2.0 row or `charts` cell from the rows' model the box keeps, as the cores group
 //! draws the core rows. The box updates the model on a sample and notifies only the widgets of
 //! the rows that changed ([`MetricWidget::flow_changed`]).
+//!
+//! The Network box's flow looks (`FlowLook::NetDirection` and `FlowLook::NetCombined`,
+//! `overview/net_flow.rs`) draw a 1.2.0 Download or Upload part, or the `combined` body, from
+//! the rate lines the box keeps. The box notifies only these widgets when a rate, peak or total
+//! changed.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -59,6 +64,9 @@ use crate::pages::performance::overview::fit::fit_text;
 use crate::pages::performance::overview::gpu_flow::line_style;
 use crate::pages::performance::overview::mem_box::{
     MemRowsRef, MeterRow, mem_cell_part, mem_row_part,
+};
+use crate::pages::performance::overview::net_box::{
+    NetModelRef, net_combined_element, net_direction_element,
 };
 use crate::pages::performance::overview::parts::{
     ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
@@ -145,6 +153,20 @@ pub enum FlowLook {
         index: usize,
         chart: Entity<ChartView>,
     },
+    /// A Network box part of `stacked` and `columns` (UI-PRF-017): the Download (`upload`
+    /// false) or Upload rate line from the box's model, with its 60 s peak and its total since
+    /// boot in the tooltip, over the box's chart of that direction.
+    NetDirection {
+        model: NetModelRef,
+        upload: bool,
+        chart: Entity<ChartView>,
+    },
+    /// The Network box's `combined` body: both rate lines from the box's model over the box's
+    /// chart with both lines.
+    NetCombined {
+        model: NetModelRef,
+        chart: Entity<ChartView>,
+    },
 }
 
 impl FlowLook {
@@ -153,8 +175,12 @@ impl FlowLook {
         match self {
             Self::Cell { .. } => FormSet::LABEL | FormSet::VALUE,
             Self::Row { .. } => FormSet::LABEL | FormSet::VALUE | FormSet::BAR,
-            // The Memory looks read the box's model, not the source.
-            Self::Chart(_) | Self::MemRow { .. } | Self::MemCell { .. } => FormSet::empty(),
+            // The Memory and Network looks read the box's model, not the source.
+            Self::Chart(_)
+            | Self::MemRow { .. }
+            | Self::MemCell { .. }
+            | Self::NetDirection { .. }
+            | Self::NetCombined { .. } => FormSet::empty(),
             Self::Text => FormSet::VALUE,
         }
     }
@@ -162,9 +188,12 @@ impl FlowLook {
     fn label(&self) -> SharedString {
         match self {
             Self::Cell { label, .. } | Self::Row { label, .. } => label.clone(),
-            Self::Chart(_) | Self::Text | Self::MemRow { .. } | Self::MemCell { .. } => {
-                SharedString::default()
-            }
+            Self::Chart(_)
+            | Self::Text
+            | Self::MemRow { .. }
+            | Self::MemCell { .. }
+            | Self::NetDirection { .. }
+            | Self::NetCombined { .. } => SharedString::default(),
         }
     }
 }
@@ -1039,7 +1068,14 @@ impl MetricWidget {
 
 impl MetricWidget {
     /// The 1.1.0 part of `look`. Every part but the text fills the place the host gives.
-    fn flow_part(&self, look: &FlowLook, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
+    fn flow_part(
+        &self,
+        look: &FlowLook,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let (id, s) = (self.setting.id, m.ui_scale);
         match look {
             FlowLook::Cell {
@@ -1118,6 +1154,14 @@ impl MetricWidget {
             FlowLook::MemCell { rows, index, chart } => {
                 mem_cell_part(&rows.0.borrow(), *index, chart, m, theme)
             }
+            FlowLook::NetDirection {
+                model,
+                upload,
+                chart,
+            } => net_direction_element(model, *upload, chart, m, theme, window, cx),
+            FlowLook::NetCombined { model, chart } => {
+                net_combined_element(model, chart, m, theme, window, cx)
+            }
             FlowLook::Text => {
                 // The line's style, with tabular digits: the box places the value at the
                 // width of its shape in this style (tasklens-lhliq.7).
@@ -1137,13 +1181,13 @@ impl MetricWidget {
 }
 
 impl Render for MetricWidget {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
         if let Some(look) = self.flow.clone() {
-            let part = self.flow_part(&look, &m, &theme);
+            let part = self.flow_part(&look, &m, &theme, window, cx);
             let id = widget_id(self.setting.id);
             let root = div().debug_selector(move || id).relative();
             // The text sizes itself, so the values of one line sit side by side.

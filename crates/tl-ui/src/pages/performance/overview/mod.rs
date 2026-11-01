@@ -43,6 +43,7 @@ pub mod layout;
 pub mod mem_box;
 pub mod mem_flow;
 pub mod net_box;
+pub mod net_flow;
 pub mod parts;
 pub mod picked;
 pub mod procs_box;
@@ -954,8 +955,8 @@ impl OverviewPage {
     }
 
     /// Writes the layout to `[performance.overview]`. A saved flow layout of a box on widgets
-    /// (the GPU, CPU, Memory and Disk boxes) follows its mode, arrangement, split, hidden engines
-    /// and CPU switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
+    /// (the GPU, CPU, Memory, Disk and Network boxes) follows its mode, arrangement, split, hidden
+    /// engines and CPU switches (ADR-019 "Flow placement": the box menu edits the flow layout entry), since a
     /// build with that entry ignores the old keys. A grid layout stays as it is.
     fn save_layout(&self, cx: &mut Context<Self>) {
         if !cx.has_global::<TlSettings>() {
@@ -963,23 +964,29 @@ impl OverviewPage {
         }
         let setting = self.layout.to_setting();
         let layouts = &TlSettings::settings(cx).performance.layouts;
-        let flows: SmallVec<[_; 4]> = [BoxKind::Gpu, BoxKind::Cpu, BoxKind::Memory, BoxKind::Disk]
-            .into_iter()
-            .filter_map(|kind| {
-                let container = box_menu::widget_container(kind)?;
-                layouts
-                    .known(container)
-                    .is_some_and(|l| l.preset.is_some())
-                    .then_some(())?;
-                let entry = setting
-                    .grid
-                    .iter()
-                    .find(|e| e.kind == kind.key())
-                    .cloned()
-                    .unwrap_or_default();
-                convert_box(kind.key(), &entry)
-            })
-            .collect();
+        let flows: SmallVec<[_; 5]> = [
+            BoxKind::Gpu,
+            BoxKind::Cpu,
+            BoxKind::Memory,
+            BoxKind::Disk,
+            BoxKind::Net,
+        ]
+        .into_iter()
+        .filter_map(|kind| {
+            let container = box_menu::widget_container(kind)?;
+            layouts
+                .known(container)
+                .is_some_and(|l| l.preset.is_some())
+                .then_some(())?;
+            let entry = setting
+                .grid
+                .iter()
+                .find(|e| e.kind == kind.key())
+                .cloned()
+                .unwrap_or_default();
+            convert_box(kind.key(), &entry)
+        })
+        .collect();
         TlSettings::update(cx, |d| {
             let perf = &mut d.settings.performance;
             perf.overview = Some(setting);

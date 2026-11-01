@@ -11,6 +11,9 @@
 //!   The Disk box lists one submenu per shown disk (Active time, Read, Write, Read and write,
 //!   Temperature) and "All disks >" (the same but Temperature, of the disk total); Add Widget
 //!   adds "All disks >" (Active time, Read, Write, Read and write) ([`disk_source_groups`]).
+//!   The Network box lists one submenu per counted adapter and "All adapters >" (of the counted
+//!   total), each with Download, Upload and Download and upload; Add Widget adds "All adapters >"
+//!   with the same three ([`net_source_groups`]).
 //! - **Widget menu** ([`widget_menu`]): "Source >" (radio items, one submenu per GPU when the
 //!   box shows two), "Show >" (check items for the forms the metric offers; the last checked one
 //!   is disabled), "Chart >" while Chart is on (Fill under the line, Dashed line), a separator,
@@ -41,11 +44,12 @@ use tl_model::layout::{
     METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
 use tl_model::layout_boxes::{
-    CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_DISKS, DEVICE_MEMORY, DeviceKind, METRIC_CORE_CLOCKS,
-    METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
-    METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED,
-    METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX,
-    METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE,
+    CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_DISKS, DEVICE_MEMORY, DEVICE_NETS, DeviceKind,
+    METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO,
+    METRIC_DISK_READ, METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD, METRIC_MEM_AVAILABLE,
+    METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED,
+    METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW,
+    METRIC_PRESSURE,
 };
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
@@ -564,23 +568,38 @@ pub fn mem_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     }]
 }
 
-/// The sources of the Disk box on `snap` (UI-PRF-061 phase 2): one group per disk the box
-/// shows (the whole disks of the visible sidebar cards, in sidebar order, named as the catalog
-/// names them) with the metrics it reports, then "All disks" with the disk total's metrics and
-/// "All disks >" for Add Widget. Without a disk-total device only the disks are listed.
-pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+/// What an aggregate box lists in "Source >": one submenu per member of its group, then the
+/// aggregate device's submenu, which also offers the group in Add Widget.
+struct AggregateSources {
+    /// The group whose members get a submenu each, and the metrics a member lists.
+    members: GroupKind,
+    member_kind: DeviceKind,
+    member_metrics: &'static [(&'static str, &'static str)],
+    /// The aggregate device's persistent key, kind and metrics.
+    total_key: &'static str,
+    total_kind: DeviceKind,
+    total_metrics: &'static [(&'static str, &'static str)],
+    /// The name key of the aggregate's submenu and of its Add Widget group.
+    all_key: &'static str,
+}
+
+/// The sources of the box `spec` describes on `snap`: one group per member the box shows (in
+/// sidebar order, named as the catalog names them) with the metrics it reports, then the
+/// aggregate with its metrics and its group for Add Widget. Without an aggregate device only
+/// the members are listed.
+fn aggregate_source_groups(spec: &AggregateSources, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     let perf = cx
         .try_global::<TlSettings>()
         .map(|_| &TlSettings::settings(cx).performance);
-    // A disk lists the metrics it reports. The disk total sums the disks' series, so it lists
-    // its four metrics even before the first of its samples arrives.
+    // A member lists the metrics it reports. The aggregate sums the members' series, so it
+    // lists its metrics even before the first of its samples arrives.
     let items = |kind: DeviceKind, idx: DeviceIdx, metrics: &[(&str, &str)]| {
         metrics
             .iter()
             .filter_map(|(key, name_key)| {
                 let metric = MetricKey::new(key);
                 let (value, _) = box_reading(kind, &metric, snap, idx, None);
-                if kind == DeviceKind::Disk && value.validity == Validity::Unsupported {
+                if kind == spec.member_kind && value.validity == Validity::Unsupported {
                     return None;
                 }
                 Some(SourceItem {
@@ -594,10 +613,11 @@ pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
             })
             .collect::<Vec<_>>()
     };
-    let disks = GroupSelector {
-        device: DeviceSelector::Key(Arc::from(DEVICE_DISKS)),
-        members: GroupKind::Disks,
-        metric: MetricKey::new(METRIC_DISK_IO),
+    let group_metrics_of = group_metrics(&spec.members);
+    let group = GroupSelector {
+        device: DeviceSelector::Key(Arc::from(spec.total_key)),
+        members: spec.members.clone(),
+        metric: MetricKey::new(group_metrics_of.first().map_or("", |(k, _)| k)),
         options: GroupOptions {
             limit: None,
             items: GroupItems::Cells,
@@ -605,7 +625,7 @@ pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
         },
     };
     let mut groups = Vec::new();
-    for s in members(&disks, snap, perf, None, false).list() {
+    for s in members(&group, snap, perf, None, false).list() {
         let DeviceSelector::Key(key) = &s.device else {
             continue;
         };
@@ -618,7 +638,7 @@ pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
         groups.push(SourceGroup {
             key: Arc::clone(key),
             name: SharedString::from(entry.display_name.to_string()),
-            items: items(DeviceKind::Disk, entry.idx, &DISK_METRICS),
+            items: items(spec.member_kind, entry.idx, spec.member_metrics),
             subs: Vec::new(),
             add_group: None,
         });
@@ -627,27 +647,63 @@ pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
         .devices
         .entries
         .iter()
-        .find(|e| e.present && &*e.persistent_key == DEVICE_DISKS)
+        .find(|e| e.present && &*e.persistent_key == spec.total_key)
     else {
         return groups;
     };
-    let all = tr(cx, "perf-widget-group-disks");
+    let all = tr(cx, spec.all_key);
     let add_group = GroupAdd {
         label: all.clone(),
-        kind: GroupKind::Disks,
-        metrics: group_metrics(&GroupKind::Disks)
+        kind: spec.members.clone(),
+        metrics: group_metrics_of
             .iter()
             .map(|(key, name)| (MetricKey::new(key), tr(cx, name)))
             .collect(),
     };
     groups.push(SourceGroup {
-        key: Arc::from(DEVICE_DISKS),
+        key: Arc::from(spec.total_key),
         name: all,
-        items: items(DeviceKind::Disks, total.idx, &DISK_METRICS[..4]),
+        items: items(spec.total_kind, total.idx, spec.total_metrics),
         subs: Vec::new(),
         add_group: Some(add_group),
     });
     groups
+}
+
+/// The sources of the Disk box on `snap` (UI-PRF-061 phase 2): one group per disk the box
+/// shows (the whole disks of the visible sidebar cards, in sidebar order, named as the catalog
+/// names them) with the metrics it reports, then "All disks" with the disk total's metrics and
+/// "All disks >" for Add Widget. Without a disk-total device only the disks are listed.
+pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let spec = AggregateSources {
+        members: GroupKind::Disks,
+        member_kind: DeviceKind::Disk,
+        member_metrics: &DISK_METRICS,
+        total_key: DEVICE_DISKS,
+        total_kind: DeviceKind::Disks,
+        total_metrics: &DISK_METRICS[..4],
+        all_key: "perf-widget-group-disks",
+    };
+    aggregate_source_groups(&spec, snap, cx)
+}
+
+/// The sources of the Network box on `snap` (UI-PRF-061 phase 2): one group per adapter the
+/// box counts (not `lo`, of a class `show_network_*` shows, in sidebar order, named as the
+/// catalog names them) with Download, Upload and Download and upload, then "All adapters" with
+/// the same three of the counted total and "All adapters >" for Add Widget. Without a network
+/// total device only the adapters are listed.
+pub fn net_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
+    let metrics = group_metrics(&GroupKind::Adapters);
+    let spec = AggregateSources {
+        members: GroupKind::Adapters,
+        member_kind: DeviceKind::Net,
+        member_metrics: metrics,
+        total_key: DEVICE_NETS,
+        total_kind: DeviceKind::Nets,
+        total_metrics: metrics,
+        all_key: "perf-widget-group-adapters",
+    };
+    aggregate_source_groups(&spec, snap, cx)
 }
 
 /// The fixed widget Add Widget offers: its kind's name as written and its menu label.
@@ -1075,6 +1131,7 @@ fn box_name(container: &str, cx: &App) -> SharedString {
         tl_model::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
         tl_model::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
         tl_model::layout::DISK_BOX_CONTAINER => tr(cx, "perf-overview-box-disks"),
+        tl_model::layout::NET_BOX_CONTAINER => tr(cx, "perf-overview-box-network"),
         other => SharedString::from(other.to_string()),
     }
 }

@@ -900,6 +900,7 @@ perf-widget-empty = No widgets. Use Edit Widgets to add some.
 perf-widget-group-none = None found
 perf-widget-group-cores = All cores
 perf-widget-group-disks = All disks
+perf-widget-group-adapters = All adapters
 perf-widget-group-engines = All engines
 perf-widget-fixed-by-app = Memory by app
 perf-widget-core-load = Core load

@@ -29,7 +29,9 @@
 //! no member items and takes no member sources of its own. The host updates the model on a
 //! sample and notifies only this group ([`GroupWidget::flow_changed`]) when a row's text or
 //! bucket changed. The disk sections work out their busiest-first expansion and "+n more" in
-//! this group's render, so an activity change renders this group only.
+//! this group's render, so an activity change renders this group only. The Network box's
+//! `adapter_charts` cells (`overview/net_flow.rs`) are drawn the same way, from the adapter cells
+//! the box keeps.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -62,6 +64,7 @@ use crate::pages::performance::overview::disk_box::{
     DiskModel, disk_cells_element, disk_rows_element,
 };
 use crate::pages::performance::overview::layout::Arrange;
+use crate::pages::performance::overview::net_box::{NetModelRef, net_cells_element};
 use crate::pages::performance::overview::parts::{CoreBarsLayout, CoreBarsModel, core_board};
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::timeline::OverviewPause;
@@ -148,6 +151,14 @@ pub enum GroupFlowLook {
         body: Rc<Cell<Size<Pixels>>>,
         arrange: Arrange,
     },
+    /// The Network box's `adapter_charts` cells (`net_box::net_cells_element`): one combined
+    /// download and upload chart per counted adapter, placed as `arrange` says, only whole
+    /// cells. `body` is the body's size at the last paint.
+    NetCells {
+        model: NetModelRef,
+        body: Rc<Cell<Size<Pixels>>>,
+        arrange: Arrange,
+    },
 }
 
 impl PartialEq for GroupFlowLook {
@@ -211,6 +222,18 @@ impl PartialEq for GroupFlowLook {
                     arrange: a,
                 },
             ) => Rc::ptr_eq(model, m) && Rc::ptr_eq(body, b) && arrange == a,
+            (
+                Self::NetCells {
+                    model,
+                    body,
+                    arrange,
+                },
+                Self::NetCells {
+                    model: m,
+                    body: b,
+                    arrange: a,
+                },
+            ) => model == m && Rc::ptr_eq(body, b) && arrange == a,
             _ => false,
         }
     }
@@ -742,6 +765,11 @@ impl Render for GroupWidget {
                     body,
                     arrange,
                 } => disk_cells_element(model, body, *arrange, &m, &theme, view),
+                GroupFlowLook::NetCells {
+                    model,
+                    body,
+                    arrange,
+                } => net_cells_element(model, body, *arrange, &m, &theme, view),
             };
             return root.child(part);
         }
