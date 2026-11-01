@@ -460,7 +460,9 @@ fn overview_range_switch_is_a_drop_down(cx: &mut TestAppContext) {
             let state = window.use_keyed_state(
                 gpui_kit::ElementId::Name(STATUS_SWITCH.into()),
                 cx,
-                |_, _| unreachable!("the state exists"),
+                |_, _| -> tl_ui::components::select::TlSelectState {
+                    unreachable!("the state exists")
+                },
             );
             state.read(cx).selected_value().map(|v| v.to_string())
         })
