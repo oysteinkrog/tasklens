@@ -1126,8 +1126,10 @@ const MEM_GROUPS: [(u16, &str, &str, f32); 5] = [
     (64, "k:shmem", "Shared memory", 2.),
 ];
 
-/// The name of the Memory by app legend row the 1.3.0 Edit Widgets lost at the bottom.
-const SHARED_MEMORY: &str = "Shared memory";
+/// The band key of the Memory by app legend row "Shared memory", the last row, which the
+/// 1.3.0 Edit Widgets lost at the bottom. The rig's catalog is not indexed by device, so the
+/// legend names this band by its key; the row is found by key.
+const SHARED_MEMORY: &str = "k:shmem";
 
 /// Whether `b` lies inside `outer`, to half a pixel.
 fn inside(b: Bounds<Pixels>, outer: Bounds<Pixels>) -> bool {
@@ -1241,17 +1243,43 @@ impl Rig<'_> {
         })
     }
 
-    /// The bounds of the Memory by app legend row named `name`, when the legend draws it.
-    fn by_app_row(&mut self, name: &str) -> Option<Bounds<Pixels>> {
+    /// The bounds of the Memory by app legend row of band `key`, when the legend draws it.
+    fn by_app_row(&mut self, key: &str) -> Option<Bounds<Pixels>> {
         let page = self.page.clone();
         let row = self.vcx.update(|_, cx| {
             let apps = page.read(cx).mem_box().read(cx).apps()?.read(cx);
             let bands = apps.bands();
             memory_apps::legend_order(bands)
                 .iter()
-                .position(|&i| bands[i].name.as_ref() == name)
+                .position(|&i| &*bands[i].key == key)
         })?;
         self.bounds(format!("{}-{row}", memory_apps::LEGEND_ID))
+    }
+
+    /// The Memory by app bands in legend order and the legend rows drawn, for a failure
+    /// message.
+    fn by_app_legend(&mut self) -> String {
+        let page = self.page.clone();
+        let names: Vec<String> = self.vcx.update(|_, cx| {
+            page.read(cx)
+                .mem_box()
+                .read(cx)
+                .apps()
+                .map(|a| {
+                    let bands = a.read(cx).bands();
+                    memory_apps::legend_order(bands)
+                        .iter()
+                        .map(|&i| bands[i].key.to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let rows: Vec<String> = (0..names.len().max(1) + 1)
+            .map(|n| format!("{}-{n}", memory_apps::LEGEND_ID))
+            .chain([format!("{}-more", memory_apps::LEGEND_ID)])
+            .filter_map(|sel| self.bounds(sel.clone()).map(|b| format!("{sel} {b:?}")))
+            .collect();
+        format!("bands {names:?}, rows drawn {rows:?}")
     }
 
     /// Scrolls the edit body `body_sel` with the mouse wheel until the text `name` of widget
@@ -1417,8 +1445,8 @@ impl Rig<'_> {
 /// by app legend and time axis. No text is clipped, for every widget placed, with no exception:
 /// each text lies inside its widget, and inside the body under the toolbar, at once or after
 /// the user scrolls the body to it with the wheel. The Memory by app widget keeps its time axis
-/// (as many ticks as the applied view) and its last legend row "Shared memory", both in the
-/// body under the toolbar with no scroll. The CPU box's Total chart has the Total and Kernel
+/// (as many ticks as the applied view, which has one at 100 % and 150 %) and its last legend
+/// row, "Shared memory", both in the body under the toolbar with no scroll. The CPU box's Total chart has the Total and Kernel
 /// legend at its top left, under the grip and the gear without the inset; the Memory by app
 /// widget filled the box body and was cut off by the toolbar.
 #[gpui_kit::test]
@@ -1426,7 +1454,6 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
     let mut r = open_with(cx, true);
     r.publish_mem_groups();
     let mut legends = 0;
-    let mut scrolled_to = 0;
     for pct in [100u16, 150, 200] {
         r.set_ui_scale(pct);
         for (kind, container_id, presets) in EDIT_BOXES {
@@ -1445,14 +1472,20 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                 let (container, editor) = r.parts(kind);
                 let by_app = kind == "memory" && *preset == "apps";
                 // The applied view's time axis and last legend row, which Edit Widgets keeps.
+                // At 200 % the 1920 × 1200 window is 960 × 600 logical px, and the applied
+                // by app chart is too short for its time axis: there Edit Widgets draws the
+                // same none.
                 let applied_ticks = if by_app {
-                    let ticks = r.by_app_ticks();
-                    assert!(!ticks.is_empty(), "{at}: the applied view has a time axis");
+                    let ticks = r.by_app_ticks().len();
+                    if pct < 200 {
+                        assert!(ticks > 0, "{at}: the applied view has a time axis");
+                    }
                     assert!(
                         r.by_app_row(SHARED_MEMORY).is_some(),
-                        "{at}: the applied legend shows {SHARED_MEMORY}"
+                        "{at}: the applied legend shows {SHARED_MEMORY}: {}",
+                        r.by_app_legend()
                     );
-                    ticks.len()
+                    ticks
                 } else {
                     0
                 };
@@ -1477,9 +1510,12 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                             "{at}: time axis label {t:?} shows in the body {body:?}"
                         );
                     }
-                    let row = r
-                        .by_app_row(SHARED_MEMORY)
-                        .unwrap_or_else(|| panic!("{at}: the legend shows {SHARED_MEMORY}"));
+                    let row = r.by_app_row(SHARED_MEMORY).unwrap_or_else(|| {
+                        panic!(
+                            "{at}: the legend keeps its {SHARED_MEMORY} row: {}",
+                            r.by_app_legend()
+                        )
+                    });
                     assert!(
                         inside(row, body),
                         "{at}: the {SHARED_MEMORY} row {row:?} shows in the body {body:?}"
@@ -1539,7 +1575,6 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
                             inside(b, after),
                             "{at}: {part} {b:?} is cut off by the body {after:?}"
                         );
-                        scrolled_to += 1;
                         now = r.edit_texts(&container, container_id, id);
                         body = after;
                     }
@@ -1551,5 +1586,4 @@ fn overview_widget_edit_covers_and_clips_no_text(cx: &mut TestAppContext) {
         }
     }
     assert!(legends > 0, "the sweep saw chart legends");
-    eprintln!("texts the sweep scrolled to: {scrolled_to}");
 }
