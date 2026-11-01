@@ -33,6 +33,7 @@ Where these records deviate from Astra, the ADR says so under "Deviation from As
 | 017 | Device metric history |
 | 018 | Engine service, clients and multiple hosts |
 | 019 | Configurable widget layout |
+| 020 | tl-ui crate layers |
 
 ---
 
@@ -53,12 +54,16 @@ tasklens/
   rust-toolchain.toml
   .cargo/config.toml      # [alias] xtask = "run -p xtask --"
   crates/
-    tl-model/             # lib: data contracts, units, formatting, wire framing, EngineClient trait
+    tl-model/             # lib: data contracts, units, formatting, wire framing, EngineClient trait, engine settings (EngineSettings, HistorySettings, NetworkUnit, engine ranges)
     tl-collect/           # lib: synchronous samplers and parsers (procfs, sysfs, netlink)
     tl-ops/               # lib: synchronous OS operations (signals, nice, affinity, ioprio, cgroup writes)
     tl-engine/            # lib: asupersync runtime, workers, reducer, actions, D-Bus adapters, probe client
     tl-gpu-probe/         # bin: the only process that loads NVML
-    tl-ui/                # lib: GPUI views, chart element, process table, theme
+    tl-ui/                # lib: GPUI views, chart element, process table, theme; after the split (ADR-020) the shell: main window, app init
+    tl-ui-settings/       # lib: UI settings and widget layout types, moved from tl-model (ADR-020, CS-D1 and CS-D2)
+    tl-ui-*/              # lib: base, kit, chart, table, perf-core, overview, perf, procs, sys (ADR-020)
+    tl-ui-testkit/        # lib, dev only: FakeEngine and render helpers (ADR-020)
+    tl-ui-pagehost/       # lib, dev only: mounts one page for integration tests (ADR-020)
     tl-app/               # bin "tasklens": main, wiring, single instance, settings store, logging
     tl-history/           # lib, P2: device metric segment format (ADR-017); P3: history segment format, store and rolling window (ADR-012)
     tl-tray/              # lib, P3: StatusNotifierItem tray and tray graph rasterizer
@@ -82,18 +87,32 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 
 | Crate | Workspace deps allowed | External deps allowed |
 |---|---|---|
-| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`) |
+| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`), toml (`LayoutEntry::Kept` in `layout.rs`, ADR-019; moves to tl-ui-settings with `layout.rs` in CS-D2) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal), bitflags (`CpuFlags`, R-285) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P2 for ADR-017 device history, P3 for ADR-012) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, libc (`close_range` in the GPU probe child only, R-290), postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
-| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
+| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), intl_pluralrules (plural rules in `pages/performance/details.rs`, in use since o55.37), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
+| tl-ui-settings | tl-model | serde, toml (`LayoutEntry::Kept`, ADR-019), bitflags (`layout.rs`) |
+| tl-ui-base | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, unic-langid, async-channel, unicode-segmentation |
+| tl-ui-kit | tl-model, tl-ui-settings, tl-ui-base | gpui-kit, tracing, smallvec, rustc-hash, fluent-bundle |
+| tl-ui-chart | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit | gpui-kit, smallvec, jiff |
+| tl-ui-table | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle |
+| tl-ui-perf-core | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle, unic-langid, intl_pluralrules, unicode-segmentation |
+| tl-ui-overview | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table, tl-ui-perf-core | gpui-kit, tracing, smallvec, rustc-hash, fluent-bundle, jiff |
+| tl-ui-perf | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table, tl-ui-perf-core, tl-ui-overview | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle, jiff |
+| tl-ui-procs | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table, tl-ui-perf-core | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, jiff |
+| tl-ui-sys | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table, tl-ui-perf-core, tl-ui-procs | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle, jiff |
+| tl-ui-testkit | tl-model | gpui-kit (feature `test-support` only behind its `render` feature), async-channel, image (optional, `render` only, PNG goldens) |
+| tl-ui-pagehost | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-testkit | gpui-kit |
 | tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142), wgpu `=29.0.4` (Rendering GPU adapter probe, R-142) |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni, async-channel (R-278) |
 | tl-helper | tl-model, tl-ops, tl-collect (shared strings scanner `proc/strings.rs`, R-157) | rustix, postcard, serde |
 | tl-netmon | tl-model | decided in its own ADR when that phase starts |
 | xtask | none | serde, serde_json, anyhow |
+
+The tl-ui-* rows are reserved now, like the P3 rows; each crate is created by its extraction bead (ADR-020). Their external lists are what each crate's files used on 2026-11-01, found by grep. An extraction bead that finds another crate from the tl-ui row in use adds it to this table and to `xtask/src/check_deps.rs` in the same commit. Any crate outside the tl-ui row (the tl-model row for tl-ui-settings) needs an ADR change. After the split the tl-ui row covers only the shell; CS-E10 writes its final list. Until CS-D2, the UI settings and layout types stay in tl-model.
 
 **Dependency direction rule.** Edges only point toward `tl-model`:
 
@@ -104,7 +123,7 @@ tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-op
 ```
 
 Hard rules:
-1. `tl-ui` never declares a direct dependency on `tl-engine`, `tl-collect`, `tl-ops`, `asupersync`, `arc-swap` or `zbus`. It talks to the engine only through the `EngineClient` trait in `tl-model` (ADR-005). Rule 1 and the allowed-dependency table are about direct dependencies in our own `Cargo.toml` files; what an allowed crate pulls in does not count (`zbus` reaches `tl-ui` through `gpui-pre-linux` and `gpui-base`, `arc-swap` through `gpui-component`; R-259).
+1. `tl-ui` never declares a direct dependency on `tl-engine`, `tl-collect`, `tl-ops`, `asupersync`, `arc-swap` or `zbus`. It talks to the engine only through the `EngineClient` trait in `tl-model` (ADR-005). Rule 1 and the allowed-dependency table are about direct dependencies in our own `Cargo.toml` files; what an allowed crate pulls in does not count (`zbus` reaches `tl-ui` through `gpui-pre-linux` and `gpui-base`, `arc-swap` through `gpui-component`; R-259). Rule 1 applies to every `tl-ui-*` crate as well (ADR-020).
 2. `asupersync` appears in the normal dependency closure of `tl-engine` and `tl-app` only. No public item of `tl-engine` names an asupersync type. `tl-engine`'s public API is `EngineConfig`, `Engine::start`, `EngineHandle` (implements `EngineClient`) and `ShutdownReport`.
 3. `tl-model`, `tl-collect` and `tl-ops` contain no async code and no runtime.
 4. `unsafe` is denied workspace-wide (`unsafe_code = "deny"`). It is allowed only in these files, each with `#![allow(unsafe_code)]` at file level and a `// SAFETY:` comment per block: `crates/tl-ops/src/sys.rs`, `crates/tl-engine/src/gpu/spawn.rs`, `crates/tl-app/src/main.rs` (environment setup before any thread starts), `crates/tl-gpu-probe/src/api_versions.rs` (`ash` and `khronos-egl` entry points for the `--api-versions` mode, R-143), `crates/tl-gpu-probe/src/nvml_raw.rs` (only the raw `nvmlDeviceGetJpgUtilization` and `nvmlDeviceGetOfaUtilization` calls from nvml-wrapper-sys 0.10.0, each in a safe function: nvml-wrapper 0.13.0 has no safe API for them, and the probe runs in its own process, so a fault there cannot reach the app; R-292, bead hjn.42). Adding a file to this list needs an ADR change.
@@ -2129,11 +2148,13 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 | Unit and parser fixture tests | `crates/tl-collect/tests/`, `tl-model`, `tl-ops` unit tests | `cargo test --workspace` | yes |
 | Parser property tests | `tl-collect/tests/prop_*.rs` (proptest: arbitrary bytes never panic) | same | yes |
 | Engine LabRuntime tests | `crates/tl-engine/tests/lab_*.rs` | same | yes |
-| UI logic tests | `crates/tl-ui/tests/ui_*.rs` with `#[gpui_kit::test]` | same | yes |
-| Headless screenshot tests and FakeEngine UI tests | `crates/tl-ui/tests/render_*.rs` (feature `render-tests`) and `crates/tl-ui/tests/ui_*.rs` that need `FakeEngine` (feature `test-hooks`) | `cargo test -p tl-ui --features render-tests,test-hooks` | yes, with Mesa lavapipe (`VK_ICD_FILENAMES` set to lavapipe) |
+| UI logic tests | one integration test binary per tl-ui crate, `crates/<crate>/tests/<short>/main.rs` (ADR-020), with `#[gpui_kit::test]`; tests that need the shell stay in `crates/tl-ui/tests/ui/` | `cargo test -p <crate>` | yes |
+| Headless screenshot tests and FakeEngine UI tests | the `render_*` modules of those binaries (feature `render-tests`) and the tests that need `FakeEngine` from tl-ui-testkit (no feature flag) | `cargo test -p <crate> --features render-tests` | yes, with Mesa lavapipe (`VK_ICD_FILENAMES` set to lavapipe) |
 | Real-system integration | `tests/real_*.rs` in each crate, `#[ignore]` | `cargo test --workspace -- --ignored` | no; owner machine |
 | Performance gates | `cargo xtask bench` | see ADR-014 | no; owner machine |
 | Static checks | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check-deps` | | yes |
+
+The FakeEngine row holds from CS-B8 on; until then those tests need `--features test-hooks`. The per-crate binaries arrive as each crate is extracted (CS-F1 to CS-F9). Until a crate has its own binary, its tests stay modules of the one `crates/tl-ui/tests/ui/` binary (`cargo test -p tl-ui --test ui`).
 
 `scripts/ci.sh` runs the CI rows in order. A GitHub Actions workflow on the private repo calls it on `ubuntu-latest` with the pinned toolchain.
 
@@ -2167,7 +2188,7 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 - Right-click captures targets; a re-sort before the click does not change them.
 - Filter debounce: 5 keystrokes within 100 ms send one `SetTableQuery`.
 - Demand: switching tabs changes `Demand`; visible-row keys update after a re-sort with an unchanged range; demand is not resent when equal.
-- Render counters (a test-only `Cell<u32>` in each view, behind `cfg(test)` or feature `test-hooks`): a CPU-only snapshot change does not re-render `ProcessTable`; a series change re-renders only its `ChartView`.
+- Render counters (a test-only `Cell<u32>` in each view, behind the test-hook gate of ADR-020): a CPU-only snapshot change does not re-render `ProcessTable`; a series change re-renders only its `ChartView`.
 - Animation driver: no frame request when no chart is moving; exactly one pending request per window.
 
 **Headless screenshot tests.**
@@ -3360,3 +3381,125 @@ Each tl-ui bead adds its UI-PRF-061 strings to `assets/locales/en-US.ftl`.
 - tl-app: the first save after a conversion writes `settings.toml.pre-layouts-v1` with the old bytes, and a later save does not change it.
 - tl-ui (`test-hooks`): every composition at its minimum size and larger; the three unavailable states; two widgets on one source share one `SourceData`; inner grid insert, move, resize and shrink at 1.0, 1.5 and 2.0 scale and at the GPU box minimum of 200 × 220 px; no overlap after random actions (proptest); Apply saves, Cancel restores, Undo steps back; the counter test of the render contract above; widget entity ids survive a move of another widget and a Cancel.
 - Phase gate (`tasklens-lhliq.8`): migration fixtures for every old GPU box setting; a visual check of the default and of each old mode against screenshots of 1.1.0 taken in a hidden session; a hotplug test (a GPU gone and back keeps the layout and shows the unavailable state between); the `perf-overview` and `perf-overview-static` bench scenes within their ADR-014 budgets with the GPU box on widgets.
+
+---
+
+## ADR-020: tl-ui crate layers
+
+### Context
+
+tl-ui is one crate of about 222k lines, and its integration tests are one `ui` binary of 142.4k lines (80 files, 366 MB). Every edit compiles tl-ui twice: once for the app build and once with feature `test-hooks` for the tests. In a 40.8 h window, lanes spent 6.14 h compiling test builds, mostly tl-ui and the `ui` binary. The measurements are in `docs/plan/crate-split.md` section 1.
+
+Oystein approved splitting tl-ui into layered crates and moving the UI settings out of tl-model on 2026-11-01 (epic `tasklens-zljr5`, decisions in `docs/plan/crate-split.md` section 9). This ADR is the target layout and the rules every split bead follows. The bead order and the reasons for it are in `docs/plan/crate-split.md` section 4. Where this ADR and the plan differ, this ADR wins.
+
+### Decision
+
+**Crates.** Twelve new crates under `crates/`. The workspace grows from 14 to 26 members.
+
+| Crate | Holds | Lines (about) |
+|---|---|---|
+| `tl-ui-settings` | The UI half of tl-model `settings.rs` (`Settings` and the UI sections), plus `layout.rs`, `layout_boxes.rs` and `layout_pages.rs` from `crates/tl-model/src`. tl-model keeps `EngineSettings`, `HistorySettings`, `NetworkUnit` and the engine ranges. | 7.5k |
+| `tl-ui-base` | Theme, text, strings, focus, animation, hosts, the action tracker, app and shell types | 14k |
+| `tl-ui-kit` | Components and the helper flow | 22k |
+| `tl-ui-chart` | The chart element and views, network totals | 9k |
+| `tl-ui-table` | `TlTreeTable`, the text cache, the shared system table | 10k |
+| `tl-ui-perf-core` | Device keys, perf actions, details, core clocks, minigraphs, the tray bridge, the detached graph window | 10k |
+| `tl-ui-overview` | The Overview page and the widget container | 40k |
+| `tl-ui-perf` | `PerformancePage`, the device pages, the mini window | 31k |
+| `tl-ui-procs` | The Processes page and its dialogs and property windows | 43k |
+| `tl-ui-sys` | The Services, Connections and Startup pages and their windows | 17k |
+| `tl-ui` (the shell) | The main window, app init, the Information page, the run, low-memory and SMART windows, the bench | 32k |
+| `tl-ui-testkit` (dev only) | `FakeEngine`; the render helpers behind its feature `render` | 0.8k |
+| `tl-ui-pagehost` (dev only) | A host that mounts one page with its globals, without `MainWindow` | 0.5k |
+
+**Where each file goes.** Paths are today's paths under `crates/tl-ui/src`. A file keeps its path relative to `src/` in its new crate, so `pages/processes/menu.rs` becomes `crates/tl-ui-procs/src/pages/processes/menu.rs`.
+
+| Crate | Files |
+|---|---|
+| `tl-ui-base` | `theme/`, `text/`, `i18n.rs`, `selector.rs`, `util.rs`, `focus.rs`, `anim.rs`, `components/motion.rs` (as the root module `motion`), `hub.rs`, `demand.rs`, `settings_global.rs`, `host.rs`, `host_settings.rs`, `hosts_api.rs`, `hosts_edit.rs`, `action_tracker.rs`, `actions.rs`, `engine_link.rs`, `request_ends.rs`. Also the files the cycle beads create: `template.rs` (`Template`, CS-C5), `app_env.rs` and `registry.rs` (CS-C1, CS-C2), `shell.rs` (shell types and `ShellApi`, CS-C2 to CS-C4). |
+| `tl-ui-kit` | `components/` (all but `motion.rs`), `helper_flow.rs` |
+| `tl-ui-chart` | `chart/`, `net_totals.rs` (it uses `chart::view::derived_view`) |
+| `tl-ui-table` | `table/`, `text_cache.rs`, `pages/sys_table.rs`, `pages/sys_status.rs`, `pages/sys_copy.rs` |
+| `tl-ui-perf-core` | `pages/performance/actions.rs`, `pages/performance/details.rs` and `pages/performance/core_clocks.rs`, which CS-C8 moves to `pages/performance/core/` together with `DeviceKey`, `DeviceKind` and the shared constants and helpers the overview and widget code name; `pages/minigraph/`; `tray_bridge.rs`; `windows/detached_graph.rs` |
+| `tl-ui-overview` | `pages/performance/overview/`, `pages/performance/widget/`, `pages/performance/memory_apps.rs` |
+| `tl-ui-perf` | Every other file under `pages/performance/`: `mod.rs` (`PerformancePage`), `page.rs`, `page_flow/`, `aggregate.rs`, `card.rs`, `sidebar.rs`, `status_bar/`, `menu.rs`, `summary.rs`, `cpu.rs`, `cpu_board.rs`, `cpu_details.rs`, `cpu_grid.rs`, `memory.rs`, `memory_bar.rs`, `disk.rs`, `gpu.rs`, `net.rs`, `sensors.rs`. Also `windows/mini.rs`. |
+| `tl-ui-procs` | `pages/processes/`; `windows/props/`, `windows/app_props.rs`, `windows/affinity.rs`, `windows/priority.rs`, `windows/signal.rs`, `windows/handle_search.rs`, `windows/notices.rs`, `windows/actions.rs`, `windows/disk_in_use.rs`, `windows/frame.rs` |
+| `tl-ui-sys` | `pages/services/`, `pages/connections/`, `pages/startup/`; `windows/service_properties/`, `windows/connection_properties.rs`, `windows/startup_properties.rs`, `windows/confirm_startup_delete.rs` |
+| `tl-ui` (shell) | `lib.rs`, `app.rs`, `window/`, `pages/mod.rs`, `pages/information/`, `windows/mod.rs`, `windows/run.rs`, `windows/run_history.rs`, `windows/low_memory.rs`, `windows/smart.rs`, `bench/` |
+| `tl-ui-testkit` | `testing/fake_engine.rs`; `testing/render.rs` behind feature `render` (CS-B1) |
+
+A new file goes to the crate that holds its directory. A new file at the root of `src/`, or in `pages/` or `windows/` outside a listed subdirectory, needs a row in this table, added by the bead that creates it.
+
+The `action_tracker.rs` loop (settings_global uses host, host holds an `ActionTracker`, `ActionTracker` uses `components::dialog` and `components::toast`, components use settings_global and host) is broken by CS-C6. If CS-C6 cannot break it cleanly, tl-ui-base and tl-ui-kit merge into one `tl-ui-kit` of about 36k lines, and every rule below reads "kit" for "base".
+
+**Allowed edges.** Each crate may depend on the tl-ui crates in its row, plus tl-model and gpui-kit. No other workspace crate is allowed.
+
+| Crate | May depend on |
+|---|---|
+| `tl-ui-settings` | tl-model only, no gpui-kit |
+| `tl-ui-base` | settings |
+| `tl-ui-kit` | base, settings |
+| `tl-ui-chart` | kit, base, settings |
+| `tl-ui-table` | kit, base, settings |
+| `tl-ui-perf-core` | chart, table, kit, base, settings |
+| `tl-ui-overview` | perf-core, chart, table, kit, base, settings |
+| `tl-ui-perf` | overview, perf-core, chart, table, kit, base, settings |
+| `tl-ui-procs` | perf-core, chart, table, kit, base, settings |
+| `tl-ui-sys` | procs, perf-core, chart, table, kit, base, settings |
+| `tl-ui` (shell) | every crate above |
+| `tl-ui-testkit` | tl-model and gpui-kit only |
+| `tl-ui-pagehost` | testkit, kit, base, settings |
+
+Page crates (overview, perf, procs, sys) never depend on each other, with two exceptions: tl-ui-perf on tl-ui-overview, and tl-ui-sys on tl-ui-procs. tl-app depends on tl-ui only; the shell re-exports what tl-app needs. tl-engine, tl-server and tl-remote depend on tl-model and not on tl-ui-settings, so a UI settings edit no longer rebuilds them.
+
+```text
+tl-app -> tl-ui (shell) -> tl-ui-sys -> tl-ui-procs --------\
+                        -> tl-ui-perf -> tl-ui-overview -----> tl-ui-perf-core -> tl-ui-chart -> tl-ui-kit -> tl-ui-base -> tl-ui-settings -> tl-model
+                                                              \-> tl-ui-table --/
+```
+
+The ADR-001 rule 1 closure for tl-ui applies to every `tl-ui-*` crate: no tl-engine, tl-collect or tl-ops, and arc-swap and zbus only through gpui-kit. asupersync and zbus stay out of every tl-ui closure.
+
+**Test hooks.** Test-only code is gated on `cfg(any(debug_assertions, feature = "test-hooks"))`. Items that only unit tests use may add `test` to that list. The `test-hooks` feature stays only for release-mode bench builds (`bench` enables it). Debug builds (`cargo run`, the smoke harness) compile the hooks behind their runtime checks; release builds never do. A hook that changes behaviour must do nothing until a test turns it on. CS-B2 sorts the hooks into recorders, readers and switches and adds the list of switches to this ADR. CS-B2 to CS-B7 move the gates one directory at a time, and CS-B8 removes `--features test-hooks` from tl-app's dev-dependency, the tests, the scripts and the docs.
+
+**Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
+
+**Move method.** A crate extraction is one commit:
+
+1. `git mv` the files into `crates/<crate>/src/`, keeping their paths relative to `src/`.
+2. The new crate's `lib.rs` imports the lower crates' modules at its root (`use tl_ui_base::{theme, i18n, ...};`), so moved code keeps its `crate::theme::...` paths. Its `pages` and `windows` modules do the same for the lower crates' modules under `pages/` and `windows/`.
+3. tl-ui's `lib.rs` replaces `pub mod x;` with `pub use tl_ui_x::x;`, and the shell's `pages/mod.rs` and `windows/mod.rs` do the same for their submodules, so upper code, tl-app and the tests keep their `tl_ui::x` paths.
+4. `pub(crate)` and `pub(super)` items used across the new boundary become `pub`. A `#[cfg(test)]` helper used across the boundary becomes `#[cfg(any(test, debug_assertions))] pub`, or moves with the tests that use it.
+5. The root `Cargo.toml` gains the member, and `xtask/src/check_deps.rs` gains the crate's row from ADR-001.
+
+These root re-exports stay during the split. CS-J1 rewrites them to direct crate paths after CS-E10 and CS-F9. A move does not change behaviour: if a test needs a changed assertion, the move is wrong.
+
+**Actions.** Each crate that declares `actions!` exports `pub fn init(cx: &mut App)` (or a `bind_keys_*` function) that tl-ui's app init calls. That call keeps the crate linked, so its actions resolve from the keymap. A shell test (CS-E10) checks that every keymap action name resolves and that every crate with `actions!` is initialised.
+
+**Tests.** Each crate has one integration test binary, `crates/<crate>/tests/<short>/main.rs`, where `<short>` is the crate name without `tl-ui-` (for example `crates/tl-ui-kit/tests/kit/main.rs`). Tests that need the shell (`MainWindow`, app init, more than one page) stay in tl-ui's `tests/ui`. Page tests use tl-ui-pagehost. A test move takes the golden files only that test uses and reads them through `CARGO_MANIFEST_DIR`. Golden files shared between crates stay where they are, and the tests that read them name them in a comment.
+
+**Lane commands after the split.** `heavy-build cargo test -p tl-ui-<crate>` for the crate a bead touches, plus `cargo clippy -p tl-ui-<crate> --all-targets -- -D warnings`. CS-B9 writes the final commands and the leader-gate rule into AGENTS.md.
+
+### Consequences
+
+- An edit rebuilds its crate and the crates above it. A lane tests one crate and links that crate's test binary instead of the 366 MB `ui` binary.
+- tl-ui is compiled once per edit, because the hooks no longer need a feature flip.
+- A full `cargo build -p tl-app` after a kit edit still runs rustc for every UI crate above kit; incremental compilation makes most of that cheap.
+- The workspace has 26 members. CS-I1 measures a build from an empty cache against the baseline of 873 units and 381 s.
+- Debug app builds carry the test hooks. Release builds do not.
+
+### Rejected alternatives
+
+- **Keep the `testing` module inside tl-ui behind `debug_assertions`.** Rejected: `render.rs` needs gpui-kit `test-support`, which app builds do not have (crate-split.md section 3 item 9).
+- **Keep the `test-hooks` feature for tests.** Rejected: it compiles tl-ui and the crates above it twice per edit.
+- **One test binary per test file.** Rejected: each binary links GPUI, about 300 MB each.
+- **Page host used from unit tests in base or kit.** Rejected: the page host depends on base, so base would be built twice.
+- **Split crates first and break the cycles after.** Rejected: a lower crate cannot name an upper module. Every cycle is broken inside tl-ui first (CS-C1 to CS-C11).
+
+### Verification
+
+- `cargo xtask check-layers` (CS-A2) passes on every commit. Its allowlist of today's upward edges may only shrink, and CS-C11 empties it.
+- `cargo xtask check-deps` passes, and each `tl-ui-*` crate has a row in `xtask/src/check_deps.rs` that matches its ADR-001 row.
+- The CS-E10 shell test: every keymap action name resolves, and every crate with `actions!` is initialised.
+- CS-I2 runs the full suite and compares the test count with the 7,163 tests of the last full run before the split.
+- CS-I1 records build times, units and `target/` size against the baselines in crate-split.md section 1.
