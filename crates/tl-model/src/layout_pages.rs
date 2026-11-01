@@ -34,8 +34,8 @@ pub const PAGE_CONTAINER_PREFIX: &str = "page.";
 pub const PAGE_GRID_COLS: u16 = 12;
 
 /// The device kinds whose pages this build shows as widget containers. Each page bead adds its
-/// kind (`tasklens-hzire.3` to `.9`).
-pub const PAGE_KINDS: &[DeviceKind] = &[];
+/// kind (`tasklens-hzire.3` to `.9`). `tasklens-hzire.3` adds Aggregate storage.
+pub const PAGE_KINDS: &[DeviceKind] = &[DeviceKind::Disks];
 
 /// Every device kind that has a page: CPU, Memory, GPU, disk, Aggregate storage, adapter,
 /// fan, battery and Aggregate graphics.
@@ -807,8 +807,8 @@ mod tests {
 
     #[test]
     fn this_build_converts_no_page_yet() {
-        // PAGE_KINDS is empty until the page beads add their kinds: clamp converts nothing.
-        if !PAGE_KINDS.is_empty() {
+        // Until the CPU page bead adds its kind, clamp converts nothing.
+        if PAGE_KINDS.contains(&DeviceKind::Cpu) {
             return;
         }
         let mut s: Settings =
