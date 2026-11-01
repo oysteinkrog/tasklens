@@ -10717,6 +10717,7 @@ mod sweep {
     use tl_ui::pages::performance::overview::fit::{
         FitTextPaint, fit_text, round_decimals, shorter_forms, take_fit_texts,
     };
+    use tl_ui::pages::performance::overview::fixed_box::FixedBox;
     use tl_ui::pages::performance::overview::gpu_box::{self, GpuBox};
     use tl_ui::pages::performance::overview::layout::BoxKind;
     use tl_ui::pages::performance::overview::mem_box::{self, CHARTS_GRID_ID, MemBox};
@@ -10724,9 +10725,9 @@ mod sweep {
     use tl_ui::pages::performance::overview::parts::{
         CORE_ROWS_SCROLL_ID, body_id, core_spark_id, take_core_labels, title_row_id,
     };
-    use tl_ui::pages::performance::overview::procs_box::{PROC_ROW_ID_PREFIX, ProcsBox};
+    use tl_ui::pages::performance::overview::procs_box::{self, PROC_ROW_ID_PREFIX, ProcsBox};
     use tl_ui::pages::performance::overview::timeline::{
-        BANDS_ID, MARKER_ROW_ID, TICK_ROW_ID, TimelineBox,
+        self, BANDS_ID, MARKER_ROW_ID, TICK_ROW_ID, TimelineBox,
     };
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -10979,8 +10980,8 @@ mod sweep {
         Gpu(Entity<GpuBox>),
         Disk(Entity<DiskBox>),
         Net(Entity<NetBox>),
-        Procs(Entity<ProcsBox>),
-        Timeline(Entity<TimelineBox>),
+        Procs(Entity<FixedBox>),
+        Timeline(Entity<FixedBox>),
     }
 
     impl Boxed {
@@ -11285,8 +11286,14 @@ mod sweep {
                         cx.new(|cx| DiskBox::new(&hub, &devices("disk", &[20, 21, 22]), cx)),
                     ),
                     BoxKind::Net => Boxed::Net(cx.new(|cx| NetBox::new(&hub, cx))),
-                    BoxKind::TopProcs => Boxed::Procs(cx.new(|cx| ProcsBox::new(&hub, cx))),
-                    BoxKind::Timeline => Boxed::Timeline(cx.new(|cx| TimelineBox::new(&hub, cx))),
+                    BoxKind::TopProcs => Boxed::Procs(cx.new(|cx| {
+                        let content = cx.new(|cx| ProcsBox::new(&hub, cx));
+                        FixedBox::new(procs_box::SPEC, content, None, &hub, cx)
+                    })),
+                    BoxKind::Timeline => Boxed::Timeline(cx.new(|cx| {
+                        let content = cx.new(|cx| TimelineBox::new(&hub, cx));
+                        FixedBox::new(timeline::SPEC, content, Some(TimelineBox::line), &hub, cx)
+                    })),
                 };
                 Host {
                     boxed,
