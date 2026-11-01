@@ -124,8 +124,8 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
-        // Only the Top processes and the Timeline boxes: the other boxes' widgets would draw
-        // `perf-widget-<id>` too and shadow theirs.
+        // Only the Top processes and the Timeline boxes. Widget selectors have the container id
+        // (tasklens-6swdr.10), so other boxes do not shadow them.
         let mut overview =
             OverviewLayoutSetting::with_top_procs(settings.performance.overview_row_unit_px);
         overview
@@ -396,7 +396,11 @@ fn overview_fixed_default_is_the_widget_alone(cx: &mut TestAppContext) {
             r.vcx.update(|_, cx| container.read(cx).fixed(id).is_some()),
             "a FixedWidgetView"
         );
-        assert!(r.vcx.debug_bounds(leak(widget_id(id))).is_some());
+        assert!(
+            r.vcx
+                .debug_bounds(leak(widget_id(w.container(), id)))
+                .is_some()
+        );
         let content = leak(w.content_id());
         assert!(r.vcx.debug_bounds(content).is_some(), "{content}");
         let frame = r.frame(w);
@@ -460,7 +464,11 @@ fn overview_fixed_metric_beside_then_reset(cx: &mut TestAppContext) {
             )
         });
         assert_eq!(both, (true, true));
-        assert!(r.vcx.debug_bounds(leak(widget_id(added))).is_some());
+        assert!(
+            r.vcx
+                .debug_bounds(leak(widget_id(w.container(), added)))
+                .is_some()
+        );
         assert!(r.vcx.debug_bounds(leak(w.content_id())).is_some());
 
         // Reset in Edit Widgets and Apply: the built-in default, no entry.
@@ -529,7 +537,11 @@ fn overview_fixed_remove_drops_demand(cx: &mut TestAppContext) {
         draw(r.vcx);
         let frame = r.frame(w);
         assert!(r.vcx.update(|_, cx| frame.read(cx).is_placed()));
-        assert!(r.vcx.debug_bounds(leak(widget_id(again))).is_some());
+        assert!(
+            r.vcx
+                .debug_bounds(leak(widget_id(w.container(), again)))
+                .is_some()
+        );
         let d = r.demand();
         assert!(d.process_top || matches!(w, Which::Timeline), "{d:?}");
         assert!(d.device_timeline || matches!(w, Which::Procs), "{d:?}");

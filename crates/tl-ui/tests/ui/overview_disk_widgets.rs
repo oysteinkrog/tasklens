@@ -310,8 +310,8 @@ impl Rig<'_> {
         draw(self.vcx);
     }
 
-    /// The Network box's widgets draw `perf-widget-<id>` too, after the Disk box: take the
-    /// Network box off the page, so a Disk widget's debug selector finds the Disk widget.
+    /// Takes the Network box off the page, so the Disk box has its room. Widget selectors have
+    /// the container id (tasklens-6swdr.10), so other boxes do not shadow them.
     fn leave_out_net(&mut self) {
         use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
         self.vcx.update(|_, cx| {
@@ -391,7 +391,7 @@ fn overview_disk_flow_matches_modes(cx: &mut TestAppContext) {
         );
         let part = match mode {
             "total_chart" => TOTAL_CHART_ID.to_owned(),
-            _ => widget_id(id),
+            _ => widget_id(DISK_BOX_CONTAINER, id),
         };
         let painted = r.bounds_of(part);
         assert!(
@@ -570,7 +570,11 @@ fn overview_disk_device_gone_unavailable(cx: &mut TestAppContext) {
     assert!(name.contains("nvme0n1"), "the gone disk's name: {name}");
     assert_eq!(reason, "Not connected");
     assert_eq!(gone_cells, cells, "the widget keeps its cells");
-    assert!(r.vcx.debug_bounds(leak(widget_id(read))).is_some());
+    assert!(
+        r.vcx
+            .debug_bounds(leak(widget_id(DISK_BOX_CONTAINER, read)))
+            .is_some()
+    );
     assert_eq!(
         group,
         Some((group_entity, GroupState::Members { count: 1 }))
@@ -725,7 +729,12 @@ fn overview_disk_edit_add_remove_move_apply(cx: &mut TestAppContext) {
     let placed = r.vcx.update(|_, cx| container.read(cx).placed_ids());
     for id in [read, total, active] {
         assert!(placed.contains(&id), "{id} in {placed:?}");
-        assert!(r.vcx.debug_bounds(leak(widget_id(id))).is_some(), "{id}");
+        assert!(
+            r.vcx
+                .debug_bounds(leak(widget_id(DISK_BOX_CONTAINER, id)))
+                .is_some(),
+            "{id}"
+        );
     }
     assert!(
         r.vcx

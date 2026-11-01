@@ -315,7 +315,8 @@ impl Rig<'_> {
         let widget = self.vcx.update(|_, cx| {
             let selector = setting.content.metric().expect("a metric widget");
             let source = store.source(selector, cx);
-            let widget = cx.new(|cx| MetricWidget::new(setting, source, &hub, cx));
+            let widget =
+                cx.new(|cx| MetricWidget::new(GPU_BOX_CONTAINER.into(), setting, source, &hub, cx));
             host.update(cx, |host, cx| {
                 host.widgets.push((widget.clone(), w, h));
                 cx.notify();
@@ -381,7 +382,7 @@ impl Rig<'_> {
     }
 
     fn has_part(&mut self, id: u32, part: &str) -> bool {
-        let p: &'static str = Box::leak(part_id(id, part).into_boxed_str());
+        let p: &'static str = Box::leak(part_id(GPU_BOX_CONTAINER, id, part).into_boxed_str());
         self.vcx.debug_bounds(p).is_some()
     }
 }
@@ -432,7 +433,7 @@ fn overview_widget_compositions_min_sizes(cx: &mut TestAppContext) {
     for part in ["name", "value", "stats", "bar", "chart"] {
         assert!(r.has_part(1, part), "cell {part}");
     }
-    let chart: &'static str = Box::leak(part_id(1, "chart").into_boxed_str());
+    let chart: &'static str = Box::leak(part_id(GPU_BOX_CONTAINER, 1, "chart").into_boxed_str());
     let bounds = r.vcx.debug_bounds(chart).expect("chart");
     assert!(bounds.size.height >= px(30.) - px(0.5), "{bounds:?}");
     assert!(r.read(&widgets[0], |w| w.chart().is_some()));
@@ -959,7 +960,7 @@ impl Rig<'_> {
         let origin = self.vcx.debug_bounds(body)?.origin;
         let b = self
             .vcx
-            .debug_bounds(Box::leak(widget_id(id).into_boxed_str()))?;
+            .debug_bounds(Box::leak(widget_id(GPU_BOX_CONTAINER, id).into_boxed_str()))?;
         Some((
             f32::from(b.origin.x - origin.x),
             f32::from(b.origin.y - origin.y),
@@ -1539,7 +1540,9 @@ fn overview_widget_edit_apply_saves(cx: &mut TestAppContext) {
     assert!(r.vcx.read_entity(&c, |c, _| c.is_editing()));
     assert!(r.vcx.debug_bounds(TOOLBAR_ID).is_some(), "the edit toolbar");
     assert!(
-        r.vcx.debug_bounds(leak(frame_id(1))).is_some(),
+        r.vcx
+            .debug_bounds(leak(frame_id(GPU_BOX_CONTAINER, 1)))
+            .is_some(),
         "the chrome"
     );
     assert_eq!(r.working(&e), Some(four_widgets()));
@@ -1758,7 +1761,7 @@ fn overview_widget_reset_asks(cx: &mut TestAppContext) {
     assert_eq!(order.first(), Some(&first));
 
     // Its gear opens the widget menu.
-    r.click(&gear_id(first));
+    r.click(&gear_id(GPU_BOX_CONTAINER, first));
     let top: Vec<String> = labels(&r.menu_entries())
         .into_iter()
         .map(|(l, _, _)| l)
@@ -1772,7 +1775,10 @@ fn overview_widget_reset_asks(cx: &mut TestAppContext) {
         c.placement().grid.row + c.placement().grid.gutter
     });
     let start = cell_of(&shown, first).expect("a cell");
-    let grip = r.vcx.debug_bounds(leak(grip_id(first))).expect("grip");
+    let grip = r
+        .vcx
+        .debug_bounds(leak(grip_id(GPU_BOX_CONTAINER, first)))
+        .expect("grip");
     let from = grip.center();
     let to = point(from.x, from.y + px(pitch * 2.));
     r.press(from, 1);
@@ -1852,7 +1858,10 @@ fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
     let (e, _) = r.editor(layout, 400., 320.);
     r.start(&e);
 
-    let gear = r.vcx.debug_bounds(leak(gear_id(1))).expect("gear");
+    let gear = r
+        .vcx
+        .debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, 1)))
+        .expect("gear");
     r.vcx.simulate_click(gear.center(), Modifiers::none());
     draw(r.vcx);
     assert_eq!(r.selected(&e), Some(1));
@@ -1911,7 +1920,10 @@ fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
     // Power without a power limit has no bar to offer.
     r.vcx.update(tl_ui::components::menu::close_context_menu);
     draw(r.vcx);
-    let gear = r.vcx.debug_bounds(leak(gear_id(2))).expect("gear");
+    let gear = r
+        .vcx
+        .debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, 2)))
+        .expect("gear");
     r.vcx.simulate_click(gear.center(), Modifiers::none());
     draw(r.vcx);
     let entries = r.menu_entries();
@@ -1934,7 +1946,10 @@ fn overview_widget_last_form_disabled(cx: &mut TestAppContext) {
     let layout = grid_layout(vec![(2, a("power"), FormSet::VALUE, cell(0, 0, 6, 1))]);
     let (e, _) = r.editor(layout, 400., 320.);
     r.start(&e);
-    let gear = r.vcx.debug_bounds(leak(gear_id(2))).expect("gear");
+    let gear = r
+        .vcx
+        .debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, 2)))
+        .expect("gear");
     r.vcx.simulate_click(gear.center(), Modifiers::none());
     draw(r.vcx);
     let entries = r.menu_entries();
@@ -1981,7 +1996,10 @@ fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
     });
 
     // Widget 4 (GPU B's value row, the full width) moves to the top by its grip.
-    let grip = r.vcx.debug_bounds(leak(grip_id(4))).expect("grip");
+    let grip = r
+        .vcx
+        .debug_bounds(leak(grip_id(GPU_BOX_CONTAINER, 4)))
+        .expect("grip");
     let from = grip.center();
     r.press(from, 1);
     let to = point(from.x + px(pitch.0 * 3.), from.y - px(pitch.1 * 5.));
@@ -2008,7 +2026,10 @@ fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
     // The corner of widget 1 makes it one column wider.
     let corner = r
         .vcx
-        .debug_bounds(leak(tl_ui::pages::performance::widget::edit::corner_id(1)))
+        .debug_bounds(leak(tl_ui::pages::performance::widget::edit::corner_id(
+            GPU_BOX_CONTAINER,
+            1,
+        )))
         .expect("corner");
     let before = cell_of(&working, 1).expect("cell");
     let from = corner.center();
@@ -2048,7 +2069,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     r.start(&e);
 
     // Source > Card A > Power draw: power keeps the forms it offers; it has no bar.
-    r.click(&gear_id(1));
+    r.click(&gear_id(GPU_BOX_CONTAINER, 1));
     let entries = r.menu_entries();
     let source = r.submenu_entries(&entries[0]);
     let card_a = r.submenu_entries(&pick(source, "Card A"));
@@ -2059,7 +2080,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     assert_eq!(w.forms, FormSet::all() - FormSet::BAR);
 
     // Chart > Dashed line on, then Fill under the line off.
-    r.click(&gear_id(1));
+    r.click(&gear_id(GPU_BOX_CONTAINER, 1));
     let chart = {
         let entries = r.menu_entries();
         r.submenu_entries(&pick(entries, "Chart"))
@@ -2067,7 +2088,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     r.choose(&e, pick(chart, "Dashed line"));
     let w = r.working_widget(&e, 1).expect("widget 1");
     assert!(w.options.dashed && w.options.fill, "{:?}", w.options);
-    r.click(&gear_id(1));
+    r.click(&gear_id(GPU_BOX_CONTAINER, 1));
     let chart = {
         let entries = r.menu_entries();
         r.submenu_entries(&pick(entries, "Chart"))
@@ -2077,7 +2098,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     assert!(w.options.dashed && !w.options.fill, "{:?}", w.options);
 
     // Show > Name off.
-    r.click(&gear_id(1));
+    r.click(&gear_id(GPU_BOX_CONTAINER, 1));
     let show = {
         let entries = r.menu_entries();
         r.submenu_entries(&pick(entries, "Show"))
@@ -2087,7 +2108,7 @@ fn overview_widget_menu_changes_source_and_options(cx: &mut TestAppContext) {
     assert!(!w.forms.contains(FormSet::LABEL), "{:?}", w.forms);
 
     // Remove Widget.
-    r.click(&gear_id(1));
+    r.click(&gear_id(GPU_BOX_CONTAINER, 1));
     let entries = r.menu_entries();
     r.choose(&e, pick(entries, "Remove Widget"));
     assert_eq!(r.working_widget(&e, 1), None);
@@ -2107,7 +2128,10 @@ fn overview_widget_corner_double_click_minimum(cx: &mut TestAppContext) {
         min.0 < 3 || min.1 < 4,
         "widget 1 is above its minimum: {min:?}"
     );
-    let corner = r.vcx.debug_bounds(leak(corner_id(1))).expect("corner");
+    let corner = r
+        .vcx
+        .debug_bounds(leak(corner_id(GPU_BOX_CONTAINER, 1)))
+        .expect("corner");
     r.press(corner.center(), 1);
     r.release(corner.center());
     assert_eq!(
@@ -2204,7 +2228,7 @@ fn overview_widget_add_scrolls_new_widget_into_view(cx: &mut TestAppContext) {
     );
     let w = r
         .vcx
-        .debug_bounds(leak(widget_id(id)))
+        .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, id)))
         .expect("the new widget is drawn");
     assert!(
         w.top() >= body_after.top() - px(0.5) && w.bottom() <= body_after.bottom() + px(0.5),
@@ -2227,7 +2251,10 @@ fn overview_widget_add_taller_than_body_shows_top(cx: &mut TestAppContext) {
         .vcx
         .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
         .expect("scrolling body");
-    let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("drawn");
+    let w = r
+        .vcx
+        .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, id)))
+        .expect("drawn");
     assert!((w.top() - body.top()).abs() <= px(0.5), "{w:?} {body:?}");
 }
 
@@ -2289,8 +2316,14 @@ fn overview_widget_edit_gear_clear_of_chart_labels(cx: &mut TestAppContext) {
     let (e, c) = r.editor(four_widgets(), 400., 320.);
     r.start(&e);
     for id in [1u32, 2] {
-        let gear = r.vcx.debug_bounds(leak(gear_id(id))).expect("gear");
-        let grip = r.vcx.debug_bounds(leak(grip_id(id))).expect("grip");
+        let gear = r
+            .vcx
+            .debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, id)))
+            .expect("gear");
+        let grip = r
+            .vcx
+            .debug_bounds(leak(grip_id(GPU_BOX_CONTAINER, id)))
+            .expect("grip");
         assert!(!gear.intersects(&grip), "{gear:?} vs {grip:?}");
         let chart = r
             .vcx
@@ -2373,7 +2406,10 @@ impl Rig<'_> {
     ) -> Vec<(String, Bounds<Pixels>)> {
         let mut texts = Vec::new();
         for part in ["name", "value", "stats", "reason"] {
-            if let Some(b) = self.vcx.debug_bounds(leak(part_id(id, part))) {
+            if let Some(b) = self
+                .vcx
+                .debug_bounds(leak(part_id(GPU_BOX_CONTAINER, id, part)))
+            {
                 texts.push((part.to_owned(), b));
             }
         }
@@ -2410,18 +2446,21 @@ impl Rig<'_> {
     fn decorations(&mut self, id: u32) -> Vec<(String, Bounds<Pixels>)> {
         let mut out = Vec::new();
         for (part, sel) in [
-            ("grip", grip_id(id)),
-            ("gear", gear_id(id)),
-            ("corner", corner_id(id)),
+            ("grip", grip_id(GPU_BOX_CONTAINER, id)),
+            ("gear", gear_id(GPU_BOX_CONTAINER, id)),
+            ("corner", corner_id(GPU_BOX_CONTAINER, id)),
         ] {
             if let Some(b) = self.vcx.debug_bounds(leak(sel)) {
                 out.push((format!("widget {id} {part}"), b));
             }
         }
-        if let Some(f) = self.vcx.debug_bounds(leak(frame_id(id))) {
+        if let Some(f) = self.vcx.debug_bounds(leak(frame_id(GPU_BOX_CONTAINER, id))) {
             out.extend(ring(f, 1.).map(|b| (format!("widget {id} border"), b)));
         }
-        if let Some(o) = self.vcx.debug_bounds(leak(outline_id(id))) {
+        if let Some(o) = self
+            .vcx
+            .debug_bounds(leak(outline_id(GPU_BOX_CONTAINER, id)))
+        {
             out.extend(ring(o, OUTLINE).map(|b| (format!("widget {id} outline"), b)));
         }
         out
@@ -2459,9 +2498,9 @@ impl Rig<'_> {
             ("resize", -1., -1.),
         ] {
             let handle = if grab == "move" {
-                grip_id(id)
+                grip_id(GPU_BOX_CONTAINER, id)
             } else {
-                corner_id(id)
+                corner_id(GPU_BOX_CONTAINER, id)
             };
             let from = self
                 .vcx
@@ -2480,7 +2519,10 @@ impl Rig<'_> {
                     overlapping += 1;
                 }
                 let preview = self.vcx.debug_bounds(PREVIEW_ID).expect("preview");
-                let shown = self.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+                let shown = self
+                    .vcx
+                    .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, id)))
+                    .expect("widget");
                 assert!(
                     (shown.origin - preview.origin).x.abs() < px(0.5)
                         && (shown.origin - preview.origin).y.abs() < px(0.5)
@@ -2581,28 +2623,40 @@ fn overview_widget_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
                 if selected {
                     r.ed(&e, |e, _, cx| e.select(id, cx));
                 }
-                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+                let w = r
+                    .vcx
+                    .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, id)))
+                    .expect("widget");
                 assert!(
                     w.left() >= scroll.left() - px(0.5) && w.right() <= right + px(0.5),
                     "{at}: {w:?} outside the body content {scroll:?} (right edge {right:?})"
                 );
-                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let frame = r
+                    .vcx
+                    .debug_bounds(leak(frame_id(GPU_BOX_CONTAINER, id)))
+                    .expect("frame");
                 let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
                     (
                         "grip".into(),
-                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                        r.vcx
+                            .debug_bounds(leak(grip_id(GPU_BOX_CONTAINER, id)))
+                            .expect("grip"),
                     ),
                     (
                         "gear".into(),
-                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                        r.vcx
+                            .debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, id)))
+                            .expect("gear"),
                     ),
                     (
                         "corner".into(),
-                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                        r.vcx
+                            .debug_bounds(leak(corner_id(GPU_BOX_CONTAINER, id)))
+                            .expect("corner"),
                     ),
                 ];
                 decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
-                let outline = r.vcx.debug_bounds(leak(outline_id(id)));
+                let outline = r.vcx.debug_bounds(leak(outline_id(GPU_BOX_CONTAINER, id)));
                 assert_eq!(outline.is_some(), selected, "{at}: the outline shows");
                 if let Some(o) = outline {
                     decorations.extend(ring(o, OUTLINE).map(|b| ("outline".to_owned(), b)));
@@ -2652,7 +2706,7 @@ fn overview_widget_edit_wheel_scrolls(cx: &mut TestAppContext) {
         .expect("body");
     let top = |r: &mut Rig<'_>| {
         r.vcx
-            .debug_bounds(leak(widget_id(8)))
+            .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, 8)))
             .expect("widget")
             .top()
     };
@@ -2668,13 +2722,16 @@ fn overview_widget_edit_wheel_scrolls(cx: &mut TestAppContext) {
     // Over a gear and over the selected widget's outline.
     r.ed(&e, |e, _, cx| e.select(4, cx));
     let gear = (1u32..=8)
-        .filter_map(|id| r.vcx.debug_bounds(leak(gear_id(id))))
+        .filter_map(|id| r.vcx.debug_bounds(leak(gear_id(GPU_BOX_CONTAINER, id))))
         .find(|g| body.contains(&g.center()))
         .expect("a gear in view");
     r.wheel(gear.center(), -10.);
     let off = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
     assert!((off - px(90.)).abs() < px(0.5), "over a gear: {off:?}");
-    let outline = r.vcx.debug_bounds(leak(outline_id(4))).expect("outline");
+    let outline = r
+        .vcx
+        .debug_bounds(leak(outline_id(GPU_BOX_CONTAINER, 4)))
+        .expect("outline");
     r.wheel(point(outline.center().x, outline.top() + px(1.)), 10.);
     let off = r.vcx.read_entity(&e, |e, _| e.scroll_offset());
     assert!((off - px(80.)).abs() < px(0.5), "over the outline: {off:?}");
@@ -2698,7 +2755,7 @@ fn overview_widget_edit_keeps_scroll_offset(cx: &mut TestAppContext) {
     );
     let shown = r
         .vcx
-        .debug_bounds(leak(widget_id(8)))
+        .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, 8)))
         .expect("widget")
         .top()
         - applied.top();
@@ -2711,7 +2768,7 @@ fn overview_widget_edit_keeps_scroll_offset(cx: &mut TestAppContext) {
         .expect("body");
     let top = r
         .vcx
-        .debug_bounds(leak(widget_id(8)))
+        .debug_bounds(leak(widget_id(GPU_BOX_CONTAINER, 8)))
         .expect("widget")
         .top()
         - body.top();

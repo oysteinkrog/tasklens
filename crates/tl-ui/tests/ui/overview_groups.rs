@@ -34,7 +34,9 @@ use tl_ui::pages::performance::widget::container::WidgetContainer;
 use tl_ui::pages::performance::widget::edit::{
     OUTLINE, WidgetEditor, corner_id, frame_id, gear_id, grip_id,
 };
-use tl_ui::pages::performance::widget::group_widget::{GroupState, GroupWidget};
+use tl_ui::pages::performance::widget::group_widget::{
+    GroupState, GroupWidget, scroll_id as group_scroll_id,
+};
 use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
 use tl_ui::pages::performance::widget::source::SourceStore;
 use tl_ui::settings_global::TlSettings;
@@ -443,7 +445,7 @@ fn overview_group_rows_fill_d040(cx: &mut TestAppContext) {
     assert!(fill.scrolls);
     assert_eq!(fill.cols, 1);
     assert!(fill.items.iter().all(|b| b.size.height == px(18.)));
-    assert!(r.has("perf-widget-1-scroll".into()));
+    assert!(r.has(group_scroll_id(CPU_BOX_CONTAINER, 1)));
     // The group kept its entity and its items.
     assert_eq!(r.group(&c, 1).entity_id(), g.entity_id());
     assert_eq!(r.items(&g), items);
@@ -496,7 +498,7 @@ fn overview_group_limit_more_item(cx: &mut TestAppContext) {
     // The "+4 more" item is the fifth row.
     let fill = r.vcx.read_entity(&g, |g, _| g.fill().clone());
     assert_eq!(fill.items.len(), 5);
-    assert!(r.has(part_id(1, "more")));
+    assert!(r.has(part_id(CPU_BOX_CONTAINER, 1, "more")));
     // As cells, "+4 more" is a cell of its own.
     let w = group_widget(
         1,
@@ -514,7 +516,7 @@ fn overview_group_limit_more_item(cx: &mut TestAppContext) {
     let fill = r.vcx.read_entity(&g, |g, _| g.fill().clone());
     assert_eq!(fill.items.len(), 5);
     assert_eq!(fill.composition, Composition::Cell);
-    assert!(r.has(part_id(1, "more")));
+    assert!(r.has(part_id(CPU_BOX_CONTAINER, 1, "more")));
     // Without a limit every member shows and there is no "+n more".
     let w = group_widget(
         1,
@@ -529,7 +531,7 @@ fn overview_group_limit_more_item(cx: &mut TestAppContext) {
     });
     draw(r.vcx);
     assert_eq!(r.items(&g).len(), 8);
-    assert!(!r.has(part_id(1, "more")));
+    assert!(!r.has(part_id(CPU_BOX_CONTAINER, 1, "more")));
 }
 
 /// A disk added and removed: the group keeps its entity and cells, the kept disks keep their
@@ -583,7 +585,7 @@ fn overview_group_hotplug_keeps_entity(cx: &mut TestAppContext) {
         r.vcx.read_entity(&g, |g, _| g.reason_text().to_string()),
         "None found"
     );
-    assert!(r.has(part_id(1, "reason")));
+    assert!(r.has(part_id(DISK_BOX_CONTAINER, 1, "reason")));
     assert_eq!(r.group(&c, 1).entity_id(), g.entity_id());
     assert_eq!(r.vcx.read_entity(&c, |c, _| c.placement().clone()), cells);
 }
@@ -817,7 +819,10 @@ impl Rig<'_> {
                 .vcx
                 .read_entity(&item, |w, _| (w.id(), w.chart().cloned()));
             for part in ["name", "value", "stats"] {
-                if let Some(b) = self.vcx.debug_bounds(leak(part_id(member, part))) {
+                if let Some(b) =
+                    self.vcx
+                        .debug_bounds(leak(part_id(CPU_BOX_CONTAINER, member, part)))
+                {
                     texts.push((format!("{member:x} {part}"), b));
                 }
             }
@@ -831,7 +836,10 @@ impl Rig<'_> {
                 }));
             }
         }
-        if let Some(b) = self.vcx.debug_bounds(leak(part_id(id, "more"))) {
+        if let Some(b) = self
+            .vcx
+            .debug_bounds(leak(part_id(CPU_BOX_CONTAINER, id, "more")))
+        {
             texts.push(("more".to_owned(), b));
         }
         texts
@@ -890,20 +898,32 @@ fn overview_group_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
                     (g.fill().cols, g.fill().rows, g.fill().composition)
                 });
                 assert_eq!(fill, applied[id as usize - 1], "{at}: the fit stays");
-                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
-                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let w = r
+                    .vcx
+                    .debug_bounds(leak(widget_id(CPU_BOX_CONTAINER, id)))
+                    .expect("widget");
+                let frame = r
+                    .vcx
+                    .debug_bounds(leak(frame_id(CPU_BOX_CONTAINER, id)))
+                    .expect("frame");
                 let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
                     (
                         "grip".into(),
-                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                        r.vcx
+                            .debug_bounds(leak(grip_id(CPU_BOX_CONTAINER, id)))
+                            .expect("grip"),
                     ),
                     (
                         "gear".into(),
-                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                        r.vcx
+                            .debug_bounds(leak(gear_id(CPU_BOX_CONTAINER, id)))
+                            .expect("gear"),
                     ),
                     (
                         "corner".into(),
-                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                        r.vcx
+                            .debug_bounds(leak(corner_id(CPU_BOX_CONTAINER, id)))
+                            .expect("corner"),
                     ),
                 ];
                 decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
@@ -969,20 +989,32 @@ fn overview_group_edit_decorations_cover_no_empty_text(cx: &mut TestAppContext) 
                 }
                 let g = r.group(&c, id);
                 assert_eq!(r.vcx.read_entity(&g, |g, _| g.state()), state, "{at}");
-                let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
-                let frame = r.vcx.debug_bounds(leak(frame_id(id))).expect("frame");
+                let w = r
+                    .vcx
+                    .debug_bounds(leak(widget_id(CPU_BOX_CONTAINER, id)))
+                    .expect("widget");
+                let frame = r
+                    .vcx
+                    .debug_bounds(leak(frame_id(CPU_BOX_CONTAINER, id)))
+                    .expect("frame");
                 let mut decorations: Vec<(String, Bounds<Pixels>)> = vec![
                     (
                         "grip".into(),
-                        r.vcx.debug_bounds(leak(grip_id(id))).expect("grip"),
+                        r.vcx
+                            .debug_bounds(leak(grip_id(CPU_BOX_CONTAINER, id)))
+                            .expect("grip"),
                     ),
                     (
                         "gear".into(),
-                        r.vcx.debug_bounds(leak(gear_id(id))).expect("gear"),
+                        r.vcx
+                            .debug_bounds(leak(gear_id(CPU_BOX_CONTAINER, id)))
+                            .expect("gear"),
                     ),
                     (
                         "corner".into(),
-                        r.vcx.debug_bounds(leak(corner_id(id))).expect("corner"),
+                        r.vcx
+                            .debug_bounds(leak(corner_id(CPU_BOX_CONTAINER, id)))
+                            .expect("corner"),
                     ),
                 ];
                 decorations.extend(ring(frame, 1.).map(|b| ("border".to_owned(), b)));
@@ -990,7 +1022,7 @@ fn overview_group_edit_decorations_cover_no_empty_text(cx: &mut TestAppContext) 
                 for part in parts {
                     let b = r
                         .vcx
-                        .debug_bounds(leak(part_id(id, part)))
+                        .debug_bounds(leak(part_id(CPU_BOX_CONTAINER, id, part)))
                         .unwrap_or_else(|| panic!("{at}: {part}"));
                     assert!(
                         b.left() >= w.left()

@@ -384,7 +384,7 @@ fn overview_net_flow_matches_modes(cx: &mut TestAppContext) {
             let at = r
                 .placed(*id)
                 .unwrap_or_else(|| panic!("{mode} {arrange:?}: {id} placed"));
-            let painted = r.bounds_of(widget_id(*id));
+            let painted = r.bounds_of(widget_id(NET_BOX_CONTAINER, *id));
             assert!(
                 near(painted.origin.x - origin.origin.x, at.origin.x)
                     && near(painted.origin.y - origin.origin.y, at.origin.y)
@@ -607,7 +607,11 @@ fn overview_net_device_gone_unavailable(cx: &mut TestAppContext) {
     assert!(name.contains("wlan0"), "the gone adapter's name: {name}");
     assert_eq!(reason, "Not connected");
     assert_eq!(gone_cells, cells, "the widget keeps its cells");
-    assert!(r.vcx.debug_bounds(leak(widget_id(rx))).is_some());
+    assert!(
+        r.vcx
+            .debug_bounds(leak(widget_id(NET_BOX_CONTAINER, rx)))
+            .is_some()
+    );
     assert_eq!(
         group,
         Some((group_entity, GroupState::Members { count: 1 }))
@@ -743,7 +747,12 @@ fn overview_net_edit_add_remove_move_apply(cx: &mut TestAppContext) {
     let placed = r.vcx.update(|_, cx| container.read(cx).placed_ids());
     for id in [rx, total, adapters] {
         assert!(placed.contains(&id), "{id} in {placed:?}");
-        assert!(r.vcx.debug_bounds(leak(widget_id(id))).is_some(), "{id}");
+        assert!(
+            r.vcx
+                .debug_bounds(leak(widget_id(NET_BOX_CONTAINER, id)))
+                .is_some(),
+            "{id}"
+        );
     }
     assert!(
         r.vcx

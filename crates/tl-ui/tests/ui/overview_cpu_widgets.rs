@@ -174,8 +174,8 @@ fn open(cx: &mut TestAppContext, cores: u16, w: f32, h: f32) -> Rig<'_> {
         settings.motion.smooth_graphs = false;
         // Raw core values: two samples a few ms apart barely move a smoothed bar.
         settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
-        // The Memory, Disk and Network boxes' widgets would draw `perf-widget-<id>` too: leave
-        // the boxes out.
+        // Leave the Memory, Disk and Network boxes out, so the CPU box has their room. Widget
+        // selectors have the container id (tasklens-6swdr.10), so other boxes do not shadow them.
         let mut overview = OverviewLayoutSetting::grid_default();
         overview
             .grid
@@ -355,7 +355,7 @@ fn overview_cpu_flow_matches_modes(cx: &mut TestAppContext) {
             let part = if mode == "core_charts" {
                 CORE_CHARTS_ID.to_owned()
             } else {
-                widget_id(cores)
+                widget_id(CPU_BOX_CONTAINER, cores)
             };
             parts.push((cores, part));
             // The cores group draws the 1.2.0 part from the box's model.
@@ -425,7 +425,7 @@ fn overview_cpu_core_group_fills_height(cx: &mut TestAppContext) {
     assert!(layout.cols * layout.rows >= 32, "{layout:?}");
     assert!(layout.row_h > px(18.), "rows grow (D-040): {layout:?}");
     let cores = cores_of(&r.flow()).expect("a cores group");
-    let group = r.bounds_of(widget_id(cores));
+    let group = r.bounds_of(widget_id(CPU_BOX_CONTAINER, cores));
     let rows_h = layout.row_h * layout.rows as f32;
     assert!(
         near(rows_h, group.size.height),
@@ -613,7 +613,9 @@ fn overview_cpu_edit_add_remove_move_apply(cx: &mut TestAppContext) {
     );
     assert!(
         r.vcx
-            .debug_bounds(Box::leak(widget_id(kernel).into_boxed_str()))
+            .debug_bounds(Box::leak(
+                widget_id(CPU_BOX_CONTAINER, kernel).into_boxed_str()
+            ))
             .is_some()
     );
 }

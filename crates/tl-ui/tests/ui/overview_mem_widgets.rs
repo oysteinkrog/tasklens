@@ -170,8 +170,8 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
-        // The Network box's widgets would draw `perf-widget-<id>` too, after the Memory box:
-        // leave the box out.
+        // Leave the Network box out, as the Memory box tests were written. Widget selectors have
+        // the container id (tasklens-6swdr.10), so other boxes do not shadow them.
         let mut overview = OverviewLayoutSetting::grid_default();
         overview.grid.retain(|b| b.kind != "net");
         settings.performance.overview = Some(overview);
@@ -602,7 +602,7 @@ fn overview_mem_by_app_legend_click(cx: &mut TestAppContext) {
         Some(chart.entity_id()),
         "the widget draws the chart"
     );
-    let widget = r.bounds_of(widget_id(id));
+    let widget = r.bounds_of(widget_id(MEMORY_BOX_CONTAINER, id));
     // Rows: Other apps, p2, p1, p0, then Shared and kernel under the divider.
     let row = r.bounds_of(format!("{LEGEND_ID}-1"));
     assert!(
@@ -746,8 +746,16 @@ fn overview_mem_edit_add_remove_move_apply(cx: &mut TestAppContext) {
         r.vcx
             .update(|_, cx| container.read(cx).fixed(apps).is_some())
     );
-    assert!(r.vcx.debug_bounds(leak(widget_id(pressure))).is_some());
-    assert!(r.vcx.debug_bounds(leak(widget_id(apps))).is_some());
+    assert!(
+        r.vcx
+            .debug_bounds(leak(widget_id(MEMORY_BOX_CONTAINER, pressure)))
+            .is_some()
+    );
+    assert!(
+        r.vcx
+            .debug_bounds(leak(widget_id(MEMORY_BOX_CONTAINER, apps)))
+            .is_some()
+    );
     assert!(r.sweep(), "the saved By app widget asks for the sweep");
 }
 

@@ -8442,7 +8442,7 @@ mod page {
                 // The VRAM row and the line's values draw no selector of their own: the widget's
                 // view is the part.
                 let painted = if part.is_empty() {
-                    r.bounds_of(widget_id(*id))
+                    r.bounds_of(widget_id(GPU_BOX_CONTAINER, *id))
                 } else {
                     r.bounds_of(part.clone())
                 };
@@ -8520,7 +8520,7 @@ mod page {
     /// formats; a part the box does not draw has none.
     #[gpui_kit::test]
     fn overview_gpu_presets_render_through_widgets(cx: &mut TestAppContext) {
-        use tl_model::layout::DeviceSelector;
+        use tl_model::layout::{DeviceSelector, GPU_BOX_CONTAINER};
         use tl_ui::pages::performance::overview::gpu_box::{
             chart_id, engine_cell_id, engine_row_id,
         };
@@ -8635,7 +8635,7 @@ mod page {
                 };
                 assert_eq!(look, want, "{mode}: widget {id}");
                 if !part.is_empty() {
-                    let at = r.bounds_of(widget_id(*id));
+                    let at = r.bounds_of(widget_id(GPU_BOX_CONTAINER, *id));
                     assert_eq!(at, r.bounds_of(part.clone()), "{mode}: {part}");
                 }
             }
@@ -8705,9 +8705,9 @@ mod page {
         }
     }
 
-    /// The Disk and Network boxes' widgets draw `perf-widget-<id>` too, after the GPU box: hide
-    /// the disks so the Disk box leaves the page, and take the Network box off the page, so a
-    /// GPU widget's debug selector finds the GPU widget.
+    /// Hides the disks so the Disk box leaves the page, and takes the Network box off the page,
+    /// so the GPU box has their room. Widget selectors have the container id
+    /// (tasklens-6swdr.10), so other boxes do not shadow them.
     fn leave_out_disk_and_net(r: &mut Rig) {
         use tl_model::settings::OverviewLayoutSetting;
         use tl_ui::pages::performance::overview::disk_box::DISK_BOX_ID;
@@ -8773,7 +8773,7 @@ mod page {
         let origin = r.bounds_of(container_id(GPU_BOX_CONTAINER)).origin;
         let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
         for (id, at) in placed {
-            let painted = r.bounds_of(widget_id(id));
+            let painted = r.bounds_of(widget_id(GPU_BOX_CONTAINER, id));
             let (x, y) = (painted.origin.x - origin.x, painted.origin.y - origin.y);
             assert!(
                 near(at.origin.x, x)
@@ -9050,7 +9050,9 @@ mod page {
         draw(r.vcx);
         assert!(r.vcx.update(|_, cx| gpu.read(cx).grid().is_some()));
         assert!(
-            r.vcx.debug_bounds(leak_str(widget_id(1))).is_some(),
+            r.vcx
+                .debug_bounds(leak_str(widget_id(GPU_BOX_CONTAINER, 1)))
+                .is_some(),
             "the widget is drawn"
         );
         // The engine rows of the flow layout are gone.
@@ -9174,7 +9176,7 @@ mod page {
             TlSettings::update(cx, |d| d.settings.performance.layouts.set(saved));
         });
         draw(r.vcx);
-        let widget = leak_str(widget_id(40));
+        let widget = leak_str(widget_id(GPU_BOX_CONTAINER, 40));
         assert!(r.vcx.debug_bounds(widget).is_some(), "drawn before");
 
         // The GPU is unplugged: the box is gone, the layout is not.
@@ -9213,6 +9215,192 @@ mod page {
             r.vcx.update(|_, cx| gpu.read(cx).grid().is_some()),
             "the box shows the grid layout"
         );
+    }
+
+    /// Each box's widget container and editor, Top processes only while the layout places it.
+    fn widget_boxes(
+        r: &mut Rig,
+    ) -> Vec<(
+        BoxKind,
+        Entity<tl_ui::pages::performance::widget::container::WidgetContainer>,
+        Entity<tl_ui::pages::performance::widget::edit::WidgetEditor>,
+    )> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            let mut out = vec![
+                (
+                    BoxKind::Cpu,
+                    p.cpu_box().read(cx).container().clone(),
+                    p.cpu_box().read(cx).editor().clone(),
+                ),
+                (
+                    BoxKind::Memory,
+                    p.mem_box().read(cx).container().clone(),
+                    p.mem_box().read(cx).editor().clone(),
+                ),
+                (
+                    BoxKind::Gpu,
+                    p.gpu_box().read(cx).container().clone(),
+                    p.gpu_box().read(cx).editor().clone(),
+                ),
+                (
+                    BoxKind::Disk,
+                    p.disk_box().read(cx).container().clone(),
+                    p.disk_box().read(cx).editor().clone(),
+                ),
+                (
+                    BoxKind::Net,
+                    p.net_box().read(cx).container().clone(),
+                    p.net_box().read(cx).editor().clone(),
+                ),
+                (
+                    BoxKind::Timeline,
+                    p.timeline_frame().read(cx).container().clone(),
+                    p.timeline_frame().read(cx).editor().clone(),
+                ),
+            ];
+            if let Some(f) = p.procs_frame() {
+                let f = f.read(cx);
+                out.push((BoxKind::TopProcs, f.container().clone(), f.editor().clone()));
+            }
+            out
+        })
+    }
+
+    /// Every widget-level debug selector the page's containers can draw, with the box it
+    /// belongs to and whether it must lie inside that box. GPUI keeps one entry per selector,
+    /// so two elements with one selector would leave only the last one: the names must be
+    /// unique, and each drawn root and part must sit in its own box. Group items can scroll
+    /// out of the box, so only their names count.
+    fn widget_selectors(r: &mut Rig) -> Vec<(BoxKind, String, bool)> {
+        use tl_ui::pages::performance::widget::group_widget::scroll_id as group_scroll_id;
+        use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
+        const PARTS: [&str; 7] = ["name", "value", "stats", "bar", "chart", "reason", "more"];
+        fn push_widget(
+            out: &mut Vec<(BoxKind, String, bool)>,
+            kind: BoxKind,
+            c: &str,
+            id: u32,
+            inside: bool,
+        ) {
+            out.push((kind, widget_id(c, id), inside));
+            for part in PARTS {
+                out.push((kind, part_id(c, id, part), inside));
+            }
+        }
+        let boxes = widget_boxes(r);
+        r.vcx.update(|_, cx| {
+            let mut out = Vec::new();
+            for (kind, container, _) in &boxes {
+                let container = container.read(cx);
+                let c = container.id().to_string();
+                for w in &container.layout().widgets {
+                    let id = w.id;
+                    if container.widget(id).is_some() {
+                        push_widget(&mut out, *kind, &c, id, true);
+                    } else if let Some(g) = container.group(id) {
+                        push_widget(&mut out, *kind, &c, id, true);
+                        out.push((*kind, group_scroll_id(&c, id), true));
+                        for (_, item) in g.read(cx).items() {
+                            push_widget(&mut out, *kind, &c, item.read(cx).id(), false);
+                        }
+                    } else if container.fixed(id).is_some() {
+                        push_widget(&mut out, *kind, &c, id, true);
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    /// Asserts the widget selectors of the page are unique and each drawn one is in its box.
+    fn assert_widget_selectors_unique(r: &mut Rig, what: &str) {
+        let selectors = widget_selectors(r);
+        let mut seen = std::collections::HashSet::new();
+        for (_, s, _) in &selectors {
+            assert!(seen.insert(s.clone()), "{what}: {s} twice");
+        }
+        let mut drawn_roots = std::collections::HashMap::<BoxKind, usize>::new();
+        for (kind, s, inside) in &selectors {
+            let Some(b) = r.vcx.debug_bounds(leak_str(s.clone())) else {
+                continue;
+            };
+            if !inside {
+                continue;
+            }
+            let frame = r
+                .vcx
+                .debug_bounds(box_id(*kind))
+                .unwrap_or_else(|| panic!("{what}: {s} drawn, {kind:?} box not drawn"));
+            let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| a >= b - px(1.);
+            assert!(
+                near(b.left(), frame.left())
+                    && near(b.top(), frame.top())
+                    && near(frame.right(), b.right())
+                    && near(frame.bottom(), b.bottom()),
+                "{what}: {s} at {b:?} is outside the {kind:?} box {frame:?}"
+            );
+            if !s.ends_with(|c: char| c.is_ascii_alphabetic()) {
+                *drawn_roots.entry(*kind).or_default() += 1;
+            }
+        }
+        for (kind, _, _) in widget_boxes(r) {
+            if r.vcx.debug_bounds(box_id(kind)).is_some() {
+                assert!(
+                    drawn_roots.get(&kind).copied().unwrap_or(0) > 0,
+                    "{what}: the {kind:?} box draws no widget: {drawn_roots:?}"
+                );
+            }
+        }
+    }
+
+    /// tasklens-6swdr.10, ADR-019: widget ids repeat across containers, so every widget-level
+    /// debug selector has the container id. The whole Overview at 1200 × 900, every box on its
+    /// default widgets and then with one added widget each: every widget selector is unique on
+    /// the page and finds the widget of its own box.
+    #[gpui_kit::test]
+    fn overview_widget_selectors_unique_on_the_page(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::{PerfWidgetEditBox, WidgetSource};
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        draw(r.vcx);
+        assert_widget_selectors_unique(&mut r, "default");
+
+        for (kind, _, editor) in widget_boxes(&mut r) {
+            if r.vcx.debug_bounds(box_id(kind)).is_none() {
+                continue;
+            }
+            r.page_action(&PerfWidgetEditBox {
+                kind: kind.key().into(),
+            });
+            assert!(
+                r.vcx.read_entity(&editor, |e, _| e.is_editing()),
+                "{kind:?}: Edit Widgets"
+            );
+            let source = r.vcx.update(|_, cx| {
+                let groups = editor.read(cx).source_groups(cx);
+                let group = groups
+                    .iter()
+                    .find(|g| !g.items.is_empty())
+                    .unwrap_or_else(|| panic!("{kind:?}: a source"));
+                let item = &group.items[0];
+                WidgetSource {
+                    device: item.device.clone().unwrap_or_else(|| group.key.clone()),
+                    metric: item.metric.0.clone(),
+                }
+            });
+            let added = r
+                .vcx
+                .update(|_, cx| editor.update(cx, |e, cx| e.add(&source, cx)));
+            assert!(added.is_some(), "{kind:?}: a widget added");
+            assert!(
+                r.vcx.update(|_, cx| editor.update(cx, |e, cx| e.apply(cx))),
+                "{kind:?}: applied"
+            );
+            draw(r.vcx);
+        }
+        assert_widget_selectors_unique(&mut r, "one added widget per box");
     }
 }
 
