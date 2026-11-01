@@ -8398,6 +8398,13 @@ mod page {
         use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        // A record for the GPU, so the rows show values.
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.gpus = Arc::from([(DeviceIdx(2), gpu_record(2))]);
+        });
+        draw(r.vcx);
         let page = r.page.clone();
         let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
         let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
@@ -8508,7 +8515,51 @@ mod page {
                     (w.texts()[1].to_string(), e.meter.value.to_string())
                 });
                 assert_eq!(shown, want, "{mode}: engine value");
+                assert_eq!(shown, "25.0%", "{mode}: a known value");
             }
+        }
+    }
+
+    /// A GPU record: 3D, encode and decode at 25, 10 and 5 percent, 4 of 16 GiB VRAM and 120 W.
+    fn gpu_record(device: u16) -> tl_model::system::GpuTotals {
+        use tl_model::system::Metric;
+        use tl_model::validity::Validity;
+        const GIB: u64 = 1 << 30;
+        tl_model::system::GpuTotals {
+            device: DeviceIdx(device),
+            util_pct: Metric::valid(25.),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::valid(4 * GIB),
+            mem_total: Metric::valid(16 * GIB),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            mem_reserved: Metric::default(),
+            enc_pct: Metric::valid(10.),
+            dec_pct: Metric::valid(5.),
+            enc_sessions: Metric::default(),
+            enc_dec_shared: false,
+            temp_c: Metric::with(Validity::Unsupported),
+            temp_edge_c: Metric::default(),
+            temp_junction_c: Metric::default(),
+            temp_mem_c: Metric::default(),
+            power_w: Metric::valid(120.),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+            engines: Default::default(),
+            throttling: Default::default(),
+            fdinfo_partial: false,
+            energy_since_boot: Metric::default(),
+            clock_video_mhz: Metric::default(),
+            pstate: Metric::default(),
+            clock_event_reasons: Metric::default(),
+            fan_rpm: Metric::default(),
+            pcie_gen: Metric::default(),
+            pcie_width: Metric::default(),
+            info: Arc::default(),
         }
     }
 

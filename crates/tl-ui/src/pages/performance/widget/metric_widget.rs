@@ -37,6 +37,7 @@ use gpui_kit::{
 use smallvec::smallvec;
 use tl_model::ids::SeriesId;
 use tl_model::layout::{FormSet, WidgetOptions, WidgetSetting};
+use tl_model::validity::Validity;
 
 use super::compose::{
     CELL_BAR_PAD, CELL_HEADER_H, CELL_STATS_H, Composed, Composition, ROW_BAR_MIN_W, ROW_GAP,
@@ -45,6 +46,7 @@ use super::compose::{
 use super::source::{Availability, SourceData};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
+use crate::components::validity::copy_text;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::overview::fit::fit_text;
@@ -474,8 +476,9 @@ impl MetricWidget {
     }
 
     /// What a widget with `look` shows: the look's name, and the value and bar from the source.
-    /// The part draws whether or not the source is available; an unavailable source has no
-    /// value and no fill.
+    /// The part draws whether or not the source is available. An unavailable source has no
+    /// fill and the glyph 1.1.0 shows for it: "-" for a GPU with no record, the unsupported
+    /// glyph for a metric the GPU does not report.
     fn read_flow(&self, look: &FlowLook, src: &SourceData, availability: Availability) -> Shown {
         let kept = look.forms();
         let fraction = kept
@@ -493,10 +496,15 @@ impl MetricWidget {
             forms: kept,
             kept,
             name: look.label(),
-            value: if kept.contains(FormSet::VALUE) {
-                src.value_text().clone()
-            } else {
-                SharedString::default()
+            value: match availability {
+                _ if !kept.contains(FormSet::VALUE) => SharedString::default(),
+                Availability::Available => src.value_text().clone(),
+                Availability::NotReported => {
+                    copy_text(Validity::Unsupported, &SharedString::default())
+                }
+                Availability::Gone | Availability::Unknown => {
+                    copy_text(Validity::Missing, &SharedString::default())
+                }
             },
             stats: SharedString::default(),
             bar,
