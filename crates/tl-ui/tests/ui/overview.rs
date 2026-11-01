@@ -9321,6 +9321,19 @@ mod page {
         for (_, s, _) in &selectors {
             assert!(seen.insert(s.clone()), "{what}: {s} twice");
         }
+        // A body that scrolls moves its widgets up by its offset, and the ones below the fold
+        // reach past the box's bottom.
+        let scrolled: std::collections::HashMap<BoxKind, Option<gpui_kit::Pixels>> =
+            widget_boxes(r)
+                .into_iter()
+                .map(|(kind, c, _)| {
+                    let scroll = r.vcx.update(|_, cx| {
+                        let c = c.read(cx);
+                        c.placement().scrolls.then(|| c.scroll_offset())
+                    });
+                    (kind, scroll)
+                })
+                .collect();
         let mut drawn_roots = std::collections::HashMap::<BoxKind, usize>::new();
         for (kind, s, inside) in &selectors {
             let Some(b) = r.vcx.debug_bounds(leak_str(s.clone())) else {
@@ -9334,12 +9347,14 @@ mod page {
                 .debug_bounds(box_id(*kind))
                 .unwrap_or_else(|| panic!("{what}: {s} drawn, {kind:?} box not drawn"));
             let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| a >= b - px(1.);
+            let scroll = scrolled.get(kind).copied().flatten();
+            let top = b.top() + scroll.unwrap_or(px(0.));
             assert!(
                 near(b.left(), frame.left())
-                    && near(b.top(), frame.top())
+                    && near(top, frame.top())
                     && near(frame.right(), b.right())
-                    && near(frame.bottom(), b.bottom()),
-                "{what}: {s} at {b:?} is outside the {kind:?} box {frame:?}"
+                    && (scroll.is_some() || near(frame.bottom(), b.bottom())),
+                "{what}: {s} at {b:?} (scrolled {scroll:?}) is outside the {kind:?} box {frame:?}"
             );
             if !s.ends_with(|c: char| c.is_ascii_alphabetic()) {
                 *drawn_roots.entry(*kind).or_default() += 1;
