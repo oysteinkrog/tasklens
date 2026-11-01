@@ -8328,8 +8328,9 @@ mod page {
     /// UI-PRF-061, ADR-019 "Flow placement": the default and each old mode are flow layouts of
     /// the preset's widgets. The container places each widget at the rectangle the fit rules
     /// give it, worked out from the box's plan and the body size, not from a paint; that is
-    /// where the box draws the part, as 1.1.0 did. Edit Widgets pins the placed widgets there,
-    /// keyed to the GPU.
+    /// where the box draws the part, as 1.1.0 did. The temperature and power values sit at
+    /// their text's width, joined by " · ". Edit Widgets pins the placed widgets there, keyed
+    /// to the GPU.
     #[gpui_kit::test]
     fn overview_gpu_flow_matches_modes(cx: &mut TestAppContext) {
         use gpui_kit::Pixels;
@@ -8347,6 +8348,13 @@ mod page {
         let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
         let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
         let body = container_id(GPU_BOX_CONTAINER);
+        // A record with the temperature and the power draw, so the line draws both values.
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.gpus = Arc::from([(DeviceIdx(2), line_record(2))]);
+        });
+        draw(r.vcx);
         // The placement of widget `id`, in the body, px.
         let placed = |r: &mut Rig, id: u32| {
             r.vcx
@@ -8396,9 +8404,19 @@ mod page {
             let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
             let vram = widget_of(&flow, 0, "vram").expect("VRAM widget");
             let vram_part = (vram, String::new());
-            for (id, part) in parts.iter().chain([&vram_part]) {
+            // The line's values: `chart_engines` only.
+            let line: Vec<(u32, String)> = if mode == "chart_engines" {
+                ["temp", "power"]
+                    .into_iter()
+                    .map(|k| (widget_of(&flow, 0, k).expect(k), String::new()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for (id, part) in parts.iter().chain([&vram_part]).chain(&line) {
                 let at = placed(&mut r, *id).unwrap_or_else(|| panic!("{mode}: {id} placed"));
-                // The VRAM row draws no selector of its own: its widget's view fills it.
+                // The VRAM row and the line's values draw no selector of their own: the widget's
+                // view is the part.
                 let painted = if part.is_empty() {
                     r.bounds_of(widget_id(*id))
                 } else {
@@ -8422,7 +8440,12 @@ mod page {
                 .update(|_, cx| editor.read(cx).working_layout(cx))
                 .expect("Edit Widgets is on");
             assert!(working.preset.is_none(), "{mode}: pinned to a grid layout");
-            for id in parts.iter().map(|p| p.0).chain([vram]) {
+            for id in parts
+                .iter()
+                .map(|p| p.0)
+                .chain([vram])
+                .chain(line.iter().map(|p| p.0))
+            {
                 let w = working.widgets.iter().find(|w| w.id == id);
                 let w = w.unwrap_or_else(|| panic!("{mode}: widget {id} pinned"));
                 assert!(matches!(w.source.device, DeviceSelector::Key(_)), "{w:?}");
@@ -8641,6 +8664,187 @@ mod page {
             pcie_width: Metric::default(),
             info: Arc::default(),
         }
+    }
+
+    /// [`gpu_record`] with the temperature too: 65 °C.
+    fn line_record(device: u16) -> tl_model::system::GpuTotals {
+        tl_model::system::GpuTotals {
+            temp_c: tl_model::system::Metric::valid(65.),
+            ..gpu_record(device)
+        }
+    }
+
+    /// Every widget the container places is drawn by the box exactly there: each widget's
+    /// view, from the body's origin, within 1 px (painted edges snap to device pixels). The box
+    /// draws nothing it does not place.
+    fn assert_drawn_is_placed(
+        r: &mut Rig,
+        gpu: &Entity<tl_ui::pages::performance::overview::gpu_box::GpuBox>,
+        what: &str,
+    ) {
+        use gpui_kit::Pixels;
+        use tl_model::layout::GPU_BOX_CONTAINER;
+        use tl_ui::pages::performance::widget::container::container_id;
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
+
+        let (placed, drawn) = r.vcx.update(|_, cx| {
+            let g = gpu.read(cx);
+            let placed: Vec<(u32, gpui_kit::Bounds<Pixels>)> = g
+                .container()
+                .read(cx)
+                .placement()
+                .widgets
+                .iter()
+                .map(|p| (p.id, p.bounds))
+                .collect();
+            (placed, g.drawn_widgets().to_vec())
+        });
+        assert!(!placed.is_empty(), "{what}: widgets placed");
+        let mut placed_ids: Vec<u32> = placed.iter().map(|p| p.0).collect();
+        let mut drawn_ids = drawn.clone();
+        placed_ids.sort_unstable();
+        drawn_ids.sort_unstable();
+        assert_eq!(
+            placed_ids, drawn_ids,
+            "{what}: the box draws what it places"
+        );
+        let origin = r.bounds_of(container_id(GPU_BOX_CONTAINER)).origin;
+        let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
+        for (id, at) in placed {
+            let painted = r.bounds_of(widget_id(id));
+            let (x, y) = (painted.origin.x - origin.x, painted.origin.y - origin.y);
+            assert!(
+                near(at.origin.x, x)
+                    && near(at.origin.y, y)
+                    && near(at.size.width, painted.size.width)
+                    && near(at.size.height, painted.size.height),
+                "{what}: widget {id}: placed {at:?}, drawn {painted:?} from {origin:?}"
+            );
+        }
+    }
+
+    /// tasklens-lhliq.7, ADR-019 "Flow placement": drawing and placement come from one
+    /// function. For the default and every old mode, Side by side included, at two window
+    /// sizes, every widget's drawn bounds are its placed rectangle: the cells, the section
+    /// chart, the engine rows, the VRAM row and the temperature and power values.
+    #[gpui_kit::test]
+    fn overview_gpu_flow_drawn_is_placed(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::gpu_flow::widget_of;
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.gpus = Arc::from([(DeviceIdx(2), line_record(2))]);
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let modes = [
+            ("engine_charts", None),
+            ("chart_engines", None),
+            ("chart_engines", Some(Arrange::Horizontal)),
+            ("chart", None),
+        ];
+        for (w, h) in [(1200., 900.), (1500., 1100.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            for (mode, arrange) in modes {
+                r.page_action(&PerfOverviewSetBoxMode {
+                    kind: "gpu".into(),
+                    mode: mode.into(),
+                });
+                r.page_action(&PerfOverviewSetBoxArrange {
+                    kind: "gpu".into(),
+                    arrange: arrange.unwrap_or(Arrange::Auto).id().into(),
+                });
+                let what = format!("{mode} {arrange:?} at {w} x {h}");
+                assert_drawn_is_placed(&mut r, &gpu, &what);
+                if mode == "chart_engines" {
+                    // Both line values are placed and drawn.
+                    let (flow, drawn) = r.vcx.update(|_, cx| {
+                        (gpu.read(cx).flow().clone(), gpu.read(cx).drawn_widgets())
+                    });
+                    for k in ["temp", "power"] {
+                        let id = widget_of(&flow, 0, k).expect(k);
+                        assert!(drawn.contains(&id), "{what}: {k} drawn");
+                    }
+                }
+            }
+        }
+    }
+
+    /// tasklens-lhliq.7: with the stacked `chart_engines` split moved, the first chart's
+    /// height follows the body height at every layout. After each resize the drawn chart is
+    /// the placed rectangle, and the splitter sits under it.
+    #[gpui_kit::test]
+    fn gpu_box_split_resize_draws_the_placed_chart(cx: &mut TestAppContext) {
+        use gpui_kit::Pixels;
+        use tl_model::layout::GPU_BOX_CONTAINER;
+        use tl_ui::pages::performance::overview::gpu_box::{GPU_SPLITTER_ID, chart_id};
+        use tl_ui::pages::performance::overview::gpu_flow::chart_of;
+        use tl_ui::pages::performance::widget::container::container_id;
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.gpus = Arc::from([(DeviceIdx(2), line_record(2))]);
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "gpu".into(),
+            mode: "chart_engines".into(),
+        });
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |g, cx| g.set_split(0.6, cx)));
+        draw(r.vcx);
+        let near = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 1.;
+        let mut heights = Vec::new();
+        for (w, h) in [(1200., 900.), (1200., 1150.), (1400., 800.), (1200., 900.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            let (flow, plan) = r
+                .vcx
+                .update(|_, cx| (gpu.read(cx).flow().clone(), gpu.read(cx).flow_plan()));
+            assert_eq!(
+                plan.and_then(|p| p.stacked_share),
+                Some(0.6),
+                "the split is moved"
+            );
+            let chart = chart_of(&flow, 0).expect("section chart");
+            let at = r
+                .vcx
+                .update(|_, cx| gpu.read(cx).container().read(cx).placement().bounds(chart))
+                .expect("chart placed");
+            let origin = r.bounds_of(container_id(GPU_BOX_CONTAINER)).origin;
+            let drawn = r.bounds_of(chart_id(0));
+            let (x, y) = (drawn.origin.x - origin.x, drawn.origin.y - origin.y);
+            assert!(
+                near(at.origin.x, x)
+                    && near(at.origin.y, y)
+                    && near(at.size.width, drawn.size.width)
+                    && near(at.size.height, drawn.size.height),
+                "{w} x {h}: placed {at:?}, drawn {drawn:?} from {origin:?}"
+            );
+            let gap = r.bounds_of(GPU_SPLITTER_ID.to_owned());
+            assert!(
+                near(gap.origin.y, drawn.bottom()),
+                "{w} x {h}: the splitter {gap:?} under the chart {drawn:?}"
+            );
+            assert_drawn_is_placed(&mut r, &gpu, &format!("split at {w} x {h}"));
+            heights.push(f32::from(drawn.size.height));
+        }
+        assert!(
+            heights[1] > heights[0] && heights[2] < heights[0],
+            "the chart follows the body height: {heights:?}"
+        );
+        assert!(
+            (heights[3] - heights[0]).abs() < 1.,
+            "back to the first size: {heights:?}"
+        );
     }
 
     fn leak_str(s: String) -> &'static str {

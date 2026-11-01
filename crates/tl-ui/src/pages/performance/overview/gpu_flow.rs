@@ -21,11 +21,18 @@
 //! collapsed fit state (UI-PRF-059) a sample that makes another engine the busiest one. No
 //! other sample places anything; the temperature and power line keeps its place while its
 //! values come and go.
+//!
+//! Drawing and placement share one function for each rectangle that is not plain flex: the
+//! first chart of a stacked `chart_engines` body with the split moved has the height
+//! [`stacked_chart_h`] gives for the body height at layout, and each value of the line is as
+//! wide as [`line_text_w`] measures its text when the box draws it ([`LineWidths`]), the
+//! " · " between two of them too. A sample that changes a value's text places nothing: the
+//! next placement takes the new widths.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui_kit::{Bounds, Pixels, Size, point, px, size};
+use gpui_kit::{Bounds, Pixels, Refineable as _, Size, Window, point, px, size};
 use smallvec::SmallVec;
 use tl_model::layout::{
     ContainerLayout, DeviceSelector, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
@@ -38,11 +45,13 @@ use super::gpu_box::{
     Kept, MAX_GPUS, SectionRows, cell_min, charts_fit, charts_fixed_h, engine_lines, fit, kept,
     section_h, spacing,
 };
+use super::inner_split::clamp_split;
 use super::layout::Arrange;
 use super::parts::{MIN_CHART_H, arrange_min_h};
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::pages::performance::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::pages::performance::widget::source::Availability;
+use crate::text::style::t_xs;
 use crate::theme::UiMetrics;
 
 /// The flow layout of preset `mode` with `arrange`, `split` and the box's hidden engine names
@@ -174,9 +183,9 @@ pub struct FlowPlan {
     pub sections: SmallVec<[PlanSection; MAX_GPUS]>,
     /// `chart_engines` Side by side: the chart's share of the body width.
     pub side_share: Option<f32>,
-    /// `chart_engines` stacked, with the split moved: the first chart's share of the body
-    /// height.
-    pub chart_share: Option<f32>,
+    /// `chart_engines` stacked, with the split moved: the saved share, before the clamps. The
+    /// first chart's height comes from it and the body height through [`stacked_chart_h`].
+    pub stacked_share: Option<f32>,
     /// The index of the first section's busiest engine.
     pub busiest: usize,
     /// The box's render showed the first section collapsed (UI-PRF-059), so `busiest` decides
@@ -203,12 +212,12 @@ impl FlowPlan {
     }
 
     /// Every widget's rectangle in a body of `area`, px from the body's top left corner, in
-    /// drawing order.
-    pub fn rects(&self, area: Size<Pixels>) -> Vec<(&Part, Bounds<Pixels>)> {
+    /// drawing order. `line` has the drawn widths of the temperature and power values.
+    pub fn rects(&self, area: Size<Pixels>, line: &LineWidths) -> Vec<(&Part, Bounds<Pixels>)> {
         let mut out = Vec::new();
         match self.look {
             PlanLook::Cells => self.cell_rects(area, &mut out),
-            PlanLook::Rows | PlanLook::Chart => self.row_rects(area, &mut out),
+            PlanLook::Rows | PlanLook::Chart => self.row_rects(area, line, &mut out),
         }
         out
     }
@@ -278,7 +287,12 @@ impl FlowPlan {
 
     /// `chart_engines` and `chart`: each section's chart, engine rows, VRAM row and line, as
     /// `GpuBox::list_body` lays them out.
-    fn row_rects<'p>(&'p self, area: Size<Pixels>, out: &mut Vec<(&'p Part, Bounds<Pixels>)>) {
+    fn row_rects<'p>(
+        &'p self,
+        area: Size<Pixels>,
+        line: &LineWidths,
+        out: &mut Vec<(&'p Part, Bounds<Pixels>)>,
+    ) {
         let m = &self.m;
         let (row, gap, section_gap) = spacing(m);
         let with_rows = self.look == PlanLook::Rows;
@@ -317,10 +331,11 @@ impl FlowPlan {
                 engines + usize::from(k.vram) + usize::from(k.line) + usize::from(k.more)
             })
             .collect();
+        // The box draws the first chart at this height, from the same function at layout.
         let custom = self
-            .chart_share
-            .filter(|_| with_rows && side.is_none() && shown.chart && h > 0.)
-            .map(|share| share * h);
+            .stacked_share
+            .filter(|_| with_rows && side.is_none() && shown.chart)
+            .map(|share| stacked_chart_h(share, &lines, h, m));
         let items: SmallVec<[FlexItem; MAX_GPUS]> = (0..n)
             .map(|i| {
                 let l = lines[i];
@@ -330,7 +345,6 @@ impl FlowPlan {
                 } else if side.is_some() {
                     (section_h(l, i > 0, true, m), 1., head)
                 } else if let Some(ch) = custom.filter(|_| i == 0) {
-                    let ch = ch.max(chart_min);
                     (ch + l as f32 * (gap + row), 0., ch + gap + rows_h(l))
                 } else {
                     (
@@ -366,7 +380,7 @@ impl FlowPlan {
                 (cw + sp, (w - cw - sp).max(0.), top + head)
             } else {
                 let ch = match custom.filter(|_| i == 0) {
-                    Some(ch) => ch.max(chart_min),
+                    Some(ch) => ch,
                     None => (heights[i] - head - gap - rows_h(l)).max(chart_min),
                 };
                 if let Some(c) = chart {
@@ -406,12 +420,23 @@ impl FlowPlan {
                 }
             }
             if with_rows && keep.line {
-                // The values share the line: each gets an equal part of it, so where a widget
-                // goes does not follow its text.
+                // The values the box drew sit side by side at their text's width, joined by
+                // " · ". A value it did not draw (no reading yet) keeps a place with no width.
                 let at = next();
-                let part = rw / s.line.len().max(1) as f32;
-                for (k, p) in s.line.iter().enumerate() {
-                    out.push((p, rect(x + k as f32 * part, at, part, row)));
+                let mut lx = x;
+                let mut first = true;
+                for p in &s.line {
+                    match line.width(p.0) {
+                        Some(w) => {
+                            if !first {
+                                lx += line.sep;
+                            }
+                            first = false;
+                            out.push((p, rect(lx, at, w, row)));
+                            lx += w;
+                        }
+                        None => out.push((p, rect(lx, at, 0., row))),
+                    }
                 }
             }
             top += heights[i] + section_gap;
@@ -422,6 +447,63 @@ impl FlowPlan {
 /// A rectangle from its left, top, width and height in px.
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
     Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+}
+
+/// The least height under the first chart of a stacked `chart_engines` body whose sections
+/// show `lines` body rows each, logical px: the first section's rows and the later sections at
+/// their smallest. Dragging the split down stops there, so every engine row and the VRAM row
+/// stay in the body (crw.73).
+pub(super) fn stacked_min_second(lines: &[usize], m: &UiMetrics) -> f32 {
+    let (_, _, section_gap) = spacing(m);
+    let n = lines.len() as f32;
+    let basis: f32 = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| section_h(*l, i > 0, false, m))
+        .sum();
+    let under = basis + (n - 1.).max(0.) * section_gap - MIN_CHART_H * m.ui_scale;
+    ((under - f32::from(m.sp[5])) / m.ui_scale).max(0.)
+}
+
+/// The first chart's height, px, in a stacked `chart_engines` body `len` px high whose split
+/// was moved to `share` and whose sections show `lines` body rows each: the share clamped to
+/// the split range and the parts' minimums, times the body height. The box draws the chart at
+/// this height at every layout (`GpuBox::list_body`), and the placer places the chart widget
+/// with it, so the two never differ.
+pub fn stacked_chart_h(share: f32, lines: &[usize], len: f32, m: &UiMetrics) -> f32 {
+    let mins = (MIN_CHART_H, stacked_min_second(lines, m));
+    let share = clamp_split(share, len, f32::from(m.sp[5]), mins, m.ui_scale);
+    (share * len).max(MIN_CHART_H * m.ui_scale)
+}
+
+/// The widths of the temperature and power values the box drew on their line, px, by widget
+/// id, and the width of the " · " between two of them. A value the box did not draw has none.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct LineWidths {
+    pub values: SmallVec<[(u32, f32); 4]>,
+    pub sep: f32,
+}
+
+impl LineWidths {
+    /// The drawn width of widget `id`'s value.
+    pub fn width(&self, id: u32) -> Option<f32> {
+        self.values.iter().find(|(i, _)| *i == id).map(|(_, w)| *w)
+    }
+}
+
+/// The width the line's small text `text` takes when drawn: the window's shaping of it in the
+/// `t_xs` style over the inherited text style, rounded up to a whole px as GPUI's text layout
+/// rounds a text's width.
+pub fn line_text_w(text: &str, m: &UiMetrics, window: &Window) -> f32 {
+    let mut style = window.text_style();
+    style.refine(&t_xs(m));
+    let run = style.to_run(text.len());
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let w = window
+        .text_system()
+        .layout_line(text, font_size, &[run], None)
+        .width;
+    f32::from(w).ceil()
 }
 
 /// One item of a flex column: its basis, its grow and shrink factors and its least height, px.
@@ -484,12 +566,13 @@ fn flex_col(items: &[FlexItem], avail: f32, gap: f32) -> SmallVec<[f32; MAX_GPUS
     out
 }
 
-/// What the GPU box placed and drew: the plan of its last flow render, and the widgets that
-/// render drew, in drawing order.
+/// What the GPU box placed and drew: the plan of its last flow render, the widgets that
+/// render drew, in drawing order, and the widths of the line values it drew.
 #[derive(Default, Debug)]
 struct PlanState {
     plan: Option<FlowPlan>,
     drawn: SmallVec<[u32; 16]>,
+    line: LineWidths,
 }
 
 /// The [`FlowPlan`] shared by the box (which makes it) and its [`placer`].
@@ -530,6 +613,18 @@ impl PlanCell {
     pub fn drawn(&self) -> SmallVec<[u32; 16]> {
         self.0.borrow().drawn.clone()
     }
+
+    /// The widths of the line values a render drew. They are not part of the plan: a value's
+    /// text changes on a sample, and a sample places nothing (only the next placement uses
+    /// the new widths).
+    pub fn set_line(&self, line: LineWidths) {
+        self.0.borrow_mut().line = line;
+    }
+
+    /// The widths of the line values the last flow render drew.
+    pub fn line(&self) -> LineWidths {
+        self.0.borrow().line.clone()
+    }
 }
 
 /// The placer of the GPU box's flow layouts: every widget of the box's plan at the rectangle
@@ -548,7 +643,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
         let st = cell.0.borrow();
         let preset = input.layout.preset.as_ref().map(|p| p.id.as_str());
         if let Some(plan) = st.plan.as_ref().filter(|p| preset == Some(p.look.id())) {
-            for ((id, metric), bounds) in plan.rects(input.area) {
+            for ((id, metric), bounds) in plan.rects(input.area, &st.line) {
                 let Some(item) = input.items.iter().find(|i| i.setting.id == *id) else {
                     continue;
                 };
@@ -646,14 +741,26 @@ mod tests {
                 line: smallvec::smallvec![part(6, METRIC_TEMP), part(7, METRIC_POWER)],
             }],
             side_share: None,
-            chart_share: None,
+            stacked_share: None,
             busiest: 2,
             collapsed: false,
         }
     }
 
+    /// The line's values drawn 30 px (temperature) and 44 px (power) wide, 9 px apart.
+    fn line_widths() -> LineWidths {
+        LineWidths {
+            values: smallvec::smallvec![(6, 30.), (7, 44.)],
+            sep: 9.,
+        }
+    }
+
     fn rects_of(plan: &FlowPlan, w: f32, h: f32) -> Vec<(u32, [f32; 4])> {
-        plan.rects(gpui_kit::size(px(w), px(h)))
+        rects_with(plan, w, h, &line_widths())
+    }
+
+    fn rects_with(plan: &FlowPlan, w: f32, h: f32, line: &LineWidths) -> Vec<(u32, [f32; 4])> {
+        plan.rects(gpui_kit::size(px(w), px(h)), line)
             .into_iter()
             .map(|((id, _), b)| {
                 (
@@ -670,7 +777,8 @@ mod tests {
     }
 
     /// The 1.1.0 parts: the chart takes the spare height, the 18 px rows sit under it 4 px
-    /// apart, and the line's two values share its row.
+    /// apart, and the line's two values sit side by side at their drawn widths, the " · "
+    /// between them.
     #[test]
     fn rows_plan_places_every_part() {
         let r = rects_of(&rows_plan(), 400., 300.);
@@ -682,8 +790,8 @@ mod tests {
                 (3, [0., 216., 400., 18.]),
                 (4, [0., 238., 400., 18.]),
                 (5, [0., 260., 400., 18.]),
-                (6, [0., 282., 200., 18.]),
-                (7, [200., 282., 200., 18.]),
+                (6, [0., 282., 30., 18.]),
+                (7, [39., 282., 44., 18.]),
             ]
         );
     }
@@ -698,8 +806,8 @@ mod tests {
                 (1, [0., 0., 400., 64.]),
                 (4, [0., 68., 400., 18.]),
                 (5, [0., 112., 400., 18.]),
-                (6, [0., 134., 200., 18.]),
-                (7, [200., 134., 200., 18.]),
+                (6, [0., 134., 30., 18.]),
+                (7, [39., 134., 44., 18.]),
             ]
         );
     }
@@ -715,6 +823,49 @@ mod tests {
         assert_eq!(r[0], (1, [0., 0., 200., 300.]));
         assert_eq!(r[1], (2, [212., 0., 188., 18.]));
         assert_eq!(r[4], (5, [212., 66., 188., 18.]));
+    }
+
+    /// A value with no reading is not drawn: it keeps a place with no width, and the other
+    /// value starts the line with no " · " before it.
+    #[test]
+    fn line_value_not_drawn_has_no_width() {
+        let line = LineWidths {
+            values: smallvec::smallvec![(7, 44.)],
+            sep: 9.,
+        };
+        let r = rects_with(&rows_plan(), 400., 300., &line);
+        assert_eq!(r[5], (6, [0., 282., 0., 18.]));
+        assert_eq!(r[6], (7, [0., 282., 44., 18.]));
+    }
+
+    /// Stacked with the split moved, the chart's height follows the body height through
+    /// `stacked_chart_h`, and the rows sit under it.
+    #[test]
+    fn stacked_split_follows_the_body_height() {
+        let plan = FlowPlan {
+            stacked_share: Some(0.5),
+            ..rows_plan()
+        };
+        let m = plan.m;
+        for h in [300., 420.] {
+            let r = rects_of(&plan, 400., h);
+            let ch = stacked_chart_h(0.5, &[5], h, &m);
+            assert_eq!(ch, h / 2., "half the body");
+            assert_eq!(r[0], (1, [0., 0., 400., ch]));
+            assert_eq!(r[1], (2, [0., ch + 4., 400., 18.]));
+        }
+        // A share that leaves too little room under the chart is clamped: the 5 rows need
+        // 5 x 22 = 110 px, so a 300 px body keeps 300 - 110 = 190 px for the chart.
+        let low = rects_of(
+            &FlowPlan {
+                stacked_share: Some(0.8),
+                ..plan
+            },
+            400.,
+            300.,
+        );
+        assert_eq!(low[0].1[3], stacked_chart_h(0.8, &[5], 300., &m));
+        assert!((low[0].1[3] - 190.).abs() < 1e-3, "{low:?}");
     }
 
     /// `engine_charts`: the cells fill the grid above the VRAM row, which sits at the bottom.

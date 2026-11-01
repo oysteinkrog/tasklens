@@ -49,8 +49,8 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
-    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
-    relative, size,
+    StyleRefinement, Styled as _, Subscription, Window, container_query, div,
+    prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -70,8 +70,9 @@ use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
 use super::fit::fit_text;
 use super::gpu_flow::{
-    self, FlowPlan, Part, PlanCell, PlanLook, PlanSection, chart_of, engine_widget, flow_layout,
-    shows_engine, shows_line, shows_vram, widget_of,
+    self, FlowPlan, LineWidths, Part, PlanCell, PlanLook, PlanSection, chart_of, engine_widget,
+    flow_layout, line_text_w, shows_engine, shows_line, shows_vram, stacked_chart_h,
+    stacked_min_second, widget_of,
 };
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
@@ -1740,12 +1741,6 @@ impl<'a> FlowDraw<'a> {
         }
     }
 
-    /// Widget `id` as one value of a shared line: its own width, so the values sit side by side.
-    fn text(&mut self, id: u32, cx: &mut App) -> Option<AnyElement> {
-        let widget = self.widget(Some(id), FlowLook::Text, cx)?;
-        Some(div().flex_none().child(widget).into_any_element())
-    }
-
     /// The widgets drawn.
     fn finish(self) -> SmallVec<[u32; 16]> {
         self.shown
@@ -1777,23 +1772,33 @@ fn row_slot(m: &UiMetrics) -> Div {
 }
 
 /// The temperature and power line of a section: of the values the GPU reports (`line`, placed
-/// whether known or not), those known now, joined by " · ", in the small secondary text.
+/// whether known or not), those known now, joined by " · ", in the small secondary text. Each
+/// drawn value's width, and the separator's, come back for the placer, from the same shaping
+/// the text draws with (`gpu_flow::line_text_w`).
 fn line_row(
     fd: &mut FlowDraw<'_>,
     line: &[Part],
     section: &GpuSection,
     m: &UiMetrics,
     theme: &TlTheme,
+    window: &Window,
     cx: &mut App,
-) -> AnyElement {
+) -> (AnyElement, LineWidths) {
     let (temp_known, power_known) = section.line_known;
     let known = |p: &&Part| match p.1.as_str() {
         METRIC_TEMP => temp_known,
         METRIC_POWER => power_known,
         _ => false,
     };
+    let mut widths = LineWidths {
+        values: SmallVec::new(),
+        sep: line_text_w(SEP, m, window),
+    };
     let mut row = row_slot(m).flex().flex_row().overflow_hidden();
     for (k, (id, _)) in line.iter().filter(known).enumerate() {
+        let Some(widget) = fd.widget(Some(*id), FlowLook::Text, cx) else {
+            continue;
+        };
         if k > 0 {
             let mut sep = div();
             *sep.text_style() = t_xs(m);
@@ -1804,21 +1809,26 @@ fn line_row(
                     .child(SEP),
             );
         }
-        row = row.children(fd.text(*id, cx));
+        let w = line_text_w(widget.read(cx).texts()[1], m, window);
+        widths.values.push((*id, w));
+        row = row.child(div().flex_none().child(widget));
     }
-    row.into_any_element()
+    (row.into_any_element(), widths)
 }
 
-/// Takes the plan and the widgets of a flow render. When the plan can place a widget elsewhere,
-/// the container places its widgets again and keeps only the entities of those it places.
+/// Takes the plan, the widgets and the line widths of a flow render. When the plan can place a
+/// widget elsewhere, the container places its widgets again and keeps only the entities of
+/// those it places.
 fn place_plan(
     container: &Entity<WidgetContainer>,
     cell: &PlanCell,
     plan: FlowPlan,
     drawn: SmallVec<[u32; 16]>,
+    line: LineWidths,
     cx: &mut App,
 ) {
     cell.set_drawn(drawn);
+    cell.set_line(line);
     if cell.set(plan) {
         container.update(cx, |c, cx| {
             c.place_again(cx);
@@ -1888,14 +1898,20 @@ impl GpuBox {
             vram: !self.vram_hidden(),
             sections,
             side_share,
-            chart_share: None,
+            stacked_share: None,
             busiest: self.sections.first().map_or(0, |s| busiest(&s.engines)),
             collapsed: false,
         }
     }
 
     /// `chart_engines` and `chart`: the sections of UI-PRF-017, or only their charts and VRAM rows.
-    fn list_body(&mut self, m: &UiMetrics, theme: &TlTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn list_body(
+        &mut self,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let s = m.ui_scale;
         let row_h = px(LABEL_ROW * s);
         let mode = self.mode;
@@ -1954,7 +1970,10 @@ impl GpuBox {
             })
             .collect();
         let mut split_share = None;
-        let mut custom_chart_h = None;
+        // Stacked with the split moved: the saved share. The first chart's height comes from it
+        // and the body height at layout (`stacked_chart_h`, which the placer uses too), so a
+        // resize never leaves a stale height.
+        let mut stacked = None;
         let charts = if shown.chart { shown.sections } else { 0 };
         if side && charts > 0 {
             split_share = Some(self.chart_split.share(SplitAxis::Row, m.sp[5], s));
@@ -1967,53 +1986,51 @@ impl GpuBox {
                 .map(|(i, l)| section_h(*l, i > 0, false, m))
                 .sum();
             let spare = (len - basis - (n - 1.) * section_gap).max(0.);
-            // Everything under the first chart: its rows, then the later sections at their
-            // smallest. Dragging down stops there, so every engine row and the VRAM row stay
-            // in the body (crw.73).
-            let under = basis + (n - 1.) * section_gap - MIN_CHART_H * s;
-            let min_second = ((under - f32::from(m.sp[5])) / s).max(0.);
-            self.chart_split.set_mins(MIN_CHART_H, min_second);
+            self.chart_split
+                .set_mins(MIN_CHART_H, stacked_min_second(&lines, m));
             let first_h = section_h(lines[0], false, false, m) + spare / n;
             let chart_h =
                 (first_h - lines[0] as f32 * (gap + f32::from(row_h))).max(MIN_CHART_H * s);
             let second = (len - f32::from(m.sp[5]) - chart_h).max(0.) / s;
             self.chart_split.set_default_second_px(second);
-            let share = self.chart_split.share(SplitAxis::Column, m.sp[5], s);
-            split_share = Some(share);
-            if self.chart_split.saved() != self.chart_split.default_share() && len > 0. {
-                custom_chart_h = Some(share * len);
-                plan.chart_share = Some(share);
+            split_share = Some(self.chart_split.share(SplitAxis::Column, m.sp[5], s));
+            if self.chart_split.saved() != self.chart_split.default_share() {
+                stacked = Some(self.chart_split.saved());
+                plan.stacked_share = stacked;
             }
         }
         plan.collapsed = shown.collapsed;
         let id_of = |p: &Option<Part>| p.as_ref().map(|p| p.0);
 
-        let mut body = div()
+        let body = div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
             .overflow_hidden()
             .gap(m.sp[5]);
+        let mut sections: SmallVec<[AnyElement; MAX_GPUS]> = SmallVec::new();
+        // The first section's column, chart and rows, when its chart height waits for the
+        // body height.
+        let mut first = None;
+        let mut line_w = LineWidths::default();
         let mut fd = FlowDraw::new(&self.container);
         for (i, section) in self.sections.iter().take(shown.sections).enumerate() {
             let widgets = &plan.sections[i];
             let collapsed = shown.collapsed && i == 0;
             let keep = keeps[i];
-            let fixed = custom_chart_h.filter(|_| i == 0);
+            let fixed = stacked.is_some() && i == 0;
             let mut col = div()
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
                 .w_full()
                 .gap(m.sp[2]);
-            col = match fixed {
-                Some(h) => col
-                    .flex_grow(0.)
-                    .flex_basis(px(h + lines[i] as f32 * (gap + f32::from(row_h)))),
-                None => col
-                    .flex_grow(1.)
-                    .flex_basis(px(section_h(lines[i], i > 0, side, m))),
+            col = if fixed {
+                col.flex_grow(0.)
+            } else {
+                col.flex_grow(1.)
+                    .flex_basis(px(section_h(lines[i], i > 0, side, m)))
             };
             if i > 0 {
                 col = col.child(section_heading(section, row_h, m, theme));
@@ -2056,14 +2073,21 @@ impl GpuBox {
                 section_rows = section_rows.child(fd.slot(row_slot(m), id, look, cx));
             }
             if with_rows && keep.line {
-                let line = line_row(&mut fd, &widgets.line, section, m, theme, cx);
+                let (line, widths) =
+                    line_row(&mut fd, &widgets.line, section, m, theme, window, cx);
+                line_w.sep = widths.sep;
+                line_w.values.extend(widths.values);
                 section_rows = section_rows.child(line);
             }
             if keep.more {
                 section_rows = section_rows.child(text_row(&more, m, theme));
             }
             if !shown.chart {
-                body = body.child(col.flex_basis(px(0.)).child(section_rows));
+                sections.push(
+                    col.flex_basis(px(0.))
+                        .child(section_rows)
+                        .into_any_element(),
+                );
                 continue;
             }
             let chart = fd.slot(
@@ -2085,44 +2109,85 @@ impl GpuBox {
                     .gap(m.sp[5])
                     .child(chart.flex_none().w(relative(share)).h_full())
                     .child(section_rows.flex_1().min_w_0());
-                body = body.child(col.child(parts));
+                sections.push(col.child(parts).into_any_element());
                 continue;
             }
             let chart = chart.w_full();
-            let chart = match fixed {
-                Some(h) => chart.flex_none().h(px(h)),
-                None => chart.flex_1(),
-            };
-            body = body.child(col.child(chart).child(section_rows));
+            if fixed {
+                first = Some((col, chart, section_rows));
+                continue;
+            }
+            sections.push(
+                col.child(chart.flex_1())
+                    .child(section_rows)
+                    .into_any_element(),
+            );
         }
         let drawn = fd.finish();
-        place_plan(&self.container, &self.plan, plan, drawn, cx);
+        place_plan(&self.container, &self.plan, plan, drawn, line_w, cx);
         let probe_m = *m;
-        body = body.child(class_probe(
-            Rc::clone(&self.body),
-            shown.class(),
-            move |b| {
-                let share = sharer.as_ref().map(|f| f(f32::from(b.width)));
-                fit(b, &rows, total, share, &probe_m).class()
-            },
-            cx.entity_id(),
-        ));
+        let mut extras: SmallVec<[AnyElement; 2]> = SmallVec::new();
+        extras.push(
+            class_probe(
+                Rc::clone(&self.body),
+                shown.class(),
+                move |b| {
+                    let share = sharer.as_ref().map(|f| f(f32::from(b.width)));
+                    fit(b, &rows, total, share, &probe_m).class()
+                },
+                cx.entity_id(),
+            )
+            .into_any_element(),
+        );
+        let mut gap_el = None;
         if let Some(share) = split_share {
-            body = body
-                .child(self.chart_split.probe(Self::chart_inner_split, cx))
-                .child(self.chart_split.gap(
-                    if side {
-                        SplitAxis::Row
-                    } else {
-                        SplitAxis::Column
-                    },
-                    share,
-                    m.sp[5],
-                    Self::chart_inner_split,
-                    cx,
-                ));
+            extras.push(
+                self.chart_split
+                    .probe(Self::chart_inner_split, cx)
+                    .into_any_element(),
+            );
+            let axis = if side {
+                SplitAxis::Row
+            } else {
+                SplitAxis::Column
+            };
+            // With the split moved, only the layout knows the chart's height: the gap goes at
+            // the top of a holder placed there.
+            let at = if stacked.is_some() { 0. } else { share };
+            gap_el = Some(
+                self.chart_split
+                    .gap(axis, at, m.sp[5], Self::chart_inner_split, cx),
+            );
         }
-        body.into_any_element()
+        let (Some(share), Some((col, chart, first_rows))) = (stacked, first) else {
+            return body
+                .children(sections)
+                .children(extras)
+                .children(gap_el)
+                .into_any_element();
+        };
+        let (m, row_h) = (*m, f32::from(row_h));
+        container_query(move |area, _, _| {
+            let h = stacked_chart_h(share, &lines, f32::from(area.height), &m);
+            let col = col
+                .flex_basis(px(h + lines[0] as f32 * (gap + row_h)))
+                .child(chart.flex_none().h(px(h)))
+                .child(first_rows);
+            let holder = gap_el.map(|g| {
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(h))
+                    .h(m.sp[5])
+                    .child(g)
+            });
+            body.child(col)
+                .children(sections)
+                .children(extras)
+                .children(holder)
+        })
+        .into_any_element()
     }
 
     /// `engine_charts`: per section a grid of engine charts that fills its part of the body,
@@ -2252,7 +2317,14 @@ impl GpuBox {
             body = body.child(col);
         }
         let drawn = fd.finish();
-        place_plan(&self.container, &self.plan, plan, drawn, cx);
+        place_plan(
+            &self.container,
+            &self.plan,
+            plan,
+            drawn,
+            LineWidths::default(),
+            cx,
+        );
         let probe_m = *m;
         body = body.child(class_probe(
             Rc::clone(&self.body),
@@ -2265,7 +2337,7 @@ impl GpuBox {
 }
 
 impl Render for GpuBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
@@ -2286,7 +2358,7 @@ impl Render for GpuBox {
         } else {
             let body = match self.mode {
                 GpuMode::EngineCharts => self.charts_body(&m, &theme, cx),
-                GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, cx),
+                GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, window, cx),
             };
             // The editor sits under the body with no widgets, so its container knows the body's
             // size when Edit Widgets starts.
