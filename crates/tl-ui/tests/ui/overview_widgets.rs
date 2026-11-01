@@ -3082,3 +3082,181 @@ fn overview_widget_net_traffic_minus_both_lines(cx: &mut TestAppContext) {
     assert!(minus.is_empty(), "no kind is hidden");
     assert!(after > revision, "a new minus list notifies");
 }
+
+/// What a source shows a widget, to compare with a source built fresh: availability, name,
+/// value and stats text, series and minus list.
+type Look = (
+    Availability,
+    String,
+    String,
+    String,
+    Vec<SeriesId>,
+    Vec<SeriesId>,
+);
+
+fn look(r: &mut Rig, s: &Entity<SourceData>) -> Look {
+    r.vcx.read_entity(s, |s, _| {
+        (
+            s.availability(),
+            s.name().to_string(),
+            s.value_text().to_string(),
+            s.stats_text().to_string(),
+            s.series_list().to_vec(),
+            s.minus_list().to_vec(),
+        )
+    })
+}
+
+/// Download and upload series of the network aggregate (device 6) at `rx` and `tx`, one per
+/// second, newest last, ending now.
+fn net_series(r: &mut Rig, rx: &[f32], tx: &[f32]) {
+    r.series_version += 1;
+    let version = r.series_version;
+    let newest = now_boot_ns();
+    let view = |metric, values: &[f32]| {
+        let n = values.len() as u64;
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(6),
+                metric,
+            },
+            version,
+            period_ns: 1_000_000_000,
+            samples: values
+                .iter()
+                .enumerate()
+                .map(|(k, v)| Sample::valid(newest - (n - 1 - k as u64) * 1_000_000_000, *v))
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    };
+    let views = [view(MetricId::NET_RX, rx), view(MetricId::NET_TX, tx)];
+    r.publish(|s| {
+        s.series = Arc::new(SeriesSet {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            series: Arc::from(views),
+            slow: Arc::from([]),
+        });
+    });
+}
+
+/// ADR-019 "Entities and data flow": a source compares its whole state, so every way an input
+/// can change notifies its widgets, and what it shows then equals a source built fresh for the
+/// same snapshot and settings. Steps: a new sample, a hidden network kind plugged in with the
+/// traffic unchanged (only the minus list changes), a new network unit, new hidden kinds, a new
+/// language and a pause.
+#[gpui_kit::test]
+fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
+    use tl_model::devices::{AggregateKind, NetKind};
+    use tl_model::settings::NetworkUnit;
+    use tl_ui::pages::performance::overview::timeline::{PauseKind, Paused, set_paused};
+    let mut r = open(cx);
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = false);
+    });
+    r.publish(|s| s.devices = Arc::new(box_catalog(2)));
+    net_series(&mut r, &[1000., 3000., 2000.], &[100., 300., 200.]);
+    let sel = selector(DeviceSelector::Key(Arc::from("aggregate:net")), "traffic");
+    let store = &mut r.store;
+    let s = r.vcx.update(|_, cx| store.source(&sel, cx));
+    draw(r.vcx);
+    let notes = Rc::new(Cell::new(0u32));
+    let _watch = r.vcx.update(|_, cx| {
+        let notes = Rc::clone(&notes);
+        cx.observe(&s, move |_, _| notes.set(notes.get() + 1))
+    });
+    let mut last = look(&mut r, &s);
+    assert_eq!(last.0, Availability::Available);
+    assert!(!last.3.is_empty(), "stats from the series");
+
+    let check = |r: &mut Rig, step: &str, last: &Look| -> Look {
+        let notified = notes.replace(0);
+        assert!(notified > 0, "{step}: the widgets are notified");
+        let hub = r.hub.clone();
+        let sel = sel.clone();
+        let fresh = r
+            .vcx
+            .update(|_, cx| cx.new(|cx| SourceData::new(&hub, sel, None, cx)));
+        let now = look(r, &s);
+        assert_eq!(now, look(r, &fresh), "{step}: equals a fresh source");
+        assert_ne!(&now, last, "{step}: changes what the source shows");
+        now
+    };
+
+    net_series(
+        &mut r,
+        &[1000., 3000., 2000., 5000.],
+        &[100., 300., 200., 500.],
+    );
+    last = check(&mut r, "new sample", &last);
+
+    // The virtual kind's total appears; it has no series yet, so the traffic is unchanged.
+    let mut catalog = box_catalog(3);
+    let mut entries = catalog.entries.to_vec();
+    entries[7] = DeviceEntry {
+        persistent_key: Arc::from("aggregate:net:virtual"),
+        ..entry(
+            7,
+            DeviceIdentity::Aggregate(AggregateKind::NetsOf(NetKind::Virtual)),
+            "Virtual",
+            true,
+        )
+    };
+    catalog.entries = Arc::from(entries);
+    let value = last.2.clone();
+    r.publish(|s| s.devices = Arc::new(catalog));
+    last = check(&mut r, "hidden kind plugged in", &last);
+    assert_eq!(last.2, value, "the traffic is unchanged");
+    assert_eq!(
+        last.5,
+        vec![
+            SeriesId {
+                device: DeviceIdx(7),
+                metric: MetricId::NET_RX
+            },
+            SeriesId {
+                device: DeviceIdx(7),
+                metric: MetricId::NET_TX
+            },
+        ]
+    );
+
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.units.network = NetworkUnit::Bytes);
+    });
+    draw(r.vcx);
+    last = check(&mut r, "network unit", &last);
+
+    r.vcx.update(|_, cx| {
+        TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = true);
+    });
+    draw(r.vcx);
+    last = check(&mut r, "hidden kinds", &last);
+    assert!(last.5.is_empty());
+
+    r.vcx.update(|_, cx| {
+        tl_ui::i18n::set_test_catalogue(
+            cx,
+            "perf-widget-metric-net-traffic = <traffic>\n\
+             perf-overview-figures = lo {$min} mid {$avg} hi {$peak}\n",
+        );
+    });
+    draw(r.vcx);
+    last = check(&mut r, "language", &last);
+    assert_eq!(last.1, "<traffic>");
+
+    r.vcx.update(|_, cx| {
+        set_paused(
+            Some(Paused {
+                at_realtime_ns: 1_000_000_000_000,
+                kind: PauseKind::Pause,
+            }),
+            cx,
+        );
+    });
+    draw(r.vcx);
+    check(&mut r, "pause", &last);
+}

@@ -435,19 +435,13 @@ impl Followed {
     }
 }
 
-/// One source in use: its device, its current value and its stats over the Overview range.
-pub struct SourceData {
-    hub: Entity<SnapshotHub>,
-    selector: SourceSelector,
-    /// The kind of device the selector names; a slot is a GPU.
-    kind: DeviceKind,
-    meta: Option<&'static MetricMeta>,
-    /// The series the metric names on its kind of device (`None` for an unknown key).
-    series_of: Option<MetricSeries>,
+/// Everything a widget reads from a source, and every input its text is formatted from.
+/// [`SourceData::update`] compares the whole state before and after a change and notifies when
+/// it differs, so a field added here joins the comparison by itself (ADR-019).
+#[derive(Clone, Debug, PartialEq)]
+struct SourceState {
     /// The device key the selector stands for: its own key, or the slot's GPU from the store.
     key: Option<Arc<str>>,
-    /// The catalog version the device was resolved at; `None` forces a new lookup.
-    catalog_version: Option<u64>,
     device: Option<Resolved>,
     /// The series the chart draws, resolved with the device: the metric's series on the
     /// device, one per physical core for `core_clocks`, and for the network aggregate the
@@ -457,16 +451,31 @@ pub struct SourceData {
     net_total: Option<NetTotal>,
     /// The hidden kinds' series of each line of the network aggregate's metric.
     minus: SmallVec<[SeriesId; 5]>,
-    /// The smoothed load of a logical CPU (UI-PRF-018).
-    average: CoreAverage,
     vendor: GpuVendor,
     followed: Followed,
     reading: Reading,
+    /// The version of the strings the name and the stats words come from.
+    strings_version: u64,
+}
+
+/// One source in use: its device, its current value and its stats over the Overview range.
+pub struct SourceData {
+    hub: Entity<SnapshotHub>,
+    selector: SourceSelector,
+    /// The kind of device the selector names; a slot is a GPU.
+    kind: DeviceKind,
+    meta: Option<&'static MetricMeta>,
+    /// The series the metric names on its kind of device (`None` for an unknown key).
+    series_of: Option<MetricSeries>,
+    /// The catalog version the device was resolved at; `None` forces a new lookup.
+    catalog_version: Option<u64>,
+    /// The smoothed load of a logical CPU (UI-PRF-018).
+    average: CoreAverage,
+    state: SourceState,
     name: SharedString,
     value_text: SharedString,
     stats_text: SharedString,
     figures_words: Template,
-    strings_version: u64,
     /// Bumped each time the source notifies.
     revision: u64,
     _subs: [Subscription; 4],
@@ -501,30 +510,32 @@ impl SourceData {
             kind,
             meta,
             series_of,
-            key,
             catalog_version: None,
-            device: None,
-            series: SmallVec::new(),
-            net_total: None,
-            minus: SmallVec::new(),
             average: CoreAverage::default(),
-            vendor: GpuVendor::Unknown,
-            followed: Followed::read(cx),
-            reading: Reading {
-                availability: Availability::Gone,
-                value: Metric::default(),
-                second: None,
-                bar_max: None,
-                total: None,
-                y_scale: YScale::StickyUp { hw_max: None },
-                offered: FormSet::empty(),
-                figures: None,
+            state: SourceState {
+                key,
+                device: None,
+                series: SmallVec::new(),
+                net_total: None,
+                minus: SmallVec::new(),
+                vendor: GpuVendor::Unknown,
+                followed: Followed::read(cx),
+                reading: Reading {
+                    availability: Availability::Gone,
+                    value: Metric::default(),
+                    second: None,
+                    bar_max: None,
+                    total: None,
+                    y_scale: YScale::StickyUp { hw_max: None },
+                    offered: FormSet::empty(),
+                    figures: None,
+                },
+                strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             },
             name: SharedString::default(),
             value_text: SharedString::default(),
             stats_text: SharedString::default(),
             figures_words: Template::new(cx, KEY_FIGURES, &["min", "avg", "peak"]),
-            strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             revision: 0,
             _subs: [
                 cx.subscribe(hub, Self::on_snapshot),
@@ -553,17 +564,17 @@ impl SourceData {
     }
 
     pub fn availability(&self) -> Availability {
-        self.reading.availability
+        self.state.reading.availability
     }
 
     /// The device the source reads, while it is present.
     pub fn device(&self) -> Option<DeviceIdx> {
-        self.device.as_ref().map(|d| d.idx)
+        self.state.device.as_ref().map(|d| d.idx)
     }
 
     /// The device's name in the catalog, while it is present.
     pub fn device_name(&self) -> Option<&SharedString> {
-        self.device.as_ref().map(|d| &d.name)
+        self.state.device.as_ref().map(|d| &d.name)
     }
 
     /// The first series a chart of the source draws, while the source is available.
@@ -576,20 +587,20 @@ impl SourceData {
     /// `core_clocks`. On the network aggregate it is the engine's total; the hidden kinds'
     /// totals it leaves out are [`Self::minus_list`]. The page asks for every series in it.
     pub fn series_list(&self) -> &[SeriesId] {
-        if self.reading.availability != Availability::Available {
+        if self.state.reading.availability != Availability::Available {
             return &[];
         }
-        &self.series
+        &self.state.series
     }
 
     /// The series a network aggregate source takes away from its total: the per-kind totals of
     /// the kinds `show_network_*` hides, for each of its lines (download and upload for
     /// `traffic`). [`Self::minus_of`] picks one line's. Empty for every other source.
     pub fn minus_list(&self) -> &[SeriesId] {
-        if self.reading.availability != Availability::Available {
+        if self.state.reading.availability != Availability::Available {
             return &[];
         }
-        &self.minus
+        &self.state.minus
     }
 
     /// The series of [`Self::minus_list`] to take away from `line`: the ones of its metric.
@@ -630,7 +641,7 @@ impl SourceData {
 
     /// How full the bar is, 0 to 1; `None` without a bar or a value.
     pub fn bar_fraction(&self) -> Option<f32> {
-        let r = &self.reading;
+        let r = &self.state.reading;
         let max = r.bar_max?;
         if !shown(r.value.validity) {
             return None;
@@ -645,12 +656,12 @@ impl SourceData {
 
     /// The chart's Y axis on this device.
     pub fn y_scale(&self) -> YScale {
-        self.reading.y_scale
+        self.state.reading.y_scale
     }
 
     /// The forms the metric offers on this device (`MetricMeta::offered_forms`).
     pub fn offered_forms(&self) -> FormSet {
-        self.reading.offered
+        self.state.reading.offered
     }
 
     /// Bumped each time the source notifies.
@@ -660,13 +671,14 @@ impl SourceData {
 
     /// The slot's GPU changed (store): the source reads the new device.
     pub fn set_slot_key(&mut self, key: Option<Arc<str>>, cx: &mut Context<Self>) {
-        if !matches!(self.selector.device, DeviceSelector::Slot(_)) || self.key == key {
+        if !matches!(self.selector.device, DeviceSelector::Slot(_)) || self.state.key == key {
             return;
         }
-        self.key = key;
-        self.catalog_version = None;
         let snap = box_snapshot(&self.hub, cx);
-        self.update(&snap, true, false, cx);
+        self.update(&snap, true, cx, |this, _| {
+            this.state.key = key;
+            this.catalog_version = None;
+        });
     }
 
     fn on_snapshot(
@@ -684,68 +696,70 @@ impl SourceData {
             || self.minus_list().iter().any(changed)
             || mask.intersects(ComponentMask::DEVICE_HISTORY);
         let snap = box_snapshot(&hub, cx);
-        self.update(&snap, series_changed, false, cx);
+        self.update(&snap, series_changed, cx, |_, _| {});
     }
 
     /// The Overview was held at a time or made live: read the other snapshot.
     fn on_pause(&mut self, cx: &mut Context<Self>) {
         let snap = box_snapshot(&self.hub, cx);
-        self.average = CoreAverage::default();
-        self.update(&snap, true, false, cx);
+        self.update(&snap, true, cx, |this, _| {
+            this.average = CoreAverage::default()
+        });
     }
 
     /// A new Overview range, network view, set of hidden network kinds or core smoothing: new
-    /// stats, scale, text or series. Formats and notifies even when the reading is the same, as
-    /// a new network unit changes the text and new hidden kinds change [`Self::minus_list`].
+    /// stats, scale, text or series. The settings are part of the state, so a change of them
+    /// formats and notifies even when the reading is the same.
     fn on_settings(&mut self, cx: &mut Context<Self>) {
         let followed = Followed::read(cx);
-        if followed == self.followed {
+        if followed == self.state.followed {
             return;
         }
-        if followed.hidden_nets != self.followed.hidden_nets {
-            // The network total's series change with the hidden kinds.
-            self.catalog_version = None;
-        }
-        if followed.tau_s != self.followed.tau_s {
-            self.average = CoreAverage::default();
-        }
-        self.followed = followed;
         let snap = box_snapshot(&self.hub, cx);
-        self.update(&snap, true, true, cx);
+        self.update(&snap, true, cx, |this, _| {
+            if followed.hidden_nets != this.state.followed.hidden_nets {
+                // The network total's series change with the hidden kinds.
+                this.catalog_version = None;
+            }
+            if followed.tau_s != this.state.followed.tau_s {
+                this.average = CoreAverage::default();
+            }
+            this.state.followed = followed;
+        });
     }
 
     /// A new language: new name and stats words.
     fn on_strings(&mut self, cx: &mut Context<Self>) {
         let version = cx.global::<Strings>().strings_version;
-        if version == self.strings_version {
+        if version == self.state.strings_version {
             return;
         }
-        self.strings_version = version;
-        self.figures_words = Template::new(cx, KEY_FIGURES, &["min", "avg", "peak"]);
-        self.format_all(cx);
-        self.changed(cx);
+        let snap = box_snapshot(&self.hub, cx);
+        self.update(&snap, false, cx, |this, cx| {
+            this.state.strings_version = version;
+            this.figures_words = Template::new(cx, KEY_FIGURES, &["min", "avg", "peak"]);
+        });
     }
 
-    /// Reads `snap`; with `stats`, works the stats out again. Formats and notifies when
-    /// anything a widget shows changed, or always with `force`, and emits
-    /// [`AvailabilityChanged`] on an availability change.
-    fn update(&mut self, snap: &Snapshot, stats: bool, force: bool, cx: &mut Context<Self>) {
-        let before = self.reading;
-        let vendor = self.vendor;
-        let device = self.device.clone();
-        let series = self.series.clone();
+    /// Applies `input` (a change of what the source follows), reads `snap` and, with `stats`,
+    /// works the stats out again. Compares the whole [`SourceState`] before and after: when it
+    /// differs, formats, notifies, and emits [`AvailabilityChanged`] on an availability change.
+    fn update(
+        &mut self,
+        snap: &Snapshot,
+        stats: bool,
+        cx: &mut Context<Self>,
+        input: impl FnOnce(&mut Self, &App),
+    ) {
+        let before = self.state.clone();
+        input(self, cx);
         self.refresh(snap, stats, cx);
-        if !force
-            && self.reading == before
-            && self.vendor == vendor
-            && self.device == device
-            && self.series == series
-        {
+        if self.state == before {
             return;
         }
         self.format_all(cx);
-        if self.reading.availability != before.availability {
-            cx.emit(AvailabilityChanged(self.reading.availability));
+        if self.state.reading.availability != before.reading.availability {
+            cx.emit(AvailabilityChanged(self.state.reading.availability));
         }
         self.changed(cx);
     }
@@ -760,7 +774,7 @@ impl SourceData {
     /// Finds the device of the key in the catalog: a present entry whose persistent key is the
     /// key (or, for a GPU, whose identity gives the key, as phase 1 did).
     fn resolve_device(&self, snap: &Snapshot) -> Option<Resolved> {
-        let key = self.key.as_deref()?;
+        let key = self.state.key.as_deref()?;
         snap.devices
             .entries
             .iter()
@@ -779,10 +793,11 @@ impl SourceData {
     /// `core_clocks` (the CPU page's Core clocks lines), the engine total for the network
     /// aggregate (and its hidden kinds in `net_total`), else the metric's series on the device.
     fn resolve_series(&mut self, snap: &Snapshot, cx: &App) {
-        self.series.clear();
-        self.net_total = None;
-        self.minus.clear();
-        let (Some(idx), Some(of)) = (self.device.as_ref().map(|d| d.idx), self.series_of) else {
+        self.state.series.clear();
+        self.state.net_total = None;
+        self.state.minus.clear();
+        let (Some(idx), Some(of)) = (self.state.device.as_ref().map(|d| d.idx), self.series_of)
+        else {
             return;
         };
         match of {
@@ -790,7 +805,7 @@ impl SourceData {
                 let mut logical = Vec::new();
                 logical_devices(&snap.devices, &mut logical);
                 let lines = core_lines(&snap.system.cpu_topology, &logical);
-                self.series.extend(
+                self.state.series.extend(
                     lines
                         .devices
                         .iter()
@@ -800,9 +815,9 @@ impl SourceData {
             _ if self.kind == DeviceKind::Nets => {
                 if cx.has_global::<TlSettings>() {
                     let perf = &TlSettings::settings(cx).performance;
-                    self.net_total = Some(NetTotal::of(&snap.devices, perf));
+                    self.state.net_total = Some(NetTotal::of(&snap.devices, perf));
                 } else {
-                    self.net_total = Some(NetTotal {
+                    self.state.net_total = Some(NetTotal {
                         total: Some(idx),
                         hidden: SmallVec::new(),
                     });
@@ -811,10 +826,10 @@ impl SourceData {
                     device: idx,
                     metric,
                 });
-                self.series.extend(ids);
-                if let Some(n) = &self.net_total {
+                self.state.series.extend(ids);
+                if let Some(n) = &self.state.net_total {
                     for &metric in of.ids() {
-                        self.minus.extend(n.minus(metric).iter().copied());
+                        self.state.minus.extend(n.minus(metric).iter().copied());
                     }
                 }
             }
@@ -823,7 +838,7 @@ impl SourceData {
                     device: idx,
                     metric,
                 });
-                self.series.extend(ids);
+                self.state.series.extend(ids);
             }
         }
     }
@@ -832,8 +847,8 @@ impl SourceData {
     /// smoothing's time constant, as the core rows do (UI-PRF-018). The raw value while the
     /// smoothing is off or the Overview is paused.
     fn smooth(&mut self, snap: &Snapshot, raw: Metric<f32>, cx: &App) -> Metric<f32> {
-        let tau_s = self.followed.tau_s;
-        let Some(id) = self.series.first().copied() else {
+        let tau_s = self.state.followed.tau_s;
+        let Some(id) = self.state.series.first().copied() else {
             return raw;
         };
         if tau_s <= 0.0 || paused(cx).is_some() {
@@ -849,25 +864,28 @@ impl SourceData {
         }
     }
 
-    /// Resolves the device when the catalog changed and reads the record and the stats.
-    fn refresh(&mut self, snap: &Snapshot, stats: bool, cx: &App) {
+    /// Resolves the device when the catalog changed and reads the record and the stats. The
+    /// stats are worked out again with `stats`, and after a new lookup, whose series or minus
+    /// list may differ.
+    fn refresh(&mut self, snap: &Snapshot, mut stats: bool, cx: &App) {
         if self.catalog_version != Some(snap.devices.version) {
             self.catalog_version = Some(snap.devices.version);
-            self.device = self.resolve_device(snap);
+            self.state.device = self.resolve_device(snap);
             self.resolve_series(snap, cx);
             self.average = CoreAverage::default();
+            stats = true;
         }
-        let idx = self.device.as_ref().map(|d| d.idx);
-        self.vendor = match (self.kind, idx) {
+        let idx = self.state.device.as_ref().map(|d| d.idx);
+        self.state.vendor = match (self.kind, idx) {
             (DeviceKind::Gpu, Some(i)) => GpuVendor::of(snap, i),
             _ => GpuVendor::Unknown,
         };
         let metric = &self.selector.metric;
         let (mut value, second) = match idx {
-            Some(i) => box_reading(self.kind, metric, snap, i, self.net_total.as_ref()),
+            Some(i) => box_reading(self.kind, metric, snap, i, self.state.net_total.as_ref()),
             None => (Metric::default(), None),
         };
-        if metric.as_str() == METRIC_CORE_CLOCKS && self.series.is_empty() {
+        if metric.as_str() == METRIC_CORE_CLOCKS && self.state.series.is_empty() {
             value = Metric::with(Validity::Unsupported);
         }
         let availability = match (self.meta, idx) {
@@ -877,7 +895,7 @@ impl SourceData {
             _ => Availability::Available,
         };
         let Some(meta) = self.meta else {
-            self.reading.availability = availability;
+            self.state.reading.availability = availability;
             return;
         };
         if meta.smoothed && availability == Availability::Available {
@@ -885,26 +903,26 @@ impl SourceData {
         }
         let figures = if availability != Availability::Available {
             None
-        } else if stats || self.reading.availability != Availability::Available {
+        } else if stats || self.state.reading.availability != Availability::Available {
             #[cfg(any(test, feature = "test-hooks"))]
             self.stats_count.set(self.stats_count.get() + 1);
-            let range = self.followed.range;
-            // `self.minus` itself: the reading's availability is still the last one here.
-            self.series.first().and_then(|&id| {
-                let minus = line_minus(&self.minus, id);
+            let range = self.state.followed.range;
+            // `self.state.minus` itself: the reading's availability is still the last one here.
+            self.state.series.first().and_then(|&id| {
+                let minus = line_minus(&self.state.minus, id);
                 meta.stats_minus(snap, id, &minus, range)
             })
         } else {
-            self.reading.figures
+            self.state.reading.figures
         };
         let on = idx.map(|i| (snap, i));
-        self.reading = Reading {
+        self.state.reading = Reading {
             availability,
             value,
             second,
             bar_max: meta.bar_max(on),
             total: meta.value_total(on),
-            y_scale: meta.y_scale(on, self.followed.net),
+            y_scale: meta.y_scale(on, self.state.followed.net),
             offered: meta.offered_forms(on),
             figures,
         };
@@ -917,7 +935,7 @@ impl SourceData {
     fn format_name(&self, cx: &App) -> SharedString {
         let metric = &self.selector.metric;
         let key = match self.kind {
-            DeviceKind::Gpu => metric_name_key(metric, self.vendor),
+            DeviceKind::Gpu => metric_name_key(metric, self.state.vendor),
             kind => box_metric_name_key(kind, metric),
         };
         let Some(key) = key else {
@@ -925,7 +943,12 @@ impl SourceData {
         };
         match self.kind {
             DeviceKind::CpuLogical => {
-                let n = self.key.as_deref().and_then(cpu_number).unwrap_or_default();
+                let n = self
+                    .state
+                    .key
+                    .as_deref()
+                    .and_then(cpu_number)
+                    .unwrap_or_default();
                 tr_args(cx, key, &[("n", FluentValue::from(n))])
             }
             DeviceKind::Disk | DeviceKind::Net => {
@@ -953,7 +976,7 @@ impl SourceData {
     /// The name, value and stats text from the last reading.
     fn format_all(&mut self, cx: &App) {
         self.name = self.format_name(cx);
-        let r = self.reading;
+        let r = self.state.reading;
         let Some(meta) = self
             .meta
             .filter(|_| r.availability == Availability::Available)
@@ -962,7 +985,7 @@ impl SourceData {
             self.stats_text = SharedString::default();
             return;
         };
-        let net = self.followed.net.format;
+        let net = self.state.followed.net.format;
         let no_swap = self.kind == DeviceKind::Memory
             && self.selector.metric.as_str() == METRIC_MEM_SWAP
             && shown(r.value.validity)
