@@ -27,9 +27,11 @@ use std::sync::Arc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
-use tl_model::layout::{ContainerLayout, DeviceSelector, FormSet, WidgetCell, WidgetSetting};
+use tl_model::layout::{
+    ContainerLayout, DeviceSelector, FormSet, WidgetCell, WidgetContent, WidgetSetting,
+};
 
-use super::compose::smallest;
+use super::compose::{smallest, widget_smallest};
 
 /// The row unit, logical px.
 pub const ROW_UNIT: f32 = 24.;
@@ -121,6 +123,12 @@ impl InnerGrid {
     /// The smallest span of a widget with `forms`, from its smallest composition (UI-PRF-061).
     pub fn forms_min_span(&self, forms: FormSet) -> (u16, u16) {
         self.min_span(smallest(forms))
+    }
+
+    /// The smallest span of widget `w`: [`Self::forms_min_span`] for a metric widget, one item
+    /// for a group, the fixed widget's minimum (ADR-019 phase 2 "Minimum span").
+    pub fn widget_min_span(&self, w: &WidgetSetting) -> (u16, u16) {
+        self.min_span(widget_smallest(w))
     }
 }
 
@@ -250,6 +258,23 @@ pub fn default_span(forms: FormSet, cols: u16) -> (u16, u16) {
     }
 }
 
+/// The rows a new group or fixed widget spans (ADR-019 phase 2).
+pub const GROUP_ROWS: u16 = 8;
+
+/// The span a new widget `w` gets on a grid of `cols` columns (ADR-019 phase 2): with a chart
+/// half the columns (rounded up) × 4, any other metric widget all columns × 1, a group or fixed
+/// widget all columns × 8. On the GPU box's 6 columns a chart is 3 × 4, as [`default_span`].
+pub fn widget_default_span(w: &WidgetSetting, cols: u16) -> (u16, u16) {
+    let cols = cols.max(1);
+    match w.content {
+        WidgetContent::Metric(_) if w.forms.contains(FormSet::CHART) => {
+            (cols.div_ceil(2), CHART_SPAN.1)
+        }
+        WidgetContent::Metric(_) => (cols, 1),
+        WidgetContent::Group(_) | WidgetContent::Fixed(_) => (cols, GROUP_ROWS),
+    }
+}
+
 /// The first place a widget of `span` fits among `cells` on `cols` columns, scanning rows from
 /// `from` down and columns left to right. With no free place it goes under the lowest widget.
 pub fn first_free(cells: &[WidgetCell], span: (u16, u16), cols: u16, from: u16) -> WidgetCell {
@@ -280,8 +305,8 @@ pub fn first_free(cells: &[WidgetCell], span: (u16, u16), cols: u16, from: u16) 
 /// Adds `widget` to the grid layout `layout` (ADR-019 "Insert"): it takes the next id, its
 /// default span raised to its minimum span on `grid`, and the first free place. Returns its id.
 pub fn insert(layout: &mut ContainerLayout, mut widget: WidgetSetting, grid: &InnerGrid) -> u32 {
-    let (dw, dh) = default_span(widget.forms, grid.cols);
-    let (mw, mh) = grid.forms_min_span(widget.forms);
+    let (dw, dh) = widget_default_span(&widget, grid.cols);
+    let (mw, mh) = grid.widget_min_span(&widget);
     let span = (dw.max(mw).min(grid.cols), dh.max(mh));
     let cells: SmallVec<[WidgetCell; 16]> = layout.widgets.iter().filter_map(|w| w.cell).collect();
     let id = layout.next_id.max(
@@ -371,7 +396,7 @@ pub fn set_cell(
     let Some(at) = layout.widgets.iter().position(|w| w.id == id) else {
         return false;
     };
-    let min = grid.forms_min_span(layout.widgets[at].forms);
+    let min = grid.widget_min_span(&layout.widgets[at]);
     // Widgets without cells (none in a loaded grid layout) take no part.
     let index: SmallVec<[usize; 16]> = (0..layout.widgets.len())
         .filter(|&i| i == at || layout.widgets[i].cell.is_some())
@@ -527,7 +552,7 @@ pub fn pin(
     }
     let lowest = placed.iter().map(bottom).max().unwrap_or(0);
     for &i in &cut {
-        let span = grid.forms_min_span(kept[i].forms);
+        let span = grid.widget_min_span(&kept[i]);
         let c = first_free(&placed, span, cols, lowest);
         kept[i].cell = Some(c);
         placed.push(c);

@@ -18,7 +18,7 @@
 //! multiply. This module does no drawing and keeps no state.
 
 use gpui_kit::{Pixels, Size, px, size};
-use tl_model::layout::FormSet;
+use tl_model::layout::{FixedWidget, FormSet, GroupItems, WidgetContent, WidgetSetting};
 
 /// The header line of a Cell: name at the left, value at the right.
 pub const CELL_HEADER_H: f32 = 18.;
@@ -146,6 +146,67 @@ pub fn min_size(composition: Composition, forms: FormSet) -> Size<f32> {
 /// span from this (ADR-019 "Minimum span").
 pub fn smallest(forms: FormSet) -> Size<f32> {
     row_min(forms)
+}
+
+/// The composition each item of a group drawn as `items` uses (ADR-019 "Group widgets"): a
+/// Row for Rows; a Cell for Cells, or a Tile when the forms have no chart.
+pub fn group_item_composition(items: GroupItems, forms: FormSet) -> Composition {
+    match items {
+        GroupItems::Rows => Composition::Row,
+        GroupItems::Cells if forms.contains(FormSet::CHART) => Composition::Cell,
+        GroupItems::Cells => Composition::Tile,
+    }
+}
+
+/// The smallest item of a group drawn as `items` with `forms`, logical px: the Row minimum
+/// width × 18 px for Rows, the Cell or Tile minimum for Cells. It is the group's minimum span
+/// too: one item; more items scroll.
+pub fn group_item_min(items: GroupItems, forms: FormSet) -> Size<f32> {
+    min_size(group_item_composition(items, forms), forms)
+}
+
+/// The smallest fixed widget of `kind`, logical px (ADR-019 "Fixed widgets"): Processes and
+/// Timeline at their box body's kind minimum, Memory by app where its legend shows.
+pub fn fixed_min(kind: &FixedWidget) -> Size<f32> {
+    match kind {
+        FixedWidget::Processes => size(256., 192.),
+        FixedWidget::Timeline => size(376., 92.),
+        FixedWidget::MemoryByApp => size(160., 100.),
+        FixedWidget::Other(_) => row_min(FormSet::LABEL),
+    }
+}
+
+/// The smallest composition of widget `w`, logical px, which the inner grid takes its minimum
+/// span from: a metric widget's smallest composition, one item of a group, a fixed widget's
+/// minimum.
+pub fn widget_smallest(w: &WidgetSetting) -> Size<f32> {
+    match &w.content {
+        WidgetContent::Metric(_) => smallest(w.forms),
+        WidgetContent::Group(g) => group_item_min(g.options.items, w.forms),
+        WidgetContent::Fixed(kind) => fixed_min(kind),
+    }
+}
+
+/// `forms` drawn as `composition` at `area` (window px) and UI scale `scale`, whatever the size:
+/// a group's items keep the composition of their kind. A Row still drops parts by its width.
+pub fn compose_as(
+    composition: Composition,
+    forms: FormSet,
+    area: Size<Pixels>,
+    scale: f32,
+) -> Composed {
+    let scale = if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    };
+    match composition {
+        Composition::Row => Composed {
+            composition,
+            forms: row_forms(forms, f32::from(area.width) / scale),
+        },
+        _ => Composed { composition, forms },
+    }
 }
 
 /// The width the parts of a Row with `forms` take, logical px. The name column carries its
@@ -317,6 +378,41 @@ mod tests {
             FormSet::LABEL
         );
         assert_eq!(row_forms(FormSet::BAR, 1.), FormSet::BAR);
+    }
+
+    #[test]
+    fn group_items_and_widget_minimums() {
+        let chart = FormSet::CHART | FormSet::VALUE | FormSet::LABEL;
+        assert_eq!(
+            group_item_composition(GroupItems::Rows, chart),
+            Composition::Row
+        );
+        assert_eq!(
+            group_item_composition(GroupItems::Cells, chart),
+            Composition::Cell
+        );
+        let tile = FormSet::VALUE | FormSet::LABEL;
+        assert_eq!(
+            group_item_composition(GroupItems::Cells, tile),
+            Composition::Tile
+        );
+        assert_eq!(group_item_min(GroupItems::Rows, chart), size(120., 18.));
+        assert_eq!(group_item_min(GroupItems::Cells, chart), cell_min(chart));
+        assert_eq!(group_item_min(GroupItems::Cells, tile), tile_min(tile));
+        assert_eq!(fixed_min(&FixedWidget::Processes), size(256., 192.));
+        // A forced Row drops parts by its width; a forced Cell keeps its forms at any size.
+        let all = FormSet::all();
+        let row = compose_as(Composition::Row, all, size(px(130.), px(60.)), 1.);
+        assert_eq!(row.composition, Composition::Row);
+        assert_eq!(row.forms, row_forms(all, 130.));
+        let cell = compose_as(Composition::Cell, all, size(px(10.), px(10.)), 1.);
+        assert_eq!(
+            cell,
+            Composed {
+                composition: Composition::Cell,
+                forms: all
+            }
+        );
     }
 
     #[test]

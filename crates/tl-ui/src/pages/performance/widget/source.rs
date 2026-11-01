@@ -1056,6 +1056,11 @@ impl SourceStore {
         self.len() == 0
     }
 
+    /// The device key of the GPU in slot `n`, if the box shows one there.
+    pub fn slot(&self, n: u8) -> Option<Arc<str>> {
+        self.slots.get(usize::from(n)).cloned()
+    }
+
     fn slot_key(&self, device: &DeviceSelector) -> Option<Arc<str>> {
         match device {
             DeviceSelector::Slot(n) => self.slots.get(usize::from(*n)).cloned(),

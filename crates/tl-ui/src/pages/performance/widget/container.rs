@@ -3,8 +3,9 @@
 //! A [`WidgetContainer`] holds the widgets of one box or page. It places them: a grid layout on
 //! its inner snap grid (`grid.rs`), a flow layout with the placer its host gives (the GPU box
 //! presets, `overview/gpu_flow.rs`), or without one in list order on the grid. It keeps a map
-//! from widget id to its [`MetricWidget`] entity and a [`SourceData`] for every widget of the
-//! layout, from the page's [`SourceStore`].
+//! from widget id to its view, a [`MetricWidget`] or a [`GroupWidget`], and a [`SourceData`] for
+//! every metric widget of the layout, from the page's [`SourceStore`]. A group widget takes its
+//! members' sources from the same store itself.
 //!
 //! Render contract (UI-PRF-017, UI-PRF-019): samples go to the widgets only. The container
 //! listens to its sources for [`AvailabilityChanged`] and to nothing else on a sample, so it
@@ -29,7 +30,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
+    AnyView, AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, Size,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
     div, point, px, size,
@@ -37,9 +38,12 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
-use tl_model::layout::{ContainerLayout, DeviceSelector, WidgetCell, WidgetSetting, grid_cols};
+use tl_model::layout::{
+    ContainerLayout, DeviceSelector, GroupKind, WidgetCell, WidgetContent, WidgetSetting, grid_cols,
+};
 
 use super::grid::{self, InnerGrid, InnerPlacement};
+use super::group_widget::GroupWidget;
 use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use crate::hub::SnapshotHub;
@@ -75,6 +79,44 @@ pub struct FlowInput<'a> {
 /// Places a flow layout. A widget it leaves out takes no space and gets no entity.
 pub type FlowPlace = Rc<dyn Fn(&FlowInput<'_>) -> InnerPlacement>;
 
+/// The view of one placed widget.
+#[derive(Clone)]
+pub enum WidgetView {
+    Metric(Entity<MetricWidget>),
+    Group(Entity<GroupWidget>),
+}
+
+impl WidgetView {
+    fn any(&self) -> AnyView {
+        match self {
+            WidgetView::Metric(w) => w.clone().into(),
+            WidgetView::Group(g) => g.clone().into(),
+        }
+    }
+
+    /// Whether the view is the kind `content` needs.
+    fn fits(&self, content: &WidgetContent) -> bool {
+        matches!(
+            (self, content),
+            (WidgetView::Metric(_), WidgetContent::Metric(_))
+                | (WidgetView::Group(_), WidgetContent::Group(_))
+        )
+    }
+}
+
+/// The availability of a widget with no source of its own: a group is shown unless its kind is
+/// unknown to this build (its members come and go inside it); a fixed widget is not drawn here
+/// yet (tasklens-6swdr.8).
+fn content_availability(content: &WidgetContent) -> Availability {
+    match content {
+        WidgetContent::Group(g) if matches!(g.members, GroupKind::Other(_)) => {
+            Availability::Unknown
+        }
+        WidgetContent::Group(_) => Availability::Available,
+        WidgetContent::Metric(_) | WidgetContent::Fixed(_) => Availability::Gone,
+    }
+}
+
 /// The placement of a flow layout without a placer: the available widgets in list order, each
 /// at its default span raised to its minimum span, in the first free place on the grid.
 pub fn list_flow(input: &FlowInput<'_>) -> InnerPlacement {
@@ -85,9 +127,8 @@ pub fn list_flow(input: &FlowInput<'_>) -> InnerPlacement {
         if item.availability != Availability::Available {
             continue;
         }
-        let forms = item.setting.forms;
-        let (dw, dh) = grid::default_span(forms, cols);
-        let (mw, mh) = g.forms_min_span(forms);
+        let (dw, dh) = grid::widget_default_span(item.setting, cols);
+        let (mw, mh) = g.widget_min_span(item.setting);
         let taken: SmallVec<[WidgetCell; 16]> = cells.iter().map(|(_, c)| *c).collect();
         let cell = grid::first_free(&taken, (dw.max(mw), dh.max(mh)), cols, 0);
         cells.push((item.setting.id, cell));
@@ -108,8 +149,8 @@ pub struct WidgetContainer {
     sources: FxHashMap<u32, Entity<SourceData>>,
     /// One availability subscription per source entity.
     source_subs: FxHashMap<EntityId, Subscription>,
-    /// The entities of the placed widgets, by widget id.
-    widgets: FxHashMap<u32, Entity<MetricWidget>>,
+    /// The views of the placed widgets, by widget id.
+    widgets: FxHashMap<u32, WidgetView>,
     placement: InnerPlacement,
     /// The body size at the last paint.
     area: Size<Pixels>,
@@ -195,8 +236,24 @@ impl WidgetContainer {
         self.frozen.is_some()
     }
 
-    /// The entity of widget `id`, while it takes space.
+    /// The entity of metric widget `id`, while it takes space.
     pub fn widget(&self, id: u32) -> Option<&Entity<MetricWidget>> {
+        match self.widgets.get(&id)? {
+            WidgetView::Metric(w) => Some(w),
+            WidgetView::Group(_) => None,
+        }
+    }
+
+    /// The entity of group widget `id`, while it takes space.
+    pub fn group(&self, id: u32) -> Option<&Entity<GroupWidget>> {
+        match self.widgets.get(&id)? {
+            WidgetView::Group(g) => Some(g),
+            WidgetView::Metric(_) => None,
+        }
+    }
+
+    /// The view of widget `id`, while it takes space.
+    pub fn view(&self, id: u32) -> Option<&WidgetView> {
         self.widgets.get(&id)
     }
 
@@ -211,12 +268,31 @@ impl WidgetContainer {
     }
 
     /// The part of the page's demand this container adds: the GPU records while it places a
-    /// widget. A container with no placed widget asks for nothing.
+    /// widget, and the records of the members of the groups it places (fast CPU samples for
+    /// cores, as the core rows ask). A container with no placed widget asks for nothing.
     pub fn demand_part(&self) -> Demand {
-        Demand {
+        let mut demand = Demand {
             gpus: !self.placement.widgets.is_empty(),
             ..Demand::default()
+        };
+        for p in &self.placement.widgets {
+            let Some(WidgetContent::Group(g)) = self
+                .layout
+                .widgets
+                .iter()
+                .find(|w| w.id == p.id)
+                .map(|w| &w.content)
+            else {
+                continue;
+            };
+            match g.members {
+                GroupKind::Cores => demand.cpu_fast = true,
+                GroupKind::Disks => demand.disks = true,
+                GroupKind::Adapters => demand.nets = true,
+                GroupKind::Engines | GroupKind::Other(_) => {}
+            }
         }
+        demand
     }
 
     /// A new layout. Widgets whose id stays keep their entities; nothing renders when the
@@ -262,7 +338,10 @@ impl WidgetContainer {
         look: FlowLook,
         cx: &mut Context<Self>,
     ) -> Option<Entity<MetricWidget>> {
-        if let Some(widget) = self.widgets.get(&id) {
+        if let Some(view) = self.widgets.get(&id) {
+            let WidgetView::Metric(widget) = view else {
+                return None;
+            };
             let widget = widget.clone();
             widget.update(cx, |w, cx| w.set_flow(Some(look), cx));
             return Some(widget);
@@ -271,7 +350,7 @@ impl WidgetContainer {
         let source = self.sources.get(&id)?.clone();
         let hub = self.hub.clone();
         let widget = cx.new(|cx| MetricWidget::with_flow(setting, source, &hub, Some(look), cx));
-        self.widgets.insert(id, widget.clone());
+        self.widgets.insert(id, WidgetView::Metric(widget.clone()));
         Some(widget)
     }
 
@@ -431,10 +510,10 @@ impl WidgetContainer {
                 .iter()
                 .map(|w| FlowItem {
                     setting: w,
-                    availability: self
-                        .sources
-                        .get(&w.id)
-                        .map_or(Availability::Gone, |s| s.read(cx).availability()),
+                    availability: self.sources.get(&w.id).map_or_else(
+                        || content_availability(&w.content),
+                        |s| s.read(cx).availability(),
+                    ),
                 })
                 .collect();
             let input = FlowInput {
@@ -473,15 +552,46 @@ impl WidgetContainer {
         }
         let prefix = devices.len() > 1;
         let host_draws = self.host_draws();
+        let flow = self.layout.preset.is_some();
         for p in &placement.widgets {
             let Some(setting) = self.layout.widgets.iter().find(|w| w.id == p.id).cloned() else {
                 continue;
             };
+            let area = p.bounds.size;
+            // A widget whose content changed kind gets a new view.
+            if self
+                .widgets
+                .get(&p.id)
+                .is_some_and(|v| !v.fits(&setting.content))
+            {
+                self.widgets.remove(&p.id);
+                changed = true;
+            }
+            if let WidgetContent::Group(_) = setting.content {
+                if let Some(WidgetView::Group(group)) = self.widgets.get(&p.id) {
+                    group.update(cx, |g, cx| {
+                        g.set_flow(flow, cx);
+                        g.set_setting(setting, cx);
+                        g.set_edit_inset(editing, cx);
+                        g.set_size(area, cx);
+                    });
+                } else {
+                    let (hub, store) = (self.hub.clone(), Rc::clone(&self.store));
+                    let group = cx.new(|cx| {
+                        let mut g = GroupWidget::new(setting, &hub, store, flow, cx);
+                        g.set_edit_inset(editing, cx);
+                        g.set_size(area, cx);
+                        g
+                    });
+                    self.widgets.insert(p.id, WidgetView::Group(group));
+                    changed = true;
+                }
+                continue;
+            }
             let Some(source) = self.sources.get(&p.id).cloned() else {
                 continue;
             };
-            let area = p.bounds.size;
-            if let Some(widget) = self.widgets.get(&p.id) {
+            if let Some(WidgetView::Metric(widget)) = self.widgets.get(&p.id) {
                 widget.update(cx, |w, cx| {
                     w.set_setting(setting, source, cx);
                     w.set_device_prefix(prefix, cx);
@@ -500,7 +610,7 @@ impl WidgetContainer {
                     w.set_size(area, cx);
                     w
                 });
-                self.widgets.insert(p.id, widget);
+                self.widgets.insert(p.id, WidgetView::Metric(widget));
                 changed = true;
             }
         }
@@ -534,7 +644,7 @@ impl Render for WidgetContainer {
             if host_draws {
                 return None;
             }
-            let widget = self.widgets.get(&p.id)?;
+            let view = self.widgets.get(&p.id)?.any();
             Some(
                 div()
                     .absolute()
@@ -542,11 +652,7 @@ impl Render for WidgetContainer {
                     .top(p.bounds.top())
                     .w(p.bounds.size.width)
                     .h(p.bounds.size.height)
-                    .child(
-                        widget
-                            .clone()
-                            .cached(StyleRefinement::default().size_full()),
-                    ),
+                    .child(view.cached(StyleRefinement::default().size_full())),
             )
         });
         let id = container_id(&self.id);

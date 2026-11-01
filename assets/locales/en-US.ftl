@@ -897,6 +897,7 @@ perf-widget-not-reported = Not reported by this GPU
 perf-widget-not-reported-device = Not reported by this device
 perf-widget-unknown = Needs a newer tasklens
 perf-widget-empty = No widgets. Use Edit Widgets to add some.
+perf-widget-group-none = None found
 perf-widget-edit = Edit Widgets…
 perf-widget-add = Add Widget
 perf-widget-undo = Undo

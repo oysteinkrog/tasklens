@@ -41,7 +41,8 @@ use tl_model::validity::Validity;
 
 use super::compose::{
     CELL_BAR_PAD, CELL_HEADER_H, CELL_STATS_H, Composed, Composition, ROW_BAR_MIN_W, ROW_GAP,
-    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose, row_forms,
+    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose, compose_as,
+    row_forms,
 };
 use super::source::{Availability, SourceData};
 use crate::chart::labels::LABEL_ROW;
@@ -143,6 +144,16 @@ impl FlowLook {
     }
 }
 
+/// How a widget draws one member of a group widget (`group_widget.rs`): the composition every
+/// item of the group uses, whatever the item's size, and whether the item keeps the edit grip
+/// and gear's width free at the start of its first line. The group keeps the outline and corner
+/// margins itself, so the item gets no other edit margin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemberLook {
+    pub composition: Option<Composition>,
+    pub lead: bool,
+}
+
 /// What the widget shows, compared to tell whether a source change must render it again.
 #[derive(Clone, Debug, PartialEq)]
 struct Shown {
@@ -180,6 +191,8 @@ pub struct MetricWidget {
     device_prefix: bool,
     /// Edit Widgets is on: the first line keeps the grip and the gear's width free at its start.
     edit_inset: bool,
+    /// How the widget draws as a member of a group widget.
+    member: MemberLook,
     shown: Shown,
     chart: Option<Entity<ChartView>>,
     chart_key: Option<ChartKey>,
@@ -228,6 +241,7 @@ impl MetricWidget {
             source,
             device_prefix: false,
             edit_inset: false,
+            member: MemberLook::default(),
             shown: Shown {
                 availability: Availability::Gone,
                 forms: FormSet::empty(),
@@ -368,10 +382,22 @@ impl MetricWidget {
         self.notify(cx);
     }
 
+    /// The widget is a member of a group widget and draws as `look` says. It renders again only
+    /// when the look changed.
+    pub fn set_member(&mut self, look: MemberLook, cx: &mut Context<Self>) {
+        if self.member == look {
+            return;
+        }
+        self.member = look;
+        self.shown = self.read_shown(cx);
+        self.sync_chart(cx);
+        self.notify(cx);
+    }
+
     /// The left margin of the first text line: the grip and the gear in Edit Widgets, past the
     /// edge the parts keep free, else 0.
     fn lead(&self, s: f32) -> Pixels {
-        px(if self.edit_inset {
+        px(if self.edit_inset || self.member.lead {
             EDIT_INSET * s - EDIT_EDGE
         } else {
             0.
@@ -451,6 +477,7 @@ impl MetricWidget {
                 self.size.get(),
                 metrics(cx).ui_scale,
                 self.edit_inset,
+                self.member,
             )
             .forms
         };
@@ -669,19 +696,29 @@ impl MetricWidget {
         if self.flow.is_some() {
             FLOW_CLASS
         } else if self.shown.availability == Availability::Available {
-            compose_at(self.shown.forms, area, scale, self.edit_inset).class()
+            compose_at(self.shown.forms, area, scale, self.edit_inset, self.member).class()
         } else {
             UNAVAILABLE_CLASS
         }
     }
 }
 
-/// The composition of `forms` at `area`. In Edit Widgets (`edit`) a Row drops its parts by the
-/// width left inside the edit margins, so no part reaches under the resize corner; the
-/// composition itself is the applied view's.
-fn compose_at(forms: FormSet, area: Size<Pixels>, scale: f32, edit: bool) -> Composed {
-    let composed = compose(forms, area, scale);
-    if !edit || composed.composition != Composition::Row {
+/// The composition of `forms` at `area`, or the composition a group member keeps. In Edit
+/// Widgets (`edit`) a Row drops its parts by the width left inside the edit margins, so no part
+/// reaches under the resize corner; the composition itself is the applied view's. A group
+/// member with the edit lead drops them by the width right of the grip and the gear.
+fn compose_at(
+    forms: FormSet,
+    area: Size<Pixels>,
+    scale: f32,
+    edit: bool,
+    member: MemberLook,
+) -> Composed {
+    let composed = match member.composition {
+        Some(c) => compose_as(c, forms, area, scale),
+        None => compose(forms, area, scale),
+    };
+    if !(edit || member.lead) || composed.composition != Composition::Row {
         return composed;
     }
     let s = if scale.is_finite() && scale > 0. {
@@ -695,7 +732,12 @@ fn compose_at(forms: FormSet, area: Size<Pixels>, scale: f32, edit: bool) -> Com
     } else {
         EDIT_INSET * s - EDIT_EDGE
     };
-    let inner = f32::from(area.width) - 2. * EDIT_EDGE - EDIT_RIGHT * s - lead;
+    let margins = if edit {
+        2. * EDIT_EDGE + EDIT_RIGHT * s
+    } else {
+        0.
+    };
+    let inner = f32::from(area.width) - margins - lead;
     // Whatever is left must hold the value, which a Row never drops (`compose::row_forms`).
     Composed {
         composition: Composition::Row,
@@ -1075,7 +1117,7 @@ impl Render for MetricWidget {
         let available = self.shown.availability == Availability::Available;
         let forms = self.shown.forms;
         let body = if available {
-            self.composed = compose_at(forms, self.size.get(), scale, self.edit_inset);
+            self.composed = compose_at(forms, self.size.get(), scale, self.edit_inset, self.member);
             // The size probe asked for this render after a resize changed the kept forms:
             // read the parts that are now kept.
             if self.composed.forms != self.shown.kept {
@@ -1096,12 +1138,13 @@ impl Render for MetricWidget {
         let class = self.class();
         let view = cx.entity_id();
         let edit = self.edit_inset;
+        let member = self.member;
         let probe = class_probe(
             Rc::clone(&self.size),
             class,
             move |area| {
                 if available {
-                    compose_at(forms, area, scale, edit).class()
+                    compose_at(forms, area, scale, edit, member).class()
                 } else {
                     UNAVAILABLE_CLASS
                 }
