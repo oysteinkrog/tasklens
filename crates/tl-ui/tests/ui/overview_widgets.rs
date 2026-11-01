@@ -2379,10 +2379,24 @@ impl Rig<'_> {
 #[gpui_kit::test]
 fn overview_widget_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
     let mut r = open(cx);
+    // Wide enough for the box at 200 %.
+    r.vcx.simulate_resize(size(px(900.), px(1600.)));
     let (e, c) = r.editor(compositions(), 420., 360.);
     let mut previews = 0;
     for pct in [100u16, 150, 200] {
         r.set_ui_scale(pct);
+        // The width grows with the scale, so every composition shows at every scale; the
+        // height does not, so the 200 % rows are taller than the body.
+        let host = r.host.clone();
+        r.vcx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                if let Some(x) = h.editor.as_mut() {
+                    x.1 = 420. * f32::from(pct) / 100.;
+                }
+                cx.notify();
+            })
+        });
+        draw(r.vcx);
         r.start(&e);
         draw(r.vcx);
         draw(r.vcx);
