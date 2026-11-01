@@ -109,12 +109,18 @@ pub enum StatsRule {
 /// How the value form writes the current value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueText {
-    /// The value in the metric's format: "42%", "1755 MHz".
+    /// The value in the metric's format: "42.0%", "1755 MHz".
     Plain,
+    /// A whole percent, cut down to the 1% step the core rows and the load bars show: "41%"
+    /// for 41.7. The CPU, memory pressure and disk active time values (ADR-019 phase 2).
+    WholePercent,
     /// The value and its total, "3.1 / 16.0 GiB" (the UI-PRF-017 VRAM row). The total is the
     /// bar's denominator, else the scale's total. Just the value when the device does not
     /// report the total.
     OfTotal,
+    /// The value alone, "30.00 GiB", as the Memory box's rows show it; the total is still
+    /// known (the "No swap" text reads it) but not written (tasklens-6swdr.12).
+    Part,
     /// Read and write of a pair, "R 1.2 MB/s  W 340 KB/s".
     ReadWrite,
     /// Download and upload of a pair, "↓ 1.4 Mbps  ↑ 220 kbps".
@@ -262,8 +268,16 @@ pub const PERCENT: MetricMeta = MetricMeta {
     smoothed: false,
 };
 
-/// Every GPU engine: `engine:<key>` for each key of `GpuEngine::key`.
+/// Every GPU engine: `engine:<key>` for each key of `GpuEngine::key`. One decimal, as the GPU
+/// box's spark rows show it.
 pub const GPU_ENGINE: MetricMeta = PERCENT;
+
+/// A percent gauge shown as a whole percent ("42%"): CPU `total`, `kernel` and `pressure`,
+/// memory `pressure`, disk `active`.
+pub const WHOLE_PERCENT: MetricMeta = MetricMeta {
+    value_text: ValueText::WholePercent,
+    ..PERCENT
+};
 
 /// `vram`: VRAM in use, of the card's total.
 pub const GPU_VRAM: MetricMeta = MetricMeta {
@@ -311,10 +325,10 @@ pub const GPU_TEMP: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `load` of a logical CPU: its percent, smoothed as the core rows are.
+/// `load` of a logical CPU: its percent, smoothed and shown as the core rows are ("41%").
 pub const CORE_LOAD: MetricMeta = MetricMeta {
     smoothed: true,
-    ..PERCENT
+    ..WHOLE_PERCENT
 };
 
 /// `freq` of the CPU or a logical CPU: the clock, on the CPU page's Clock graph scale.
@@ -367,11 +381,12 @@ pub const CORE_CLOCKS: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `used`, `cached` and `available`: a part of memory, of the total.
+/// `used`, `cached` and `available`: a part of memory, of the total. The value is the part
+/// alone ("30.00 GiB"), as the Memory box's rows show it.
 pub const MEM_PART: MetricMeta = MetricMeta {
     unit: Unit::Bytes,
     format: ValueFormat::Bytes,
-    value_text: ValueText::OfTotal,
+    value_text: ValueText::Part,
     scale: ScaleRule::FixedTotal(mem_total),
     bar: BarMax::Total(mem_total),
     ..PERCENT
@@ -394,6 +409,7 @@ pub const MEM_COMMIT: MetricMeta = MetricMeta {
 
 /// `composition`: in use, cached and available stacked. The value is in use, of the total.
 pub const MEM_COMPOSITION: MetricMeta = MetricMeta {
+    value_text: ValueText::OfTotal,
     bar: BarMax::None,
     stats: StatsRule::None,
     lines: Lines::Stacked,
@@ -409,12 +425,13 @@ pub const DISK_RATE: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `io` of a disk or of every disk: read and write, two lines on one scale.
+/// `io` of a disk or of every disk: read filled and write dashed, two lines on one scale, as
+/// the `disk_charts` cells.
 pub const DISK_IO: MetricMeta = MetricMeta {
     value_text: ValueText::ReadWrite,
     stats: StatsRule::None,
     lines: Lines::Pair {
-        second_dashed: false,
+        second_dashed: true,
     },
     ..DISK_RATE
 };
@@ -440,13 +457,14 @@ pub const NET_RATE: MetricMeta = MetricMeta {
     ..PERCENT
 };
 
-/// `traffic` of an adapter or of every adapter: download filled and upload dashed, one scale.
+/// `traffic` of an adapter or of every adapter: download filled and upload as a lighter solid
+/// line, one scale, as the `combined` chart.
 pub const NET_TRAFFIC: MetricMeta = MetricMeta {
     value_text: ValueText::DownUp,
     bar: BarMax::None,
     stats: StatsRule::None,
     lines: Lines::Pair {
-        second_dashed: true,
+        second_dashed: false,
     },
     ..NET_RATE
 };
@@ -489,7 +507,7 @@ impl MetricMeta {
                 }
             }
             DeviceKind::Cpu => match k {
-                METRIC_CPU_TOTAL | METRIC_CPU_KERNEL | METRIC_PRESSURE => &PERCENT,
+                METRIC_CPU_TOTAL | METRIC_CPU_KERNEL | METRIC_PRESSURE => &WHOLE_PERCENT,
                 METRIC_FREQ => &CPU_FREQ,
                 METRIC_TEMP => &CPU_TEMP,
                 METRIC_POWER | METRIC_POWER_CORES => &CPU_POWER,
@@ -506,12 +524,12 @@ impl MetricMeta {
                 METRIC_MEM_USED | METRIC_MEM_CACHED | METRIC_MEM_AVAILABLE => &MEM_PART,
                 METRIC_MEM_SWAP => &MEM_SWAP,
                 METRIC_MEM_COMMIT => &MEM_COMMIT,
-                METRIC_PRESSURE => &PERCENT,
+                METRIC_PRESSURE => &WHOLE_PERCENT,
                 METRIC_MEM_COMPOSITION => &MEM_COMPOSITION,
                 _ => return None,
             },
             DeviceKind::Disk | DeviceKind::Disks => match k {
-                METRIC_DISK_ACTIVE => &PERCENT,
+                METRIC_DISK_ACTIVE => &WHOLE_PERCENT,
                 METRIC_DISK_READ | METRIC_DISK_WRITE => &DISK_RATE,
                 METRIC_DISK_IO => &DISK_IO,
                 METRIC_TEMP if kind == DeviceKind::Disk => &DISK_TEMP,
@@ -592,7 +610,7 @@ impl MetricMeta {
     /// The total the [`ValueText::OfTotal`] text names: the bar's denominator, else the
     /// scale's total. `None` for the other value texts.
     pub fn value_total(&self, on: On<'_>) -> Option<f32> {
-        if self.value_text != ValueText::OfTotal {
+        if !matches!(self.value_text, ValueText::OfTotal | ValueText::Part) {
             return None;
         }
         match (self.bar, self.scale) {
@@ -651,7 +669,11 @@ impl MetricMeta {
     ) {
         let one = |v: f32, out: &mut String| format_value(self.format, v, net, out);
         match self.value_text {
-            ValueText::Plain => one(value, out),
+            ValueText::Plain | ValueText::Part => one(value, out),
+            ValueText::WholePercent => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{}%", crate::components::progress::bucket(value));
+            }
             ValueText::OfTotal => {
                 one(value, out);
                 if let Some(total) = total {
@@ -1195,8 +1217,10 @@ mod tests {
         let mut out = String::new();
         let total = commit.value_total(on);
         commit.write_value(50.0 * gib, None, total, NetFormat::default(), &mut out);
+        // The value alone, as the Memory box's Commit row (tasklens-6swdr.12).
+        assert_eq!(total, Some(40.0 * gib));
         let mut expected = String::new();
-        units::bytes_of(&mut expected, 50 << 30, 40 << 30);
+        units::bytes(&mut expected, 50 << 30);
         assert_eq!(out, expected);
         // Composition has no bar, but its value names the total.
         let comp = at(METRIC_MEM_COMPOSITION);

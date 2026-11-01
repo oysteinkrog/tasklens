@@ -639,6 +639,14 @@ impl SourceData {
         &self.stats_text
     }
 
+    /// The current value while it is shown (valid or stale), in the metric's unit: the core
+    /// rows' clock column reads a logical CPU's `freq` from it (tasklens-6swdr.12).
+    pub fn value(&self) -> Option<f32> {
+        let r = &self.state.reading;
+        (r.availability == Availability::Available && shown(r.value.validity))
+            .then_some(r.value.value)
+    }
+
     /// How full the bar is, 0 to 1; `None` without a bar or a value.
     pub fn bar_fraction(&self) -> Option<f32> {
         let r = &self.state.reading;

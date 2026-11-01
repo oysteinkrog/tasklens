@@ -83,6 +83,14 @@ pub fn group_fill(
 
 /// Rows (D-029, D-040): see the module notes.
 pub fn rows_fill(n: usize, area: Size<Pixels>, forms: FormSet, scale: f32) -> GroupFill {
+    let min_w = group_item_min(GroupItems::Rows, forms).width;
+    rows_fill_min(n, area, min_w, scale)
+}
+
+/// [`rows_fill`] with columns at least `min_w` logical px wide. A cores group's core rows take
+/// the core cell's minimum (`parts::CELL_MIN_W`), so they get the columns of the CPU box's core
+/// rows in every layout (tasklens-6swdr.12).
+pub fn rows_fill_min(n: usize, area: Size<Pixels>, min_w: f32, scale: f32) -> GroupFill {
     let s = sane_scale(scale);
     let composition = Composition::Row;
     if n == 0 {
@@ -97,7 +105,7 @@ pub fn rows_fill(n: usize, area: Size<Pixels>, forms: FormSet, scale: f32) -> Gr
     );
     let gap = ITEM_GAP * s;
     let row_h = ROW_H * s;
-    let min_w = group_item_min(GroupItems::Rows, forms).width * s;
+    let min_w = min_w * s;
     let max_cols =
         |w: f32| (((w + gap) / (min_w + gap) + 1e-3).floor() as usize).clamp(1, MAX_ROW_COLS);
     let fits = |cols: usize| n.div_ceil(cols) as f32 * row_h <= h + 1e-3;

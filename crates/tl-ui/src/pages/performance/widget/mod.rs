@@ -19,6 +19,7 @@ pub mod fixed_widget;
 pub mod grid;
 pub mod group_fill;
 pub mod group_widget;
+pub mod look;
 pub mod members;
 pub mod menu;
 pub mod meta;

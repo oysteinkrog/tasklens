@@ -75,8 +75,8 @@ const CORE_SPARK_INSET: f32 = 2.;
 /// The core row pitch, logical px before `ui_scale`: one label row (UI-PRF-059).
 const CORE_ROW_H: f32 = LABEL_ROW;
 /// The narrowest core cell: the name and the percent with their gap. Logical px before
-/// `ui_scale`.
-const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
+/// `ui_scale`. A cores group's core rows take their columns by it in every layout.
+pub(crate) const CELL_MIN_W: f32 = NAME_W + PART_GAP + PCT_W;
 /// The box title row, logical px before `ui_scale`: the 20 px icon and the 16 px value fit.
 pub const TITLE_ROW: f32 = 22.;
 /// The space between a box's top border and its title row, logical px before `ui_scale`
@@ -111,7 +111,7 @@ pub fn clock_bucket(mhz: f32) -> u16 {
 }
 
 /// "812 MHz" or "3.9 GHz" for a [`clock_bucket`], with " (?)" when `mark`.
-fn clock_text(bucket: u16, mark: bool) -> SharedString {
+pub(crate) fn clock_text(bucket: u16, mark: bool) -> SharedString {
     let mut out = if bucket < 1000 {
         format!("{bucket} MHz")
     } else {

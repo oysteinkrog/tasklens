@@ -40,12 +40,12 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, relative, size,
 };
-use smallvec::smallvec;
 use tl_model::ids::SeriesId;
-use tl_model::layout::{FormSet, WidgetOptions, WidgetSetting};
+use tl_model::layout::{FormSet, WidgetSetting};
 use tl_model::validity::Validity;
 
 use super::compose::{
@@ -53,9 +53,10 @@ use super::compose::{
     ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose, compose_as,
     row_forms,
 };
+use super::look::{ChartLook, accent};
 use super::source::{Availability, SourceData};
 use crate::chart::labels::LABEL_ROW;
-use crate::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
+use crate::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
 use crate::components::validity::copy_text;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
@@ -68,8 +69,8 @@ use crate::pages::performance::overview::net_box::{
     NetModelRef, net_combined_element, net_direction_element,
 };
 use crate::pages::performance::overview::parts::{
-    ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
-    spark_labels, spark_row,
+    ChartSettings, CoreBarsLayout, CoreCellFit, METER_H, Meter, PLOT_LINE, SPARK_GRID, box_chart,
+    chart_section_versions, class_probe, core_bars_layout_marked, core_cell, spark_row,
 };
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
@@ -97,6 +98,9 @@ const FLOW_CLASS: u32 = u32::MAX - 1;
 
 /// Bar buckets: the bar notifies only when its fill moves by half a percent or more.
 const BAR_BUCKETS: f32 = 200.;
+
+/// The space above and below a core row's sparkline, logical px (`parts::core_sparks`).
+const CORE_SPARK_INSET: f32 = 2.;
 
 /// The debug selector of the root of widget `id` in container `container` (ADR-019: widget
 /// ids repeat across containers, so every widget selector has the container id).
@@ -203,10 +207,17 @@ impl FlowLook {
 /// item of the group uses, whatever the item's size, and whether the item keeps the edit grip
 /// and gear's width free at the start of its first line. The group keeps the outline and corner
 /// margins itself, so the item gets no other edit margin.
+///
+/// `core` draws a Row as a core row of the CPU box (`parts::core_board`, D-040): name,
+/// sparkline, meter, percent and the clock column the group hands in ([`MetricWidget::set_clock`]),
+/// dropping parts by the core rows' fit rules. `mark` widens the clock column for the BogoMIPS
+/// mark. A cores group of `load` in Rows draws its items so, in every layout (tasklens-6swdr.12).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemberLook {
     pub composition: Option<Composition>,
     pub lead: bool,
+    pub core: bool,
+    pub mark: bool,
 }
 
 /// What the widget shows, compared to tell whether a source change must render it again.
@@ -228,12 +239,12 @@ struct Shown {
     series: Option<SeriesId>,
 }
 
-/// What the chart spec is built from.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What the chart's spec and labels are built from: the metric's lines, the widget's options and
+/// the source's series (`look.rs`), the scale and the value format.
+#[derive(Clone, Debug, PartialEq)]
 struct ChartKey {
-    series: SeriesId,
+    look: ChartLook,
     y: YScale,
-    options: WidgetOptions,
     format: ValueFormat,
 }
 
@@ -257,9 +268,16 @@ pub struct MetricWidget {
     chart_cell: bool,
     /// The 1.1.0 part the widget draws, while its host draws its flow layout.
     flow: Option<FlowLook>,
+    /// The clock column of a core row ([`MemberLook::core`]): "3.9 GHz", from the group.
+    clock: SharedString,
+    /// The bar's colour: the accent of the source's device (`look::accent`).
+    bar_color: Hsla,
     /// The widget's size at its last paint, or the size the container gave.
     size: Rc<Cell<Size<Pixels>>>,
     composed: Composed,
+    /// The core row fit of the last render, as probe class bits ([`core_class`]); 0 for other
+    /// widgets.
+    core_bits: u32,
     settings: ChartSettings,
     settings_versions: [u64; 3],
     style_version: u64,
@@ -319,11 +337,14 @@ impl MetricWidget {
             chart_key: None,
             chart_cell: true,
             flow,
+            clock: SharedString::default(),
+            bar_color: current(cx).graph.gpu_line,
             size: Rc::new(Cell::new(size(px(0.), px(0.)))),
             composed: Composed {
                 composition: Composition::Row,
                 forms: FormSet::empty(),
             },
+            core_bits: 0,
             settings: ChartSettings::read(cx),
             settings_versions: chart_section_versions(cx),
             style_version: metrics(cx).style_version,
@@ -461,6 +482,22 @@ impl MetricWidget {
         self.shown = self.read_shown(cx);
         self.sync_chart(cx);
         self.notify(cx);
+    }
+
+    /// The clock column of a core row ("3.9 GHz"). It renders again only when the text changed.
+    pub fn set_clock(&mut self, clock: SharedString, cx: &mut Context<Self>) {
+        if self.clock == clock {
+            return;
+        }
+        self.clock = clock;
+        if self.member.core {
+            self.notify(cx);
+        }
+    }
+
+    /// The clock column's text, as shown on a core row.
+    pub fn clock_text(&self) -> &SharedString {
+        &self.clock
     }
 
     /// The left margin of the first text line: the grip and the gear in Edit Widgets, past the
@@ -651,44 +688,51 @@ impl MetricWidget {
 
     /// Creates, updates or drops the chart to match what is shown. Returns whether the chart
     /// was created or dropped, which the widget must render; a new spec only renders the chart.
-    fn sync_chart(&mut self, cx: &mut Context<Self>) -> bool {
+    /// What the chart is built from now, while the widget shows a chart.
+    fn chart_key(&self, cx: &App) -> Option<ChartKey> {
+        self.shown.series?;
         let src = self.source.read(cx);
-        let key = self
-            .shown
-            .series
-            .zip(src.meta())
-            .map(|(series, meta)| ChartKey {
-                series,
-                y: src.y_scale(),
+        let meta = src.meta()?;
+        Some(ChartKey {
+            look: ChartLook {
+                kind: src.kind(),
+                metric: src.selector().metric.0.clone(),
+                lines: meta.lines,
+                smoothed: meta.smoothed,
                 options: self.setting.options,
-                format: meta.format,
-            });
-        let Some(key) = key else {
+                kernel: self.settings.kernel,
+                series: src.series_list().iter().copied().collect(),
+                minus: src.minus_list().iter().copied().collect(),
+            },
+            y: src.y_scale(),
+            format: meta.format,
+        })
+    }
+
+    fn sync_chart(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.chart_key(cx) else {
             self.chart_key = None;
             return self.chart.take().is_some();
         };
-        if self.chart_key == Some(key) && self.chart.is_some() {
+        if self.chart_key.as_ref() == Some(&key) && self.chart.is_some() {
             return false;
         }
-        let old_format = self.chart_key.map(|k| k.format);
+        // The spec and the labels follow the key: a new source can bring a new value format
+        // (percent to bytes), a new line count or the kernel line.
+        let spec = chart_spec(&key, self.chart_cell, &self.settings, current(cx));
+        let labels = key.look.labels(key.format, self.chart_cell, cx);
         self.chart_key = Some(key);
-        let spec = chart_spec(key, self.chart_cell, &self.settings, current(cx));
         match &self.chart {
             Some(chart) => {
-                // A new source can bring a new value format (percent to bytes): the labels
-                // follow it, not only the spec.
-                let labels = (old_format != Some(key.format)).then(|| spark_labels(key.format));
                 chart.update(cx, |v, cx| {
                     v.set_spec(spec, cx);
-                    if let Some(labels) = labels {
-                        v.set_labels(labels, cx);
-                    }
+                    v.set_labels(labels, cx);
                 });
                 false
             }
             None => {
                 let hub = self.hub.clone();
-                self.chart = Some(box_chart(spec, spark_labels(key.format), &hub, cx));
+                self.chart = Some(box_chart(spec, labels, &hub, cx));
                 true
             }
         }
@@ -700,16 +744,14 @@ impl MetricWidget {
             return;
         }
         self.chart_cell = cell;
-        if let (Some(chart), Some(key)) = (&self.chart, self.chart_key) {
-            let spec = chart_spec(key, cell, &self.settings, current(cx));
-            chart.update(cx, |v, cx| v.set_spec(spec, cx));
-        }
+        self.rebuild_chart(cx);
     }
 
+    /// Builds the chart's spec and labels again from the current settings, theme and strings.
     fn rebuild_chart(&mut self, cx: &mut Context<Self>) {
-        if let (Some(chart), Some(key)) = (&self.chart, self.chart_key) {
-            let spec = chart_spec(key, self.chart_cell, &self.settings, current(cx));
-            chart.update(cx, |v, cx| v.set_spec(spec, cx));
+        if self.chart.is_some() {
+            self.chart_key = None;
+            self.sync_chart(cx);
         }
     }
 
@@ -746,6 +788,7 @@ impl MetricWidget {
             return;
         }
         self.strings_version = version;
+        self.rebuild_chart(cx);
         self.refresh(cx);
     }
 
@@ -754,7 +797,7 @@ impl MetricWidget {
         if self.flow.is_some() {
             FLOW_CLASS
         } else if self.shown.availability == Availability::Available {
-            self.composed.class()
+            self.composed.class() | self.core_bits
         } else {
             UNAVAILABLE_CLASS
         }
@@ -765,7 +808,7 @@ impl MetricWidget {
         if self.flow.is_some() {
             FLOW_CLASS
         } else if self.shown.availability == Availability::Available {
-            compose_at(self.shown.forms, area, scale, self.edit_inset, self.member).class()
+            probe_class(self.shown.forms, area, scale, self.edit_inset, self.member)
         } else {
             UNAVAILABLE_CLASS
         }
@@ -787,14 +830,13 @@ fn compose_at(
         Some(c) => compose_as(c, forms, area, scale),
         None => compose(forms, area, scale),
     };
+    if member.core && composed.composition == Composition::Row {
+        return core_composed(forms, area, scale, member);
+    }
     if !(edit || member.lead) || composed.composition != Composition::Row {
         return composed;
     }
-    let s = if scale.is_finite() && scale > 0. {
-        scale
-    } else {
-        1.
-    };
+    let s = sane(scale);
     // Without a name the whole line starts right of the grip and the gear.
     let lead = if forms.contains(FormSet::LABEL) {
         0.
@@ -814,18 +856,81 @@ fn compose_at(
     }
 }
 
-/// The chart of a widget: its series in the GPU colours, filled unless the Fill option is off,
-/// dashed with the Dashed option. A Cell's chart has grid lines and an outline; a Row's
+fn sane(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0. {
+        scale
+    } else {
+        1.
+    }
+}
+
+/// The width a core row's first line keeps free for the edit grip and gear, px.
+fn core_lead(member: MemberLook, s: f32) -> f32 {
+    if member.lead {
+        EDIT_INSET * s - EDIT_EDGE
+    } else {
+        0.
+    }
+}
+
+/// The core row layout of one item at `area`: one cell as wide as the item right of the lead,
+/// at least one row high, by the core rows' fit rules (`parts::core_bars_layout_marked`).
+fn core_layout(area: Size<Pixels>, s: f32, member: MemberLook) -> CoreBarsLayout {
+    let w = (f32::from(area.width) - core_lead(member, s)).max(0.);
+    let h = f32::from(area.height).max(LABEL_ROW * s);
+    core_bars_layout_marked(1, px(w), px(h), s, member.mark)
+}
+
+/// What a core row keeps at `area`: the name and the percent always, the sparkline and the
+/// meter while the fit has room for them.
+fn core_composed(forms: FormSet, area: Size<Pixels>, scale: f32, member: MemberLook) -> Composed {
+    let s = sane(scale);
+    let parts = core_cell(&core_layout(area, s, member), s);
+    let mut kept = FormSet::LABEL | FormSet::VALUE;
+    kept.set(FormSet::CHART, parts.spark_w > px(0.));
+    kept.set(FormSet::BAR, parts.meter_w > px(0.));
+    Composed {
+        composition: Composition::Row,
+        forms: forms & kept,
+    }
+}
+
+/// The probe class bits of a core row's fit at `area`: the clock column comes and goes inside
+/// one set of kept forms. 0 for other widgets.
+fn core_class(forms: FormSet, area: Size<Pixels>, scale: f32, member: MemberLook) -> u32 {
+    if !member.core || member.composition != Some(Composition::Row) || forms.is_empty() {
+        return 0;
+    }
+    let fit = core_layout(area, sane(scale), member).fit;
+    let n = match fit {
+        CoreCellFit::Full => 1,
+        CoreCellFit::NoGhz => 2,
+        CoreCellFit::SparkShrinks => 3,
+        CoreCellFit::MeterShrinks => 4,
+        CoreCellFit::NoSpark => 5,
+    };
+    n << 12
+}
+
+/// The probe class of `forms` at `area`: the composition and kept forms, and a core row's fit.
+fn probe_class(
+    forms: FormSet,
+    area: Size<Pixels>,
+    scale: f32,
+    edit: bool,
+    member: MemberLook,
+) -> u32 {
+    compose_at(forms, area, scale, edit, member).class() | core_class(forms, area, scale, member)
+}
+
+/// The chart of a widget: its series from the metric, the widget's options and the source
+/// (`look.rs`), in its device's accent. A Cell's chart has grid lines and an outline; a Row's
 /// sparkline has the sparkline grid.
-fn chart_spec(key: ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+fn chart_spec(key: &ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
+    let (series, stack) = key.look.series(theme);
     ChartSpec {
-        series: smallvec![ChartSeries {
-            id: key.series,
-            fill: key.options.fill.then_some(theme.graph.gpu_fill),
-            line: theme.graph.gpu_line,
-            dashed: key.options.dashed,
-            ..ChartSeries::default()
-        }],
+        series,
+        stack,
         y: key.y,
         range_ns: s.range_ns,
         grid: if cell {
@@ -877,12 +982,114 @@ fn value_style(m: &UiMetrics, size: Pixels) -> gpui_kit::TextStyleRefinement {
 }
 
 impl MetricWidget {
-    fn meter(&self, id: u32, theme: &TlTheme) -> gpui_kit::Div {
+    fn meter(&self, id: u32, _theme: &TlTheme) -> gpui_kit::Div {
         let p = part_id(&self.container, id, "bar");
         div().tl_selector(move || p).w_full().child(Meter {
             fraction: self.shown.fraction,
-            color: theme.graph.gpu_line,
+            color: self.bar_color,
         })
+    }
+
+    /// A core row of the CPU box (`parts::core_board`): the name at the left, the sparkline,
+    /// the meter, the percent and the clock at the right, placed by the core rows' fit at the
+    /// row's width. The meter and the sparkline grow with a taller row (D-040); the text stays
+    /// centred. Parts sit at offsets that stay put inside one fit, so a resize in one probe
+    /// class needs no render.
+    fn core_row(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
+        let (id, s) = (self.setting.id, m.ui_scale);
+        let lead = px(core_lead(self.member, s));
+        let l = core_layout(self.size.get(), s, self.member);
+        let parts = core_cell(&l, s);
+        let cell = l.cell_w;
+        let mut el = div().relative().size_full();
+        // The text style goes first: setting it replaces the nowrap and colour set before it.
+        let line = |part: &str, style: gpui_kit::TextStyleRefinement| {
+            let p = part_id(&self.container, id, part);
+            let mut el = div();
+            *el.text_style() = style;
+            el.tl_selector(move || p)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .text_color(theme.text_secondary)
+        };
+        if forms.contains(FormSet::LABEL) {
+            let name = line("name", t_xs(m)).left(lead);
+            el = el.child(name.child(self.shown.name.clone()));
+        }
+        if forms.contains(FormSet::CHART) && parts.spark_w > px(0.) {
+            let p = part_id(&self.container, id, "chart");
+            let inset = px(CORE_SPARK_INSET * s);
+            let mut spark = div()
+                .tl_selector(move || p)
+                .absolute()
+                .top(inset)
+                .bottom(inset)
+                .left(lead + parts.spark_x);
+            spark = if l.fit == CoreCellFit::SparkShrinks {
+                spark.right(cell - parts.spark_x - parts.spark_w)
+            } else {
+                spark.w(parts.spark_w)
+            };
+            if let Some(chart) = &self.chart {
+                spark = spark.child(cached(chart));
+            }
+            el = el.child(spark);
+        }
+        if forms.contains(FormSet::BAR) && parts.meter_w > px(0.) {
+            let p = part_id(&self.container, id, "bar");
+            let right = cell - parts.meter_x - parts.meter_w;
+            let mut meter = div()
+                .tl_selector(move || p)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(right)
+                .flex()
+                .items_center();
+            meter = if l.fit == CoreCellFit::SparkShrinks {
+                meter.w(parts.meter_w)
+            } else {
+                meter.left(lead + parts.meter_x)
+            };
+            let fill = self.shown.fraction.map(|f| f.clamp(0., 1.));
+            let track = div()
+                .relative()
+                .w_full()
+                .min_h(px(METER_H * s))
+                .h(relative(METER_H / LABEL_ROW))
+                .rounded(m.radius_small)
+                .bg(theme.divider)
+                .when_some(fill.filter(|f| *f > 0.), |d, f| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(relative(f))
+                            .rounded(m.radius_small)
+                            .bg(self.bar_color),
+                    )
+                });
+            el = el.child(meter.child(track));
+        }
+        if forms.contains(FormSet::VALUE) {
+            let pct = line("value", numeric_style(m, m.text.xs))
+                .right(cell - parts.pct_right)
+                .justify_end();
+            el = el.child(pct.child(self.shown.value.clone()));
+        }
+        if parts.ghz {
+            let clock = line("clock", numeric_style(m, m.text.xs))
+                .right_0()
+                .justify_end();
+            el = el.child(clock.child(self.clock.clone()));
+        }
+        el
     }
 
     fn chart_part(&self, id: u32) -> gpui_kit::Div {
@@ -1248,8 +1455,13 @@ impl Render for MetricWidget {
         let scale = m.ui_scale;
         let available = self.shown.availability == Availability::Available;
         let forms = self.shown.forms;
+        self.bar_color = {
+            let src = self.source.read(cx);
+            accent(src.kind(), src.selector().metric.as_str(), &theme).line
+        };
         let body = if available {
             self.composed = compose_at(forms, self.size.get(), scale, self.edit_inset, self.member);
+            self.core_bits = core_class(forms, self.size.get(), scale, self.member);
             // The size probe asked for this render after a resize changed the kept forms:
             // read the parts that are now kept.
             if self.composed.forms != self.shown.kept {
@@ -1262,6 +1474,7 @@ impl Render for MetricWidget {
             match self.composed.composition {
                 Composition::Cell => self.cell(kept, &m, &theme),
                 Composition::Tile => self.tile(kept, &m, &theme),
+                Composition::Row if self.member.core => self.core_row(kept, &m, &theme),
                 Composition::Row => self.row(kept, &m, &theme),
             }
         } else {
@@ -1276,7 +1489,7 @@ impl Render for MetricWidget {
             class,
             move |area| {
                 if available {
-                    compose_at(forms, area, scale, edit, member).class()
+                    probe_class(forms, area, scale, edit, member)
                 } else {
                     UNAVAILABLE_CLASS
                 }

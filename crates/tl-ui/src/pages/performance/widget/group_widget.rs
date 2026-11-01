@@ -43,19 +43,20 @@ use gpui_kit::{
     SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use tl_model::layout::{
-    DeviceSelector, FormSet, GroupItems, GroupSelector, SourceSelector, WidgetContent,
-    WidgetSetting,
+    DeviceSelector, FormSet, GroupItems, GroupKind, GroupSelector, MetricKey, SourceSelector,
+    WidgetContent, WidgetSetting,
 };
-use tl_model::layout_boxes::DeviceKind;
+use tl_model::layout_boxes::{DeviceKind, METRIC_FREQ, METRIC_LOAD};
 use tl_model::snapshot::ComponentMask;
 
 use super::compose::{Composition, group_item_composition};
-use super::group_fill::{GroupFill, fitted_into, group_fill};
+use super::group_fill::{GroupFill, fitted_into, group_fill, rows_fill_min};
 use super::members::{Members, members};
 use super::meta::MetricMeta;
 use super::metric_widget::{MemberLook, MetricWidget, part_id, widget_id};
-use super::source::SourceStore;
+use super::source::{SourceData, SourceStore};
 use crate::chart::ChartView;
+use crate::chart::labels::WARMING;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::overview::cpu_box::core_charts_element;
@@ -64,7 +65,10 @@ use crate::pages::performance::overview::disk_box::{
 };
 use crate::pages::performance::overview::layout::Arrange;
 use crate::pages::performance::overview::net_box::{NetModelRef, net_cells_element};
-use crate::pages::performance::overview::parts::{CoreBarsLayout, CoreBarsModel, core_board};
+use crate::pages::performance::overview::parts::{
+    CELL_MIN_W as CORE_CELL_MIN_W, CoreBarsLayout, CoreBarsModel, clock_bucket, clock_text,
+    core_board,
+};
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::timeline::OverviewPause;
 use crate::selector::TlSelector;
@@ -244,6 +248,8 @@ impl PartialEq for GroupFlowLook {
 struct Item {
     selector: SourceSelector,
     widget: Entity<MetricWidget>,
+    /// A core row's clock column: the logical CPU's `freq` source and its observation.
+    clock: Option<(Entity<SourceData>, Subscription)>,
 }
 
 /// One group widget of a container.
@@ -268,6 +274,8 @@ pub struct GroupWidget {
     flow_look: Option<GroupFlowLook>,
     /// Edit Widgets is on: the items keep the edit margins free.
     edit_inset: bool,
+    /// The clocks come from BogoMIPS: the core rows' clock column carries the mark (PERF-033).
+    clock_mark: bool,
     size: Size<Pixels>,
     scale: f32,
     fill: GroupFill,
@@ -330,6 +338,7 @@ impl GroupWidget {
             serial: 0,
             flow_look,
             edit_inset: false,
+            clock_mark: false,
             size: size(px(0.), px(0.)),
             scale: metrics(cx).ui_scale,
             fill: GroupFill::default(),
@@ -606,6 +615,84 @@ impl GroupWidget {
         self.group().map_or(GroupItems::Rows, |g| g.options.items)
     }
 
+    /// Whether the items are the CPU box's core rows: a cores group of `load` drawn as Rows. They
+    /// look as the box's core rows in every layout, with the clock column (tasklens-6swdr.12).
+    fn core_rows(&self) -> bool {
+        self.group().is_some_and(|g| {
+            g.members == GroupKind::Cores
+                && g.metric.as_str() == METRIC_LOAD
+                && g.options.items == GroupItems::Rows
+        })
+    }
+
+    /// The clock source of a core row's member: its logical CPU's `freq`.
+    fn clock_selector(selector: &SourceSelector) -> SourceSelector {
+        SourceSelector {
+            device: selector.device.clone(),
+            metric: MetricKey::new(METRIC_FREQ),
+        }
+    }
+
+    /// Takes or drops the clock source of `item` as the group's items are core rows or not, and
+    /// gives its widget the clock text.
+    fn sync_clock(&mut self, at: usize, cx: &mut Context<Self>) {
+        let core = self.core_rows();
+        let item = &mut self.items[at];
+        if !core {
+            item.clock = None;
+            return;
+        }
+        if item.clock.is_none() {
+            let selector = Self::clock_selector(&item.selector);
+            let source = self.store.borrow_mut().source(&selector, cx);
+            let sub = cx.observe(&source, Self::on_clock);
+            item.clock = Some((source, sub));
+        }
+        let clock = self.clock_text(at, cx);
+        self.items[at]
+            .widget
+            .update(cx, |w, cx| w.set_clock(clock, cx));
+    }
+
+    /// The clock column's text of item `at`: "3.9 GHz", "800 MHz", or "…" with no valid sample,
+    /// as the core rows.
+    fn clock_text(&self, at: usize, cx: &App) -> SharedString {
+        let mhz = self.items[at]
+            .clock
+            .as_ref()
+            .and_then(|(source, _)| source.read(cx).value());
+        match mhz {
+            Some(v) => clock_text(clock_bucket(v), self.clock_mark),
+            None => SharedString::new_static(WARMING),
+        }
+    }
+
+    /// A core's clock changed: only that core's item renders again, when its text changed.
+    fn on_clock(&mut self, source: Entity<SourceData>, cx: &mut Context<Self>) {
+        let mark = box_snapshot(&self.hub, cx).system.cpu.freq_is_bogomips;
+        if mark != self.clock_mark {
+            // Every clock text and the column's width change.
+            self.clock_mark = mark;
+            for at in 0..self.items.len() {
+                self.sync_clock(at, cx);
+            }
+            if self.relayout(cx) {
+                self.notify(cx);
+            }
+            return;
+        }
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.clock.as_ref().is_some_and(|(s, _)| *s == source));
+        if let Some(at) = at {
+            let clock = self.clock_text(at, cx);
+            self.items[at]
+                .widget
+                .update(cx, |w, cx| w.set_clock(clock, cx));
+        }
+    }
+
     fn arrange(&self) -> Arrange {
         self.group()
             .and_then(|g| g.options.arrange.as_deref())
@@ -655,12 +742,19 @@ impl GroupWidget {
                     let (hub, container) = (self.hub.clone(), self.container.clone());
                     let widget =
                         cx.new(|cx| MetricWidget::new(container, setting, source, &hub, cx));
-                    Item { selector, widget }
+                    Item {
+                        selector,
+                        widget,
+                        clock: None,
+                    }
                 }
             };
             items.push(item);
         }
         self.items = items;
+        for at in 0..self.items.len() {
+            self.sync_clock(at, cx);
+        }
     }
 
     /// The "+n more" text and the centred line.
@@ -707,8 +801,13 @@ impl GroupWidget {
         let forms = self.item_forms();
         let kind = self.items_kind();
         let n = self.items.len() + usize::from(self.hidden > 0);
+        let core = self.core_rows();
         // Edit Widgets keeps the applied view's columns and item kind inside its margins.
-        let applied = group_fill(kind, self.arrange(), n, self.size, forms, scale);
+        let applied = if core {
+            rows_fill_min(n, self.size, CORE_CELL_MIN_W, scale)
+        } else {
+            group_fill(kind, self.arrange(), n, self.size, forms, scale)
+        };
         let fill = if self.edit_inset {
             fitted_into(&applied, self.size, self.inner().size)
         } else {
@@ -721,6 +820,8 @@ impl GroupWidget {
             let look = MemberLook {
                 composition: Some(composition),
                 lead: edit && i == 0,
+                core,
+                mark: core && self.clock_mark,
             };
             item.widget.update(cx, |w, cx| {
                 w.set_member(look, cx);

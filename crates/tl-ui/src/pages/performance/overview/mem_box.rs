@@ -342,7 +342,7 @@ pub struct MemAppsPlaced(pub bool);
 impl EventEmitter<MemAppsPlaced> for MemBox {}
 
 /// The series of each row, in row order.
-const ROW_METRICS: [MetricId; ROWS] = [
+pub(crate) const ROW_METRICS: [MetricId; ROWS] = [
     MetricId::MEM_USED,
     MetricId::MEM_CACHED,
     MetricId::MEM_AVAILABLE,
@@ -532,7 +532,7 @@ fn fraction(part: u64, whole: u64) -> Option<f32> {
 }
 
 /// The colours of the five rows.
-fn row_colors(theme: &TlTheme) -> [Hsla; ROWS] {
+pub(crate) fn row_colors(theme: &TlTheme) -> [Hsla; ROWS] {
     let line = theme.graph.mem_line;
     let with = |a: f32| Hsla {
         a: line.a * a,

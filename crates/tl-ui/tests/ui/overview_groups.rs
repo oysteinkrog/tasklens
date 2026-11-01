@@ -397,7 +397,8 @@ impl Rig<'_> {
 
 /// 32 cores as Rows fill the widget's height as the core rows do (D-040): two columns of 16
 /// rows, each 30 px in a 480 px high body. In a narrow body they do not fit at 18 px and
-/// scroll, keeping 18 px rows.
+/// scroll, keeping 18 px rows. Core rows take their columns by the core cell's minimum width,
+/// as the CPU box's core rows (tasklens-6swdr.12).
 #[gpui_kit::test]
 fn overview_group_rows_fill_d040(cx: &mut TestAppContext) {
     let mut r = open(cx, 32, &[]);
@@ -439,8 +440,9 @@ fn overview_group_rows_fill_d040(cx: &mut TestAppContext) {
         "C0"
     );
 
-    // A narrow body: one column of 18 px rows that scrolls.
-    r.resize(250., 200.);
+    // A narrow body: one column of 18 px rows that scrolls. (At 250 px three core columns of
+    // 11 rows fit, as in the CPU box.)
+    r.resize(150., 200.);
     let fill = r.vcx.read_entity(&g, |g, _| g.fill().clone());
     assert!(fill.scrolls);
     assert_eq!(fill.cols, 1);

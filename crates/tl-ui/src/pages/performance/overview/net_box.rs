@@ -232,7 +232,7 @@ const KEY_RANGE: &str = "perf-net-heading-throughput";
 const KEY_EMPTY: &str = "perf-widget-empty";
 
 /// The upload line: the network colour blended with white, as the sidebar draws it.
-const UPLOAD_TINT: f32 = 0.3;
+pub(crate) const UPLOAD_TINT: f32 = 0.3;
 
 /// The window of the peak rows: the last 60 s of the aggregate series.
 const PEAK_WINDOW_NS: u64 = 60_000_000_000;

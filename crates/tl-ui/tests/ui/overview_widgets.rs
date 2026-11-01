@@ -2943,14 +2943,20 @@ fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
     let (a, name, value) = get(0);
     assert_eq!(a, Availability::Available);
     assert_eq!(name, "Utilization");
-    assert_eq!(value, fmt(ValueFormat::Percent, 42.0));
+    assert_eq!(
+        value, "42%",
+        "a whole percent, as the CPU box (tasklens-6swdr.12)"
+    );
 
     let (a, name, value) = get(1);
     assert_eq!(a, Availability::Available);
     assert_eq!(name, "In use");
-    let mut of_total = String::new();
-    tl_model::units::bytes_of(&mut of_total, 8 << 30, 32 << 30);
-    assert_eq!(value, of_total, "in use of the total");
+    let mut part = String::new();
+    tl_model::units::bytes(&mut part, 8 << 30);
+    assert_eq!(
+        value, part,
+        "in use alone, as the Memory box's row (tasklens-6swdr.12)"
+    );
 
     let (_, name, value) = get(2);
     assert_eq!((name.as_str(), value.as_str()), ("Swap", "No swap"));

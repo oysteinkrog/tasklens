@@ -231,7 +231,7 @@ const KEY_LEGEND_KERNEL: &str = "perf-legend-kernel";
 const KEY_POWER: &str = "perf-cpu-secondary-power";
 
 /// The span one core sparkline point averages (UI-PRF-018).
-const SPARK_MEAN_NS: u64 = 1_000_000_000;
+pub(crate) const SPARK_MEAN_NS: u64 = 1_000_000_000;
 
 /// One core's exponential moving average of `CPU_TOTAL`.
 #[derive(Clone, Copy, Debug, Default)]
