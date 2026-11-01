@@ -9071,6 +9071,99 @@ mod page {
         draw(r.vcx);
         assert!(r.vcx.debug_bounds(EMPTY_ID).is_some());
     }
+
+    /// Phase 1 gate (tasklens-lhliq.8): the only GPU goes and comes back. The box leaves the page
+    /// and returns; the saved layout is never touched, and the widget is drawn again.
+    #[gpui_kit::test]
+    fn overview_gpu_hotplug_keeps_the_saved_layout(cx: &mut TestAppContext) {
+        use tl_model::layout::{
+            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
+            SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
+        };
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let key = r
+            .vcx
+            .update(|_, cx| gpu.read(cx).sections()[0].key.0.clone());
+        let saved = ContainerLayout {
+            container: GPU_BOX_CONTAINER.to_owned(),
+            version: LAYOUT_VERSION,
+            preset: None,
+            widgets: vec![WidgetSetting {
+                id: 1,
+                source: SourceSelector {
+                    device: DeviceSelector::Key(key),
+                    metric: MetricKey::new("vram"),
+                },
+                forms: FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
+                cell: Some(WidgetCell {
+                    col: 0,
+                    row: 0,
+                    cols: 6,
+                    rows: 6,
+                }),
+                options: WidgetOptions::default(),
+                device_name: None,
+            }],
+            next_id: 2,
+        };
+        let stored = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                TlSettings::settings(cx)
+                    .performance
+                    .layouts
+                    .known(GPU_BOX_CONTAINER)
+                    .cloned()
+            })
+        };
+        let want = saved.clone();
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.layouts.set(saved));
+        });
+        draw(r.vcx);
+        let widget = leak_str(widget_id(1));
+        assert!(r.vcx.debug_bounds(widget).is_some(), "drawn before");
+
+        // The GPU is unplugged: the box is gone, the layout is not.
+        r.engine.publish_with(|s| {
+            let mut catalog = (*s.devices).clone();
+            catalog.version += 1;
+            catalog.entries = catalog
+                .entries
+                .iter()
+                .filter(|e| !matches!(e.identity, DeviceIdentity::Gpu { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+                .into();
+            s.devices = Arc::new(catalog);
+        });
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(box_id(BoxKind::Gpu)).is_none(), "no box");
+        assert!(r.vcx.debug_bounds(widget).is_none(), "no widget");
+        assert_eq!(stored(&mut r), Some(want.clone()), "gone: layout kept");
+
+        // The GPU is plugged in again: the same layout is drawn.
+        r.engine.publish_with(|s| {
+            let mut catalog = catalog(true);
+            catalog.version = s.devices.version + 1;
+            s.devices = Arc::new(catalog);
+        });
+        draw(r.vcx);
+        assert!(
+            r.vcx.debug_bounds(box_id(BoxKind::Gpu)).is_some(),
+            "box back"
+        );
+        assert!(r.vcx.debug_bounds(widget).is_some(), "drawn after");
+        assert_eq!(stored(&mut r), Some(want), "back: layout kept");
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        assert!(
+            r.vcx.update(|_, cx| gpu.read(cx).grid().is_some()),
+            "the box shows the grid layout"
+        );
+    }
 }
 
 /// The Overview page inside `PerformancePage` in the main window, reached through the sidebar
