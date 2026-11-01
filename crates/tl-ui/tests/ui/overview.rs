@@ -6704,6 +6704,42 @@ mod page {
         );
     }
 
+    /// tasklens-6swdr.13: a header value never touches the next cell's name: on one row the gap
+    /// from the last header part of a cell to the name of the cell beside it is at least `sp2`.
+    #[gpui_kit::test]
+    fn overview_disk_cell_head_gap_between_cells(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::overview::disk_box::{cell_id, head_id};
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let keys = more_disks(&mut r, 6);
+        r.page_action(&PerfOverviewSetBoxMode {
+            kind: "disk".into(),
+            mode: "disk_charts".into(),
+        });
+        set_disk_arrange(&mut r, "auto");
+        widest_rates(&mut r);
+        let gap = r.vcx.update(|_, cx| tl_ui::theme::metrics(cx).sp[2]);
+        let mut pairs = 0;
+        for (w, h) in [(1200., 900.), (900., 560.), (500., 900.)] {
+            r.vcx.simulate_resize(size(px(w), px(h)));
+            draw(r.vcx);
+            let shown: Vec<&DeviceKey> = keys.iter().take(shown_disks(&mut r)).collect();
+            for pair in shown.windows(2) {
+                let (a, b) = (r.bounds_of(cell_id(pair[0])), r.bounds_of(cell_id(pair[1])));
+                if a.top() != b.top() {
+                    continue;
+                }
+                let last = ["active", "read", "write"]
+                    .map(|p| r.bounds_of(head_id(pair[0], p)).right())
+                    .into_iter()
+                    .fold(px(0.), |m, x| if x > m { x } else { m });
+                let next = r.bounds_of(head_id(pair[1], "name")).left();
+                assert!(next - last >= gap - px(0.5), "{w}x{h} {last:?} to {next:?}");
+                pairs += 1;
+            }
+        }
+        assert!(pairs > 0, "no two cells on one row");
+    }
+
     /// crw.70: in `rows` mode a long model stays on one line inside its header row, and every
     /// rate cell keeps its whole text, down to a 500 px window.
     #[gpui_kit::test]

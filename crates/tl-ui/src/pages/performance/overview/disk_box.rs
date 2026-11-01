@@ -1340,7 +1340,8 @@ fn cell_head(
             .child(line().child(name).child(active))
             .child(line().justify_between().child(read).child(write))
     };
-    opens_device(head, Some(r.key.clone())).into_any_element()
+    // The right padding keeps the last value off the next cell's name (sp2 plus the cell gap).
+    opens_device(head.pr(m.sp[2]), Some(r.key.clone())).into_any_element()
 }
 
 /// A `disk_charts` cell of `cell` px: the header over the read and write chart, which starts
