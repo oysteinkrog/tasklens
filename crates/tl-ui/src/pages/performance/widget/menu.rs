@@ -572,13 +572,15 @@ pub fn disk_source_groups(snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
     let perf = cx
         .try_global::<TlSettings>()
         .map(|_| &TlSettings::settings(cx).performance);
+    // A disk lists the metrics it reports. The disk total sums the disks' series, so it lists
+    // its four metrics even before the first of its samples arrives.
     let items = |kind: DeviceKind, idx: DeviceIdx, metrics: &[(&str, &str)]| {
         metrics
             .iter()
             .filter_map(|(key, name_key)| {
                 let metric = MetricKey::new(key);
                 let (value, _) = box_reading(kind, &metric, snap, idx, None);
-                if value.validity == Validity::Unsupported {
+                if kind == DeviceKind::Disk && value.validity == Validity::Unsupported {
                     return None;
                 }
                 Some(SourceItem {

@@ -3934,9 +3934,11 @@ mod page {
                     n.render_count.get(),
                     n.notify_count.get(),
                 ];
+                // The disk rows are borrowed from the box's model for as long as `charts` lives.
+                let disk_rows = d.rows();
                 let mut charts: Vec<&Entity<ChartView>> = vec![c.total_chart(), &m.sparks()[0]];
                 charts.extend(g.sections().iter().map(|s| &s.chart));
-                if let Some(row) = d.rows().first() {
+                if let Some(row) = disk_rows.first() {
                     charts.extend([&row.read_chart, &row.write_chart]);
                 }
                 charts.extend([n.down_chart(), n.up_chart()]);
@@ -5933,12 +5935,16 @@ mod page {
         assert!(cs[0].size.height > px(CELL_MIN_H));
         assert_eq!(r.saved(), None, "nothing is written for the default");
 
-        // The gear's Layout items end with the Arrange submenu, the shown choice selected.
+        // The gear's Layout items end with the Arrange submenu, the shown choice selected, then
+        // "Edit Widgets…" (UI-PRF-061 phase 2).
         r.edit_layout();
         let (labels, items) = gear_menu(&mut r, BoxKind::Disk);
-        assert_eq!(
-            labels.last().map(String::as_str),
-            Some("Arrange"),
+        assert!(
+            labels.ends_with(&[
+                "Arrange".to_owned(),
+                String::new(),
+                "Edit Widgets…".to_owned()
+            ]),
             "{labels:?}"
         );
         let marks: Vec<_> = items.iter().map(|(l, c, _)| (l.as_str(), *c)).collect();
@@ -8521,6 +8527,7 @@ mod page {
         use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        leave_out_disks(&mut r);
         // A record for the GPU, so the rows show values.
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
@@ -8696,6 +8703,17 @@ mod page {
         }
     }
 
+    /// The Disk box's widgets draw `perf-widget-<id>` too, after the GPU box: hide the disks so
+    /// the Disk box leaves the page and a GPU widget's debug selector finds the GPU widget.
+    fn leave_out_disks(r: &mut Rig) {
+        use tl_ui::pages::performance::overview::disk_box::DISK_BOX_ID;
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.show_disks = false);
+        });
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(DISK_BOX_ID).is_none(), "no Disk box");
+    }
+
     /// Every widget the container places is drawn by the box exactly there: each widget's
     /// view, from the body's origin, within 1 px (painted edges snap to device pixels). The box
     /// draws nothing it does not place.
@@ -8761,6 +8779,7 @@ mod page {
         use tl_ui::pages::performance::overview::gpu_flow::widget_of;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        leave_out_disks(&mut r);
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;
@@ -8814,6 +8833,7 @@ mod page {
         use tl_ui::pages::performance::overview::gpu_flow::widget_of;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        leave_out_disks(&mut r);
         let publish = |r: &mut Rig, temp: Metric<f32>, power: f32| {
             r.engine.publish_with(|s| {
                 let sys = Arc::make_mut(&mut s.system);
@@ -8901,6 +8921,7 @@ mod page {
         use tl_ui::pages::performance::widget::container::container_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
+        leave_out_disks(&mut r);
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;

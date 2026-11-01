@@ -442,8 +442,10 @@ fn overview_disk_flow_matches_modes(cx: &mut TestAppContext) {
     }
 }
 
-/// The render contract on widgets: a disk sample renders the disks group, not the box or the
-/// container, and keeps the group's entity. The sections show the new rate.
+/// The render contract on widgets: a disk sample notifies the disks group, not the box or the
+/// container, and keeps the group's entity. The sections show the new rate. (GPUI draws the
+/// ancestors of a notified view again, so the box's render count is not checked here, as in
+/// the CPU and Memory widget tests.)
 #[gpui_kit::test]
 fn overview_disk_sample_renders_only_the_group(cx: &mut TestAppContext) {
     let mut r = open(cx, 1200., 900.);
@@ -473,7 +475,6 @@ fn overview_disk_sample_renders_only_the_group(cx: &mut TestAppContext) {
         r.publish_read(5.);
         let after = counts(&mut r);
         assert_eq!(after[0], before[0], "{mode}: the box does not notify");
-        assert_eq!(after[1], before[1], "{mode}: the box does not render");
         assert_eq!(after[2], before[2], "{mode}: the container does not notify");
         assert_eq!(after[3], before[3] + 1, "{mode}: the group notifies once");
         assert!(after[4] > before[4], "{mode}: the group renders");
