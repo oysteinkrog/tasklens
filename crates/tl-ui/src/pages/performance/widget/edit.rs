@@ -15,8 +15,9 @@
 //!   grip and the gear at the top left and the resize corner at the bottom right. The widget
 //!   keeps its text clear of all of it (`MetricWidget::set_edit_inset`), and the chrome lets
 //!   the wheel through, so the body scrolls as in the applied view;
-//! - the placement preview of a drag: an accent outline of the target cells, the widget at its
-//!   old place dimmed, and the other widgets where the drop puts them;
+//! - the placement preview of a drag: an accent outline of the target cells, the widget dimmed
+//!   in them, and the other widgets where the drop puts them. The preview is the drop's layout,
+//!   so no widget overlaps another and the outline lies in the target's text-free margin;
 //! - the keys of the `PerfWidgetEdit` context (Tab, Alt+arrows, Alt+Shift+arrows, Delete,
 //!   Ctrl+Z, Enter, Esc).
 //!
@@ -85,7 +86,7 @@ const MARK: f32 = 1.5;
 const DRAG_START: f32 = 3.;
 /// The opacity of the preview outline.
 const PREVIEW_OPACITY: f32 = 0.8;
-/// How much of the background covers a dragged widget at its old place, so it shows at 0.3.
+/// How much of the background covers a dragged widget in its target cells, so it shows at 0.3.
 const DIM: f32 = 0.7;
 
 /// Debug selectors and element ids.
@@ -1060,13 +1061,11 @@ impl WidgetEditor {
         cx.notify();
     }
 
-    /// The layout a drag shows: the drop's layout with the dragged widget at its old place.
+    /// The layout a drag shows: the drop's layout, the dragged widget in its target cells. At
+    /// its old place it would lie under the preview outline and under the widgets that close up
+    /// into the freed space, and their decorations would cover its text.
     fn drag_shown(drag: &WidgetDrag) -> ContainerLayout {
-        let mut shown = drag.preview.clone().unwrap_or_else(|| drag.base.clone());
-        if let Some(w) = shown.widgets.iter_mut().find(|w| w.id == drag.id) {
-            w.cell = Some(drag.start_cell);
-        }
-        shown
+        drag.preview.clone().unwrap_or_else(|| drag.base.clone())
     }
 
     /// The pointer moved while a widget is held: the preview follows the cells under it.

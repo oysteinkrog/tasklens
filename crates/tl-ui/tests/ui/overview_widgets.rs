@@ -2371,9 +2371,123 @@ impl Rig<'_> {
     }
 }
 
+impl Rig<'_> {
+    /// Every edit decoration widget `id` shows now: the grip, the gear, the resize corner, the
+    /// 1 px border and the selected outline.
+    fn decorations(&mut self, id: u32) -> Vec<(String, Bounds<Pixels>)> {
+        let mut out = Vec::new();
+        for (part, sel) in [
+            ("grip", grip_id(id)),
+            ("gear", gear_id(id)),
+            ("corner", corner_id(id)),
+        ] {
+            if let Some(b) = self.vcx.debug_bounds(leak(sel)) {
+                out.push((format!("widget {id} {part}"), b));
+            }
+        }
+        if let Some(f) = self.vcx.debug_bounds(leak(frame_id(id))) {
+            out.extend(ring(f, 1.).map(|b| (format!("widget {id} border"), b)));
+        }
+        if let Some(o) = self.vcx.debug_bounds(leak(outline_id(id))) {
+            out.extend(ring(o, OUTLINE).map(|b| (format!("widget {id} outline"), b)));
+        }
+        out
+    }
+
+    /// Drags widget `id` by its grip one cell right, one row down and one cell left, and by its
+    /// corner one cell larger and one cell smaller each way. While each preview shows, neither
+    /// the preview outline nor any decoration of any widget covers any text of any widget. Each
+    /// drag goes back to its start before the release, so the layout stays. Returns how many
+    /// previews overlapped the widget's old cells without matching them.
+    fn drag_sweep(
+        &mut self,
+        e: &Entity<WidgetEditor>,
+        c: &Entity<WidgetContainer>,
+        id: u32,
+        at: &str,
+    ) -> usize {
+        let body = self
+            .vcx
+            .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
+            .expect("body");
+        let pitch = self.vcx.read_entity(c, |c, _| {
+            let g = c.placement().grid;
+            (g.cw + g.gutter, g.row + g.gutter)
+        });
+        let before = self.working(e).expect("working");
+        let start = cell_of(&before, id).expect("cell");
+        let ids: Vec<u32> = before.widgets.iter().map(|w| w.id).collect();
+        let mut overlapping = 0;
+        for (grab, dx, dy) in [
+            ("move", 1., 0.),
+            ("move", 0., 1.),
+            ("move", -1., 0.),
+            ("resize", 1., 1.),
+            ("resize", -1., -1.),
+        ] {
+            let handle = if grab == "move" {
+                grip_id(id)
+            } else {
+                corner_id(id)
+            };
+            let from = self
+                .vcx
+                .debug_bounds(leak(handle))
+                .expect("handle")
+                .center();
+            if !body.contains(&from) {
+                continue;
+            }
+            self.press(from, 1);
+            self.move_to(point(from.x + px(pitch.0 * dx), from.y + px(pitch.1 * dy)));
+            let target = self.vcx.read_entity(e, |e, _| e.drag_cell());
+            if let Some(target) = target {
+                let drag = format!("{at}, {grab} by ({dx}, {dy}) to {target:?}");
+                if target != start && target.overlaps(&start) {
+                    overlapping += 1;
+                }
+                let preview = self.vcx.debug_bounds(PREVIEW_ID).expect("preview");
+                let shown = self.vcx.debug_bounds(leak(widget_id(id))).expect("widget");
+                assert!(
+                    (shown.origin - preview.origin).x.abs() < px(0.5)
+                        && (shown.origin - preview.origin).y.abs() < px(0.5)
+                        && (shown.size.width - preview.size.width).abs() < px(0.5)
+                        && (shown.size.height - preview.size.height).abs() < px(0.5),
+                    "{drag}: the widget shows in the target cells, {shown:?} vs {preview:?}"
+                );
+                let mut decorations: Vec<(String, Bounds<Pixels>)> = ring(preview, OUTLINE)
+                    .map(|b| ("preview".to_owned(), b))
+                    .to_vec();
+                for &w in &ids {
+                    decorations.extend(self.decorations(w));
+                }
+                for &w in &ids {
+                    for (part, b) in self.widget_texts(c, w) {
+                        for (d, db) in &decorations {
+                            assert!(
+                                !covers(*db, b),
+                                "{drag}: {d} {db:?} on widget {w} {part} {b:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            self.release(from);
+            assert_eq!(
+                self.working(e).as_ref(),
+                Some(&before),
+                "{at}: a drag back to its start changes nothing"
+            );
+        }
+        overlapping
+    }
+}
+
 /// In Edit Widgets no edit decoration covers any text of its widget: not the grip, the gear,
 /// the 1 px border, the selected outline, the resize corner or the placement preview, for every
-/// composition at scale 1.0, 1.5 and 2.0, with the widget selected and not. Every widget also
+/// composition at scale 1.0, 1.5 and 2.0, with the widget selected and not. While the selected
+/// widget is dragged one cell or resized so the target overlaps its old cells, neither the
+/// preview nor any decoration covers any text of any widget. Every widget also
 /// lies inside the body's content area: the outline is drawn inside the cell and the
 /// scrollbar's width stays free, as in the applied view (tasklens-lhliq.11, tasklens-lhliq.12).
 #[gpui_kit::test]
@@ -2463,15 +2577,8 @@ fn overview_widget_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
                 // A drag that lands on the widget's own cells previews them.
                 decorations.extend(ring(w, OUTLINE).map(|b| ("preview".to_owned(), b)));
                 let texts = r.widget_texts(&c, id);
-                let grip = decorations[0].1;
-                if selected && scroll.contains(&grip.center()) {
-                    let from = grip.center();
-                    r.press(from, 1);
-                    r.move_to(point(from.x + px(6.), from.y));
-                    let preview = r.vcx.debug_bounds(PREVIEW_ID).expect("preview");
-                    decorations.extend(ring(preview, OUTLINE).map(|b| ("drag".to_owned(), b)));
-                    r.release(from);
-                    previews += 1;
+                if selected {
+                    previews += r.drag_sweep(&e, &c, id, &at);
                 }
                 for (part, b) in &texts {
                     assert!(
@@ -2486,7 +2593,10 @@ fn overview_widget_edit_decorations_cover_no_text(cx: &mut TestAppContext) {
         }
         r.ed(&e, |e, _, cx| e.cancel(cx));
     }
-    assert!(previews >= 3, "the real drag preview ran: {previews}");
+    assert!(
+        previews >= 12,
+        "drags whose target overlaps the widget's old cells: {previews}"
+    );
 }
 
 /// The mouse wheel scrolls the Edit Widgets body over a widget and over its chrome, by the same
