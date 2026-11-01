@@ -35,6 +35,7 @@ pub mod disk_box;
 pub mod edit;
 pub mod fit;
 pub mod gpu_box;
+pub mod gpu_flow;
 pub mod inner_split;
 pub mod layout;
 pub mod mem_box;
@@ -61,6 +62,7 @@ use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::layout::{GPU_BOX_CONTAINER, convert_gpu_box};
 use tl_model::settings::{OverviewRange, StatusBarPlacement};
 use tl_model::snapshot::ComponentMask;
 
@@ -937,13 +939,36 @@ impl OverviewPage {
         self.notify(cx);
     }
 
-    /// Writes the layout to `[performance.overview]`.
+    /// Writes the layout to `[performance.overview]`. A saved flow layout of the GPU box follows
+    /// its mode, arrangement, split and hidden engines (ADR-019 "Flow placement": the box menu
+    /// edits the flow layout entry), since a build with that entry ignores the old keys. A grid
+    /// layout stays as it is.
     fn save_layout(&self, cx: &mut Context<Self>) {
         if !cx.has_global::<TlSettings>() {
             return;
         }
         let setting = self.layout.to_setting();
-        TlSettings::update(cx, |d| d.settings.performance.overview = Some(setting));
+        let flow = TlSettings::settings(cx)
+            .performance
+            .layouts
+            .known(GPU_BOX_CONTAINER)
+            .is_some_and(|l| l.preset.is_some());
+        let gpu = flow.then(|| {
+            let entry = setting
+                .grid
+                .iter()
+                .find(|e| e.kind == BoxKind::Gpu.key())
+                .cloned()
+                .unwrap_or_default();
+            convert_gpu_box(&entry)
+        });
+        TlSettings::update(cx, |d| {
+            let perf = &mut d.settings.performance;
+            perf.overview = Some(setting);
+            if let Some(layout) = gpu {
+                perf.layouts.set(layout);
+            }
+        });
     }
 
     /// The pointer entered or left a gap. The accent line shows after

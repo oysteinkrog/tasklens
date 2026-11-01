@@ -1985,6 +1985,77 @@ mod bottom {
         assert!(copy.ends_with("+1 more\n"), "{copy}");
     }
 
+    /// The GPU box's widget slots follow the GPUs it shows: the first two visible GPUs, so a
+    /// hidden GPU is skipped and a third is never placed (tasklens-lhliq.7).
+    #[gpui_kit::test]
+    fn overview_gpu_widget_slots_follow_shown_gpus(cx: &mut TestAppContext) {
+        use tl_model::layout::DeviceSelector;
+
+        let shown = |idx: &[u16]| -> Devices {
+            idx.iter()
+                .map(|i| {
+                    let id = gpu_id((*i - 10) as u8);
+                    (
+                        DeviceKey::from_identity(&id).expect("GPU key"),
+                        DeviceIdx(*i),
+                        SharedString::from(format!("GPU {i}")),
+                    )
+                })
+                .collect()
+        };
+        let key = |i: u16| {
+            DeviceKey::from_identity(&gpu_id((i - 10) as u8))
+                .expect("key")
+                .0
+        };
+        let mut r = open(cx, shown(&[10, 11, 12]), Vec::new(), (450., 200.));
+        let (gpu, _, _) = r.boxes();
+        let pinned_keys = |r: &mut Rig| {
+            r.vcx.update(|window, cx| {
+                gpu.update(cx, |g, cx| g.prepare_edit(cx));
+                let editor = gpu.read(cx).editor().clone();
+                editor.update(cx, |e, cx| e.start(window, cx));
+            });
+            draw(r.vcx);
+            let editor = r.vcx.update(|_, cx| gpu.read(cx).editor().clone());
+            let working = r
+                .vcx
+                .update(|_, cx| editor.read(cx).working_layout(cx))
+                .expect("Edit Widgets is on");
+            r.vcx
+                .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
+            draw(r.vcx);
+            let mut keys: Vec<std::sync::Arc<str>> = working
+                .widgets
+                .iter()
+                .filter_map(|w| match &w.source.device {
+                    DeviceSelector::Key(k) => Some(k.clone()),
+                    DeviceSelector::Slot(_) => None,
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            keys
+        };
+        let mut want = vec![key(10), key(11)];
+        want.sort();
+        assert_eq!(pinned_keys(&mut r), want, "three GPUs: the first two only");
+
+        // GPU 11 hidden: slot 1 is GPU 12.
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |g, cx| g.set_gpus(&shown(&[10, 12]), cx)));
+        draw(r.vcx);
+        let mut want = vec![key(10), key(12)];
+        want.sort();
+        assert_eq!(pinned_keys(&mut r), want, "the hidden GPU is skipped");
+
+        // One GPU: slot 1 is empty, so none of its widgets is pinned.
+        r.vcx
+            .update(|_, cx| gpu.update(cx, |g, cx| g.set_gpus(&shown(&[12]), cx)));
+        draw(r.vcx);
+        assert_eq!(pinned_keys(&mut r), vec![key(12)]);
+    }
+
     #[gpui_kit::test]
     fn gpu_box_second_section_only_when_both_fit(cx: &mut TestAppContext) {
         let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (450., 200.));
@@ -8081,25 +8152,17 @@ mod page {
     /// ends Edit Layout, and Edit Layout does not start while a box is in Edit Widgets.
     #[gpui_kit::test]
     fn overview_widget_edit_modes_exclusive(cx: &mut TestAppContext) {
-        use tl_model::layout::GPU_BOX_CONTAINER;
         use tl_ui::pages::performance::actions::PerfWidgetEditStart;
-        use tl_ui::pages::performance::widget::container::WidgetContainer;
-        use tl_ui::pages::performance::widget::edit::{WidgetEditor, any_editing, default_layout};
-        use tl_ui::pages::performance::widget::source::SourceStore;
+        use tl_ui::pages::performance::widget::edit::any_editing;
 
         let mut r = open(cx, true, 1200., 900.);
-        // Without a widget editor on the GPU box, the action does nothing.
         r.edit_layout();
-        r.page_action(&PerfWidgetEditStart);
-        assert!(r.editing());
-
         let hub = r.hub.clone();
-        let editor = r.vcx.update(|_, cx| {
-            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
-            let layout = default_layout(GPU_BOX_CONTAINER);
-            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
-            cx.new(|cx| WidgetEditor::new(c, &hub, cx))
-        });
+        // The GPU box hosts the widget editor (tasklens-lhliq.7).
+        let page = r.page.clone();
+        let editor = r
+            .vcx
+            .update(|_, cx| page.read(cx).gpu_box().read(cx).editor().clone());
         r.page_action(&PerfWidgetEditStart);
         assert!(!r.editing(), "Edit Widgets ends Edit Layout");
         assert!(r.vcx.read_entity(&editor, |e, _| e.is_editing()));
@@ -8114,6 +8177,246 @@ mod page {
         draw(r.vcx);
         assert!(!r.vcx.read_entity(&editor, |e, _| e.is_editing()));
         r.edit_layout();
+    }
+
+    /// UI-PRF-061, ADR-019 "Flow placement": the default and each old mode are flow layouts of
+    /// the preset's widgets. The box draws each widget's part where 1.1.0 drew it and records
+    /// that rectangle; Edit Widgets pins the drawn widgets there, keyed to the GPU.
+    #[gpui_kit::test]
+    fn overview_gpu_flow_matches_modes(cx: &mut TestAppContext) {
+        use tl_model::layout::DeviceSelector;
+        use tl_ui::pages::performance::actions::PerfWidgetEditStart;
+        use tl_ui::pages::performance::overview::gpu_box::{
+            chart_id, engine_cell_id, engine_row_id,
+        };
+        use tl_ui::pages::performance::overview::gpu_flow::{chart_of, engine_widget, widget_of};
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        for mode in ["engine_charts", "chart_engines", "chart"] {
+            r.page_action(&PerfOverviewSetBoxMode {
+                kind: "gpu".into(),
+                mode: mode.into(),
+            });
+            let (flow, engines) = r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let engines: Vec<&'static str> =
+                    g.sections()[0].engines.iter().map(|e| e.key).collect();
+                (g.flow().clone(), engines)
+            });
+            assert_eq!(
+                flow.preset.as_ref().map(|p| p.id.as_str()),
+                Some(mode),
+                "the mode is the preset"
+            );
+            assert!(engines.len() >= 2, "{mode}: {engines:?}");
+            // (widget, the part the box drew for it)
+            let mut parts: Vec<(u32, String)> = Vec::new();
+            if mode != "engine_charts" {
+                parts.push((chart_of(&flow, 0).expect("section chart"), chart_id(0)));
+            }
+            for k in &engines {
+                let id = engine_widget(&flow, 0, k).expect(k);
+                match mode {
+                    "engine_charts" => parts.push((id, engine_cell_id(0, k))),
+                    "chart_engines" => parts.push((id, engine_row_id(0, k))),
+                    _ => {}
+                }
+            }
+            if mode == "chart" {
+                for k in &engines {
+                    let id = engine_widget(&flow, 0, k);
+                    assert!(id.is_none(), "chart has no engine widgets: {k}");
+                }
+            }
+            let mut offset = None;
+            for (id, part) in &parts {
+                let drawn = r
+                    .vcx
+                    .update(|_, cx| gpu.read(cx).drawn_bounds(*id))
+                    .unwrap_or_else(|| panic!("{mode}: {part} recorded"));
+                let at = r.bounds_of(part.clone());
+                assert_eq!(drawn.size, at.size, "{mode}: {part}");
+                // One offset for every part: the body's origin.
+                let d = at.origin - drawn.origin;
+                assert_eq!(*offset.get_or_insert(d), d, "{mode}: {part}");
+            }
+            let vram = widget_of(&flow, 0, "vram").expect("VRAM widget");
+            assert!(
+                r.vcx
+                    .update(|_, cx| gpu.read(cx).drawn_bounds(vram))
+                    .is_some(),
+                "{mode}: the VRAM row is recorded"
+            );
+
+            // Edit Widgets pins every drawn widget, keyed to the GPU, on the grid.
+            r.page_action(&PerfWidgetEditStart);
+            let editor = r.vcx.update(|_, cx| gpu.read(cx).editor().clone());
+            let working = r
+                .vcx
+                .update(|_, cx| editor.read(cx).working_layout(cx))
+                .expect("Edit Widgets is on");
+            assert!(working.preset.is_none(), "{mode}: pinned to a grid layout");
+            for id in parts.iter().map(|p| p.0).chain([vram]) {
+                let w = working.widgets.iter().find(|w| w.id == id);
+                let w = w.unwrap_or_else(|| panic!("{mode}: widget {id} pinned"));
+                assert!(matches!(w.source.device, DeviceSelector::Key(_)), "{w:?}");
+                assert!(w.cell.is_some(), "{w:?}");
+            }
+            // Pinned in the order drawn: the parts top to bottom, left to right.
+            let cell = |id: u32| {
+                let c = working
+                    .widgets
+                    .iter()
+                    .find(|w| w.id == id)
+                    .and_then(|w| w.cell)
+                    .expect("cell");
+                (c.row, c.col)
+            };
+            let drawn_order = |id: u32| {
+                let b = r
+                    .vcx
+                    .update(|_, cx| gpu.read(cx).drawn_bounds(id))
+                    .expect("drawn");
+                (f32::from(b.origin.y) as i32, f32::from(b.origin.x) as i32)
+            };
+            let mut by_drawn: Vec<u32> = parts.iter().map(|p| p.0).chain([vram]).collect();
+            let mut by_cell = by_drawn.clone();
+            by_drawn.sort_by_key(|id| drawn_order(*id));
+            by_cell.sort_by_key(|id| cell(*id));
+            assert_eq!(by_cell, by_drawn, "{mode}");
+
+            r.vcx
+                .update(|_, cx| editor.update(cx, |e, cx| e.cancel(cx)));
+            draw(r.vcx);
+            assert!(r.vcx.update(|_, cx| gpu.read(cx).grid().is_none()));
+            // Back to the flow renderer: the box's own parts show again.
+            assert!(r.vcx.debug_bounds(leak_str(parts[0].1.clone())).is_some());
+        }
+    }
+
+    fn leak_str(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// A saved grid layout with VRAM as a chart: the box draws it through its widget
+    /// container, and the chart reads the VRAM history.
+    #[gpui_kit::test]
+    fn overview_gpu_vram_chart_widget_draws_history(cx: &mut TestAppContext) {
+        use tl_model::layout::{
+            ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION, MetricKey,
+            SourceSelector, WidgetCell, WidgetOptions, WidgetSetting,
+        };
+        use tl_ui::pages::performance::overview::gpu_box::EMPTY_ID;
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
+
+        let mut r = open_rooted(cx, true, 1200., 900.);
+        let page = r.page.clone();
+        let gpu = r.vcx.update(|_, cx| page.read(cx).gpu_box().clone());
+        let (key, idx) = r.vcx.update(|_, cx| {
+            let s = &gpu.read(cx).sections()[0];
+            (s.key.0.clone(), s.idx)
+        });
+        let layout = |widgets: Vec<WidgetSetting>| ContainerLayout {
+            container: GPU_BOX_CONTAINER.to_owned(),
+            version: LAYOUT_VERSION,
+            preset: None,
+            widgets,
+            next_id: 2,
+        };
+        let vram = WidgetSetting {
+            id: 1,
+            source: SourceSelector {
+                device: DeviceSelector::Key(key),
+                metric: MetricKey::new("vram"),
+            },
+            forms: FormSet::CHART | FormSet::VALUE | FormSet::LABEL,
+            cell: Some(WidgetCell {
+                col: 0,
+                row: 0,
+                cols: 6,
+                rows: 6,
+            }),
+            options: WidgetOptions::default(),
+            device_name: None,
+        };
+        let saved = layout(vec![vram]);
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.performance.layouts.set(saved));
+        });
+        draw(r.vcx);
+        assert!(r.vcx.update(|_, cx| gpu.read(cx).grid().is_some()));
+        assert!(
+            r.vcx.debug_bounds(leak_str(widget_id(1))).is_some(),
+            "the widget is drawn"
+        );
+        // The engine rows of the flow layout are gone.
+        assert!(
+            r.vcx
+                .debug_bounds(leak_str(
+                    tl_ui::pages::performance::overview::gpu_box::engine_cell_id(0, "gpu")
+                ))
+                .is_none()
+        );
+
+        // A VRAM history: the widget's chart reads it.
+        r.version += 1;
+        let version = r.version;
+        let newest = now_boot_ns();
+        let view = Arc::new(SeriesView {
+            id: SeriesId {
+                device: idx,
+                metric: MetricId::GPU_MEM,
+            },
+            version,
+            period_ns: 1_000_000_000,
+            samples: (0..10u64)
+                .map(|k| Sample::valid(newest - (9 - k) * 1_000_000_000, (k as f32 + 1.) * 1e9))
+                .collect::<Vec<_>>()
+                .into(),
+        });
+        r.engine.publish_with(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([view]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+        let container = r.vcx.update(|_, cx| gpu.read(cx).container().clone());
+        let (series, points) = r.vcx.update(|_, cx| {
+            let w = container.read(cx).widget(1).expect("widget entity").clone();
+            let chart = w.read(cx).chart().expect("a chart").clone();
+            let chart = chart.read(cx);
+            let series: Vec<SeriesId> = chart.series_ids().collect();
+            let points = chart
+                .resolved()
+                .first()
+                .and_then(|v| v.as_ref())
+                .map_or(0, |v| v.samples.len());
+            (series, points)
+        });
+        assert_eq!(
+            series,
+            [SeriesId {
+                device: idx,
+                metric: MetricId::GPU_MEM,
+            }]
+        );
+        assert_eq!(points, 10, "the chart draws the VRAM history");
+
+        // An empty grid layout shows the empty text.
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.performance.layouts.set(layout(Vec::new()))
+            });
+        });
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds(EMPTY_ID).is_some());
     }
 }
 
@@ -8837,29 +9140,19 @@ mod wired {
     /// Widgets takes the covers away.
     #[gpui_kit::test]
     fn overview_widget_edit_page_takes_only_scroll(cx: &mut TestAppContext) {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
         use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point};
-        use tl_model::layout::GPU_BOX_CONTAINER;
         use tl_ui::pages::performance::actions::PerfWidgetEditStart;
         use tl_ui::pages::performance::overview::box_menu::widget_edit_cover_id;
         use tl_ui::pages::performance::overview::layout::BoxKind;
-        use tl_ui::pages::performance::widget::container::WidgetContainer;
-        use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
-        use tl_ui::pages::performance::widget::source::SourceStore;
 
         // Every card on, so the Overview shows the GPU box.
         let mut r = open_with(cx, true);
         select(&mut r, OVERVIEW_KEY);
         let page = overview(&mut r).expect("an OverviewPage");
-        let editor = r.vcx.update(|_, cx| {
-            let hub = page.read(cx).hub().clone();
-            let store = Rc::new(RefCell::new(SourceStore::new(&hub)));
-            let layout = default_layout(GPU_BOX_CONTAINER);
-            let c = cx.new(|cx| WidgetContainer::new(GPU_BOX_CONTAINER, layout, &hub, store, cx));
-            cx.new(|cx| WidgetEditor::new(c, &hub, cx))
-        });
+        // The GPU box hosts the widget editor (tasklens-lhliq.7).
+        let editor = r
+            .vcx
+            .update(|_, cx| page.read(cx).gpu_box().read(cx).editor().clone());
         draw(r.vcx);
         let cover =
             |kind| -> &'static str { Box::leak(widget_edit_cover_id(kind).into_boxed_str()) };

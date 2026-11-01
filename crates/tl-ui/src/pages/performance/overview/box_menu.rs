@@ -487,6 +487,7 @@ impl OverviewPage {
         if self.is_editing() {
             self.on_edit_done(&PerfOverviewEditDone, window, cx);
         }
+        self.gpu.update(cx, |g, cx| g.prepare_edit(cx));
         editor.update(cx, |e, cx| e.start(window, cx));
         self.notify(cx);
     }

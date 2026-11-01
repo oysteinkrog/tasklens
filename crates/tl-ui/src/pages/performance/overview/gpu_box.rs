@@ -24,8 +24,16 @@
 //! layout above, with an inner splitter under the first section's chart, clamped so every
 //! engine row and the VRAM row stay in the body. `chart` is the utilization chart and the VRAM
 //! row only.
+//!
+//! D-041, ADR-019: these modes are the presets of the box's widget layout. A preset is a flow
+//! layout (`gpu_flow.rs`): its widget list says which engines, which VRAM row and which
+//! temperature and power line each section shows, and the rules above place them. The box
+//! records where it drew each widget, so Edit Widgets pins them to the grid where they were. A
+//! grid layout (the user's own widgets, after Apply) is drawn by the box's
+//! [`WidgetEditor`] and its `WidgetContainer`, one cached entity per widget; so is the box while
+//! Edit Widgets is on.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
@@ -33,11 +41,12 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, px, relative, size,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::layout::{ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP};
 use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
@@ -49,6 +58,10 @@ use super::super::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, sho
 use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
 use super::fit::fit_text;
+use super::gpu_flow::{
+    self, DrawnRects, chart_of, engine_widget, flow_layout, shows_engine, shows_line, shows_vram,
+    widget_of,
+};
 use super::inner_split::{InnerSplit, InnerSplitChanged, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode, SPLIT_RANGE};
 use super::mem_box::MeterRow;
@@ -67,6 +80,10 @@ use crate::chart::{
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::performance::widget::container::WidgetContainer;
+use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::pages::performance::widget::grid::SlotDevice;
+use crate::pages::performance::widget::source::SourceStore;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -158,6 +175,7 @@ const KEY_ENC_DEC: &str = "perf-overview-gpu-enc-dec";
 const KEY_MORE: &str = "perf-overview-more";
 const KEY_MORE_ENGINES: &str = "perf-overview-gpu-more-engines";
 const KEY_RANGE: &str = "perf-gpu-row-utilization";
+const KEY_EMPTY: &str = "perf-widget-empty";
 
 /// The joint between the temperature and the power.
 const SEP: &str = " · ";
@@ -184,6 +202,8 @@ pub struct GpuSection {
     pub vram: MeterRow,
     /// Temperature and power, each only when known.
     pub line: SharedString,
+    /// Whether the line shows the temperature and the power draw: the layout has their widgets.
+    line_parts: (bool, bool),
 }
 
 /// One engine row: label, meter and percent in `meter`, and a sparkline of the engine's series.
@@ -740,11 +760,63 @@ pub struct GpuBox {
     settings_versions: [u64; 3],
     style_version: u64,
     strings_version: u64,
+    /// The flow layout of the shown preset (ADR-019): which widgets each section shows.
+    flow: ContainerLayout,
+    /// The saved grid layout, when the user has one: the editor draws it.
+    grid: Option<ContainerLayout>,
+    /// Edit Widgets is on: the editor draws the body.
+    editing: bool,
+    editor: Entity<WidgetEditor>,
+    container: Entity<WidgetContainer>,
+    store: Rc<RefCell<SourceStore>>,
+    /// Where the last flow render drew each widget.
+    drawn: DrawnRects,
     _subs: [Subscription; 5],
+    _editor_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+}
+
+/// The flow layout `flow` with no widgets: what the container holds while the box draws a flow
+/// layout itself, so no widget entity or source does work.
+fn no_widgets(flow: &ContainerLayout) -> ContainerLayout {
+    ContainerLayout {
+        widgets: Vec::new(),
+        ..flow.clone()
+    }
+}
+
+/// The saved grid layout of the GPU box, if any.
+fn saved_grid(cx: &App) -> Option<ContainerLayout> {
+    if !cx.has_global::<TlSettings>() {
+        return None;
+    }
+    TlSettings::settings(cx)
+        .performance
+        .layouts
+        .known(GPU_BOX_CONTAINER)
+        .filter(|l| l.preset.is_none())
+        .cloned()
+}
+
+/// A probe that records where widget `id` of `flow` is drawn: at its parent's bounds, or at
+/// part `part` of `parts` side by side. `None` without a widget.
+fn probe(
+    drawn: &DrawnRects,
+    flow: &ContainerLayout,
+    id: Option<u32>,
+    part: usize,
+    parts: usize,
+) -> Option<AnyElement> {
+    let id = id?;
+    let w = flow.widgets.iter().find(|w| w.id == id)?;
+    Some(
+        drawn
+            .probe(id, w.source.metric.clone(), part, parts)
+            .into_any_element(),
+    )
 }
 
 impl GpuBox {
@@ -753,6 +825,21 @@ impl GpuBox {
         gpus: &[(DeviceKey, DeviceIdx, SharedString)],
         cx: &mut Context<Self>,
     ) -> Self {
+        let flow = flow_layout(MODES[0].id, Some(Arrange::Auto), None, &[]);
+        let store = Rc::new(RefCell::new(SourceStore::new(hub)));
+        let grid = saved_grid(cx);
+        let drawn = DrawnRects::default();
+        let shown = grid.clone().unwrap_or_else(|| no_widgets(&flow));
+        let container = {
+            let store = Rc::clone(&store);
+            cx.new(|cx| {
+                let mut c = WidgetContainer::new(GPU_BOX_CONTAINER, shown, hub, store, cx);
+                c.set_flow_placer(Some(gpu_flow::placer(drawn.clone())), cx);
+                c
+            })
+        };
+        let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
+        let editor_sub = cx.subscribe(&editor, Self::on_widget_edit);
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
@@ -793,6 +880,14 @@ impl GpuBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
+            flow,
+            grid,
+            editing: false,
+            editor,
+            container,
+            store,
+            drawn,
+            _editor_sub: editor_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -800,6 +895,123 @@ impl GpuBox {
         };
         this.build_sections(gpus, cx);
         this
+    }
+
+    /// The editor of the box's widgets (Edit Widgets, UI-PRF-061).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The container of the box's widgets.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The flow layout of the shown preset.
+    pub fn flow(&self) -> &ContainerLayout {
+        &self.flow
+    }
+
+    /// The saved grid layout the box shows, if any.
+    pub fn grid(&self) -> Option<&ContainerLayout> {
+        self.grid.as_ref()
+    }
+
+    /// Where the last flow render drew widget `id`, in the body, px.
+    pub fn drawn_bounds(&self, id: u32) -> Option<gpui_kit::Bounds<Pixels>> {
+        self.drawn.bounds(id)
+    }
+
+    /// Gets the container ready for Edit Widgets: with a flow layout it takes the preset's
+    /// widgets that the box shows or would show with more room, placed where the box drew them,
+    /// so the editor pins them there. Engines `performance.hidden_gpu_engines` hides, and the
+    /// decode engine of a shared encode/decode row, are left out. With a grid layout the
+    /// container already holds it.
+    pub fn prepare_edit(&mut self, cx: &mut Context<Self>) {
+        if self.editing || self.grid.is_some() {
+            return;
+        }
+        let mut layout = self.flow.clone();
+        let sections = &self.sections;
+        let mode = self.mode;
+        layout.widgets.retain(|w| {
+            let slot = match w.source.device {
+                tl_model::layout::DeviceSelector::Slot(n) => usize::from(n),
+                tl_model::layout::DeviceSelector::Key(_) => return true,
+            };
+            let Some(section) = sections.get(slot) else {
+                return true;
+            };
+            if w.forms == FormSet::CHART && mode != GpuMode::EngineCharts {
+                return true;
+            }
+            match w.source.metric.gpu_engine() {
+                Some(e) => section.engines.iter().any(|r| r.key == e.key()),
+                None => true,
+            }
+        });
+        self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+    }
+
+    /// Edit Widgets started or ended. When it ends, the box shows the saved layout again.
+    fn on_widget_edit(
+        &mut self,
+        _: Entity<WidgetEditor>,
+        ev: &WidgetEditEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            WidgetEditEvent::Started => self.editing = true,
+            WidgetEditEvent::Ended { .. } => {
+                self.editing = false;
+                self.grid = saved_grid(cx);
+                self.show_saved(cx);
+            }
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// The container holds the saved grid layout, or no widgets while the box draws a flow
+    /// layout itself.
+    fn show_saved(&mut self, cx: &mut Context<Self>) {
+        let shown = self.grid.clone().unwrap_or_else(|| no_widgets(&self.flow));
+        self.container.update(cx, |c, cx| c.set_layout(shown, cx));
+    }
+
+    /// The saved grid layout came, went or changed: outside Edit Widgets the box shows it.
+    fn sync_grid(&mut self, cx: &mut Context<Self>) {
+        let grid = saved_grid(cx);
+        if grid == self.grid {
+            return;
+        }
+        self.grid = grid;
+        if self.editing {
+            return;
+        }
+        self.show_saved(cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// The flow layout of the shown mode, arrangement, split and hidden names. Returns whether
+    /// it changed.
+    fn sync_flow(&mut self, cx: &mut Context<Self>) -> bool {
+        let arrange = (self.mode != GpuMode::Chart).then_some(self.arrange);
+        let split = (self.mode == GpuMode::ChartEngines
+            && self.chart_split.saved() != self.chart_split.default_share())
+        .then(|| self.chart_split.saved());
+        let flow = flow_layout(self.mode.id(), arrange, split, &self.box_hidden);
+        if flow == self.flow {
+            return false;
+        }
+        self.flow = flow;
+        if !self.editing && self.grid.is_none() {
+            self.show_saved(cx);
+        }
+        true
     }
 
     /// New GPUs from the page. Sections whose key is unchanged keep their chart.
@@ -817,18 +1029,40 @@ impl GpuBox {
             return;
         }
         self.build_sections(gpus, cx);
+        self.sync_slots(gpus, cx);
         #[cfg(any(test, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
 
-    /// Takes the box's saved hidden engine charts (D-029). The engine lists follow and only this
-    /// box renders again.
+    /// The GPUs of slot 0 and slot 1 for the widget sources and the editor: the first two GPUs
+    /// the box shows.
+    fn sync_slots(
+        &mut self,
+        gpus: &[(DeviceKey, DeviceIdx, SharedString)],
+        cx: &mut Context<Self>,
+    ) {
+        let slots: Vec<SlotDevice> = gpus
+            .iter()
+            .take(MAX_GPUS)
+            .map(|(key, _, name)| SlotDevice {
+                key: key.0.clone(),
+                name: std::sync::Arc::from(&**name),
+            })
+            .collect();
+        let keys: Vec<std::sync::Arc<str>> = slots.iter().map(|s| s.key.clone()).collect();
+        self.store.borrow_mut().set_slots(&keys, cx);
+        self.editor.update(cx, |e, _| e.set_slots(slots));
+    }
+
+    /// Takes the box's saved hidden engine charts (D-029): the preset's widget list leaves them
+    /// out. The engine lists follow and only this box renders again.
     pub fn set_hidden(&mut self, hidden: &[String], cx: &mut Context<Self>) {
         if self.box_hidden == hidden {
             return;
         }
         self.box_hidden = hidden.to_vec();
+        self.sync_flow(cx);
         let snap = box_snapshot(&self.hub, cx);
         self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
@@ -851,24 +1085,9 @@ impl GpuBox {
             .collect()
     }
 
-    /// Whether the VRAM row is left out.
+    /// Whether the VRAM row is left out: the preset's widget list has no VRAM widget.
     fn vram_hidden(&self) -> bool {
-        self.box_hidden.iter().any(|n| n == GPU_VRAM_ID)
-    }
-
-    /// The engine keys GPU `idx` hides: `performance.hidden_gpu_engines` and the engines whose
-    /// name is in the box's own list.
-    fn hidden_keys(&self, snap: &Snapshot, idx: DeviceIdx) -> Vec<String> {
-        let mut keys = self.hidden.clone();
-        if !self.box_hidden.is_empty() {
-            keys.extend(
-                device_engines(snap, idx)
-                    .into_iter()
-                    .filter(|(_, name)| self.box_hidden.iter().any(|n| **n == **name))
-                    .map(|(key, _)| key.to_string()),
-            );
-        }
-        keys
+        !shows_vram(&self.flow, 0)
     }
 
     /// The shown mode's id.
@@ -882,6 +1101,7 @@ impl GpuBox {
         let mode = GpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            self.sync_flow(cx);
             let snap = box_snapshot(&self.hub, cx);
             if self.sync_engines(&snap, cx) {
                 self.sync_text(&snap, true);
@@ -900,6 +1120,7 @@ impl GpuBox {
     pub fn set_arrange(&mut self, arrange: Arrange, cx: &mut Context<Self>) {
         if arrange != self.arrange {
             self.arrange = arrange;
+            self.sync_flow(cx);
             if matches!(self.mode, GpuMode::EngineCharts | GpuMode::ChartEngines) {
                 cx.notify();
             }
@@ -926,6 +1147,7 @@ impl GpuBox {
     /// Takes the saved share for `chart_engines`. Nothing changes while the gap is held.
     pub fn set_split(&mut self, share: f32, cx: &mut Context<Self>) {
         if self.mode == GpuMode::ChartEngines && self.chart_split.set_share(share) {
+            self.sync_flow(cx);
             cx.notify();
         }
     }
@@ -1063,6 +1285,7 @@ impl GpuBox {
                             color: theme.graph.gpu_line,
                         },
                         line: SharedString::default(),
+                        line_parts: (false, false),
                     }
                 }
             };
@@ -1083,8 +1306,23 @@ impl GpuBox {
         let mut changed = false;
         for i in 0..self.sections.len() {
             let idx = self.sections[i].idx;
-            let hidden = self.hidden_keys(snap, idx);
-            let wants = engine_wants(snap, idx, &hidden, self.mode);
+            let flow = &self.flow;
+            let mut wants = engine_wants(snap, idx, &self.hidden, self.mode);
+            // The preset's widget list says which engines show. A shared encode/decode row shows
+            // while either engine has its widget.
+            wants.retain(|w| {
+                shows_engine(flow, i, w.key)
+                    || (w.name == KEY_ENC_DEC && shows_engine(flow, i, "dec"))
+            });
+            let parts = if self.mode == GpuMode::ChartEngines {
+                shows_line(flow, i)
+            } else {
+                (false, false)
+            };
+            if parts != self.sections[i].line_parts {
+                self.sections[i].line_parts = parts;
+                changed = true;
+            }
             let same = {
                 let rows = &self.sections[i].engines;
                 rows.len() == wants.len()
@@ -1235,6 +1473,7 @@ impl GpuBox {
 
     /// Applies the chart settings and the hidden engines when one of their sections changed.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        self.sync_grid(cx);
         let versions = chart_section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1360,16 +1599,40 @@ fn format_section(s: &mut GpuSection, t: Option<&GpuTotals>) {
     s.vram.fraction = (vram_known && t.mem_total.value > 0)
         .then(|| (t.mem_used.value as f64 / t.mem_total.value as f64) as f32);
     let mut line = String::new();
-    if shown(t.temp_c.validity) {
+    let (temp, power) = s.line_parts;
+    if temp && shown(t.temp_c.validity) {
         format_value(ValueFormat::Celsius, t.temp_c.value, unit, &mut line);
     }
-    if shown(t.power_w.validity) {
+    if power && shown(t.power_w.validity) {
         if !line.is_empty() {
             line.push_str(SEP);
         }
         format_value(ValueFormat::Watts, t.power_w.value, unit, &mut line);
     }
     s.line = line.into();
+}
+
+/// The debug selector of the empty box's text.
+pub const EMPTY_ID: &str = "perf-overview-gpu-widgets-empty";
+
+/// "No widgets. Use Edit Widgets to add some.", centred in the body (UI-PRF-061).
+fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
+    let mut text = div();
+    *text.text_style() = t_xs(m);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            text.debug_selector(|| EMPTY_ID.to_owned())
+                .text_color(theme.text_secondary)
+                .child(tr(cx, KEY_EMPTY)),
+        )
+        .into_any_element()
 }
 
 /// The section's chart.
@@ -1453,6 +1716,7 @@ fn engine_cell(
     i: usize,
     e: &EngineRow,
     cell: Size<Pixels>,
+    probe: Option<AnyElement>,
     m: &UiMetrics,
     theme: &TlTheme,
 ) -> AnyElement {
@@ -1479,6 +1743,7 @@ fn engine_cell(
         .child(fit_text(e.meter.value.clone()));
     div()
         .debug_selector(move || engine_cell_id(i, key))
+        .relative()
         .flex()
         .flex_col()
         .flex_none()
@@ -1508,6 +1773,20 @@ fn engine_cell(
                         .cached(StyleRefinement::default().size_full()),
                 ),
         )
+        .children(probe)
+        .into_any_element()
+}
+
+/// A part that records where a widget is drawn: `el` with the probes over it.
+fn probed(el: AnyElement, probes: impl IntoIterator<Item = Option<AnyElement>>) -> AnyElement {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w_full()
+        .child(el)
+        .children(probes.into_iter().flatten())
         .into_any_element()
 }
 
@@ -1635,13 +1914,16 @@ impl GpuBox {
             if i > 0 {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
+            let (drawn, flow) = (&self.drawn, &self.flow);
             let engine = |e: &EngineRow| {
                 let key = e.key;
                 div()
                     .debug_selector(move || engine_row_id(i, key))
+                    .relative()
                     .flex_none()
                     .w_full()
                     .child(spark_row(&e.meter, Some(&e.chart), shown.meters, m, theme))
+                    .children(probe(drawn, flow, engine_widget(flow, i, key), 0, 1))
             };
             let mut section_rows = div()
                 .debug_selector(move || rows_id(i))
@@ -1663,19 +1945,37 @@ impl GpuBox {
                 }
             }
             if keep.vram {
-                section_rows =
-                    section_rows.child(spark_row(&section.vram, None, shown.meters, m, theme));
+                section_rows = section_rows.child(probed(
+                    spark_row(&section.vram, None, shown.meters, m, theme),
+                    [probe(drawn, flow, widget_of(flow, i, METRIC_VRAM), 0, 1)],
+                ));
             }
             if with_rows && keep.line {
-                section_rows = section_rows.child(text_row(&section.line, m, theme));
+                let (temp, power) = section.line_parts;
+                let parts = usize::from(temp) + usize::from(power);
+                section_rows = section_rows.child(probed(
+                    text_row(&section.line, m, theme),
+                    [
+                        probe(drawn, flow, widget_of(flow, i, METRIC_TEMP), 0, parts),
+                        probe(
+                            drawn,
+                            flow,
+                            widget_of(flow, i, METRIC_POWER),
+                            parts.saturating_sub(1),
+                            parts,
+                        ),
+                    ],
+                ));
             }
             if keep.more {
                 section_rows = section_rows.child(text_row(&more, m, theme));
             }
             let chart = div()
                 .debug_selector(move || chart_id(i))
+                .relative()
                 .min_h(px(MIN_CHART_H * s))
-                .child(chart_element(section));
+                .child(chart_element(section))
+                .children(probe(drawn, flow, chart_of(flow, i), 0, 1));
             if !shown.chart {
                 body = body.child(col.flex_basis(px(0.)).child(section_rows));
                 continue;
@@ -1796,11 +2096,16 @@ impl GpuBox {
             }
             let cells = grid_cells(
                 &fit.grid,
-                section
-                    .engines
-                    .iter()
-                    .take(fit.shown)
-                    .map(|e| engine_cell(i, e, fit.grid.cell, m, theme)),
+                section.engines.iter().take(fit.shown).map(|e| {
+                    let p = probe(
+                        &self.drawn,
+                        &self.flow,
+                        engine_widget(&self.flow, i, e.key),
+                        0,
+                        1,
+                    );
+                    engine_cell(i, e, fit.grid.cell, p, m, theme)
+                }),
                 m.sp[2],
                 grid_id(i),
             );
@@ -1828,7 +2133,16 @@ impl GpuBox {
                 rest = rest.child(text_row(&section.cells_more, m, theme));
             }
             if keep.vram {
-                rest = rest.child(spark_row(&section.vram, None, self.meters, m, theme));
+                rest = rest.child(probed(
+                    spark_row(&section.vram, None, self.meters, m, theme),
+                    [probe(
+                        &self.drawn,
+                        &self.flow,
+                        widget_of(&self.flow, i, METRIC_VRAM),
+                        0,
+                        1,
+                    )],
+                ));
             }
             if keep.more {
                 rest = rest.child(text_row(&more, m, theme));
@@ -1858,9 +2172,34 @@ impl Render for GpuBox {
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        let body = match self.mode {
-            GpuMode::EngineCharts => self.charts_body(&m, &theme, cx),
-            GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, cx),
+        let editor = self
+            .editor
+            .clone()
+            .cached(StyleRefinement::default().size_full());
+        let body = if self.editing || self.grid.is_some() {
+            // The user's widgets, or Edit Widgets: the editor draws them.
+            let empty = !self.editing && self.grid.as_ref().is_some_and(|g| g.widgets.is_empty());
+            div()
+                .relative()
+                .size_full()
+                .child(editor)
+                .when(empty, |d| d.child(empty_text(&m, &theme, cx)))
+                .into_any_element()
+        } else {
+            self.drawn.clear();
+            let body = match self.mode {
+                GpuMode::EngineCharts => self.charts_body(&m, &theme, cx),
+                GpuMode::ChartEngines | GpuMode::Chart => self.list_body(&m, &theme, cx),
+            };
+            // The editor sits under the body with no widgets, so its container knows the body's
+            // size when Edit Widgets starts.
+            div()
+                .relative()
+                .size_full()
+                .child(div().absolute().top_0().left_0().size_full().child(editor))
+                .child(self.drawn.body_probe())
+                .child(body)
+                .into_any_element()
         };
         let first = self.sections.first();
         let pick = |f: fn(&GpuSection) -> &SharedString| first.map(f).cloned().unwrap_or_default();
