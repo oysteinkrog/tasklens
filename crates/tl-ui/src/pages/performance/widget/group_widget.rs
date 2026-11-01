@@ -338,7 +338,9 @@ impl GroupWidget {
             serial: 0,
             flow_look,
             edit_inset: false,
-            clock_mark: false,
+            // From the current snapshot, so a widget made after the first clock sample (Edit
+            // Widgets, Apply) shows the BogoMIPS mark and its column width from the start.
+            clock_mark: box_snapshot(hub, cx).system.cpu.freq_is_bogomips,
             size: size(px(0.), px(0.)),
             scale: metrics(cx).ui_scale,
             fill: GroupFill::default(),

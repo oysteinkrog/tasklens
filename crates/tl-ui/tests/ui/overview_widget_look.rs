@@ -174,7 +174,7 @@ struct Rig<'a> {
 }
 
 /// The Overview page at 1920 × 1200 with every box, the kernel line on, memory totals, one
-/// sample per core of load (41.7%) and clock (3.94 GHz), and each disk's and eth0's rates.
+/// sample per core of load (41.7%) and clock (3.94 GHz, BogoMIPS), and each disk's and eth0's rates.
 fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
@@ -183,6 +183,10 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         sys.header.version += 1;
         sys.header.validity = Validity::Valid;
         sys.memory.validity = Validity::Valid;
+        // BogoMIPS clocks carry a mark that changes the clock column, so a widget made after
+        // the first sample (Edit Widgets, Apply) must take it from the snapshot, not wait for a
+        // notification.
+        sys.cpu.freq_is_bogomips = true;
         sys.memory.total = 64 * GIB;
         sys.memory.used = 23 * GIB;
         sys.memory.available = 41 * GIB;
@@ -811,7 +815,7 @@ fn masked_widget(grid: &WidgetLook, flow: &WidgetLook) -> WidgetLook {
 /// series and their line colours, the legend, the value and rate texts, a core row's clock
 /// column and part order, the group's column count, and the widget's forms and options. The
 /// CPU box has the kernel line on, so its total chart has two series and the Total and Kernel
-/// legend in both layouts; its core rows show "41%" and "3.9 GHz". Each disk and eth0 has a
+/// legend in both layouts; its core rows show "41%" and "3.9 GHz (?)". Each disk and eth0 has a
 /// read and a write rate, so the Disk sections and cells and the Network adapter cells have
 /// charts and rates to compare.
 #[gpui_kit::test]
@@ -938,7 +942,7 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                             for l in &look.items {
                                 assert_eq!(
                                     l.clock,
-                                    Some(Some("3.9 GHz".to_owned())),
+                                    Some(Some("3.9 GHz (?)".to_owned())),
                                     "{preset}: the clock column"
                                 );
                                 assert_eq!(
