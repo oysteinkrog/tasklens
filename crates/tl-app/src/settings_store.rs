@@ -332,8 +332,11 @@ fn deserialize_by_section<T: Stored>(kind: FileKind, mut table: toml::Table) -> 
 }
 
 /// The suffix of the copy of `settings.toml` kept before the first save after a load that
-/// converted old settings to widget layouts (ADR-019).
-pub const PRE_LAYOUTS_SUFFIX: &str = ".pre-layouts-v1";
+/// converted old settings to widget layouts (ADR-019): `.pre-layouts-v{LAYOUT_VERSION}`, now
+/// `.pre-layouts-v2`. A copy an older build kept under another version stays as it is.
+pub fn pre_layouts_suffix() -> String {
+    format!(".pre-layouts-v{}", tl_model::layout::LAYOUT_VERSION)
+}
 
 /// How long the store waits after the last change before it saves (ADR-011 Save).
 pub const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -380,7 +383,7 @@ struct Written {
     /// so the entry is only touched once the user changes them.
     startup: StartupSettings,
     /// Set by [`Store::keep_pre_layouts_copy`]: the next settings write first copies the file
-    /// on disk to `settings.toml.pre-layouts-v1`. Cleared once that copy exists. While the copy
+    /// on disk to `settings.toml.pre-layouts-v2`. Cleared once that copy exists. While the copy
     /// fails, no settings write happens.
     pre_layouts_copy: bool,
 }
@@ -483,7 +486,7 @@ impl Store {
         })
     }
 
-    /// Makes the first settings write copy the file on disk to `settings.toml.pre-layouts-v1`
+    /// Makes the first settings write copy the file on disk to `settings.toml.pre-layouts-v2`
     /// (mode 0600) before it writes, unless that copy already exists. Called when loading
     /// converted old settings to widget layouts (ADR-019). While the copy fails, settings.toml is
     /// not written; the next change, `write_settings_now` or `flush` tries again.
@@ -648,17 +651,17 @@ fn save_settings_file(target: &Target, text: String, written: &mut Written) -> R
     save_file(target, text, &mut written.settings)
 }
 
-/// Copies `path` to `<path>.pre-layouts-v1` in the same directory with mode 0600, unless that
+/// Copies `path` to `<path>.pre-layouts-v2` ([`pre_layouts_suffix`]) in the same directory with mode 0600, unless that
 /// file exists. The copy goes through `write_atomic`, so a failed or cut-off copy never leaves
 /// a file under the final name. Returns Ok when there is no `path` to copy.
 fn keep_pre_layouts(path: &Path) -> Result<(), String> {
+    let suffix = pre_layouts_suffix();
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(PRE_LAYOUTS_SUFFIX);
+    name.push(&suffix);
     let to = path.with_file_name(name);
     let failed = |e: String| {
-        let message = format!(
-            "Could not keep settings.toml{PRE_LAYOUTS_SUFFIX}, so settings.toml was not saved: {e}"
-        );
+        let message =
+            format!("Could not keep settings.toml{suffix}, so settings.toml was not saved: {e}");
         warn!(target: "tasklens::settings", "{message}");
         message
     };
@@ -675,7 +678,7 @@ fn keep_pre_layouts(path: &Path) -> Result<(), String> {
     atomic::write_atomic(&to, &bytes, FILE_MODE).map_err(|e| failed(e.to_string()))?;
     info!(
         target: "tasklens::settings",
-        "kept settings.toml as settings.toml{PRE_LAYOUTS_SUFFIX} before its first save with widget layouts"
+        "kept settings.toml as settings.toml{suffix} before its first save with widget layouts"
     );
     Ok(())
 }

@@ -853,7 +853,7 @@ fn pre_layouts_copy_kept_once() {
     let paths = paths_in(&dir);
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::write(paths.settings_file(), OLD_GPU_BOX).unwrap();
-    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v2");
 
     let loaded = load_settings(&paths.settings_file(), NOW);
     assert!(loaded.layouts_converted);
@@ -898,7 +898,7 @@ fn pre_layouts_copy_not_replaced() {
     let paths = paths_in(&dir);
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     std::fs::write(paths.settings_file(), OLD_GPU_BOX).unwrap();
-    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v2");
     std::fs::write(&copy, "earlier copy\n").unwrap();
 
     let loaded = load_settings(&paths.settings_file(), NOW);
@@ -907,6 +907,44 @@ fn pre_layouts_copy_not_replaced() {
     store.persist_callback()(&settings_with(3000), &UiState::default());
     store.flush();
     assert_eq!(std::fs::read_to_string(&copy).unwrap(), "earlier copy\n");
+}
+
+/// A settings file whose CPU box has an old mode, which the phase 2 conversion converts.
+const OLD_CPU_BOX: &str = "schema_version = 1\n\n[performance.overview]\ngrid = [\n  { kind = \"cpu\", col = 0, row = 0, cols = 8, rows = 8, mode = \"cores\", power = true },\n]\n";
+
+/// The first save after a phase 2 conversion writes `settings.toml.pre-layouts-v2` once and
+/// leaves the copy 1.2.0 kept (`-v1`) as it is.
+#[test]
+fn pre_layouts_v2_copy_leaves_v1_alone() {
+    let dir = TempDir::new().unwrap();
+    let paths = paths_in(&dir);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.settings_file(), OLD_CPU_BOX).unwrap();
+    let v1 = paths.config_dir.join("settings.toml.pre-layouts-v1");
+    std::fs::write(&v1, "kept by 1.2.0\n").unwrap();
+    let v2 = paths.config_dir.join("settings.toml.pre-layouts-v2");
+
+    let loaded = load_settings(&paths.settings_file(), NOW);
+    assert!(loaded.layouts_converted);
+    assert!(
+        loaded
+            .value
+            .performance
+            .layouts
+            .known("overview.cpu")
+            .is_some()
+    );
+    let store = Store::new(&paths, false, false, (loaded.value, UiState::default()));
+    store.keep_pre_layouts_copy();
+    store.persist_callback()(&settings_with(3000), &UiState::default());
+    store.flush();
+    assert_eq!(std::fs::read_to_string(&v2).unwrap(), OLD_CPU_BOX);
+    assert_eq!(std::fs::read_to_string(&v1).unwrap(), "kept by 1.2.0\n");
+    // A later save does not change either copy.
+    store.persist_callback()(&settings_with(4000), &UiState::default());
+    store.flush();
+    assert_eq!(std::fs::read_to_string(&v2).unwrap(), OLD_CPU_BOX);
+    assert_eq!(std::fs::read_to_string(&v1).unwrap(), "kept by 1.2.0\n");
 }
 
 /// A failed pre-layouts copy blocks the settings write and leaves no file under the copy's name.
@@ -918,7 +956,7 @@ fn pre_layouts_copy_failure_blocks_the_write() {
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     let file = paths.settings_file();
     std::fs::write(&file, OLD_GPU_BOX).unwrap();
-    let copy = paths.config_dir.join("settings.toml.pre-layouts-v1");
+    let copy = paths.config_dir.join("settings.toml.pre-layouts-v2");
 
     let loaded = load_settings(&file, NOW);
     assert!(loaded.layouts_converted);
@@ -937,7 +975,7 @@ fn pre_layouts_copy_failure_blocks_the_write() {
         .write_settings_now(&settings_with(4000))
         .expect_err("the copy failed");
     assert!(
-        err.starts_with("Could not keep settings.toml.pre-layouts-v1"),
+        err.starts_with("Could not keep settings.toml.pre-layouts-v2"),
         "{err}"
     );
     assert!(!copy.exists());
