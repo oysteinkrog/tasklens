@@ -16,21 +16,27 @@
 //!   aggregate (the Network box's charts), with the box's range word.
 //! - Core clocks: one line per physical core (the CPU page's Core clocks chart).
 //!
+//! In a device page container a Cell's chart is a 1.3.0 page chart ([`ChartLook::page_labels`],
+//! ADR-019 phase 3 "Page style"): the name as its heading, the value at the right of the
+//! heading, the legend, and the range text under the plot. A metric that has a 1.3.0 page chart
+//! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate).
+//!
 //! Pure functions: no drawing, no state.
 
 use std::sync::Arc;
 
-use gpui_kit::{App, Hsla, px, white};
+use gpui_kit::{App, Hsla, SharedString, px, white};
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{MetricId, SeriesId};
-use tl_model::layout::WidgetOptions;
+use tl_model::layout::{FormSet, WidgetOptions};
 use tl_model::layout_boxes::{
-    DeviceKind, METRIC_CPU_TOTAL, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT,
-    METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_TX,
+    DeviceKind, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_MEM_AVAILABLE,
+    METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED,
+    METRIC_NET_TX,
 };
 
 use super::meta::Lines;
-use crate::chart::{ChartLabels, ChartSeries, LegendStyle, ValueFormat};
+use crate::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
 use crate::i18n::tr;
 use crate::pages::performance::core_clocks::clock_series;
 use crate::pages::performance::cpu::{OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
@@ -48,6 +54,25 @@ const KEY_LEGEND_TOTAL: &str = "perf-legend-total";
 const KEY_LEGEND_KERNEL: &str = "perf-legend-kernel";
 /// The Network box's range word (`net_box::chart_labels`).
 const KEY_NET_RANGE: &str = "perf-net-heading-throughput";
+/// The disk page charts' headings, range word and legend (`disk::active_labels`,
+/// `disk::transfer_labels`).
+const KEY_DISK_ACTIVE: &str = "perf-disk-heading-active";
+const KEY_DISK_TRANSFER: &str = "perf-disk-heading-transfer";
+const KEY_DISK_THROUGHPUT: &str = "perf-disk-range-throughput";
+const KEY_DISK_READ: &str = "perf-disk-legend-read";
+const KEY_DISK_WRITE: &str = "perf-disk-legend-write";
+
+/// What a page style Cell's chart shows besides the plot: the widget's name, which of the name
+/// and the value its forms keep, and whether the value is the sum of the chart's lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageChart {
+    pub name: SharedString,
+    /// The name and value forms the widget keeps (`FormSet::LABEL`, `FormSet::VALUE`).
+    pub forms: FormSet,
+    /// The value is the sum of every line's newest sample (`ValueText::Sum`).
+    pub sum: bool,
+}
+
 /// The names of the composition chart's bands, in stacking order (`mem_box::comp_labels`).
 const KEY_BANDS: [&str; 3] = [
     "perf-overview-mem-used",
@@ -341,6 +366,44 @@ impl ChartLook {
             }
             _ => {}
         }
+        labels
+    }
+
+    /// The labels of the chart of a page style Cell (ADR-019 phase 3): the 1.3.0 page chart's
+    /// heading, range word and legend for a metric that has one, else the name as the heading
+    /// and the range word, and the box chart's legend. The heading shows with the Name form and
+    /// the value, at the heading's right, with the Value form.
+    pub fn page_labels(&self, format: ValueFormat, page: &PageChart, cx: &App) -> ChartLabels {
+        let mut labels = self.labels(format, true, cx);
+        let disk = matches!(self.kind, DeviceKind::Disk | DeviceKind::Disks);
+        let heading = match &*self.metric {
+            METRIC_DISK_ACTIVE if disk => {
+                let word = tr(cx, KEY_DISK_ACTIVE);
+                labels.range_word = word.clone();
+                word
+            }
+            METRIC_DISK_IO if disk => {
+                labels.range_word = tr(cx, KEY_DISK_THROUGHPUT);
+                labels.legend = smallvec![
+                    (tr(cx, KEY_DISK_READ), LegendStyle::Solid),
+                    (tr(cx, KEY_DISK_WRITE), LegendStyle::Dashed),
+                ];
+                labels.show_axis_max = true;
+                tr(cx, KEY_DISK_TRANSFER)
+            }
+            _ => {
+                if labels.range_word.is_empty() {
+                    labels.range_word = page.name.clone();
+                }
+                page.name.clone()
+            }
+        };
+        labels.heading = page.forms.contains(FormSet::LABEL).then_some(heading);
+        labels.value_align = if page.forms.contains(FormSet::VALUE) {
+            ValueAlign::Right
+        } else {
+            ValueAlign::Hidden
+        };
         labels
     }
 }

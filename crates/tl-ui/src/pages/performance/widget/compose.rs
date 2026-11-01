@@ -14,6 +14,11 @@
 //! takes the bar's place), then the sparkline, then the name. The value stays. The last form a
 //! widget has is never dropped.
 //!
+//! A widget in a device page container draws a Cell in the page style (ADR-019 phase 3 "Page
+//! style"): the chart has the 1.3.0 page chart's heading row (the name and the value) above
+//! the plot and its range text under it, so its minimum is taller ([`page_cell_min`]). Tile
+//! and Row are the same in both styles.
+//!
 //! Every size here is logical px at `ui_scale_pct = 100`; the functions take the UI scale and
 //! multiply. This module does no drawing and keeps no state.
 
@@ -32,6 +37,11 @@ pub const CELL_BAR_PAD: f32 = 4.;
 pub const CELL_CHART_MIN_H: f32 = 30.;
 /// The narrowest Cell.
 pub const CELL_MIN_W: f32 = 120.;
+
+/// The heading row of a page style Cell: the chart's title row (`labels::TITLE_ROW`).
+pub const PAGE_CELL_HEADING_H: f32 = 20.;
+/// The range text under the plot of a page style Cell (`labels::LABEL_ROW`).
+pub const PAGE_CELL_RANGE_H: f32 = 18.;
 
 /// The name and value of a Tile.
 pub const TILE_BASE_H: f32 = 40.;
@@ -102,6 +112,23 @@ pub fn cell_min(forms: FormSet) -> Size<f32> {
     let mut h = CELL_CHART_MIN_H;
     if forms.intersects(FormSet::LABEL | FormSet::VALUE) {
         h += CELL_HEADER_H;
+    }
+    if forms.contains(FormSet::STATS) {
+        h += CELL_STATS_H;
+    }
+    if forms.contains(FormSet::BAR) {
+        h += CELL_BAR_H;
+    }
+    size(CELL_MIN_W, h)
+}
+
+/// The smallest page style Cell for `forms`, logical px (ADR-019 phase 3): 120 wide, 30 for the
+/// plot, 20 for the heading row (with a name or a value), 18 for the range text, 16 for stats
+/// and 14 for the bar.
+pub fn page_cell_min(forms: FormSet) -> Size<f32> {
+    let mut h = CELL_CHART_MIN_H + PAGE_CELL_RANGE_H;
+    if forms.intersects(FormSet::LABEL | FormSet::VALUE) {
+        h += PAGE_CELL_HEADING_H;
     }
     if forms.contains(FormSet::STATS) {
         h += CELL_STATS_H;
@@ -275,6 +302,12 @@ pub fn row_forms(forms: FormSet, width: f32) -> FormSet {
 
 /// The composition of a widget with `forms` at `area` (window px) and UI scale `scale`.
 pub fn compose(forms: FormSet, area: Size<Pixels>, scale: f32) -> Composed {
+    compose_styled(forms, area, scale, false)
+}
+
+/// [`compose`] in the page style (`page`, ADR-019 phase 3) or the box style: a page style Cell
+/// needs [`page_cell_min`].
+pub fn compose_styled(forms: FormSet, area: Size<Pixels>, scale: f32, page: bool) -> Composed {
     let scale = if scale.is_finite() && scale > 0. {
         scale
     } else {
@@ -283,7 +316,12 @@ pub fn compose(forms: FormSet, area: Size<Pixels>, scale: f32) -> Composed {
     let w = f32::from(area.width) / scale;
     let h = f32::from(area.height) / scale;
     let fits = |min: Size<f32>| w >= min.width && h >= min.height;
-    if forms.contains(FormSet::CHART) && fits(cell_min(forms)) {
+    let cell = if page {
+        page_cell_min(forms)
+    } else {
+        cell_min(forms)
+    };
+    if forms.contains(FormSet::CHART) && fits(cell) {
         return Composed {
             composition: Composition::Cell,
             forms,
@@ -437,5 +475,28 @@ mod tests {
         assert_ne!(a.class(), row.class());
         let narrow = at(FormSet::all(), 130., 18., 1.);
         assert_ne!(row.class(), narrow.class());
+    }
+
+    #[test]
+    fn page_style_cell_at_its_minimum() {
+        for forms in [
+            FormSet::CHART,
+            FormSet::CHART | FormSet::LABEL | FormSet::VALUE,
+            FormSet::all(),
+        ] {
+            let min = page_cell_min(forms);
+            assert!(min.height > cell_min(forms).height);
+            for scale in [1.0, 1.5, 2.0] {
+                let (w, h) = (min.width * scale, min.height * scale);
+                let at = |w: f32, h: f32| compose_styled(forms, size(px(w), px(h)), scale, true);
+                assert_eq!(at(w, h).composition, Composition::Cell);
+                assert_ne!(at(w, h - scale).composition, Composition::Cell);
+            }
+        }
+        // 30 + 20 + 18 with a name and a value.
+        assert_eq!(
+            page_cell_min(FormSet::CHART | FormSet::LABEL | FormSet::VALUE).height,
+            68.
+        );
     }
 }

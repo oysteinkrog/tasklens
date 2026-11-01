@@ -45,6 +45,7 @@ use tl_model::layout::{
     ContainerLayout, DeviceSelector, FixedWidget, GroupKind, WidgetCell, WidgetContent,
     WidgetSetting, grid_cols,
 };
+use tl_model::layout_boxes::DeviceKind;
 
 use super::fixed_widget::{FixedContent, FixedWidgetView};
 use super::grid::{self, InnerGrid, InnerPlacement, PlacedWidget};
@@ -129,20 +130,21 @@ fn content_availability(content: &WidgetContent) -> Availability {
 /// The placement of a flow layout without a placer: the available widgets in list order, each
 /// at its default span raised to its minimum span, in the first free place on the grid.
 pub fn list_flow(input: &FlowInput<'_>) -> InnerPlacement {
-    let cols = grid_cols(&input.layout.container);
-    let g = InnerGrid::new(f32::from(input.area.width), cols, input.scale);
+    let container = &input.layout.container;
+    let cols = grid_cols(container);
+    let g = InnerGrid::of(container, f32::from(input.area.width), input.scale);
     let mut cells: SmallVec<[(u32, WidgetCell); 16]> = SmallVec::new();
     for item in input.items {
         if item.availability != Availability::Available {
             continue;
         }
-        let (dw, dh) = grid::widget_default_span(item.setting, cols);
+        let (dw, dh) = grid::widget_default_span_in(container, item.setting);
         let (mw, mh) = g.widget_min_span(item.setting);
         let taken: SmallVec<[WidgetCell; 16]> = cells.iter().map(|(_, c)| *c).collect();
         let cell = grid::first_free(&taken, (dw.max(mw), dh.max(mh)), cols, 0);
         cells.push((item.setting.id, cell));
     }
-    grid::place(&cells, cols, input.area, input.scale, input.frozen)
+    grid::place_in(container, &cells, input.area, input.scale, input.frozen)
 }
 
 /// The placer of a box whose flow layout is one fixed widget (Top processes, Timeline): the
@@ -182,6 +184,23 @@ pub fn fixed_flow() -> FlowPlace {
         }];
         placement
     })
+}
+
+/// Adds the records a page widget on a device of `kind` reads to `demand`.
+fn device_demand(demand: &mut Demand, kind: DeviceKind) {
+    match kind {
+        DeviceKind::Cpu | DeviceKind::CpuLogical => {
+            if !demand.cpu.wants_total() {
+                demand.cpu = tl_model::demand::CpuDemand::Total;
+            }
+        }
+        DeviceKind::Memory => demand.memory = true,
+        DeviceKind::Disk | DeviceKind::Disks => demand.disks = true,
+        DeviceKind::Net | DeviceKind::Nets => demand.nets = true,
+        DeviceKind::Gpu | DeviceKind::AggregateGpu => demand.gpus = true,
+        DeviceKind::Fan | DeviceKind::Battery => demand.sensors = true,
+        DeviceKind::Other => {}
+    }
 }
 
 /// The widgets of one container.
@@ -331,9 +350,13 @@ impl WidgetContainer {
     /// cores, as the core rows ask), the process sweep while it places Memory by app or the
     /// Processes table, and the timeline while it places the Timeline. A
     /// container with no placed widget asks for nothing.
+    ///
+    /// A device page container asks for the records of the devices its widgets read instead of
+    /// the GPU records alone (ADR-019 phase 3 "Render contract and demand").
     pub fn demand_part(&self) -> Demand {
+        let page = grid::is_page(&self.layout.container);
         let mut demand = Demand {
-            gpus: !self.placement.widgets.is_empty(),
+            gpus: !page && !self.placement.widgets.is_empty(),
             ..Demand::default()
         };
         for p in &self.placement.widgets {
@@ -343,6 +366,9 @@ impl WidgetContainer {
                 .iter()
                 .find(|w| w.id == p.id)
                 .map(|w| &w.content);
+            if page && let Some(device) = content.and_then(WidgetContent::device) {
+                device_demand(&mut demand, DeviceKind::of(device));
+            }
             match content {
                 Some(WidgetContent::Fixed(FixedWidget::MemoryByApp | FixedWidget::Processes)) => {
                     demand.process_top = true;
@@ -636,9 +662,9 @@ impl WidgetContainer {
                 .iter()
                 .filter_map(|w| w.cell.map(|c| (w.id, c)))
                 .collect();
-            grid::place(
+            grid::place_in(
+                &self.layout.container,
                 &cells,
-                grid_cols(&self.layout.container),
                 self.place_area(),
                 scale,
                 self.frozen,

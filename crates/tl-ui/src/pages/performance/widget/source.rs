@@ -576,6 +576,9 @@ struct SourceState {
     reading: Reading,
     /// The version of the strings the name and the stats words come from.
     strings_version: u64,
+    /// The source serves a device page: the value is written in the page format
+    /// (`MetricMeta::value_text_in`, ADR-019 phase 3).
+    page: bool,
 }
 
 /// One source in use: its device, its current value and its stats over the Overview range.
@@ -652,6 +655,7 @@ impl SourceData {
                     figures: None,
                 },
                 strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
+                page: false,
             },
             name: SharedString::default(),
             value_text: SharedString::default(),
@@ -799,6 +803,16 @@ impl SourceData {
     }
 
     /// The slot's GPU changed (store): the source reads the new device.
+    /// The source serves a device page (on) or an Overview box: the value text takes that
+    /// format.
+    pub fn set_page(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.state.page == on {
+            return;
+        }
+        let snap = box_snapshot(&self.hub, cx);
+        self.update(&snap, false, cx, |this, _| this.state.page = on);
+    }
+
     pub fn set_slot_key(&mut self, key: Option<Arc<str>>, cx: &mut Context<Self>) {
         if !matches!(self.selector.device, DeviceSelector::Slot(_)) || self.state.key == key {
             return;
@@ -1171,7 +1185,8 @@ impl SourceData {
             tr(cx, KEY_NO_SWAP)
         } else if shown(r.value.validity) {
             let mut out = String::new();
-            meta.write_value(r.value.value, r.second, r.total, net, &mut out);
+            let text = meta.value_text_in(self.state.page);
+            meta.write_value_as(text, r.value.value, r.second, r.total, net, &mut out);
             out.into()
         } else {
             copy_text(r.value.validity, &SharedString::default())
@@ -1204,9 +1219,11 @@ fn line_minus(minus: &[SeriesId], line: SeriesId) -> SmallVec<[SeriesId; 5]> {
 fn snap_swap_total_is_zero(total: Option<f32>) -> bool {
     total.is_none_or(|t| t <= 0.0)
 }
-/// The sources of one Overview page, by selector.
+/// The sources of one Overview page or one device page, by selector.
 pub struct SourceStore {
     hub: Entity<SnapshotHub>,
+    /// The store serves a device page: its sources write their values in the page format.
+    page: bool,
     /// The device keys of the GPUs the box shows, in sidebar order: slot 0, then slot 1.
     slots: Vec<Arc<str>>,
     sources: FxHashMap<SourceSelector, WeakEntity<SourceData>>,
@@ -1216,8 +1233,17 @@ impl SourceStore {
     pub fn new(hub: &Entity<SnapshotHub>) -> Self {
         Self {
             hub: hub.clone(),
+            page: false,
             slots: Vec::new(),
             sources: FxHashMap::default(),
+        }
+    }
+
+    /// The store of one device page (ADR-019 phase 3: each page has its own).
+    pub fn for_page(hub: &Entity<SnapshotHub>) -> Self {
+        Self {
+            page: true,
+            ..Self::new(hub)
         }
     }
 
@@ -1231,7 +1257,12 @@ impl SourceStore {
         let slot_key = self.slot_key(&selector.device);
         let hub = self.hub.clone();
         let selector = selector.clone();
-        let data = cx.new(|cx| SourceData::new(&hub, selector.clone(), slot_key, cx));
+        let page = self.page;
+        let data = cx.new(|cx| {
+            let mut data = SourceData::new(&hub, selector.clone(), slot_key, cx);
+            data.set_page(page, cx);
+            data
+        });
         self.sources.insert(selector, data.downgrade());
         data
     }

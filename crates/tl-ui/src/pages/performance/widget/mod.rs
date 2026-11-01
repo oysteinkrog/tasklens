@@ -11,9 +11,14 @@
 //! Phase 2 adds group widgets: `members` lists a group's members, `group_fill` lays its items
 //! out and `group_widget` is the group entity. `fixed_widget` is a widget with content of its
 //! own (Memory by app).
+//!
+//! Phase 3 makes every device page a container: `details_widget` is the Details grid as its
+//! own view, and `grid` and `compose` keep the page rules (12 px unit and gutter, no fill, the
+//! page style Cell).
 
 pub mod compose;
 pub mod container;
+pub mod details_widget;
 pub mod edit;
 pub mod fixed_widget;
 pub mod grid;

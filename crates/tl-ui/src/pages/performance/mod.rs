@@ -24,6 +24,7 @@ pub mod menu;
 pub mod net;
 pub mod overview;
 pub mod page;
+pub mod page_flow;
 pub mod sensors;
 pub mod sidebar;
 pub mod status_bar;

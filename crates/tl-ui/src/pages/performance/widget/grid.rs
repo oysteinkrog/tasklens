@@ -22,14 +22,20 @@
 //!   change with the scale.
 //!
 //! [`pin`] turns a flow layout into a grid layout when Edit Widgets starts.
+//!
+//! A device page container (ADR-019 phase 3, "Inner grid of a page") has a 12 px row unit and a
+//! 12 px gutter (`sp4`), and its rows never fill the body: a page is a scrolling column, so a
+//! short layout leaves space under it. [`InnerGrid::of`] and [`place_in`] take these rules
+//! from the container id.
 
 use std::sync::Arc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
 use tl_model::layout::{
-    ContainerLayout, DeviceSelector, FormSet, WidgetCell, WidgetContent, WidgetSetting,
+    ContainerLayout, DeviceSelector, FormSet, WidgetCell, WidgetContent, WidgetSetting, grid_cols,
 };
+use tl_model::layout_pages::PAGE_CONTAINER_PREFIX;
 
 use super::compose::{smallest, widget_smallest};
 
@@ -41,6 +47,45 @@ pub const GUTTER: f32 = 4.;
 pub const SCROLLBAR_W: f32 = 16.;
 /// The span of a new widget that shows a chart.
 pub const CHART_SPAN: (u16, u16) = (3, 4);
+/// The row unit of a page container, logical px.
+pub const PAGE_ROW_UNIT: f32 = 12.;
+/// The gutter of a page container (`sp4`, the gap between the 1.3.0 page parts), logical px.
+pub const PAGE_GUTTER: f32 = 12.;
+/// The span of a new widget with a chart on a page: the 150 px page chart.
+pub const PAGE_CHART_SPAN: (u16, u16) = (6, 7);
+/// The rows of a new widget without a chart on a page.
+pub const PAGE_METRIC_ROWS: u16 = 2;
+/// The rows of a new group or fixed widget on a page.
+pub const PAGE_GROUP_ROWS: u16 = 16;
+
+/// Whether `container` is a device page container (`page.<key>`).
+pub fn is_page(container: &str) -> bool {
+    container.starts_with(PAGE_CONTAINER_PREFIX)
+}
+
+/// The row unit of `container`, logical px: 12 on a page, 24 in an Overview box.
+pub fn grid_unit(container: &str) -> f32 {
+    if is_page(container) {
+        PAGE_ROW_UNIT
+    } else {
+        ROW_UNIT
+    }
+}
+
+/// The gutter of `container`, logical px: 12 on a page, 4 in an Overview box.
+pub fn grid_gutter(container: &str) -> f32 {
+    if is_page(container) {
+        PAGE_GUTTER
+    } else {
+        GUTTER
+    }
+}
+
+/// Whether the rows of `container` grow to fill its body (D-037, D-040). A page's rows never
+/// do: a page is a scrolling column (UI-PRF-020).
+pub fn grid_fills(container: &str) -> bool {
+    !is_page(container)
+}
 
 /// The cell sizes of a container body, in px (logical px × scale): the column width `cw`, the
 /// row unit `unit`, the drawn row height `row` (at least `unit`, D-037) and the `gutter`.
@@ -56,17 +101,36 @@ pub struct InnerGrid {
 }
 
 impl InnerGrid {
-    /// The grid of a body `width` px wide with `cols` columns, rows at the unit.
+    /// The grid of a body `width` px wide with `cols` columns, rows at the unit, with the
+    /// Overview box unit and gutter.
     pub fn new(width: f32, cols: u16, scale: f32) -> Self {
+        Self::with_rules(width, cols, ROW_UNIT, GUTTER, scale)
+    }
+
+    /// The grid of container `container` on a body `width` px wide: its columns, unit and
+    /// gutter.
+    pub fn of(container: &str, width: f32, scale: f32) -> Self {
+        Self::with_rules(
+            width,
+            grid_cols(container),
+            grid_unit(container),
+            grid_gutter(container),
+            scale,
+        )
+    }
+
+    /// The grid of a body `width` px wide with `cols` columns, a row unit of `unit` and a
+    /// gutter of `gutter` logical px.
+    pub fn with_rules(width: f32, cols: u16, unit: f32, gutter: f32, scale: f32) -> Self {
         let scale = sane_scale(scale);
         let cols = cols.max(1);
-        let gutter = GUTTER * scale;
+        let gutter = gutter * scale;
         let gutters = f32::from(cols - 1) * gutter;
         Self {
             cols,
             cw: ((width - gutters) / f32::from(cols)).max(0.),
-            unit: ROW_UNIT * scale,
-            row: ROW_UNIT * scale,
+            unit: unit * scale,
+            row: unit * scale,
             gutter,
             scale,
         }
@@ -207,13 +271,44 @@ pub fn place(
     scale: f32,
     frozen: Option<f32>,
 ) -> InnerPlacement {
+    place_with(cells, cols, (ROW_UNIT, GUTTER, true), area, scale, frozen)
+}
+
+/// [`place`] with the rules of container `container`: its columns, unit and gutter, and no
+/// fill on a page.
+pub fn place_in(
+    container: &str,
+    cells: &[(u32, WidgetCell)],
+    area: Size<Pixels>,
+    scale: f32,
+    frozen: Option<f32>,
+) -> InnerPlacement {
+    let rules = (
+        grid_unit(container),
+        grid_gutter(container),
+        grid_fills(container),
+    );
+    place_with(cells, grid_cols(container), rules, area, scale, frozen)
+}
+
+/// [`place`] with `rules`: the row unit and the gutter in logical px, and whether the rows fill
+/// the body.
+fn place_with(
+    cells: &[(u32, WidgetCell)],
+    cols: u16,
+    rules: (f32, f32, bool),
+    area: Size<Pixels>,
+    scale: f32,
+    frozen: Option<f32>,
+) -> InnerPlacement {
+    let (unit, gutter, fills) = rules;
     let scale = sane_scale(scale);
     let cols = cols.max(1);
     let (w, h) = (f32::from(area.width), f32::from(area.height));
     let cells: SmallVec<[(u32, WidgetCell); 16]> =
         cells.iter().map(|&(id, c)| (id, inside(c, cols))).collect();
     let rows = cells.iter().map(|(_, c)| bottom(c)).max().unwrap_or(0);
-    let mut grid = InnerGrid::new(w, cols, scale);
+    let mut grid = InnerGrid::with_rules(w, cols, unit, gutter, scale);
     if let Some(row) = frozen {
         grid.row = (row * scale).max(grid.unit);
     }
@@ -222,9 +317,9 @@ pub fn place(
     let scrolls = rows > 0 && h > 0. && content(grid.row) > h + 0.5;
     if scrolls {
         let row = grid.row;
-        grid = InnerGrid::new((w - SCROLLBAR_W * scale).max(0.), cols, scale);
+        grid = InnerGrid::with_rules((w - SCROLLBAR_W * scale).max(0.), cols, unit, gutter, scale);
         grid.row = row;
-    } else if frozen.is_none() && rows > 0 && h > 0. {
+    } else if fills && frozen.is_none() && rows > 0 && h > 0. {
         let free = h - f32::from(rows - 1) * grid.gutter;
         grid.row = (free / f32::from(rows)).max(grid.unit);
     }
@@ -275,6 +370,23 @@ pub fn widget_default_span(w: &WidgetSetting, cols: u16) -> (u16, u16) {
     }
 }
 
+/// The span a new widget `w` gets in container `container`: on a page (ADR-019 phase 3) 6 × 7
+/// with a chart, 12 × 2 for any other metric widget and 12 × 16 for a group or fixed widget,
+/// each inside the columns; in a box [`widget_default_span`].
+pub fn widget_default_span_in(container: &str, w: &WidgetSetting) -> (u16, u16) {
+    let cols = grid_cols(container).max(1);
+    if !is_page(container) {
+        return widget_default_span(w, cols);
+    }
+    match w.content {
+        WidgetContent::Metric(_) if w.forms.contains(FormSet::CHART) => {
+            (PAGE_CHART_SPAN.0.min(cols), PAGE_CHART_SPAN.1)
+        }
+        WidgetContent::Metric(_) => (cols, PAGE_METRIC_ROWS),
+        WidgetContent::Group(_) | WidgetContent::Fixed(_) => (cols, PAGE_GROUP_ROWS),
+    }
+}
+
 /// The first place a widget of `span` fits among `cells` on `cols` columns, scanning rows from
 /// `from` down and columns left to right. With no free place it goes under the lowest widget.
 pub fn first_free(cells: &[WidgetCell], span: (u16, u16), cols: u16, from: u16) -> WidgetCell {
@@ -305,7 +417,11 @@ pub fn first_free(cells: &[WidgetCell], span: (u16, u16), cols: u16, from: u16) 
 /// Adds `widget` to the grid layout `layout` (ADR-019 "Insert"): it takes the next id, its
 /// default span raised to its minimum span on `grid`, and the first free place. Returns its id.
 pub fn insert(layout: &mut ContainerLayout, mut widget: WidgetSetting, grid: &InnerGrid) -> u32 {
-    let (dw, dh) = widget_default_span(&widget, grid.cols);
+    let (dw, dh) = if is_page(&layout.container) {
+        widget_default_span_in(&layout.container, &widget)
+    } else {
+        widget_default_span(&widget, grid.cols)
+    };
     let (mw, mh) = grid.widget_min_span(&widget);
     let span = (dw.max(mw).min(grid.cols), dh.max(mh));
     let cells: SmallVec<[WidgetCell; 16]> = layout.widgets.iter().filter_map(|w| w.cell).collect();
@@ -960,5 +1076,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    const PAGE: &str = "page.aggregate:disk";
+
+    #[test]
+    fn page_grid_has_its_unit_gutter_and_columns() {
+        for scale in [1.0, 1.5, 2.0] {
+            let g = InnerGrid::of(PAGE, 1000. * scale, scale);
+            assert_eq!(g.cols, 12);
+            assert_eq!(g.unit, PAGE_ROW_UNIT * scale);
+            assert_eq!(g.gutter, PAGE_GUTTER * scale);
+            assert!((g.cw - (1000. - 11. * PAGE_GUTTER) * scale / 12.).abs() < 1e-3);
+        }
+        // The Overview boxes keep theirs.
+        let b = InnerGrid::of(GPU_BOX_CONTAINER, 304., 1.);
+        assert_eq!((b.cols, b.unit, b.gutter), (COLS, ROW_UNIT, GUTTER));
+    }
+
+    #[test]
+    fn page_rows_never_fill() {
+        // A short page leaves space under it; a box fills.
+        let cells = [(1, cell(0, 0, 12, 7)), (2, cell(0, 7, 12, 7))];
+        let p = place_in(PAGE, &cells, size(px(1000.), px(800.)), 1., None);
+        assert_eq!(p.grid.row, PAGE_ROW_UNIT);
+        // 14 rows of 12 px and 13 gutters of 12 px.
+        assert_eq!(p.content_h, px(14. * 12. + 13. * 12.));
+        assert!(!p.scrolls);
+        // 7 rows hold the 150 px page chart and a 12 px gap above the next.
+        let b = p.bounds(1).expect("placed");
+        assert_eq!(b.size.height, px(7. * 12. + 6. * 12.));
+        let boxed = place(&cells, 12, size(px(1000.), px(800.)), 1., None);
+        assert!(boxed.grid.row > ROW_UNIT);
+        // Taller than the body: it scrolls.
+        let tall = place_in(PAGE, &cells, size(px(1000.), px(200.)), 1., None);
+        assert!(tall.scrolls);
+    }
+
+    #[test]
+    fn page_default_spans() {
+        let chart = widget(0, FormSet::CHART | FormSet::VALUE, None);
+        assert_eq!(widget_default_span_in(PAGE, &chart), PAGE_CHART_SPAN);
+        let value = widget(0, FormSet::VALUE, None);
+        assert_eq!(widget_default_span_in(PAGE, &value), (12, PAGE_METRIC_ROWS));
+        let fixed = WidgetSetting {
+            content: WidgetContent::Fixed(tl_model::layout::FixedWidget::Details),
+            ..widget(0, FormSet::empty(), None)
+        };
+        assert_eq!(widget_default_span_in(PAGE, &fixed), (12, PAGE_GROUP_ROWS));
+        // A box keeps its rule.
+        assert_eq!(widget_default_span_in(GPU_BOX_CONTAINER, &chart), (3, 4));
     }
 }

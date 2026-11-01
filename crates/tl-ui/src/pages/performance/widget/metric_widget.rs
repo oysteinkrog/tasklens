@@ -31,6 +31,11 @@
 //! draws the core rows. The box updates the model on a sample and notifies only the widgets of
 //! the rows that changed ([`MetricWidget::flow_changed`]).
 //!
+//! A widget in a device page container draws its Cell in the page style (ADR-019 phase 3): its
+//! chart is a 1.3.0 page chart with the heading, value, legend and range text inside it
+//! (`look::ChartLook::page_labels`), and the Cell needs the page minimum
+//! (`compose::page_cell_min`). The style follows the container, never the placement.
+//!
 //! The Network box's flow looks (`FlowLook::NetDirection` and `FlowLook::NetCombined`,
 //! `overview/net_flow.rs`) draw a 1.2.0 Download or Upload part, or the `combined` body, from
 //! the rate lines the box keeps. The box notifies only these widgets when a rate, peak or total
@@ -50,10 +55,12 @@ use tl_model::validity::Validity;
 
 use super::compose::{
     CELL_BAR_PAD, CELL_HEADER_H, CELL_STATS_H, Composed, Composition, ROW_BAR_MIN_W, ROW_GAP,
-    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose, compose_as,
+    ROW_NAME_W, ROW_SPARK_W, ROW_STATS_W, ROW_VALUE_W, TILE_STATS_H, compose_as, compose_styled,
     row_forms,
 };
-use super::look::{ChartLook, accent};
+use super::grid::is_page;
+use super::look::{ChartLook, PageChart, accent};
+use super::meta::ValueText;
 use super::source::{Availability, SourceData};
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
@@ -246,6 +253,8 @@ struct ChartKey {
     look: ChartLook,
     y: YScale,
     format: ValueFormat,
+    /// The page chart parts of a page style Cell; `None` in a box and in a Row.
+    page: Option<PageChart>,
 }
 
 /// One widget of a container.
@@ -253,6 +262,8 @@ pub struct MetricWidget {
     setting: WidgetSetting,
     /// The id of the container the widget is in, for its debug selectors.
     container: SharedString,
+    /// The container is a device page: the Cell draws in the page style.
+    page: bool,
     hub: Entity<SnapshotHub>,
     source: Entity<SourceData>,
     /// Whether the name has the GPU's name in front (the box shows two GPUs).
@@ -314,6 +325,7 @@ impl MetricWidget {
     ) -> Self {
         let mut this = Self {
             setting,
+            page: is_page(&container),
             container,
             hub: hub.clone(),
             _source_sub: cx.observe(&source, Self::on_source),
@@ -584,6 +596,7 @@ impl MetricWidget {
                 metrics(cx).ui_scale,
                 self.edit_inset,
                 self.member,
+                self.page,
             )
             .forms
         };
@@ -693,7 +706,13 @@ impl MetricWidget {
         self.shown.series?;
         let src = self.source.read(cx);
         let meta = src.meta()?;
+        let page = (self.page && self.chart_cell).then(|| PageChart {
+            name: src.name().clone(),
+            forms: self.shown.kept & (FormSet::LABEL | FormSet::VALUE),
+            sum: meta.value_text_in(true) == ValueText::Sum,
+        });
         Some(ChartKey {
+            page,
             look: ChartLook {
                 kind: src.kind(),
                 metric: src.selector().metric.0.clone(),
@@ -720,19 +739,35 @@ impl MetricWidget {
         // The spec and the labels follow the key: a new source can bring a new value format
         // (percent to bytes), a new line count or the kernel line.
         let spec = chart_spec(&key, self.chart_cell, &self.settings, current(cx));
-        let labels = key.look.labels(key.format, self.chart_cell, cx);
+        let labels = match &key.page {
+            Some(page) => key.look.page_labels(key.format, page, cx),
+            None => key.look.labels(key.format, self.chart_cell, cx),
+        };
+        let sum = key.page.as_ref().is_some_and(|p| p.sum);
+        // A page chart and a box chart are made differently: a change between them makes a new
+        // chart.
+        let same_kind = self
+            .chart_key
+            .as_ref()
+            .is_some_and(|k| k.page.is_some() == key.page.is_some());
+        let page = key.page.is_some();
         self.chart_key = Some(key);
         match &self.chart {
-            Some(chart) => {
+            Some(chart) if same_kind => {
                 chart.update(cx, |v, cx| {
                     v.set_spec(spec, cx);
                     v.set_labels(labels, cx);
+                    v.set_value_sum(sum, cx);
                 });
                 false
             }
-            None => {
+            _ => {
                 let hub = self.hub.clone();
-                self.chart = Some(box_chart(spec, labels, &hub, cx));
+                self.chart = Some(if page {
+                    page_chart(spec, labels, sum, &hub, cx)
+                } else {
+                    box_chart(spec, labels, &hub, cx)
+                });
                 true
             }
         }
@@ -808,7 +843,14 @@ impl MetricWidget {
         if self.flow.is_some() {
             FLOW_CLASS
         } else if self.shown.availability == Availability::Available {
-            probe_class(self.shown.forms, area, scale, self.edit_inset, self.member)
+            probe_class(
+                self.shown.forms,
+                area,
+                scale,
+                self.edit_inset,
+                self.member,
+                self.page,
+            )
         } else {
             UNAVAILABLE_CLASS
         }
@@ -825,10 +867,11 @@ fn compose_at(
     scale: f32,
     edit: bool,
     member: MemberLook,
+    page: bool,
 ) -> Composed {
     let composed = match member.composition {
         Some(c) => compose_as(c, forms, area, scale),
-        None => compose(forms, area, scale),
+        None => compose_styled(forms, area, scale, page),
     };
     if member.core && composed.composition == Composition::Row {
         return core_composed(forms, area, scale, member);
@@ -919,8 +962,10 @@ fn probe_class(
     scale: f32,
     edit: bool,
     member: MemberLook,
+    page: bool,
 ) -> u32 {
-    compose_at(forms, area, scale, edit, member).class() | core_class(forms, area, scale, member)
+    compose_at(forms, area, scale, edit, member, page).class()
+        | core_class(forms, area, scale, member)
 }
 
 /// The chart of a widget: its series from the metric, the widget's options and the source
@@ -928,6 +973,9 @@ fn probe_class(
 /// sparkline has the sparkline grid.
 fn chart_spec(key: &ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) -> ChartSpec {
     let (series, stack) = key.look.series(theme);
+    // A page chart is drawn as the 1.3.0 page charts are (`disk::spec`): on the window
+    // background, with the hover line.
+    let page = key.page.is_some();
     ChartSpec {
         series,
         stack,
@@ -945,9 +993,30 @@ fn chart_spec(key: &ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) ->
             SPARK_GRID
         },
         smooth: s.smooth,
-        background: ChartBg::List,
+        background: if page { ChartBg::Window } else { ChartBg::List },
+        hover: page,
         ..ChartSpec::default()
     }
+}
+
+/// The chart of a page style Cell: a 1.3.0 page chart (`aggregate::chart_box`), with the
+/// heading row and the range text inside it and the device history at 1 h, 24 h and 7 d. With
+/// `sum` its value is the sum of its lines' newest samples.
+fn page_chart<T: 'static>(
+    spec: ChartSpec,
+    labels: crate::chart::ChartLabels,
+    sum: bool,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut Context<T>,
+) -> Entity<ChartView> {
+    cx.new(|cx| {
+        let snap = std::sync::Arc::clone(hub.read(cx).current());
+        let mut view = ChartView::new(spec, labels, hub, cx)
+            .with_newest_marks()
+            .with_device_history(&snap);
+        view.set_value_sum(sum, cx);
+        view
+    })
 }
 
 fn cached(chart: &Entity<ChartView>) -> AnyElement {
@@ -1101,8 +1170,39 @@ impl MetricWidget {
         el
     }
 
+    /// The page style Cell: the stats line and the bar, then the page chart, which draws the
+    /// name, the value, the legend and the range text itself. In Edit Widgets the chart starts
+    /// under the grip and the gear, so they cover none of its heading.
+    fn page_cell(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
+        let (id, s) = (self.setting.id, m.ui_scale);
+        let mut el = div().flex().flex_col().size_full();
+        if self.edit_inset {
+            el = el.pt(px(super::edit::HANDLE * s - EDIT_EDGE));
+        }
+        if forms.contains(FormSet::STATS) {
+            let stats = self.shown.stats.clone();
+            el = el.child(
+                text_part(
+                    part_id(&self.container, id, "stats"),
+                    stats,
+                    t_xs(m),
+                    theme.text_secondary,
+                )
+                .flex_none()
+                .h(px(CELL_STATS_H * s)),
+            );
+        }
+        if forms.contains(FormSet::BAR) {
+            el = el.child(self.meter(id, theme).flex_none().py(px(CELL_BAR_PAD * s)));
+        }
+        el.child(self.chart_part(id).flex_1().min_h_0().w_full())
+    }
+
     /// The Cell: header line, stats line, bar, then the chart filling the rest.
     fn cell(&self, forms: FormSet, m: &UiMetrics, theme: &TlTheme) -> gpui_kit::Div {
+        if self.page {
+            return self.page_cell(forms, m, theme);
+        }
         let (id, s) = (self.setting.id, m.ui_scale);
         let mut el = div().flex().flex_col().size_full();
         let mut lead = self.lead(s);
@@ -1460,7 +1560,14 @@ impl Render for MetricWidget {
             accent(src.kind(), src.selector().metric.as_str(), &theme).line
         };
         let body = if available {
-            self.composed = compose_at(forms, self.size.get(), scale, self.edit_inset, self.member);
+            self.composed = compose_at(
+                forms,
+                self.size.get(),
+                scale,
+                self.edit_inset,
+                self.member,
+                self.page,
+            );
             self.core_bits = core_class(forms, self.size.get(), scale, self.member);
             // The size probe asked for this render after a resize changed the kept forms:
             // read the parts that are now kept.
@@ -1484,12 +1591,13 @@ impl Render for MetricWidget {
         let view = cx.entity_id();
         let edit = self.edit_inset;
         let member = self.member;
+        let page = self.page;
         let probe = class_probe(
             Rc::clone(&self.size),
             class,
             move |area| {
                 if available {
-                    probe_class(forms, area, scale, edit, member)
+                    probe_class(forms, area, scale, edit, member, page)
                 } else {
                     UNAVAILABLE_CLASS
                 }
