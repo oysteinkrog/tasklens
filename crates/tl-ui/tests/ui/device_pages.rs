@@ -422,7 +422,7 @@ mod shared_range {
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
-    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, segment_id};
+    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, trigger_id};
     use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
 
     use super::*;
@@ -431,18 +431,8 @@ mod shared_range {
     const FAN: &str = "fan:nct6797:2";
     const PAGES: [&str; 7] = ["cpu", "memory", DISKS[0], "net:enp38s0", GPU, FAN, MOUSE];
 
-    fn segment(range: OverviewRange) -> &'static str {
-        Box::leak(segment_id(PAGE_SWITCH, range).into_boxed_str())
-    }
-
     fn click_range(r: &mut Rig, range: OverviewRange) {
-        let at = r
-            .vcx
-            .debug_bounds(segment(range))
-            .expect("range segment")
-            .center();
-        r.vcx.simulate_click(at, gpui_kit::Modifiers::none());
-        draw(r.vcx);
+        crate::overview_range::pick(r.vcx, PAGE_SWITCH, range);
         r.vcx.executor().advance_clock(Duration::from_millis(200));
         draw(r.vcx);
     }
@@ -493,10 +483,8 @@ mod shared_range {
         for k in PAGES {
             select(&mut r, k);
             assert!(r.vcx.debug_bounds(RANGE_ID).is_some(), "switch on {k}");
-            for range in OverviewRange::ALL {
-                let id = segment(range);
-                assert!(r.vcx.debug_bounds(id).is_some(), "{id} on {k}");
-            }
+            let id: &'static str = Box::leak(trigger_id(PAGE_SWITCH).into_boxed_str());
+            assert!(r.vcx.debug_bounds(id).is_some(), "{id} on {k}");
         }
         assert_eq!(ranges(&mut r), [60; 9], "1 min by default");
 

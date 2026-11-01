@@ -26,7 +26,7 @@ use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::overview::range::{
-    HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id,
+    HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id, trigger_id,
 };
 use tl_ui::pages::performance::overview::{
     BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
@@ -288,6 +288,26 @@ pub(crate) fn click(cx: &mut VisualTestContext, id: &'static str) {
     draw(cx);
 }
 
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Picks `range` from the drop-down `prefix`: opens the menu unless it is open, then clicks the
+/// item. A disabled item takes the click and the menu stays open.
+pub(crate) fn pick(cx: &mut VisualTestContext, prefix: &str, range: OverviewRange) {
+    let item = leak(segment_id(prefix, range));
+    if cx.debug_bounds(item).is_none() {
+        click(cx, leak(trigger_id(prefix)));
+    }
+    click(cx, item);
+}
+
+/// The drop-down's menu closed (after a refused click on a disabled item).
+pub(crate) fn close_menu(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+}
+
 pub(crate) fn set_range(r: &mut Rig, range: OverviewRange) {
     r.vcx.update(|_, cx| {
         TlSettings::update(cx, |d| d.settings.performance.overview_range = range);
@@ -365,16 +385,15 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     let merged = r.vcx.update(|_, cx| demand.read(cx).merged());
     assert_eq!(merged.device_history_range, None, "1 min is live");
 
-    let header: &'static str =
-        Box::leak(segment_id(HEADER_SWITCH, OverviewRange::H24).into_boxed_str());
+    let header: &'static str = leak(trigger_id(HEADER_SWITCH));
     // The bar carries the switch: the page has no header row (tasklens-o55.54).
     assert!(r.vcx.debug_bounds(header).is_none(), "one switch");
     assert!(
         r.vcx.debug_bounds(RANGE_HEADER_ID).is_none(),
         "no header row with the bar on the Overview"
     );
-    let id: &'static str = Box::leak(segment_id(STATUS_SWITCH, OverviewRange::H1).into_boxed_str());
-    click(r.vcx, id);
+    let id: &'static str = leak(trigger_id(STATUS_SWITCH));
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::H1);
     let saved = r
         .vcx
         .update(|_, cx| TlSettings::settings(cx).performance.overview_range);
@@ -406,10 +425,90 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
     draw(r.vcx);
     assert!(r.vcx.debug_bounds(RANGE_HEADER_ID).is_some());
     assert!(r.vcx.debug_bounds(id).is_none(), "no status bar");
-    click(r.vcx, header);
+    pick(r.vcx, HEADER_SWITCH, OverviewRange::H24);
     for chart in box_charts(&mut r) {
         let range = r.vcx.read_entity(&chart, |c, _| c.spec.range_ns);
         assert_eq!(range, 86_400 * S);
+    }
+}
+
+/// The switch is one drop-down button, not five segments: the button is drawn, the menu items
+/// only while it is open, and the menu lists the five ranges.
+#[gpui_kit::test]
+fn overview_range_switch_is_a_drop_down(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let trigger = leak(trigger_id(STATUS_SWITCH));
+    assert!(r.vcx.debug_bounds(trigger).is_some(), "the button");
+    for range in OverviewRange::ALL {
+        let item = leak(segment_id(STATUS_SWITCH, range));
+        assert!(
+            r.vcx.debug_bounds(item).is_none(),
+            "{range:?} hidden while closed"
+        );
+    }
+    click(r.vcx, trigger);
+    for range in OverviewRange::ALL {
+        let item = leak(segment_id(STATUS_SWITCH, range));
+        assert!(
+            r.vcx.debug_bounds(item).is_some(),
+            "{range:?} in the open menu"
+        );
+    }
+    // The button shows the saved range: the label text is in the keyed state of the switch.
+    let shown = |r: &mut Rig| -> Option<String> {
+        r.vcx.update(|window, cx| {
+            let state = window.use_keyed_state(
+                gpui_kit::ElementId::Name(STATUS_SWITCH.into()),
+                cx,
+                |_, _| unreachable!("the state exists"),
+            );
+            state.read(cx).selected_value().map(|v| v.to_string())
+        })
+    };
+    assert_eq!(shown(&mut r).as_deref(), Some("1m"));
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::M5);
+    assert_eq!(shown(&mut r).as_deref(), Some("5m"));
+    // Set from elsewhere (the page menu, a key), the button follows.
+    set_range(&mut r, OverviewRange::D7);
+    assert_eq!(shown(&mut r).as_deref(), Some("7d"));
+}
+
+/// The button is as wide as its label, the chevron and the padding, with no 160 px minimum: at
+/// every UI scale it is narrower than the old five-segment switch and than the select's own
+/// minimum, and it does not grow with the scale faster than the scale itself.
+#[gpui_kit::test]
+fn overview_range_switch_is_compact(cx: &mut TestAppContext) {
+    let mut r = open(cx);
+    let widths = |r: &mut Rig, pct: u16| -> Vec<(OverviewRange, f32, f32)> {
+        r.vcx.update(|_, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: pct,
+                ..AppearanceSettings::default()
+            };
+            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+        });
+        draw(r.vcx);
+        let mut out = Vec::new();
+        for range in OverviewRange::ALL {
+            set_range(r, range);
+            let b = r
+                .vcx
+                .debug_bounds(leak(trigger_id(STATUS_SWITCH)))
+                .expect("button");
+            out.push((range, f32::from(b.size.width), f32::from(b.size.height)));
+        }
+        out
+    };
+    for pct in [100u16, 150, 200] {
+        let scale = f32::from(pct) / 100.;
+        let w = widths(&mut r, pct);
+        let widest = w.iter().map(|(_, w, _)| *w).fold(0., f32::max);
+        eprintln!("scale {scale}: {w:?}");
+        assert!(
+            widest <= 96. * scale,
+            "{widest} px at {scale}: label, chevron and padding only"
+        );
+        assert!(widest < 160. * scale, "below the select's old minimum");
     }
 }
 
@@ -418,9 +517,6 @@ fn overview_range_switch_redraws_all_boxes(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_range_long_ranges_need_device_history(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    let segment = |prefix: &str, range: OverviewRange| -> &'static str {
-        Box::leak(segment_id(prefix, range).into_boxed_str())
-    };
     let saved = |r: &mut Rig| {
         r.vcx
             .update(|_, cx| TlSettings::settings(cx).performance.overview_range)
@@ -434,10 +530,10 @@ fn overview_range_long_ranges_need_device_history(cx: &mut TestAppContext) {
     };
     set_kept(&mut r, false);
     for range in [OverviewRange::H24, OverviewRange::D7] {
-        click(r.vcx, segment(STATUS_SWITCH, range));
+        pick(r.vcx, STATUS_SWITCH, range);
         assert_eq!(saved(&mut r), OverviewRange::M1, "{range:?} in the bar");
     }
-    click(r.vcx, segment(STATUS_SWITCH, OverviewRange::H1));
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::H1);
     assert_eq!(saved(&mut r), OverviewRange::H1, "1 h stays enabled");
 
     // The bar off: the Overview header's switch has the same rule.
@@ -448,16 +544,16 @@ fn overview_range_long_ranges_need_device_history(cx: &mut TestAppContext) {
     });
     draw(r.vcx);
     for range in [OverviewRange::H24, OverviewRange::D7] {
-        click(r.vcx, segment(HEADER_SWITCH, range));
+        pick(r.vcx, HEADER_SWITCH, range);
         assert_eq!(saved(&mut r), OverviewRange::H1, "{range:?} in the header");
     }
-    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::M5));
+    pick(r.vcx, HEADER_SWITCH, OverviewRange::M5);
     assert_eq!(saved(&mut r), OverviewRange::M5);
 
     set_kept(&mut r, true);
-    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::H24));
+    pick(r.vcx, HEADER_SWITCH, OverviewRange::H24);
     assert_eq!(saved(&mut r), OverviewRange::H24, "enabled again");
-    click(r.vcx, segment(HEADER_SWITCH, OverviewRange::D7));
+    pick(r.vcx, HEADER_SWITCH, OverviewRange::D7);
     assert_eq!(saved(&mut r), OverviewRange::D7);
 }
 

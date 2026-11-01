@@ -23,6 +23,7 @@ use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric, N
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::chart::ChartView;
+use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::host::HostContext;
 use tl_ui::pages::performance::overview::layout::BoxKind;
 use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
@@ -32,7 +33,7 @@ use tl_ui::pages::performance::overview::timeline::{
 };
 use tl_ui::settings_global::TlSettings;
 
-use super::overview_range::{Rig, box_charts, click, draw, open, overview, set_range};
+use super::overview_range::{Rig, box_charts, click, draw, open, overview, pick, set_range};
 
 const S: i64 = 1_000_000_000;
 const MIN: i64 = 60 * S;
@@ -421,17 +422,36 @@ fn timeline_paused_disables_unservable_ranges(cx: &mut TestAppContext) {
     click_bands(&mut r, 19. / 24.);
     assert!(paused(&mut r).is_some());
     assert_eq!(range(&mut r), OverviewRange::H1, "1 min cannot be served");
-    let one_min: &'static str =
-        Box::leak(segment_id(STATUS_SWITCH, OverviewRange::M1).into_boxed_str());
-    click(r.vcx, one_min);
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::M1);
     assert_eq!(range(&mut r), OverviewRange::H1, "1 min is disabled");
-    let day: &'static str =
-        Box::leak(segment_id(STATUS_SWITCH, OverviewRange::H24).into_boxed_str());
-    click(r.vcx, day);
+    // The menu is still open: the disabled items say why, the enabled ones say nothing.
+    let tip = |r: &mut Rig, range: OverviewRange| {
+        let id: &'static str = Box::leak(segment_id(STATUS_SWITCH, range).into_boxed_str());
+        let at = r.vcx.debug_bounds(id).expect("menu item").center();
+        r.vcx
+            .simulate_mouse_move(point(px(5.), px(5.)), None, Modifiers::none());
+        draw(r.vcx);
+        r.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        r.vcx.executor().advance_clock(DELAY_CONTROL);
+        r.vcx.run_until_parked();
+        draw(r.vcx);
+        draw(r.vcx);
+        r.vcx.debug_bounds("TlTooltip-text").is_some()
+    };
+    assert!(
+        tip(&mut r, OverviewRange::M1),
+        "1 min: Not kept at this resolution"
+    );
+    assert!(
+        tip(&mut r, OverviewRange::M5),
+        "5 min: Not kept at this resolution"
+    );
+    assert!(!tip(&mut r, OverviewRange::H1), "1 h is served: no tooltip");
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::H24);
     assert_eq!(range(&mut r), OverviewRange::H24, "24 h is served");
     // Live again: every range is enabled.
     click(r.vcx, BACK_TO_LIVE_ID);
-    click(r.vcx, one_min);
+    pick(r.vcx, STATUS_SWITCH, OverviewRange::M1);
     assert_eq!(range(&mut r), OverviewRange::M1);
 }
 

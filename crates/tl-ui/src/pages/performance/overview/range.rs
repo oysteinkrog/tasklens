@@ -212,7 +212,9 @@ fn switch(
                 .compact()
                 .aria_label(words.aria_label.clone())
                 .on_change(|value, _, cx| {
-                    if let Some(range) = OverviewRange::ALL.into_iter().find(|r| r.key() == value) {
+                    if let Some(range) =
+                        OverviewRange::ALL.into_iter().find(|r| r.key() == &**value)
+                    {
                         set_range(range, cx);
                     }
                 }),

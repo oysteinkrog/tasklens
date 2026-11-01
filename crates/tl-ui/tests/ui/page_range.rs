@@ -9,10 +9,10 @@ use tl_model::settings::OverviewRange;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::cpu::CpuPage;
 use tl_ui::pages::performance::overview::OVERVIEW_KEY;
-use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, segment_id};
+use tl_ui::pages::performance::overview::range::PAGE_SWITCH;
 use tl_ui::settings_global::TlSettings;
 
-use crate::overview_range::{Rig, box_charts, click, draw, open};
+use crate::overview_range::{Rig, box_charts, draw, open, pick};
 
 const S: u64 = 1_000_000_000;
 
@@ -32,8 +32,7 @@ fn select(r: &mut Rig, key: &str) {
 fn page_switch_moves_the_overview(cx: &mut TestAppContext) {
     let mut r = open(cx);
     select(&mut r, "cpu");
-    let id: &'static str = Box::leak(segment_id(PAGE_SWITCH, OverviewRange::H1).into_boxed_str());
-    click(r.vcx, id);
+    pick(r.vcx, PAGE_SWITCH, OverviewRange::H1);
     let saved = r
         .vcx
         .update(|_, cx| TlSettings::settings(cx).performance.overview_range);

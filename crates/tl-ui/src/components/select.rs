@@ -616,13 +616,20 @@ fn popup(
     let visible = st.visible(cx);
     let bounds = st.trigger_bounds;
     let filter = st.filter.clone().filter(|_| filterable && st.filtering);
+    // Copied out so the rows can take `cx` for their tooltip state.
+    let (items, highlight, selected, scroll) = (
+        st.items.clone(),
+        st.highlight,
+        st.selected,
+        st.scroll.clone(),
+    );
 
     let rows: Vec<_> = visible
         .iter()
         .map(|&ix| {
-            let item = &st.items[ix];
-            let highlighted = st.highlight == Some(ix);
-            let checked = st.selected == Some(ix);
+            let item = &items[ix];
+            let highlighted = highlight == Some(ix);
+            let checked = selected == Some(ix);
             let mut label = div()
                 .flex_1()
                 .min_w_0()
@@ -694,7 +701,7 @@ fn popup(
         .flex_col()
         .max_h(s(LIST_MAX_HEIGHT))
         .overflow_y_scroll()
-        .track_scroll(&st.scroll)
+        .track_scroll(&scroll)
         .map(|d| {
             if rows.is_empty() {
                 let mut empty = div()
