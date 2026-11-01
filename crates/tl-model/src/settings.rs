@@ -2244,12 +2244,15 @@ impl Settings {
             c.push("performance.memory_by_app.colors");
         }
         self.performance.migrate_overview(c);
-        // ADR-019: read the layouts, then convert the GPU box's old keys once. Runs after the
-        // overview, so conversion reads its validated grid entry.
+        // ADR-019: read the layouts, then convert the Overview boxes' old keys once. Runs after
+        // the overview, so conversion reads its validated grid entry. Phase 3: the CPU and
+        // Memory pages convert their old page keys once too, when this build has their page.
         if self.performance.layouts.load() {
             c.push(LAYOUTS_KEY);
         }
-        if layout::convert_old_settings(&mut self.performance) {
+        let boxes = layout::convert_old_settings(&mut self.performance);
+        let pages = crate::layout_pages::convert_old_page_settings(&mut self.performance);
+        if boxes || pages {
             c.push(LAYOUTS_CONVERTED_KEY);
         }
         // `[[hosts]]`: an invalid entry is dropped, the others keep their order. The local

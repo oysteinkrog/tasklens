@@ -1,0 +1,6 @@
+# Settings written by 1.3.0: CPU page graph mode overall, secondary graph clocks.
+schema_version = 1
+
+[performance]
+cpu_graph_mode = "overall"
+cpu_secondary_graph = "clocks"

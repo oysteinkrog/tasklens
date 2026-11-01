@@ -1,0 +1,7 @@
+# Settings written by 1.3.0: Memory page view usage, swap chart on, composition bar off.
+schema_version = 1
+
+[performance]
+memory_view = "usage"
+memory_swap_graph = true
+memory_composition = false

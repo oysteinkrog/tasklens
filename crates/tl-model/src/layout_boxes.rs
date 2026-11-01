@@ -34,6 +34,12 @@ pub const DISK_PREFIX: &str = "disk:";
 pub const NET_PREFIX: &str = "net:";
 /// The prefix of a GPU's persistent key.
 pub const GPU_PREFIX: &str = "gpu:";
+/// The persistent key of the GPU aggregate (Aggregate graphics).
+pub const DEVICE_GPUS: &str = "aggregate:gpu";
+/// The prefix of a fan's persistent key.
+pub const FAN_PREFIX: &str = "fan:";
+/// The prefix of a battery's persistent key.
+pub const BATTERY_PREFIX: &str = "bat:";
 
 /// `cpu`: utilization.
 pub const METRIC_CPU_TOTAL: &str = "total";
@@ -91,6 +97,12 @@ pub enum DeviceKind {
     Nets,
     /// `gpu:…`, or a GPU box slot.
     Gpu,
+    /// `fan:…`, one fan.
+    Fan,
+    /// `bat:…`, one battery.
+    Battery,
+    /// `aggregate:gpu`, every GPU (Aggregate graphics).
+    AggregateGpu,
     /// Any other key, including one this build does not know.
     Other,
 }
@@ -103,6 +115,7 @@ impl DeviceKind {
             DEVICE_MEMORY => DeviceKind::Memory,
             DEVICE_DISKS => DeviceKind::Disks,
             DEVICE_NETS => DeviceKind::Nets,
+            DEVICE_GPUS => DeviceKind::AggregateGpu,
             k if k
                 .strip_prefix(CPU_LOGICAL_PREFIX)
                 .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) =>
@@ -112,6 +125,8 @@ impl DeviceKind {
             k if k.starts_with(DISK_PREFIX) => DeviceKind::Disk,
             k if k.starts_with(NET_PREFIX) => DeviceKind::Net,
             k if k.starts_with(GPU_PREFIX) => DeviceKind::Gpu,
+            k if k.starts_with(FAN_PREFIX) => DeviceKind::Fan,
+            k if k.starts_with(BATTERY_PREFIX) => DeviceKind::Battery,
             _ => DeviceKind::Other,
         }
     }
@@ -134,21 +149,32 @@ pub enum MetricSeries {
     Pair([MetricId; 2]),
     /// Three series stacked (`composition`).
     Stacked([MetricId; 3]),
+    /// Three lines in one chart, not stacked (`physical`), the filled one first.
+    Triple([MetricId; 3]),
     /// This metric of every physical core, one line each (`core_clocks`). The series are on
     /// the logical CPU devices, not on the widget's own device.
     PerCore(MetricId),
+    /// This metric of every present logical CPU, one line each (`cores_overlaid`,
+    /// `cores_stacked`). The series are on the logical CPU devices.
+    PerLogical(MetricId),
+    /// This metric of the device paired with the widget's device: the temperature sensor a
+    /// fan's `[fans]` entry names, else its default pairing (fan `temp`).
+    Paired(MetricId),
     /// No series: the value comes from the device record only (disk `temp`).
     NoSeries,
 }
 
 impl MetricSeries {
     /// The series ids on the widget's own device, the first first. Empty for `NoSeries`; the
-    /// one metric for `PerCore`, whose devices the source finds.
+    /// one metric for `PerCore`, `PerLogical` and `Paired`, whose devices the source finds.
     pub fn ids(&self) -> &[MetricId] {
         match self {
-            MetricSeries::One(id) | MetricSeries::PerCore(id) => std::slice::from_ref(id),
+            MetricSeries::One(id)
+            | MetricSeries::PerCore(id)
+            | MetricSeries::PerLogical(id)
+            | MetricSeries::Paired(id) => std::slice::from_ref(id),
             MetricSeries::Pair(ids) => ids,
-            MetricSeries::Stacked(ids) => ids,
+            MetricSeries::Stacked(ids) | MetricSeries::Triple(ids) => ids,
             MetricSeries::NoSeries => &[],
         }
     }
@@ -162,14 +188,25 @@ impl MetricSeries {
     pub fn is_multi(&self) -> bool {
         matches!(
             self,
-            MetricSeries::Pair(..) | MetricSeries::Stacked(_) | MetricSeries::PerCore(_)
+            MetricSeries::Pair(..)
+                | MetricSeries::Stacked(_)
+                | MetricSeries::Triple(_)
+                | MetricSeries::PerCore(_)
+                | MetricSeries::PerLogical(_)
         )
     }
 }
 
 /// The series of `metric` on a device of `kind`; `None` for a key this build does not know on
-/// that kind. GPU keys are [`MetricKey::metric`].
+/// that kind. GPU keys of phase 1 are [`MetricKey::metric`]; the keys phase 3 adds are
+/// [`crate::layout_pages::page_metric_series`].
 pub fn metric_series(kind: DeviceKind, metric: &MetricKey) -> Option<MetricSeries> {
+    box_metric_series(kind, metric)
+        .or_else(|| crate::layout_pages::page_metric_series(kind, metric.as_str()))
+}
+
+/// The series of a phase 1 or phase 2 key.
+fn box_metric_series(kind: DeviceKind, metric: &MetricKey) -> Option<MetricSeries> {
     use MetricSeries::{NoSeries, One, Pair, PerCore, Stacked};
     let key = metric.as_str();
     let series = match kind {
@@ -219,7 +256,9 @@ pub fn metric_series(kind: DeviceKind, metric: &MetricKey) -> Option<MetricSerie
             METRIC_NET_TRAFFIC => Pair([MetricId::NET_RX, MetricId::NET_TX]),
             _ => return None,
         },
-        DeviceKind::Other => return None,
+        DeviceKind::Fan | DeviceKind::Battery | DeviceKind::AggregateGpu | DeviceKind::Other => {
+            return None;
+        }
     };
     Some(series)
 }
@@ -502,7 +541,10 @@ mod tests {
             ("aggregate:net", DeviceKind::Nets),
             ("aggregate:net:wired", DeviceKind::Other),
             ("gpu:GPU-0a1b", DeviceKind::Gpu),
-            ("fan:nct6798:1", DeviceKind::Other),
+            ("fan:nct6798:1", DeviceKind::Fan),
+            ("bat:BAT0", DeviceKind::Battery),
+            ("aggregate:gpu", DeviceKind::AggregateGpu),
+            ("sensor:k10temp:temp1", DeviceKind::Other),
         ];
         for (key, kind) in cases {
             assert_eq!(DeviceKind::of_key(key), kind, "{key}");
@@ -572,7 +614,7 @@ mod tests {
                     match content {
                         WidgetContent::Fixed(f) => {
                             assert!(forms.is_empty(), "{kind} {mode}");
-                            assert_eq!(f.container(), Some(&*overview_container(kind)));
+                            assert!(f.allowed_in(&overview_container(kind)), "{kind} {mode}");
                         }
                         _ => assert!(!forms.is_empty(), "{kind} {mode}"),
                     }

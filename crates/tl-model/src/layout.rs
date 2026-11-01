@@ -1,12 +1,13 @@
 //! Widget layout settings, `[[performance.layouts]]` (ADR-019, D-041). No file I/O.
 //!
-//! A container (an Overview box, later a resource page) holds a list of widgets. A widget shows
+//! A container (an Overview box or a device page) holds a list of widgets. A widget shows
 //! one metric of one device, one metric of every member of a group (every core, disk, adapter or
 //! GPU engine), or a fixed view of its own (the Top processes table, the Timeline, Memory by
 //! app). This module holds the plain serde data, the GPU metric keys, the load rules that
 //! `Settings::clamp` runs, the conversion of the GPU box's old settings and the reset to the
 //! default. The other boxes' metric keys, preset lists and conversions are in
-//! [`crate::layout_boxes`]. `tl-ui` turns the data into its views.
+//! [`crate::layout_boxes`], the device pages' in [`crate::layout_pages`]. `tl-ui` turns the
+//! data into its views.
 //!
 //! As deserialized, every entry is [`LayoutEntry::Kept`]. `Settings::clamp` reads the entries
 //! this build supports into [`LayoutEntry::Known`] and drops the invalid parts.
@@ -17,7 +18,11 @@ use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 
 use crate::ids::MetricId;
-use crate::layout_boxes::{self, convert_box};
+use crate::layout_boxes::{self, DeviceKind, convert_box};
+use crate::layout_pages::{
+    PAGE_CONTAINER_PREFIX, PAGE_GRID_COLS, PAGE_KINDS, default_page_layout, is_page_container_for,
+    page_kind, page_presets, reset_page_to_default,
+};
 use crate::settings::{
     OVERVIEW_ARRANGES, OVERVIEW_BOX_MODES, OVERVIEW_POWER_PLACEMENTS, OVERVIEW_POWER_SPLIT_RANGE,
     OVERVIEW_SPLIT_RANGE, OverviewGridSetting, PerformanceSettings,
@@ -39,7 +44,8 @@ pub const NET_BOX_CONTAINER: &str = "overview.net";
 pub const PROCESSES_BOX_CONTAINER: &str = "overview.processes";
 pub const TIMELINE_BOX_CONTAINER: &str = "overview.timeline";
 
-/// The containers this build supports: the seven Overview boxes.
+/// The Overview boxes, the containers every build since phase 2 supports. The device pages of
+/// the kinds in [`PAGE_KINDS`] are containers too: ask [`is_layout_container`].
 pub const LAYOUT_CONTAINERS: &[&str] = &[
     CPU_BOX_CONTAINER,
     MEMORY_BOX_CONTAINER,
@@ -64,6 +70,17 @@ pub const OVERVIEW_GRID_COLS: [(&str, u16); 7] = [
 
 /// The column count of a container this build does not know.
 const DEFAULT_GRID_COLS: u16 = 6;
+
+/// Whether this build reads `container`'s entry: an Overview box, or a device page whose kind
+/// is in [`PAGE_KINDS`]. Any other entry is kept as read and written back unchanged.
+pub fn is_layout_container(container: &str) -> bool {
+    is_layout_container_for(container, PAGE_KINDS)
+}
+
+/// [`is_layout_container`] with the page kinds `kinds`.
+pub fn is_layout_container_for(container: &str, kinds: &[DeviceKind]) -> bool {
+    LAYOUT_CONTAINERS.contains(&container) || is_page_container_for(container, kinds)
+}
 
 /// The prefix of an Overview box container id; the rest is the box kind.
 const OVERVIEW_PREFIX: &str = "overview.";
@@ -103,8 +120,9 @@ pub struct ContainerLayout {
 /// The built-in preset of a flow layout.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct PresetSetting {
-    /// A mode id of the container's kind in [`OVERVIEW_BOX_MODES`]: for the GPU box
-    /// "engine_charts", "chart_engines" or "chart".
+    /// A mode id of the container's kind in [`OVERVIEW_BOX_MODES`] (for the GPU box
+    /// "engine_charts", "chart_engines" or "chart"), or for a page an id of
+    /// [`crate::layout_pages::page_presets`].
     pub id: String,
     /// An id from [`OVERVIEW_ARRANGES`]; `None` is the preset's default.
     pub arrange: Option<String>,
@@ -323,40 +341,117 @@ pub enum FixedWidget {
     Processes,
     /// The 24-hour timeline (UI-PRF-057), in `overview.timeline` only.
     Timeline,
-    /// The Memory by app chart and its legend (UI-PRF-060), in `overview.memory` only.
+    /// The Memory by app chart and its legend (UI-PRF-060), in `overview.memory` and
+    /// `page.memory`.
     MemoryByApp,
+    /// The "Details" heading and the page's Details grid (UI-PRF-021), on every page.
+    Details,
+    /// The CPU page's per-core charts (UI-PRF-023), in `page.cpu` only.
+    CpuCoreGrid,
+    /// The CPU page's core board with its heading and sort toggle, in `page.cpu` only.
+    CpuCoreBoard,
+    /// A GPU page's engine charts (UI-PRF-032), on GPU pages only.
+    GpuEngineGrid,
+    /// The Memory page's composition bar (UI-PRF-027), in `page.memory` only.
+    MemoryBar,
+    /// The Memory page's "Compressed memory" block (UI-PRF-028), in `page.memory` only.
+    MemoryCompressed,
+    /// The Memory page's "Swap devices" table, in `page.memory` only.
+    SwapDevices,
+    /// The Memory page's "Memory modules" block, in `page.memory` only.
+    MemoryModules,
+    /// A GPU page's "Displays" block (UI-PRF-033), on GPU pages only.
+    GpuDisplays,
+    /// A disk page's partitions table (UI-PRF-030), on disk pages only.
+    DiskPartitions,
+    /// An adapter page's "Network settings" link (UI-PRF-031), on adapter pages only.
+    NetSettings,
+    /// A battery page's 24-hour charge chart (UI-PRF-035), on battery pages only.
+    BatteryHistory,
     /// A name this build does not know: kept, written back, shown as unavailable.
     Other(Arc<str>),
 }
 
 impl FixedWidget {
+    /// Each known fixed widget and its name, as written.
+    pub const NAMES: [(&'static str, FixedWidget); 15] = [
+        ("processes", FixedWidget::Processes),
+        ("timeline", FixedWidget::Timeline),
+        ("memory_by_app", FixedWidget::MemoryByApp),
+        ("details", FixedWidget::Details),
+        ("cpu_core_grid", FixedWidget::CpuCoreGrid),
+        ("cpu_core_board", FixedWidget::CpuCoreBoard),
+        ("gpu_engine_grid", FixedWidget::GpuEngineGrid),
+        ("memory_bar", FixedWidget::MemoryBar),
+        ("memory_compressed", FixedWidget::MemoryCompressed),
+        ("swap_devices", FixedWidget::SwapDevices),
+        ("memory_modules", FixedWidget::MemoryModules),
+        ("gpu_displays", FixedWidget::GpuDisplays),
+        ("disk_partitions", FixedWidget::DiskPartitions),
+        ("net_settings", FixedWidget::NetSettings),
+        ("battery_history", FixedWidget::BatteryHistory),
+    ];
+
     /// The fixed widget of `name`; `Other` for a name this build does not know.
     pub fn from_name(name: &str) -> Self {
-        match name {
-            "processes" => FixedWidget::Processes,
-            "timeline" => FixedWidget::Timeline,
-            "memory_by_app" => FixedWidget::MemoryByApp,
-            other => FixedWidget::Other(Arc::from(other)),
-        }
+        Self::NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or_else(|| FixedWidget::Other(Arc::from(name)), |(_, f)| f.clone())
     }
 
     /// The name as written.
     pub fn name(&self) -> &str {
         match self {
-            FixedWidget::Processes => "processes",
-            FixedWidget::Timeline => "timeline",
-            FixedWidget::MemoryByApp => "memory_by_app",
             FixedWidget::Other(name) => name,
+            known => Self::NAMES
+                .iter()
+                .find(|(_, f)| f == known)
+                .map_or("", |(n, _)| n),
         }
     }
 
-    /// The only container the widget may be in; `None` for `Other`, which any container keeps.
+    /// The Overview box the widget may be in; `None` for a page part and for `Other`.
     pub fn container(&self) -> Option<&'static str> {
         match self {
             FixedWidget::Processes => Some(PROCESSES_BOX_CONTAINER),
             FixedWidget::Timeline => Some(TIMELINE_BOX_CONTAINER),
             FixedWidget::MemoryByApp => Some(MEMORY_BOX_CONTAINER),
-            FixedWidget::Other(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The kind of device page the widget may be on; `None` for the Overview-only kinds,
+    /// Details (every page) and `Other`.
+    pub fn page_kind(&self) -> Option<DeviceKind> {
+        match self {
+            FixedWidget::MemoryByApp
+            | FixedWidget::MemoryBar
+            | FixedWidget::MemoryCompressed
+            | FixedWidget::SwapDevices
+            | FixedWidget::MemoryModules => Some(DeviceKind::Memory),
+            FixedWidget::CpuCoreGrid | FixedWidget::CpuCoreBoard => Some(DeviceKind::Cpu),
+            FixedWidget::GpuEngineGrid | FixedWidget::GpuDisplays => Some(DeviceKind::Gpu),
+            FixedWidget::DiskPartitions => Some(DeviceKind::Disk),
+            FixedWidget::NetSettings => Some(DeviceKind::Net),
+            FixedWidget::BatteryHistory => Some(DeviceKind::Battery),
+            FixedWidget::Processes
+            | FixedWidget::Timeline
+            | FixedWidget::Details
+            | FixedWidget::Other(_) => None,
+        }
+    }
+
+    /// Whether the widget may be in `container` (ADR-019 phase 2 and phase 3 fixed widget
+    /// tables). `Other` is kept in any container.
+    pub fn allowed_in(&self, container: &str) -> bool {
+        if matches!(self, FixedWidget::Other(_)) || self.container() == Some(container) {
+            return true;
+        }
+        match (self, page_kind(container)) {
+            (FixedWidget::Details, Some(_)) => true,
+            (f, Some(kind)) => f.page_kind() == Some(kind),
+            (_, None) => false,
         }
     }
 }
@@ -503,8 +598,12 @@ impl Default for WidgetOptions {
     }
 }
 
-/// The column count of `container`'s inner grid ([`OVERVIEW_GRID_COLS`]).
+/// The column count of `container`'s inner grid: [`OVERVIEW_GRID_COLS`] for an Overview box,
+/// [`PAGE_GRID_COLS`] for every page container.
 pub fn grid_cols(container: &str) -> u16 {
+    if container.starts_with(PAGE_CONTAINER_PREFIX) {
+        return PAGE_GRID_COLS;
+    }
     OVERVIEW_GRID_COLS
         .iter()
         .find(|(c, _)| *c == container)
@@ -523,6 +622,9 @@ pub fn overview_container(kind: &str) -> String {
 
 /// The preset ids of `container`, the default first.
 pub(crate) fn presets_of(container: &str) -> &'static [&'static str] {
+    if let Some(kind) = page_kind(container) {
+        return page_presets(kind);
+    }
     overview_kind(container)
         .and_then(|kind| OVERVIEW_BOX_MODES.iter().find(|(k, _)| *k == kind))
         .map_or(&[], |(_, modes)| *modes)
@@ -573,6 +675,12 @@ impl LayoutsSetting {
     /// gives the same result. Returns `true` when it dropped or changed anything, for one
     /// `warn!` line.
     pub fn load(&mut self) -> bool {
+        self.load_for(PAGE_KINDS)
+    }
+
+    /// [`Self::load`] with the page kinds `kinds` read as containers; the entries of other
+    /// page kinds are kept as read.
+    pub fn load_for(&mut self, kinds: &[DeviceKind]) -> bool {
         let mut dropped = false;
         let mut out: Vec<LayoutEntry> = Vec::with_capacity(self.0.len());
         for entry in std::mem::take(&mut self.0) {
@@ -593,7 +701,7 @@ impl LayoutsSetting {
                 Some(v) => v.as_integer().and_then(|v| u32::try_from(v).ok()),
             };
             let readable = version.is_some_and(|v| (1..=LAYOUT_VERSION).contains(&v));
-            if !readable || !LAYOUT_CONTAINERS.contains(&container) {
+            if !readable || !is_layout_container_for(container, kinds) {
                 out.push(LayoutEntry::Kept(table));
                 continue;
             }
@@ -1004,7 +1112,7 @@ impl WidgetSetting {
             return None;
         }
         let fixed = FixedWidget::from_name(t.get("fixed")?.as_str()?);
-        if fixed.container().is_some_and(|c| c != ctx.container) {
+        if !fixed.allowed_in(ctx.container) {
             return None;
         }
         Some(WidgetContent::Fixed(fixed))
@@ -1308,10 +1416,28 @@ pub fn box_layout(perf: &PerformanceSettings, kind: &str) -> Option<ContainerLay
         .or_else(|| default_box_layout(kind))
 }
 
+/// The layout `container` shows: an Overview box's as [`box_layout`] gives it; a page's known
+/// entry, else its built-in default. `None` for an id that is neither.
+pub fn container_layout(perf: &PerformanceSettings, container: &str) -> Option<ContainerLayout> {
+    if let Some(kind) = overview_kind(container) {
+        return box_layout(perf, kind);
+    }
+    page_kind(container)?;
+    match perf.layouts.known(container) {
+        Some(layout) => Some(layout.clone()),
+        None => default_page_layout(container),
+    }
+}
+
 /// Saves the default for `container` (ADR-019 "Saving the default"): removes its entry and, for
 /// an Overview box, the old keys its conversion reads from the box's grid entry. The box's
-/// other grid keys stay. The next load then shows the built-in default and converts nothing.
+/// other grid keys stay. The next load then shows the built-in default and converts nothing. A
+/// page follows [`reset_page_to_default`].
 pub fn reset_to_default(perf: &mut PerformanceSettings, container: &str) {
+    if page_kind(container).is_some() {
+        reset_page_to_default(perf, container);
+        return;
+    }
     perf.layouts.remove(container);
     let Some(kind) = overview_kind(container) else {
         return;

@@ -1,0 +1,5 @@
+# Settings written by 1.3.0: GPU page optional graphs [].
+schema_version = 1
+
+[performance]
+gpu_optional_graphs = []

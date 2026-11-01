@@ -55,3 +55,5 @@ pub mod remote_proto;
 pub mod layout;
 
 pub mod layout_boxes;
+
+pub mod layout_pages;
