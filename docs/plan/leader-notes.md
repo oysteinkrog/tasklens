@@ -1070,3 +1070,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-10-31: lhliq.1 (ADR-019) closed by the leader after fixing the last two doc findings in f66bea66.
 - 2026-11-01: lhliq.4 closed by the leader after fixing the source-switch label finding in 1ee7a6ed.
 - 2026-11-01: lhliq.5 closed by the leader: sample test accepted per ADR-019 render contract; GPUI re-renders cached children of a re-rendered view (view.rs:501), now named in ADR-019.
+- 2026-11-01: lhliq.7 decision: old GPU modes render through widgets via flow placement; collapsed box may re-place only when the busiest engine changes.
