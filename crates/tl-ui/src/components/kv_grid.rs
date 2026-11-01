@@ -78,6 +78,7 @@ use super::motion::{M_FAST, ease_out_cubic};
 use super::skeleton::TlSkeletonBlock;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
+use crate::selector::TlSelector;
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, numeric_style, t_base, t_md, t_sm};
@@ -452,7 +453,7 @@ fn dotted_underline(n: usize, color: Hsla, m: &UiMetrics) -> AnyElement {
     let dot = px(DOT * m.ui_scale);
     let step = px(DOT_STEP * m.ui_scale);
     div()
-        .debug_selector(move || format!("TlKv-underline-{n}"))
+        .tl_selector(move || format!("TlKv-underline-{n}"))
         .absolute()
         .left_0()
         .right_0()
@@ -876,7 +877,7 @@ impl TlKeyValueGrid {
             });
 
         h_flex()
-            .debug_selector(move || format!("TlKv-band-{si}"))
+            .tl_selector(move || format!("TlKv-band-{si}"))
             .relative()
             .h(f.row_height)
             .px(m.sp[4])
@@ -921,7 +922,7 @@ impl TlKeyValueGrid {
         let id = self.child_id("value", n);
         let mut cell = div()
             .id(id.clone())
-            .debug_selector(move || format!("TlKv-value-{n}"))
+            .tl_selector(move || format!("TlKv-value-{n}"))
             .relative()
             .self_start()
             .flex()
@@ -1144,7 +1145,7 @@ impl TlKeyValueGrid {
         }
         let color = f.theme.accent;
         let overlay = div()
-            .debug_selector(move || format!("TlKv-flash-{n}"))
+            .tl_selector(move || format!("TlKv-flash-{n}"))
             .absolute()
             .inset_0()
             .bg(color.alpha(FLASH_ALPHA));
@@ -1170,7 +1171,7 @@ impl TlKeyValueGrid {
         let inset = px(1.);
         Some(
             div()
-                .debug_selector(move || format!("TlKv-cursor-{n}"))
+                .tl_selector(move || format!("TlKv-cursor-{n}"))
                 .absolute()
                 .top(inset)
                 .bottom(inset)
@@ -1198,7 +1199,7 @@ impl TlKeyValueGrid {
         let tip = TlTooltip::text(tip.clone());
         let label = label
             .relative()
-            .debug_selector(move || format!("TlKv-label-{n}"));
+            .tl_selector(move || format!("TlKv-label-{n}"));
         HoverTooltip::attach(&state, label, DELAY_CONTROL, tip.build(), window, cx)
     }
 
@@ -1254,7 +1255,7 @@ impl TlKeyValueGrid {
         };
         Some(
             div()
-                .debug_selector(move || format!("TlKv-row-{n}"))
+                .tl_selector(move || format!("TlKv-row-{n}"))
                 .relative()
                 .flex()
                 // A one-line value beside a wrapped label sits at the label's middle.
@@ -1292,7 +1293,7 @@ impl TlKeyValueGrid {
         let label = self.label_tip(n, label, window, cx);
         Some(
             div()
-                .debug_selector(move || format!("TlKv-row-{n}"))
+                .tl_selector(move || format!("TlKv-row-{n}"))
                 .relative()
                 .flex()
                 .flex_col()
@@ -1397,14 +1398,14 @@ impl RenderOnce for TlKeyValueGrid {
         let theme = current(cx).clone();
         let root = div()
             .id(self.id.clone())
-            .debug_selector(|| "TlKeyValueGrid".into())
+            .tl_selector(|| "TlKeyValueGrid".into())
             .w_full();
         if self.loading {
             return root.child(TlSkeletonBlock::new()).into_any_element();
         }
         let words = kv_words(cx);
         if self.filtered_empty {
-            let mut text = div().debug_selector(|| "TlKv-empty".into());
+            let mut text = div().tl_selector(|| "TlKv-empty".into());
             *text.text_style() = t_base(&m);
             return root
                 .size_full()
@@ -2193,7 +2194,7 @@ mod tests {
                 .value_prefix(|n, _, _| {
                     (n == 1).then(|| {
                         let icon = div()
-                            .debug_selector(|| "TlKv-prefix".into())
+                            .tl_selector(|| "TlKv-prefix".into())
                             .w(px(16.))
                             .h(px(16.))
                             .into_any_element();
@@ -2219,7 +2220,7 @@ mod tests {
                 .value_suffix(|n, _, _| {
                     (n == 1).then(|| {
                         let button = div()
-                            .debug_selector(|| "TlKv-suffix".into())
+                            .tl_selector(|| "TlKv-suffix".into())
                             .w(px(40.))
                             .h(px(24.))
                             .into_any_element();

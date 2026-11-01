@@ -53,6 +53,7 @@ use crate::pages::processes::actions::{CapturedTargets, EndProcess, EndTask};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};
 use crate::pages::processes::toasts::toast_words;
+use crate::selector::TlSelector;
 use crate::text::style::{label_style, t_base, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::push_main_toast;
@@ -743,7 +744,7 @@ impl DiskInUseWindow {
             .text_color(theme.text_primary);
         *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
         div()
-            .debug_selector(move || format!("DiskInUseGroup-{i}"))
+            .tl_selector(move || format!("DiskInUseGroup-{i}"))
             .flex_none()
             .flex()
             .items_center()
@@ -795,7 +796,7 @@ impl DiskInUseWindow {
                 let _ = this.update(cx, |w, cx| w.end(vec![key], kill, window, cx));
             });
         div()
-            .debug_selector(move || format!("DiskInUseRow-{i}"))
+            .tl_selector(move || format!("DiskInUseRow-{i}"))
             .flex_none()
             .flex()
             .items_center()
@@ -808,7 +809,7 @@ impl DiskInUseWindow {
             .child(paths.child(row.paths.clone()))
             .child(
                 div()
-                    .debug_selector(move || format!("DiskInUseEnd-{i}"))
+                    .tl_selector(move || format!("DiskInUseEnd-{i}"))
                     .flex_none()
                     .child(button),
             )
@@ -824,7 +825,7 @@ impl Render for DiskInUseWindow {
 
         let mut list = div()
             .id("DiskInUseList")
-            .debug_selector(|| "DiskInUseList".into())
+            .tl_selector(|| "DiskInUseList".into())
             .flex_1()
             .min_h_0()
             .flex()
@@ -842,13 +843,13 @@ impl Render for DiskInUseWindow {
         }
 
         let mut intro = div()
-            .debug_selector(|| "DiskInUseIntro".into())
+            .tl_selector(|| "DiskInUseIntro".into())
             .text_color(theme.text_primary);
         *intro.text_style() = t_base(&m);
 
         let note = self.eacces_note.then(|| {
             let mut note = div()
-                .debug_selector(|| "DiskInUseNote".into())
+                .tl_selector(|| "DiskInUseNote".into())
                 .text_color(theme.text_secondary);
             *note.text_style() = t_sm(&m);
             note.child(self.words.other_users.clone())
@@ -892,24 +893,16 @@ impl Render for DiskInUseWindow {
             .children(note)
             .child(
                 div()
-                    .debug_selector(|| "DiskInUseFooter".into())
+                    .tl_selector(|| "DiskInUseFooter".into())
                     .flex_none()
                     .flex()
                     .justify_end()
                     .gap(m.sp[3])
+                    .child(div().tl_selector(|| "DiskInUseClose".into()).child(close))
+                    .child(div().tl_selector(|| "DiskInUseRetry".into()).child(retry))
                     .child(
                         div()
-                            .debug_selector(|| "DiskInUseClose".into())
-                            .child(close),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "DiskInUseRetry".into())
-                            .child(retry),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "DiskInUseEndAll".into())
+                            .tl_selector(|| "DiskInUseEndAll".into())
                             .child(end_all),
                     ),
             )

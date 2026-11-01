@@ -31,6 +31,7 @@ use crate::components::progress::bucket;
 use crate::hub::SnapshotHub;
 use crate::pages::performance::actions::PerfSelectDevice;
 use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current};
@@ -745,7 +746,7 @@ pub fn core_sparks(
             let core = order.get(slot).and_then(|&i| Some((i, charts.get(i)?)));
             if let Some((i, chart)) = core {
                 let spark = div()
-                    .debug_selector(move || core_spark_id(i))
+                    .tl_selector(move || core_spark_id(i))
                     .absolute()
                     .top(inset)
                     .bottom(inset)
@@ -796,7 +797,7 @@ pub fn core_rows(
     // The selector sits on a plain wrapper: the scrollable's own element is its content.
     div()
         .size_full()
-        .debug_selector(|| CORE_ROWS_SCROLL_ID.into())
+        .tl_selector(|| CORE_ROWS_SCROLL_ID.into())
         .child(
             div()
                 .size_full()
@@ -1117,7 +1118,7 @@ fn box_icon(id: &'static str, m: &UiMetrics, theme: &TlTheme) -> Option<impl Int
     let name = device.icon()?;
     Some(
         div()
-            .debug_selector(move || title_icon_id(id))
+            .tl_selector(move || title_icon_id(id))
             .flex_none()
             .child(icon(name, m.icon.lg, device.icon_color(theme))),
     )
@@ -1152,7 +1153,7 @@ fn box_highlight(m: &UiMetrics) -> Div {
         .border_1()
         .border_color(gpui_kit::white().alpha(HIGHLIGHT_ALPHA))
         .rounded((m.radius_card - px(1.)).max(px(0.)))
-        .debug_selector(|| "BoxHighlight".into())
+        .tl_selector(|| "BoxHighlight".into())
 }
 
 /// Alpha of the inner highlight ring.
@@ -1200,7 +1201,7 @@ pub fn box_frame(
     let mut title_el = div();
     *title_el.text_style() = t_md(m);
     let title_el = title_el
-        .debug_selector(move || title_name_id(id))
+        .tl_selector(move || title_name_id(id))
         .h_full()
         .flex()
         .items_center()
@@ -1216,7 +1217,7 @@ pub fn box_frame(
     let mut line_el = div();
     *line_el.text_style() = t_sm(m);
     let line_el = line_el
-        .debug_selector(move || title_line_id(id))
+        .tl_selector(move || title_line_id(id))
         .flex_none()
         .h(row_h)
         .flex()
@@ -1227,7 +1228,7 @@ pub fn box_frame(
     let mut figures_el = div();
     *figures_el.text_style() = t_xs(m);
     let figures_el = figures_el
-        .debug_selector(move || figures_id(id))
+        .tl_selector(move || figures_id(id))
         .flex_none()
         .ml_auto()
         .pl(m.sp[4])
@@ -1252,14 +1253,14 @@ pub fn box_frame(
     let mut value_el = div();
     *value_el.text_style() = title_value_style(m);
     let value_el = value_el
-        .debug_selector(move || title_value_id(id))
+        .tl_selector(move || title_value_id(id))
         .flex()
         .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_primary)
         .child(fit_text(value));
     let mut frame = div()
-        .debug_selector(move || id.into())
+        .tl_selector(move || id.into())
         .relative()
         .flex()
         .flex_col()
@@ -1274,7 +1275,7 @@ pub fn box_frame(
     frame
         .child(opens_device(
             div()
-                .debug_selector(move || title_row_id(id))
+                .tl_selector(move || title_row_id(id))
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -1303,7 +1304,7 @@ pub fn box_frame(
                 // Clipped, so nothing draws over the bottom padding (UI-PRF-017).
                 .child(
                     div()
-                        .debug_selector(move || body_id(id))
+                        .tl_selector(move || body_id(id))
                         .flex_1()
                         .min_h_0()
                         .w_full()

@@ -53,6 +53,7 @@ use super::motion::{M_FAST, ease_out_cubic};
 use super::slider::{KeyMove, MENU_ROW_HEIGHT, TlSlider, key_move};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{t_base, t_xs};
 use crate::theme::{UiMetrics, current, metrics};
@@ -1422,7 +1423,7 @@ impl TlMenuPopup {
                 };
                 let value = value.clone().map(|value| {
                     let mut text = div()
-                        .debug_selector(move || format!("TlMenuValue-{ix}"))
+                        .tl_selector(move || format!("TlMenuValue-{ix}"))
                         .flex_none()
                         .ml(m.sp[6])
                         .whitespace_nowrap()
@@ -1565,7 +1566,7 @@ impl TlMenuPopup {
                 };
                 let value = value.clone().map(|value| {
                     let mut text = div()
-                        .debug_selector(move || format!("TlMenuValue-{ix}"))
+                        .tl_selector(move || format!("TlMenuValue-{ix}"))
                         .flex_none()
                         .ml(m.sp[6])
                         .whitespace_nowrap()

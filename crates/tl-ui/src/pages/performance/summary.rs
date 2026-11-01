@@ -34,6 +34,7 @@ use crate::components::menu::TlMenuPopup;
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::{current, metrics};
 
@@ -514,7 +515,7 @@ impl Render for SummaryView {
             let key = tile.key.clone();
             let marker = (selected.as_ref() == Some(&tile.key)).then(|| {
                 div()
-                    .debug_selector(|| MARKER_ID.into())
+                    .tl_selector(|| MARKER_ID.into())
                     .absolute()
                     .top(marker_top)
                     .left(m.sp[3])
@@ -524,7 +525,7 @@ impl Render for SummaryView {
             });
             div()
                 .id(("perf-summary-tile", i))
-                .debug_selector(move || format!("perf-summary-tile-{i}"))
+                .tl_selector(move || format!("perf-summary-tile-{i}"))
                 .relative()
                 .flex_none()
                 .w(l.tile_w)
@@ -590,7 +591,7 @@ impl Render for SummaryView {
 
         let grid = div()
             .id(GRID_ID)
-            .debug_selector(|| GRID_ID.into())
+            .tl_selector(|| GRID_ID.into())
             .size_full()
             .p(m.sp[6])
             .flex()

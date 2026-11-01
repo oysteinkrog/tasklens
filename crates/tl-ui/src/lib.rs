@@ -19,6 +19,7 @@ pub mod i18n;
 pub mod net_totals;
 pub mod pages;
 pub mod request_ends;
+pub mod selector;
 pub mod settings_global;
 pub mod table;
 pub mod text;

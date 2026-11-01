@@ -40,9 +40,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, size,
+    AnyElement, App, Context, Entity, FontWeight, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use smallvec::smallvec;
 use tl_model::ids::SeriesId;
@@ -72,6 +71,7 @@ use crate::pages::performance::overview::parts::{
     ChartSettings, Meter, PLOT_LINE, SPARK_GRID, box_chart, chart_section_versions, class_probe,
     spark_labels, spark_row,
 };
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_lg, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -861,7 +861,7 @@ fn text_part(
 ) -> gpui_kit::Div {
     let mut el = div();
     *el.text_style() = style;
-    el.debug_selector(move || id)
+    el.tl_selector(move || id)
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
@@ -879,7 +879,7 @@ fn value_style(m: &UiMetrics, size: Pixels) -> gpui_kit::TextStyleRefinement {
 impl MetricWidget {
     fn meter(&self, id: u32, theme: &TlTheme) -> gpui_kit::Div {
         let p = part_id(&self.container, id, "bar");
-        div().debug_selector(move || p).w_full().child(Meter {
+        div().tl_selector(move || p).w_full().child(Meter {
             fraction: self.shown.fraction,
             color: theme.graph.gpu_line,
         })
@@ -887,7 +887,7 @@ impl MetricWidget {
 
     fn chart_part(&self, id: u32) -> gpui_kit::Div {
         let p = part_id(&self.container, id, "chart");
-        let mut el = div().debug_selector(move || p).relative();
+        let mut el = div().tl_selector(move || p).relative();
         if let Some(chart) = &self.chart {
             el = el.child(cached(chart));
         }
@@ -929,7 +929,7 @@ impl MetricWidget {
                 let mut v = div();
                 *v.text_style() = value_style(m, m.text.sm);
                 header = header.child(
-                    v.debug_selector(move || p)
+                    v.tl_selector(move || p)
                         .flex_none()
                         .whitespace_nowrap()
                         .text_color(theme.text_primary)
@@ -1049,7 +1049,7 @@ impl MetricWidget {
             let mut v = div();
             *v.text_style() = numeric_style(m, m.text.sm);
             let mut v = v
-                .debug_selector(move || p)
+                .tl_selector(move || p)
                 .min_w(px(ROW_VALUE_W * s))
                 .flex()
                 .justify_end()
@@ -1135,7 +1135,7 @@ impl MetricWidget {
                 *name.text_style() = t_xs(m);
                 let p = part_id(&self.container, id, "name");
                 let name = name
-                    .debug_selector(move || p)
+                    .tl_selector(move || p)
                     .flex_1()
                     .min_w_0()
                     .whitespace_nowrap()
@@ -1147,7 +1147,7 @@ impl MetricWidget {
                 *value.text_style() = numeric_style(m, m.text.sm);
                 let p = part_id(&self.container, id, "value");
                 let value = value
-                    .debug_selector(move || p)
+                    .tl_selector(move || p)
                     .flex()
                     .min_w_0()
                     .whitespace_nowrap()
@@ -1171,7 +1171,7 @@ impl MetricWidget {
                     )
                     .child(
                         div()
-                            .debug_selector(move || chart_id)
+                            .tl_selector(move || chart_id)
                             .relative()
                             .flex_1()
                             .min_h_0()
@@ -1215,7 +1215,7 @@ impl MetricWidget {
                 let mut text = div();
                 *text.text_style() = line_style(m);
                 let p = part_id(&self.container, id, "value");
-                text.debug_selector(move || p)
+                text.tl_selector(move || p)
                     .flex_none()
                     .h(px(LABEL_ROW * s))
                     .whitespace_nowrap()
@@ -1236,7 +1236,7 @@ impl Render for MetricWidget {
         if let Some(look) = self.flow.clone() {
             let part = self.flow_part(&look, &m, &theme, window, cx);
             let id = widget_id(&self.container, self.setting.id);
-            let root = div().debug_selector(move || id).relative();
+            let root = div().tl_selector(move || id).relative();
             // The text sizes itself, so the values of one line sit side by side.
             let root = if look == FlowLook::Text {
                 root.flex_none()
@@ -1297,7 +1297,7 @@ impl Render for MetricWidget {
             body
         };
         div()
-            .debug_selector(move || id)
+            .tl_selector(move || id)
             .relative()
             .size_full()
             .overflow_hidden()

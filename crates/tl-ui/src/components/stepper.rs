@@ -32,6 +32,7 @@ use super::button::{TlButton, TlButtonKind};
 use super::icons::TlIcon;
 use super::input::TlTextInput;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::TNUM;
 use crate::theme::{current, metrics};
 
@@ -295,7 +296,7 @@ impl RenderOnce for TlStepper {
 
         let mut field = div()
             .id((self.id.clone(), "field"))
-            .debug_selector({
+            .tl_selector({
                 let id = self.id.clone();
                 move || format!("TlStepper-field-{id}")
             })
@@ -364,7 +365,7 @@ impl RenderOnce for TlStepper {
 
         div()
             .id(self.id.clone())
-            .debug_selector({
+            .tl_selector({
                 let id = self.id.clone();
                 move || format!("TlStepper-{id}")
             })

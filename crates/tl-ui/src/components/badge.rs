@@ -16,10 +16,11 @@
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    App, Div, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Window, div, px,
+    App, Div, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
+    Window, div, px,
 };
 
+use crate::selector::TlSelector;
 use crate::text::style::{TNUM, label_style};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -139,7 +140,7 @@ impl RenderOnce for TlBadge {
 
         let dot = self.dot.then(|| {
             div()
-                .debug_selector(|| "TlBadge-dot".into())
+                .tl_selector(|| "TlBadge-dot".into())
                 .flex_none()
                 .size(px(DOT * s))
                 .rounded_full()
@@ -147,7 +148,7 @@ impl RenderOnce for TlBadge {
         });
 
         h_flex()
-            .debug_selector(|| "TlBadge".into())
+            .tl_selector(|| "TlBadge".into())
             .flex_none()
             .justify_center()
             .gap(m.sp[2])
@@ -165,7 +166,7 @@ impl RenderOnce for TlBadge {
 
 /// The text part: `t_xs` at weight 500 (`tnum` for counts), one line, end ellipsis.
 fn text_box(kind: TlBadgeKind, m: &UiMetrics) -> Div {
-    let mut text = div().debug_selector(|| "TlBadge-text".into()).min_w_0();
+    let mut text = div().tl_selector(|| "TlBadge-text".into()).min_w_0();
     *text.text_style() = label_style(m, m.text.xs, FontWeight::MEDIUM);
     if kind == TlBadgeKind::Count {
         text = text.font_features(TNUM.clone());

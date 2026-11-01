@@ -49,6 +49,7 @@ use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::text::style::{label_style, t_sm, t_xs};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{
@@ -1420,7 +1421,7 @@ impl Render for AffinityDialog {
 
         // Subtitle.
         let mut subtitle = div()
-            .debug_selector(|| "AffinitySubtitle".into())
+            .tl_selector(|| "AffinitySubtitle".into())
             .flex_none()
             .flex()
             .items_center()
@@ -1475,7 +1476,7 @@ impl Render for AffinityDialog {
             );
         let helper = self.list_invalid.then(|| {
             let mut helper = div()
-                .debug_selector(|| "AffinityListHelper".into())
+                .tl_selector(|| "AffinityListHelper".into())
                 .flex_none()
                 .flex()
                 .justify_end()
@@ -1486,7 +1487,7 @@ impl Render for AffinityDialog {
         });
         let mixed_helper = self.has_mixed().then(|| {
             let mut helper = div()
-                .debug_selector(|| "AffinityMixedHelper".into())
+                .tl_selector(|| "AffinityMixedHelper".into())
                 .flex_none()
                 .flex()
                 .justify_end()
@@ -1500,7 +1501,7 @@ impl Render for AffinityDialog {
         let grid_focused = self.grid_focus.is_focused(window);
         let mut grid = div()
             .id("AffinityGrid")
-            .debug_selector(|| "AffinityGrid".into())
+            .tl_selector(|| "AffinityGrid".into())
             .track_focus(&self.grid_focus)
             .flex_1()
             .min_h_0()
@@ -1523,7 +1524,7 @@ impl Render for AffinityDialog {
             *label.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
             let kind_icon = core_icon(group.label).map(|(icon, mark)| {
                 div()
-                    .debug_selector(move || format!("AffinityGroupIcon-{mark}"))
+                    .tl_selector(move || format!("AffinityGroupIcon-{mark}"))
                     .flex_none()
                     .child(
                         Icon::new(icon)
@@ -1563,10 +1564,10 @@ impl Render for AffinityDialog {
                         });
                     let mut row = row
                         .id(("AffinityCpuRow", usize::from(cpu)))
-                        .debug_selector(move || format!("AffinityCpuRow-{cpu}"))
+                        .tl_selector(move || format!("AffinityCpuRow-{cpu}"))
                         .child(
                             div()
-                                .debug_selector(move || format!("AffinityCpuCheck-{cpu}"))
+                                .tl_selector(move || format!("AffinityCpuCheck-{cpu}"))
                                 .flex_none()
                                 .child(check),
                         );
@@ -1643,7 +1644,7 @@ impl Render for AffinityDialog {
             let mut text = div().text_color(theme.status.danger);
             *text.text_style() = t_sm(&m);
             div()
-                .debug_selector(|| "AffinityValidation".into())
+                .tl_selector(|| "AffinityValidation".into())
                 .flex_none()
                 .flex()
                 .items_center()
@@ -1689,7 +1690,7 @@ impl Render for AffinityDialog {
                 .action(Box::new(AffinityReset))
         });
         let footer = div()
-            .debug_selector(|| "AffinityFooter".into())
+            .tl_selector(|| "AffinityFooter".into())
             .flex_none()
             .flex()
             .items_center()

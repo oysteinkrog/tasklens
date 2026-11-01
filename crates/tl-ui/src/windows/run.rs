@@ -45,6 +45,7 @@ use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_xs};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
@@ -669,7 +670,7 @@ impl RunWindow {
             });
             div()
                 .id(("run-row", pos))
-                .debug_selector(move || format!("{POPUP_ROW_ID}-{pos}"))
+                .tl_selector(move || format!("{POPUP_ROW_ID}-{pos}"))
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -688,7 +689,7 @@ impl RunWindow {
         let n = self.matches.len().min(VISIBLE_ROWS);
         let mut panel = div()
             .id(POPUP_ID)
-            .debug_selector(|| POPUP_ID.into())
+            .tl_selector(|| POPUP_ID.into())
             .flex()
             .flex_col()
             .w_full()
@@ -784,7 +785,7 @@ impl Render for RunWindow {
                 })
         };
         let combo = div()
-            .debug_selector(|| "RunCombo".into())
+            .tl_selector(|| "RunCombo".into())
             .relative()
             .flex_1()
             .min_w_0()
@@ -831,7 +832,7 @@ impl Render for RunWindow {
             .tooltip(TlTooltip::text(words.wayland_note.clone()).build())
             .child(check);
         let mut note = div()
-            .debug_selector(|| "RunWaylandNote".into())
+            .tl_selector(|| "RunWaylandNote".into())
             .flex_none()
             .h(px(NOTE_ROW_H * s))
             .pl(px(NOTE_INDENT * s))
@@ -860,7 +861,7 @@ impl Render for RunWindow {
             .disabled(busy)
             .on_click(|_, window, _| window.remove_window());
         let footer = div()
-            .debug_selector(|| "RunFooter".into())
+            .tl_selector(|| "RunFooter".into())
             .flex()
             .flex_row()
             .flex_none()

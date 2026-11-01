@@ -42,6 +42,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
+use crate::selector::TlSelector;
 use crate::text::ellipsis::ELLIPSIS;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style};
@@ -1785,7 +1786,7 @@ impl RenderOnce for DeviceCard {
             .map(|v| value_element(v, v.text.clone(), &key, &m, &theme));
         let text_key = key.0.clone();
         let mut text = div()
-            .debug_selector(move || format!("perf-card-text:{text_key}"))
+            .tl_selector(move || format!("perf-card-text:{text_key}"))
             .relative()
             .flex()
             .flex_col()
@@ -1817,7 +1818,7 @@ impl RenderOnce for DeviceCard {
             };
             text = text.child(
                 div()
-                    .debug_selector(|| "perf-card-value-row".into())
+                    .tl_selector(|| "perf-card-value-row".into())
                     .flex()
                     .flex_none()
                     .items_center()
@@ -1869,7 +1870,7 @@ impl RenderOnce for DeviceCard {
 
         let graph_key = key.0.clone();
         let graph = div()
-            .debug_selector(move || format!("perf-card-graph:{graph_key}"))
+            .tl_selector(move || format!("perf-card-graph:{graph_key}"))
             .flex_none()
             .w(graph_w)
             .h(px(CARD_GRAPH_H * s))
@@ -1879,7 +1880,7 @@ impl RenderOnce for DeviceCard {
         let hover = theme.row_hover;
         let mut card = h_flex()
             .id(id)
-            .debug_selector(|| "perf-card".into())
+            .tl_selector(|| "perf-card".into())
             .relative()
             .flex_none()
             .w(self.width)
@@ -1907,7 +1908,7 @@ impl RenderOnce for DeviceCard {
             card = card.child(
                 // Absolute insets count from inside the card border; this covers it.
                 div()
-                    .debug_selector(|| "perf-card-selected".into())
+                    .tl_selector(|| "perf-card-selected".into())
                     .absolute()
                     .inset(-edge)
                     .border(px(2.0 * s))
@@ -1920,7 +1921,7 @@ impl RenderOnce for DeviceCard {
             let out = px(3.0 * s);
             card = card.child(
                 div()
-                    .debug_selector(|| "perf-card-focus-ring".into())
+                    .tl_selector(|| "perf-card-focus-ring".into())
                     .absolute()
                     .inset(-(edge + out))
                     .border(px(s))
@@ -1962,7 +1963,7 @@ fn line_rows(
         color,
     } = spec;
     let mut col = div()
-        .debug_selector(move || selector.into())
+        .tl_selector(move || selector.into())
         .flex()
         .flex_col()
         .flex_none()
@@ -1974,7 +1975,7 @@ fn line_rows(
     for (i, row) in line.rows.iter().enumerate() {
         let row_key = key.0.clone();
         let mut el = h_flex()
-            .debug_selector(move || format!("perf-card-row:{row_key}:{name}:{i}"))
+            .tl_selector(move || format!("perf-card-row:{row_key}:{name}:{i}"))
             .flex_none()
             .h(px(height))
             .whitespace_nowrap();
@@ -1987,7 +1988,7 @@ fn line_rows(
             }
             el = el.child(
                 div()
-                    .debug_selector(|| "perf-card-lock".into())
+                    .tl_selector(|| "perf-card-lock".into())
                     .flex_none()
                     .child(icon(TlIcon::Lock, m.icon.xs, color)),
             );
@@ -2019,7 +2020,7 @@ fn value_element(
 ) -> AnyElement {
     let value_key = key.0.clone();
     let mut el = div()
-        .debug_selector(move || format!("perf-card-row:{value_key}:value:0"))
+        .tl_selector(move || format!("perf-card-row:{value_key}:value:0"))
         .flex()
         .flex_none()
         .items_center();

@@ -49,6 +49,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::engine_link::{self, EngineLinkGlobal, EngineLinkState, SwitchToEngineService};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::text::style::numeric_style;
 use crate::text::untrusted::debug_assert_clean;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -577,7 +578,7 @@ impl StatusChip {
         let focus = self.health_focus[ix].clone();
         let mut part = div()
             .id(id.clone())
-            .debug_selector(move || format!("StatusChip-health-{ix}"))
+            .tl_selector(move || format!("StatusChip-health-{ix}"))
             .relative()
             .flex()
             .flex_none()
@@ -636,7 +637,7 @@ impl StatusChip {
         let id = ElementId::NamedInteger("StatusChipEngine".into(), ix as u64);
         let mut part = div()
             .id(id.clone())
-            .debug_selector(move || format!("StatusChip-engine-{ix}"))
+            .tl_selector(move || format!("StatusChip-engine-{ix}"))
             .relative()
             .flex()
             .flex_none()
@@ -754,7 +755,7 @@ impl StatusChip {
         let focus = self.action_focus[ix].clone();
         let mut part = div()
             .id(id.clone())
-            .debug_selector(move || format!("StatusChip-action-{ix}"))
+            .tl_selector(move || format!("StatusChip-action-{ix}"))
             .relative()
             .flex()
             .flex_none()
@@ -864,7 +865,7 @@ impl Render for StatusChip {
             {
                 self.text_layout = None;
             }
-            return div().debug_selector(|| "StatusChip".into());
+            return div().tl_selector(|| "StatusChip".into());
         }
 
         let m = *metrics(cx);
@@ -878,7 +879,7 @@ impl Render for StatusChip {
         }
         let text = (!self.text.is_empty()).then(|| {
             div()
-                .debug_selector(|| "StatusChip-text".into())
+                .tl_selector(|| "StatusChip-text".into())
                 .min_w_0()
                 .flex_shrink(1.)
                 .truncate()
@@ -918,7 +919,7 @@ impl Render for StatusChip {
         let mut chip = div();
         *chip.text_style() = numeric_style(&m, m.text.sm);
         let mut chip = chip
-            .debug_selector(|| "StatusChip".into())
+            .tl_selector(|| "StatusChip".into())
             .flex()
             .flex_row()
             .items_center()

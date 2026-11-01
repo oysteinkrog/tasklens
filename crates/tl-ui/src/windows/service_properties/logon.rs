@@ -32,6 +32,7 @@ use crate::components::kv_grid::{
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::theme::metrics;
 
 /// Label column width at 100% scale.
@@ -371,7 +372,7 @@ impl Render for LogOnTab {
             });
         v_flex()
             .id("ServiceLogOnTab")
-            .debug_selector(|| "ServiceLogOnTab".into())
+            .tl_selector(|| "ServiceLogOnTab".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(|_: &Copy, window, cx| {

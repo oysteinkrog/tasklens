@@ -39,9 +39,8 @@ use std::rc::Rc;
 use fluent_bundle::FluentValue;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
-    Subscription, Window, div, px, size,
+    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use tl_model::layout::{
     DeviceSelector, FormSet, GroupItems, GroupSelector, SourceSelector, WidgetContent,
@@ -68,6 +67,7 @@ use crate::pages::performance::overview::net_box::{NetModelRef, net_cells_elemen
 use crate::pages::performance::overview::parts::{CoreBarsLayout, CoreBarsModel, core_board};
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::timeline::OverviewPause;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_sm;
 use crate::theme::{UiMetrics, current, metrics};
@@ -743,7 +743,7 @@ impl Render for GroupWidget {
         let container = self.container.clone();
         let root_id = widget_id(&container, id);
         let root = div()
-            .debug_selector(move || root_id)
+            .tl_selector(move || root_id)
             .relative()
             .size_full()
             .overflow_hidden();
@@ -793,7 +793,7 @@ impl Render for GroupWidget {
                 let mut el = div();
                 *el.text_style() = t_sm(&m);
                 let p = part_id(&container, id, part);
-                el.debug_selector(move || p)
+                el.tl_selector(move || p)
                     .max_w_full()
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -841,7 +841,7 @@ impl Render for GroupWidget {
                 *el.text_style() = t_sm(&m);
                 let p = part_id(&container, id, "more");
                 let el = el
-                    .debug_selector(move || p)
+                    .tl_selector(move || p)
                     .absolute()
                     .left(b.left())
                     .top(b.top())
@@ -870,7 +870,7 @@ impl Render for GroupWidget {
         let selector = scroll.clone();
         let body = if self.fill.scrolls_x {
             div()
-                .debug_selector(move || selector)
+                .tl_selector(move || selector)
                 .size_full()
                 .child(content)
                 .overflow_x_scrollbar()
@@ -878,7 +878,7 @@ impl Render for GroupWidget {
                 .into_any_element()
         } else if self.fill.scrolls {
             div()
-                .debug_selector(move || selector)
+                .tl_selector(move || selector)
                 .size_full()
                 .child(content.w_full())
                 .overflow_y_scrollbar()

@@ -49,6 +49,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
 use crate::pages::information::actions::CopyInformationAll;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
 
@@ -475,7 +476,7 @@ impl TabStrip {
         }
         let icon = div()
             .id("TabStrip-copy")
-            .debug_selector(|| "TabStrip-copy".into())
+            .tl_selector(|| "TabStrip-copy".into())
             .role(Role::Button)
             .aria_label(tooltip.clone())
             .flex()
@@ -537,7 +538,7 @@ impl TabStrip {
         let (hover, primary) = (theme.tab_hover, theme.text_primary);
         let icon = div()
             .id("TabStrip-history")
-            .debug_selector(|| "TabStrip-history".into())
+            .tl_selector(|| "TabStrip-history".into())
             .role(Role::Button)
             .aria_label(tooltip.clone())
             .flex()
@@ -742,7 +743,7 @@ impl Render for TabStrip {
             let active = tab == self.active;
             div()
                 .id(ElementId::Name(tab.as_str().into()))
-                .debug_selector(move || format!("TabStrip-{}", tab.as_str()))
+                .tl_selector(move || format!("TabStrip-{}", tab.as_str()))
                 .role(Role::Tab)
                 .aria_label(label.clone())
                 .aria_selected(active)
@@ -781,7 +782,7 @@ impl Render for TabStrip {
             let strip = cx.entity().downgrade();
             let layout = self.layout.clone();
             div()
-                .debug_selector(|| "TabStripOverflow".into())
+                .tl_selector(|| "TabStripOverflow".into())
                 .flex()
                 .flex_none()
                 .items_center()
@@ -818,7 +819,7 @@ impl Render for TabStrip {
             .when_some(self.filter_slot.clone(), |row, slot| {
                 row.child(
                     div()
-                        .debug_selector(|| "TabStripFilter".into())
+                        .tl_selector(|| "TabStripFilter".into())
                         .flex_none()
                         .h_full()
                         .child(slot),
@@ -839,7 +840,7 @@ impl Render for TabStrip {
         };
         div()
             .id("TabStrip")
-            .debug_selector(|| "TabStrip".into())
+            .tl_selector(|| "TabStrip".into())
             .role(Role::TabList)
             .relative()
             .flex_none()

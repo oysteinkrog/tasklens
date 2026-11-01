@@ -38,6 +38,7 @@ use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
 use crate::i18n::{Strings, tr, tr_args};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{TNUM, t_base, t_sm, t_xs};
 use crate::theme::preview::PreviewToken;
@@ -441,7 +442,7 @@ impl Render for ColorPlane {
         let me = cx.entity();
         div()
             .id("ThemeEditor-plane")
-            .debug_selector(|| "ThemeEditor-plane".into())
+            .tl_selector(|| "ThemeEditor-plane".into())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)))
             .size(edge)
@@ -604,7 +605,7 @@ impl Render for HueStrip {
         let me = cx.entity();
         div()
             .id("ThemeEditor-hue")
-            .debug_selector(|| "ThemeEditor-hue".into())
+            .tl_selector(|| "ThemeEditor-hue".into())
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, ev, _, cx| this.on_key(ev, cx)))
             .w(px(STRIP_W * m.ui_scale))
@@ -1352,7 +1353,7 @@ impl ThemeEditor {
         .w(px(GRAPH_W * s))
         .h(px(GRAPH_H * s));
         div()
-            .debug_selector(|| "ThemeEditor-preview".into())
+            .tl_selector(|| "ThemeEditor-preview".into())
             .w(px(PREVIEW_COLUMN_W * s))
             .flex_none()
             .flex()
@@ -1399,7 +1400,7 @@ impl Render for ThemeEditor {
         let error = self.name_error.clone().map(|text| {
             let mut e = div();
             *e.text_style() = t_xs(&m);
-            e.debug_selector(|| "ThemeEditor-name-error".into())
+            e.tl_selector(|| "ThemeEditor-name-error".into())
                 .text_color(theme.status.danger)
                 .child(text)
         });
@@ -1420,7 +1421,7 @@ impl Render for ThemeEditor {
             rows.push(
                 div()
                     .id(("ThemeEditor-slot", i))
-                    .debug_selector(move || format!("ThemeEditor-slot-{i}"))
+                    .tl_selector(move || format!("ThemeEditor-slot-{i}"))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1454,7 +1455,7 @@ impl Render for ThemeEditor {
         }
         let list = div()
             .id("ThemeEditor-slots")
-            .debug_selector(|| "ThemeEditor-slots".into())
+            .tl_selector(|| "ThemeEditor-slots".into())
             .track_focus(&self.list_focus)
             .on_key_down(cx.listener(|this, ev, window, cx| this.on_list_key(ev, window, cx)))
             .w(px(SLOT_COLUMN_W * s))
@@ -1491,7 +1492,7 @@ impl Render for ThemeEditor {
                     )
                     .child(readout(rgb_text, &m, theme.text_primary))
                     .child(readout(hsv_text, &m, theme.text_primary))
-                    .child(div().debug_selector(|| "ThemeEditor-hex".into()).children(
+                    .child(div().tl_selector(|| "ThemeEditor-hex".into()).children(
                         self.hex.as_ref().map(|hex| {
                             TlTextInput::new("ThemeEditor-hex-input", hex)
                                 .placeholder(hint.clone())
@@ -1502,7 +1503,7 @@ impl Render for ThemeEditor {
                     .children(hex_error.then(|| {
                         let mut e = div();
                         *e.text_style() = t_xs(&m);
-                        e.debug_selector(|| "ThemeEditor-hex-error".into())
+                        e.tl_selector(|| "ThemeEditor-hex-error".into())
                             .text_color(theme.status.danger)
                             .child(hint.clone())
                     })),
@@ -1510,7 +1511,7 @@ impl Render for ThemeEditor {
             .child(self.preview_pane(&theme, &m));
 
         let footer = div()
-            .debug_selector(|| "ThemeEditor-footer".into())
+            .tl_selector(|| "ThemeEditor-footer".into())
             .flex()
             .flex_row()
             .items_center()

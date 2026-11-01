@@ -43,6 +43,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
+use crate::selector::TlSelector;
 use crate::text::style::{numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::main_window_view;
@@ -369,7 +370,7 @@ fn row_element(
     };
     #[cfg(any(test, feature = "test-hooks"))]
     let last_jump = Rc::clone(last_jump);
-    row.debug_selector(move || format!("{PROC_ROW_ID_PREFIX}{}", key.pid))
+    row.tl_selector(move || format!("{PROC_ROW_ID_PREFIX}{}", key.pid))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             #[cfg(any(test, feature = "test-hooks"))]
             last_jump.set(Some(key));

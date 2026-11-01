@@ -74,6 +74,7 @@ use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;
 use crate::pages::performance::widget::metric_widget::FlowLook;
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -1374,7 +1375,7 @@ fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(|| EMPTY_ID.to_owned())
+            text.tl_selector(|| EMPTY_ID.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )
@@ -1430,7 +1431,7 @@ impl CpuBox {
         let id = cpu_flow::total_of(&self.flow);
         let chart = self.chart_widget(id, &self.total, drawn, cx);
         div()
-            .debug_selector(|| CPU_CHART_ID.into())
+            .tl_selector(|| CPU_CHART_ID.into())
             .relative()
             .size_full()
             .child(chart)
@@ -1458,7 +1459,7 @@ impl CpuBox {
             .child(div().relative().flex_1().min_h_0().w_full().child(chart))
             .child(
                 div()
-                    .debug_selector(|| CLOCKS_ID.into())
+                    .tl_selector(|| CLOCKS_ID.into())
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -1551,7 +1552,7 @@ pub(crate) fn core_charts_element(
     let bars = bars.borrow();
     let mut grid = div()
         .id(CORE_CHARTS_ID)
-        .debug_selector(|| CORE_CHARTS_ID.into())
+        .tl_selector(|| CORE_CHARTS_ID.into())
         .size_full()
         .flex()
         .flex_col()
@@ -1608,7 +1609,7 @@ fn core_cell(
     *name.text_style() = t_xs(m);
     let mut pct = div();
     *pct.text_style() = numeric_style(m, m.text.xs);
-    cell.debug_selector(move || core_chart_id(i))
+    cell.tl_selector(move || core_chart_id(i))
         .child(chart.clone().cached(StyleRefinement::default().size_full()))
         .child(
             name.absolute()
@@ -1663,7 +1664,7 @@ fn core_charts_arranged(
         .size_full()
         .child(
             div()
-                .debug_selector(|| CORE_CHARTS_ID.into())
+                .tl_selector(|| CORE_CHARTS_ID.into())
                 .size_full()
                 .overflow_hidden()
                 .child(cells),
@@ -1710,7 +1711,7 @@ impl CpuBox {
             )
             .child(
                 div()
-                    .debug_selector(|| POWER_STRIP_ID.into())
+                    .tl_selector(|| POWER_STRIP_ID.into())
                     .relative()
                     .flex_1()
                     .min_h_0()

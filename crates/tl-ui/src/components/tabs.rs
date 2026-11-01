@@ -38,6 +38,7 @@ use super::focus::TlFocusRing;
 use super::icons::TlIcon;
 use super::motion::{M_FAST, ease_out_cubic};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::{label_style, numeric_style};
 use crate::theme::{current, metrics};
 
@@ -221,7 +222,7 @@ fn overflow_items(tabs: &[TlTabSpec], selected: usize, cx: &App) -> Vec<PopupMen
             let count = tab.count.clone();
             PopupMenuItem::element(move |_, _| {
                 cell_text(&m, label.clone(), count.clone(), FontWeight::NORMAL)
-                    .debug_selector(move || format!("TlTabs-menu-{ix}"))
+                    .tl_selector(move || format!("TlTabs-menu-{ix}"))
             })
             .checked(ix == selected)
             .disabled(!tab.enabled())
@@ -362,7 +363,7 @@ impl RenderOnce for TlTabs {
                 .disabled(!enabled)
                 .set_position(ix + 1, n)
                 .accessibility_label(name)
-                .debug_selector(move || format!("TlTabs-cell-{ix}"))
+                .tl_selector(move || format!("TlTabs-cell-{ix}"))
                 .relative()
                 .flex_none()
                 .h_full()
@@ -447,7 +448,7 @@ impl RenderOnce for TlTabs {
                 .tooltip(tooltip)
                 .tab_stop(false),
             }
-            .debug_selector(|| "TlTabs-more".into())
+            .tl_selector(|| "TlTabs-more".into())
             .flex_none()
             .px(m.sp[1])
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
@@ -529,7 +530,7 @@ fn underline(
     epoch: usize,
 ) -> gpui_kit::AnyElement {
     let line = div()
-        .debug_selector(|| "TlTabs-underline".into())
+        .tl_selector(|| "TlTabs-underline".into())
         .absolute()
         .bottom_0()
         .h(UNDERLINE)

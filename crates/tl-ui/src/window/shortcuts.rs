@@ -40,6 +40,7 @@ use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 
@@ -1111,7 +1112,7 @@ impl Render for ShortcutsWindow {
                 }
             };
             let column = div()
-                .debug_selector(move || format!("Shortcuts-keys-{ix}"))
+                .tl_selector(move || format!("Shortcuts-keys-{ix}"))
                 .relative()
                 .flex()
                 .flex_shrink(1.)
@@ -1150,11 +1151,11 @@ impl Render for ShortcutsWindow {
                 .py(m.sp[1])
                 .px(m.sp[4])
                 .text_color(theme.text_primary)
-                .debug_selector(move || format!("Shortcuts-row-{ix}"))
+                .tl_selector(move || format!("Shortcuts-row-{ix}"))
                 .child(
                     // Wraps, so a long description shows in full and the row grows.
                     div()
-                        .debug_selector(move || format!("Shortcuts-desc-{ix}"))
+                        .tl_selector(move || format!("Shortcuts-desc-{ix}"))
                         .min_w_0()
                         .flex_1()
                         .child(row.description.clone()),

@@ -37,10 +37,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription,
-    Task, WeakEntity, Window, canvas, div, fill, point, px, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, Task, WeakEntity, Window, canvas, div, fill, point,
+    px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::{Command, HistoryWhat};
@@ -63,6 +63,7 @@ use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::net_totals;
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_xs;
 use crate::theme::palette::DeviceAccent;
@@ -976,7 +977,7 @@ impl Render for TimelineBox {
             }));
         let band_h = (4. * BAND_H + 3. * BAND_GAP) * s;
         let area = div()
-            .debug_selector(|| BANDS_ID.into())
+            .tl_selector(|| BANDS_ID.into())
             .relative()
             .flex_1()
             .min_w_0()
@@ -999,7 +1000,7 @@ impl Render for TimelineBox {
         };
         let row = |id: &'static str, child: AnyElement, h: f32| {
             div()
-                .debug_selector(move || id.into())
+                .tl_selector(move || id.into())
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -1191,7 +1192,7 @@ impl TimelineBox {
                 .text_color(color)
                 .child(SharedString::from(label));
             let marker = div()
-                .debug_selector(move || id.clone())
+                .tl_selector(move || id.clone())
                 .absolute()
                 .left(px(mk.x))
                 .top_0()
@@ -1291,7 +1292,7 @@ impl TimelineBox {
         let w = (x1 - x0).max(2. * s);
         out.push(
             div()
-                .debug_selector(|| BRACKET_ID.into())
+                .tl_selector(|| BRACKET_ID.into())
                 .absolute()
                 .left(px((x1 - w).max(0.)))
                 .top(px(-2. * s))
@@ -1306,7 +1307,7 @@ impl TimelineBox {
             let (a, b) = (press.x0.min(press.x), press.x0.max(press.x));
             out.push(
                 div()
-                    .debug_selector(|| SELECTION_ID.into())
+                    .tl_selector(|| SELECTION_ID.into())
                     .absolute()
                     .left(px(a))
                     .top_0()

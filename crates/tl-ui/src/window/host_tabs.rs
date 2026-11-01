@@ -23,6 +23,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hosts_api::HostLinkStatus;
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::text::style::numeric_style;
 use crate::theme::{current, metrics};
 
@@ -192,7 +193,7 @@ impl Render for HostTabs {
         let view = cx.weak_entity();
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         let mut row = div()
-            .debug_selector(|| "HostTabs".into())
+            .tl_selector(|| "HostTabs".into())
             .track_focus(&focus)
             .flex()
             .flex_none()
@@ -226,7 +227,7 @@ impl Render for HostTabs {
             *cpu_el.text_style() = numeric_style(&m, m.text.sm);
             let tab = div()
                 .id(("HostTab", i))
-                .debug_selector(move || format!("HostTab{i}"))
+                .tl_selector(move || format!("HostTab{i}"))
                 .role(Role::Tab)
                 .aria_label(name.clone())
                 .flex()

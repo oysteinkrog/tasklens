@@ -67,6 +67,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::derived::blend_over;
 use crate::theme::palette::accent_color;
@@ -1902,7 +1903,7 @@ impl Render for DeviceSidebar {
                     continue;
                 }
                 let label = div()
-                    .debug_selector(move || format!("perf-edit-group-{group}"))
+                    .tl_selector(move || format!("perf-edit-group-{group}"))
                     .mt(m.sp[4])
                     .text_size(m.text.xs)
                     .font_weight(FontWeight::SEMIBOLD)
@@ -1928,7 +1929,7 @@ impl Render for DeviceSidebar {
                     if let Some(empty_index) = empty_index {
                         section = section.child(
                             div()
-                                .debug_selector(move || format!("perf-edit-empty-{group}"))
+                                .tl_selector(move || format!("perf-edit-empty-{group}"))
                                 .pl(m.sp[4])
                                 .text_size(m.text.sm)
                                 .text_color(theme.text_secondary)
@@ -2048,7 +2049,7 @@ impl Render for DeviceSidebar {
                         let key = device_card.key.clone();
                         let target_key = key.clone();
                         let mut row = div()
-                            .debug_selector({
+                            .tl_selector({
                                 let key = key.clone();
                                 move || format!("perf-edit-row-{}", key.0)
                             })
@@ -2073,7 +2074,7 @@ impl Render for DeviceSidebar {
                             .child(div().flex_none().w(px(28. * m.ui_scale)).child(switch));
                         if indicator_before || indicator_after {
                             let line = div()
-                                .debug_selector(|| "perf-drop-indicator".into())
+                                .tl_selector(|| "perf-drop-indicator".into())
                                 .absolute()
                                 .left(-m.sp[4])
                                 .right(-m.sp[4])
@@ -2105,7 +2106,7 @@ impl Render for DeviceSidebar {
             }
 
             let header = v_flex()
-                .debug_selector(|| "perf-edit-header".into())
+                .tl_selector(|| "perf-edit-header".into())
                 .on_drag_move(
                     cx.listener(|this, event: &DragMoveEvent<DraggedCard>, _, cx| {
                         this.drag_over_none(event, cx);
@@ -2242,7 +2243,7 @@ impl Render for DeviceSidebar {
 
         div()
             .id("perf-sidebar")
-            .debug_selector(|| "perf-sidebar".into())
+            .tl_selector(|| "perf-sidebar".into())
             .key_context(if edit_present {
                 "Performance PerformanceEdit"
             } else {

@@ -25,6 +25,7 @@ use crate::components::empty::TlEmptyState;
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(
@@ -321,7 +322,7 @@ pub fn filter_bar(
     let words = &f.words;
 
     div()
-        .debug_selector(|| "PropsFilter-bar".into())
+        .tl_selector(|| "PropsFilter-bar".into())
         .flex()
         .flex_row()
         .flex_none()

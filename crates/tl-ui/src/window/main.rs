@@ -105,6 +105,7 @@ use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::pages::services::ServicesPage;
 use crate::pages::services::actions::{GoToService, ManagerArg};
 use crate::pages::startup::StartupPage;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::table::actions::TABLE_CONTEXT;
 use crate::text::style::numeric_style;
@@ -2977,7 +2978,7 @@ impl Render for FpsOverlay {
         let theme = current(cx);
         let mut el = div();
         *el.text_style() = numeric_style(&m, m.text.xs);
-        el.debug_selector(|| "FpsOverlay".into())
+        el.tl_selector(|| "FpsOverlay".into())
             .bg(theme.menu_bg.opacity(0.9))
             .rounded(m.radius_small)
             .py(px(FPS_PAD_Y * m.ui_scale))
@@ -3058,7 +3059,7 @@ impl Render for MainWindow {
         }
         let reconnect = reconnect.map(|text| {
             div()
-                .debug_selector(|| "MainWindowReconnect".into())
+                .tl_selector(|| "MainWindowReconnect".into())
                 .absolute()
                 .top_0()
                 .left_0()
@@ -3088,7 +3089,7 @@ impl Render for MainWindow {
         let menu = context_menu_layer(window, cx);
 
         v_flex()
-            .debug_selector(|| "MainWindow".into())
+            .tl_selector(|| "MainWindow".into())
             .size_full()
             .bg(bg)
             .key_context(if self.hosts.len() > 1 {
@@ -3132,7 +3133,7 @@ impl Render for MainWindow {
             )
             .children(summary.map(|view| {
                 div()
-                    .debug_selector(|| "MainWindowSummary".into())
+                    .tl_selector(|| "MainWindowSummary".into())
                     .flex_1()
                     .min_h_0()
                     .child(view.cached(StyleRefinement::default().size_full()))
@@ -3147,7 +3148,7 @@ impl Render for MainWindow {
             .when(shell, |el| {
                 el.child(
                     div()
-                        .debug_selector(|| "MainWindowPage".into())
+                        .tl_selector(|| "MainWindowPage".into())
                         .relative()
                         .flex_1()
                         .min_h_0()

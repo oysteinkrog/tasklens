@@ -50,6 +50,7 @@ use crate::pages::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
 use crate::pages::performance::card::{CARD_H, CardLines, CardView};
 use crate::pages::performance::sidebar::DeviceSidebar;
 use crate::pages::performance::{DeviceKey, PerformancePage};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{UiMetrics, current, metrics};
 use crate::window::main::{ShellState, main_window_view, push_main_toast};
@@ -599,7 +600,7 @@ impl Render for MiniWindow {
             .border_color(t.divider);
         div()
             .id("mini-window")
-            .debug_selector(|| "mini-window".into())
+            .tl_selector(|| "mini-window".into())
             .key_context(MINI_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_close))

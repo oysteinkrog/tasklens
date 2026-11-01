@@ -54,6 +54,7 @@ use crate::pages::services::actions::{
     ServiceLogsTop,
 };
 use crate::pages::sys_status::{LabelTone, tone_color};
+use crate::selector::TlSelector;
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::fonts::MONO_FAMILY;
 use crate::theme::{TlTheme, current, metrics};
@@ -851,7 +852,7 @@ impl LogsView {
                 let _ = this.update(cx, |this, cx| this.open_terminal(0, window, cx));
             });
         h_flex()
-            .debug_selector(|| "ServiceLogsToolbar".into())
+            .tl_selector(|| "ServiceLogsToolbar".into())
             .flex_none()
             .w_full()
             .h(px(TOOLBAR_H * s))
@@ -945,7 +946,7 @@ impl LogsView {
         );
         let mut row = h_flex()
             .id(("svc-log-row", id as usize))
-            .debug_selector(move || format!("ServiceLogs-row-{pos}"))
+            .tl_selector(move || format!("ServiceLogs-row-{pos}"))
             .w_full()
             .h(line_h)
             .px(m.sp[4])
@@ -1241,7 +1242,7 @@ impl Render for LogsView {
         });
         v_flex()
             .id("ServiceLogsTab")
-            .debug_selector(|| "ServiceLogsTab".into())
+            .tl_selector(|| "ServiceLogsTab".into())
             .size_full()
             .on_mouse_down(
                 MouseButton::Left,
@@ -1260,7 +1261,7 @@ impl Render for LogsView {
             .child(
                 div()
                     .id("ServiceLogsList")
-                    .debug_selector(|| "ServiceLogsList".into())
+                    .tl_selector(|| "ServiceLogsList".into())
                     .key_context(JOURNAL_LIST_CONTEXT)
                     .track_focus(&self.focus)
                     .role(Role::List)

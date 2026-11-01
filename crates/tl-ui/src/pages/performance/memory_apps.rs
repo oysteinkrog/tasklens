@@ -66,6 +66,7 @@ use crate::chart::{
 use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
@@ -1326,7 +1327,7 @@ impl MemoryAppsChart {
     ) -> impl IntoElement {
         let (m, theme) = (metrics(cx), current(cx));
         let mut tip = div()
-            .debug_selector(|| TOOLTIP_ID.into())
+            .tl_selector(|| TOOLTIP_ID.into())
             .absolute()
             .map(|tip| {
                 // Keep the tooltip inside the chart box: above or left of the pointer in the
@@ -1444,7 +1445,7 @@ impl MemoryAppsChart {
         *value_el.text_style() = numeric_style(&m, m.text.sm);
         div()
             .id((LEGEND_ID, row))
-            .debug_selector(move || format!("{LEGEND_ID}-{row}"))
+            .tl_selector(move || format!("{LEGEND_ID}-{row}"))
             .flex()
             .flex_row()
             .items_center()
@@ -1551,7 +1552,7 @@ impl Render for MemoryAppsChart {
         };
         let chart = div()
             .id(APPS_ID)
-            .debug_selector(|| APPS_ID.into())
+            .tl_selector(|| APPS_ID.into())
             .relative()
             .flex_1()
             .min_w_0()
@@ -1578,7 +1579,7 @@ impl Render for MemoryAppsChart {
         };
 
         let mut legend = div()
-            .debug_selector(|| LEGEND_ID.into())
+            .tl_selector(|| LEGEND_ID.into())
             .flex()
             .flex_col()
             .flex_none()
@@ -1603,7 +1604,7 @@ impl Render for MemoryAppsChart {
             let _ = t.write(&mut text, &[&more]);
             legend = legend.child(
                 div()
-                    .debug_selector(move || format!("{LEGEND_ID}-more"))
+                    .tl_selector(move || format!("{LEGEND_ID}-more"))
                     .h(px(row_h))
                     .flex()
                     .items_center()

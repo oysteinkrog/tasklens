@@ -11,10 +11,10 @@
 use gpui_kit::component::v_flex;
 use gpui_kit::{
     App, BorderStyle, Bounds, ContentMask, Context, Corners, Element, ElementId, Entity,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    InteractiveElement as _, IntoElement, LayoutId, MouseMoveEvent, ParentElement as _, Path,
-    PathBuilder, Pixels, Point, Render, SharedString, Style, Styled as _, Subscription, Window,
-    div, fill, outline, point, px, relative, size,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseMoveEvent, ParentElement as _, Path, PathBuilder, Pixels, Point, Render,
+    SharedString, Style, Styled as _, Subscription, Window, div, fill, outline, point, px,
+    relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::system::MemoryTotals;
@@ -25,6 +25,7 @@ use super::details::Template;
 use crate::chart::labels::{self, CachedLine, LineStyle};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
+use crate::selector::TlSelector;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -389,7 +390,7 @@ impl Render for CompositionBarView {
             .child(self.caption().clone());
 
         let mut bar = div()
-            .debug_selector(|| BAR_ID.into())
+            .tl_selector(|| BAR_ID.into())
             .relative()
             .w_full()
             .h(px(BAR_H * m.ui_scale))
@@ -400,7 +401,7 @@ impl Render for CompositionBarView {
             .and_then(|k| self.state.segments.iter().find(|s| s.kind == k).copied());
         if let (Some(seg), Some(text)) = (hovered, self.hover_tooltip()) {
             let trigger = div()
-                .debug_selector(|| BAR_TRIGGER_ID.into())
+                .tl_selector(|| BAR_TRIGGER_ID.into())
                 .absolute()
                 .top_0()
                 .left(px(seg.x0))

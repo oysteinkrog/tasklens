@@ -47,6 +47,7 @@ use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::net_totals::NetTotal;
 use crate::pages::performance::DeviceKey;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::ellipsis::ELLIPSIS;
 use crate::text::metrics::TextMetricsCache;
@@ -698,7 +699,7 @@ impl MinigraphCard {
     /// `text_secondary`; the `TlValidityGlyph` lock when Restricted.
     fn value_element(&self, m: &UiMetrics, t: &TlTheme) -> gpui_kit::Div {
         let el = div()
-            .debug_selector(|| "MinigraphCard-value".into())
+            .tl_selector(|| "MinigraphCard-value".into())
             .flex_none()
             .whitespace_nowrap();
         match self.state {
@@ -710,7 +711,7 @@ impl MinigraphCard {
                 match glyph_parts(Validity::Restricted, &self.value, false, t) {
                     (GlyphContent::Lock, color) => el.child(
                         div()
-                            .debug_selector(|| "TlValidityGlyph-lock".into())
+                            .tl_selector(|| "TlValidityGlyph-lock".into())
                             .flex()
                             .items_center()
                             .child(icon(TlIcon::Lock, m.icon.xs, color)),
@@ -748,7 +749,7 @@ impl Render for MinigraphCard {
             // The home slot while the card follows the pointer: 1 px accent dashed outline.
             return div()
                 .id(("MinigraphCard", u64::from(self.id.0)))
-                .debug_selector(|| "MinigraphCard-home".into())
+                .tl_selector(|| "MinigraphCard-home".into())
                 .w(px(MINI_CARD_W * s))
                 .h(px(MINI_CARD_H * s))
                 .border_1()
@@ -778,7 +779,7 @@ impl Render for MinigraphCard {
                 // A press on the label text starts no drag (UI-PRF-043).
                 div()
                     .id("MinigraphCard-label")
-                    .debug_selector(|| "MinigraphCard-label".into())
+                    .tl_selector(|| "MinigraphCard-label".into())
                     .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .whitespace_nowrap()
                     .overflow_hidden()
@@ -788,7 +789,7 @@ impl Render for MinigraphCard {
             .child(self.value_element(&m, t));
         let card = div()
             .id(("MinigraphCard", u64::from(self.id.0)))
-            .debug_selector(|| "MinigraphCard".into())
+            .tl_selector(|| "MinigraphCard".into())
             .relative()
             .w(px(MINI_CARD_W * s))
             .h(px(MINI_CARD_H * s))
@@ -903,7 +904,7 @@ impl Render for MinigraphDragGhost {
         let t = current(cx);
         let s = m.ui_scale;
         let mut ghost = div()
-            .debug_selector(|| "MinigraphDragGhost".into())
+            .tl_selector(|| "MinigraphDragGhost".into())
             .w(px(MINI_CARD_W * s))
             .h(px(MINI_CARD_H * s))
             .opacity(GHOST_OPACITY)

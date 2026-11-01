@@ -53,6 +53,7 @@ use crate::pages::services::actions::{
     ServicePropsSelectTab,
 };
 use crate::pages::sys_table::SysActions;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
@@ -771,7 +772,7 @@ impl ServicePropertiesWindow {
                 let _ = this.update(cx, |this, cx| this.apply_all(false, window, cx));
             });
         div()
-            .debug_selector(|| "ServicePropsFooter".into())
+            .tl_selector(|| "ServicePropsFooter".into())
             .flex_none()
             .flex()
             .items_center()

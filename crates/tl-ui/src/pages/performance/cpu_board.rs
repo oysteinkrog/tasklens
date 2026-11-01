@@ -15,9 +15,9 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, Styled as _, Subscription,
-    Window, div, px, size,
+    App, AppContext as _, Context, Entity, FocusHandle, FontWeight, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, Styled as _, Subscription, Window, div,
+    px, size,
 };
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{CoreSmoothing, CoreSort};
@@ -36,6 +36,7 @@ use crate::chart::{ChartBg, ChartSpec, ChartView, ValueFormat};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::t_sm;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -414,7 +415,7 @@ impl Render for CpuBoard {
         let mut heading = div();
         *heading.text_style() = t_sm(&m);
         v_flex()
-            .debug_selector(|| BOARD_ID.into())
+            .tl_selector(|| BOARD_ID.into())
             .size_full()
             .gap(m.sp[2])
             .child(

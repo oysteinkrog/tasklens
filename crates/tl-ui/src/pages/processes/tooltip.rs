@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui_kit::base::Tooltip as BaseTooltip;
 use gpui_kit::{
-    App, BoxShadow, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, StyledText, Window, div, point, px,
+    App, BoxShadow, Context, HighlightStyle, Hsla, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, StyledText, Window, div, point, px,
 };
 use tl_model::ids::{NodeId, PseudoKind};
 use tl_model::process::{GroupRowKind, ProcessRecord};
@@ -25,6 +25,7 @@ use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::RowRef;
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::table::tree_table::RowKind;
 use crate::text::style::t_sm;
 use crate::theme::{current, metrics};
@@ -278,7 +279,7 @@ impl Render for RowTooltip {
             } else {
                 theme.text_primary
             };
-            let mut line = div().debug_selector(move || {
+            let mut line = div().tl_selector(move || {
                 if warning {
                     "TlRowTip-warning".into()
                 } else {
@@ -311,6 +312,6 @@ impl Render for RowTooltip {
             spread_radius: px(0.),
             inset: false,
         }]);
-        div().debug_selector(|| "TlRowTip".into()).child(panel)
+        div().tl_selector(|| "TlRowTip".into()).child(panel)
     }
 }

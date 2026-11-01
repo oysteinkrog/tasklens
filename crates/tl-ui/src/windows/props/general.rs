@@ -76,6 +76,7 @@ use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
@@ -1563,7 +1564,7 @@ impl Render for CmdLineBlock {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                 window_toast(window, cx, ToastKind::Success, copied.clone());
             });
-        let mut body = div().debug_selector(|| "GeneralTab-cmdline-text".into());
+        let mut body = div().tl_selector(|| "GeneralTab-cmdline-text".into());
         *body.text_style() = t_sm(&m);
         let body = body
             .w_full()
@@ -1576,7 +1577,7 @@ impl Render for CmdLineBlock {
             })
             .child(self.text.clone());
         v_flex()
-            .debug_selector(|| "GeneralTab-cmdline".into())
+            .tl_selector(|| "GeneralTab-cmdline".into())
             .w_full()
             .p(m.sp[4])
             .bg(theme.list_bg)
@@ -3338,7 +3339,7 @@ fn verify_row(
         b = b.tooltip(tooltip);
     }
     h_flex()
-        .debug_selector(|| "GeneralTab-verify-row".into())
+        .tl_selector(|| "GeneralTab-verify-row".into())
         .h(height)
         .w_full()
         .min_w_0()
@@ -3419,7 +3420,7 @@ impl Render for GeneralTab {
                 let windows = (i == 2 && !self.col3_tail.is_empty()).then(|| {
                     let tail = grid("general-col-windows".into(), i, 1, &self.col3_tail);
                     let divider = div()
-                        .debug_selector(|| "GeneralTab-window-divider".into())
+                        .tl_selector(|| "GeneralTab-window-divider".into())
                         .mt(px(WINDOW_GAP * m.ui_scale))
                         .h(px(1.))
                         .w_full()
@@ -3428,7 +3429,7 @@ impl Render for GeneralTab {
                 });
                 let bounds = self.panel_bounds.clone();
                 div()
-                    .debug_selector(move || format!("GeneralTab-panel-{i}"))
+                    .tl_selector(move || format!("GeneralTab-panel-{i}"))
                     .relative()
                     .min_w_0()
                     .when(wide, |d| d.flex_1().flex_basis(px(0.)))
@@ -3450,14 +3451,14 @@ impl Render for GeneralTab {
             .collect();
         let panels = if wide {
             h_flex()
-                .debug_selector(|| "GeneralTab-panels".into())
+                .tl_selector(|| "GeneralTab-panels".into())
                 .w_full()
                 .items_start()
                 .gap(m.sp[4])
                 .children(panels)
         } else {
             v_flex()
-                .debug_selector(|| "GeneralTab-panels".into())
+                .tl_selector(|| "GeneralTab-panels".into())
                 .w_full()
                 .gap(m.sp[4])
                 .children(panels)
@@ -3512,7 +3513,7 @@ impl Render for GeneralTab {
         let width = self.width.clone();
         let pad = m.sp[5] * 2.;
         div()
-            .debug_selector(|| "GeneralTab".into())
+            .tl_selector(|| "GeneralTab".into())
             .on_action(cx.listener(|this, _: &PropsVerifyPackage, _, cx| {
                 this.verify_package(cx);
             }))

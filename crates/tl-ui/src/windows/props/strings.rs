@@ -56,6 +56,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -741,12 +742,12 @@ impl Render for StringsStatus {
         let m = *metrics(cx);
         let s = m.ui_scale;
         let mut text = div()
-            .debug_selector(|| "StringsStatus-text".into())
+            .tl_selector(|| "StringsStatus-text".into())
             .text_color(theme.text_secondary)
             .whitespace_nowrap();
         *text.text_style() = numeric_style(&m, m.text.sm);
         h_flex()
-            .debug_selector(|| "StringsStatus".into())
+            .tl_selector(|| "StringsStatus".into())
             .flex_none()
             .w_full()
             .h(px(STATUS_H * s))
@@ -756,7 +757,7 @@ impl Render for StringsStatus {
             .when_some(self.pct, |d, pct| {
                 d.child(
                     div()
-                        .debug_selector(|| "StringsProgress".into())
+                        .tl_selector(|| "StringsProgress".into())
                         .flex_none()
                         .w(px(PROGRESS_W * s))
                         .child(
@@ -1437,7 +1438,7 @@ impl StringsTab {
 
         h_flex()
             .id("StringsOptions")
-            .debug_selector(|| "StringsOptions".into())
+            .tl_selector(|| "StringsOptions".into())
             .key_context(STRINGS_OPTIONS_CONTEXT)
             .track_focus(&self.options_focus)
             .flex_none()
@@ -1484,11 +1485,11 @@ impl StringsTab {
         let s = m.ui_scale;
         let warning = theme.status.warning;
         let mut label = div()
-            .debug_selector(|| "StringsLimitBanner-text".into())
+            .tl_selector(|| "StringsLimitBanner-text".into())
             .text_color(theme.text_primary);
         *label.text_style() = t_sm(&m);
         h_flex()
-            .debug_selector(|| "StringsLimitBanner".into())
+            .tl_selector(|| "StringsLimitBanner".into())
             .flex_none()
             .w_full()
             .h(px(STATUS_H * s))
@@ -1516,7 +1517,7 @@ impl Render for StringsTab {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let root = v_flex()
-            .debug_selector(|| "PropsStrings".into())
+            .tl_selector(|| "PropsStrings".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_rows))
             .on_action(cx.listener(Self::on_copy_value))
@@ -1525,7 +1526,7 @@ impl Render for StringsTab {
             .child(self.options_bar(cx));
         if let Some(text) = self.body_text() {
             let mut label = div()
-                .debug_selector(|| "StringsBody-text".into())
+                .tl_selector(|| "StringsBody-text".into())
                 .text_center()
                 .text_color(theme.text_secondary);
             *label.text_style() = t_base(&m);

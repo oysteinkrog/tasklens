@@ -42,6 +42,7 @@ use crate::components::menu::TlMenu;
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -353,7 +354,7 @@ fn header_of(
 /// `chart` in a full-width box of `height`.
 fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> Div {
     div()
-        .debug_selector(move || id.into())
+        .tl_selector(move || id.into())
         .flex_none()
         .w_full()
         .h(px(height))

@@ -15,6 +15,7 @@ use gpui_kit::{
 
 use super::focus::TlFocusRing;
 use super::motion::{M_FAST, ease_out_cubic};
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens, [RadioPrev, RadioNext, RadioFirst, RadioLast]);
@@ -150,7 +151,7 @@ impl RenderOnce for TlRadio {
         if checked {
             let selector = format!("{}-dot", self.id);
             let dot = div()
-                .debug_selector(move || selector)
+                .tl_selector(move || selector)
                 .flex_none()
                 .rounded_full()
                 .bg(theme.accent);

@@ -44,6 +44,7 @@ use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -524,7 +525,7 @@ impl TitleBarView {
         let button = no_drag(
             div()
                 .id("TitleBarPin")
-                .debug_selector(|| "TitleBarPin".into())
+                .tl_selector(|| "TitleBarPin".into())
                 .role(Role::Button)
                 .aria_label(tooltip.clone())
                 .flex()
@@ -594,7 +595,7 @@ impl TitleBarView {
         let button = no_drag(
             div()
                 .id(id)
-                .debug_selector(move || format!("TitleBarCaption-{id}"))
+                .tl_selector(move || format!("TitleBarCaption-{id}"))
                 .role(Role::Button)
                 .aria_label(tooltip.clone())
                 .flex()
@@ -728,7 +729,7 @@ impl TitleBarView {
         );
         div()
             .id("TitleBar")
-            .debug_selector(|| "TitleBar".into())
+            .tl_selector(|| "TitleBar".into())
             .flex()
             .flex_row()
             .flex_none()
@@ -741,7 +742,7 @@ impl TitleBarView {
             .child(
                 // Keeps its 16 px when the asset is missing (E15-022).
                 div()
-                    .debug_selector(|| "TitleBarIcon".into())
+                    .tl_selector(|| "TitleBarIcon".into())
                     .flex_none()
                     .size(px(APP_ICON * s))
                     .mr(px(GAP_ICON * s))
@@ -752,7 +753,7 @@ impl TitleBarView {
                 |bar, menu| {
                     bar.child(no_drag(
                         div()
-                            .debug_selector(|| "TitleBarMenu".into())
+                            .tl_selector(|| "TitleBarMenu".into())
                             .flex_none()
                             .mr(px(GAP_MENU * s))
                             .child(menu),
@@ -773,7 +774,7 @@ impl TitleBarView {
         self.leading(h, theme, window, cx)
             .child(
                 div()
-                    .debug_selector(|| "TitleBarSpacer".into())
+                    .tl_selector(|| "TitleBarSpacer".into())
                     .flex_1()
                     .h_full(),
             )
@@ -797,7 +798,7 @@ impl TitleBarView {
         let bar = bar
             .child(
                 div()
-                    .debug_selector(|| "TitleBarDrag".into())
+                    .tl_selector(|| "TitleBarDrag".into())
                     .flex_1()
                     .min_w(px(DRAG_MIN_W * s))
                     .h_full(),

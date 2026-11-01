@@ -52,6 +52,7 @@ use crate::pages::performance::actions::{
 use crate::pages::performance::cpu::PowerState;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
 use crate::pages::performance::widget::menu::{confirm_preset, confirm_reset_now};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::metrics;
 use crate::window::setup::OpenAdditionalSetup;
@@ -89,7 +90,7 @@ pub const WIDGET_EDIT_HEADER_COVER_ID: &str = "perf-overview-widget-edit-cover-h
 /// scrolls. It also keeps the Performance tab's right-press from opening a menu.
 pub(super) fn widget_edit_cover(id: String) -> gpui_kit::Div {
     div()
-        .debug_selector(move || id)
+        .tl_selector(move || id)
         .absolute()
         .top_0()
         .left_0()
@@ -832,7 +833,7 @@ impl OverviewPage {
                 open_context_menu_at(ev.position(), window, cx, menu);
             });
         div()
-            .debug_selector(move || id.clone())
+            .tl_selector(move || id.clone())
             .absolute()
             // On the title line, below the border and the space above the title.
             .top(px(1. + TITLE_TOP * s))

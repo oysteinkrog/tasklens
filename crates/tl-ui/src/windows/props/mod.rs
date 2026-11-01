@@ -68,6 +68,7 @@ use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
@@ -351,7 +352,7 @@ impl RenderOnce for AccessBlock {
         let m = *metrics(cx);
         let s = m.ui_scale;
         let mut message = div()
-            .debug_selector(|| "PropsAccessBlock-text".into())
+            .tl_selector(|| "PropsAccessBlock-text".into())
             .max_w(px(ACCESS_MAX_W * s))
             .text_center()
             .text_color(theme.text_primary);
@@ -363,7 +364,7 @@ impl RenderOnce for AccessBlock {
             // `TlButton::loading` hides the label, and "Waiting for authentication…" must stay
             // readable. While loading the button is inert and the spinner sits beside it.
             h_flex()
-                .debug_selector(|| "PropsAccessButton".into())
+                .tl_selector(|| "PropsAccessButton".into())
                 .mt(m.sp[5] - m.sp[4])
                 .gap(m.sp[3])
                 .child(
@@ -378,14 +379,14 @@ impl RenderOnce for AccessBlock {
                 .when(view.loading, |row| {
                     row.child(
                         div()
-                            .debug_selector(|| "PropsAccessButton-spinner".into())
+                            .tl_selector(|| "PropsAccessButton-spinner".into())
                             .flex_none()
                             .child(TlSpinner::new(m.icon.sm)),
                     )
                 })
         });
         v_flex()
-            .debug_selector(|| "PropsAccessBlock".into())
+            .tl_selector(|| "PropsAccessBlock".into())
             .size_full()
             .items_center()
             .pt(px(ACCESS_TOP * s))
@@ -1376,7 +1377,7 @@ impl PropsWindow {
         let mut text = div().text_color(theme.text_primary);
         *text.text_style() = t_sm(&m);
         div()
-            .debug_selector(|| "PropsExitedBanner".into())
+            .tl_selector(|| "PropsExitedBanner".into())
             .flex()
             .flex_row()
             .flex_none()
@@ -1548,7 +1549,7 @@ impl gpui_kit::Render for PropsWindow {
             .when(self.exited, |d| d.child(self.banner(cx)))
             .child(
                 div()
-                    .debug_selector(|| "PropsBody".into())
+                    .tl_selector(|| "PropsBody".into())
                     .flex_1()
                     .min_h_0()
                     .w_full()

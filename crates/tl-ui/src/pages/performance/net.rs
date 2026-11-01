@@ -61,6 +61,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::public_ip::request_public_ip_fetch;
@@ -1544,7 +1545,7 @@ impl DevicePage for NetPage {
     fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
         let h = GRAPH_H_SINGLE * metrics(cx).ui_scale;
         div()
-            .debug_selector(|| THROUGHPUT_ID.into())
+            .tl_selector(|| THROUGHPUT_ID.into())
             .flex_none()
             .w_full()
             .h(px(h))
@@ -1573,7 +1574,7 @@ impl DevicePage for NetPage {
             .focus_handle(self.settings_focus.clone());
             out.push(
                 h_flex()
-                    .debug_selector(|| SETTINGS_LINK_ID.into())
+                    .tl_selector(|| SETTINGS_LINK_ID.into())
                     .gap(m.sp[3])
                     .child(link)
                     .child(

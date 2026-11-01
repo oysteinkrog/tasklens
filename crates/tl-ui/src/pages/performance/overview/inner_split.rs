@@ -29,6 +29,7 @@ use gpui_kit::{
 
 use super::layout::SPLIT_RANGE;
 use super::parts::edit_chrome;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 
 /// The smallest part when a mode sets no other minimum, logical px.
@@ -380,7 +381,7 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         cx: &mut Context<V>,
     ) -> AnyElement {
         let (id, line_id) = (self.id, self.line_id);
-        let el = div().debug_selector(move || id.into()).absolute();
+        let el = div().tl_selector(move || id.into()).absolute();
         let el = match axis {
             SplitAxis::Row => el.top_0().bottom_0().left(relative(share)).w(gap),
             SplitAxis::Column => el.left_0().right_0().top(relative(share)).h(gap),
@@ -399,7 +400,7 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         }
         let hit = div()
             .id(id)
-            .debug_selector(move || hit_selector(id))
+            .tl_selector(move || hit_selector(id))
             .absolute()
             .inset_0()
             .on_mouse_down(
@@ -420,7 +421,7 @@ impl<E: From<f32> + 'static> InnerSplit<E> {
         }
         let offset = px((f32::from(gap) - LINE_W) / 2.);
         let line = div()
-            .debug_selector(move || line_id.into())
+            .tl_selector(move || line_id.into())
             .absolute()
             .bg(current(cx).accent);
         let line = match axis {

@@ -66,6 +66,7 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::table::actions::CopyRowsAsTable;
 use crate::table::cells::CellOut;
@@ -895,7 +896,7 @@ impl AppGeneralTab {
         let mut subtitle = div().truncate().text_color(theme.text_secondary);
         *subtitle.text_style() = t_sm(&m);
         h_flex()
-            .debug_selector(|| "AppGeneralTab-header".into())
+            .tl_selector(|| "AppGeneralTab-header".into())
             .h(px(HEADER_HEIGHT * scale))
             .px(m.sp[5])
             .gap(m.sp[4])
@@ -952,7 +953,7 @@ impl AppGeneralTab {
             _ => tr(cx, "fnd-kv-collecting"),
         };
         v_flex()
-            .debug_selector(|| "AppGeneralTab-cmdline".into())
+            .tl_selector(|| "AppGeneralTab-cmdline".into())
             .w_full()
             .p(m.sp[4])
             .bg(theme.list_bg)
@@ -1022,7 +1023,7 @@ impl Render for AppGeneralTab {
         let panel = |id: &'static str, panel_ix: usize, grid: TlKeyValueGrid| {
             let bounds = panel_bounds.clone();
             div()
-                .debug_selector(move || id.into())
+                .tl_selector(move || id.into())
                 .relative()
                 .min_w_0()
                 .when(self.side_by_side, |d| d.flex_1().flex_basis(px(0.)))
@@ -1067,7 +1068,7 @@ impl Render for AppGeneralTab {
         let width = self.width.clone();
         let pad = m.sp[5] * 2.;
         div()
-            .debug_selector(|| "AppGeneralTab".into())
+            .tl_selector(|| "AppGeneralTab".into())
             .on_action(cx.listener(|this, _: &AppGeneralOpenDesktop, window, cx| {
                 this.open_desktop(window, cx);
             }))
@@ -2005,7 +2006,7 @@ impl Render for AppProcessesTab {
             });
         }
         div()
-            .debug_selector(|| "AppPropsProcesses".into())
+            .tl_selector(|| "AppPropsProcesses".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_open_props))
@@ -2348,7 +2349,7 @@ impl AppPropsWindow {
         let mut text = div().text_color(theme.text_primary);
         *text.text_style() = t_sm(&m);
         h_flex()
-            .debug_selector(|| "AppPropsExitedBanner".into())
+            .tl_selector(|| "AppPropsExitedBanner".into())
             .h(px(BANNER_HEIGHT * m.ui_scale))
             .w_full()
             .px(m.sp[5])

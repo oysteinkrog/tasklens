@@ -25,6 +25,7 @@ use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{SIGNAL_DIALOG_CONTEXT, SendSignal, SignalSendRealtime};
@@ -848,7 +849,7 @@ impl Render for RtSignalDialog {
         let view = cx.entity().downgrade();
 
         let mut subtitle = div()
-            .debug_selector(|| "SignalSubtitle".into())
+            .tl_selector(|| "SignalSubtitle".into())
             .flex_none()
             .flex()
             .items_center()
@@ -865,13 +866,13 @@ impl Render for RtSignalDialog {
         let mut row_label = div().flex_none().text_color(theme.text_secondary);
         *row_label.text_style() = t_base(&m);
         let mut signal_name = div()
-            .debug_selector(|| "SignalName".into())
+            .tl_selector(|| "SignalName".into())
             .flex_1()
             .min_w_0()
             .text_color(theme.text_primary);
         *signal_name.text_style() = t_base(&m);
         let row = div()
-            .debug_selector(|| "SignalRow".into())
+            .tl_selector(|| "SignalRow".into())
             .flex_none()
             .flex()
             .items_center()
@@ -906,7 +907,7 @@ impl Render for RtSignalDialog {
                 })
         };
         let footer = div()
-            .debug_selector(|| "SignalFooter".into())
+            .tl_selector(|| "SignalFooter".into())
             .flex_none()
             .flex()
             .items_center()

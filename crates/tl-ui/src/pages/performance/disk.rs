@@ -57,6 +57,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -1642,7 +1643,7 @@ impl DiskPage {
     /// `chart` in a full-width box of `height`.
     fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> gpui_kit::Div {
         div()
-            .debug_selector(move || id.into())
+            .tl_selector(move || id.into())
             .flex_none()
             .w_full()
             .h(px(height))
@@ -1731,7 +1732,7 @@ impl DevicePage for DiskPage {
         {
             el = el.child(
                 flat_static_table(table, block.rows.len(), PARTITIONS_MAX_ROWS, m)
-                    .debug_selector(|| PARTITIONS_TABLE_ID.into()),
+                    .tl_selector(|| PARTITIONS_TABLE_ID.into()),
             );
         }
         blocks.push(el.into_any_element());

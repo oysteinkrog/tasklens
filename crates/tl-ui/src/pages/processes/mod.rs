@@ -61,6 +61,7 @@ use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -1424,7 +1425,7 @@ fn toast(kind: ToastKind, text: SharedString, cx: &mut App) {
 impl Render for ProcessesPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .debug_selector(|| "ProcessesPage".into())
+            .tl_selector(|| "ProcessesPage".into())
             .key_context(PAGE_CONTEXT)
             .size_full()
             .flex()
@@ -1465,7 +1466,7 @@ impl Render for ProcessesPage {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .debug_selector(|| "ProcessesTableArea".into())
+                    .tl_selector(|| "ProcessesTableArea".into())
                     .child(match &self.history {
                         Some(history) => history
                             .clone()

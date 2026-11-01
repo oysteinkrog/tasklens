@@ -43,6 +43,7 @@ use crate::host::HostContext;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm, t_xs};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{PRIORITY_DIALOG_CONTEXT, PriorityApply, PrioritySliderStep};
@@ -705,7 +706,7 @@ impl Render for PriorityDialog {
         let rt_on = self.rt_enabled(cx);
 
         let mut subtitle = div()
-            .debug_selector(|| "PrioritySubtitle".into())
+            .tl_selector(|| "PrioritySubtitle".into())
             .flex_none()
             .flex()
             .items_center()
@@ -762,7 +763,7 @@ impl Render for PriorityDialog {
         };
         let select = div()
             .id("PriorityPolicyBox")
-            .debug_selector(|| "PriorityPolicy".into())
+            .tl_selector(|| "PriorityPolicy".into())
             .flex_none()
             .child(select);
         let select = with_tooltip(
@@ -777,7 +778,7 @@ impl Render for PriorityDialog {
         let nice_value = self.nice(cx);
         let slider = div()
             .id("PriorityNice")
-            .debug_selector(|| "PriorityNice".into())
+            .tl_selector(|| "PriorityNice".into())
             .aria_label(words.nice_name.clone())
             .flex_none()
             .w(px(CONTROL_W * s))
@@ -800,7 +801,7 @@ impl Render for PriorityDialog {
                 el.child(text.clone())
             };
             div()
-                .debug_selector(|| "PriorityNiceScale".into())
+                .tl_selector(|| "PriorityNiceScale".into())
                 .flex_none()
                 .flex()
                 .items_center()
@@ -829,7 +830,7 @@ impl Render for PriorityDialog {
         };
         let stepper = div()
             .id("PriorityRealtimeBox")
-            .debug_selector(|| "PriorityRealtime".into())
+            .tl_selector(|| "PriorityRealtime".into())
             .aria_label(words.realtime.clone())
             .flex_none()
             .child(stepper);
@@ -847,7 +848,7 @@ impl Render for PriorityDialog {
             let mut second = div().text_color(theme.text_secondary);
             *second.text_style() = t_xs(&m);
             div()
-                .debug_selector(|| "PriorityWarning".into())
+                .tl_selector(|| "PriorityWarning".into())
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -890,7 +891,7 @@ impl Render for PriorityDialog {
                 })
         };
         let footer = div()
-            .debug_selector(|| "PriorityFooter".into())
+            .tl_selector(|| "PriorityFooter".into())
             .flex_none()
             .flex()
             .items_center()

@@ -51,6 +51,7 @@ use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::selector::TlSelector;
 use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::theme::metrics;
 use crate::window::main::push_main_toast;
@@ -1158,7 +1159,7 @@ impl Render for MinigraphPanel {
         // table, and only the cards take clicks.
         let mut root = div()
             .id("MinigraphPanel")
-            .debug_selector(|| "MinigraphPanel".into())
+            .tl_selector(|| "MinigraphPanel".into())
             .relative()
             .size_full()
             .on_action(cx.listener(|this, _: &ResetMinigraphLayout, _, cx| this.reset(cx)))
@@ -1254,7 +1255,7 @@ impl Render for MinigraphPanel {
             let (right, bottom) = offset(slot);
             let el = div()
                 .id(("MinigraphSlot", u64::from(id.0)))
-                .debug_selector(move || format!("MinigraphSlot-{slot}"))
+                .tl_selector(move || format!("MinigraphSlot-{slot}"))
                 .absolute()
                 .right(px(right))
                 .bottom(px(bottom))

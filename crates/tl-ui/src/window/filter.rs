@@ -54,6 +54,7 @@ use crate::components::input::{FILTER_GROW, FILTER_WIDTH, FILTER_WIDTH_WIDE};
 use crate::components::motion::ease_out_cubic;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, TlSettings};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
@@ -435,7 +436,7 @@ impl Render for FilterBox {
         self.input_target = px(target * s);
 
         let mut label = div()
-            .debug_selector(|| "FilterBox-label".into())
+            .tl_selector(|| "FilterBox-label".into())
             .flex_none()
             .whitespace_nowrap()
             .text_color(theme.text_secondary);
@@ -445,7 +446,7 @@ impl Render for FilterBox {
         let clear = has_text.then(|| {
             let button = div()
                 .id("shell-filter-clear")
-                .debug_selector(|| "FilterBox-clear".into())
+                .tl_selector(|| "FilterBox-clear".into())
                 .role(Role::Button)
                 .aria_label(self.labels.clear.clone())
                 .flex()
@@ -493,7 +494,7 @@ impl Render for FilterBox {
 
         let field = div()
             .id("shell-filter-input")
-            .debug_selector(|| "FilterBox-input".into())
+            .tl_selector(|| "FilterBox-input".into())
             .key_context(SHELL_FILTER_CONTEXT)
             .flex_none()
             .h(px(INPUT_H * s))
@@ -526,7 +527,7 @@ impl Render for FilterBox {
             let checked = self.processes.include_children;
             let mut text = div()
                 .id("shell-filter-include-children-label")
-                .debug_selector(|| "FilterBox-include-children-label".into())
+                .tl_selector(|| "FilterBox-include-children-label".into())
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(theme.text_primary)
@@ -534,7 +535,7 @@ impl Render for FilterBox {
             *text.text_style() = t_sm(&m);
             div()
                 .id("shell-filter-include-children")
-                .debug_selector(|| "FilterBox-include-children".into())
+                .tl_selector(|| "FilterBox-include-children".into())
                 .role(Role::CheckBox)
                 .aria_label(self.labels.include_children.clone())
                 .aria_toggled(checked.into())
@@ -561,7 +562,7 @@ impl Render for FilterBox {
                 let clear = self.labels.group_clear.clone();
                 let button = div()
                     .id("shell-filter-group-clear")
-                    .debug_selector(|| "FilterBox-group-clear".into())
+                    .tl_selector(|| "FilterBox-group-clear".into())
                     .role(Role::Button)
                     .aria_label(clear.clone())
                     .flex()
@@ -587,13 +588,13 @@ impl Render for FilterBox {
                     cx,
                 );
                 let mut label = div()
-                    .debug_selector(|| "FilterBox-group-chip-label".into())
+                    .tl_selector(|| "FilterBox-group-chip-label".into())
                     .flex_none()
                     .whitespace_nowrap()
                     .text_color(theme.text_primary);
                 *label.text_style() = t_sm(&m);
                 let pill = div()
-                    .debug_selector(|| "FilterBox-group-chip".into())
+                    .tl_selector(|| "FilterBox-group-chip".into())
                     .flex()
                     .flex_row()
                     .flex_none()
@@ -618,7 +619,7 @@ impl Render for FilterBox {
         // after the filter input (UI-SHL-121) while it is drawn to the left. The group chip
         // comes second, so it sits directly left of the outline.
         div()
-            .debug_selector(|| "FilterBox".into())
+            .tl_selector(|| "FilterBox".into())
             .flex()
             .flex_row_reverse()
             .flex_none()
@@ -635,7 +636,7 @@ impl Render for FilterBox {
             })
             .child(
                 div()
-                    .debug_selector(|| "FilterBox-outline".into())
+                    .tl_selector(|| "FilterBox-outline".into())
                     .flex()
                     .flex_row()
                     .flex_none()

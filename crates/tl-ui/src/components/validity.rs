@@ -31,6 +31,7 @@ use tl_model::validity::Validity;
 
 use super::icons::{TlIcon, icon};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::numeric_style;
 use crate::theme::{TlTheme, UiMetrics};
 
@@ -212,9 +213,7 @@ fn base(
     theme: &TlTheme,
 ) -> gpui_kit::Div {
     let (content, color) = glyph_parts(validity, value_text, selected, theme);
-    let cell = h_flex()
-        .debug_selector(|| "TlValidityGlyph".into())
-        .w_full();
+    let cell = h_flex().tl_selector(|| "TlValidityGlyph".into()).w_full();
     let mut cell = if start {
         cell.justify_start()
     } else {
@@ -223,13 +222,13 @@ fn base(
     *cell.text_style() = numeric_style(m, m.base_text);
     let inner = match content {
         GlyphContent::Text(text) => div()
-            .debug_selector(|| "TlValidityGlyph-text".into())
+            .tl_selector(|| "TlValidityGlyph-text".into())
             .flex_none()
             .whitespace_nowrap()
             .text_color(color)
             .child(text),
         GlyphContent::Lock => div()
-            .debug_selector(|| "TlValidityGlyph-lock".into())
+            .tl_selector(|| "TlValidityGlyph-lock".into())
             .flex_none()
             .child(icon(TlIcon::Lock, m.icon.xs, color)),
     };

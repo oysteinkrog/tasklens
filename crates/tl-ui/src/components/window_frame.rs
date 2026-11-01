@@ -44,6 +44,7 @@ use super::toast::ToastQueue;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, current, metrics};
@@ -638,7 +639,7 @@ impl RenderOnce for TlWindowPin {
         let mut button = BaseButton::new(id)
             .disabled(!look.enabled)
             .track_focus(&focus)
-            .debug_selector(|| "TlWindowPin".into())
+            .tl_selector(|| "TlWindowPin".into())
             .relative()
             .flex_none()
             .flex()
@@ -754,7 +755,7 @@ impl RenderOnce for TlTitleBar {
         let mut title = div();
         *title.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
         let title = title
-            .debug_selector(|| "TlWindowTitle".into())
+            .tl_selector(|| "TlWindowTitle".into())
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -766,7 +767,7 @@ impl RenderOnce for TlTitleBar {
         let caption = |id: &'static str, name: IconName, hover: Hsla, hover_fg: Hsla| {
             div()
                 .id(id)
-                .debug_selector(move || format!("TlWindowCaption-{id}"))
+                .tl_selector(move || format!("TlWindowCaption-{id}"))
                 .flex()
                 .flex_none()
                 .items_center()
@@ -795,7 +796,7 @@ impl RenderOnce for TlTitleBar {
 
         div()
             .id("TlWindowTitleBar")
-            .debug_selector(|| "TlWindowTitleBar".into())
+            .tl_selector(|| "TlWindowTitleBar".into())
             .flex()
             .flex_row()
             .flex_none()
@@ -833,7 +834,7 @@ impl RenderOnce for TlTitleBar {
                 div()
                     .flex_none()
                     .size(m.icon.md)
-                    .debug_selector(|| "TlWindowIcon".into()),
+                    .tl_selector(|| "TlWindowIcon".into()),
             )
             .child(title)
             .child(
@@ -892,7 +893,7 @@ fn close_button(side: Pixels, theme: &TlTheme, window: &mut Window, cx: &mut App
     let white: Hsla = rgb(0xFFFFFF).into();
     BaseButton::new(id)
         .track_focus(&focus)
-        .debug_selector(|| "TlWindowCaption-close".into())
+        .tl_selector(|| "TlWindowCaption-close".into())
         .relative()
         .flex_none()
         .w(side)
@@ -970,7 +971,7 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
             .children(title_bar)
             .child(
                 div()
-                    .debug_selector(|| "TlWindowContent".into())
+                    .tl_selector(|| "TlWindowContent".into())
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -988,7 +989,7 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
                         d.child(
                             div()
                                 .id("TlWindowModalOverlay")
-                                .debug_selector(|| "TlWindowModalOverlay".into())
+                                .tl_selector(|| "TlWindowModalOverlay".into())
                                 .absolute()
                                 .inset_0()
                                 .bg(theme.derived.overlay)

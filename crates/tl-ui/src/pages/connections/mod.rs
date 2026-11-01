@@ -47,6 +47,7 @@ use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
+use crate::selector::TlSelector;
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
@@ -396,7 +397,7 @@ impl ConnectionsPage {
                 open_context_menu_at(at, window, cx, menu);
             });
         div()
-            .debug_selector(|| "ConnectionsNamespaces-control".into())
+            .tl_selector(|| "ConnectionsNamespaces-control".into())
             .absolute()
             .right(m.sp[4])
             .bottom(m.sp[4] + px(crate::window::status::CHIP_H * m.ui_scale))

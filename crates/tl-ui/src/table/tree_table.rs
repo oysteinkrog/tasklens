@@ -39,6 +39,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::table::actions::{
     CollapseOrParent, CopyRowsAsTable, EnableAllColumns, ExpandOrChild, HideColumn, MoveFocus,
     MoveFocusEdge, MoveFocusPage, OpenColumnPicker, OpenContextMenu, OpenProperties, ResetColumns,
@@ -856,11 +857,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         );
 
         if kind == RowKind::GroupHeader {
-            row = row.debug_selector(|| "TlTreeTable-group-row".into());
+            row = row.tl_selector(|| "TlTreeTable-group-row".into());
             if ix > 0 {
                 row = row.child(
                     div()
-                        .debug_selector(|| "TlTreeTable-group-line".into())
+                        .tl_selector(|| "TlTreeTable-group-line".into())
                         .absolute()
                         .top_0()
                         .left_0()
@@ -992,7 +993,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             // The keyboard caret on a row that is not selected (UI-PRC-008).
             row = row.child(
                 div()
-                    .debug_selector(|| "TlTreeTable-focus-row".into())
+                    .tl_selector(|| "TlTreeTable-focus-row".into())
                     .absolute()
                     .top_0()
                     .left_0()
@@ -1079,7 +1080,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     ) -> Div {
         let s = m.ui_scale;
         let hit = div()
-            .debug_selector(|| "TlTreeTable-chevron".into())
+            .tl_selector(|| "TlTreeTable-chevron".into())
             .absolute()
             .top_0()
             .left(left - px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s))
@@ -2556,7 +2557,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
 
         let mut body = div()
             .id("tl-tree-table-body-box")
-            .debug_selector(|| "TlTreeTable-body".into())
+            .tl_selector(|| "TlTreeTable-body".into())
             .relative()
             .flex_1()
             .min_h_0()
@@ -2589,7 +2590,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         {
             body = body.child(
                 div()
-                    .debug_selector(|| "TlTreeTable-empty-state".into())
+                    .tl_selector(|| "TlTreeTable-empty-state".into())
                     .absolute()
                     .top(px(EMPTY_STATE_TOP * m.ui_scale))
                     .left_0()
@@ -2605,7 +2606,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             *label.text_style() = t_base(&m);
             body = body.child(
                 label
-                    .debug_selector(|| "TlTreeTable-empty".into())
+                    .tl_selector(|| "TlTreeTable-empty".into())
                     .absolute()
                     .top_0()
                     .left_0()
@@ -2620,13 +2621,13 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         if let Some(x) = self.header_state.insert_x {
             body = body.child(
                 insert_line(x - self.x_offset, &theme, &m)
-                    .debug_selector(|| "TlTreeTable-insert".into()),
+                    .tl_selector(|| "TlTreeTable-insert".into()),
             );
         }
         if ring {
             body = body.child(
                 div()
-                    .debug_selector(|| "TlTreeTable-focus-ring".into())
+                    .tl_selector(|| "TlTreeTable-focus-ring".into())
                     .absolute()
                     .top_0()
                     .left_0()
@@ -2637,7 +2638,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         }
 
         v_flex()
-            .debug_selector(|| "TlTreeTable".into())
+            .tl_selector(|| "TlTreeTable".into())
             .size_full()
             .bg(theme.list_bg)
             .key_context(TABLE_CONTEXT)

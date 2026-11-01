@@ -54,6 +54,7 @@ use crate::host::HostContext;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{self, Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_base};
 use crate::theme::user_store::ThemePersist;
@@ -1072,7 +1073,7 @@ impl LowMemoryWindow {
 
         let memory = if row.validity.is_valid() {
             let mut text = div()
-                .debug_selector(move || format!("LowMemMemory-{i}"))
+                .tl_selector(move || format!("LowMemMemory-{i}"))
                 .flex()
                 .justify_end()
                 .whitespace_nowrap()
@@ -1100,7 +1101,7 @@ impl LowMemoryWindow {
 
         div()
             .id(("LowMemRow", i))
-            .debug_selector(move || format!("LowMemRow-{i}"))
+            .tl_selector(move || format!("LowMemRow-{i}"))
             .flex_none()
             .flex()
             .items_center()
@@ -1114,7 +1115,7 @@ impl LowMemoryWindow {
             .child(div().flex_none().w(px(MEMORY_W * s)).child(memory))
             .child(
                 div()
-                    .debug_selector(move || format!("LowMemEndTask-{i}"))
+                    .tl_selector(move || format!("LowMemEndTask-{i}"))
                     .flex_none()
                     .flex()
                     .justify_end()
@@ -1184,7 +1185,7 @@ impl Render for LowMemoryWindow {
         let s = m.ui_scale;
 
         let header = self.header_in(&words, &theme).into_iter().map(|line| {
-            let mut text = div().debug_selector(|| "LowMemHeaderLine".into());
+            let mut text = div().tl_selector(|| "LowMemHeaderLine".into());
             *text.text_style() = if line.strong {
                 label_style(&m, m.text.md, FontWeight::SEMIBOLD)
             } else {
@@ -1196,7 +1197,7 @@ impl Render for LowMemoryWindow {
         let list_focused = self.list_focus.is_focused(window);
         let mut list = div()
             .id("LowMemList")
-            .debug_selector(|| "LowMemList".into())
+            .tl_selector(|| "LowMemList".into())
             .track_focus(&self.list_focus)
             .on_key_down(cx.listener(Self::list_key_down))
             .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
@@ -1220,7 +1221,7 @@ impl Render for LowMemoryWindow {
         match self.empty_text_in(&words) {
             Some(text) => {
                 let mut empty = div()
-                    .debug_selector(|| "LowMemFilterEmpty".into())
+                    .tl_selector(|| "LowMemFilterEmpty".into())
                     .p(m.sp[4])
                     .text_color(theme.text_secondary);
                 *empty.text_style() = t_base(&m);
@@ -1268,14 +1269,14 @@ impl Render for LowMemoryWindow {
             .child(list)
             .child(
                 div()
-                    .debug_selector(|| "LowMemFooter".into())
+                    .tl_selector(|| "LowMemFooter".into())
                     .flex_none()
                     .flex()
                     .items_center()
                     .h(px(FOOTER * s))
                     .child(
                         div()
-                            .debug_selector(|| "LowMemOpenFull".into())
+                            .tl_selector(|| "LowMemOpenFull".into())
                             .child(open_full),
                     ),
             )

@@ -29,6 +29,7 @@ use super::{HistoryUiState, MAX_SERIES};
 use crate::components::icons::{TlIcon, icon};
 use crate::i18n::{tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::theme::{TlTheme, current, metrics};
 
 /// Chip height, × ui_scale.
@@ -167,7 +168,7 @@ fn chip(c: Chip, window: &mut Window, cx: &mut App) -> AnyElement {
     BaseButton::new(id)
         .track_focus(&focus)
         .key_context("TlButton")
-        .debug_selector(move || debug_id.to_string())
+        .tl_selector(move || debug_id.to_string())
         .accessibility_label(label.clone())
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
         .flex_none()
@@ -253,7 +254,7 @@ pub fn render_legend(
                 .flex_none()
                 .text_size(m.text.sm)
                 .text_color(theme.text_secondary)
-                .debug_selector(|| "history-chip-more".into())
+                .tl_selector(|| "history-chip-more".into())
                 .child(SharedString::from(text)),
         );
     }

@@ -10,11 +10,12 @@
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    App, Global, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, div,
+    App, Global, Hsla, IntoElement, ParentElement, SharedString, Styled, div,
     prelude::FluentBuilder as _, px,
 };
 
 use crate::i18n::{Strings, tr, tr_en};
+use crate::selector::TlSelector;
 use crate::text::style::t_base;
 use crate::theme::{TlTheme, UiMetrics};
 
@@ -255,7 +256,7 @@ pub fn status_cell(
     let colors = cell_colors(look, selected, stale, theme);
     let dot = colors.dot.map(|color| {
         let d = div()
-            .debug_selector(|| "sys-status-dot".into())
+            .tl_selector(|| "sys-status-dot".into())
             .flex_none()
             .size(px(8.0 * metrics.ui_scale))
             .rounded_full();
@@ -265,7 +266,7 @@ pub fn status_cell(
         }
     });
     let mut text = div()
-        .debug_selector(|| "sys-status-label".into())
+        .tl_selector(|| "sys-status-label".into())
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
@@ -274,7 +275,7 @@ pub fn status_cell(
         .child(label);
     *text.text_style() = t_base(metrics);
     h_flex()
-        .debug_selector(|| "sys-status-cell".into())
+        .tl_selector(|| "sys-status-cell".into())
         .min_w_0()
         .items_center()
         .when_some(dot, |row, dot| row.gap(metrics.sp[3]).child(dot))

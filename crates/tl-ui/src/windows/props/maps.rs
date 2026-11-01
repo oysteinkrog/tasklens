@@ -44,6 +44,7 @@ use crate::components::validity::copy_text;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
@@ -1220,7 +1221,7 @@ impl MapsTab {
 impl Render for MapsTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .debug_selector(|| "PropsMaps".into())
+            .tl_selector(|| "PropsMaps".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_cell))

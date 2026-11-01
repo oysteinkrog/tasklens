@@ -58,6 +58,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings, animations_on};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -2217,7 +2218,7 @@ impl MemoryPage {
             let weak = self.this.clone();
             let selector = format!("{VIEW_SWITCH_ID}-{id}");
             row = row.child(
-                div().debug_selector(move || selector).child(
+                div().tl_selector(move || selector).child(
                     TlButton::new(
                         ElementId::Name(format!("{VIEW_SWITCH_ID}-{id}").into()),
                         TlButtonKind::Segment {
@@ -2233,7 +2234,7 @@ impl MemoryPage {
             );
         }
         div()
-            .debug_selector(|| VIEW_SWITCH_ID.into())
+            .tl_selector(|| VIEW_SWITCH_ID.into())
             .flex()
             .flex_row()
             .justify_end()
@@ -2285,7 +2286,7 @@ impl MemoryPage {
     /// `chart` in a full-width box of `height`.
     fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> gpui_kit::Div {
         div()
-            .debug_selector(move || id.into())
+            .tl_selector(move || id.into())
             .flex_none()
             .w_full()
             .h(px(height))
@@ -2317,7 +2318,7 @@ impl MemoryPage {
                 out.child(
                     div()
                         .id(MODULES_NOT_REPORTED_ID)
-                        .debug_selector(|| MODULES_NOT_REPORTED_ID.into())
+                        .tl_selector(|| MODULES_NOT_REPORTED_ID.into())
                         .child(render_details(block.details_model(), &m, cx)),
                 )
                 .into_any_element(),
@@ -2373,7 +2374,7 @@ impl MemoryPage {
                 .h(px(28. * m.ui_scale))
                 .child(
                     div()
-                        .debug_selector(move || format!("{MODULE_CHEVRON_ID}-{n}"))
+                        .tl_selector(move || format!("{MODULE_CHEVRON_ID}-{n}"))
                         .flex_none()
                         .child(chevron),
                 );
@@ -2383,7 +2384,7 @@ impl MemoryPage {
                 out = out.child(
                     div()
                         .id((MODULE_GRID_ID, n))
-                        .debug_selector(move || format!("{MODULE_GRID_ID}-{n}"))
+                        .tl_selector(move || format!("{MODULE_GRID_ID}-{n}"))
                         .child(render_details(model, &m, cx)),
                 );
             }
@@ -2462,7 +2463,7 @@ impl DevicePage for MemoryPage {
                 // Not cached: a cached view with only a width has no height of its own, so the
                 // Details heading below would be drawn over the bar.
                 div()
-                    .debug_selector(|| BAR_WRAP_ID.into())
+                    .tl_selector(|| BAR_WRAP_ID.into())
                     .w_full()
                     .pt(m.sp[6] - m.sp[4])
                     .child(bar.clone())
@@ -2506,7 +2507,7 @@ impl DevicePage for MemoryPage {
                     .child(heading(self.words.block_swap.clone(), md.clone()))
                     .child(
                         flat_static_table(table, self.swap_rows.len(), SWAP_TABLE_MAX_ROWS, m)
-                            .debug_selector(|| SWAP_TABLE_ID.into()),
+                            .tl_selector(|| SWAP_TABLE_ID.into()),
                     )
                     .into_any_element(),
             );
@@ -2523,7 +2524,7 @@ impl DevicePage for MemoryPage {
         let grid = |id: ElementId, selector: String, model: &KeyValueModel| {
             div()
                 .id(id)
-                .debug_selector(move || selector)
+                .tl_selector(move || selector)
                 .child(render_details(model, m, cx))
         };
         for (n, (name, model)) in self

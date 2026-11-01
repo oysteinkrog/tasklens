@@ -52,6 +52,7 @@ use crate::pages::sys_status::{
     DotStyle, StatusLook, SysStatus, cell_colors, status_label, status_look,
 };
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
+use crate::selector::TlSelector;
 use crate::text::style::t_base;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::ShellState;
@@ -471,7 +472,7 @@ fn status_value(
     let colors = cell_colors(look, false, false, theme);
     let dot = colors.dot.map(|color| {
         let d = div()
-            .debug_selector(|| "sys-status-dot".into())
+            .tl_selector(|| "sys-status-dot".into())
             .flex_none()
             .size(px(8.0 * m.ui_scale))
             .rounded_full();
@@ -871,7 +872,7 @@ impl GeneralTab {
             .child(value);
         *value.text_style() = t_base(&m);
         h_flex()
-            .debug_selector(move || format!("ServiceGeneral-row-{row}"))
+            .tl_selector(move || format!("ServiceGeneral-row-{row}"))
             .w_full()
             .items_start()
             .child(label)
@@ -898,7 +899,7 @@ impl GeneralTab {
                 .into_any_element();
         }
         let items = list.items.iter().enumerate().map(|(i, item)| {
-            let entry = div().debug_selector(move || format!("ServiceGeneral-link-{row}-{i}"));
+            let entry = div().tl_selector(move || format!("ServiceGeneral-link-{row}-{i}"));
             match &item.link {
                 Some(link) => entry
                     .child(TlLink::new(
@@ -1055,7 +1056,7 @@ impl Render for GeneralTab {
 
         let desc = self.links(2, &f.desc, false, cx);
         let mut path = div()
-            .debug_selector(|| "ServiceGeneral-path".into())
+            .tl_selector(|| "ServiceGeneral-path".into())
             .w_full()
             .whitespace_normal()
             .text_color(match f.path.word {
@@ -1080,7 +1081,7 @@ impl Render for GeneralTab {
             });
         let select = div()
             .id("ServiceGeneralStartupBox")
-            .debug_selector(|| "ServiceGeneralStartup".into())
+            .tl_selector(|| "ServiceGeneralStartup".into())
             .role(Role::ComboBox)
             .aria_label(tr(cx, "services-sys031-startup-type"))
             .flex_none()
@@ -1164,7 +1165,7 @@ impl Render for GeneralTab {
         ];
         v_flex()
             .id("ServiceGeneralTab")
-            .debug_selector(|| "ServiceGeneralTab".into())
+            .tl_selector(|| "ServiceGeneralTab".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             // Ctrl+C with a selection in a drawn row copies it, as the grids do.

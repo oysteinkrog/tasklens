@@ -29,9 +29,9 @@ use std::rc::Rc;
 use gpui_kit::assets::IconNamed as _;
 use gpui_kit::{
     Action, App, Bounds, CursorStyle, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
-    InteractiveElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, SharedString, Styled, TextRun, TransformationMatrix, Window,
-    canvas, div, fill, font, point, prelude::FluentBuilder, px, size,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, Point, SharedString, Styled, TextRun, TransformationMatrix, Window, canvas, div, fill,
+    font, point, prelude::FluentBuilder, px, size,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
@@ -41,6 +41,7 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::table::actions::{
     HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SetColumnResize, SortByColumn,
 };
@@ -426,7 +427,7 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             let mut label = div();
             *label.text_style() = label_style(m, m.text.base, FontWeight::MEDIUM);
             let label = label
-                .debug_selector(|| format!("TlTreeTableHeader-label-{}", id.key()))
+                .tl_selector(|| format!("TlTreeTableHeader-label-{}", id.key()))
                 .absolute()
                 .top(line1_top)
                 .left(cell.x)
@@ -460,7 +461,7 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
                 FxBuildHasher.hash_one(cell.id),
             );
             let trigger = div()
-                .debug_selector(|| "TlTreeTableHeader-tip".into())
+                .tl_selector(|| "TlTreeTableHeader-tip".into())
                 .absolute()
                 .top_0()
                 .left(cell.x)
@@ -484,13 +485,12 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             content = content.child(self.ghost(cell, drag.x - drag.grab, line1_top, line1_h));
         }
         if let Some(x) = self.state.insert_x {
-            content = content.child(
-                insert_line(x, theme, m).debug_selector(|| "TlTreeTableHeader-insert".into()),
-            );
+            content = content
+                .child(insert_line(x, theme, m).tl_selector(|| "TlTreeTableHeader-insert".into()));
         }
 
         div()
-            .debug_selector(|| "TlTreeTableHeader".into())
+            .tl_selector(|| "TlTreeTableHeader".into())
             .relative()
             .flex_none()
             .w_full()
@@ -523,7 +523,7 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             .text_color(self.theme.text_primary)
             .child(cell.label.clone());
         div()
-            .debug_selector(|| "TlTreeTableHeader-ghost".into())
+            .tl_selector(|| "TlTreeTableHeader-ghost".into())
             .absolute()
             .top_0()
             .left(x)
@@ -552,7 +552,7 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             glyph_cell(validity, text, &ctx)
         };
         let id = cell.id;
-        line.debug_selector(|| format!("TlTreeTableHeader-total-{}", id.key()))
+        line.tl_selector(|| format!("TlTreeTableHeader-total-{}", id.key()))
             .absolute()
             .top(px(LINE2_TOP * m.ui_scale))
             .left(cell.x)

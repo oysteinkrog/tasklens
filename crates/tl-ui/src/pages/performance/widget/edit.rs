@@ -68,6 +68,7 @@ use crate::pages::performance::actions::{
     PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, PerfWidgetUndo, WidgetSource,
 };
 use crate::pages::performance::overview::picked::box_snapshot;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
@@ -1417,7 +1418,7 @@ impl WidgetEditor {
             .child(cancel)
             .child(apply);
         div()
-            .debug_selector(|| TOOLBAR_ID.to_owned())
+            .tl_selector(|| TOOLBAR_ID.to_owned())
             .flex_none()
             .w_full()
             .h(px(TOOLBAR_H * s))
@@ -1456,7 +1457,7 @@ impl WidgetEditor {
             let outline_cid = cid.clone();
             let grip = div()
                 .id(SharedString::from(grip_sel.clone()))
-                .debug_selector(move || grip_sel)
+                .tl_selector(move || grip_sel)
                 .absolute()
                 // The frame's 1 px border puts the padding box inside the widget.
                 .left(px(-1.))
@@ -1482,7 +1483,7 @@ impl WidgetEditor {
                             let _ = this.update(cx, |e, cx| e.open_widget_menu(id, at, window, cx));
                         });
                 div()
-                    .debug_selector(move || gear_sel)
+                    .tl_selector(move || gear_sel)
                     .absolute()
                     .top(px(-1.))
                     // Right of the grip, clear of the chart's scale label in the top right.
@@ -1503,7 +1504,7 @@ impl WidgetEditor {
             };
             let corner = div()
                 .id(SharedString::from(corner_sel.clone()))
-                .debug_selector(move || corner_sel)
+                .tl_selector(move || corner_sel)
                 .absolute()
                 // In the widget's corner, as the grip is in its top left.
                 .right(px(-1.))
@@ -1529,7 +1530,7 @@ impl WidgetEditor {
                 );
             let frame = div()
                 .id(SharedString::from(frame_sel.clone()))
-                .debug_selector(move || frame_sel)
+                .tl_selector(move || frame_sel)
                 .absolute()
                 .left(b.left())
                 .top(b.top())
@@ -1569,7 +1570,7 @@ impl WidgetEditor {
                     // which the widget keeps free of text.
                     d.child(
                         div()
-                            .debug_selector(move || outline_id(&outline_cid, id))
+                            .tl_selector(move || outline_id(&outline_cid, id))
                             .absolute()
                             .inset(px(-1.))
                             .border(px(OUTLINE))
@@ -1585,7 +1586,7 @@ impl WidgetEditor {
             let b = placement.grid.bounds(target);
             out.push(
                 div()
-                    .debug_selector(|| PREVIEW_ID.to_owned())
+                    .tl_selector(|| PREVIEW_ID.to_owned())
                     .absolute()
                     .left(b.left())
                     .top(b.top())
@@ -1630,7 +1631,7 @@ impl Render for WidgetEditor {
             .clone()
             .cached(StyleRefinement::default().size_full());
         let root = div()
-            .debug_selector(move || id)
+            .tl_selector(move || id)
             .track_focus(&self.focus)
             .size_full();
         let Some(edit) = self.edit.clone() else {
@@ -1703,7 +1704,7 @@ impl Render for WidgetEditor {
                 div()
                     .size_full()
                     .relative()
-                    .debug_selector(move || scroll_selector)
+                    .tl_selector(move || scroll_selector)
                     .child(
                         div()
                             .id(scroll)

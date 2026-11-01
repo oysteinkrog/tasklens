@@ -31,6 +31,7 @@ use gpui_kit::{
 };
 
 use crate::components::focus::TlFocusRing;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(
@@ -352,7 +353,7 @@ impl RenderOnce for TlSlider {
             );
 
         let value_el = div()
-            .debug_selector(|| "TlSliderValue".into())
+            .tl_selector(|| "TlSliderValue".into())
             .flex_none()
             .min_w(s(VALUE_MIN_WIDTH))
             .text_size(m.text.sm)
@@ -389,7 +390,7 @@ impl RenderOnce for TlSlider {
                 };
                 d.child(
                     label_el
-                        .debug_selector(|| "TlSliderLabel".into())
+                        .tl_selector(|| "TlSliderLabel".into())
                         .text_size(m.text.base)
                         .text_color(theme.text_primary)
                         .child(label),

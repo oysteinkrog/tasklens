@@ -55,6 +55,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, t_xs};
 use crate::theme::palette::accent_color;
@@ -958,7 +959,7 @@ impl FanPage {
         m: &crate::theme::UiMetrics,
     ) -> gpui_kit::Div {
         div()
-            .debug_selector(move || selector.into())
+            .tl_selector(move || selector.into())
             .w_full()
             .h(px(GRAPH_H_STACKED * m.ui_scale))
             .child(view.clone().cached(StyleRefinement::default().size_full()))
@@ -968,7 +969,7 @@ impl FanPage {
     /// text "Choose a sensor".
     fn empty_overlay(&self, m: &crate::theme::UiMetrics, theme: &TlTheme) -> AnyElement {
         let mut value = div()
-            .debug_selector(|| NO_VALUE_ID.into())
+            .tl_selector(|| NO_VALUE_ID.into())
             .absolute()
             .top(m.sp[3])
             .right(m.sp[3])
@@ -976,7 +977,7 @@ impl FanPage {
             .child(SharedString::from(NO_VALUE));
         *value.text_style() = label_style(m, m.text.sm, FontWeight::NORMAL);
         let mut choose = div()
-            .debug_selector(|| CHOOSE_SENSOR_ID.into())
+            .tl_selector(|| CHOOSE_SENSOR_ID.into())
             .absolute()
             .top_0()
             .left_0()
@@ -2132,7 +2133,7 @@ impl DevicePage for BatteryPage {
         let theme = current(cx).clone();
         let mut out = v_flex().w_full().child(
             div()
-                .debug_selector(|| BATTERY_CHART_ID.into())
+                .tl_selector(|| BATTERY_CHART_ID.into())
                 .w_full()
                 .h(px(GRAPH_H_STACKED * m.ui_scale))
                 .child(
@@ -2156,7 +2157,7 @@ impl DevicePage for BatteryPage {
                     .left(relative(*x))
                     .child(self.words.days[usize::from(*day).min(6)].clone());
                 days = days.child(if n == 0 {
-                    label.debug_selector(|| BATTERY_DAY_LABEL_ID.into())
+                    label.tl_selector(|| BATTERY_DAY_LABEL_ID.into())
                 } else {
                     label
                 });
@@ -2165,7 +2166,7 @@ impl DevicePage for BatteryPage {
                 .child(div().h(m.sp[4]))
                 .child(
                     div()
-                        .debug_selector(|| BATTERY_HISTORY_ID.into())
+                        .tl_selector(|| BATTERY_HISTORY_ID.into())
                         .w_full()
                         .h(px(HISTORY_H * m.ui_scale))
                         .child(

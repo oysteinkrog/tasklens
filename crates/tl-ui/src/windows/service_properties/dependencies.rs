@@ -36,6 +36,7 @@ use crate::pages::services::delegate::service_sys_status;
 use crate::pages::sys_status::{
     DotStyle, LabelTone, StatusLook, cell_colors, status_label, status_look,
 };
+use crate::selector::TlSelector;
 use crate::text::style::{label_style, t_base, t_xs};
 use crate::theme::{current, metrics};
 use fluent_bundle::FluentValue;
@@ -536,7 +537,7 @@ impl DependenciesTab {
                 };
                 let mut d = h_flex()
                     .id("ServiceDeps-ordering")
-                    .debug_selector(|| "ServiceDeps-ordering".into())
+                    .tl_selector(|| "ServiceDeps-ordering".into())
                     .flex_none()
                     .h(m.row_height)
                     .px(m.sp[4])
@@ -594,7 +595,7 @@ impl DependenciesTab {
                 *badge.text_style() = t_xs(&m);
                 let mut d = h_flex()
                     .id(("svc-dep-row", ix))
-                    .debug_selector(move || format!("ServiceDeps-row-{ix}"))
+                    .tl_selector(move || format!("ServiceDeps-row-{ix}"))
                     .flex_none()
                     .w_full()
                     .h(m.row_height)
@@ -759,7 +760,7 @@ impl Render for DependenciesTab {
         };
         v_flex()
             .id("ServiceDepsTab")
-            .debug_selector(|| "ServiceDepsTab".into())
+            .tl_selector(|| "ServiceDepsTab".into())
             .track_focus(&self.focus)
             .size_full()
             .on_key_down(cx.listener(Self::key_down))

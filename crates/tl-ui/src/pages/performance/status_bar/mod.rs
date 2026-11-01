@@ -49,6 +49,7 @@ use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -802,7 +803,7 @@ fn pill(
         .child(text.pill.clone());
     let el = div()
         .id(PILL_ID)
-        .debug_selector(|| PILL_ID.into())
+        .tl_selector(|| PILL_ID.into())
         .flex()
         .flex_row()
         .items_center()
@@ -848,7 +849,7 @@ fn chip(
     let selector = id.clone();
     let el = div()
         .id(SharedString::from(id.clone()))
-        .debug_selector(move || selector.clone())
+        .tl_selector(move || selector.clone())
         .flex()
         .flex_row()
         .flex_none()
@@ -886,7 +887,7 @@ impl Render for StatusBar {
             *label.text_style() = t_sm(&m);
             div()
                 .id(WARNINGS_ID)
-                .debug_selector(|| WARNINGS_ID.into())
+                .tl_selector(|| WARNINGS_ID.into())
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -938,7 +939,7 @@ impl Render for StatusBar {
         let row = || div().flex().flex_row().items_center().gap(m.sp[3]).w_full();
         let bar = div()
             .id(BAR_ID)
-            .debug_selector(|| BAR_ID.into())
+            .tl_selector(|| BAR_ID.into())
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open))
             .relative()

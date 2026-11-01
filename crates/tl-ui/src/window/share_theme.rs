@@ -31,6 +31,7 @@ use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::share_code::encode_tl1;
 use crate::theme::{ThemeDef, ThemeStore, current, metrics};
@@ -284,7 +285,7 @@ impl Render for ShareThemeView {
         let mut text = div();
         *text.text_style() = t_base(&m);
         let text = text
-            .debug_selector(|| "ShareTheme-text".into())
+            .tl_selector(|| "ShareTheme-text".into())
             .text_color(theme.text_primary)
             .child(self.words.text.clone());
 
@@ -304,7 +305,7 @@ impl Render for ShareThemeView {
             })
             .text_color(theme.text_primary);
         let code = div()
-            .debug_selector(|| "ShareTheme-code".into())
+            .tl_selector(|| "ShareTheme-code".into())
             .w_full()
             .rounded(m.radius_small)
             .border_1()
@@ -313,7 +314,7 @@ impl Render for ShareThemeView {
             .child(code);
 
         let footer = div()
-            .debug_selector(|| "ShareTheme-footer".into())
+            .tl_selector(|| "ShareTheme-footer".into())
             .flex()
             .flex_row()
             .justify_end()

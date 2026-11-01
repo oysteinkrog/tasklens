@@ -44,6 +44,7 @@ use crate::components::tooltip::TlTooltip;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::connections::actions::GoToConnection;
+use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
@@ -842,7 +843,7 @@ impl Render for FdDetailsPane {
         let theme = current(cx).clone();
         let root = div()
             .id("FdDetailsPane")
-            .debug_selector(|| "FdDetailsPane".into())
+            .tl_selector(|| "FdDetailsPane".into())
             .key_context(crate::table::actions::TABLE_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_copy))
@@ -851,7 +852,7 @@ impl Render for FdDetailsPane {
             .bg(theme.list_bg);
         if let Some(text) = self.message() {
             let mut msg = div()
-                .debug_selector(|| "FdDetailsPane-message".into())
+                .tl_selector(|| "FdDetailsPane-message".into())
                 .text_color(theme.text_secondary);
             *msg.text_style() = t_base(&m);
             return root
@@ -1267,7 +1268,7 @@ impl Render for FdsTab {
         let s = metrics(cx).ui_scale;
         let max = (window.viewport_size().height * 0.5).max(px(PANE_MIN_H * s));
         v_flex()
-            .debug_selector(|| "PropsFds".into())
+            .tl_selector(|| "PropsFds".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_cell))

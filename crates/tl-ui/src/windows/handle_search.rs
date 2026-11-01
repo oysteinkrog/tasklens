@@ -66,6 +66,7 @@ use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
+use crate::selector::TlSelector;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -1608,7 +1609,7 @@ impl Render for HandleSearchWindow {
 
         let progress_row = (self.state != SearchStatus::Idle).then(|| {
             let mut text = div()
-                .debug_selector(|| "HandleSearchStatus".into())
+                .tl_selector(|| "HandleSearchStatus".into())
                 .text_color(theme.text_secondary)
                 .whitespace_nowrap();
             *text.text_style() = numeric_style(&m, m.text.sm);
@@ -1627,7 +1628,7 @@ impl Render for HandleSearchWindow {
                 .when(searching, |d| {
                     d.child(
                         div()
-                            .debug_selector(|| "HandleSearchProgress".into())
+                            .tl_selector(|| "HandleSearchProgress".into())
                             .flex_none()
                             .w(px(PROGRESS_W * s))
                             .child(
@@ -1654,11 +1655,11 @@ impl Render for HandleSearchWindow {
 
         // The result table (E23-031).
         let mut empty = div()
-            .debug_selector(|| "HandleSearchEmpty".into())
+            .tl_selector(|| "HandleSearchEmpty".into())
             .text_color(theme.text_secondary);
         *empty.text_style() = t_base(&m);
         let table = div()
-            .debug_selector(|| "HandleSearchTable".into())
+            .tl_selector(|| "HandleSearchTable".into())
             .flex_1()
             .min_h_0()
             .map(|d| {
@@ -1671,7 +1672,7 @@ impl Render for HandleSearchWindow {
 
         let note = self.footer_note().map(|text| {
             let mut note = div()
-                .debug_selector(|| "HandleSearchNote".into())
+                .tl_selector(|| "HandleSearchNote".into())
                 .text_color(theme.text_secondary);
             *note.text_style() = t_sm(&m);
             note.child(text)
@@ -1688,7 +1689,7 @@ impl Render for HandleSearchWindow {
             .label(words.close.clone())
             .on_click(|_, window, _| window.remove_window());
         let footer = div()
-            .debug_selector(|| "HandleSearchFooter".into())
+            .tl_selector(|| "HandleSearchFooter".into())
             .flex()
             .flex_row()
             .flex_none()

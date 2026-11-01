@@ -46,6 +46,7 @@ use tl_model::validity::Validity;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat, glyph_start};
 use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, cell_colors};
+use crate::selector::TlSelector;
 use crate::table::columns::ColumnKind;
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
@@ -165,7 +166,7 @@ impl CellCtx<'_> {
 pub fn text_cell(text: SharedString, ctx: &CellCtx, truncated: Rc<Cell<bool>>) -> Div {
     debug_assert_clean(&text);
     cell_box(t_base(ctx.m), ctx)
-        .debug_selector(|| "TlCell-text".into())
+        .tl_selector(|| "TlCell-text".into())
         .text_color(ctx.primary())
         .text_ellipsis()
         .child(CellText::new(
@@ -182,7 +183,7 @@ pub fn text_cell(text: SharedString, ctx: &CellCtx, truncated: Rc<Cell<bool>>) -
 pub fn path_cell(text: SharedString, ctx: &CellCtx) -> Div {
     debug_assert_clean(&text);
     cell_box(t_base(ctx.m), ctx)
-        .debug_selector(|| "TlCell-path".into())
+        .tl_selector(|| "TlCell-path".into())
         .text_color(ctx.primary())
         .child(CellText::new(text, Align::Start, Fit::Clip, None))
 }
@@ -237,14 +238,14 @@ pub fn value_cell(
         ColumnKind::Text => {
             debug_assert_clean(&text);
             cell_box(t_base(ctx.m), ctx)
-                .debug_selector(|| "TlCell-text".into())
+                .tl_selector(|| "TlCell-text".into())
                 .text_color(ctx.primary())
                 .text_ellipsis()
         }
         ColumnKind::Path => {
             debug_assert_clean(&text);
             cell_box(t_base(ctx.m), ctx)
-                .debug_selector(|| "TlCell-path".into())
+                .tl_selector(|| "TlCell-path".into())
                 .text_color(ctx.primary())
         }
         ColumnKind::Numeric => {
@@ -254,7 +255,7 @@ pub fn value_cell(
                 ctx.primary()
             };
             cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-                .debug_selector(|| "TlCell-numeric".into())
+                .tl_selector(|| "TlCell-numeric".into())
                 .text_color(color)
         }
     };
@@ -266,7 +267,7 @@ pub fn value_cell(
         };
         if let Some(color) = cell_colors(look, ctx.selected, stale, ctx.theme).dot {
             let d = div()
-                .debug_selector(|| "TlCell-dot".into())
+                .tl_selector(|| "TlCell-dot".into())
                 .flex_none()
                 .size(px(8.0 * ctx.m.ui_scale))
                 .rounded_full()
@@ -280,13 +281,13 @@ pub fn value_cell(
     if let Some(fraction) = out.bar {
         let scale = ctx.m.ui_scale;
         let fill = div()
-            .debug_selector(|| "TlCell-bar-fill".into())
+            .tl_selector(|| "TlCell-bar-fill".into())
             .h_full()
             .w(relative(fraction.clamp(0., 1.)))
             .bg(ctx.theme.accent);
         cell = cell.child(
             div()
-                .debug_selector(|| "TlCell-bar".into())
+                .tl_selector(|| "TlCell-bar".into())
                 .flex_1()
                 .min_w(px(0.))
                 .h(px(BAR_H * scale))
@@ -305,7 +306,7 @@ pub fn value_cell(
         };
         cell = cell.child(
             div()
-                .debug_selector(|| "TlCell-prefix".into())
+                .tl_selector(|| "TlCell-prefix".into())
                 .flex_none()
                 .text_color(color)
                 .child(prefix.clone()),
@@ -321,7 +322,7 @@ pub fn value_cell(
         // The bar takes the rest of the cell; the text keeps a width of its own.
         return cell.child(
             div()
-                .debug_selector(|| "TlCell-bar-text".into())
+                .tl_selector(|| "TlCell-bar-text".into())
                 .flex_none()
                 .w(px(BAR_TEXT_W * ctx.m.ui_scale))
                 .child(text),
@@ -335,7 +336,7 @@ pub fn value_cell(
 /// ([`cell_background`]).
 pub fn glyph_cell(validity: Validity, value_text: &SharedString, ctx: &CellCtx) -> Div {
     cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-        .debug_selector(|| "TlCell-glyph".into())
+        .tl_selector(|| "TlCell-glyph".into())
         .child(glyph(validity, value_text, ctx.selected, ctx.m, ctx.theme))
 }
 
@@ -343,7 +344,7 @@ pub fn glyph_cell(validity: Validity, value_text: &SharedString, ctx: &CellCtx) 
 /// edge, where the text it replaces starts.
 pub fn glyph_cell_start(validity: Validity, value_text: &SharedString, ctx: &CellCtx) -> Div {
     cell_box(numeric_style(ctx.m, ctx.m.text.base), ctx)
-        .debug_selector(|| "TlCell-glyph".into())
+        .tl_selector(|| "TlCell-glyph".into())
         .child(glyph_start(
             validity,
             value_text,
@@ -986,7 +987,7 @@ pub fn paint_name_cell(
     let mut root = div();
     *root.text_style() = t_base(m);
     root = root
-        .debug_selector(|| "TlNameCell".into())
+        .tl_selector(|| "TlNameCell".into())
         .relative()
         .w(ctx.width)
         .h_full()
@@ -1090,7 +1091,7 @@ pub fn paint_name_cell(
     };
     let text_gap = if flat && !has_icon { px(0.) } else { gap };
     let primary_el = div()
-        .debug_selector(|| "TlNameCell-primary".into())
+        .tl_selector(|| "TlNameCell-primary".into())
         .ml(text_gap)
         .min_w_0()
         .flex_shrink(1.)
@@ -1128,7 +1129,7 @@ pub fn paint_name_cell(
             primary_el = primary_el.flex_shrink(0.);
             secondary_el = Some(
                 div()
-                    .debug_selector(|| "TlNameCell-secondary".into())
+                    .tl_selector(|| "TlNameCell-secondary".into())
                     .ml(px(NAME_SECONDARY_GAP * s))
                     .min_w_0()
                     .flex_shrink(1.)
@@ -1189,7 +1190,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
     let m = ctx.m;
     let s = m.ui_scale;
     let mut root = div()
-        .debug_selector(|| "TlGroupHeaderCell".into())
+        .tl_selector(|| "TlGroupHeaderCell".into())
         .relative()
         .w(ctx.width)
         .h_full()
@@ -1229,7 +1230,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
         .items_center()
         .overflow_hidden()
         .child(
-            text.debug_selector(|| "TlGroupHeaderCell-label".into())
+            text.tl_selector(|| "TlGroupHeaderCell-label".into())
                 .min_w_0()
                 .flex_shrink(1.)
                 .text_ellipsis()
@@ -1239,7 +1240,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
     for (name, _tip) in cell.glyphs {
         row = row.child(
             svg()
-                .debug_selector(|| "TlGroupHeaderCell-glyph".into())
+                .tl_selector(|| "TlGroupHeaderCell-glyph".into())
                 .path(name.path())
                 .size(m.icon.sm)
                 .flex_none()
@@ -1250,7 +1251,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
     if let Some(secondary) = cell.secondary {
         row = row.child(
             div()
-                .debug_selector(|| "TlGroupHeaderCell-secondary".into())
+                .tl_selector(|| "TlGroupHeaderCell-secondary".into())
                 .ml(m.sp[3])
                 .min_w_0()
                 .flex_shrink(1.)

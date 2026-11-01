@@ -43,6 +43,7 @@ use super::input::TlTextInput;
 use super::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
 };
+use crate::selector::TlSelector;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -402,7 +403,7 @@ impl TlDialog {
         };
         let lead = lead.map(|(name, color)| {
             div()
-                .debug_selector(|| "TlDialogIcon".into())
+                .tl_selector(|| "TlDialogIcon".into())
                 .flex_none()
                 .child(icon(name, m.icon.lg, color))
         });
@@ -410,7 +411,7 @@ impl TlDialog {
         let heading = self.heading.clone().map(|text| {
             let mut el = div();
             *el.text_style() = label_style(&m, m.text.md, FontWeight::MEDIUM);
-            el.debug_selector(|| "TlDialogHeading".into())
+            el.tl_selector(|| "TlDialogHeading".into())
                 .text_color(theme.text_primary)
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -420,7 +421,7 @@ impl TlDialog {
         let mut text = div();
         *text.text_style() = label_style(&m, m.text.base, FontWeight::NORMAL);
         let text = text
-            .debug_selector(|| "TlDialogText".into())
+            .tl_selector(|| "TlDialogText".into())
             .text_color(theme.text_primary)
             .line_clamp(MAX_TEXT_LINES)
             .text_ellipsis()
@@ -492,7 +493,7 @@ impl TlDialog {
         );
 
         div()
-            .debug_selector(|| "TlDialogBody".into())
+            .tl_selector(|| "TlDialogBody".into())
             .flex()
             .flex_col()
             .w_full()
@@ -521,7 +522,7 @@ impl TlDialog {
             )
             .child(
                 div()
-                    .debug_selector(|| "TlDialogFooter".into())
+                    .tl_selector(|| "TlDialogFooter".into())
                     .flex()
                     .flex_row()
                     .justify_end()
@@ -603,7 +604,7 @@ fn footer_button(
     let text = text.whitespace_nowrap().child(label.clone());
     let button = BaseButton::new(ElementId::Name(id.into()))
         .track_focus(focus)
-        .debug_selector(move || id.into())
+        .tl_selector(move || id.into())
         .relative()
         .flex_none()
         .h(px(BUTTON_HEIGHT * m.ui_scale))

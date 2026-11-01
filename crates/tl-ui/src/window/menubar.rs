@@ -52,6 +52,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::minigraph::GraphColor;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
 use crate::theme::{current, metrics};
@@ -585,7 +586,7 @@ impl MenuBar {
         };
         div()
             .id(("TlMenuBarButton", position(id)))
-            .debug_selector(move || format!("TlMenuBarButton-{}", label_key(id)))
+            .tl_selector(move || format!("TlMenuBarButton-{}", label_key(id)))
             .role(Role::MenuItem)
             .aria_label(label.clone())
             .aria_expanded(open)
@@ -657,7 +658,7 @@ impl Render for MenuBar {
 
         let mut bar = div()
             .id("TlMenuBar")
-            .debug_selector(|| "TlMenuBar".into())
+            .tl_selector(|| "TlMenuBar".into())
             .role(Role::MenuBar)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::select_left))

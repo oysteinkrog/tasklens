@@ -54,6 +54,7 @@ use crate::pages::performance::overview::parts::title_value_style;
 use crate::pages::performance::overview::range::{
     PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -128,7 +129,7 @@ pub fn live_only_note(m: &UiMetrics, cx: &mut App) -> Option<AnyElement> {
             .w_full()
             .justify_end()
             .child(
-                note.debug_selector(|| LIVE_ONLY_ID.into())
+                note.tl_selector(|| LIVE_ONLY_ID.into())
                     .text_color(color)
                     .child(text),
             )
@@ -472,7 +473,7 @@ impl DevicePageFrame<'_> {
         let range_words = page_words(cx).range.clone();
 
         let header = h_flex()
-            .debug_selector(|| "perf-page-header".into())
+            .tl_selector(|| "perf-page-header".into())
             .flex_none()
             .w_full()
             .h(px(PAGE_HEADER_H * s))
@@ -480,13 +481,13 @@ impl DevicePageFrame<'_> {
             .gap(m.sp[4])
             .children(key.kind().icon().map(|name| {
                 div()
-                    .debug_selector(|| "perf-page-icon".into())
+                    .tl_selector(|| "perf-page-icon".into())
                     .flex_none()
                     .child(icon(name, m.icon.lg, key.kind().icon_color(theme)))
             }))
             .child(
                 div()
-                    .debug_selector(|| "perf-page-type".into())
+                    .tl_selector(|| "perf-page-type".into())
                     .flex_none()
                     .whitespace_nowrap()
                     // The style first: it replaces the whole text refinement, colour included.
@@ -498,14 +499,14 @@ impl DevicePageFrame<'_> {
             .children(header_value(key, window, cx))
             .child(
                 h_flex()
-                    .debug_selector(|| "perf-page-toggles".into())
+                    .tl_selector(|| "perf-page-toggles".into())
                     .flex_none()
                     .gap(m.sp[4])
                     .children(page.toggles(window, cx).into_iter().enumerate().map(
                         |(i, toggle)| {
                             // Column direction stretches the button to the minimum width.
                             v_flex()
-                                .debug_selector(move || format!("perf-page-toggle-{i}"))
+                                .tl_selector(move || format!("perf-page-toggle-{i}"))
                                 .min_w(px(TOGGLE_MIN_W * s))
                                 .child(toggle)
                         },
@@ -513,14 +514,14 @@ impl DevicePageFrame<'_> {
             )
             .child(
                 div()
-                    .debug_selector(|| RANGE_ID.into())
+                    .tl_selector(|| RANGE_ID.into())
                     .flex_none()
                     .child(page_range_switch(PAGE_SWITCH, &range_words, page.hub(), cx)),
             );
 
         let graph_area = div()
             .id(GRAPH_AREA_ID)
-            .debug_selector(|| GRAPH_AREA_ID.into())
+            .tl_selector(|| GRAPH_AREA_ID.into())
             .w_full()
             .on_click(|ev, window, cx| {
                 if ev.click_count() == 2 {
@@ -530,7 +531,7 @@ impl DevicePageFrame<'_> {
             .child(page.graphs(window, cx));
 
         let heading = div()
-            .debug_selector(|| "perf-page-details-heading".into())
+            .tl_selector(|| "perf-page-details-heading".into())
             .flex()
             .items_center()
             .h(px(DETAILS_HEADING_H * s))
@@ -631,7 +632,7 @@ impl Render for HeaderValue {
         let m = *metrics(cx);
         let theme = current(cx);
         let el = div()
-            .debug_selector(|| "perf-page-value".into())
+            .tl_selector(|| "perf-page-value".into())
             .flex()
             .flex_none()
             .items_center();
@@ -704,7 +705,7 @@ fn model_text(
     };
 
     let inner = div()
-        .debug_selector(|| "perf-page-model".into())
+        .tl_selector(|| "perf-page-model".into())
         .relative()
         .min_w_0()
         .map_text(label_style(m, m.text.lg, FontWeight::NORMAL))

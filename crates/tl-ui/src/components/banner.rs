@@ -14,14 +14,15 @@ use std::sync::Arc;
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    Action, App, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Window, div, px,
+    Action, App, Div, ElementId, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
+    Styled, Window, div, px,
 };
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
 use super::link::TlLink;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::t_sm;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -137,7 +138,7 @@ impl RenderOnce for TlBanner {
 
         let link = self.link.map(|(label, action)| {
             div()
-                .debug_selector(|| "TlBanner-link".into())
+                .tl_selector(|| "TlBanner-link".into())
                 .flex_none()
                 .child(
                     TlLink::new(
@@ -150,7 +151,7 @@ impl RenderOnce for TlBanner {
         });
 
         h_flex()
-            .debug_selector(|| "TlBanner".into())
+            .tl_selector(|| "TlBanner".into())
             .w_full()
             .h(px(HEIGHT * m.ui_scale))
             .px(m.sp[5])
@@ -171,7 +172,7 @@ impl RenderOnce for TlBanner {
 
 /// The text part: `t_sm`, one line, end ellipsis.
 fn text_box(m: &UiMetrics) -> Div {
-    let mut text = div().debug_selector(|| "TlBanner-text".into()).min_w_0();
+    let mut text = div().tl_selector(|| "TlBanner-text".into()).min_w_0();
     *text.text_style() = t_sm(m);
     text.truncate()
 }
@@ -182,9 +183,9 @@ mod tests {
     use std::rc::Rc;
 
     use gpui_kit::{
-        Background, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render,
-        TestAppContext, TestDispatcher, TextOverflow, TextRun, VisualTestContext, WhiteSpace,
-        black, font,
+        Background, Context, InteractiveElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+        Render, TestAppContext, TestDispatcher, TextOverflow, TextRun, VisualTestContext,
+        WhiteSpace, black, font,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 

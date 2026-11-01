@@ -35,6 +35,7 @@ use super::icons::{TlIcon, icon};
 use super::motion::ease_out_cubic;
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 
@@ -233,7 +234,7 @@ impl RenderOnce for TlTextInput {
 
         let suffix_text = self.suffix_text.map(|text| {
             let mut unit = div()
-                .debug_selector(|| "TlTextInput-suffix".into())
+                .tl_selector(|| "TlTextInput-suffix".into())
                 .flex_none()
                 .whitespace_nowrap()
                 .text_color(theme.text_secondary);
@@ -253,14 +254,14 @@ impl RenderOnce for TlTextInput {
             } else if self.loading {
                 slot.child(
                     div()
-                        .debug_selector(|| "TlTextInput-spinner".into())
+                        .tl_selector(|| "TlTextInput-spinner".into())
                         .child(TlSpinner::new(m.icon.sm).color(theme.text_secondary)),
                 )
             } else {
                 let clear_state = state.clone();
                 let button = div()
                     .id((self.id.clone(), "clear"))
-                    .debug_selector(|| "TlTextInput-clear".into())
+                    .tl_selector(|| "TlTextInput-clear".into())
                     .flex()
                     .flex_none()
                     .items_center()
@@ -294,7 +295,7 @@ impl RenderOnce for TlTextInput {
                 Some(text) => {
                     let anchor = div()
                         .id((self.id.clone(), "prefix"))
-                        .debug_selector(|| "TlTextInput-prefix".into())
+                        .tl_selector(|| "TlTextInput-prefix".into())
                         .flex()
                         .flex_none()
                         .items_center()
@@ -347,7 +348,7 @@ impl RenderOnce for TlTextInput {
         let hover_border = theme.text_secondary;
         div()
             .id(self.id.clone())
-            .debug_selector({
+            .tl_selector({
                 let id = self.id.clone();
                 move || format!("TlTextInput-{id}")
             })

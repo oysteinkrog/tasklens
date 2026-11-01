@@ -45,6 +45,7 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::tr;
 use crate::pages::services::flows::startup_texts;
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::setup::SetupRow;
@@ -789,7 +790,7 @@ impl RecoveryTab {
             });
         let control = div()
             .id(id)
-            .debug_selector(move || id.into())
+            .tl_selector(move || id.into())
             .flex_none()
             .child(select);
         self.with_helper_tip(id, control, window, cx)
@@ -824,7 +825,7 @@ impl RecoveryTab {
     ) -> AnyElement {
         let m = metrics(cx);
         let mut line = div()
-            .debug_selector(move || selector.into())
+            .tl_selector(move || selector.into())
             .pt(px(2. * m.ui_scale))
             .text_color(color)
             .child(text);
@@ -857,7 +858,7 @@ impl RecoveryTab {
             .child(value);
         *value.text_style() = t_base(m);
         h_flex()
-            .debug_selector(move || format!("ServiceRecovery-row-{row}"))
+            .tl_selector(move || format!("ServiceRecovery-row-{row}"))
             .w_full()
             .items_start()
             .pb(px(4. * m.ui_scale))
@@ -1019,7 +1020,7 @@ impl RecoveryTab {
             .disabled(!enabled);
         let field = div()
             .id("ServiceRecoveryOnFailureBox")
-            .debug_selector(|| "ServiceRecoveryOnFailure".into())
+            .tl_selector(|| "ServiceRecoveryOnFailure".into())
             .w_full()
             .child(input);
         let field = self.with_helper_tip("ServiceRecoveryOnFailureBox", field, window, cx);
@@ -1076,7 +1077,7 @@ impl RecoveryTab {
             .is_some_and(|d| d.recovery_dropin_exists);
         let saved = exists.then(|| {
             let mut saved = h_flex()
-                .debug_selector(|| "ServiceRecoverySavedAs".into())
+                .tl_selector(|| "ServiceRecoverySavedAs".into())
                 .flex_1()
                 .min_w_0()
                 .gap(m.sp[2])
@@ -1293,7 +1294,7 @@ impl Render for RecoveryTab {
         let m = *metrics(cx);
         let setup = self.needs_helper().then(|| {
             div()
-                .debug_selector(|| "ServiceRecoverySetupLink".into())
+                .tl_selector(|| "ServiceRecoverySetupLink".into())
                 .pb(m.sp[4])
                 .child(TlLink::new(
                     "svc-recovery-setup",
@@ -1310,7 +1311,7 @@ impl Render for RecoveryTab {
         let footer = self.footer(cx);
         v_flex()
             .id("ServiceRecoveryTab")
-            .debug_selector(|| "ServiceRecoveryTab".into())
+            .tl_selector(|| "ServiceRecoveryTab".into())
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(|_: &Copy, window, cx| {

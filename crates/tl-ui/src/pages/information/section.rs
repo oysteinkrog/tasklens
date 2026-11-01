@@ -42,6 +42,7 @@ use crate::components::kv_grid::{
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
+use crate::selector::TlSelector;
 use crate::text::style::t_md;
 use crate::theme::{current, metrics};
 use crate::window::public_ip::request_public_ip_fetch;
@@ -378,7 +379,7 @@ impl InfoSection {
 
         let mut title = div()
             .id(("info-title", n))
-            .debug_selector(move || format!("InfoSection-{n}-title"))
+            .tl_selector(move || format!("InfoSection-{n}-title"))
             .role(Role::Heading)
             .ml(m.sp[4])
             .min_w_0();
@@ -395,7 +396,7 @@ impl InfoSection {
             .map(|path| {
                 let size = px(LOGO_SIZE * m.ui_scale);
                 div()
-                    .debug_selector(move || format!("InfoSection-{n}-logo"))
+                    .tl_selector(move || format!("InfoSection-{n}-logo"))
                     .flex_none()
                     .ml(m.sp[3])
                     .size(size)
@@ -414,7 +415,7 @@ impl InfoSection {
             .action(Box::new(CopyInformationSection { section: id }));
 
         h_flex()
-            .debug_selector(move || format!("InfoSection-{n}-band"))
+            .tl_selector(move || format!("InfoSection-{n}-band"))
             .w_full()
             .h(m.row_height)
             .rounded(m.radius_small)
@@ -422,7 +423,7 @@ impl InfoSection {
             .bg(theme.header)
             .child(
                 div()
-                    .debug_selector(move || format!("InfoSection-{n}-bar"))
+                    .tl_selector(move || format!("InfoSection-{n}-bar"))
                     .flex_none()
                     .w(px(BAR_WIDTH * m.ui_scale))
                     .h_full()
@@ -498,7 +499,7 @@ impl Render for InfoSection {
         .absolute()
         .inset_0();
         v_flex()
-            .debug_selector(move || format!("InfoSection-{n}"))
+            .tl_selector(move || format!("InfoSection-{n}"))
             .relative()
             .w_full()
             .child(measure)

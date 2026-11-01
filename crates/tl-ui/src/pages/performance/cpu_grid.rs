@@ -19,9 +19,8 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, StyleRefinement, Styled as _, Window, canvas, div,
-    px,
+    AnyElement, App, AppContext as _, Entity, IntoElement, ParentElement as _, Pixels,
+    SharedString, StyleRefinement, Styled as _, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -37,6 +36,7 @@ use crate::components::icons::AppIcon;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
+use crate::selector::TlSelector;
 use crate::theme::{TlTheme, metrics};
 
 use super::details::Template;
@@ -391,7 +391,7 @@ impl CpuGrid {
         };
 
         let mut root = div()
-            .debug_selector(|| GRID_ID.into())
+            .tl_selector(|| GRID_ID.into())
             .relative()
             .w_full()
             .h(dims.height(width))
@@ -407,7 +407,7 @@ impl CpuGrid {
             let pad = m.sp[3];
             let (col, row) = (i % layout.cols, i / layout.cols);
             let trigger = div()
-                .debug_selector(|| TRIGGER_ID.into())
+                .tl_selector(|| TRIGGER_ID.into())
                 .absolute()
                 .left((layout.cell_w + dims.gap) * col as f32 + pad)
                 .top((dims.cell_h + dims.gap) * row as f32 + pad)

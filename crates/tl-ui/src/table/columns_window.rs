@@ -29,6 +29,7 @@ use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::table::columns::{Availability, ColumnError, TableId};
 use crate::text::style::{label_style, t_base, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -390,7 +391,7 @@ impl ColumnPicker {
                 match item {
                     PickerItem::TableName(name) => {
                         let mut row = row
-                            .debug_selector(|| "ColumnPicker-table-name".into())
+                            .tl_selector(|| "ColumnPicker-table-name".into())
                             .flex()
                             .items_center()
                             .pl(scale(CHECK_X))
@@ -442,7 +443,7 @@ impl ColumnPicker {
         *label.text_style() = t_base(m);
         let note = note.map(|note| {
             let mut el = div()
-                .debug_selector(move || format!("ColumnPicker-note-{key}"))
+                .tl_selector(move || format!("ColumnPicker-note-{key}"))
                 .absolute()
                 .right(scale(CHECK_X))
                 .top_0()
@@ -456,7 +457,7 @@ impl ColumnPicker {
         let focused = list_focused && self.cursor == Some(key);
         div()
             .id(("column-picker-row", ix))
-            .debug_selector(move || format!("ColumnPicker-row-{key}"))
+            .tl_selector(move || format!("ColumnPicker-row-{key}"))
             .relative()
             .w_full()
             .h(scale(ITEM_H))
@@ -529,7 +530,7 @@ impl Render for ColumnPicker {
             .into_any_element()
         } else {
             let mut empty = div()
-                .debug_selector(|| "ColumnPicker-no-match".into())
+                .tl_selector(|| "ColumnPicker-no-match".into())
                 .size_full()
                 .flex()
                 .items_center()
@@ -542,7 +543,7 @@ impl Render for ColumnPicker {
         };
 
         let mut count_el = div()
-            .debug_selector(|| "ColumnPicker-count".into())
+            .tl_selector(|| "ColumnPicker-count".into())
             .text_color(theme.text_secondary);
         *count_el.text_style() = t_sm(&m);
 

@@ -20,9 +20,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, EventEmitter, IntoElement,
+    ParentElement as _, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _,
 };
 use tl_model::layout::{ContainerLayout, FixedWidget, WidgetContent};
 use tl_model::layout_boxes::fixed_box_default;
@@ -35,6 +35,7 @@ use crate::pages::performance::widget::container::{WidgetContainer, fixed_flow};
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::fixed_widget::FixedContent;
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_xs;
 use crate::theme::{UiMetrics, current, metrics};
@@ -345,7 +346,7 @@ fn empty_text(id: &'static str, m: &UiMetrics, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(move || id.to_owned())
+            text.tl_selector(move || id.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )

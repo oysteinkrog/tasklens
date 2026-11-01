@@ -18,6 +18,7 @@ use gpui_kit::{
 use crate::components::focus::TlFocusRing;
 use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_FAST, ease_out_cubic};
+use crate::selector::TlSelector;
 use crate::text::style::numeric_style;
 use crate::theme::{TlTheme, current, metrics};
 
@@ -246,7 +247,7 @@ impl RenderOnce for TlCheckbox {
                 .into_any_element()
             };
             div()
-                .debug_selector(move || glyph_selector(glyph).into())
+                .tl_selector(move || glyph_selector(glyph).into())
                 .flex_none()
                 .child(mark)
         });
@@ -290,7 +291,7 @@ impl RenderOnce for TlCheckbox {
             .child(check_box)
             .children(self.label.map(|label| {
                 let style = self.label_style;
-                let el = div().debug_selector(move || style.selector().into());
+                let el = div().tl_selector(move || style.selector().into());
                 let el = match style {
                     CheckboxLabelStyle::Base => el
                         .text_size(m.text.base)

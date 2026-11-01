@@ -35,9 +35,9 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
-    StyleRefinement, Styled as _, Subscription, TextStyleRefinement, Window, div,
-    prelude::FluentBuilder as _, px, relative, size,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
+    Styled as _, Subscription, TextStyleRefinement, Window, div, prelude::FluentBuilder as _, px,
+    relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -74,6 +74,7 @@ use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;
 use crate::pages::performance::widget::metric_widget::FlowLook;
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -1141,7 +1142,7 @@ fn rate_cell(id: String, text: &SharedString, m: &UiMetrics, theme: &TlTheme) ->
     // The text style first: assigning it later would drop the nowrap and the color.
     let mut d = div();
     *d.text_style() = numeric_style(m, m.text.sm);
-    d.debug_selector(move || id)
+    d.tl_selector(move || id)
         .min_w(px(RATE_W * m.ui_scale))
         .flex()
         .justify_end()
@@ -1167,7 +1168,7 @@ fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let mut model = div();
     *model.text_style() = t_sm(m);
     let model = model
-        .debug_selector({
+        .tl_selector({
             let id = row_part_id(&r.key, "model");
             move || id
         })
@@ -1180,7 +1181,7 @@ fn header(r: &DiskRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .child(r.model.clone());
     let key = r.key.0.clone();
     let row = div()
-        .debug_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"))
+        .tl_selector(move || format!("{DISK_ROW_ID_PREFIX}{key}"))
         .flex()
         .flex_row()
         .flex_none()
@@ -1219,7 +1220,7 @@ fn io_text_row(
         .text_color(theme.text_secondary)
         .child(word.clone());
     div()
-        .debug_selector(move || id)
+        .tl_selector(move || id)
         .flex()
         .flex_row()
         .flex_none()
@@ -1235,7 +1236,7 @@ fn io_text_row(
 /// A Read or Write sparkline cell of the sparkline part, as high as its text row.
 fn spark_cell(id: String, chart: &Entity<ChartView>, m: &UiMetrics) -> AnyElement {
     div()
-        .debug_selector(move || id)
+        .tl_selector(move || id)
         .relative()
         .flex_none()
         .w_full()
@@ -1279,7 +1280,7 @@ fn cell_head(
         // later would drop the nowrap.
         let mut d = div();
         *d.text_style() = style;
-        d.debug_selector(move || id)
+        d.tl_selector(move || id)
             .flex()
             .min_w_0()
             .whitespace_nowrap()
@@ -1289,7 +1290,7 @@ fn cell_head(
     let mut name = div();
     *name.text_style() = label_style(m, m.text.sm, FontWeight::MEDIUM);
     let name = name
-        .debug_selector({
+        .tl_selector({
             let id = head_id(key, "name");
             move || id
         })
@@ -1353,7 +1354,7 @@ fn chart_cell(
 ) -> AnyElement {
     let (key, chart_key) = (r.key.clone(), r.key.clone());
     div()
-        .debug_selector(move || cell_id(&key))
+        .tl_selector(move || cell_id(&key))
         .flex()
         .flex_col()
         .flex_none()
@@ -1363,7 +1364,7 @@ fn chart_cell(
         .child(cell_head(r, cell.width, words, m, theme))
         .child(
             div()
-                .debug_selector(move || chart_id(&chart_key))
+                .tl_selector(move || chart_id(&chart_key))
                 .relative()
                 .flex_1()
                 .min_h_0()
@@ -1517,7 +1518,7 @@ pub(crate) fn disk_cells_element(
     // A "+n more" line that does not fit whole is left out (UI-PRF-017).
     let mut el = whole_rows().relative().size_full().gap(m.sp[2]).child(
         div()
-            .debug_selector(|| GRID_ID.into())
+            .tl_selector(|| GRID_ID.into())
             .flex_1()
             .min_h_0()
             .w_full()
@@ -1554,7 +1555,7 @@ fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(|| EMPTY_ID.to_owned())
+            text.tl_selector(|| EMPTY_ID.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )
@@ -1659,7 +1660,7 @@ impl DiskBox {
             None => cached_full(self.total_chart.clone()),
         };
         div()
-            .debug_selector(|| TOTAL_CHART_ID.into())
+            .tl_selector(|| TOTAL_CHART_ID.into())
             .relative()
             .size_full()
             .child(chart)

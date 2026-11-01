@@ -39,6 +39,7 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::connections::actions::ConnectionJumpToProcess;
 use crate::pages::connections::jump_to_owner;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::push_main_toast;
@@ -695,7 +696,7 @@ impl Render for ConnectionPropertiesView {
         }
 
         let footer = div()
-            .debug_selector(|| "ConnPropsFooter".into())
+            .tl_selector(|| "ConnPropsFooter".into())
             .flex_none()
             .flex()
             .items_center()

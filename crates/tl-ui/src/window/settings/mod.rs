@@ -68,6 +68,7 @@ use crate::host::HostContext;
 use crate::host_settings;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::text::style::t_sm;
 use crate::theme::{current, metrics};
@@ -1806,7 +1807,7 @@ impl Render for SettingsWindow {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         div()
-            .debug_selector(|| "SettingsWindowBody".into())
+            .tl_selector(|| "SettingsWindowBody".into())
             .size_full()
             .relative()
             .child(
@@ -1822,7 +1823,7 @@ impl Render for SettingsWindow {
                 // The kit draws a blank page when nothing matches. Cover the page area (right of
                 // the sidebar) with the message.
                 let mut text = div()
-                    .debug_selector(|| "SettingsNoMatch".into())
+                    .tl_selector(|| "SettingsNoMatch".into())
                     .absolute()
                     .top_0()
                     .bottom_0()

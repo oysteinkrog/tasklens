@@ -35,6 +35,7 @@ use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
+use crate::selector::TlSelector;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -401,7 +402,7 @@ impl RenderOnce for TlButton {
                 let rotation = self.icon_rotation;
                 c.child(
                     div()
-                        .debug_selector(move || format!("TlButton-{id}-icon"))
+                        .tl_selector(move || format!("TlButton-{id}-icon"))
                         .flex_none()
                         .child(icon_element(
                             name,
@@ -413,7 +414,7 @@ impl RenderOnce for TlButton {
                 )
             });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
-            let mut text_el = div().debug_selector(|| "TlButton-label".into());
+            let mut text_el = div().tl_selector(|| "TlButton-label".into());
             *text_el.text_style() = text;
             content = content.child(text_el.whitespace_nowrap().child(label));
         }
@@ -421,7 +422,7 @@ impl RenderOnce for TlButton {
             let id = self.id.clone();
             content = content.child(
                 div()
-                    .debug_selector(move || format!("TlButton-{id}-trailing-icon"))
+                    .tl_selector(move || format!("TlButton-{id}-trailing-icon"))
                     .flex_none()
                     .child(icon_element(name, icon_size, icon_fg, icon_hover_fg, None)),
             );
@@ -437,7 +438,7 @@ impl RenderOnce for TlButton {
             .tab_stop(self.tab_stop)
             .track_focus(&focus)
             .key_context("TlButton")
-            .debug_selector({
+            .tl_selector({
                 let id = self.id.clone();
                 move || format!("TlButton-{id}")
             })
@@ -487,7 +488,7 @@ impl RenderOnce for TlButton {
             .when(self.loading, |b| {
                 b.child(
                     div()
-                        .debug_selector(|| "TlButton-spinner".into())
+                        .tl_selector(|| "TlButton-spinner".into())
                         .absolute()
                         .inset_0()
                         .flex()
@@ -830,18 +831,18 @@ mod tests {
                     KitButton::new("kit-xs")
                         .label("Kit")
                         .xsmall()
-                        .debug_selector(|| "kit-xs".into()),
+                        .tl_selector(|| "kit-xs".into()),
                 )
                 .child(
                     KitButton::new("kit-sm")
                         .label("Kit")
                         .small()
-                        .debug_selector(|| "kit-sm".into()),
+                        .tl_selector(|| "kit-sm".into()),
                 )
                 .child(
                     KitButton::new("kit-md")
                         .label("Kit")
-                        .debug_selector(|| "kit-md".into()),
+                        .tl_selector(|| "kit-md".into()),
                 )
                 .into_any_element()
         });

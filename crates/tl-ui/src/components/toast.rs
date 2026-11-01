@@ -47,6 +47,7 @@ use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::host::HostContext;
 use crate::i18n::tr_args;
+use crate::selector::TlSelector;
 use crate::settings_global::animations_on;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, t_base};
@@ -778,7 +779,7 @@ impl Render for ToastQueue {
             toasts.push(
                 div()
                     .id(ElementId::Name(format!("TlToast-{slot}-frame").into()))
-                    .debug_selector(move || format!("TlToast-{slot}-frame"))
+                    .tl_selector(move || format!("TlToast-{slot}-frame"))
                     .occlude()
                     .w_full()
                     .on_hover(move |hovered, _, cx| {
@@ -940,7 +941,7 @@ fn toast_card(
         .min_w_0()
         .text_color(theme.text_primary)
         .when(live, |d| {
-            d.debug_selector(move || format!("TlToast-{slot}-text"))
+            d.tl_selector(move || format!("TlToast-{slot}-text"))
         });
     *text_box.text_style() = t_base(m);
     let text_box = div()
@@ -1015,9 +1016,7 @@ fn toast_card(
 
     let content = h_flex()
         .id(ElementId::Name(name.into()))
-        .when(live, |c| {
-            c.debug_selector(move || format!("TlToast-{slot}"))
-        })
+        .when(live, |c| c.tl_selector(move || format!("TlToast-{slot}")))
         .when_some(view.focus.as_ref().filter(|_| live), |c, focus| {
             c.track_focus(focus)
         })

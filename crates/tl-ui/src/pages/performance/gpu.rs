@@ -53,6 +53,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -1621,7 +1622,7 @@ impl GpuPage {
         };
 
         let root = div()
-            .debug_selector(|| ENGINES_ID.into())
+            .tl_selector(|| ENGINES_ID.into())
             .relative()
             .w_full()
             .h(height)
@@ -1647,7 +1648,7 @@ impl GpuPage {
                     let pad = m.sp[3];
                     let (col, row) = (i % layout.cols, i / layout.cols);
                     let trigger = div()
-                        .debug_selector(|| ENGINE_TIP_ID.into())
+                        .tl_selector(|| ENGINE_TIP_ID.into())
                         .absolute()
                         .left((layout.cell_w + gap) * col as f32 + pad)
                         .top((cell_h + gap) * row as f32 + pad)
@@ -1705,7 +1706,7 @@ impl GpuPage {
         cx: &mut App,
     ) -> AnyElement {
         let mut chart = div()
-            .debug_selector(move || selector.into())
+            .tl_selector(move || selector.into())
             .relative()
             .flex_1()
             .min_w_0()
@@ -1713,7 +1714,7 @@ impl GpuPage {
             .child(view.clone().cached(StyleRefinement::default().size_full()));
         if let Some((id, text)) = tip.filter(|_| self.probe_tooltip().is_none()) {
             let trigger = div()
-                .debug_selector(move || id.into())
+                .tl_selector(move || id.into())
                 .absolute()
                 .top_0()
                 .left_0()

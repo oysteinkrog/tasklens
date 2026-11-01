@@ -37,7 +37,6 @@ use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQ
 use tl_model::validity::Validity;
 use tracing::{debug, warn};
 
-#[cfg(any(test, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
 use crate::action_tracker::{
     ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
@@ -50,6 +49,8 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args, tr_en};
+#[cfg(any(test, feature = "test-hooks"))]
+use crate::selector::TlSelector;
 use crate::table::TreeTableDelegate;
 use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
 use crate::theme::{UiMetrics, current, metrics};
@@ -1311,14 +1312,14 @@ impl<D: SysDelegate> SysTableFrame<D> {
             body => Some(render_empty(body, self.state.tab, clear_action, cx)),
         };
         v_flex()
-            .debug_selector(|| "SysTableFrame".into())
+            .tl_selector(|| "SysTableFrame".into())
             .size_full()
             .bg(theme.window_bg)
             .key_context(self.key_context)
             .children(strip)
             .child(
                 div()
-                    .debug_selector(|| "SysTableFrame-table".into())
+                    .tl_selector(|| "SysTableFrame-table".into())
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -1328,7 +1329,7 @@ impl<D: SysDelegate> SysTableFrame<D> {
                     .child(self.table.clone())
                     .children(cover.map(|cover| {
                         div()
-                            .debug_selector(|| "SysTableFrame-cover".into())
+                            .tl_selector(|| "SysTableFrame-cover".into())
                             .absolute()
                             .top(header_h)
                             .left_0()

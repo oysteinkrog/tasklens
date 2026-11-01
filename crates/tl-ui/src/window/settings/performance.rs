@@ -49,6 +49,7 @@ use crate::pages::performance::{
     DeviceKey, DeviceKind as PerfKind, DeviceRow, PerformanceSettingsView, sidebar_order,
     type_number,
 };
+use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
@@ -499,7 +500,7 @@ fn device_list(
     let keys: Rc<[Arc<str>]> = rows.iter().map(|r| r.key.clone()).collect();
     let hover = t.row_hover;
     let mut list = div()
-        .debug_selector(|| "DeviceOrderList".into())
+        .tl_selector(|| "DeviceOrderList".into())
         .flex()
         .flex_col()
         .w_full();
@@ -534,7 +535,7 @@ fn device_list(
             .id(ElementId::Name(
                 format!("device-order-handle-{}", row.key).into(),
             ))
-            .debug_selector({
+            .tl_selector({
                 let key = row.key.clone();
                 move || format!("DeviceOrderHandle-{key}")
             })
@@ -557,7 +558,7 @@ fn device_list(
                 .id(ElementId::Name(
                     format!("device-order-row-{}", row.key).into(),
                 ))
-                .debug_selector({
+                .tl_selector({
                     let key = row.key.clone();
                     move || format!("DeviceOrderRow-{key}")
                 })
@@ -819,7 +820,7 @@ fn fans_group(
     let t = current(cx).clone();
     let m = *metrics(cx);
     let mut list = div()
-        .debug_selector(|| "FansGroup".into())
+        .tl_selector(|| "FansGroup".into())
         .flex()
         .flex_col()
         .gap(m.sp[2])
@@ -904,7 +905,7 @@ fn fans_group(
         list = list.child(
             div()
                 .id(ElementId::Name(format!("fan-row-el-{}", row.key).into()))
-                .debug_selector({
+                .tl_selector({
                     let key = row.key.clone();
                     move || format!("FanRow-{key}")
                 })

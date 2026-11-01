@@ -19,8 +19,8 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Styled as _, div,
+    AnyElement, App, ElementId, Entity, IntoElement, ParentElement as _, SharedString, Styled as _,
+    div,
 };
 use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
@@ -36,6 +36,7 @@ use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::net_totals::hist_minus;
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 
 /// The switch labels, in [`OverviewRange::ALL`] order.
@@ -185,7 +186,7 @@ fn switch(
         } else if !servable {
             button = button.tooltip(words.not_kept.clone());
         }
-        row = row.child(div().debug_selector(move || id.clone()).child(button));
+        row = row.child(div().tl_selector(move || id.clone()).child(button));
     }
     row.into_any_element()
 }

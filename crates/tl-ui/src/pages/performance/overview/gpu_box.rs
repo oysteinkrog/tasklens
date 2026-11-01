@@ -47,10 +47,9 @@ use std::rc::Rc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
-    StyleRefinement, Styled as _, Subscription, Window, container_query, div,
-    prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
+    Subscription, Window, container_query, div, prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -97,6 +96,7 @@ use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::grid::SlotDevice;
 use crate::pages::performance::widget::metric_widget::{FlowLook, MetricWidget};
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -1632,7 +1632,7 @@ fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(|| EMPTY_ID.to_owned())
+            text.tl_selector(|| EMPTY_ID.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )
@@ -2038,7 +2038,7 @@ impl GpuBox {
                 col = col.child(section_heading(section, row_h, m, theme));
             }
             let mut section_rows = div()
-                .debug_selector(move || rows_id(i))
+                .tl_selector(move || rows_id(i))
                 .flex()
                 .flex_col()
                 .flex_none()
@@ -2048,7 +2048,7 @@ impl GpuBox {
                 let engine = |fd: &mut FlowDraw<'_>, j: usize, cx: &mut App| {
                     let e = &section.engines[j];
                     let key = e.key;
-                    let slot = row_slot(m).debug_selector(move || engine_row_id(i, key));
+                    let slot = row_slot(m).tl_selector(move || engine_row_id(i, key));
                     let look = row_look(&e.meter.label, Some(&e.chart), shown.meters);
                     let id = widgets.engines.get(j).and_then(id_of);
                     fd.slot(slot, id, look, cx)
@@ -2094,7 +2094,7 @@ impl GpuBox {
             }
             let chart = fd.slot(
                 div()
-                    .debug_selector(move || chart_id(i))
+                    .tl_selector(move || chart_id(i))
                     .min_h(px(MIN_CHART_H * s)),
                 id_of(&widgets.chart),
                 FlowLook::Chart(section.chart.clone()),
@@ -2265,7 +2265,7 @@ impl GpuBox {
             for (j, e) in section.engines.iter().take(fit.shown).enumerate() {
                 let key = e.key;
                 let slot = div()
-                    .debug_selector(move || engine_cell_id(i, key))
+                    .tl_selector(move || engine_cell_id(i, key))
                     .flex_none()
                     .w(fit.grid.cell.width)
                     .h(fit.grid.cell.height)
@@ -2286,14 +2286,14 @@ impl GpuBox {
             };
             let keep = kept(rows, extra > 0, if i == 0 { shown.cut } else { 0 });
             let grid = div()
-                .debug_selector(move || grid_id(i))
+                .tl_selector(move || grid_id(i))
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .overflow_hidden()
                 .child(cells);
             let mut rest = div()
-                .debug_selector(move || vram_id(i))
+                .tl_selector(move || vram_id(i))
                 .flex()
                 .flex_col()
                 .flex_none()

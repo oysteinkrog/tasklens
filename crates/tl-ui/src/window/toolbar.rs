@@ -19,6 +19,7 @@ use tl_model::table::TableMode;
 
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
+use crate::selector::TlSelector;
 use crate::theme::metrics;
 
 /// Toolbar button side, × ui_scale.
@@ -177,7 +178,7 @@ impl RenderOnce for Toolbar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = metrics(cx).ui_scale;
         div()
-            .debug_selector(|| "Toolbar".into())
+            .tl_selector(|| "Toolbar".into())
             .flex()
             .flex_row()
             .flex_none()

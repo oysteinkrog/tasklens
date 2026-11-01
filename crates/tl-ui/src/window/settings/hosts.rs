@@ -13,9 +13,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    App, AppContext as _, AsyncApp, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
-    WindowId, div, px,
+    App, AppContext as _, AsyncApp, Context, Entity, Global, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, WeakEntity, Window, WindowId, div, px,
 };
 use tl_model::settings::HostEntry;
 
@@ -27,6 +26,7 @@ use crate::components::switch::TlSwitch;
 use crate::host::HostContext;
 use crate::hosts_edit;
 use crate::i18n::{tr, tr_args};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_sm;
 use crate::theme::{current, metrics};
@@ -390,7 +390,7 @@ impl Render for HostsEditor {
         let s = m.ui_scale;
         let theme = current(cx).clone();
         let mut list = div()
-            .debug_selector(|| "HostsEditor".into())
+            .tl_selector(|| "HostsEditor".into())
             .flex()
             .flex_col()
             .gap(px(8. * s))

@@ -33,9 +33,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -74,6 +74,7 @@ use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::fixed_widget::FixedContent;
 use crate::pages::performance::widget::metric_widget::FlowLook;
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::{numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -1303,7 +1304,7 @@ pub fn meter_row(row: &MeterRow, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let mut label = div();
     *label.text_style() = t_sm(m);
     let label = label
-        .debug_selector(|| METER_ROW_LABEL_ID.into())
+        .tl_selector(|| METER_ROW_LABEL_ID.into())
         .flex_none()
         .w(px(ROW_LABEL_W * s))
         .overflow_hidden()
@@ -1360,7 +1361,7 @@ fn text_row(
         .child(row.label.clone());
     *label.text_style() = t_sm(m);
     let mut value = div()
-        .debug_selector(move || value_id(index))
+        .tl_selector(move || value_id(index))
         .min_w_0()
         .flex()
         .justify_end()
@@ -1378,7 +1379,7 @@ fn text_row(
         .child(fit_text(percent.clone()));
     *pct.text_style() = numeric_style(m, m.text.sm);
     let meter = div()
-        .debug_selector(move || meter_id(index))
+        .tl_selector(move || meter_id(index))
         .flex_1()
         .min_w_0()
         .child(Meter {
@@ -1387,7 +1388,7 @@ fn text_row(
         });
     let line = || div().flex().flex_row().items_center().gap(m.sp[4]);
     let row_el = div()
-        .debug_selector(move || row_id(index))
+        .tl_selector(move || row_id(index))
         .flex()
         .flex_row()
         .flex_1()
@@ -1421,7 +1422,7 @@ fn text_row(
 /// Row `index`'s sparkline cell. It has the height of its text row, so the two columns line up.
 fn spark_cell(chart: &Entity<ChartView>, index: usize, wide: bool, m: &UiMetrics) -> AnyElement {
     div()
-        .debug_selector(move || spark_id(index))
+        .tl_selector(move || spark_id(index))
         .relative()
         .flex_1()
         .min_h(row_min_h(wide, m.ui_scale))
@@ -1462,7 +1463,7 @@ fn chart_cell(
     let mut name = div();
     *name.text_style() = t_sm(m);
     let name = name
-        .debug_selector(move || cell_head_id(i, "name"))
+        .tl_selector(move || cell_head_id(i, "name"))
         .flex_1()
         .min_w_0()
         .overflow_hidden()
@@ -1473,7 +1474,7 @@ fn chart_cell(
     let mut value = div();
     *value.text_style() = numeric_style(m, m.text.sm);
     let value = value
-        .debug_selector(move || cell_head_id(i, "value"))
+        .tl_selector(move || cell_head_id(i, "value"))
         .flex()
         .min_w_0()
         .whitespace_nowrap()
@@ -1482,14 +1483,14 @@ fn chart_cell(
     let mut pct = div();
     *pct.text_style() = numeric_style(m, m.text.sm);
     let pct = pct
-        .debug_selector(move || cell_head_id(i, "percent"))
+        .tl_selector(move || cell_head_id(i, "percent"))
         .flex()
         .min_w_0()
         .whitespace_nowrap()
         .text_color(theme.text_secondary)
         .child(fit_text(percent.clone()));
     div()
-        .debug_selector(move || cell_id(i))
+        .tl_selector(move || cell_id(i))
         .flex()
         .flex_col()
         .size_full()
@@ -1509,7 +1510,7 @@ fn chart_cell(
         )
         .child(
             div()
-                .debug_selector(move || cell_chart_id(i))
+                .tl_selector(move || cell_chart_id(i))
                 .relative()
                 .flex_1()
                 .min_h_0()
@@ -1608,7 +1609,7 @@ fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(|| EMPTY_ID.to_owned())
+            text.tl_selector(|| EMPTY_ID.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )
@@ -1754,7 +1755,7 @@ impl MemBox {
         }
         let cells = grid_cells(&fit, cells, m.sp[2], CHARTS_GRID_ID);
         div()
-            .debug_selector(|| CHARTS_GRID_ID.into())
+            .tl_selector(|| CHARTS_GRID_ID.into())
             .relative()
             .size_full()
             .overflow_hidden()
@@ -1808,7 +1809,7 @@ impl MemBox {
         );
         // The chart gives way when the body is lower or narrower than its share.
         let chart = div()
-            .debug_selector(|| MEM_USED_CHART_ID.into())
+            .tl_selector(|| MEM_USED_CHART_ID.into())
             .relative()
             .flex_shrink(1.)
             .min_h_0()
@@ -1854,7 +1855,7 @@ impl MemBox {
             cx,
         );
         div()
-            .debug_selector(|| MEM_COMP_CHART_ID.into())
+            .tl_selector(|| MEM_COMP_CHART_ID.into())
             .relative()
             .size_full()
             .child(part)
@@ -1873,7 +1874,7 @@ impl MemBox {
             None => self.apps.get().cloned().map(cached_full),
         };
         div()
-            .debug_selector(|| MEM_APPS_ID.into())
+            .tl_selector(|| MEM_APPS_ID.into())
             .relative()
             .size_full()
             .children(part)
@@ -2003,7 +2004,7 @@ impl Render for MemBox {
                 .into_any_element()
         };
         let body = div()
-            .debug_selector(|| MEM_BODY_ID.into())
+            .tl_selector(|| MEM_BODY_ID.into())
             .relative()
             .size_full()
             .child(inner)

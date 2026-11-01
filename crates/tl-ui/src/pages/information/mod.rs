@@ -71,6 +71,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
@@ -599,10 +600,10 @@ impl InformationPage {
     fn error_state(&self, cx: &App) -> AnyElement {
         let m = metrics(cx);
         let theme = current(cx);
-        let mut text = div().debug_selector(|| "InformationPage-error-text".into());
+        let mut text = div().tl_selector(|| "InformationPage-error-text".into());
         *text.text_style() = t_base(m);
         v_flex()
-            .debug_selector(|| "InformationPage-error".into())
+            .tl_selector(|| "InformationPage-error".into())
             .size_full()
             .items_center()
             .justify_center()
@@ -672,7 +673,7 @@ impl Render for InformationPage {
             self.error_state(cx)
         } else if !self.shown.contains(&true) {
             div()
-                .debug_selector(|| "InformationPage-filter-empty".into())
+                .tl_selector(|| "InformationPage-filter-empty".into())
                 .w_full()
                 .child(
                     TlEmptyState::new(self.page_words.filter_empty.clone())
@@ -681,7 +682,7 @@ impl Render for InformationPage {
                 .into_any_element()
         } else if self.width.get() >= px(TWO_COLUMNS_FROM * m.ui_scale) {
             h_flex()
-                .debug_selector(|| "InformationPage-columns".into())
+                .tl_selector(|| "InformationPage-columns".into())
                 .w_full()
                 .items_start()
                 .gap(m.sp[7])
@@ -690,7 +691,7 @@ impl Render for InformationPage {
                 .into_any_element()
         } else {
             v_flex()
-                .debug_selector(|| "InformationPage-column".into())
+                .tl_selector(|| "InformationPage-column".into())
                 .w_full()
                 .gap(m.sp[8])
                 .children(
@@ -720,7 +721,7 @@ impl Render for InformationPage {
         .inset_0();
 
         div()
-            .debug_selector(|| "InformationPage".into())
+            .tl_selector(|| "InformationPage".into())
             .relative()
             .size_full()
             .child(measure)

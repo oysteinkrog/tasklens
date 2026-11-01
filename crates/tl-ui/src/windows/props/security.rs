@@ -53,6 +53,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
+use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -2165,7 +2166,7 @@ fn cap_checks(table: Entity<TlTreeTable<CapDelegate>>, m: UiMetrics) -> impl Int
     let stroke = px(CAP_CHECK_SIZE / 12. * m.ui_scale);
     let header_h = px(HEADER_H_ONE * m.ui_scale);
     div()
-        .debug_selector(|| "SecurityCapabilityChecks".into())
+        .tl_selector(|| "SecurityCapabilityChecks".into())
         .absolute()
         .top(header_h)
         .bottom_0()
@@ -2280,7 +2281,7 @@ impl Render for SecurityTab {
         });
         let summary = div()
             .id("security-fields")
-            .debug_selector(|| "SecuritySummary".into())
+            .tl_selector(|| "SecuritySummary".into())
             .key_context(KV_GRID_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &PropsFieldUp, _, cx| this.step_row(-1, cx)))
@@ -2344,7 +2345,7 @@ impl Render for SecurityTab {
             .map_or(0, |t| t.read(cx).delegate.row_count())
             .clamp(3, GROUPS_SHARE_ROWS);
         let caps = v_flex()
-            .debug_selector(|| "SecurityCapabilities".into())
+            .tl_selector(|| "SecurityCapabilities".into())
             .flex_grow(caps_weight as f32)
             .flex_basis(px(0.))
             .min_h_0()
@@ -2358,7 +2359,7 @@ impl Render for SecurityTab {
                     .child(cap_checks(caps_table, m)),
             );
         let groups = v_flex()
-            .debug_selector(|| "SecurityGroups".into())
+            .tl_selector(|| "SecurityGroups".into())
             .flex_grow(groups_weight as f32)
             .flex_basis(px(0.))
             .min_h_0()
@@ -2370,7 +2371,7 @@ impl Render for SecurityTab {
                     .child(self.groups_table.as_ref().expect("initialized").clone()),
             );
         v_flex()
-            .debug_selector(|| "PropsSecurity".into())
+            .tl_selector(|| "PropsSecurity".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_table_rows))
             .on_action(cx.listener(Self::on_copy_table_cell))

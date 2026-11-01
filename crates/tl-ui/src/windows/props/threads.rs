@@ -38,6 +38,7 @@ use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
+use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -1237,7 +1238,7 @@ impl ThreadsTab {
 impl Render for ThreadsTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .debug_selector(|| "PropsThreads".into())
+            .tl_selector(|| "PropsThreads".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_row))
             .on_action(cx.listener(Self::on_copy_cell))

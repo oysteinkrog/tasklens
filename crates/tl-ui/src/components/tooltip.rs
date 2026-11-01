@@ -33,6 +33,7 @@ use gpui_kit::{
     point, prelude::FluentBuilder as _, px,
 };
 
+use crate::selector::TlSelector;
 use crate::text::style::{t_sm, t_xs};
 use crate::theme::{current, metrics};
 
@@ -177,7 +178,7 @@ impl Render for TlTooltip {
             .as_ref()
             .and_then(|(action, focus)| shortcut_text(action.as_ref(), focus.as_ref(), window));
 
-        let mut text = div().debug_selector(|| "TlTooltip-text".into());
+        let mut text = div().tl_selector(|| "TlTooltip-text".into());
         *text.text_style() = t_sm(&m);
         let max_width = self.max_width();
         let text = text
@@ -207,9 +208,9 @@ impl Render for TlTooltip {
         }]);
 
         div()
-            .debug_selector(|| "TlTooltip".into())
+            .tl_selector(|| "TlTooltip".into())
             .child(panel.when_some(shortcut, |panel, shortcut| {
-                let mut line = div().debug_selector(|| "TlTooltip-shortcut".into());
+                let mut line = div().tl_selector(|| "TlTooltip-shortcut".into());
                 *line.text_style() = t_xs(&m);
                 panel.child(
                     line.flex()
@@ -848,7 +849,7 @@ mod tests {
             };
             let trigger = div()
                 .id("trigger")
-                .debug_selector(|| "trigger".into())
+                .tl_selector(|| "trigger".into())
                 .absolute()
                 .left(px(TRIGGER_LEFT))
                 .top(px(top))

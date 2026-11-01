@@ -64,6 +64,7 @@ use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::jump::JumpTexts;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -1476,7 +1477,7 @@ impl HistoryPage {
         let state = HoverTooltip::state("history-live-tip", window, cx);
         let button = BaseButton::new("history-live")
             .key_context("TlButton")
-            .debug_selector(|| "history-live".to_string())
+            .tl_selector(|| "history-live".to_string())
             .accessibility_label(label.clone())
             .flex_none()
             .flex()
@@ -1497,7 +1498,7 @@ impl HistoryPage {
             .when_some(look.dot, |b, color| {
                 b.child(
                     div()
-                        .debug_selector(|| LIVE_DOT_ID.to_string())
+                        .tl_selector(|| LIVE_DOT_ID.to_string())
                         .flex_none()
                         .size(px(LIVE_DOT * m.ui_scale))
                         .rounded_full()
@@ -1522,7 +1523,7 @@ impl HistoryPage {
         let m = *metrics(cx);
         let page = cx.entity().downgrade();
         div()
-            .debug_selector(|| "history-off-banner".to_string())
+            .tl_selector(|| "history-off-banner".to_string())
             .flex()
             .flex_row()
             .items_center()

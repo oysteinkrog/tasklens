@@ -62,6 +62,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -1110,7 +1111,7 @@ impl CpuPage {
     fn board_element(&self, board: &Entity<CpuBoard>, m: &UiMetrics) -> AnyElement {
         let cached = StyleRefinement::default().size_full();
         div()
-            .debug_selector(|| BOARD_AREA_ID.into())
+            .tl_selector(|| BOARD_AREA_ID.into())
             .flex()
             .flex_row()
             .gap(core_gutter(m))
@@ -1118,7 +1119,7 @@ impl CpuPage {
             .h(px(GRAPH_H_OVERALL * m.ui_scale))
             .child(
                 div()
-                    .debug_selector(|| BOARD_CHART_ID.into())
+                    .tl_selector(|| BOARD_CHART_ID.into())
                     .flex_none()
                     .w(relative(BOARD_CHART_SHARE))
                     .h_full()
@@ -1137,7 +1138,7 @@ impl CpuPage {
     /// `view` in a full-width box of `GRAPH_H_OVERALL`.
     fn chart_element(id: &'static str, view: &Entity<ChartView>, scale: f32) -> AnyElement {
         div()
-            .debug_selector(move || id.into())
+            .tl_selector(move || id.into())
             .w_full()
             .h(px(GRAPH_H_OVERALL * scale))
             .child(view.clone().cached(StyleRefinement::default().size_full()))
@@ -1488,14 +1489,14 @@ impl CpuPage {
         cx: &mut App,
     ) -> AnyElement {
         let mut root = div()
-            .debug_selector(|| SECONDARY_ID.into())
+            .tl_selector(|| SECONDARY_ID.into())
             .relative()
             .w_full()
             .h(px(SECONDARY_GRAPH_H * m.ui_scale))
             .child(view.clone().cached(StyleRefinement::default().size_full()));
         if let Some(text) = self.secondary_fallback_text() {
             let trigger = div()
-                .debug_selector(|| SECONDARY_TIP_ID.into())
+                .tl_selector(|| SECONDARY_TIP_ID.into())
                 .absolute()
                 .top_0()
                 .left_0()
@@ -1561,7 +1562,7 @@ impl CpuPage {
         let anim = || Animation::new(M_BASE).with_easing(ease_out_cubic);
         let id = |part: &'static str| (part, generation as usize);
         let old = div()
-            .debug_selector(|| FADE_OLD_ID.into())
+            .tl_selector(|| FADE_OLD_ID.into())
             .absolute()
             .top_0()
             .left_0()
@@ -1569,7 +1570,7 @@ impl CpuPage {
             .child(self.mode_element(from, window, cx))
             .with_animation(id("perf-cpu-fade-old"), anim(), |el, t| el.opacity(1. - t));
         let new = div()
-            .debug_selector(|| FADE_NEW_ID.into())
+            .tl_selector(|| FADE_NEW_ID.into())
             .absolute()
             .top_0()
             .left_0()
@@ -1592,7 +1593,7 @@ impl CpuPage {
     /// The Overall chart in a full-width box of `GRAPH_H_OVERALL`.
     fn overall_element(&self, scale: f32) -> AnyElement {
         div()
-            .debug_selector(|| OVERALL_ID.into())
+            .tl_selector(|| OVERALL_ID.into())
             .w_full()
             .h(px(GRAPH_H_OVERALL * scale))
             .child(

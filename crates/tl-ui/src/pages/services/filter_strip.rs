@@ -2,9 +2,7 @@
 
 use fluent_bundle::FluentValue;
 use gpui_kit::component::h_flex;
-use gpui_kit::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
-};
+use gpui_kit::{AnyElement, App, IntoElement, ParentElement, Styled, Window, div, px};
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::settings::ServicesSettings;
@@ -21,6 +19,7 @@ use crate::components::menu::{TlMenu, set_open_menu_check};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
 use crate::pages::sys_table::SysQuery;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
@@ -155,7 +154,7 @@ pub fn render_strip(
     let m = *metrics(cx);
     let separator = || {
         div()
-            .debug_selector(|| "ServicesFilterStrip-separator".into())
+            .tl_selector(|| "ServicesFilterStrip-separator".into())
             .flex_none()
             .w(px(1.))
             .h(px(16. * m.ui_scale))
@@ -170,7 +169,7 @@ pub fn render_strip(
     };
 
     let mut strip = h_flex()
-        .debug_selector(|| "ServicesFilterStrip".into())
+        .tl_selector(|| "ServicesFilterStrip".into())
         .w_full()
         .h(px(28. * m.ui_scale))
         .px(m.sp[4])

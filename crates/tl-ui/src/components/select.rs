@@ -38,6 +38,7 @@ use gpui_kit::{
 
 use super::icons::{TlIcon, icon};
 use super::input::{TlInputSize, TlTextInput};
+use crate::selector::TlSelector;
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
 
@@ -443,7 +444,7 @@ impl RenderOnce for TlSelect {
 
         let trigger = div()
             .id((self.id.clone(), "trigger"))
-            .debug_selector({
+            .tl_selector({
                 let id = self.id.clone();
                 move || format!("TlSelect-{id}")
             })
@@ -485,7 +486,7 @@ impl RenderOnce for TlSelect {
             .child(text)
             .child(
                 div()
-                    .debug_selector(|| "TlSelect-chevron".into())
+                    .tl_selector(|| "TlSelect-chevron".into())
                     .flex_none()
                     .child(chevron),
             );
@@ -635,7 +636,7 @@ fn popup(
 
     let list = div()
         .id((id.clone(), "list"))
-        .debug_selector(|| "TlSelect-list".into())
+        .tl_selector(|| "TlSelect-list".into())
         .flex()
         .flex_col()
         .max_h(s(LIST_MAX_HEIGHT))
@@ -644,7 +645,7 @@ fn popup(
         .map(|d| {
             if rows.is_empty() {
                 let mut empty = div()
-                    .debug_selector(|| "TlSelect-no-matches".into())
+                    .tl_selector(|| "TlSelect-no-matches".into())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -660,7 +661,7 @@ fn popup(
 
     let field = filter.as_ref().map(|input| {
         div()
-            .debug_selector(|| "TlSelect-filter".into())
+            .tl_selector(|| "TlSelect-filter".into())
             .p(m.sp[2])
             .border_b_1()
             .border_color(theme.divider)
@@ -670,7 +671,7 @@ fn popup(
     let close_state = state.clone();
     let mut panel = div()
         .id((id.clone(), "popup"))
-        .debug_selector(|| "TlSelect-popup".into())
+        .tl_selector(|| "TlSelect-popup".into())
         .occlude()
         .flex()
         .flex_col()

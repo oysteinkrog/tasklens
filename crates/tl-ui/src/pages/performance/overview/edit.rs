@@ -51,6 +51,7 @@ use crate::pages::performance::actions::{
     PerfOverviewMoveBox, PerfOverviewResetLayout, PerfOverviewResizeBox,
 };
 use crate::pages::performance::page::PAGE_PAD;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 
 /// The toolbar height, logical px.
@@ -765,7 +766,7 @@ impl OverviewPage {
         };
         Some(
             div()
-                .debug_selector(|| TOOLBAR_ID.into())
+                .tl_selector(|| TOOLBAR_ID.into())
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -845,7 +846,7 @@ impl OverviewPage {
                 out.push(
                     div()
                         .id(SharedString::from(corner_id(kind)))
-                        .debug_selector(move || corner_id(kind))
+                        .tl_selector(move || corner_id(kind))
                         .absolute()
                         .left(b.right() - corner)
                         .top(b.bottom() - corner)
@@ -879,7 +880,7 @@ impl OverviewPage {
                 );
             }
             let grip = div()
-                .debug_selector(move || grip_id(kind))
+                .tl_selector(move || grip_id(kind))
                 .absolute()
                 .left_0()
                 .top(title_top)
@@ -897,7 +898,7 @@ impl OverviewPage {
             let tip = HoverTooltip::state(SharedString::from(hide_id.clone()), window, cx);
             let hide_button = div()
                 .id(SharedString::from(hide_id.clone()))
-                .debug_selector(move || hide_id.clone())
+                .tl_selector(move || hide_id.clone())
                 .absolute()
                 .right_0()
                 .top(title_top)
@@ -930,7 +931,7 @@ impl OverviewPage {
             out.push(
                 div()
                     .id(SharedString::from(title_handle_id(kind)))
-                    .debug_selector(move || title_handle_id(kind))
+                    .tl_selector(move || title_handle_id(kind))
                     .absolute()
                     .left(b.left())
                     .top(b.top())
@@ -969,7 +970,7 @@ impl OverviewPage {
             let g = self.placement.grid.bounds(target);
             out.push(
                 div()
-                    .debug_selector(|| GHOST_ID.into())
+                    .tl_selector(|| GHOST_ID.into())
                     .absolute()
                     .left(g.left())
                     .top(g.top())

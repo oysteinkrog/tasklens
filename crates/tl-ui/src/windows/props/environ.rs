@@ -41,6 +41,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::table::actions::{CopyRow, CopyRowsAsTable, ToggleExpand};
 use crate::table::cells::CellOut;
@@ -1092,7 +1093,7 @@ impl Render for EnvironTab {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         let root = v_flex()
-            .debug_selector(|| "PropsEnvironment".into())
+            .tl_selector(|| "PropsEnvironment".into())
             .size_full()
             .on_action(cx.listener(Self::on_copy_rows))
             .on_action(cx.listener(Self::on_copy_name))
@@ -1114,7 +1115,7 @@ impl Render for EnvironTab {
             }));
         if self.unavailable {
             let mut text = div()
-                .debug_selector(|| "EnvUnavailable".into())
+                .tl_selector(|| "EnvUnavailable".into())
                 .text_color(theme.text_secondary);
             *text.text_style() = t_base(&m);
             return root
@@ -1128,7 +1129,7 @@ impl Render for EnvironTab {
                 *text.text_style() = t_sm(&m);
                 d.child(
                     div()
-                        .debug_selector(|| "EnvTruncated".into())
+                        .tl_selector(|| "EnvTruncated".into())
                         .flex_none()
                         .flex()
                         .items_center()

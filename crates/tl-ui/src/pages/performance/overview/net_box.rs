@@ -39,9 +39,8 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EntityId, EventEmitter, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString, Size,
-    StyleRefinement, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
-    relative, size, white,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, StyleRefinement,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, relative, size, white,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -82,6 +81,7 @@ use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;
 use crate::pages::performance::widget::metric_widget::FlowLook;
 use crate::pages::performance::widget::source::SourceStore;
+use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::derived::blend_over;
@@ -1529,7 +1529,7 @@ fn stat_row(
         );
     }
     if let Some(id) = id {
-        value_el = value_el.debug_selector(move || id.into());
+        value_el = value_el.tl_selector(move || id.into());
     }
     div()
         .flex()
@@ -1614,7 +1614,7 @@ fn cell_head(a: &AdapterCell, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
         .whitespace_nowrap()
         .text_ellipsis()
         .text_color(theme.text_primary)
-        .debug_selector({
+        .tl_selector({
             let idx = a.idx;
             move || name_id(idx)
         })
@@ -1673,7 +1673,7 @@ fn charts_fit(
 fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlTheme) -> AnyElement {
     let idx = a.idx;
     div()
-        .debug_selector(move || cell_id(idx))
+        .tl_selector(move || cell_id(idx))
         .flex()
         .flex_col()
         .flex_none()
@@ -1683,7 +1683,7 @@ fn chart_cell(a: &AdapterCell, cell: Size<Pixels>, m: &UiMetrics, theme: &TlThem
         .child(cell_head(a, m, theme))
         .child(
             div()
-                .debug_selector(move || chart_id(idx))
+                .tl_selector(move || chart_id(idx))
                 .relative()
                 .flex_1()
                 .min_h_0()
@@ -1764,7 +1764,7 @@ pub(crate) fn net_combined_element(
         )
         .child(
             div()
-                .debug_selector(|| COMBINED_CHART_ID.into())
+                .tl_selector(|| COMBINED_CHART_ID.into())
                 .relative()
                 .flex_1()
                 .min_h_0()
@@ -1804,7 +1804,7 @@ pub(crate) fn net_cells_element(
     // A "+n more" line that does not fit whole is left out (UI-PRF-017).
     let mut el = whole_rows().relative().size_full().gap(m.sp[2]).child(
         div()
-            .debug_selector(|| GRID_ID.into())
+            .tl_selector(|| GRID_ID.into())
             .flex_1()
             .min_h_0()
             .w_full()
@@ -1838,7 +1838,7 @@ fn empty_text(m: &UiMetrics, theme: &TlTheme, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .child(
-            text.debug_selector(|| EMPTY_ID.to_owned())
+            text.tl_selector(|| EMPTY_ID.to_owned())
                 .text_color(theme.text_secondary)
                 .child(tr(cx, KEY_EMPTY)),
         )

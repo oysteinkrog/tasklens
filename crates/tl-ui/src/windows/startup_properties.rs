@@ -35,6 +35,7 @@ use crate::host::{HostRegistry, with_host_name};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::pages::startup::delegate::StartupWords;
+use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::push_main_toast;
@@ -495,7 +496,7 @@ impl Render for StartupPropertiesView {
             buttons = buttons.child(
                 div()
                     .id(ElementId::from(("StartupPropsCopyCell", i)))
-                    .debug_selector(move || format!("StartupPropsCopy-{i}"))
+                    .tl_selector(move || format!("StartupPropsCopy-{i}"))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -508,7 +509,7 @@ impl Render for StartupPropertiesView {
         }
 
         let footer = div()
-            .debug_selector(|| "StartupPropsFooter".into())
+            .tl_selector(|| "StartupPropsFooter".into())
             .flex_none()
             .flex()
             .items_center()

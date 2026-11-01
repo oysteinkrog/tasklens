@@ -14,12 +14,13 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::{
-    Action, App, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Action, App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
+use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_md, t_sm};
 use crate::theme::{current, metrics};
 
@@ -138,7 +139,7 @@ impl RenderOnce for TlEmptyState {
         let heading_fg = theme.text_primary;
 
         let heading = self.heading.map(|h| {
-            let mut el = div().debug_selector(|| "TlEmptyState-heading".into());
+            let mut el = div().tl_selector(|| "TlEmptyState-heading".into());
             *el.text_style() = t_md(&m);
             el.font_weight(FontWeight::SEMIBOLD)
                 .text_color(heading_fg)
@@ -148,7 +149,7 @@ impl RenderOnce for TlEmptyState {
         // is laid out as before, so the older callers keep their exact pixels.
         let capped = heading.is_some();
         let text = (!self.text.is_empty()).then(|| {
-            let mut el = div().debug_selector(|| "TlEmptyState-text".into());
+            let mut el = div().tl_selector(|| "TlEmptyState-text".into());
             *el.text_style() = t_base(&m);
             el.when(capped, |el| {
                 el.max_w(px(TEXT_MAX_W * m.ui_scale)).text_center()
@@ -157,13 +158,13 @@ impl RenderOnce for TlEmptyState {
             .child(self.text)
         });
         let second_line = self.second_line.map(|line| {
-            let mut el = div().debug_selector(|| "TlEmptyState-second-line".into());
+            let mut el = div().tl_selector(|| "TlEmptyState-second-line".into());
             *el.text_style() = t_sm(&m);
             el.child(line)
         });
 
         div()
-            .debug_selector(|| "TlEmptyState".into())
+            .tl_selector(|| "TlEmptyState".into())
             .size_full()
             .flex()
             .flex_col()
@@ -197,7 +198,8 @@ mod tests {
     use std::cell::Cell;
 
     use gpui_kit::{
-        Context, FocusHandle, Modifiers, Render, TestAppContext, VisualTestContext, px,
+        Context, FocusHandle, InteractiveElement, Modifiers, Render, TestAppContext,
+        VisualTestContext, px,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 

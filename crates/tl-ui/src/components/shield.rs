@@ -24,6 +24,7 @@ use super::icons::{AppIcon, TlIcon, icon};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::theme::{TlTheme, current, metrics};
 
 /// Starts the privileged helper session: the engine runs pkexec, with a 120 s polkit deadline
@@ -144,18 +145,16 @@ impl RenderOnce for TlShield {
         let color = glyph_color(face.glyph, &theme);
         let glyph = match face.glyph {
             Glyph::Shield => div()
-                .debug_selector(|| "TlShield-icon-shield".into())
+                .tl_selector(|| "TlShield-icon-shield".into())
                 .child(icon(TlIcon::Shield, m.icon.md, color)),
             Glyph::Spinner => div()
-                .debug_selector(|| "TlShield-spinner".into())
+                .tl_selector(|| "TlShield-spinner".into())
                 .child(TlSpinner::new(m.icon.md).color(color)),
-            Glyph::Unlocked => div()
-                .debug_selector(|| "TlShield-icon-unlocked".into())
-                .child(
-                    Icon::new(AppIcon::ShieldUnlocked)
-                        .size(m.icon.md)
-                        .text_color(color),
-                ),
+            Glyph::Unlocked => div().tl_selector(|| "TlShield-icon-unlocked".into()).child(
+                Icon::new(AppIcon::ShieldUnlocked)
+                    .size(m.icon.md)
+                    .text_color(color),
+            ),
         };
 
         let (bg, border) = if face.on {
@@ -171,7 +170,7 @@ impl RenderOnce for TlShield {
             .tab_stop(false)
             .track_focus(&focus)
             .key_context("TlShield")
-            .debug_selector(|| "TlShield".into())
+            .tl_selector(|| "TlShield".into())
             .relative()
             .flex_none()
             .size(size)

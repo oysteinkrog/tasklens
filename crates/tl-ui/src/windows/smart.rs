@@ -51,6 +51,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
+use crate::selector::TlSelector;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -1144,7 +1145,7 @@ impl Render for SmartWindow {
             .p(m.sp[3])
             .child(
                 div()
-                    .debug_selector(|| "SmartHeaderBox".into())
+                    .tl_selector(|| "SmartHeaderBox".into())
                     .relative()
                     .flex_1()
                     .min_w_0()
@@ -1153,7 +1154,7 @@ impl Render for SmartWindow {
             )
             .child(
                 div()
-                    .debug_selector(move || selector.into())
+                    .tl_selector(move || selector.into())
                     .flex_none()
                     .child(button),
             );
@@ -1167,7 +1168,7 @@ impl Render for SmartWindow {
         } else {
             div()
                 .id("SmartTable")
-                .debug_selector(|| "SmartTable".into())
+                .tl_selector(|| "SmartTable".into())
                 .flex_1()
                 .min_h_0()
                 .child(self.table.clone())
@@ -1192,7 +1193,7 @@ impl SmartWindow {
         *detail.text_style() = t_sm(m);
         div()
             .id("SmartFailure")
-            .debug_selector(|| "SmartFailure".into())
+            .tl_selector(|| "SmartFailure".into())
             .flex_1()
             .flex()
             .flex_col()
@@ -1240,7 +1241,7 @@ impl SmartWindow {
                 .text_color(theme.text_primary);
             *v.text_style() = t_base(m);
             div()
-                .debug_selector(move || format!("SmartNvmeRow-{i}"))
+                .tl_selector(move || format!("SmartNvmeRow-{i}"))
                 .flex_none()
                 .flex()
                 .items_center()

@@ -70,6 +70,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::palette::{DeviceAccent, accent_color};
 use crate::theme::{TlTheme, metrics};
@@ -1272,11 +1273,11 @@ impl Render for PerformancePage {
         }
 
         let sidebar = div()
-            .debug_selector(|| SIDEBAR_PANEL_ID.into())
+            .tl_selector(|| SIDEBAR_PANEL_ID.into())
             .size_full()
             .child(self.sidebar.clone());
         let page = div()
-            .debug_selector(|| PAGE_PANEL_ID.into())
+            .tl_selector(|| PAGE_PANEL_ID.into())
             .size_full()
             // Right-click anywhere on the device page: the page menu (UI-PRF-015). The press is
             // seen here before the Details grid takes it, and the menu opens once the grid has

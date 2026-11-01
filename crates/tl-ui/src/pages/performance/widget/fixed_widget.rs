@@ -22,13 +22,14 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyView, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Window, div, px,
+    AnyView, App, Context, IntoElement, ParentElement as _, Render, SharedString, StyleRefinement,
+    Styled as _, Window, div, px,
 };
 use tl_model::layout::{FixedWidget, WidgetSetting};
 
 use super::metric_widget::{part_id, widget_id};
 use crate::i18n::tr;
+use crate::selector::TlSelector;
 use crate::text::style::t_sm;
 use crate::theme::{current, metrics};
 
@@ -151,7 +152,7 @@ impl Render for FixedWidgetView {
                 *line.text_style() = t_sm(&m);
                 let p = part_id(&self.container, id, "reason");
                 body.flex().items_center().justify_center().child(
-                    line.debug_selector(move || p)
+                    line.tl_selector(move || p)
                         .max_w_full()
                         .overflow_hidden()
                         .whitespace_nowrap()
@@ -162,7 +163,7 @@ impl Render for FixedWidgetView {
             }
         };
         div()
-            .debug_selector(move || root_id)
+            .tl_selector(move || root_id)
             .relative()
             .size_full()
             .overflow_hidden()

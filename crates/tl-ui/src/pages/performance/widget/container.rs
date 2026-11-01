@@ -52,6 +52,7 @@ use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
 use crate::hub::SnapshotHub;
+use crate::selector::TlSelector;
 use crate::theme::{UiMetrics, metrics};
 
 /// The debug selector of container `id`'s body ("overview.gpu" gives
@@ -832,7 +833,7 @@ impl Render for WidgetContainer {
             div()
                 .size_full()
                 .relative()
-                .debug_selector(move || selector)
+                .tl_selector(move || selector)
                 .child(
                     div()
                         .id(SharedString::from(scroll))
@@ -857,7 +858,7 @@ impl Render for WidgetContainer {
                 .into_any_element()
         };
         div()
-            .debug_selector(move || id)
+            .tl_selector(move || id)
             .relative()
             .size_full()
             .overflow_hidden()

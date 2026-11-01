@@ -100,6 +100,7 @@ use crate::demand::DemandAggregator;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::net_totals::NetTotal;
+use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::{current, metrics};
 
@@ -1096,7 +1097,7 @@ impl OverviewPage {
         let target = s.target;
         let vertical = target.is_vertical();
         let gap = div()
-            .debug_selector(move || target.selector())
+            .tl_selector(move || target.selector())
             .absolute()
             .left(s.bounds.left())
             .top(s.bounds.top())
@@ -1110,7 +1111,7 @@ impl OverviewPage {
             || (dragging.is_none() && self.hover == Some(target) && self.hover_shown);
         let hit = div()
             .id(SharedString::from(target.selector()))
-            .debug_selector(move || hit_selector(&target.selector()))
+            .tl_selector(move || hit_selector(&target.selector()))
             .absolute()
             .inset_0()
             .on_mouse_down(
@@ -1131,7 +1132,7 @@ impl OverviewPage {
             return gap.child(hit).into_any_element();
         }
         let line = div()
-            .debug_selector(|| SPLITTER_LINE_ID.into())
+            .tl_selector(|| SPLITTER_LINE_ID.into())
             .absolute()
             .bg(current(cx).accent);
         let line = if vertical {
@@ -1167,7 +1168,7 @@ impl OverviewPage {
             .then(|| range::range_switch(range::HEADER_SWITCH, Some(&self.hub), cx));
         let live = self.paused.is_some().then(|| {
             div()
-                .debug_selector(|| timeline::BACK_TO_LIVE_ID.into())
+                .tl_selector(|| timeline::BACK_TO_LIVE_ID.into())
                 .child(
                     TlButton::new(timeline::BACK_TO_LIVE_ID, TlButtonKind::Primary)
                         .size(TlButtonSize::Sm)
@@ -1181,7 +1182,7 @@ impl OverviewPage {
         let m = metrics(cx);
         Some(
             div()
-                .debug_selector(|| RANGE_HEADER_ID.into())
+                .tl_selector(|| RANGE_HEADER_ID.into())
                 .flex()
                 .flex_row()
                 .flex_none()
@@ -1455,7 +1456,7 @@ impl Render for OverviewPage {
                     let id = edge_id(kind);
                     let m = metrics(cx);
                     div()
-                        .debug_selector(move || id.clone())
+                        .tl_selector(move || id.clone())
                         .absolute()
                         .top_0()
                         .left_0()
