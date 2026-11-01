@@ -73,9 +73,12 @@ fn every_selector_goes_through_the_helper() {
                 walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).expect("source file");
-                for (n, line) in text.lines().enumerate() {
-                    if line.contains("debug_selector(") {
-                        out.push(format!("{}:{}", path.display(), n + 1));
+                // A call may put spaces or a line break between the name and its `(`.
+                for (at, _) in text.match_indices("debug_selector") {
+                    let rest = text[at + "debug_selector".len()..].trim_start();
+                    if rest.starts_with('(') {
+                        let line = text[..at].lines().count().max(1);
+                        out.push(format!("{}:{}", path.display(), line));
                     }
                 }
             }
@@ -317,15 +320,20 @@ fn processes_tab_draws_no_selector_twice(cx: &mut TestAppContext) {
     draw(r.vcx);
     let drawn = assert_none_drawn_twice(r.vcx, "Processes");
     assert!(drawn.contains_key("ProcessesPage"), "the page is drawn");
-    let named = |prefix: &str| drawn.keys().filter(|k| k.starts_with(prefix)).count();
-    assert!(
-        named("MinigraphCard-") >= 6,
-        "the minigraph cards are drawn: {drawn:?}"
-    );
-    assert!(
-        named("TlNameCell") >= 6,
-        "the six rows are drawn: {drawn:?}"
-    );
+    // Count roots only: a card is `MinigraphCard-<id>` (its parts add `-value`, `-label`, ...),
+    // and a row's name cell is `TlNameCell-<row>-<col>` (its parts are `TlNameCell-primary-...`).
+    let cards = drawn
+        .keys()
+        .filter_map(|k| k.strip_prefix("MinigraphCard-"))
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+        .count();
+    assert!(cards >= 6, "the minigraph cards are drawn: {drawn:?}");
+    let rows: std::collections::BTreeSet<usize> = drawn
+        .keys()
+        .filter_map(|k| k.strip_prefix("TlNameCell-"))
+        .filter_map(|rest| rest.split('-').next()?.parse().ok())
+        .collect();
+    assert!(rows.len() >= 6, "the six rows are drawn: {drawn:?}");
 }
 
 /// Each Performance resource page draws no selector twice.
