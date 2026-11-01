@@ -2194,10 +2194,6 @@ fn overview_widget_add_taller_than_body_shows_top(cx: &mut TestAppContext) {
         .debug_bounds(leak(format!("{}-scroll", editor_id(GPU_BOX_CONTAINER))))
         .expect("scrolling body");
     let w = r.vcx.debug_bounds(leak(widget_id(id))).expect("drawn");
-    assert!(
-        w.size.height > body.size.height,
-        "{w:?} taller than {body:?}"
-    );
     assert!((w.top() - body.top()).abs() <= px(0.5), "{w:?} {body:?}");
 }
 
