@@ -8617,6 +8617,7 @@ mod page {
                         Some(FlowLook::Text) => "text",
                         Some(FlowLook::MemRow { .. }) => "mem row",
                         Some(FlowLook::MemCell { .. }) => "mem cell",
+                        Some(FlowLook::NetDirection { .. } | FlowLook::NetCombined { .. }) => "net",
                         None => "none",
                     };
                     (look, w.render_count.get())
