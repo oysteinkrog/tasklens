@@ -47,7 +47,7 @@ use tl_model::layout::{
 };
 
 use super::fixed_widget::{FixedContent, FixedWidgetView};
-use super::grid::{self, InnerGrid, InnerPlacement};
+use super::grid::{self, InnerGrid, InnerPlacement, PlacedWidget};
 use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
@@ -142,6 +142,45 @@ pub fn list_flow(input: &FlowInput<'_>) -> InnerPlacement {
         cells.push((item.setting.id, cell));
     }
     grid::place(&cells, cols, input.area, input.scale, input.frozen)
+}
+
+/// The placer of a box whose flow layout is one fixed widget (Top processes, Timeline): the
+/// fixed widget fills the whole body, as the box drew its content before it was a widget
+/// (ADR-019 "Presets"). A widget of any other kind is not placed. In Edit Widgets, when the
+/// layout holds no fixed widget the box could draw, the widgets go in list order
+/// ([`list_flow`]).
+pub fn fixed_flow() -> FlowPlace {
+    Rc::new(|input: &FlowInput<'_>| {
+        let fixed = input.items.iter().find(|i| {
+            matches!(i.setting.content, WidgetContent::Fixed(_))
+                && i.availability == Availability::Available
+        });
+        let Some(fixed) = fixed else {
+            if input.frozen.is_some() {
+                return list_flow(input);
+            }
+            return grid::place(
+                &[],
+                grid_cols(&input.layout.container),
+                input.area,
+                input.scale,
+                input.frozen,
+            );
+        };
+        let mut placement = grid::place(
+            &[],
+            grid_cols(&input.layout.container),
+            input.area,
+            input.scale,
+            input.frozen,
+        );
+        placement.content_h = input.area.height;
+        placement.widgets = vec![PlacedWidget {
+            id: fixed.setting.id,
+            bounds: gpui_kit::Bounds::new(point(px(0.), px(0.)), input.area),
+        }];
+        placement
+    })
 }
 
 /// The widgets of one container.
@@ -288,7 +327,8 @@ impl WidgetContainer {
 
     /// The part of the page's demand this container adds: the GPU records while it places a
     /// widget, the records of the members of the groups it places (fast CPU samples for
-    /// cores, as the core rows ask), and the process sweep while it places Memory by app. A
+    /// cores, as the core rows ask), the process sweep while it places Memory by app or the
+    /// Processes table, and the timeline while it places the Timeline. A
     /// container with no placed widget asks for nothing.
     pub fn demand_part(&self) -> Demand {
         let mut demand = Demand {
@@ -302,8 +342,12 @@ impl WidgetContainer {
                 .iter()
                 .find(|w| w.id == p.id)
                 .map(|w| &w.content);
-            if let Some(WidgetContent::Fixed(FixedWidget::MemoryByApp)) = content {
-                demand.process_top = true;
+            match content {
+                Some(WidgetContent::Fixed(FixedWidget::MemoryByApp | FixedWidget::Processes)) => {
+                    demand.process_top = true;
+                }
+                Some(WidgetContent::Fixed(FixedWidget::Timeline)) => demand.device_timeline = true,
+                _ => {}
             }
             let Some(WidgetContent::Group(g)) = content else {
                 continue;

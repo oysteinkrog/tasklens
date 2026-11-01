@@ -36,6 +36,7 @@ pub mod disk_box;
 pub mod disk_flow;
 pub mod edit;
 pub mod fit;
+pub mod fixed_box;
 pub mod gpu_box;
 pub mod gpu_flow;
 pub mod inner_split;
@@ -73,6 +74,7 @@ use tl_model::snapshot::ComponentMask;
 use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;
 use self::edit::EditState;
+use self::fixed_box::{FixedBox, FixedPlaced};
 use self::gpu_box::GpuBox;
 use self::inner_split::{InnerSplitChanged, hit_selector};
 use self::layout::{BoxKind, GridBox, OverviewLayout, Placement, ROW_UNIT_DEFAULT, place_rows};
@@ -217,10 +219,11 @@ pub struct OverviewPage {
     gpu: Entity<GpuBox>,
     disk: Entity<DiskBox>,
     net: Entity<NetBox>,
-    /// The Top processes box, built only while the layout places it.
-    procs: Option<Entity<ProcsBox>>,
-    /// The 24-hour timeline box (UI-PRF-057).
-    timeline: Entity<TimelineBox>,
+    /// The Top processes box, built only while the layout places it: the rows (the content of
+    /// the fixed `processes` widget) and the box around them.
+    procs: Option<Hosted<ProcsBox>>,
+    /// The 24-hour timeline box (UI-PRF-057): the bands and the box around them.
+    timeline: Hosted<TimelineBox>,
     /// The time the page is held at, and CLOCK_REALTIME when it was set, so the request end
     /// stays the same until the pause or the range changes (UI-PRF-057).
     paused: Option<(Paused, i64)>,
@@ -269,6 +272,16 @@ pub struct OverviewPage {
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
+}
+
+/// A box of one fixed widget: its content view and the [`FixedBox`] that frames it. The page
+/// asks for the widget's demand while the box shows the widget.
+struct Hosted<T: 'static> {
+    content: Entity<T>,
+    frame: Entity<FixedBox>,
+    /// The box shows its fixed widget now.
+    placed: bool,
+    _sub: Subscription,
 }
 
 impl OverviewPage {
@@ -366,8 +379,8 @@ impl OverviewPage {
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         let procs = layout
             .has(BoxKind::TopProcs)
-            .then(|| cx.new(|cx| ProcsBox::new(&hub, cx)));
-        let timeline = cx.new(|cx| TimelineBox::new(&hub, cx));
+            .then(|| Self::procs_hosted(&hub, cx));
+        let timeline = Self::timeline_hosted(&hub, cx);
         subs.push(cx.observe_global::<OverviewPause>(Self::on_pause));
         let id = cx.entity_id();
         let release_demand = demand.clone();
@@ -427,6 +440,50 @@ impl OverviewPage {
         this
     }
 
+    /// The Top processes box: its rows and the frame around them.
+    fn procs_hosted(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Hosted<ProcsBox> {
+        let content = cx.new(|cx| ProcsBox::new(hub, cx));
+        let frame = cx.new(|cx| FixedBox::new(procs_box::SPEC, content.clone(), None, hub, cx));
+        let placed = frame.read(cx).is_placed();
+        let _sub = cx.subscribe(&frame, |this, _, ev: &FixedPlaced, cx| {
+            if let Some(p) = &mut this.procs {
+                p.placed = ev.0;
+            }
+            this.send_demand(cx);
+        });
+        Hosted {
+            content,
+            frame,
+            placed,
+            _sub,
+        }
+    }
+
+    /// The 24-hour timeline box: its bands and the frame around them.
+    fn timeline_hosted(hub: &Entity<SnapshotHub>, cx: &mut Context<Self>) -> Hosted<TimelineBox> {
+        let content = cx.new(|cx| TimelineBox::new(hub, cx));
+        let frame = cx.new(|cx| {
+            FixedBox::new(
+                timeline::SPEC,
+                content.clone(),
+                Some(TimelineBox::line),
+                hub,
+                cx,
+            )
+        });
+        let placed = frame.read(cx).is_placed();
+        let _sub = cx.subscribe(&frame, |this, _, ev: &FixedPlaced, cx| {
+            this.timeline.placed = ev.0;
+            this.send_demand(cx);
+        });
+        Hosted {
+            content,
+            frame,
+            placed,
+            _sub,
+        }
+    }
+
     /// Everything the boxes draw, CPU per core at 10 Hz, the process sweep while the Top
     /// processes box is placed or the Memory box shows "By app" (its groups are summed on each
     /// sweep, UI-PRF-060), the device metric history for 1 h, 24 h and 7 d and for every range
@@ -434,10 +491,10 @@ impl OverviewPage {
     pub fn demand_part(&self) -> Demand {
         let (paused, at) = self.paused.unzip();
         Demand {
-            process_top: self.procs.is_some()
+            process_top: self.procs.as_ref().is_some_and(|p| p.placed)
                 || (self.layout.has(BoxKind::Memory) && self.mem_apps),
             device_history_range: history_request(self.range, paused, at.unwrap_or(0)),
-            device_timeline: self.layout.has(BoxKind::Timeline),
+            device_timeline: self.layout.has(BoxKind::Timeline) && self.timeline.placed,
             any_surface_visible: true,
             cpu: CpuDemand::PerCore,
             cpu_fast: true,
@@ -488,12 +545,22 @@ impl OverviewPage {
 
     /// The Top processes box while the layout places it.
     pub fn procs_box(&self) -> Option<&Entity<ProcsBox>> {
-        self.procs.as_ref()
+        self.procs.as_ref().map(|p| &p.content)
     }
 
-    /// The 24-hour timeline box.
+    /// The box around the Top processes rows, with its container and editor.
+    pub fn procs_frame(&self) -> Option<&Entity<FixedBox>> {
+        self.procs.as_ref().map(|p| &p.frame)
+    }
+
+    /// The 24-hour timeline bands, the content of the Timeline box.
     pub fn timeline_box(&self) -> &Entity<TimelineBox> {
-        &self.timeline
+        &self.timeline.content
+    }
+
+    /// The box around the timeline bands, with its container and editor.
+    pub fn timeline_frame(&self) -> &Entity<FixedBox> {
+        &self.timeline.frame
     }
 
     /// The time the page is held at, `None` while live (UI-PRF-057).
@@ -872,10 +939,8 @@ impl OverviewPage {
             self.net.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
         if procs != self.procs.is_some() {
-            self.procs = procs.then(|| {
-                let hub = self.hub.clone();
-                cx.new(|cx| ProcsBox::new(&hub, cx))
-            });
+            let hub = self.hub.clone();
+            self.procs = procs.then(|| Self::procs_hosted(&hub, cx));
             self.send_demand(cx);
         } else if timeline_moved || mem_apps_moved {
             self.send_demand(cx);
@@ -1142,10 +1207,15 @@ impl OverviewPage {
             BoxKind::Disk => self.disk.clone().cached(cached).into_any_element(),
             BoxKind::Net => self.net.clone().cached(cached).into_any_element(),
             BoxKind::TopProcs => match &self.procs {
-                Some(procs) => procs.clone().cached(cached).into_any_element(),
+                Some(procs) => procs.frame.clone().cached(cached).into_any_element(),
                 None => div().into_any_element(),
             },
-            BoxKind::Timeline => self.timeline.clone().cached(cached).into_any_element(),
+            BoxKind::Timeline => self
+                .timeline
+                .frame
+                .clone()
+                .cached(cached)
+                .into_any_element(),
         }
     }
 }
@@ -1246,10 +1316,10 @@ impl OverviewPage {
                 BoxKind::Net => self.net.read(cx).copy_text(out),
                 BoxKind::TopProcs => {
                     if let Some(procs) = &self.procs {
-                        procs.read(cx).copy_text(out);
+                        procs.content.read(cx).copy_text(out);
                     }
                 }
-                BoxKind::Timeline => self.timeline.read(cx).copy_text(out),
+                BoxKind::Timeline => self.timeline.content.read(cx).copy_text(out),
             }
         }
     }

@@ -512,8 +512,9 @@ impl OverviewPage {
         self.disk.update(cx, |_, cx| cx.notify());
         self.net.update(cx, |_, cx| cx.notify());
         if let Some(procs) = &self.procs {
-            procs.update(cx, |_, cx| cx.notify());
+            procs.frame.update(cx, |_, cx| cx.notify());
         }
+        self.timeline.frame.update(cx, |_, cx| cx.notify());
     }
 
     /// `PerfOverviewResetLayout`: the default layout, saved; the mode stays on.

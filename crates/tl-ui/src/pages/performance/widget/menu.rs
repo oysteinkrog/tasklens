@@ -1132,6 +1132,8 @@ fn box_name(container: &str, cx: &App) -> SharedString {
         tl_model::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
         tl_model::layout::DISK_BOX_CONTAINER => tr(cx, "perf-overview-box-disks"),
         tl_model::layout::NET_BOX_CONTAINER => tr(cx, "perf-overview-box-network"),
+        tl_model::layout::PROCESSES_BOX_CONTAINER => tr(cx, "perf-overview-box-processes"),
+        tl_model::layout::TIMELINE_BOX_CONTAINER => tr(cx, "perf-overview-box-timeline"),
         other => SharedString::from(other.to_string()),
     }
 }

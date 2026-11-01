@@ -44,9 +44,9 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FixedWidget, FormSet,
-    LAYOUT_VERSION, MEMORY_BOX_CONTAINER, MetricKey, NET_BOX_CONTAINER, SourceSelector, WidgetCell,
-    WidgetContent, WidgetOptions, WidgetSetting, default_box_layout, grid_cols, overview_kind,
-    reset_to_default,
+    LAYOUT_VERSION, MEMORY_BOX_CONTAINER, MetricKey, NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER,
+    SourceSelector, TIMELINE_BOX_CONTAINER, WidgetCell, WidgetContent, WidgetOptions,
+    WidgetSetting, default_box_layout, grid_cols, overview_kind, reset_to_default,
 };
 use tl_model::layout_boxes::DeviceKind;
 
@@ -76,8 +76,11 @@ pub const UNDO_LIMIT: usize = 100;
 
 /// The fixed widgets Add Widget offers, each in its own box, with their name keys
 /// (UI-PRF-061 phase 2).
-const FIXED_ADDS: [(FixedWidget, &str); 1] =
-    [(FixedWidget::MemoryByApp, "perf-widget-fixed-by-app")];
+const FIXED_ADDS: [(FixedWidget, &str); 3] = [
+    (FixedWidget::MemoryByApp, "perf-widget-fixed-by-app"),
+    (FixedWidget::Processes, "perf-widget-fixed-processes"),
+    (FixedWidget::Timeline, "perf-widget-fixed-timeline"),
+];
 /// The edit toolbar's height, logical px.
 pub const TOOLBAR_H: f32 = 32.;
 /// The grip and the gear, logical px. The gear sits right of the grip.
@@ -886,9 +889,21 @@ impl WidgetEditor {
 
     /// The sources the box can show, now: the CPU's metrics and logical CPUs in the CPU box,
     /// the memory metrics in the Memory box, the shown disks and the disk total in the Disk box,
-    /// the counted adapters and their total in the Network box, else the GPUs the box shows.
+    /// the counted adapters and their total in the Network box, the CPU's in the Top processes
+    /// box, the four bands' devices (CPU, memory, disks, adapters) in the Timeline box, else the
+    /// GPUs the box shows.
     pub fn source_groups(&self, cx: &App) -> Vec<SourceGroup> {
         let snap = box_snapshot(&self.hub, cx);
+        if *self.id == *PROCESSES_BOX_CONTAINER {
+            return menu::cpu_source_groups(&snap, cx);
+        }
+        if *self.id == *TIMELINE_BOX_CONTAINER {
+            let mut groups = menu::cpu_source_groups(&snap, cx);
+            groups.extend(menu::mem_source_groups(&snap, cx));
+            groups.extend(menu::disk_source_groups(&snap, cx));
+            groups.extend(menu::net_source_groups(&snap, cx));
+            return groups;
+        }
         if *self.id == *CPU_BOX_CONTAINER {
             return menu::cpu_source_groups(&snap, cx);
         }
@@ -905,7 +920,8 @@ impl WidgetEditor {
     }
 
     /// The fixed widget Add Widget offers: the one the box allows (Memory by app in the Memory
-    /// box), while the working layout has none.
+    /// box, the table in Top processes, the bands in Timeline), while the working layout has
+    /// none.
     pub fn fixed_add(&self, cx: &App) -> Option<menu::FixedAdd> {
         let (kind, key) = FIXED_ADDS
             .iter()

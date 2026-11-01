@@ -21,6 +21,10 @@
 //! history request, and while it is set the range switch disables the ranges the finest tier
 //! at that time cannot serve ([`servable`]).
 //!
+//! D-041, ADR-019 phase 2: [`TimelineBox`] is the content of the box's fixed `timeline` widget.
+//! It draws the markers, bands and ticks only; the box frame (title, journal note), the
+//! container and Edit Widgets are `fixed_box::FixedBox` ([`SPEC`]).
+//!
 //! Render contract: the box notifies only when the timeline component, the pause, the range or
 //! a drag changes. A tick that leaves those alone renders nothing.
 
@@ -42,6 +46,7 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop};
 use tl_model::journal::JournalAccess;
+use tl_model::layout::{FixedWidget, TIMELINE_BOX_CONTAINER};
 use tl_model::settings::{OverviewRange, PerformanceSettings, TimelineClick};
 use tl_model::snapshot::{
     DeviceTimeline, HistPoint, TimelineBand, TimelineEvent, TimelineEventKind,
@@ -49,9 +54,9 @@ use tl_model::snapshot::{
 use tl_model::time::TimeNs;
 
 use super::fit::whole_rows;
+use super::fixed_box::FixedBoxSpec;
 use super::layout::BoxMode;
-use super::parts::{box_frame, edit_chrome};
-use super::range::{self, RangeText};
+use super::range;
 use crate::components::toast::ToastKind;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
@@ -94,6 +99,16 @@ pub const MODES: &[BoxMode] = &[BoxMode {
     label: "perf-overview-mode-bands",
     split: None,
 }];
+
+/// What makes the box: its frame, container and fixed widget (`fixed_box.rs`).
+pub const SPEC: FixedBoxSpec = FixedBoxSpec {
+    box_id: TIMELINE_BOX_ID,
+    kind: "timeline",
+    container: TIMELINE_BOX_CONTAINER,
+    fixed: || FixedWidget::Timeline,
+    title_key: "perf-overview-box-timeline",
+    empty_id: "perf-overview-timeline-widgets-empty",
+};
 
 /// One heat band's height, logical px.
 pub const BAND_H: f32 = 14.;
@@ -649,6 +664,11 @@ impl TimelineBox {
             .map(|_| self.words.own_only.clone())
     }
 
+    /// The box's title line summary: the journal note, or nothing.
+    pub fn line(&self) -> SharedString {
+        self.journal_note().unwrap_or_default()
+    }
+
     /// "Timeline" and one line per event: its name and local time.
     pub fn copy_text(&self, out: &mut String) {
         out.push_str(&self.words.title);
@@ -988,7 +1008,7 @@ impl Render for TimelineBox {
                 .child(div().relative().flex_1().min_w_0().h_full().child(child))
         };
         // Only the rows that fit whole draw, top first (UI-PRF-017).
-        let body = whole_rows()
+        whole_rows()
             .size_full()
             .child(row(MARKER_ROW_ID, markers, MARKER_ROW))
             .child(
@@ -1000,20 +1020,6 @@ impl Render for TimelineBox {
                     .child(area),
             )
             .child(row(TICK_ROW_ID, ticks, TICK_ROW))
-            .into_any_element();
-        box_frame(
-            TIMELINE_BOX_ID,
-            None,
-            self.words.title.clone(),
-            SharedString::default(),
-            self.journal_note().unwrap_or_default(),
-            &RangeText::default(),
-            body,
-            edit_chrome(cx),
-            &m,
-            &theme,
-        )
-        .size_full()
     }
 }
 

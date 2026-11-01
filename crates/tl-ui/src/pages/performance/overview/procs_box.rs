@@ -1,6 +1,10 @@
 //! The Overview page's opt-in Top processes box (UI-PRF-017, D-022, crw.45): the 10 busiest
 //! processes by CPU, one row each with name, PID and a CPU meter.
 //!
+//! D-041, ADR-019 phase 2: [`ProcsBox`] is the content of the box's fixed `processes` widget.
+//! It draws the rows only; the box frame, the container and Edit Widgets are
+//! `fixed_box::FixedBox` ([`SPEC`]).
+//!
 //! The page builds the box only while the saved layout (`[performance.overview]`) places it,
 //! and only then asks for `Demand.process_top`. On each `PROCESSES` change the box picks the top rows with
 //! a bounded selection over the records (no sort of the whole list) and hashes what the rows
@@ -23,15 +27,16 @@ use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::ids::ProcessKey;
+use tl_model::layout::{FixedWidget, PROCESSES_BOX_CONTAINER};
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
 use tracing::warn;
 
 use super::fit::whole_rows;
+use super::fixed_box::FixedBoxSpec;
 use super::layout::BoxMode;
-use super::parts::{Meter, box_frame, edit_chrome};
+use super::parts::Meter;
 use super::picked::{box_mask, box_snapshot};
-use super::range::RangeText;
 use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
@@ -51,6 +56,16 @@ pub const MODES: &[BoxMode] = &[BoxMode {
     label: "perf-overview-mode-list",
     split: None,
 }];
+
+/// What makes the box: its frame, container and fixed widget (`fixed_box.rs`).
+pub const SPEC: FixedBoxSpec = FixedBoxSpec {
+    box_id: PROCS_BOX_ID,
+    kind: "processes",
+    container: PROCESSES_BOX_CONTAINER,
+    fixed: || FixedWidget::Processes,
+    title_key: KEY_TITLE,
+    empty_id: "perf-overview-processes-widgets-empty",
+};
 
 /// The prefix of each process row's debug selector, followed by the PID.
 pub const PROC_ROW_ID_PREFIX: &str = "perf-overview-proc-row:";
@@ -391,19 +406,6 @@ impl Render for ProcsBox {
                 &self.last_jump,
             ));
         }
-        let body = whole_rows().size_full().children(rows).into_any_element();
-        box_frame(
-            PROCS_BOX_ID,
-            None,
-            self.title.clone(),
-            SharedString::default(),
-            SharedString::default(),
-            &RangeText::default(),
-            body,
-            edit_chrome(cx),
-            &m,
-            &theme,
-        )
-        .size_full()
+        whole_rows().size_full().children(rows)
     }
 }

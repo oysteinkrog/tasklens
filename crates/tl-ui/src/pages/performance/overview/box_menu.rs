@@ -14,7 +14,7 @@
 //! new arrangement or the default, the box views follow, and the layout is saved.
 //!
 //! When a box hosts a widget editor (UI-PRF-061: the GPU box, and from phase 2 the CPU, Memory,
-//! Disk and Network boxes),
+//! Disk, Network, Top processes and Timeline boxes),
 //! its menu has "Edit Widgets…" above "Reset Box" ([`PerfWidgetEditBox`]; the GPU box also keeps
 //! [`PerfWidgetEditStart`]), which ends Edit Layout and starts Edit Widgets. While the box shows
 //! the user's own widgets (a grid layout), "Arrange", "Engines", "Show power draw", "Power draw
@@ -29,9 +29,9 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::layout::{
     CPU_BOX_CONTAINER, DISK_BOX_CONTAINER, GPU_BOX_CONTAINER, MEMORY_BOX_CONTAINER,
-    NET_BOX_CONTAINER, reset_to_default,
+    NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER, TIMELINE_BOX_CONTAINER, reset_to_default,
 };
-use tl_model::layout_boxes::convert_box;
+use tl_model::layout_boxes::{convert_box, fixed_box_default};
 use tl_model::settings::TimelineClick;
 
 use super::OverviewPage;
@@ -126,8 +126,8 @@ pub struct BoxMenuTarget {
 
 /// The widget container of the box of `kind`, when the box is on widgets: the GPU box
 /// (phase 1), the CPU box (tasklens-6swdr.4), the Memory box (tasklens-6swdr.5), the Disk box
-/// (tasklens-6swdr.6) and the Network box (tasklens-6swdr.7). The other boxes join with their
-/// beads.
+/// (tasklens-6swdr.6), the Network box (tasklens-6swdr.7), and the Top processes and Timeline
+/// boxes (tasklens-6swdr.8).
 pub fn widget_container(kind: BoxKind) -> Option<&'static str> {
     match kind {
         BoxKind::Gpu => Some(GPU_BOX_CONTAINER),
@@ -135,17 +135,20 @@ pub fn widget_container(kind: BoxKind) -> Option<&'static str> {
         BoxKind::Memory => Some(MEMORY_BOX_CONTAINER),
         BoxKind::Disk => Some(DISK_BOX_CONTAINER),
         BoxKind::Net => Some(NET_BOX_CONTAINER),
-        _ => None,
+        BoxKind::TopProcs => Some(PROCESSES_BOX_CONTAINER),
+        BoxKind::Timeline => Some(TIMELINE_BOX_CONTAINER),
     }
 }
 
 /// The kinds of the boxes on widgets, in page order.
-const WIDGET_BOXES: [BoxKind; 5] = [
+const WIDGET_BOXES: [BoxKind; 7] = [
     BoxKind::Cpu,
     BoxKind::Memory,
     BoxKind::Gpu,
     BoxKind::Disk,
     BoxKind::Net,
+    BoxKind::TopProcs,
+    BoxKind::Timeline,
 ];
 
 /// Whether `container`'s saved layout is a grid layout.
@@ -564,7 +567,12 @@ impl OverviewPage {
             BoxKind::Memory => self.mem.update(cx, |b, cx| b.prepare_edit(cx)),
             BoxKind::Disk => self.disk.update(cx, |b, cx| b.prepare_edit(cx)),
             BoxKind::Net => self.net.update(cx, |b, cx| b.prepare_edit(cx)),
-            _ => {}
+            BoxKind::TopProcs => {
+                if let Some(p) = &self.procs {
+                    p.frame.update(cx, |b, cx| b.prepare_edit(cx));
+                }
+            }
+            BoxKind::Timeline => self.timeline.frame.update(cx, |b, cx| b.prepare_edit(cx)),
         }
         editor.update(cx, |e, cx| e.start(window, cx));
         self.notify(cx);
@@ -590,7 +598,9 @@ impl OverviewPage {
                 .cloned()
                 .unwrap_or_default();
             entry.mode = Some(mode.to_owned());
-            if let Some(flow) = convert_box(kind.key(), &entry) {
+            if let Some(flow) =
+                convert_box(kind.key(), &entry).or_else(|| fixed_box_default(kind.key()))
+            {
                 perf.layouts.set(flow);
             }
         });
