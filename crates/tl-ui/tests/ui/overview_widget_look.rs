@@ -24,6 +24,7 @@ use tl_model::settings::{
     AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
 };
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
+use tl_model::system::{DiskTotals, LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
@@ -35,8 +36,11 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::actions::{PerfOverviewSetBoxMode, PerfWidgetEditBox};
-use tl_ui::pages::performance::overview::parts::CoreCellFit;
+use tl_ui::pages::performance::overview::cpu_box::core_chart_id;
+use tl_ui::pages::performance::overview::mem_box::MemRowsRef;
+use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell};
 use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui::pages::performance::overview::{disk_box, net_box};
 use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::widget::container::WidgetContainer;
 use tl_ui::pages::performance::widget::edit::WidgetEditor;
@@ -49,6 +53,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 const CORE0: u16 = 100;
 const CORES: u16 = 4;
 const GIB: u64 = 1 << 30;
+/// sda and sdb: device index, read and write in bytes per second.
+const DISKS: [(u16, f64, f64); 2] = [(3, 1_000_000., 300_000.), (4, 200_000., 40_000.)];
 
 struct Host {
     page: Entity<OverviewPage>,
@@ -97,7 +103,7 @@ fn catalog() -> DeviceCatalog {
         entry(0, DeviceIdentity::CpuPackage, "cpu", None),
         entry(1, DeviceIdentity::Memory, "memory", None),
     ];
-    for (idx, name) in [(3, "sda"), (4, "sdb")] {
+    for (idx, name) in [(DISKS[0].0, "sda"), (DISKS[1].0, "sdb")] {
         entries.push(entry(
             idx,
             DeviceIdentity::Disk {
@@ -167,8 +173,8 @@ struct Rig<'a> {
     _driver: Entity<AnimationDriver>,
 }
 
-/// The Overview page at 1920 × 1200 with every box, the kernel line on, memory totals and one sample per
-/// core of load (41.7%) and clock (3.94 GHz).
+/// The Overview page at 1920 × 1200 with every box, the kernel line on, memory totals, one
+/// sample per core of load (41.7%) and clock (3.94 GHz), and each disk's and eth0's rates.
 fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
@@ -185,14 +191,53 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
         sys.memory.swap_free = 6 * GIB;
         sys.memory.commit_limit = 40 * GIB;
         sys.memory.committed = 20 * GIB;
+        // Each disk's and eth0's totals: they sum to the aggregate series below.
+        sys.disks = DISKS
+            .iter()
+            .map(|&(idx, read, write)| {
+                (
+                    DeviceIdx(idx),
+                    DiskTotals {
+                        device: DeviceIdx(idx),
+                        active_pct: Metric::valid(12.),
+                        read_bps: Metric::valid(read),
+                        write_bps: Metric::valid(write),
+                        response_ms: Metric::valid(1.),
+                        read_total: 0,
+                        written_total: 0,
+                        capacity: 0,
+                        temp_c: Metric::default(),
+                    },
+                )
+            })
+            .collect();
+        sys.nets = Arc::from([(
+            DeviceIdx(5),
+            NetTotals {
+                device: DeviceIdx(5),
+                rx_bps: Metric::valid(180_000.),
+                tx_bps: Metric::valid(27_000.),
+                rx_total: 0,
+                tx_total: 0,
+                link_speed_mbps: Metric::valid(1_000),
+                state: LinkState::Up,
+            },
+        )]);
         let version = 1;
         let mut views = Vec::new();
         for id in 0..CORES {
             views.push(series(CORE0 + id, MetricId::CPU_TOTAL, 41.7, version));
             views.push(series(CORE0 + id, MetricId::CPU_FREQ, 3940.0, version));
         }
-        // The disk and network totals, so their widgets have a series to draw.
+        // Each disk's and eth0's series, and the disk and network totals, so their widgets
+        // have a series to draw.
+        for &(idx, read, write) in &DISKS {
+            views.push(series(idx, MetricId::DISK_READ, read as f32, version));
+            views.push(series(idx, MetricId::DISK_WRITE, write as f32, version));
+        }
         for (device, metric, v) in [
+            (5, MetricId::NET_RX, 180_000.0),
+            (5, MetricId::NET_TX, 27_000.0),
             (50, MetricId::DISK_READ, 1_200_000.0),
             (50, MetricId::DISK_WRITE, 340_000.0),
             (50, MetricId::DISK_ACTIVE, 12.0),
@@ -283,31 +328,85 @@ fn draw(cx: &mut VisualTestContext) {
     }
 }
 
-/// What a widget draws that must not change with its placement. `None` is a part the flow
-/// look of that widget does not show in a comparable form, and is left out of the comparison.
-#[derive(Clone, Debug, PartialEq)]
+/// What a widget, or one item of a group, draws that must not change with its placement.
+/// `None` is a part the flow look does not show in a comparable form, and is left out of the
+/// comparison.
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Look {
-    /// The line colour of the chart's first series.
+    /// The line colour of the first series.
     accent: Option<Hsla>,
-    /// The chart's series count.
+    /// The series count, over every chart the item draws.
     series: Option<usize>,
-    /// The chart's legend names.
+    /// Every series' line colour, in order.
+    lines: Option<Vec<Hsla>>,
+    /// The legend names, over every chart the item draws.
     legend: Option<Vec<String>>,
     value: Option<String>,
+    /// The rate texts the value shows ("1.0 MB/s"), without their R, W, ↓ and ↑ marks.
+    rates: Option<Vec<String>>,
     /// A core row's clock column: its text, while it shows.
     clock: Option<Option<String>>,
+    /// A core row's parts, left to right.
+    parts: Option<Vec<&'static str>>,
 }
 
-fn chart_parts(chart: Option<&ChartView>) -> (Option<Hsla>, Option<usize>, Option<Vec<String>>) {
-    match chart {
-        Some(c) => (
-            c.spec.series.first().map(|s| s.line),
-            Some(c.spec.series.len()),
-            Some(c.labels.legend.iter().map(|(n, _)| n.to_string()).collect()),
-        ),
-        None => (None, None, None),
+/// A widget's look: one item for a widget, one per drawn member for a group, with the group's
+/// column count.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct WidgetLook {
+    cols: Option<usize>,
+    items: Vec<Look>,
+}
+
+impl WidgetLook {
+    fn one(look: Look) -> Self {
+        Self {
+            cols: None,
+            items: vec![look],
+        }
     }
 }
+
+/// The chart parts of a look drawn by `charts`, in order.
+fn charts_look(charts: &[&ChartView]) -> Look {
+    if charts.is_empty() {
+        return Look::default();
+    }
+    let lines: Vec<Hsla> = charts
+        .iter()
+        .flat_map(|c| c.spec.series.iter().map(|s| s.line))
+        .collect();
+    Look {
+        accent: lines.first().copied(),
+        series: Some(lines.len()),
+        legend: Some(
+            charts
+                .iter()
+                .flat_map(|c| c.labels.legend.iter().map(|(n, _)| n.to_string()))
+                .collect(),
+        ),
+        lines: Some(lines),
+        ..Look::default()
+    }
+}
+
+/// The rates of a value text: "R 1.0 MB/s  W 300 kB/s", "↓ 1.4 Mbps  ↑ 216 kbps" and
+/// "1.4 Mbps / 216 kbps" each give their two rates.
+fn rates(text: &str) -> Vec<String> {
+    text.split("  ")
+        .flat_map(|p| p.split(" / "))
+        .map(|p| {
+            p.trim()
+                .trim_start_matches(['R', 'W', '↓', '↑'])
+                .trim()
+                .to_owned()
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// The parts of a member core row, in the order the flow look's `parts::core_cell` draws them.
+const CORE_PARTS: [&str; 5] = ["name", "chart", "bar", "value", "clock"];
 
 /// The phase 2 boxes: (kind, container id, presets).
 const BOXES: [(&str, &str, &[&str]); 6] = [
@@ -379,12 +478,28 @@ impl Rig<'_> {
         })
     }
 
+    /// The bounds of debug selector `id` at the last frame.
+    fn bounds(&mut self, id: String) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+        self.vcx.debug_bounds(Box::leak(id.into_boxed_str()))
+    }
+
+    /// The number of columns the drawn cells `ids` stand in: their distinct left edges.
+    fn columns(&mut self, ids: impl IntoIterator<Item = String>) -> usize {
+        let mut xs: Vec<f32> = ids
+            .into_iter()
+            .filter_map(|id| self.bounds(id).map(|b| f32::from(b.origin.x)))
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        xs.len()
+    }
+
     /// The settings and look of every placed widget of `container`, by id.
     fn looks(
         &mut self,
         container: &Entity<WidgetContainer>,
         container_id: &str,
-    ) -> Vec<(WidgetSetting, Look)> {
+    ) -> Vec<(WidgetSetting, WidgetLook)> {
         let ids = self.vcx.update(|_, cx| container.read(cx).placed_ids());
         let mut out = Vec::new();
         for id in ids {
@@ -406,87 +521,78 @@ impl Rig<'_> {
         out
     }
 
-    fn look(&mut self, container: &Entity<WidgetContainer>, container_id: &str, id: u32) -> Look {
+    fn look(
+        &mut self,
+        container: &Entity<WidgetContainer>,
+        container_id: &str,
+        id: u32,
+    ) -> WidgetLook {
         let (widget, group) = self.vcx.update(|_, cx| {
             let c = container.read(cx);
             (c.widget(id).cloned(), c.group(id).cloned())
         });
         if let Some(w) = widget {
-            return self.vcx.update(|_, cx| {
+            return WidgetLook::one(self.vcx.update(|_, cx| {
                 let w = w.read(cx);
-                let chart = |c: &Entity<ChartView>| chart_parts(Some(c.read(cx)));
+                let mem_value = |rows: &MemRowsRef, index: usize| {
+                    Some(rows.0.borrow().rows[index].value.to_string())
+                };
                 match w.flow() {
-                    Some(FlowLook::Chart(c)) => {
-                        let (accent, series, legend) = chart(c);
-                        Look {
-                            accent,
-                            series,
-                            legend,
-                            value: None,
-                            clock: None,
-                        }
-                    }
-                    Some(FlowLook::MemRow { rows, index, spark }) => {
-                        let (accent, series, legend) = match spark {
-                            Some(c) => chart(c),
-                            None => (None, None, None),
-                        };
-                        Look {
-                            accent,
-                            series,
-                            legend,
-                            value: Some(rows.0.borrow().rows[*index].value.to_string()),
-                            clock: None,
-                        }
-                    }
+                    Some(FlowLook::Chart(c)) => charts_look(&[c.read(cx)]),
+                    Some(FlowLook::MemRow { rows, index, spark }) => Look {
+                        value: mem_value(rows, *index),
+                        ..charts_look(&spark.iter().map(|c| c.read(cx)).collect::<Vec<_>>())
+                    },
                     Some(FlowLook::MemCell {
                         rows,
                         index,
                         chart: c,
-                    }) => {
-                        let (accent, series, legend) = chart(c);
-                        Look {
-                            accent,
-                            series,
-                            legend,
-                            value: Some(rows.0.borrow().rows[*index].value.to_string()),
-                            clock: None,
-                        }
-                    }
-                    Some(FlowLook::NetDirection { chart: c, .. })
-                    | Some(FlowLook::NetCombined { chart: c, .. }) => {
-                        let (accent, series, legend) = chart(c);
-                        Look {
-                            accent,
-                            series,
-                            legend,
-                            value: None,
-                            clock: None,
-                        }
-                    }
+                    }) => Look {
+                        value: mem_value(rows, *index),
+                        ..charts_look(&[c.read(cx)])
+                    },
+                    Some(FlowLook::NetDirection {
+                        model,
+                        upload,
+                        chart: c,
+                    }) => Look {
+                        rates: Some(vec![
+                            model.0.borrow().rates[usize::from(*upload)].to_string(),
+                        ]),
+                        ..charts_look(&[c.read(cx)])
+                    },
+                    Some(FlowLook::NetCombined { model, chart: c }) => Look {
+                        rates: Some(
+                            model
+                                .0
+                                .borrow()
+                                .rates
+                                .iter()
+                                .map(|r| r.to_string())
+                                .collect(),
+                        ),
+                        ..charts_look(&[c.read(cx)])
+                    },
                     Some(_) => panic!("widget {id}: no GPU box look in these boxes"),
                     None => {
-                        let (accent, series, legend) = chart_parts(w.chart().map(|c| c.read(cx)));
+                        let value = w.texts()[1].to_string();
                         Look {
-                            accent,
-                            series,
-                            legend,
-                            value: Some(w.texts()[1].to_string()),
-                            clock: None,
+                            rates: Some(rates(&value)),
+                            value: Some(value),
+                            ..charts_look(
+                                &w.chart()
+                                    .map(|c| c.read(cx))
+                                    .into_iter()
+                                    .collect::<Vec<_>>(),
+                            )
                         }
                     }
                 }
-            });
+            }));
         }
         let Some(g) = group else {
             // A fixed widget draws its own content in every layout.
-            return Look {
-                accent: None,
-                series: None,
-                legend: None,
-                value: None,
-                clock: None,
-            };
+            return WidgetLook::one(Look::default());
         };
         let flow = self.vcx.update(|_, cx| g.read(cx).flow_look().cloned());
         match flow {
@@ -496,113 +602,175 @@ impl Rig<'_> {
                 layout,
                 ..
             }) => {
-                let (accent, series, legend) = self
-                    .vcx
-                    .update(|_, cx| chart_parts(Some(sparks[0].read(cx))));
+                let layout = layout.get();
+                // The parts `core_cell` places, left to right by where they start.
+                let p = core_cell(&layout, 1.);
+                let mut parts = vec![(0., "name")];
+                if p.spark_w > px(0.) {
+                    parts.push((f32::from(p.spark_x), "chart"));
+                }
+                if p.meter_w > px(0.) {
+                    parts.push((f32::from(p.meter_x), "bar"));
+                }
+                parts.push((f32::from(p.pct_right), "value"));
+                if p.ghz {
+                    parts.push((f32::from(layout.cell_w), "clock"));
+                }
+                parts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let parts: Vec<&'static str> = parts.into_iter().map(|(_, n)| n).collect();
                 let bars = bars.borrow();
-                // The last core: in Edit Widgets the first row's start is the grip's.
-                let last = bars.clock_labels().len().saturating_sub(1);
-                let clock = (layout.get().fit == CoreCellFit::Full)
-                    .then(|| bars.clock_labels()[last].to_string());
-                Look {
-                    accent,
-                    series,
-                    legend,
-                    value: Some(bars.pct_label(0).to_owned()),
-                    clock: Some(clock),
+                let items = (0..sparks.len())
+                    .map(|i| Look {
+                        value: Some(bars.pct_label(i).to_owned()),
+                        clock: Some(
+                            (layout.fit == CoreCellFit::Full)
+                                .then(|| bars.clock_labels()[i].to_string()),
+                        ),
+                        parts: Some(parts.clone()),
+                        ..self.vcx.update(|_, cx| charts_look(&[sparks[i].read(cx)]))
+                    })
+                    .collect();
+                WidgetLook {
+                    cols: Some(layout.cols),
+                    items,
                 }
             }
             Some(GroupFlowLook::CoreCells { bars, sparks, .. }) => {
-                let (accent, series, legend) = self
-                    .vcx
-                    .update(|_, cx| chart_parts(Some(sparks[0].read(cx))));
-                Look {
-                    accent,
-                    series,
-                    legend,
-                    value: Some(bars.borrow().pct_label(0).to_owned()),
-                    clock: None,
+                let cols = self.columns((0..sparks.len()).map(core_chart_id));
+                let bars = bars.borrow();
+                let items = (0..sparks.len())
+                    .map(|i| Look {
+                        value: Some(bars.pct_label(i).to_owned()),
+                        ..self.vcx.update(|_, cx| charts_look(&[sparks[i].read(cx)]))
+                    })
+                    .collect();
+                WidgetLook {
+                    cols: Some(cols),
+                    items,
                 }
             }
             Some(GroupFlowLook::DiskRows { model, .. }) => {
-                // A disk section draws read and write as two sparklines: the accent compares.
-                let chart = model.borrow().rows.first().map(|r| r.read_chart.clone());
-                let accent =
-                    chart.and_then(|c| self.vcx.update(|_, cx| chart_parts(Some(c.read(cx))).0));
-                Look {
-                    accent,
-                    series: None,
-                    legend: None,
-                    value: None,
-                    clock: None,
+                // The sections stack in one column; a section draws read and write as two
+                // sparklines.
+                let rows: Vec<_> = {
+                    let m = model.borrow();
+                    m.rows
+                        .iter()
+                        .take(m.shown)
+                        .map(|r| {
+                            (
+                                r.read_chart.clone(),
+                                r.write_chart.clone(),
+                                vec![r.read.to_string(), r.write.to_string()],
+                            )
+                        })
+                        .collect()
+                };
+                let items = rows
+                    .into_iter()
+                    .map(|(read, write, rates)| Look {
+                        rates: Some(rates),
+                        ..self
+                            .vcx
+                            .update(|_, cx| charts_look(&[read.read(cx), write.read(cx)]))
+                    })
+                    .collect();
+                WidgetLook {
+                    cols: Some(1),
+                    items,
                 }
             }
             Some(GroupFlowLook::DiskCells { model, .. }) => {
-                let chart = model.borrow().rows.first().map(|r| r.pair_chart.clone());
-                let (accent, series, legend) = match chart {
-                    Some(c) => self.vcx.update(|_, cx| chart_parts(Some(c.read(cx)))),
-                    None => (None, None, None),
+                let rows: Vec<_> = {
+                    let m = model.borrow();
+                    m.rows
+                        .iter()
+                        .take(m.cells)
+                        .map(|r| {
+                            (
+                                r.key.clone(),
+                                r.pair_chart.clone(),
+                                vec![r.read.to_string(), r.write.to_string()],
+                            )
+                        })
+                        .collect()
                 };
-                Look {
-                    accent,
-                    series,
-                    legend,
-                    value: None,
-                    clock: None,
+                let cols = self.columns(rows.iter().map(|(key, ..)| disk_box::cell_id(key)));
+                let items = rows
+                    .into_iter()
+                    .map(|(_, chart, rates)| Look {
+                        rates: Some(rates),
+                        ..self.vcx.update(|_, cx| charts_look(&[chart.read(cx)]))
+                    })
+                    .collect();
+                WidgetLook {
+                    cols: Some(cols),
+                    items,
                 }
             }
-            Some(GroupFlowLook::NetCells { .. }) => Look {
-                // The adapter cells' parts are the box's own: nothing compares.
-                accent: None,
-                series: None,
-                legend: None,
-                value: None,
-                clock: None,
-            },
-            None => {
-                // The group's first item.
-                let item = self
-                    .vcx
-                    .update(|_, cx| g.read(cx).items().next().map(|(_, w)| w.clone()));
-                let Some(item) = item else {
-                    return Look {
-                        accent: None,
-                        series: None,
-                        legend: None,
-                        value: None,
-                        clock: None,
-                    };
+            Some(GroupFlowLook::NetCells { model, .. }) => {
+                let cells: Vec<_> = {
+                    let m = model.0.borrow();
+                    m.adapter_cells().into_iter().take(m.cells).collect()
                 };
-                // The clock column of the last item: in Edit Widgets the first row's start is
-                // the grip's.
-                let last = self
-                    .vcx
-                    .update(|_, cx| g.read(cx).items().last().map(|(_, w)| w.clone()))
-                    .expect("a last item");
-                let (item_id, clock_text) = self.vcx.update(|_, cx| {
-                    let w = last.read(cx);
-                    (w.id(), w.clock_text().to_string())
+                let cols = self.columns(cells.iter().map(|(idx, ..)| net_box::cell_id(*idx)));
+                let items = cells
+                    .into_iter()
+                    .map(|(_, text, chart)| Look {
+                        rates: Some(rates(&text)),
+                        ..self.vcx.update(|_, cx| charts_look(&[chart.read(cx)]))
+                    })
+                    .collect();
+                WidgetLook {
+                    cols: Some(cols),
+                    items,
+                }
+            }
+            None => {
+                let (cols, members) = self.vcx.update(|_, cx| {
+                    let g = g.read(cx);
+                    (
+                        g.fill().cols,
+                        g.items().map(|(_, w)| w.clone()).collect::<Vec<_>>(),
+                    )
                 });
-                let look = self.vcx.update(|_, cx| {
-                    let w = item.read(cx);
-                    let (accent, series, legend) = chart_parts(w.chart().map(|c| c.read(cx)));
-                    Look {
-                        accent,
-                        series,
-                        legend,
-                        value: Some(w.texts()[1].to_string()),
-                        clock: None,
+                let mut items = Vec::new();
+                for member in members {
+                    let (member_id, clock_text, look) = self.vcx.update(|_, cx| {
+                        let w = member.read(cx);
+                        let value = w.texts()[1].to_string();
+                        let look = Look {
+                            rates: Some(rates(&value)),
+                            value: Some(value),
+                            ..charts_look(
+                                &w.chart()
+                                    .map(|c| c.read(cx))
+                                    .into_iter()
+                                    .collect::<Vec<_>>(),
+                            )
+                        };
+                        (w.id(), w.clock_text().to_string(), look)
+                    });
+                    // The parts drawn, left to right by where they start.
+                    let mut parts = Vec::new();
+                    for part in CORE_PARTS {
+                        if let Some(b) = self.bounds(part_id(container_id, member_id, part))
+                            && b.size.width > px(0.)
+                        {
+                            parts.push((f32::from(b.origin.x), part));
+                        }
                     }
-                });
-                let drawn = self
-                    .vcx
-                    .debug_bounds(Box::leak(
-                        part_id(container_id, item_id, "clock").into_boxed_str(),
-                    ))
-                    .is_some();
-                Look {
-                    clock: Some(drawn.then_some(clock_text)),
-                    ..look
+                    parts.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    let drawn = parts.iter().any(|(_, p)| *p == "clock");
+                    items.push(Look {
+                        clock: Some(drawn.then_some(clock_text)),
+                        parts: Some(parts.into_iter().map(|(_, p)| p).collect()),
+                        ..look
+                    });
+                }
+                WidgetLook {
+                    cols: Some(cols),
+                    items,
                 }
             }
         }
@@ -614,20 +782,44 @@ fn masked(grid: &Look, flow: &Look) -> Look {
     Look {
         accent: flow.accent.and(grid.accent),
         series: flow.series.and(grid.series),
+        lines: flow.lines.as_ref().and(grid.lines.clone()),
         legend: flow.legend.as_ref().and(grid.legend.clone()),
         value: flow.value.as_ref().and(grid.value.clone()),
+        rates: flow.rates.as_ref().and(grid.rates.clone()),
         clock: flow.clock.as_ref().and(grid.clock.clone()),
+        parts: flow.parts.as_ref().and(grid.parts.clone()),
+    }
+}
+
+/// `grid` with what `flow` leaves out left out too, item by item.
+fn masked_widget(grid: &WidgetLook, flow: &WidgetLook) -> WidgetLook {
+    WidgetLook {
+        cols: flow.cols.and(grid.cols),
+        items: grid
+            .items
+            .iter()
+            .zip(&flow.items)
+            .map(|(g, f)| masked(g, f))
+            .chain(grid.items.iter().skip(flow.items.len()).cloned())
+            .collect(),
     }
 }
 
 /// tasklens-6swdr.12: for each phase 2 box (CPU, Memory, Disk, Network, Top processes and
 /// Timeline) and each preset, Edit Widgets, Apply with no change and the pinned layout saved as
-/// a grid layout keep every widget's accent, series count, legend, value text and core clock
-/// column, and its forms and options. The CPU box has the kernel line on, so its total chart has two series and the
-/// Total and Kernel legend in both layouts; its core rows show "41%" and "3.9 GHz".
+/// a grid layout keep, for every widget and every drawn member of a group, the accent, the
+/// series and their line colours, the legend, the value and rate texts, a core row's clock
+/// column and part order, the group's column count, and the widget's forms and options. The
+/// CPU box has the kernel line on, so its total chart has two series and the Total and Kernel
+/// legend in both layouts; its core rows show "41%" and "3.9 GHz". Each disk and eth0 has a
+/// read and a write rate, so the Disk sections and cells and the Network adapter cells have
+/// charts and rates to compare.
 #[gpui_kit::test]
 fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     let mut r = open(cx);
+    let graph = r
+        .vcx
+        .update(|_, cx| tl_ui::theme::current(cx).graph.clone());
     for (kind, container_id, presets) in BOXES {
         for preset in presets {
             // Back to the built-in flow layout, then the preset.
@@ -647,6 +839,15 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                 !flow.is_empty(),
                 "{kind} {preset}: the flow layout places widgets"
             );
+            for (setting, look) in &flow {
+                if matches!(setting.content, WidgetContent::Group(_)) {
+                    assert!(
+                        !look.items.is_empty() && look.cols.is_some_and(|c| c > 0),
+                        "{kind} {preset}: group {} draws members in columns: {look:?}",
+                        setting.id
+                    );
+                }
+            }
 
             r.page_action(&PerfWidgetEditBox { kind: kind.into() });
             assert!(
@@ -699,7 +900,7 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                         setting.id
                     );
                     assert_eq!(
-                        &masked(l, look),
+                        &masked_widget(l, look),
                         look,
                         "{kind} {preset} {stage}: widget {} ({:?}) keeps its look",
                         setting.id,
@@ -708,39 +909,80 @@ fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
                 }
             }
 
-            // The CPU box's own facts, so a sweep that compares nothing cannot pass.
-            if kind == "cpu" {
-                for (setting, look) in &grid {
-                    match &setting.content {
-                        WidgetContent::Metric(m) if m.metric.as_str() == "total" => {
-                            assert_eq!(look.series, Some(2), "{preset}: total and kernel");
-                            assert_eq!(
-                                look.legend.as_deref(),
-                                Some(&["Total".to_owned(), "Kernel".to_owned()][..]),
-                                "{preset}"
-                            );
+            // Each box's own facts in the grid layout, so a sweep that compares nothing cannot
+            // pass.
+            for (setting, look) in &grid {
+                let group = matches!(setting.content, WidgetContent::Group(_));
+                let metric = match &setting.content {
+                    WidgetContent::Metric(m) => m.metric.as_str(),
+                    _ => "",
+                };
+                match kind {
+                    "cpu" if metric == "total" => {
+                        let l = &look.items[0];
+                        assert_eq!(l.series, Some(2), "{preset}: total and kernel");
+                        assert_eq!(
+                            l.legend.as_deref(),
+                            Some(&["Total".to_owned(), "Kernel".to_owned()][..]),
+                            "{preset}"
+                        );
+                    }
+                    "cpu" if group => {
+                        assert_eq!(
+                            look.items.len(),
+                            usize::from(CORES),
+                            "{preset}: a member per core"
+                        );
+                        for l in &look.items {
+                            assert_eq!(l.value.as_deref(), Some("41%"), "{preset}");
                         }
-                        WidgetContent::Group(_) => {
-                            assert_eq!(look.value.as_deref(), Some("41%"), "{preset}");
-                            if *preset == "cores" || *preset == "chart_cores" {
+                        if *preset == "cores" || *preset == "chart_cores" {
+                            for l in &look.items {
                                 assert_eq!(
-                                    look.clock,
+                                    l.clock,
                                     Some(Some("3.9 GHz".to_owned())),
                                     "{preset}: the clock column"
                                 );
+                                assert_eq!(
+                                    l.parts.as_deref(),
+                                    Some(&CORE_PARTS[..]),
+                                    "{preset}: name, sparkline, meter, percent, clock"
+                                );
                             }
                         }
-                        _ => {}
                     }
+                    "disk" if group => {
+                        assert_eq!(look.items.len(), DISKS.len(), "{preset}: a member per disk");
+                        for l in &look.items {
+                            assert_eq!(l.series, Some(2), "{preset}: read and write");
+                            assert_eq!(
+                                l.lines.as_deref(),
+                                Some(&[graph.disk_line, graph.disk_line][..]),
+                                "{preset}: both lines in the disk colour"
+                            );
+                            assert_eq!(l.rates.as_ref().map(Vec::len), Some(2), "{preset}: {l:?}");
+                        }
+                    }
+                    "net" if group => {
+                        assert_eq!(look.items.len(), 1, "{preset}: a member for eth0");
+                        let l = &look.items[0];
+                        assert_eq!(l.series, Some(2), "{preset}: download and upload");
+                        assert_eq!(l.accent, Some(graph.net_line), "{preset}");
+                        assert_eq!(l.rates.as_ref().map(Vec::len), Some(2), "{preset}: {l:?}");
+                    }
+                    _ => {}
                 }
-            }
-            let cpu_line = r
-                .vcx
-                .update(|_, cx| tl_ui::theme::current(cx).graph.cpu_line);
-            if kind == "cpu" {
-                for (setting, look) in &grid {
-                    if let Some(accent) = look.accent {
-                        assert_eq!(accent, cpu_line, "{preset}: widget {} is blue", setting.id);
+                let accent = match kind {
+                    "cpu" => Some(graph.cpu_line),
+                    "disk" => Some(graph.disk_line),
+                    "net" => Some(graph.net_line),
+                    _ => None,
+                };
+                if let Some(accent) = accent {
+                    for l in &look.items {
+                        if let Some(a) = l.accent {
+                            assert_eq!(a, accent, "{kind} {preset}: widget {} accent", setting.id);
+                        }
                     }
                 }
             }

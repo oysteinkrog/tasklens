@@ -556,6 +556,16 @@ impl NetModel {
     fn more_text(&self, shown: usize) -> SharedString {
         self.more_texts.get(shown).cloned().unwrap_or_default()
     }
+
+    /// The counted adapters' cells: interface index, rate text ("1.2 Mbps / 3.4 Mbps") and
+    /// chart.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn adapter_cells(&self) -> Vec<(DeviceIdx, SharedString, Entity<ChartView>)> {
+        self.adapters
+            .iter()
+            .map(|a| (a.idx, a.rates.clone(), a.chart.clone()))
+            .collect()
+    }
 }
 
 /// The box's [`NetModel`], shared with the widgets that draw it. Two refs are equal when they
