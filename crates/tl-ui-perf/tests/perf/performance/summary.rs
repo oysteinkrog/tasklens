@@ -7,9 +7,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    TestAppContext, VisualTestContext, px, size,
+    AppContext as _, Context, Entity, Focusable as _, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, ParentElement as _, Render, StyleRefinement, Styled as _,
+    TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -20,11 +22,13 @@ use tl_model::validity::Validity;
 use tl_ui_base::app_env::BootSettings;
 use tl_ui_base::motion::{M_BASE, M_FAST};
 use tl_ui_base::settings_global::TlSettings;
-use tl_ui_kit::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
+use tl_ui_kit::components::menu::{
+    MenuEntryKind, TlMenuPopup, context_menu_layer, open_context_menu,
+};
 use tl_ui_pagehost::PageHost;
 use tl_ui_perf::performance::overview::OVERVIEW_KEY;
 use tl_ui_perf::performance::summary::{MARKER_ID, SummaryView, tile_grid};
-use tl_ui_perf::performance::{DeviceKey, PerformancePage, SIDEBAR_PANEL_ID};
+use tl_ui_perf::performance::{DeviceKey, PerformancePage, SIDEBAR_PANEL_ID, SummaryToggled};
 use tl_ui_settings::settings::{DeviceVisibility, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -80,6 +84,40 @@ fn catalog() -> Vec<DeviceEntry> {
         net(7, "enp38s0", NetKind::Wired),
         net(8, "tailscale0", NetKind::VpnTunnel),
     ]
+}
+
+/// The window root: what MainWindow draws for the Performance tab. The page, or the summary
+/// view in its place (UI-PRF-016), and the open context menu over both.
+struct TabRoot {
+    page: Entity<PerformancePage>,
+}
+
+impl TabRoot {
+    fn new(page: Entity<PerformancePage>, cx: &mut Context<Self>) -> Self {
+        cx.subscribe(&page, |_, _, _: &SummaryToggled, cx| cx.notify())
+            .detach();
+        Self { page }
+    }
+}
+
+impl Render for TabRoot {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary = self.page.read(cx).summary_view();
+        let shell = summary.is_none();
+        let menu = context_menu_layer(window, cx);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .children(summary.map(|view| {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(view.cached(StyleRefinement::default().size_full()))
+            }))
+            .children(shell.then(|| div().relative().flex_1().min_h_0().child(self.page.clone())))
+            .children(menu)
+    }
 }
 
 struct Rig<'a> {
@@ -154,9 +192,17 @@ fn open_catalog(
         tl_ui_perf::performance::actions::bind_keys_performance(cx);
     });
     let page_host = host.host();
-    let (page, vcx) = host.open(cx, size(px(width), px(height)), move |_, cx| {
-        PerformancePage::new(&page_host, cx)
+    let slot = Rc::new(RefCell::new(None));
+    let keep = Rc::clone(&slot);
+    // `gpui_kit::open_window` wraps the main window in `Root`, which owns the window's text
+    // selection (U-46).
+    let (_, vcx) = host.open(cx, size(px(width), px(height)), move |window, cx| {
+        let page = cx.new(|cx| PerformancePage::new(&page_host, cx));
+        *keep.borrow_mut() = Some(page.clone());
+        let tab = cx.new(|cx| TabRoot::new(page, cx));
+        Root::new(tab, window, cx)
     });
+    let page: Entity<PerformancePage> = slot.borrow().clone().expect("PerformancePage built");
     vcx.update(|window, _| window.activate_window());
     let focus = vcx.update(|_, cx| page.read(cx).primary_focus());
     vcx.update(|window, cx| focus.focus(window, cx));

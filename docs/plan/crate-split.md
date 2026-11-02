@@ -281,7 +281,7 @@ splits are estimates for the bead that does the work.
 | minigraphs | 3,202 | 65 | `mounted` (7) opens MainWindow with the real Processes page; one test switches tabs. The other 58 have no shell | split: 64 to tl-ui-procs (about 17 need the Processes menu), 1 stays (panel_absent_on_other_tabs) | M | none yet |
 | overview | 12,202 | 171 | Only `wired` (19) opens MainWindow: tab leave, the cached Processes page, the title bar. `page` (84) needs the device sidebar. The other 68 need no shell | done: 68 to tl-ui-overview, 84 to tl-ui-perf, 19 stay | L | zljr5.41 |
 | overview_range | 982 | 10 | MainWindow mostly as host for the Performance page. One test measures box chrome at a window size, so it depends on the page area the main window gives | done: 9 to tl-ui-perf on the page host, 1 stays (overview_box_chrome_at_most_40). page_range (1) moved with the rig | S | zljr5.41 |
-| performance | 3,497 | 65 | `summary` (38) and one `tab` test open MainWindow; the rest need no shell | done: 26 to tl-ui-perf, 39 stay (see below) | M | zljr5.41 |
+| performance | 3,497 | 65 | One `tab` test and 4 of the 38 `summary` tests check MainWindow: the first visit, the tab switch block, the title bar menus, the main toast queue and the hidden window. The rest need no shell | done: 60 to tl-ui-perf, 5 stay (see below) | M | zljr5.41 |
 | process_menu | 4,603 | 77 | `TasklensUi::init` for globals; `end` and `toasts` open MainWindow on Processes for the page and its toasts | convert to tl-ui-procs | M | zljr5.42 |
 | processes | 4,516 | 89 | MainWindow for the filter box, `FilterChanged`, the pause state, the status chip, tab visits, the toolbar and a fake Performance tab | split: 42 to tl-ui-procs (top 8, delegate 15, page 14, keys 5), 47 stay | L | zljr5.42 |
 | props | 6,260 | 135 | `window` (77) uses one rig with `TasklensUi::init` and MainWindow on Processes, for the page and the main toast queue | convert to tl-ui-procs | M | zljr5.42 |
@@ -327,7 +327,7 @@ Counts from `cargo test -p tl-ui --features test-hooks --test ui -- --list` befo
 | overview | 171 | tl-ui-overview `overview` 68 (top level 10, drawn 3, boxes 18, bottom 30, title_row 1, sweep 3, mem_by_app_box 3); tl-ui-perf `perf` 84 (page) | wired 19: opens MainWindow, leaves and revisits the tab, reads the title bar and the cached Processes page |
 | overview_range | 10 | tl-ui-perf 9, on the page host | overview_box_chrome_at_most_40: on the page host the page is taller than in the main window, and the GPU box chrome came out at 41 px against the 40 px limit |
 | page_range | 1 | tl-ui-perf 1 (uses the overview_range rig) | none |
-| performance | 65 | tl-ui-perf 26 (top level 4, page_frame 10, perf_keys 6, tab 6) | tab 1 (performance_tab_initial_focus_is_sidebar: first visit through MainWindow); summary 38: the rig opens the main window, and tests check the tab switch block, the title bar menus, the main toasts and keys through the window |
+| performance | 65 | tl-ui-perf 60 (top level 4, page_frame 10, perf_keys 6, tab 6, summary 34 on the page host) | tab 1 (performance_tab_initial_focus_is_sidebar: first visit through MainWindow). summary 4: summary_blocks_tab_switch (Ctrl+1 to Ctrl+3, Alt+1 and Ctrl+Tab must leave MainWindow on the tab), summary_hides_title_bar_menus (the title bar), copy_pushes_toast_once (the main toast queue shows one toast for two copies, while the page host's ShellLog records both pushes), summary_demand_on_off_and_hidden (MainWindow::render calls SnapshotHub::note_render, and the test checks that a hidden main window drops the demand) |
 
 Shared helpers moved rather than copied: `drawn_selectors` and `assert_none_drawn_twice` to
 `tl_ui_pagehost::selectors`, and `proc_key` and `proc_record` to `tl_ui_testkit::fixtures`.
@@ -338,6 +338,11 @@ overview_timeline (8 tests) is not in the list of 40, but it builds on the overv
 stays in tl-ui: `timeline_click_modes` checks that a timeline click opens History mode, which goes
 through `ShellApi::process_jump` to MainWindow. The other 7 could move to tl-ui-perf with a split.
 
-The summary module is the largest page-test group left in tl-ui. About 30 of its 38 tests check the
-summary view itself and could move to tl-ui-perf on a page host rig that binds the same keys. That
-needs the rig to reproduce the key dispatch and the window size the main window gives the page.
+The summary rig in tl-ui-perf (`tests/perf/performance/summary.rs`) installs `PageHost`, then sets
+the `state.toml` persist callback, because the page host persists nothing and `sidebar_p1_flow`
+reads the persisted state. It binds the keys the main window binds for the page:
+`bind_keys_global`, `menu::bind_keys` and `bind_keys_performance`. The Performance keys use the
+"Performance" and "PerformanceSummary" contexts, not "Global", so they reach the page without
+MainWindow. The page is the window root at 1600 × 1000 px, so it gets the whole window rather
+than the area under the title bar and tab strip. All 34 moved tests pass with their assertions
+unchanged.
