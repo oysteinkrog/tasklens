@@ -16,21 +16,21 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::now_boot_ns;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::widget::compose::Composition;
-use tl_ui::pages::performance::widget::container::WidgetContainer;
-use tl_ui::pages::performance::widget::edit::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_overview::widget::compose::Composition;
+use tl_ui_overview::widget::container::WidgetContainer;
+use tl_ui_overview::widget::edit::{
     OUTLINE, WidgetEditor, corner_id, frame_id, gear_id, grip_id,
 };
-use tl_ui::pages::performance::widget::group_widget::{
+use tl_ui_overview::widget::group_widget::{
     GroupState, GroupWidget, scroll_id as group_scroll_id,
 };
-use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
-use tl_ui::pages::performance::widget::source::SourceStore;
-use tl_ui::settings_global::TlSettings;
+use tl_ui_overview::widget::metric_widget::{part_id, widget_id};
+use tl_ui_overview::widget::source::SourceStore;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FormSet, GroupItems,
     GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, METRIC_ENGINE_ANY, MetricKey,
@@ -221,13 +221,13 @@ fn open<'a>(cx: &'a mut TestAppContext, cores: u16, disks: &[u16]) -> Rig<'a> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
@@ -804,7 +804,7 @@ impl Rig<'_> {
                 ui_scale_pct: pct,
                 ..AppearanceSettings::default()
             };
-            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+            let _ = tl_ui_base::theme::metrics::recompute(&appearance, cx);
         });
         draw(self.vcx);
     }

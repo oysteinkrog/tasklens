@@ -19,29 +19,29 @@ use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot, SystemSnapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::YScale;
-use tl_ui::chart::labels::LabelKind;
-use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, open_context_menu};
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::actions::{PerfWidgetSetForm, WidgetSource, bind_keys_performance};
-use tl_ui::pages::performance::widget::compose::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_chart::chart::YScale;
+use tl_ui_chart::chart::labels::LabelKind;
+use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, open_context_menu};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{PerfWidgetSetForm, WidgetSource, bind_keys_performance};
+use tl_ui_overview::widget::compose::{
     Composition, cell_min, row_forms, row_min, tile_min,
 };
-use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id, scroll_id};
-use tl_ui::pages::performance::widget::edit::{
+use tl_ui_overview::widget::container::{WidgetContainer, container_id, scroll_id};
+use tl_ui_overview::widget::edit::{
     ADD_ID, APPLY_ID, CANCEL_ID, OUTLINE, PREVIEW_ID, RESET_ID, TOOLBAR_ID, UNDO_ID, WidgetEditor,
     corner_id, default_layout, editor_id, frame_id, gear_id, grip_id, outline_id,
 };
-use tl_ui::pages::performance::widget::grid::{self, InnerGrid, SlotDevice};
-use tl_ui::pages::performance::widget::metric_widget::{MetricWidget, part_id, widget_id};
-use tl_ui::pages::performance::widget::source::{
+use tl_ui_overview::widget::grid::{self, InnerGrid, SlotDevice};
+use tl_ui_overview::widget::metric_widget::{MetricWidget, part_id, widget_id};
+use tl_ui_overview::widget::source::{
     Availability, AvailabilityChanged, SourceData, SourceStore,
 };
-use tl_ui::settings_global::TlSettings;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
     MetricKey, PresetSetting, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
@@ -251,13 +251,13 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         cx.set_global(BootSettings {
@@ -947,7 +947,7 @@ impl Rig<'_> {
                 ui_scale_pct: pct,
                 ..AppearanceSettings::default()
             };
-            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+            let _ = tl_ui_base::theme::metrics::recompute(&appearance, cx);
         });
         draw(self.vcx);
     }
@@ -1475,7 +1475,7 @@ impl Rig<'_> {
             let focus = e.read(cx).focus_handle().clone();
             focus.dispatch_action(&*action, window, cx);
         });
-        self.vcx.update(tl_ui::components::menu::close_context_menu);
+        self.vcx.update(tl_ui_kit::components::menu::close_context_menu);
         draw(self.vcx);
     }
 
@@ -1753,7 +1753,7 @@ fn overview_widget_reset_asks(cx: &mut TestAppContext) {
         .expect("Tab selects a default widget");
     let order = r.vcx.read_entity(&e, |e, cx| {
         e.working_layout(cx)
-            .map(|l| tl_ui::pages::performance::widget::edit::reading_order(&l).to_vec())
+            .map(|l| tl_ui_overview::widget::edit::reading_order(&l).to_vec())
             .unwrap_or_default()
     });
     assert_eq!(order.first(), Some(&first));
@@ -1765,7 +1765,7 @@ fn overview_widget_reset_asks(cx: &mut TestAppContext) {
         .map(|(l, _, _)| l)
         .collect();
     assert_eq!(top.first().map(String::as_str), Some("Source"), "{top:?}");
-    r.vcx.update(tl_ui::components::menu::close_context_menu);
+    r.vcx.update(tl_ui_kit::components::menu::close_context_menu);
     draw(r.vcx);
 
     // Its grip drags it down two rows.
@@ -1916,7 +1916,7 @@ fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
     );
 
     // Power without a power limit has no bar to offer.
-    r.vcx.update(tl_ui::components::menu::close_context_menu);
+    r.vcx.update(tl_ui_kit::components::menu::close_context_menu);
     draw(r.vcx);
     let gear = r
         .vcx
@@ -2024,7 +2024,7 @@ fn overview_widget_grid_insert_move_resize(cx: &mut TestAppContext) {
     // The corner of widget 1 makes it one column wider.
     let corner = r
         .vcx
-        .debug_bounds(leak(tl_ui::pages::performance::widget::edit::corner_id(
+        .debug_bounds(leak(tl_ui_overview::widget::edit::corner_id(
             GPU_BOX_CONTAINER,
             1,
         )))
@@ -2928,15 +2928,15 @@ fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
     let get = |i: usize| shown[i].1.clone();
     let fmt = |format, v: f32| {
         let mut out = String::new();
-        tl_ui::chart::labels::format_value(
+        tl_ui_chart::chart::labels::format_value(
             format,
             v,
-            tl_ui::chart::labels::NetFormat::default(),
+            tl_ui_chart::chart::labels::NetFormat::default(),
             &mut out,
         );
         out
     };
-    use tl_ui::chart::ValueFormat;
+    use tl_ui_chart::chart::ValueFormat;
 
     let (a, name, value) = get(0);
     assert_eq!(a, Availability::Available);
@@ -3028,8 +3028,8 @@ fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_widget_net_source_follows_unit(cx: &mut TestAppContext) {
     use tl_model::system::{LinkState, NetTotals};
-    use tl_ui::chart::ValueFormat;
-    use tl_ui::chart::labels::{NetFormat, format_value};
+    use tl_ui_chart::chart::ValueFormat;
+    use tl_ui_chart::chart::labels::{NetFormat, format_value};
     use tl_ui_settings::settings::NetworkUnit;
     let mut r = open(cx);
     r.publish(|s| s.devices = Arc::new(box_catalog(2)));
@@ -3213,7 +3213,7 @@ fn net_series(r: &mut Rig, rx: &[f32], tx: &[f32]) {
 #[gpui_kit::test]
 fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     use tl_model::devices::{AggregateKind, NetKind};
-    use tl_ui::pages::performance::overview::timeline::{PauseKind, Paused, set_paused};
+    use tl_ui_overview::overview::timeline::{PauseKind, Paused, set_paused};
     use tl_ui_settings::settings::NetworkUnit;
     let mut r = open(cx);
     r.vcx.update(|_, cx| {
@@ -3298,7 +3298,7 @@ fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     assert!(last.5.is_empty());
 
     r.vcx.update(|_, cx| {
-        tl_ui::i18n::set_test_catalogue(
+        tl_ui_base::i18n::set_test_catalogue(
             cx,
             "perf-widget-metric-net-rx = <download>\n\
              perf-overview-figures = lo {$min} mid {$avg} hi {$peak}\n",

@@ -21,6 +21,7 @@ tl-ui-settings = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 gpui-kit = { workspace = true, features = ["test-support"] }
+tl-ui-testkit = { workspace = true }   # FakeEngine for the integration tests
 
 [features]
 default = []
