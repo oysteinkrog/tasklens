@@ -6,6 +6,7 @@
 
 mod battery_page;
 mod cpu_page;
+mod disk_page;
 mod overview_cpu_widgets;
 mod overview_disk_widgets;
 mod overview_fixed_widgets;

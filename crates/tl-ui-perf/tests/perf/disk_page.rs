@@ -17,25 +17,25 @@ use tl_model::snapshot::{DiskDetails, PartitionRow, PartitionTable, SmartKind};
 use tl_model::table::Total;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::scale::{ScaleState, compute};
-use tl_ui::chart::{ChartState, ValueFormat, YScale, format_value};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::disk::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_chart::chart::scale::{ScaleState, compute};
+use tl_ui_chart::chart::{ChartState, ValueFormat, YScale, format_value};
+use tl_ui_kit::components::kv_grid;
+use tl_ui_perf::performance::disk::{
     ACTIVE_ID, DiskPage, PARTITIONS_TABLE_ID, PartColumn, TRANSFER_ID,
 };
-use tl_ui::pages::performance::page::DevicePage as _;
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui::settings_global::TlSettings;
-use tl_ui::table::cells::CellOut;
-use tl_ui::table::tree_table::{RowFlags, TreeTableDelegate};
-use tl_ui::theme::{current, metrics};
+use tl_ui_perf::performance::page::DevicePage as _;
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::tree_table::{RowFlags, TreeTableDelegate};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f32 = 1024. * 1024.;
@@ -118,13 +118,13 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -378,8 +378,8 @@ mod details {
     use super::*;
     use tl_model::snapshot::SystemSnapshot;
     use tl_model::system::{DiskTotals, Metric};
-    use tl_ui::pages::performance::details::KeyValueModel;
-    use tl_ui::pages::performance::disk::{
+    use tl_ui_perf::performance::details::KeyValueModel;
+    use tl_ui_perf::performance::disk::{
         DiskDetailInputs, disk_details_model, update_disk_details_p1,
     };
 

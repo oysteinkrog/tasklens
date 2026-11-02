@@ -15,7 +15,6 @@ mod detached;
 mod device_pages;
 mod dialogs;
 mod dialogs_process;
-mod disk_page;
 mod fan_page;
 mod focus;
 mod gpu_page;
