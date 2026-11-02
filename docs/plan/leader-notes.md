@@ -1098,3 +1098,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 2026-11-02 zljr5.28: a crate move may span consecutive commits of the same bead; the rename criterion is checked on the range (git diff -M first^ last), never by rewriting history. Lanes never squash or reset to satisfy it.
 - 2026-11-02 zljr5.34: a lane lists every Checks command with its result line in its final message; a missing check is a failed review. Rule added to the lane prompt in dispatch.sh.
 - 2026-11-02 zljr5.39: a test that was already failing before a move does not block the move bead; the leader splits it into its own bead. Goldens that show wall-clock time pin the clock and TZ before they are regenerated.
+- 2026-11-02 zljr5.41: an intermediate commit that did not build, already fixed by a later commit of the same bead, does not block closing when the final state is green; history is never rewritten to fix it. Lanes still build before every commit.
