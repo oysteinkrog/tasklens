@@ -1,7 +1,10 @@
 //! Performance tab: the Details grid model and its rendering (E24, PERF-011 to PERF-013,
-//! UI-PRF-021), the device page frame, the Performance keys and the tab layout. Moved from the
-//! tl-ui `ui` binary (tasklens-zljr5.41); the first visit to the tab and the graph summary mode
-//! stay there, because they go through MainWindow.
+//! UI-PRF-021), the device page frame, the Performance keys, the tab layout, and the graph
+//! summary mode with the page menu and copy (`summary`). Moved from the tl-ui `ui` binary
+//! (tasklens-zljr5.41); the first visit to the tab and four summary tests stay there, because
+//! they go through MainWindow.
+
+mod summary;
 
 use gpui_kit::{
     Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
