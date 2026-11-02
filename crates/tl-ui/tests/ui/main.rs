@@ -66,7 +66,6 @@ mod render_support;
 mod render_table;
 mod render_theme;
 mod run;
-mod selection;
 mod selectors;
 mod service_props;
 mod services;

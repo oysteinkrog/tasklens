@@ -1,7 +1,7 @@
 //! Selection by identity (E18-001, UI-PRC-008, ADR-009).
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tl_ui::table::selection::{Selection, SelectionView};
+use tl_ui_table::table::selection::{Selection, SelectionView};
 
 /// Rows in display order; ids in `headers` are group headers.
 struct VecView {
