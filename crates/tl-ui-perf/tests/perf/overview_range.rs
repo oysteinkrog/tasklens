@@ -1,41 +1,32 @@
-//! The Overview time range and range figures (UI-PRF-055, D-030).
+//! The Overview time range and range figures (UI-PRF-055, D-030), on the Performance page in
+//! the page host. Moved from the tl-ui `ui` binary, where the rig opened the main window
+//! (tasklens-zljr5.41).
 
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
-    MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, px, size,
+    AppContext as _, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
+    VisualTestContext, px, size,
 };
-use tl_model::client::EngineClient;
-use tl_model::command::Tab;
 use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
 use tl_model::time::now_boot_ns;
-use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
-use tl_ui::chart::{ChartView, NetFormat, ValueFormat, format_value};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::{DemandAggregator, GlobalDemand};
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::overview::range::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::{ChartView, NetFormat, ValueFormat, format_value};
+use tl_ui_pagehost::PageHost;
+use tl_ui_perf::performance::overview::range::{
     HEADER_SWITCH, RangeText, STATUS_SWITCH, segment_id, trigger_id,
 };
-use tl_ui::pages::performance::overview::{
+use tl_ui_perf::performance::overview::{
     BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage, RANGE_HEADER_ID,
 };
-use tl_ui::pages::performance::status_bar::BAR_ID;
-use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::settings_global::TlSettings;
-use tl_ui::window::main::{
-    self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
-};
-use tl_ui::window::titlebar::TitleBarProbe;
-use tl_ui_settings::settings::{
-    AppearanceSettings, OverviewRange, Settings, StatusBarPlacement, ThemeSettings, UiState,
-};
+use tl_ui_perf::performance::status_bar::BAR_ID;
+use tl_ui_perf::performance::{DeviceKey, PerformancePage};
+use tl_ui_settings::settings::{AppearanceSettings, OverviewRange, Settings, StatusBarPlacement};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: u64 = 1_000_000_000;
@@ -90,25 +81,6 @@ fn catalog() -> Vec<DeviceEntry> {
     ]
 }
 
-struct FakeProcesses {
-    focus: FocusHandle,
-}
-
-impl gpui_kit::EventEmitter<tl_ui::window::status::StatusChanged> for FakeProcesses {}
-
-impl Render for FakeProcesses {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        use gpui_kit::{InteractiveElement as _, Styled as _};
-        div().track_focus(&self.focus).size_full()
-    }
-}
-
-impl shell::ShellPage for FakeProcesses {
-    fn primary_focus(&self) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
 pub(crate) struct Rig<'a> {
     pub(crate) page: Entity<PerformancePage>,
     pub(crate) demand: Entity<DemandAggregator>,
@@ -126,8 +98,9 @@ pub(crate) fn draw(cx: &mut VisualTestContext) {
     }
 }
 
-/// The main window, 1600 × 1000, on the Performance tab with the Overview selected and every
-/// card shown. Animations are off.
+/// The Performance page on the page host, 1600 × 1000, with the Overview selected and every
+/// card shown. Animations are off. Moved from the main window (tasklens-zljr5.41): the keys and
+/// toasts it bound are bound here too.
 pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
@@ -136,72 +109,29 @@ pub(crate) fn open(cx: &mut TestAppContext) -> Rig<'_> {
             entries: Arc::from(catalog()),
         });
     });
-    let fake = Arc::clone(&engine);
-    let client: Arc<dyn EngineClient> = engine;
-    let demand = cx.update(|cx| {
-        gpui_kit::init(cx);
+    let pages = PageHost::install(cx, Arc::clone(&engine), Settings::default());
+    cx.update(|cx| {
         cx.set_reduce_motion(true);
-        let theme_settings = ThemeSettings::default();
-        tl_ui::theme::store::init(
-            cx,
-            &theme_settings,
-            &AppearanceSettings::default(),
-            Vec::new(),
-        );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-        init_strings(cx, "en-US");
-        kv_grid::init(cx);
-        cx.set_global(EngineGlobal(Arc::clone(&client)));
-        cx.set_global(BootSettings {
-            settings: Settings {
-                theme: theme_settings,
-                ..Settings::default()
-            },
-            state: UiState::default(),
-            persist: None,
-            startup_toasts: Vec::new(),
-        });
-        TlSettings::init(cx);
-        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        cx.set_global(GlobalHub(hub));
-        cx.set_global(GlobalDemand(demand.clone()));
-        tl_ui::components::toast::init(cx);
-        tl_ui::actions::bind_keys_global(cx);
-        tl_ui::pages::performance::actions::bind_keys_performance(cx);
-        cx.set_global(StartOptions::default());
-        set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
-            let page = cx.new(|cx| FakeProcesses {
-                focus: cx.focus_handle().tab_stop(true),
-            });
-            PageSlot::new(page, cx)
-        });
-        cx.set_global(TitleBarProbe {
-            client: Some(true),
-            ..TitleBarProbe::default()
-        });
-        tl_ui::window::menubar::init(cx);
-        shell::init(cx);
-        demand
+        tl_ui_kit::components::toast::init(cx);
+        tl_ui_kit::actions::bind_keys_global(cx);
+        tl_ui_perf::performance::actions::bind_keys_performance(cx);
     });
-    let handle = cx.update(open_main_window).expect("the main window opens");
-    let vcx = VisualTestContext::from_window(handle.into(), cx).into_mut();
-    vcx.simulate_scale_factor_change(1.0);
-    vcx.simulate_resize(size(px(1600.), px(1000.)));
-    vcx.update(|window, _| window.activate_window());
+    let demand = pages.demand.clone();
+    let host = pages.host();
+    let (page, vcx) = pages.open(cx, size(px(1600.), px(1000.)), move |_, cx| {
+        PerformancePage::new(&host, cx)
+    });
+    vcx.update(|window, cx| {
+        window.activate_window();
+        // The main window registers itself with the demand aggregator.
+        let handle = window.window_handle();
+        demand.update(cx, |d, _| d.set_main_window(handle));
+    });
     draw(vcx);
-    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-    vcx.dispatch_action(tl_ui::actions::SelectTab(Tab::Performance as usize));
-    draw(vcx);
-    let page = vcx
-        .read_entity(&main, |m, _| {
-            m.page_entity::<PerformancePage>(Tab::Performance)
-        })
-        .expect("PerformancePage built");
     let r = Rig {
         page,
         demand,
-        engine: fake,
+        engine,
         vcx,
     };
     let page = r.page.clone();
@@ -478,7 +408,7 @@ fn overview_range_switch_is_compact(cx: &mut TestAppContext) {
                 ui_scale_pct: pct,
                 ..AppearanceSettings::default()
             };
-            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+            let _ = tl_ui_base::theme::metrics::recompute(&appearance, cx);
         });
         draw(r.vcx);
         let mut out = Vec::new();
@@ -849,9 +779,9 @@ fn plot_cover(plots: &[gpui_kit::Bounds<gpui_kit::Pixels>]) -> (f32, usize) {
 #[gpui_kit::test]
 fn overview_box_chrome_at_most_40(cx: &mut TestAppContext) {
     use gpui_kit::{Bounds, EntityId, Pixels};
-    use tl_ui::chart::element::take_plots;
-    use tl_ui::pages::performance::overview::gpu_box::vram_id;
-    use tl_ui::pages::performance::overview::layout::BoxKind;
+    use tl_ui_chart::chart::element::take_plots;
+    use tl_ui_perf::performance::overview::gpu_box::vram_id;
+    use tl_ui_perf::performance::overview::layout::BoxKind;
 
     let mut r = open(cx);
     // Three disks and a GPU with six engines in two rows, as on the owner's machine. Catalog entries sit

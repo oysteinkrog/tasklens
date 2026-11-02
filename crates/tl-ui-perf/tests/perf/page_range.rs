@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use gpui_kit::{AppContext as _, TestAppContext};
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::cpu::CpuPage;
-use tl_ui::pages::performance::overview::OVERVIEW_KEY;
-use tl_ui::pages::performance::overview::range::PAGE_SWITCH;
-use tl_ui::settings_global::TlSettings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_perf::performance::DeviceKey;
+use tl_ui_perf::performance::cpu::CpuPage;
+use tl_ui_perf::performance::overview::OVERVIEW_KEY;
+use tl_ui_perf::performance::overview::range::PAGE_SWITCH;
 use tl_ui_settings::settings::OverviewRange;
 
 use crate::overview_range::{Rig, box_charts, draw, open, pick};
