@@ -3461,7 +3461,28 @@ tl-app -> tl-ui (shell) -> tl-ui-sys -> tl-ui-procs --------\
 
 The ADR-001 rule 1 closure for tl-ui applies to every `tl-ui-*` crate: no tl-engine, tl-collect or tl-ops, and arc-swap and zbus only through gpui-kit. asupersync stays out of every tl-ui closure (rule 2).
 
-**Test hooks.** Test-only code is gated on `cfg(any(debug_assertions, feature = "test-hooks"))`. Items that only unit tests use may add `test` to that list. The `test-hooks` feature stays only for release-mode bench builds (`bench` enables it). Debug builds (`cargo run`, the smoke harness) compile the hooks behind their runtime checks; release builds never do. A hook that changes behaviour must do nothing until a test turns it on. CS-B2 sorts the hooks into recorders, readers and switches and adds the list of switches to this ADR. CS-B2 to CS-B7 move the gates one directory at a time, and CS-B8 removes `--features test-hooks` from tl-app's dev-dependency, the tests, the scripts and the docs.
+**Test hooks.** Test-only code is gated on `cfg(any(debug_assertions, feature = "test-hooks"))`. Items that only unit tests use may add `test` to that list. The `test-hooks` feature stays only for release-mode bench builds (`bench` enables it). Debug builds (`cargo run`, the smoke harness) compile the hooks behind their runtime checks; release builds never do. A hook that changes behaviour must do nothing until a test turns it on. The hook kinds and the list of switches follow; CS-B3 to CS-B7 add the switches of the files they convert. CS-B2 to CS-B7 move the gates one directory at a time, and CS-B8 removes `--features test-hooks` from tl-app's dev-dependency, the tests, the scripts and the docs.
+
+**Test hook kinds.** Every test hook is one of three kinds:
+
+- Recorder: a counter or log (a `Cell`, a `RefCell` log, a `Vec` field) that only records what the code did.
+- Reader: a function that returns state.
+- Switch: a hook that changes behaviour, such as a fake clock, a forced state or injected data. A switch must do nothing until a test sets it: its state is an `Option`, a flag or a GPUI global that is off by default, or it is a function that no app code calls.
+
+`scripts/split/hooks_gate.py` moves a file's gates to the rule above. Recorders that grow for the app's life are acceptable in debug builds: `ActionTracker::pushed` and `opened_details` (`action_tracker.rs`) and `SysActions::pushed` (`pages/sys_table.rs`) keep one entry per toast or Details dialog. The recorders a test turns on (`table/cells.rs:698` `record_painted_texts`, `anim.rs:207` `AnimationDriver::install_paint_log`) record nothing until then: their log is an `Option` that starts as `None`.
+
+Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None needed a fix:
+
+| Hook | What it changes | Guard |
+|---|---|---|
+| `anim.rs:202` `AnimationDriver::set_cpu_clock` | the CPU clock the frame stats read | the field starts as `tl_model::time::thread_cpu_ns`; only tests call the setter |
+| `selector.rs:91` `tag_frame`, read at `selector.rs:35` | the debug selector each element gets during one frame | the thread-local `LOG` is `None` until `tag_frame` sets it; `tag_frame` and `untag_frame` set it back to `None` |
+| `i18n.rs:95` `set_test_catalogue` | the string catalogue | only tests call it |
+| `hub.rs:117` `HostClock::remote_with_local_shift`, `hub.rs:124` `HostClock::shift_local`, `hub.rs:341` `SnapshotHub::new_remote_with_clock` | a remote host clock's offset from this PC's clock | only tests call them; the app makes remote clocks with `HostClock::remote`, shift 0 |
+| `components/window_frame.rs:106` `TestClientFrame`, read at `components/window_frame.rs:122` and `:958` | the frame inset, as if the window had client decorations | a GPUI global that the app never sets; `has_global` is false until a test sets it |
+| `app.rs:174` `AppEnv::test`, `app.rs:645` `open_first_for_test`, `app.rs:651` `start_for_test` | test app settings and app start | only tests call them |
+| `pages/startup/copy.rs:162` `copy_rows_as_table_for_test` | runs the page's "Copy rows as table" | only tests call it |
+| `table/mod.rs:10` module `test_delegate` | a fake table delegate | only tests build one |
 
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 
