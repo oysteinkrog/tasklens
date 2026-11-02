@@ -437,6 +437,22 @@ impl<C: TableColumn> ColumnLayout<C> {
         self.version += 1;
     }
 
+    /// This layout with every column id passed through `f`, which must map distinct ids to
+    /// distinct ids. The offsets, the scale and the version are kept, so no rebuild is needed.
+    pub fn map<K: TableColumn>(&self, mut f: impl FnMut(C) -> K) -> ColumnLayout<K> {
+        ColumnLayout {
+            table: self.table,
+            order: self.order.iter().map(|&c| f(c)).collect(),
+            visible: self.visible.iter().map(|&c| f(c)).collect(),
+            widths: self.widths.iter().map(|(&c, &w)| (f(c), w)).collect(),
+            offsets: self.offsets.clone(),
+            visible_order: self.visible_order.iter().map(|&c| f(c)).collect(),
+            total_width: self.total_width,
+            ui_scale: self.ui_scale,
+            version: self.version,
+        }
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }

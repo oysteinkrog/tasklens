@@ -32,17 +32,14 @@ use crate::components::tooltip::{DELAY_CONTROL, TlTooltip};
 use crate::table::cells::CellOut;
 use crate::table::columns::{ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::columns_window::{self, ColumnHost, ColumnPicker, PickerColumn};
-use crate::table::header::HeaderState;
 use crate::table::selection::{Selection, SelectionView};
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use crate::table::tree_core::QuadLogs;
 use crate::table::tree_core::{
-    Click, ColKey, CoreCall, DynRows, DynTreeDelegate, FrameLayout, Link, RowKey, RowMenu,
-    TreeTableCore, row_fill,
+    Click, ColKey, CoreCall, DynRows, DynTreeDelegate, Link, RowKey, RowMenu, TreeTableCore,
+    row_fill,
 };
-use crate::table::tree_header::{
-    self, ColCall, ColLink, ColumnSource, DynColumns, HeaderCore, Parts, live_layout,
-};
+use crate::table::tree_header::{self, HeaderView};
 use crate::theme::{TlTheme, current, metrics};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
@@ -301,12 +298,11 @@ impl<D: TreeTableDelegate> EventEmitter<TreeTableEvent> for TlTreeTable<D> {}
 /// builds only the requested range, each row is one `div` with absolutely positioned cells at
 /// the layout's precomputed offsets, and every cell text comes from `CellTextCache`.
 ///
-/// This type holds the state its owners read by type: the delegate, the selection, the header
-/// state and the column layouts. The logic lives elsewhere, so it is not compiled once per
-/// delegate type. The body rows, cells, keyboard and pointer handling are in the non-generic
-/// `TreeTableCore`, which reaches the delegate through `DynTreeDelegate`. The header and column
-/// logic is in `tree_header`, generic over the column type only, which reaches it through
-/// `DynColumns`.
+/// This type holds the state its owners read by type: the delegate, the selection and a typed
+/// copy of the drag layout. The logic and the rest of the state are in the non-generic
+/// `TreeTableCore` (body rows, cells, keyboard and pointer handling, header state) and
+/// `tree_header` (header and column logic), which reach the delegate through
+/// `DynTreeDelegate`. They are compiled once, not once per delegate type or column type.
 pub struct TlTreeTable<D: TreeTableDelegate> {
     pub delegate: D,
     pub selection: Selection<D::RowId>,
@@ -334,8 +330,9 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
 
 /// The typed table state the core does not hold.
 struct Shell<D: TreeTableDelegate> {
-    /// The header and column state.
-    head: HeaderCore<D::Column>,
+    /// The boundary drag's layout with typed ids, for [`TlTreeTable::columns`]. `None` when no
+    /// drag is in progress.
+    drag: Option<ColumnLayout<D::Column>>,
     /// The top-most visible selectable row of the last frame: its identity, its rows from the
     /// top visible row and the top row's hidden part. A new version keeps it at the same y.
     anchor: Option<(D::RowId, usize, Pixels)>,
@@ -404,11 +401,6 @@ impl<R: Copy + Eq + Hash> RowKeys<R> {
 struct ColKeys<C> {
     cols: Vec<C>,
     slots: FxHashMap<C, u32>,
-    /// The last visible list converted. Holding it keeps its address from being reused, so
-    /// pointer equality means the same list.
-    visible_source: Option<Arc<[C]>>,
-    /// `visible_source` as keys.
-    visible_keys: Arc<[ColKey]>,
 }
 
 impl<C: TableColumn> ColKeys<C> {
@@ -416,13 +408,11 @@ impl<C: TableColumn> ColKeys<C> {
         Self {
             cols: Vec::new(),
             slots: FxHashMap::default(),
-            visible_source: None,
-            visible_keys: Arc::from([]),
         }
     }
 
     fn key(&mut self, col: C) -> ColKey {
-        let Self { cols, slots, .. } = self;
+        let Self { cols, slots } = self;
         let slot = *slots.entry(col).or_insert_with(|| {
             cols.push(col);
             (cols.len() - 1) as u32
@@ -430,6 +420,8 @@ impl<C: TableColumn> ColKeys<C> {
         ColKey {
             slot,
             name: col.key(),
+            pinned: col.pinned_first(),
+            min_w: col.min_width(),
         }
     }
 
@@ -437,30 +429,23 @@ impl<C: TableColumn> ColKeys<C> {
         self.cols[key.slot as usize]
     }
 
-    /// `visible` as keys. Converts only when the list is not the one converted last.
-    fn visible(&mut self, visible: &Arc<[C]>) -> Arc<[ColKey]> {
-        if let Some(source) = &self.visible_source
-            && Arc::ptr_eq(source, visible)
-        {
-            return self.visible_keys.clone();
-        }
-        let keys: Arc<[ColKey]> = visible.iter().map(|&c| self.key(c)).collect();
-        self.visible_source = Some(visible.clone());
-        self.visible_keys = keys.clone();
-        keys
+    /// `layout` with keys.
+    fn keyed(&mut self, layout: &ColumnLayout<C>) -> ColumnLayout<ColKey> {
+        layout.map(|c| self.key(c))
+    }
+
+    /// `layout` with typed ids.
+    fn typed(&self, layout: &ColumnLayout<ColKey>) -> ColumnLayout<C> {
+        layout.map(|k| self.col(k))
     }
 }
 
 impl<D: TreeTableDelegate> TlTreeTable<D> {
     pub fn new(delegate: D, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
-        let cols: ColLink<D::Column> = Rc::new(move |cx: &mut App, f: ColCall<'_, D::Column>| {
-            let _ = weak.update(cx, |t, cx| t.with_cols(cx, |core, h| f(core, h)));
+        let link: Link = Rc::new(move |cx: &mut App, f: CoreCall<'_>| {
+            let _ = weak.update(cx, |t, cx| t.with_host(cx, |core, host| f(core, host)));
         });
-        let link: Link = {
-            let cols = cols.clone();
-            Rc::new(move |cx: &mut App, f: CoreCall<'_>| cols(cx, &mut |core, h| f(core, h)))
-        };
         Self {
             delegate,
             selection: Selection::new(),
@@ -468,7 +453,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             pressed: false,
             core: TreeTableCore::new(link, cx.focus_handle()),
             shell: Shell {
-                head: HeaderCore::new(cols),
+                drag: None,
                 anchor: None,
                 demand_hash: 0,
                 demand_ids: Vec::new(),
@@ -488,21 +473,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         }
     }
 
-    /// Runs `f` on the core with a host over the rest of the table and `cx`.
-    fn with_host<R>(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut TreeTableCore, &mut dyn DynTreeDelegate) -> R,
-    ) -> R {
-        self.with_cols(cx, |core, h| f(core, h))
-    }
-
-    /// [`Self::with_host`] with the typed column calls.
-    fn with_cols<R>(
-        &mut self,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut TreeTableCore, &mut dyn DynColumns<D::Column>) -> R,
-    ) -> R {
+    /// The core and a host over the rest of the table, without a `Context`.
+    fn split(&mut self) -> (&mut TreeTableCore, Host<'_, D, ()>) {
         let Self {
             delegate,
             selection,
@@ -520,7 +492,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             line_canvases,
             ..
         } = self;
-        let mut host = Host {
+        let host = Host {
             delegate,
             selection,
             paused: *paused,
@@ -533,8 +505,28 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 separators: separator_quads,
                 guides: guide_quads,
             },
-            cx,
+            cx: (),
         };
+        (core, host)
+    }
+
+    /// Runs `f` on the core with a host over the rest of the table and `cx`, after the core
+    /// has read the delegate's layout.
+    fn with_host<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut TreeTableCore, &mut dyn DynTreeDelegate) -> R,
+    ) -> R {
+        let (core, host) = self.split();
+        let mut host = host.with_cx(cx);
+        core.sync_layout(&mut host);
+        f(core, &mut host)
+    }
+
+    /// [`Self::with_host`] without a `Context`, for the calls that need none.
+    fn with_rows<R>(&mut self, f: impl FnOnce(&mut TreeTableCore, &mut dyn DynRows) -> R) -> R {
+        let (core, mut host) = self.split();
+        core.sync_layout(&mut host);
         f(core, &mut host)
     }
 
@@ -548,12 +540,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// The layout the table draws: the live copy during a boundary drag, else the delegate's.
     pub fn columns(&self) -> &ColumnLayout<D::Column> {
-        live_layout(&self.shell.head, &self.delegate)
+        match &self.shell.drag {
+            Some(layout) => layout,
+            None => self.delegate.columns(),
+        }
     }
 
     /// The owner passes the current `tables.column_resize` value; the table reads no settings.
     pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
-        self.shell.head.resize_mode = mode;
+        self.core.head.resize_mode = mode;
     }
 
     /// The owner passes the current `tables.column_separators` value: 1 px divider lines
@@ -565,7 +560,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// The owner's default order, visible set and widths. With them the table handles
     /// `ResetColumns` itself; without them the action goes on to the owner.
     pub fn set_default_layout(&mut self, layout: ColumnLayout<D::Column>) {
-        self.shell.head.default_layout = Some(layout);
+        self.core.head.default_layout = Some(self.shell.cols.keyed(&layout));
     }
 
     /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
@@ -675,11 +670,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let core = &mut self.core;
         if version != core.last_version || style_version != core.last_style_version {
             core.text_cache.begin_version(version, style_version);
-            self.shell
-                .head
-                .state
-                .totals
-                .begin_version(version, style_version);
+            core.head.state.totals.begin_version(version, style_version);
             core.icons.begin_version(version);
             core.last_version = version;
             core.last_style_version = style_version;
@@ -711,57 +702,31 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             .iter()
             .filter_map(|&id| self.delegate.row_index(id))
             .collect();
-        let Self {
-            delegate,
-            selection,
-            paused,
-            pressed,
-            core,
-            shell,
-            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            rows_built_last_frame,
-            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            separator_quads,
-            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            guide_quads,
-            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            line_canvases,
-            ..
-        } = self;
-        let mut host = Host {
-            delegate,
-            selection,
-            paused: *paused,
-            pressed,
-            shell,
-            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-            hooks: Hooks {
-                rows_built: rows_built_last_frame,
-                line_canvases,
-                separators: separator_quads,
-                guides: guide_quads,
-            },
-            cx: (),
-        };
-        core.rows_as_tsv(&rows, &mut host)
+        self.with_rows(|core, host| core.rows_as_tsv(&rows, host))
     }
 
-    /// Header hover, press, totals and the cells of the last frame.
-    pub fn header_state(&self) -> &HeaderState<D::Column> {
-        &self.shell.head.state
+    /// Header hover, press, totals and the cells of the last frame, with typed column ids. A
+    /// copy made per call.
+    pub fn header_state(&self) -> HeaderView<D::Column> {
+        let cols = &self.shell.cols;
+        tree_header::header_view(&self.core.head.state, |k| cols.col(k))
     }
 
     /// The header total of `col` as line 2 shows it: the cached text and its validity. `None`
     /// when the delegate has no total for `col`. Formats only when the value or validity changed.
     pub fn header_total_text(&mut self, col: D::Column) -> Option<(SharedString, Validity)> {
-        let totals = &mut self.shell.head.state.totals;
-        tree_header::header_total_text(totals, &mut self.core.out, &self.delegate, col)
+        let key = self.shell.cols.key(col);
+        self.with_rows(|core, host| {
+            let totals = &mut core.head.state.totals;
+            tree_header::header_total_text(totals, &mut core.out, host, key)
+        })
     }
 
     /// Asks the delegate to sort by `col` (header click and `SortByColumn`). The delegate picks
     /// the direction with `next_sort`. Nothing on an unsortable column.
     pub fn sort_by_column(&mut self, col: D::Column, cx: &mut Context<Self>) {
-        self.with_cols(cx, |_, h| tree_header::sort_by_column(h, col));
+        let key = self.shell.cols.key(col);
+        self.with_host(cx, |_, h| tree_header::sort_by_column(h, key));
     }
 }
 
@@ -775,10 +740,27 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
     }
 
     fn columns(&self, cx: &App) -> Vec<PickerColumn> {
-        match self.upgrade() {
-            Some(t) => tree_header::picker_columns(&t.read(cx).delegate),
-            None => Vec::new(),
-        }
+        let Some(table) = self.upgrade() else {
+            return Vec::new();
+        };
+        let delegate = &table.read(cx).delegate;
+        let layout = delegate.columns();
+        layout
+            .order
+            .iter()
+            .map(|&id| {
+                let spec = delegate.column_spec(id);
+                PickerColumn {
+                    key: id.key(),
+                    label: spec.label.clone(),
+                    full_name: spec.full_name.clone(),
+                    group: spec.group.clone(),
+                    availability: spec.availability,
+                    hideable: spec.hideable,
+                    visible: layout.visible.contains(&id),
+                }
+            })
+            .collect()
     }
 
     fn set_visible(
@@ -789,14 +771,16 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
         cx: &mut App,
     ) -> Result<(), ColumnError> {
         self.update(cx, |t, cx| {
-            t.with_cols(cx, |_, h| tree_header::set_column_visible(h, key, on))
+            t.with_host(cx, |core, h| {
+                tree_header::set_column_visible(core, h, key, on)
+            })
         })
         .unwrap_or(Err(ColumnError::Unknown))
     }
 
     fn reset(&self, window: &mut Window, cx: &mut App) {
         let reset = self.update(cx, |t, cx| {
-            t.with_cols(cx, |_, h| tree_header::reset_columns(h, window))
+            t.with_host(cx, |core, h| tree_header::reset_columns(core, h, window))
         });
         if !matches!(reset, Ok(true)) {
             tracing::debug!(target: "tasklens::ui", "picker reset: the table has no defaults");
@@ -830,6 +814,22 @@ struct Host<'a, D: TreeTableDelegate, X> {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     hooks: Hooks<'a>,
     cx: X,
+}
+
+impl<'a, D: TreeTableDelegate> Host<'a, D, ()> {
+    /// This host with `cx`.
+    fn with_cx<X>(self, cx: X) -> Host<'a, D, X> {
+        Host {
+            delegate: self.delegate,
+            selection: self.selection,
+            paused: self.paused,
+            pressed: self.pressed,
+            shell: self.shell,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            hooks: self.hooks,
+            cx,
+        }
+    }
 }
 
 impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
@@ -880,16 +880,49 @@ impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
         self.delegate.cell(ix, self.shell.cols.col(col), out);
     }
 
-    fn layout(&mut self) -> FrameLayout {
-        let Shell { head, cols, .. } = &mut *self.shell;
-        let layout = live_layout(head, &*self.delegate);
-        FrameLayout {
-            visible: cols.visible(layout.visible_columns()),
-            offsets: layout.offsets().clone(),
+    fn layout_id(&self) -> (Arc<[Pixels]>, u64) {
+        let layout = self.delegate.columns();
+        (layout.offsets().clone(), layout.version())
+    }
+    fn fresh_layout(&mut self) -> ColumnLayout<ColKey> {
+        self.shell.cols.keyed(self.delegate.columns())
+    }
+    fn spec(&self, col: ColKey) -> ColumnSpec<ColKey> {
+        let s = self.delegate.column_spec(self.shell.cols.col(col));
+        ColumnSpec {
+            id: col,
+            label: s.label.clone(),
+            full_name: s.full_name.clone(),
+            group: s.group.clone(),
+            align: s.align,
+            kind: s.kind,
+            sortable: s.sortable,
+            template: s.template,
+            default_width: s.default_width,
+            tooltip: s.tooltip.clone(),
+            availability: s.availability,
+            hideable: s.hideable,
         }
     }
-    fn total_width(&self) -> Pixels {
-        live_layout(&self.shell.head, &*self.delegate).total_width()
+    fn sort_key(&mut self) -> (ColKey, bool) {
+        let sort = self.delegate.sort();
+        (self.shell.cols.key(sort.column()), sort.ascending())
+    }
+    fn header_lines(&self) -> HeaderLines {
+        self.delegate.header_lines()
+    }
+    fn columns_fixed(&self) -> bool {
+        self.delegate.columns_fixed()
+    }
+    fn header_total(&self, col: ColKey, out: &mut CellOut) -> bool {
+        self.delegate.header_total(self.shell.cols.col(col), out)
+    }
+    fn parse_col(&mut self, key: &str) -> Option<ColKey> {
+        let col = D::Column::parse(self.delegate.columns().table, key)?;
+        Some(self.shell.cols.key(col))
+    }
+    fn set_drag(&mut self, layout: Option<&ColumnLayout<ColKey>>) {
+        self.shell.drag = layout.map(|l| self.shell.cols.typed(l));
     }
     fn name_column(&mut self) -> Option<ColKey> {
         name_column(&*self.delegate).map(|c| self.shell.cols.key(c))
@@ -1112,56 +1145,16 @@ impl<D: TreeTableDelegate> DynTreeDelegate for Host<'_, D, &mut Context<'_, TlTr
         self.delegate.on_visible_range(&ids, self.cx);
         self.shell.demand_ids = ids;
     }
-}
-
-impl<D: TreeTableDelegate> DynColumns<D::Column> for Host<'_, D, &mut Context<'_, TlTreeTable<D>>> {
-    fn parts(&mut self) -> Parts<'_, D::Column> {
-        Parts {
-            head: &mut self.shell.head,
-            src: &*self.delegate,
-            app: self.cx,
-        }
+    fn set_columns(&mut self, layout: &ColumnLayout<ColKey>) {
+        let layout = self.shell.cols.typed(layout);
+        self.delegate.on_columns_changed(&layout, self.cx);
     }
-    fn head_ref(&self) -> &HeaderCore<D::Column> {
-        &self.shell.head
-    }
-    fn source(&self) -> &dyn ColumnSource<D::Column> {
-        &*self.delegate
-    }
-    fn set_columns(&mut self, layout: &ColumnLayout<D::Column>) {
-        self.delegate.on_columns_changed(layout, self.cx);
-    }
-    fn sort_by(&mut self, col: D::Column) {
+    fn sort_by(&mut self, col: ColKey) {
+        let col = self.shell.cols.col(col);
         self.delegate.on_sort(col, self.cx);
-    }
-    fn col_key(&mut self, col: D::Column) -> ColKey {
-        self.shell.cols.key(col)
     }
     fn picker_host(&self) -> Rc<dyn ColumnHost> {
         Rc::new(self.cx.weak_entity())
-    }
-}
-
-/// The delegate as the header and column logic reads it.
-impl<D: TreeTableDelegate> ColumnSource<D::Column> for D {
-    fn col_layout(&self) -> &ColumnLayout<D::Column> {
-        self.columns()
-    }
-    fn col_spec(&self, col: D::Column) -> &ColumnSpec<D::Column> {
-        self.column_spec(col)
-    }
-    fn col_sort(&self) -> (D::Column, bool) {
-        let sort = self.sort();
-        (sort.column(), sort.ascending())
-    }
-    fn cols_fixed(&self) -> bool {
-        self.columns_fixed()
-    }
-    fn col_lines(&self) -> HeaderLines {
-        self.header_lines()
-    }
-    fn col_total(&self, col: D::Column, out: &mut CellOut) -> bool {
-        self.header_total(col, out)
     }
 }
 
@@ -1252,7 +1245,9 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
-        self.with_cols(cx, |_, h| tree_header::follow_ui_scale(h, m.ui_scale));
+        self.with_host(cx, |core, h| {
+            tree_header::follow_ui_scale(core, h, m.ui_scale)
+        });
         self.core.list_calls = 0;
         self.core.probe_gutter = None;
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -1262,8 +1257,8 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             self.line_canvases.set(0);
         }
         self.core.x_offset = -ScrollbarHandle::offset(&self.core.scroll).x;
-        self.with_cols(cx, |core, h| {
-            tree_header::render_table(h, core, &m, &theme, window)
+        self.with_host(cx, |core, h| {
+            tree_header::render_table(core, h, &m, &theme, window)
         })
     }
 }

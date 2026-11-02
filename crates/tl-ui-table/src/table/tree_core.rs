@@ -1,14 +1,17 @@
 //! The non-generic body of `TlTreeTable` (ADR-009). `TlTreeTable<D>` keeps the typed state its
-//! owners read (selection, header state, column layouts) and hands everything per row and per
-//! frame to [`TreeTableCore`], which talks to the delegate through [`DynTreeDelegate`]. The body
-//! is then compiled once in tl-ui-table instead of once per delegate type.
+//! owners read (the delegate, the selection, a typed copy of the drag layout) and hands
+//! everything per row, per frame and per header gesture to [`TreeTableCore`], which talks to the
+//! delegate through [`DynTreeDelegate`]. The body, the header and the column logic are then
+//! compiled once in tl-ui-table instead of once per delegate type or column type.
 //!
 //! Ids are erased like this:
 //! - Rows: a [`RowKey`] is a number the typed shell hands out per row id (`RowKeys`). The core
 //!   keeps keys across frames only in the cell text cache and in the row listeners of the last
 //!   frame. Everything else asks by row index in the current table version.
 //! - Columns: a [`ColKey`] is a column's slot in the shell's append-only column registry, with
-//!   its `state.toml` key for element ids.
+//!   its `state.toml` key for element ids and the two column traits the layout code reads. The
+//!   core keeps the delegate's layout, the drag layouts and the header state with `ColKey`s, so
+//!   the generic header and layout code runs only as `ColKey` code.
 
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
@@ -46,11 +49,13 @@ use crate::table::cells::{
     cell_text_color, guide_quads, icon_px, name_indent, paint_group_header_cell, paint_name_cell,
     value_cell,
 };
-use crate::table::columns::ColumnKind;
+use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId};
+use crate::table::columns_window::ColumnHost;
+use crate::table::tree_header::HeaderCore;
 use crate::table::tree_table::{
-    CHEVRON, CHEVRON_HIT_W, EMPTY_STATE_TOP, ICON_GAP, NameCell, NameIcon, PRESS_HOLD_AFTER_UP,
-    PRESS_HOLD_MAX, RowFlags, RowKind, SCROLLBAR_W, TreeTableEvent, WHEEL_QUIET,
-    metric_cell_opacity, separator_quads,
+    CHEVRON, CHEVRON_HIT_W, EMPTY_STATE_TOP, HeaderLines, ICON_GAP, NameCell, NameIcon,
+    PRESS_HOLD_AFTER_UP, PRESS_HOLD_MAX, RowFlags, RowKind, SCROLLBAR_W, TreeTableEvent,
+    WHEEL_QUIET, metric_cell_opacity, separator_quads,
 };
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::UI_FAMILY;
@@ -64,12 +69,15 @@ use crate::theme::{TlTheme, UiMetrics, metrics};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct RowKey(pub(crate) u64);
 
-/// A column id as the core sees it: the column's slot in the table's column registry, and its
-/// `state.toml` key. Equal when the slots are equal; keys of two tables are never compared.
+/// A column id as the core sees it: the column's slot in the table's column registry, its
+/// `state.toml` key, `pinned_first` and `min_width`. Equal when the slots are equal; keys of two
+/// tables are never compared.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ColKey {
     pub(crate) slot: u32,
     pub(crate) name: &'static str,
+    pub(crate) pinned: bool,
+    pub(crate) min_w: Option<f32>,
 }
 
 impl PartialEq for ColKey {
@@ -86,10 +94,21 @@ impl Hash for ColKey {
     }
 }
 
-/// The columns one frame draws: the live drag copy during a boundary drag, else the delegate's.
-pub(crate) struct FrameLayout {
-    pub(crate) visible: Arc<[ColKey]>,
-    pub(crate) offsets: Arc<[Pixels]>,
+impl TableColumn for ColKey {
+    fn key(self) -> &'static str {
+        self.name
+    }
+    /// Always `None`: only the shell knows a table's keys. The core asks
+    /// [`DynRows::parse_col`] instead.
+    fn parse(_: TableId, _: &str) -> Option<Self> {
+        None
+    }
+    fn pinned_first(self) -> bool {
+        self.pinned
+    }
+    fn min_width(self) -> Option<f32> {
+        self.min_w
+    }
 }
 
 /// The row menu the delegate builds once the press has been handled, and what runs when it
@@ -142,9 +161,23 @@ pub(crate) trait DynRows {
     fn name_weight(&self, ix: usize) -> FontWeight;
     fn cell(&self, ix: usize, col: ColKey, out: &mut CellOut);
 
-    fn layout(&mut self) -> FrameLayout;
-    /// `layout().total_width`, without building the visible list.
-    fn total_width(&self) -> Pixels;
+    /// The offsets and the version of the delegate's layout. A layout with the same offsets
+    /// `Arc` and version is the one [`Self::fresh_layout`] last returned.
+    fn layout_id(&self) -> (Arc<[Pixels]>, u64);
+    /// The delegate's layout with keys.
+    fn fresh_layout(&mut self) -> ColumnLayout<ColKey>;
+    /// The spec of `col`, with its key as the id.
+    fn spec(&self, col: ColKey) -> ColumnSpec<ColKey>;
+    /// The column and direction of the delegate's sort.
+    fn sort_key(&mut self) -> (ColKey, bool);
+    fn header_lines(&self) -> HeaderLines;
+    fn columns_fixed(&self) -> bool;
+    fn header_total(&self, col: ColKey, out: &mut CellOut) -> bool;
+    /// The key of the column `key` names in the delegate's table, if it has one.
+    fn parse_col(&mut self, key: &str) -> Option<ColKey>;
+    /// Keeps a typed copy of the boundary drag's layout for `TlTreeTable::columns`, or drops
+    /// it on `None`.
+    fn set_drag(&mut self, layout: Option<&ColumnLayout<ColKey>>);
     /// `name_column(delegate)` as a key.
     fn name_column(&mut self) -> Option<ColKey>;
     fn col_kind(&self, col: ColKey) -> ColumnKind;
@@ -233,6 +266,13 @@ pub(crate) trait DynTreeDelegate: DynRows {
     fn row_menu(&mut self, targets: &[usize], col: Option<ColKey>) -> RowMenu;
     /// Reports the demand for `visible` to the delegate when its id set changed.
     fn report_demand(&mut self, visible: Range<usize>);
+    /// `on_columns_changed` with `layout`. Use [`TreeTableCore::apply_columns`], which also
+    /// reads the result back.
+    fn set_columns(&mut self, layout: &ColumnLayout<ColKey>);
+    /// `on_sort` for `col`.
+    fn sort_by(&mut self, col: ColKey);
+    /// The column picker's view of this table.
+    fn picker_host(&self) -> Rc<dyn ColumnHost>;
 }
 
 /// The test-hook logs of painted guide and separator quads.
@@ -298,6 +338,13 @@ pub(crate) struct TreeTableCore {
     hover_tips_ready: bool,
     /// Scratch for `delegate.cell`, reused for every cell.
     pub(crate) out: CellOut,
+    /// Header hover, press, drags, totals and the header listener.
+    pub(crate) head: HeaderCore,
+    /// The delegate's layout with keys, as of the last [`Self::sync_layout`].
+    layout: ColumnLayout<ColKey>,
+    /// The offsets of the delegate layout `layout` was made from. Held, so its address is not
+    /// reused.
+    layout_src: Option<Arc<[Pixels]>>,
 }
 
 /// Wraps a core handler as an element listener that enters the table through `link`.
@@ -314,6 +361,9 @@ fn listen<E: ?Sized + 'static>(
 impl TreeTableCore {
     pub(crate) fn new(link: Link, focus: FocusHandle) -> Self {
         Self {
+            head: HeaderCore::new(&link),
+            layout: ColumnLayout::defaults(TableId::Processes, &[], &[], &[]),
+            layout_src: None,
             link,
             scroll: UniformListScrollHandle::new(),
             x_offset: Pixels::ZERO,
@@ -336,6 +386,44 @@ impl TreeTableCore {
             hover_tips_ready: false,
             out: CellOut::default(),
         }
+    }
+
+    /// Reads the delegate's layout again when it is not the one `layout` was made from. Every
+    /// entry into the core calls this first.
+    pub(crate) fn sync_layout(&mut self, host: &mut dyn DynRows) {
+        let (offsets, version) = host.layout_id();
+        if let Some(src) = &self.layout_src
+            && Arc::ptr_eq(src, &offsets)
+            && self.layout.version() == version
+        {
+            return;
+        }
+        self.layout = host.fresh_layout();
+        self.layout_src = Some(offsets);
+    }
+
+    /// The delegate's layout, as of the last [`Self::sync_layout`].
+    pub(crate) fn layout(&self) -> &ColumnLayout<ColKey> {
+        &self.layout
+    }
+
+    /// The layout the table draws: the drag copy during a boundary drag, else the delegate's.
+    pub(crate) fn live(&self) -> &ColumnLayout<ColKey> {
+        match &self.head.state.resize {
+            Some(drag) => &drag.layout,
+            None => &self.layout,
+        }
+    }
+
+    /// Hands `layout` to the delegate's `on_columns_changed` and reads the delegate's layout
+    /// back.
+    pub(crate) fn apply_columns(
+        &mut self,
+        layout: &ColumnLayout<ColKey>,
+        host: &mut dyn DynTreeDelegate,
+    ) {
+        host.set_columns(layout);
+        self.sync_layout(host);
     }
 
     /// Scroll anchoring (UI-PRC-010): the top-most visible selectable row of the last frame
@@ -387,7 +475,7 @@ impl TreeTableCore {
     /// the next update.
     fn check_gutter(&mut self, host: &mut dyn DynTreeDelegate) {
         if let Some(drawn) = self.probe_gutter.take()
-            && drawn != self.horizontal_overflow(host.total_width())
+            && drawn != self.horizontal_overflow(self.live().total_width())
         {
             host.notify();
         }
@@ -439,7 +527,7 @@ impl TreeTableCore {
         let call = self.list_calls;
         self.list_calls = self.list_calls.saturating_add(1);
         let m = *metrics(host.app());
-        let total_width = host.total_width();
+        let total_width = self.live().total_width();
         // When the columns overflow, the rows get the scrollbar's width on the right, so the
         // last column can scroll out from under the vertical scrollbar.
         let tail = if self.horizontal_overflow(total_width) {
@@ -463,7 +551,8 @@ impl TreeTableCore {
         self.record_frame(range.clone(), m.row_height, host);
         host.before_rows(range.clone(), window);
 
-        let layout = host.layout();
+        let layout = self.live();
+        let (visible, offsets) = (layout.visible_columns().clone(), layout.offsets().clone());
         let frame = FrameCtx {
             m,
             theme: crate::theme::current(host.app()).clone(),
@@ -471,8 +560,8 @@ impl TreeTableCore {
             total_width,
             guide_lines: host.guide_lines(),
             separators: self.column_separators,
-            visible: layout.visible,
-            offsets: layout.offsets,
+            visible,
+            offsets,
             name_col: host.name_column(),
         };
         let columns = frame.visible.len();
@@ -1178,15 +1267,15 @@ impl TreeTableCore {
     }
 
     /// The visible column under window x `x`. Right of the last column: the last column.
-    fn column_at_x(&self, x: Pixels, host: &mut dyn DynRows) -> Option<ColKey> {
+    fn column_at_x(&self, x: Pixels) -> Option<ColKey> {
         let body = ScrollbarHandle::viewport_bounds(&self.scroll);
         let content_x = x - body.origin.x - ScrollbarHandle::offset(&self.scroll).x;
-        let layout = host.layout();
+        let layout = self.live();
         let pos = layout
-            .offsets
+            .offsets()
             .partition_point(|&o| o <= content_x)
             .saturating_sub(1);
-        layout.visible.get(pos).copied()
+        layout.visible_columns().get(pos).copied()
     }
 
     /// Right press on the body (UI-PRC-008). One handler for every row: the row and the column
@@ -1203,7 +1292,7 @@ impl TreeTableCore {
         let Some(ix) = self.row_at_y(ev.position.y, row_h, host) else {
             return;
         };
-        let Some(col) = self.column_at_x(ev.position.x, host) else {
+        let Some(col) = self.column_at_x(ev.position.x) else {
             return;
         };
         let targets = if host.row_kind(ix) == RowKind::GroupHeader {
@@ -1256,8 +1345,8 @@ impl TreeTableCore {
         let s = m.ui_scale;
         let body = ScrollbarHandle::viewport_bounds(&self.scroll);
         let scroll = ScrollbarHandle::offset(&self.scroll);
-        let layout = host.layout();
-        let x = match layout.visible.iter().position(|c| *c == name_col) {
+        let layout = self.live();
+        let x = match layout.visible_columns().iter().position(|c| *c == name_col) {
             Some(pos) => {
                 let cell = host.name_cell(ix);
                 let icon = match cell.icon {
@@ -1269,7 +1358,7 @@ impl TreeTableCore {
                 } else {
                     name_indent(host.row_depth(ix), s) + px((CHEVRON + icon + ICON_GAP) * s)
                 };
-                layout.offsets[pos] + start + scroll.x
+                layout.offsets()[pos] + start + scroll.x
             }
             None => m.sp[4],
         };
@@ -1325,7 +1414,7 @@ impl TreeTableCore {
     /// each visible column's text. Cells copy the cached display text, the Name column its
     /// primary text and glyph cells their copy text (UI-FND-026). Group headers are left out.
     pub(crate) fn rows_as_tsv(&mut self, rows: &[usize], host: &mut dyn DynRows) -> String {
-        let visible = host.layout().visible;
+        let visible = self.live().visible_columns().clone();
         let name_col = host.name_column();
         let mut text = String::new();
         for (pos, &col) in visible.iter().enumerate() {
