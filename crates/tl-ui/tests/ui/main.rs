@@ -16,7 +16,6 @@ mod device_pages;
 mod dialogs;
 mod dialogs_process;
 mod focus;
-mod gpu_page;
 mod handle_search;
 mod helper_flow;
 mod history;
