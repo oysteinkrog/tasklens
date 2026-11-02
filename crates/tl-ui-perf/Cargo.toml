@@ -23,7 +23,8 @@ tl-ui-settings = { workspace = true }
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tl-ui-testkit = { workspace = true }   # FakeEngine for the integration tests
-tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # render helpers
+tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # page host and render helpers
+serde_json = { workspace = true }   # keymap JSON in the perf_keys tests
 
 [features]
 default = []

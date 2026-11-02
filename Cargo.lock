@@ -8293,6 +8293,7 @@ dependencies = [
  "gpui-kit",
  "jiff",
  "rustc-hash 2.1.3",
+ "serde_json",
  "smallvec",
  "tl-model",
  "tl-ui-base",
