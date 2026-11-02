@@ -3586,6 +3586,15 @@ So the GPUI stack has two variants from gpui-kit `test-support` (a dev-dependenc
 
 Both use the same `-p` list. The feature-less app variant (`cargo build -p tl-app`, and `cargo gclippy`, the alias for `clippy --locked -p tl-app`) is built by the leader gate and by the smoke harness, not by every lane. This replaces the 2026-11-01 lane rule "lanes also run `cargo check -p tl-app` without features"; per lane that saves the 8 GPUI units and the third tl-ui compile of the `cargo clippy -p tl-app` row whenever the app variant is stale. A lane builds tl-app only when its bead asks for a screenshot or a smoke check. `test-support` stays out of release builds. `cargo gclippy` is a dev-profile build, so it compiles the debug test hooks; it checks that tl-app builds without `test-support` and without dev-dependencies. Only a release-profile build (packaging) compiles without the hooks.
 
+**Lane loop check.** After `cargo lclippy -p tl-ui` and `cargo ltest -p tl-ui --test ui --no-run` were fresh, `crates/tl-ui/src/util.rs` was touched, so cargo saw an edit. Then a lane loop ran:
+
+| Step | rustc units | gpui-kit units | tl_ui | Time |
+|---|---|---|---|---|
+| `cargo lclippy -p tl-ui -v -- -D warnings` | 3 | 0 | 2 (lib, lib tests) | 14 s |
+| `cargo ltest -p tl-ui --test ui --no-run -v` | 2 | 0 | 1 | 21 s |
+| `cargo lclippy -p tl-ui -v -- -D warnings` | 0 | 0 | 0 | 0 s |
+| `cargo gclippy -v -- -D warnings` (leader gate, after the loop) | 2 | 0 | 1 | 22 s |
+
 **Decision: no feature pins, no workspace-hack crate.** Pinning features on the `[workspace.dependencies]` lines cannot make the selections agree. A pin acts only on crates that use the line, and no crate in tl-ui's closure (tl-ui, tl-model, tl-ui-testkit) declares any of the 14 crates. To pin them, tl-ui would have to depend on `libc`, `zbus`, `zeroize`, `tracing-subscriber` and the rest directly, which ADR-001 rule 1 forbids for `zbus` and the allowed-dependency table does not allow for the others. A lane keeps one `-p` list for all its commands instead, so within a lane every command reuses the same units. The remaining cost is between lanes: a lane whose `-p` list differs from the last one compiles the workspace crates of its own selection once more after an edit. GPUI itself is not rebuilt while its variant is in `target/`.
 
 **Aliases.** `.cargo/config.toml` defines `lclippy`, `ltest` and `gclippy` next to `xtask`. They pass `--locked`, which fails when Cargo.lock must change: a bead that changes dependencies runs plain `cargo` once to update Cargo.lock and commits it.
