@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::SharedString;
 use gpui_kit::base::Root;
 use gpui_kit::{
     AnyView, AnyWeakEntity, App, AppContext as _, Context, Entity, Global, InteractiveElement as _,
@@ -21,7 +22,7 @@ use tl_ui_base::{action_tracker, request_ends};
 use tl_ui_kit::actions::GLOBAL_CONTEXT;
 use tl_ui_kit::components::menu::context_menu_layer;
 use tl_ui_kit::components::toast;
-use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use tl_ui_kit::{actions, helper_flow};
 use tl_ui_pagehost::PageHost;
 use tl_ui_procs::pages::processes::ProcessesPage;
@@ -64,7 +65,18 @@ pub fn shell_free_init_with(
     state: UiState,
     env: AppEnv,
 ) -> (Arc<FakeEngine>, PageHost) {
-    let engine = FakeEngine::new();
+    shell_free_init_on(cx, FakeEngine::new(), settings, state, env)
+}
+
+/// [`shell_free_init_with`] on `engine`, for a test that publishes before the hub reads the
+/// first snapshot.
+pub fn shell_free_init_on(
+    cx: &mut TestAppContext,
+    engine: Arc<FakeEngine>,
+    settings: Settings,
+    state: UiState,
+    env: AppEnv,
+) -> (Arc<FakeEngine>, PageHost) {
     let host = PageHost::install_with(cx, Arc::clone(&engine), settings, state, env);
     cx.update(|cx| {
         install_shell_services(&host, cx);
@@ -80,7 +92,16 @@ pub fn shell_free_init_with(
 struct StandInSlot {
     toasts: Option<Entity<ToastQueue>>,
     page: Option<AnyView>,
+    /// Toasts pushed while the window was still being built, before its queue existed.
+    early: Vec<EarlyToast>,
 }
+
+type EarlyToast = (
+    ToastKind,
+    SharedString,
+    Option<ToastKey>,
+    Option<ToastAction>,
+);
 
 impl Global for StandInSlot {}
 
@@ -149,6 +170,10 @@ fn install_stand_in_api(cx: &mut App) {
     api.toast = |cx, kind, text, key, action| {
         if let Some(queue) = cx.global::<StandInSlot>().toasts.clone() {
             queue.update(cx, |q, cx| q.push(kind, text, key, action, cx));
+        } else {
+            cx.global_mut::<StandInSlot>()
+                .early
+                .push((kind, text, key, action));
         }
     };
     // The stand-in shows the Processes tab only: another tab hides the page, so its demand goes.
@@ -201,6 +226,13 @@ pub fn open_stand_in(cx: &mut TestAppContext, host: &PageHost) -> (StandIn, Visu
         window.focus(&focus, cx);
         let slot = cx.global_mut::<StandInSlot>();
         slot.toasts = Some(toasts.clone());
+        let early = std::mem::take(&mut slot.early);
+        toasts.update(cx, |q, cx| {
+            for (kind, text, key, action) in early {
+                q.push(kind, text, key, action, cx);
+            }
+        });
+        let slot = cx.global_mut::<StandInSlot>();
         slot.page = Some(page.clone().into());
         let state = cx.default_global::<ShellState>();
         state.main_window = window.window_handle().downcast::<Root>();

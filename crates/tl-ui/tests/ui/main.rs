@@ -14,7 +14,7 @@ mod demand;
 mod detached;
 mod device_pages;
 mod focus;
-mod history;
+mod history_shell;
 mod host_clock;
 mod host_manage;
 mod host_settings;

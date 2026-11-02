@@ -8,6 +8,7 @@ mod dialogs;
 mod dialogs_process;
 mod handle_search;
 mod helper_flow;
+mod history;
 mod process_cells;
 mod process_menu;
 mod process_priority_menu;
