@@ -11,6 +11,8 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, bail};
 
+use crate::check_layers;
+
 /// Package names of the shipped binaries. `tl-app` builds the `tasklens` binary (R-158).
 /// `tl-server` builds `tasklens-engine` (ADR-018).
 pub const SHIPPED_BINARIES: &[&str] = &[
@@ -38,6 +40,9 @@ pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// ADR-001 allowed direct normal and build dependencies per workspace member, with the R-130,
 /// R-131, R-132 and R-142 additions. Dev-dependencies are outside the rows (R-142 item 18).
+/// For `tl-ui` and every `tl-ui-*` member, the tl-ui crates it may depend on come from the
+/// ADR-020 map in `check_layers::EDGES`, not from these rows, so check-deps and check-layers
+/// cannot disagree.
 pub const ALLOWED: &[(&str, &[&str])] = &[
     (
         "tl-model",
@@ -125,6 +130,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "serde_json",
             "fluent-bundle",
             "unic-langid",
+            // Plural rules in `pages/performance/details.rs`, in use since o55.37 (ADR-001).
+            "intl_pluralrules",
             "async-channel",
             "jiff",
             "unicode-segmentation",
@@ -536,10 +543,19 @@ fn rows_and_closures(metadata: &serde_json::Value) -> anyhow::Result<Vec<String>
                     .filter(|edge| edge.normal || edge.build)
                     .map(|edge| graph.name(edge.pkg))
                     .collect();
-                for dep in direct.into_iter().filter(|dep| !row.contains(dep)) {
-                    violations.push(format!(
-                        "{member} depends on {dep}, which is not in its ADR-001 row"
-                    ));
+                let ui_member = check_layers::is_ui_crate(member);
+                for dep in direct {
+                    if ui_member && check_layers::is_ui_crate(dep) {
+                        if !check_layers::may_depend(member, dep) {
+                            violations.push(format!(
+                                "{member} depends on {dep}, which its ADR-020 row does not allow"
+                            ));
+                        }
+                    } else if !row.contains(&dep) {
+                        violations.push(format!(
+                            "{member} depends on {dep}, which is not in its ADR-001 row"
+                        ));
+                    }
                 }
             }
             None => violations.push(format!("{member} has no ADR-001 row")),
@@ -943,6 +959,39 @@ mod tests {
             rows_and_closures(&json).unwrap(),
             vec!["tl-ops depends on cc, which is not in its ADR-001 row"]
         );
+    }
+
+    #[test]
+    fn ui_crate_rows_come_from_layer_edges() {
+        let json = metadata(
+            &["tl-ui"],
+            &[
+                ("tl-ui", "tl-model", None),
+                ("tl-ui", "tl-ui-kit", None),
+                ("tl-ui", "tl-ui-sys", None),
+                ("tl-ui", "tl-ui-pagehost", None),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec!["tl-ui depends on tl-ui-pagehost, which its ADR-020 row does not allow"]
+        );
+    }
+
+    #[test]
+    fn ui_rows_name_no_ui_crates() {
+        // tl-ui-* dependencies come from check_layers::EDGES only, so a row naming one would be
+        // a second source that could disagree.
+        for (member, row) in ALLOWED {
+            if check_layers::is_ui_crate(member) {
+                for dep in *row {
+                    assert!(
+                        !check_layers::is_ui_crate(dep),
+                        "{member} row names {dep}; put tl-ui crates in check_layers::EDGES"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
