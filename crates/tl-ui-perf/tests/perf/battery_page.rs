@@ -13,19 +13,19 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::snapshot::{BatteryDetails, DeviceDetailsSnapshot, InvField};
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::labels::format_value;
-use tl_ui::chart::{ValueFormat, YScale};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::page::DevicePage as _;
-use tl_ui::pages::performance::sensors::BatteryPage;
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui::settings_global::TlSettings;
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::labels::format_value;
+use tl_ui_chart::chart::{ValueFormat, YScale};
+use tl_ui_kit::components::kv_grid;
+use tl_ui_perf::performance::page::DevicePage as _;
+use tl_ui_perf::performance::sensors::BatteryPage;
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -127,13 +127,13 @@ fn open<'a>(cx: &'a mut TestAppContext, b: BatteryDetails) -> Rig<'a> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));

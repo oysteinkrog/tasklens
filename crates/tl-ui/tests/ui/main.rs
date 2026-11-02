@@ -5,7 +5,6 @@
 
 mod action_links;
 mod actions;
-mod battery_page;
 mod bench_scenes;
 mod chart_cpu_grid_hover;
 mod common;
