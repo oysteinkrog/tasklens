@@ -21,16 +21,13 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::YScale;
 use tl_ui_chart::chart::labels::LabelKind;
 use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, open_context_menu};
-use tl_ui_base::hub::SnapshotHub;
-use tl_ui_base::i18n::init_strings;
-use tl_ui_perf_core::core::DeviceKey;
-use tl_ui_perf_core::core::actions::{PerfWidgetSetForm, WidgetSource, bind_keys_performance};
-use tl_ui_overview::widget::compose::{
-    Composition, cell_min, row_forms, row_min, tile_min,
-};
+use tl_ui_overview::widget::compose::{Composition, cell_min, row_forms, row_min, tile_min};
 use tl_ui_overview::widget::container::{WidgetContainer, container_id, scroll_id};
 use tl_ui_overview::widget::edit::{
     ADD_ID, APPLY_ID, CANCEL_ID, OUTLINE, PREVIEW_ID, RESET_ID, TOOLBAR_ID, UNDO_ID, WidgetEditor,
@@ -38,10 +35,9 @@ use tl_ui_overview::widget::edit::{
 };
 use tl_ui_overview::widget::grid::{self, InnerGrid, SlotDevice};
 use tl_ui_overview::widget::metric_widget::{MetricWidget, part_id, widget_id};
-use tl_ui_overview::widget::source::{
-    Availability, AvailabilityChanged, SourceData, SourceStore,
-};
-use tl_ui_base::settings_global::TlSettings;
+use tl_ui_overview::widget::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{PerfWidgetSetForm, WidgetSource, bind_keys_performance};
 use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
     MetricKey, PresetSetting, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
@@ -1475,7 +1471,8 @@ impl Rig<'_> {
             let focus = e.read(cx).focus_handle().clone();
             focus.dispatch_action(&*action, window, cx);
         });
-        self.vcx.update(tl_ui_kit::components::menu::close_context_menu);
+        self.vcx
+            .update(tl_ui_kit::components::menu::close_context_menu);
         draw(self.vcx);
     }
 
@@ -1765,7 +1762,8 @@ fn overview_widget_reset_asks(cx: &mut TestAppContext) {
         .map(|(l, _, _)| l)
         .collect();
     assert_eq!(top.first().map(String::as_str), Some("Source"), "{top:?}");
-    r.vcx.update(tl_ui_kit::components::menu::close_context_menu);
+    r.vcx
+        .update(tl_ui_kit::components::menu::close_context_menu);
     draw(r.vcx);
 
     // Its grip drags it down two rows.
@@ -1916,7 +1914,8 @@ fn overview_widget_menu_offers_metric_forms(cx: &mut TestAppContext) {
     );
 
     // Power without a power limit has no bar to offer.
-    r.vcx.update(tl_ui_kit::components::menu::close_context_menu);
+    r.vcx
+        .update(tl_ui_kit::components::menu::close_context_menu);
     draw(r.vcx);
     let gear = r
         .vcx

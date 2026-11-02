@@ -20,17 +20,13 @@ use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_overview::widget::compose::Composition;
 use tl_ui_overview::widget::container::WidgetContainer;
-use tl_ui_overview::widget::edit::{
-    OUTLINE, WidgetEditor, corner_id, frame_id, gear_id, grip_id,
-};
-use tl_ui_overview::widget::group_widget::{
-    GroupState, GroupWidget, scroll_id as group_scroll_id,
-};
+use tl_ui_overview::widget::edit::{OUTLINE, WidgetEditor, corner_id, frame_id, gear_id, grip_id};
+use tl_ui_overview::widget::group_widget::{GroupState, GroupWidget, scroll_id as group_scroll_id};
 use tl_ui_overview::widget::metric_widget::{part_id, widget_id};
 use tl_ui_overview::widget::source::SourceStore;
-use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FormSet, GroupItems,
     GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, METRIC_ENGINE_ANY, MetricKey,

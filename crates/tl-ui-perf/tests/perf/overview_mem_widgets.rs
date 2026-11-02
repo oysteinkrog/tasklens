@@ -21,27 +21,25 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
-use tl_ui_kit::components::kv_grid;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::overview::mem_box::{
+    MEM_APPS_ID, MEM_COMP_CHART_ID, MEM_USED_CHART_ID, MemBox, ROWS, cell_id, row_id, spark_id,
+};
+use tl_ui_overview::overview::mem_flow::{apps_of, comp_of, row_of, rows_of, used_chart_of};
+use tl_ui_overview::overview::memory_apps::LEGEND_ID;
+use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_overview::widget::container::{WidgetContainer, container_id};
+use tl_ui_overview::widget::edit::{WidgetEditor, default_layout};
+use tl_ui_overview::widget::metric_widget::{FlowLook, widget_id};
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
 use tl_ui_perf_core::core::DeviceKey;
 use tl_ui_perf_core::core::actions::{
     PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, PerfWidgetEditBox, WidgetSource,
 };
-use tl_ui_overview::overview::memory_apps::LEGEND_ID;
-use tl_ui_overview::overview::mem_box::{
-    MEM_APPS_ID, MEM_COMP_CHART_ID, MEM_USED_CHART_ID, MemBox, ROWS, cell_id, row_id, spark_id,
-};
-use tl_ui_overview::overview::mem_flow::{
-    apps_of, comp_of, row_of, rows_of, used_chart_of,
-};
-use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui_perf::performance::sidebar::DeviceSidebar;
-use tl_ui_overview::widget::container::{WidgetContainer, container_id};
-use tl_ui_overview::widget::edit::{WidgetEditor, default_layout};
-use tl_ui_overview::widget::metric_widget::{FlowLook, widget_id};
-use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER, WidgetContent, box_layout,
     convert_old_settings,

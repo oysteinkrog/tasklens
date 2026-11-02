@@ -18,21 +18,21 @@ use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui_base::anim::AnimationDriver;
 use tl_ui_base::app_env::{BootSettings, EngineGlobal};
-use tl_ui_kit::components::kv_grid;
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
-use tl_ui_perf_core::core::DeviceKey;
-use tl_ui_perf_core::core::actions::{PerfWidgetEditBox, WidgetSource};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_kit::components::kv_grid;
 use tl_ui_overview::overview::fixed_box::FixedBox;
 use tl_ui_overview::overview::procs_box::PROC_ROW_ID_PREFIX;
 use tl_ui_overview::overview::timeline::BANDS_ID;
 use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui_perf::performance::sidebar::DeviceSidebar;
 use tl_ui_overview::widget::container::WidgetContainer;
 use tl_ui_overview::widget::edit::{WidgetEditor, default_layout};
 use tl_ui_overview::widget::metric_widget::widget_id;
-use tl_ui_base::settings_global::TlSettings;
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{PerfWidgetEditBox, WidgetSource};
 use tl_ui_settings::layout::{
     ContainerLayout, FixedWidget, PROCESSES_BOX_CONTAINER, TIMELINE_BOX_CONTAINER, WidgetContent,
 };
