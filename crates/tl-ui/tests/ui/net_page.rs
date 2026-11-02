@@ -158,6 +158,8 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         tl_ui::components::menu::bind_keys(cx);
         // No Network settings link, whatever XDG_CURRENT_DESKTOP the test runs under.
         cx.set_global(NetSettingsDesktop(None));
+        // The public IP notice is a shell service the page reaches through ShellApi.
+        tl_ui::window::main::install_shell_api(cx);
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     // Only EngineGlobal is installed here, so the host has the client and nothing else.

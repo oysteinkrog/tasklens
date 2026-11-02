@@ -19,7 +19,7 @@ use std::sync::Arc;
 use gpui_kit::{App, BorrowAppContext, Global, SharedString};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
-use tl_ui_settings::settings::{Settings, UiState};
+use tl_ui_settings::settings::{FanOverride, Settings, UiState};
 use tracing::{debug, warn};
 
 use crate::app_env::{BootSettings, PersistFn};
@@ -648,4 +648,31 @@ pub fn system_reduce_motion(cx: &App) -> bool {
         && !cx
             .try_global::<TlSettings>()
             .is_some_and(|tl| tl.forced_reduce_motion)
+}
+
+/// Writes `fans[key].label`, the trimmed text, or removes the field when it is empty. The entry
+/// goes when neither field is left.
+pub fn set_fan_label(key: &str, text: &str, cx: &mut App) {
+    let text = text.trim();
+    update_fan(key, cx, |f| {
+        f.label = (!text.is_empty()).then(|| text.to_owned());
+    });
+}
+
+/// Writes `fans[key].temp`, or removes the field for `None`. The entry goes when neither field is
+/// left.
+pub fn set_fan_temp(key: &str, temp: Option<&str>, cx: &mut App) {
+    update_fan(key, cx, |f| f.temp = temp.map(str::to_owned));
+}
+
+fn update_fan(key: &str, cx: &mut App, edit: impl FnOnce(&mut FanOverride)) {
+    TlSettings::update(cx, |d| {
+        let mut fan = d.settings.fans.get(key).cloned().unwrap_or_default();
+        edit(&mut fan);
+        if fan.label.is_none() && fan.temp.is_none() {
+            d.settings.fans.remove(key);
+        } else {
+            d.settings.fans.insert(key.to_owned(), fan);
+        }
+    });
 }

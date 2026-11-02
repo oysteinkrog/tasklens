@@ -29,8 +29,6 @@ mod services;
 mod startup_window;
 mod units;
 
-pub(crate) use performance::{set_fan_label, set_fan_temp};
-
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::rc::Rc;

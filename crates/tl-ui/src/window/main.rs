@@ -87,7 +87,7 @@ use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::host::{HostContext, HostRegistry, HostTab};
 use crate::hosts_edit;
 use crate::hub::{ComponentMask, LinkChanged, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr_args, tr_en};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::connections::ConnectionsPage;
 use crate::pages::connections::actions::GoToConnection;
 use crate::pages::information::InformationPage;
@@ -98,7 +98,7 @@ use crate::pages::performance::status_bar::{self as machine_status, Slot, Status
 use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
-use crate::pages::processes::pick::{self, PickWatch};
+use crate::pages::processes::pick::{self, PickModifier, PickStep, PickWatch};
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::pages::services::ServicesPage;
 use crate::pages::services::actions::{GoToService, ManagerArg};
@@ -109,16 +109,17 @@ use crate::table::actions::TABLE_CONTEXT;
 use crate::text::style::numeric_style;
 use crate::theme::store::apply_metrics;
 use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
+pub(crate) use crate::tray_bridge::tray_available;
 use crate::tray_bridge::{TrayBridge, TrayStatus};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
 pub(crate) use crate::shell::PICK_NONE_TEXT;
-use crate::shell::ShellApi;
 pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
-    ShellEvents, ShellPage, ShellState, WINDOW_TITLE,
+    ShellEvents, ShellPage, ShellState, WINDOW_TITLE, main_window_title,
 };
+use crate::shell::{PublicIpFetch, ShellApi};
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
 /// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
@@ -806,12 +807,6 @@ fn activate_main(cx: &mut App) {
     }
 }
 
-/// The main window's title while it shows `host`: [`WINDOW_TITLE`] for the local host,
-/// "tasklens - <host>" for a remote one (UI-SHL-008).
-pub fn main_window_title(host: &HostContext) -> String {
-    host.titled(WINDOW_TITLE)
-}
-
 /// The caption KWin finds the main window by: `None` (the window titled [`WINDOW_TITLE`])
 /// while the local host is shown, the full title while a remote host is.
 fn main_caption(cx: &App) -> Option<Arc<str>> {
@@ -981,12 +976,6 @@ pub fn restored_bounds(state: &WindowState) -> WindowBounds {
     }
 }
 
-/// The tray is running and available.
-pub(crate) fn tray_available(cx: &App) -> bool {
-    cx.try_global::<TrayStatus>()
-        .is_some_and(|s| s.running && s.available)
-}
-
 /// Whether any detached graph window is open. False when no registry is installed.
 fn detached_graph_open(cx: &App) -> bool {
     cx.try_global::<GlobalRegistry>().is_some_and(|registry| {
@@ -1133,9 +1122,43 @@ fn metrics_key(cx: &App) -> MetricsKey {
 }
 
 /// Installs the shell services lower layers call through [`ShellApi`].
-fn install_shell_api(cx: &mut App) {
+pub fn install_shell_api(cx: &mut App) {
     cx.set_global(ShellApi {
         toast: |cx, kind, text, key, action| push_main_toast(cx, kind, text, key, action),
+        main_toasts: |cx| main_window_view(cx).map(|view| view.read(cx).toasts.clone().into_any()),
+        select_tab: |tab, window, cx| {
+            if let Some(view) = main_window_view(cx) {
+                view.update(cx, |main, cx| main.select_tab(tab, window, cx));
+            }
+        },
+        page: |cx, tab| {
+            let view = main_window_view(cx)?;
+            let main = view.read(cx);
+            main.pages[tab as usize]
+                .as_ref()
+                .map(|slot| slot.view.clone())
+        },
+        filter_text: |cx, tab| {
+            let view = main_window_view(cx)?;
+            Some(view.read(cx).filter.read(cx).text(tab).clone())
+        },
+        set_group_chip: |text, cx| {
+            if let Some(view) = main_window_view(cx) {
+                let filter = view.read(cx).filter.clone();
+                filter.update(cx, |f, cx| f.set_group_chip(text, cx));
+            }
+        },
+        note_restricted: |count, cx| {
+            let Some(view) = main_window_view(cx) else {
+                return false;
+            };
+            let chip = view.read(cx).status.clone();
+            chip.update(cx, |c, cx| c.note_restricted_refusal(count, cx));
+            true
+        },
+        public_ip_fetch: |window, cx, fetch: PublicIpFetch| {
+            super::public_ip::request_public_ip_fetch(window, cx, fetch)
+        },
     });
 }
 
@@ -1677,7 +1700,7 @@ impl MainWindow {
                     let windows = Arc::clone(&hub.read(cx).current().windows);
                     if let Some(result) = this.pick_watch.take(&windows) {
                         let host = this.host.clone();
-                        pick::on_pick_result(&host, this, result, window, cx);
+                        this.on_pick_result(&host, result, window, cx);
                     }
                     if this.picking && !keep_above_supported(cx) {
                         this.end_window_pick(cx);
@@ -2132,8 +2155,45 @@ impl MainWindow {
         });
     }
 
+    /// Handles one new pick result: ends picking, then the toast or the Processes page's
+    /// handler (PROC-055 steps 1 to 4). `host` is the host this window shows.
+    fn on_pick_result(
+        &mut self,
+        host: &HostContext,
+        result: tl_model::snapshot::PickResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        debug!(target: "tasklens::ui", outcome = ?result.outcome, "window pick result");
+        // A result for an earlier pick, such as the engine's late Cancelled after Esc, must not
+        // end or answer the pick running now.
+        if result.seq != self.pick_seq() {
+            debug!(target: "tasklens::ui", seq = result.seq, "stale window pick result ignored");
+            return;
+        }
+        self.end_window_pick(cx);
+        match pick::pick_step(host, result.outcome, cx) {
+            // The Info toast with the picker's toast key, so it replaces the start toast or an
+            // earlier "No window selected".
+            PickStep::Toast(key) => {
+                let text = tr(cx, key);
+                self.toasts.update(cx, |q, cx| {
+                    q.push(ToastKind::Info, text, Some(PICK_TOAST), None, cx)
+                });
+            }
+            PickStep::Select(target) => {
+                let modifier = PickModifier::of(window);
+                self.select_tab(Tab::Processes, window, cx);
+                let Some(page) = self.page_entity::<ProcessesPage>(Tab::Processes) else {
+                    return;
+                };
+                page.update(cx, |p, cx| p.on_picked(target, modifier, window, cx));
+            }
+        }
+    }
+
     /// Ends picking: the button turns off, the "Picker" context goes and the start toast is
-    /// removed. The Processes page calls it when the pick result arrives (PROC-055).
+    /// removed. Called when the pick result arrives (PROC-055).
     pub fn end_window_pick(&mut self, cx: &mut Context<Self>) {
         if !self.picking {
             return;

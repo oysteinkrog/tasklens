@@ -1074,11 +1074,9 @@ impl ActionTracker {
     /// Tells the status chip how many targets were refused while tl-helper is missing
     /// (E20-016, UI-FND-028). Without a main window this does nothing.
     fn note_restricted(&mut self, count: u32, cx: &mut Context<Self>) {
-        let Some(main) = crate::window::main::main_window_view(cx) else {
+        if !ShellApi::note_restricted(count, cx) {
             return;
-        };
-        let chip = main.read(cx).status_chip().clone();
-        chip.update(cx, |c, cx| c.note_restricted_refusal(count, cx));
+        }
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.restricted_notes += 1;

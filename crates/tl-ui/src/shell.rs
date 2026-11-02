@@ -5,12 +5,12 @@
 //! shell events and the shell state, the status chip's event and action types, the toolbar's
 //! content trait and model, and the title bar's keep-above check and test probe. The `window/`
 //! modules re-export each item at its old path. [`ShellApi`] holds the shell services lower
-//! layers call (tasklens-zljr5.16).
+//! layers call (tasklens-zljr5.16, tasklens-zljr5.17).
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    Action, AnyElement, AnyWeakEntity, App, Context, Entity, EventEmitter, FocusHandle, Global,
-    Render, SharedString, Window, WindowHandle,
+    Action, AnyElement, AnyEntity, AnyView, AnyWeakEntity, App, Context, Entity, EventEmitter,
+    FocusHandle, Global, Render, SharedString, Window, WindowHandle,
 };
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use gpui_kit::{Pixels, Point};
@@ -29,6 +29,12 @@ use crate::registry::WindowKey;
 
 /// The window title the KWin task switcher shows.
 pub const WINDOW_TITLE: &str = "tasklens";
+
+/// The main window's title while it shows `host`: [`WINDOW_TITLE`] for the local host,
+/// "tasklens - <host>" for a remote one (UI-SHL-008).
+pub fn main_window_title(host: &HostContext) -> String {
+    host.titled(WINDOW_TITLE)
+}
 
 /// The window picker's "No window selected" text (E20-027).
 pub(crate) const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
@@ -112,6 +118,16 @@ pub struct ShellState {
 }
 
 impl Global for ShellState {}
+
+impl ShellState {
+    /// True while the main window's view is alive. False before it opens, after it closes and
+    /// without a shell.
+    pub fn main_view_open(cx: &App) -> bool {
+        cx.try_global::<ShellState>()
+            .and_then(|s| s.main_view.as_ref())
+            .is_some_and(|view| view.upgrade().is_some())
+    }
+}
 
 impl Default for ShellState {
     fn default() -> Self {
@@ -226,16 +242,45 @@ pub fn keep_above_supported(cx: &App) -> bool {
 /// shell installs the function that pushes to the main window's toast queue.
 pub type PushToastFn = fn(&mut App, ToastKind, SharedString, Option<ToastKey>, Option<ToastAction>);
 
+/// The fetch a public IP request runs once the user allows it.
+pub type PublicIpFetch = Box<dyn FnOnce(&mut Window, &mut App)>;
+
 /// Shell services that lower layers call without naming the shell (ADR-020 "ShellApi").
-/// `window::main::init` installs it. CS-C4 adds more fields.
+/// `window::main::init` installs it. Each field acts on the main window; without one it does
+/// nothing and returns `None` or `false`. Call the wrappers below, not the fields.
 pub struct ShellApi {
     /// Pushes a toast to the main window's queue.
     pub toast: PushToastFn,
+    /// The main window's toast queue, a `components::toast::ToastQueue`.
+    pub main_toasts: fn(&App) -> Option<AnyEntity>,
+    /// Selects a tab in the main window.
+    pub select_tab: fn(Tab, &mut Window, &mut App),
+    /// The page view of a tab in the main window, when the tab's page is built.
+    pub page: fn(&App, Tab) -> Option<AnyView>,
+    /// The shell filter box's text for a tab.
+    pub filter_text: fn(&App, Tab) -> Option<SharedString>,
+    /// Sets the shell filter box's memory group chip (D-036).
+    pub set_group_chip: fn(Option<SharedString>, &mut App),
+    /// Tells the status chip how many targets were refused (E20-016). True when a main window
+    /// took it.
+    pub note_restricted: fn(u32, &mut App) -> bool,
+    /// Runs the fetch through the public IP notice (UI-SHL-096): at once when the notice was
+    /// accepted, else after Continue.
+    pub public_ip_fetch: fn(&mut Window, &mut App, PublicIpFetch),
 }
 
 impl Global for ShellApi {}
 
 impl ShellApi {
+    /// The field `f` picks, or `None` (with a debug log) when no shell is installed.
+    fn field<T>(cx: &App, what: &'static str, f: impl FnOnce(&ShellApi) -> T) -> Option<T> {
+        let field = cx.try_global::<ShellApi>().map(f);
+        if field.is_none() {
+            debug!(target: "tasklens::ui", what, "no shell, call dropped");
+        }
+        field
+    }
+
     /// Pushes a toast to the main window's queue. Does nothing when no shell is installed (a
     /// page-host test) or when the main window is closed.
     pub fn push_toast(
@@ -250,6 +295,56 @@ impl ShellApi {
             return;
         };
         toast(cx, kind, text.into(), key, action);
+    }
+
+    /// The main window's toast queue entity. Downcast it to `ToastQueue`.
+    pub fn main_toasts(cx: &App) -> Option<AnyEntity> {
+        Self::field(cx, "main_toasts", |api| api.main_toasts)?(cx)
+    }
+
+    /// Selects `tab` in the main window. Nothing without a main window or for a tab that is not
+    /// built.
+    pub fn select_tab(tab: Tab, window: &mut Window, cx: &mut App) {
+        if let Some(select) = Self::field(cx, "select_tab", |api| api.select_tab) {
+            select(tab, window, cx);
+        }
+    }
+
+    /// The page entity of `tab` in the main window, when its page is built and is a `T`.
+    pub fn page<T: 'static>(cx: &App, tab: Tab) -> Option<Entity<T>> {
+        let page = Self::field(cx, "page", |api| api.page)?;
+        page(cx, tab)?.downcast::<T>().ok()
+    }
+
+    /// The shell filter box's text for `tab`.
+    pub fn filter_text(cx: &App, tab: Tab) -> Option<SharedString> {
+        Self::field(cx, "filter_text", |api| api.filter_text)?(cx, tab)
+    }
+
+    /// Sets the shell filter box's memory group chip.
+    pub fn set_group_chip(text: Option<SharedString>, cx: &mut App) {
+        if let Some(set) = Self::field(cx, "set_group_chip", |api| api.set_group_chip) {
+            set(text, cx);
+        }
+    }
+
+    /// Tells the main window's status chip that `count` targets were refused. False when no
+    /// main window took it.
+    pub fn note_restricted(count: u32, cx: &mut App) -> bool {
+        Self::field(cx, "note_restricted", |api| api.note_restricted)
+            .is_some_and(|note| note(count, cx))
+    }
+
+    /// Runs `fetch` through the public IP notice. `window` is the caller's window; the notice is
+    /// modal to it. Without a shell the fetch is dropped.
+    pub fn request_public_ip_fetch(
+        window: &mut Window,
+        cx: &mut App,
+        fetch: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) {
+        if let Some(request) = Self::field(cx, "public_ip_fetch", |api| api.public_ip_fetch) {
+            request(window, cx, Box::new(fetch));
+        }
     }
 }
 

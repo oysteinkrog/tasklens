@@ -56,11 +56,10 @@ use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
 use crate::i18n::tr;
 use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, TlSettings, set_fan_label, set_fan_temp};
 use crate::text::style::{label_style, t_xs};
 use crate::theme::palette::accent_color;
 use crate::theme::{TlTheme, current, metrics};
-use crate::window::settings::{set_fan_label, set_fan_temp};
 
 /// Debug selector of the Fan speed chart box.
 pub const SPEED_ID: &str = "perf-fan-speed";

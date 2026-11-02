@@ -57,7 +57,6 @@ use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::shell::keep_above_supported;
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::main_window_view;
 
 /// The window width at ui_scale 1 (PERF-093).
 pub const MINI_W: f32 = 260.;
@@ -200,17 +199,15 @@ fn show_main_on(key: DeviceKey, cx: &mut App) {
     let Some(handle) = cx.try_global::<ShellState>().and_then(|s| s.main_window) else {
         return;
     };
-    let Some(view) = main_window_view(cx) else {
+    if !ShellState::main_view_open(cx) {
         return;
-    };
+    }
     let _ = handle.update(cx, |_, window, cx| {
-        view.update(cx, |main, cx| {
-            main.select_tab(Tab::Performance, window, cx);
-            if let Some(page) = main.page_entity::<PerformancePage>(Tab::Performance) {
-                let sidebar = page.read(cx).sidebar().clone();
-                sidebar.update(cx, |s, cx| s.select(key, cx));
-            }
-        });
+        ShellApi::select_tab(Tab::Performance, window, cx);
+        if let Some(page) = ShellApi::page::<PerformancePage>(cx, Tab::Performance) {
+            let sidebar = page.read(cx).sidebar().clone();
+            sidebar.update(cx, |s, cx| s.select(key, cx));
+        }
     });
 }
 

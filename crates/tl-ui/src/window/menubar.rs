@@ -25,7 +25,8 @@
 //! `menu_hover` fill.
 //!
 //! [`graph_color_menu`] (E21-032, UI-SHL-085, APP-039) is the shared Graph Color submenu: the
-//! minigraph card menu and any in-app graph menu fill a submenu with it.
+//! minigraph card menu and any in-app graph menu fill a submenu with it. It lives in
+//! `pages/minigraph/menu.rs` and is re-exported here.
 
 use fluent_bundle::FluentValue;
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -46,12 +47,12 @@ use super::main::{UI_SCALE_TOAST, push_main_toast};
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
 use super::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
 use crate::actions::{MenuId, OpenMenu};
-use crate::components::menu::{TlMenu, TlMenuPopup};
+use crate::components::menu::TlMenuPopup;
 use crate::components::slider::{TlSliderEvent, set_from_elsewhere};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::pages::minigraph::GraphColor;
+pub use crate::pages::minigraph::menu::graph_color_menu;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
@@ -294,28 +295,6 @@ impl MenuWords {
 }
 
 /// The menu bar of each window that has one, so `OpenMenu` finds the bar of the active window.
-/// Fills a Graph Color submenu: "Accent (theme default)" and the 17 named colours in
-/// `GraphColor::ALL` order, each a radio row with a colour square (the Accent row shows the
-/// current theme's accent). The mark sits on `current`; a row dispatches `action(color)`.
-pub fn graph_color_menu(
-    mut menu: TlMenu,
-    current: GraphColor,
-    action: impl Fn(GraphColor) -> Box<dyn gpui_kit::Action>,
-    cx: &App,
-) -> TlMenu {
-    let theme = crate::theme::current(cx).clone();
-    for color in GraphColor::ALL {
-        let key = format!("shell-graph-color-{}", color.as_str());
-        menu = menu.swatch_radio_item(
-            tr(cx, &key),
-            color.hsla(&theme),
-            color == current,
-            action(color),
-        );
-    }
-    menu
-}
-
 #[derive(Default)]
 struct MenuBars(Vec<(WindowId, WeakEntity<MenuBar>)>);
 

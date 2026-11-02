@@ -4,9 +4,6 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-base -> tl-ui (shell): 1
-action_tracker.rs -> window::main
-
 # tl-ui-base -> tl-ui-kit: 6
 action_tracker.rs -> components::dialog
 action_tracker.rs -> components::toast
@@ -17,10 +14,6 @@ shell.rs -> components::toast
 
 # tl-ui-base -> tl-ui-perf-core: 1
 action_tracker.rs -> pages::performance::details
-
-# tl-ui-overview -> tl-ui (shell): 2
-pages/performance/memory_apps.rs -> window::main
-pages/performance/overview/procs_box.rs -> window::main
 
 # tl-ui-overview -> tl-ui-perf: 30
 pages/performance/memory_apps.rs -> pages::performance::page
@@ -60,19 +53,8 @@ pages/performance/overview/procs_box.rs -> pages::processes
 pages/performance/overview/procs_box.rs -> pages::processes::jump
 pages/performance/overview/timeline.rs -> pages::processes::history
 
-# tl-ui-perf -> tl-ui (shell): 5
-pages/performance/mod.rs -> window::main
-pages/performance/net.rs -> window::public_ip
-pages/performance/sensors.rs -> window::settings
-pages/performance/status_bar/mod.rs -> window::main
-windows/mini.rs -> window::main
-
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
-
-# tl-ui-perf-core -> tl-ui (shell): 2
-pages/minigraph/menu.rs -> window::main
-pages/minigraph/menu.rs -> window::menubar
 
 # tl-ui-perf-core -> tl-ui-perf: 7
 pages/minigraph/bridge.rs -> windows::mini
@@ -83,18 +65,6 @@ pages/performance/actions.rs -> pages::performance
 pages/performance/core_clocks.rs -> pages::performance::cpu
 tray_bridge.rs -> pages::performance
 
-# tl-ui-procs -> tl-ui (shell): 10
-pages/processes/history/mod.rs -> window::main
-pages/processes/jump.rs -> window::main
-pages/processes/menu.rs -> window::main
-pages/processes/mod.rs -> window::main
-pages/processes/pick.rs -> window::main
-pages/processes/run.rs -> window::main
-pages/processes/toasts.rs -> window::main
-windows/app_props.rs -> window::main
-windows/handle_search.rs -> window::main
-windows/props/general.rs -> window::main
-
 # tl-ui-procs -> tl-ui-perf: 1
 windows/disk_in_use.rs -> pages::performance
 
@@ -103,10 +73,6 @@ pages/processes/menu.rs -> pages::services::actions
 windows/notices.rs -> pages::startup::delegate
 windows/props/fds.rs -> pages::connections::actions
 windows/props/general.rs -> pages::services::actions
-
-# tl-ui-sys -> tl-ui (shell): 2
-pages/connections/flows.rs -> window::main
-pages/services/flows.rs -> window::main
 
 # tl-ui-table -> tl-ui-sys: 2
 table/columns.rs -> pages::connections::delegate

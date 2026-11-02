@@ -63,8 +63,8 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
+use crate::shell::ShellApi;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::public_ip::request_public_ip_fetch;
 
 /// Debug selector of the chart box.
 pub const THROUGHPUT_ID: &str = "perf-net-throughput";
@@ -1351,7 +1351,7 @@ impl NetPage {
             return;
         }
         let engine = self.host.client().cloned();
-        request_public_ip_fetch(window, cx, move |_, _| {
+        ShellApi::request_public_ip_fetch(window, cx, move |_, _| {
             let Some(engine) = engine else {
                 return;
             };

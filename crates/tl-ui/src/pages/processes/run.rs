@@ -54,8 +54,8 @@ use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::pages::minigraph::sources::GraphColumn;
+use crate::shell::{ShellApi, ShellState};
 use crate::table::tree_table::RowKind;
-use crate::window::main::main_window_view;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::signal::{open_rt_signal, send_signal};
 
@@ -193,8 +193,8 @@ pub fn run_process_action_with(
 
 /// The main window's toast stack, else the stack of `window`.
 fn toast_queue(window: &Window, cx: &App) -> Option<WeakEntity<ToastQueue>> {
-    if let Some(main) = main_window_view(cx) {
-        return Some(main.read(cx).toasts().downgrade());
+    if let Some(main) = ShellApi::main_toasts(cx).and_then(|q| q.downcast::<ToastQueue>().ok()) {
+        return Some(main.downgrade());
     }
     ToastQueue::of_window(window, cx).map(|q| q.downgrade())
 }
@@ -623,19 +623,15 @@ impl Run {
         };
         // The caller may be the Processes page itself, which is being updated now.
         window.defer(cx, move |window, cx| {
-            let Some(view) = main_window_view(cx) else {
+            if !ShellState::main_view_open(cx) {
                 warn!(target: "tasklens::ui", "no main window for Go to parent process");
                 return;
-            };
-            if view
-                .read(cx)
-                .page_entity::<ProcessesPage>(Tab::Processes)
-                .is_none()
-            {
-                // Selecting the tab builds the page.
-                view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
             }
-            let Some(page) = view.read(cx).page_entity::<ProcessesPage>(Tab::Processes) else {
+            if ShellApi::page::<ProcessesPage>(cx, Tab::Processes).is_none() {
+                // Selecting the tab builds the page.
+                ShellApi::select_tab(Tab::Processes, window, cx);
+            }
+            let Some(page) = ShellApi::page::<ProcessesPage>(cx, Tab::Processes) else {
                 warn!(target: "tasklens::ui", "no Processes page for Go to parent process");
                 return;
             };

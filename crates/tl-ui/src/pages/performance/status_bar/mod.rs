@@ -51,9 +51,9 @@ use crate::i18n::{Strings, tr};
 use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::text::style::{label_style, numeric_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::main::main_window_view;
 
 /// The bar's debug selector.
 pub const BAR_ID: &str = "perf-status-bar";
@@ -718,11 +718,8 @@ impl StatusBar {
 /// Selects `key` on the Performance tab, switching to that tab first when the main window shows
 /// another. Without a main window (a test host) the action goes up from the bar.
 pub fn open_page(key: DeviceKey, window: &mut Window, cx: &mut App) {
-    let perf = main_window_view(cx).and_then(|main| {
-        main.update(cx, |m, cx| m.select_tab(Tab::Performance, window, cx));
-        main.read(cx)
-            .page_entity::<PerformancePage>(Tab::Performance)
-    });
+    ShellApi::select_tab(Tab::Performance, window, cx);
+    let perf = ShellApi::page::<PerformancePage>(cx, Tab::Performance);
     match perf {
         Some(perf) => {
             let sidebar = perf.read(cx).sidebar.clone();

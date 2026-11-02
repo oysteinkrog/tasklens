@@ -39,8 +39,7 @@ use crate::pages::minigraph::sources::{GraphColumn, MinigraphSource};
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
-use crate::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge};
-use crate::window::main::tray_available;
+use crate::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge, tray_available};
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 use crate::windows::signal::signal_submenu;
 

@@ -1,10 +1,10 @@
 //! The window-pick result (E22-045, PROC-055, UI-SHL-014, R-239, R-149).
 //!
-//! The shell starts a pick (E20-027) and its `WINDOWS` hub handler hands each new
-//! `WindowsSnapshot.pick` here once, through [`PickWatch`]. The shell handles it even when the
-//! Processes page was never built: [`on_pick_result`] ends picking, shows the toast for
-//! `NoWindow`, `Cancelled` or an unknown PID, and for a known PID selects the Processes tab
-//! (which builds the page) and calls [`ProcessesPage::on_picked`].
+//! The shell starts a pick (E20-027) and its `WINDOWS` hub handler takes each new
+//! `WindowsSnapshot.pick` once, through [`PickWatch`]. The shell handles it even when the
+//! Processes page was never built: it ends picking and asks [`pick_step`] what to do. That is the
+//! toast for `NoWindow`, `Cancelled` or an unknown PID, or for a known PID: select the Processes
+//! tab (which builds the page) and call [`ProcessesPage::on_picked`].
 //!
 //! A plain click with the main window active selects the row through the jump target
 //! (PROC-071). A Ctrl+click, or any click while the main window is not active (tasklens cannot
@@ -12,7 +12,6 @@
 //! runs End Task under E22-017's rules.
 
 use gpui_kit::{App, Context, Window};
-use tl_model::command::Tab;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{PickOutcome, PickResult, WindowsSnapshot};
@@ -22,11 +21,8 @@ use super::actions::{CapturedTarget, CapturedTargets, EndTask};
 use super::confirm::{ConfirmKind, ConfirmResult, confirm};
 use super::jump::JumpTexts;
 use super::{ProcessesPage, record_target};
-use crate::components::toast::ToastKind;
 use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::shell::PICK_NONE_TEXT;
-use crate::window::main::{MainWindow, PICK_TOAST};
 
 const NO_WINDOW_TEXT: &str = "prc-055-no-window-found";
 const UNKNOWN_TEXT: &str = "prc-055-unknown-process";
@@ -74,7 +70,8 @@ pub enum PickModifier {
 }
 
 impl PickModifier {
-    fn of(window: &Window) -> Self {
+    /// The modifier state `window` reports now.
+    pub fn of(window: &Window) -> Self {
         if !window.is_window_active() {
             PickModifier::Unknown
         } else if window.modifiers().control {
@@ -85,46 +82,25 @@ impl PickModifier {
     }
 }
 
-/// Handles one new pick result in the main window: ends picking, then the toast or the page's
-/// handler (PROC-055 steps 1 to 4). `host` is the host the main window shows.
-pub fn on_pick_result(
-    host: &HostContext,
-    shell: &mut MainWindow,
-    result: PickResult,
-    window: &mut Window,
-    cx: &mut Context<MainWindow>,
-) {
-    debug!(target: "tasklens::ui", outcome = ?result.outcome, "window pick result");
-    // A result for an earlier pick, such as the engine's late Cancelled after Esc, must not end
-    // or answer the pick running now.
-    if result.seq != shell.pick_seq() {
-        debug!(target: "tasklens::ui", seq = result.seq, "stale window pick result ignored");
-        return;
-    }
-    shell.end_window_pick(cx);
-    let pid = match result.outcome {
-        PickOutcome::NoWindow => return pick_toast(shell, NO_WINDOW_TEXT, cx),
-        PickOutcome::Cancelled => return pick_toast(shell, PICK_NONE_TEXT, cx),
-        PickOutcome::Picked { pid } => pid,
-    };
-    let Some(target) = live_target(host, cx, |r| r.key.pid == pid) else {
-        return pick_toast(shell, UNKNOWN_TEXT, cx);
-    };
-    let modifier = PickModifier::of(window);
-    shell.select_tab(Tab::Processes, window, cx);
-    let Some(page) = shell.page_entity::<ProcessesPage>(Tab::Processes) else {
-        return;
-    };
-    page.update(cx, |p, cx| p.on_picked(target, modifier, window, cx));
+/// What the shell does with a pick result after it ends picking (PROC-055 steps 2 to 4).
+pub enum PickStep {
+    /// Show the Info toast with this string key, with the picker's toast key.
+    Toast(&'static str),
+    /// Select the Processes tab and hand the target to [`ProcessesPage::on_picked`].
+    Select(CapturedTarget),
 }
 
-/// The Info toast `key` with the picker's toast key, so it replaces the start toast or an
-/// earlier "No window selected".
-fn pick_toast(shell: &MainWindow, key: &str, cx: &mut Context<MainWindow>) {
-    let text = tr(cx, key);
-    shell.toasts().update(cx, |q, cx| {
-        q.push(ToastKind::Info, text, Some(PICK_TOAST), None, cx)
-    });
+/// The step for a pick `outcome` on `host`, the host the main window shows.
+pub fn pick_step(host: &HostContext, outcome: PickOutcome, cx: &App) -> PickStep {
+    let pid = match outcome {
+        PickOutcome::NoWindow => return PickStep::Toast(NO_WINDOW_TEXT),
+        PickOutcome::Cancelled => return PickStep::Toast(PICK_NONE_TEXT),
+        PickOutcome::Picked { pid } => pid,
+    };
+    match live_target(host, cx, |r| r.key.pid == pid) {
+        Some(target) => PickStep::Select(target),
+        None => PickStep::Toast(UNKNOWN_TEXT),
+    }
 }
 
 /// The first non-exited record of the hub's live snapshot that `pred` accepts, as a process

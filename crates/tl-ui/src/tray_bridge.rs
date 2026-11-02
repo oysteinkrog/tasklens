@@ -91,6 +91,12 @@ pub struct TrayStatus {
 
 impl Global for TrayStatus {}
 
+/// The tray is running and available.
+pub fn tray_available(cx: &App) -> bool {
+    cx.try_global::<TrayStatus>()
+        .is_some_and(|s| s.running && s.available)
+}
+
 /// Keeps the bridge entity alive for the app's lifetime.
 struct GlobalTrayBridge(Entity<TrayBridge>);
 

@@ -11,8 +11,7 @@ use super::actions::{
 use super::sources::{GraphColumn, MinigraphId};
 use crate::components::menu::TlMenu;
 use crate::i18n::tr;
-use crate::tray_bridge::AddTrayGraph;
-use crate::window::main::tray_available;
+use crate::tray_bridge::{AddTrayGraph, tray_available};
 
 /// What the card menu needs of its card.
 pub struct CardMenuCtx {
@@ -155,7 +154,7 @@ pub(crate) fn color_submenu(
         window,
         cx,
         move |menu, _, cx| {
-            crate::window::menubar::graph_color_menu(
+            graph_color_menu(
                 menu,
                 color,
                 move |c| Box::new(MinigraphSetColor { id, color: c }),
@@ -163,4 +162,26 @@ pub(crate) fn color_submenu(
             )
         },
     )
+}
+
+/// Fills a Graph Color submenu: "Accent (theme default)" and the 17 named colours in
+/// `GraphColor::ALL` order, each a radio row with a colour square (the Accent row shows the
+/// current theme's accent). The mark sits on `current`; a row dispatches `action(color)`.
+pub fn graph_color_menu(
+    mut menu: TlMenu,
+    current: GraphColor,
+    action: impl Fn(GraphColor) -> Box<dyn gpui_kit::Action>,
+    cx: &App,
+) -> TlMenu {
+    let theme = crate::theme::current(cx).clone();
+    for color in GraphColor::ALL {
+        let key = format!("shell-graph-color-{}", color.as_str());
+        menu = menu.swatch_radio_item(
+            tr(cx, &key),
+            color.hsla(&theme),
+            color == current,
+            action(color),
+        );
+    }
+    menu
 }

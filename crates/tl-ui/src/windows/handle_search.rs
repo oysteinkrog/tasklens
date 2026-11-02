@@ -68,6 +68,7 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -79,7 +80,6 @@ use crate::table::tree_table::{
 };
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::main_window_view;
 
 gpui_kit::actions!(tasklens_handles, [HandleSearchOpenLocation]);
 
@@ -877,8 +877,7 @@ fn submit(
 /// Selects `key` on the Processes tab and brings the main window to the front.
 fn go_to_process(key: ProcessKey, cx: &mut App) {
     let main = cx.try_global::<ShellState>().and_then(|s| s.main_window);
-    let page =
-        main_window_view(cx).and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+    let page = ShellApi::page::<ProcessesPage>(cx, Tab::Processes);
     let (Some(main), Some(page)) = (main, page) else {
         warn!(target: "tasklens::ui", "no Processes page for Go to process");
         return;

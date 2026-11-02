@@ -72,7 +72,6 @@ use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::main_window_view;
 
 use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};
@@ -697,13 +696,7 @@ impl HistoryPage {
         // A filter typed before History mode started sent its FilterChanged before this page
         // listened, so take the box's text once. Deferred: the main window may be mid-update.
         cx.defer_in(window, |this, _, cx| {
-            let text = main_window_view(cx).map(|main| {
-                main.read(cx)
-                    .filter_box()
-                    .read(cx)
-                    .text(Tab::Processes)
-                    .clone()
-            });
+            let text = ShellApi::filter_text(cx, Tab::Processes);
             if let Some(text) = text.filter(|t| !t.is_empty()) {
                 this.set_filter(&text, cx);
             }
@@ -1419,8 +1412,7 @@ impl HistoryPage {
     /// History mode (UI-PRC-022); any other row shows "Process not running".
     fn jump(&mut self, key: ProcessKey, window: &mut Window, cx: &mut Context<Self>) {
         if is_live(&self.host, key, cx) {
-            let page = main_window_view(cx)
-                .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+            let page = ShellApi::page::<ProcessesPage>(cx, Tab::Processes);
             if let Some(page) = page {
                 page.update(cx, |p, cx| {
                     p.select_by_key(key, JumpTexts::default(), window, cx)

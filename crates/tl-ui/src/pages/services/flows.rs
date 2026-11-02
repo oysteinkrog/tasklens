@@ -26,7 +26,7 @@ use crate::i18n::tr;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
-use crate::window::main::main_window_view;
+use crate::shell::{ShellApi, ShellState};
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
 
 /// The five service verbs that share one flow.
@@ -425,11 +425,11 @@ pub fn run_jump_to_process(unit: &UnitRecord, snap: &Snapshot, window: &mut Wind
         toast(window, cx, ToastKind::Warning, text);
         return;
     };
-    let Some(view) = main_window_view(cx) else {
+    if !ShellState::main_view_open(cx) {
         return;
-    };
-    view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
-    let Some(page) = view.read(cx).page_entity::<ProcessesPage>(Tab::Processes) else {
+    }
+    ShellApi::select_tab(Tab::Processes, window, cx);
+    let Some(page) = ShellApi::page::<ProcessesPage>(cx, Tab::Processes) else {
         warn!(target: "tasklens::ui", "no Processes page for Jump to process");
         return;
     };

@@ -65,6 +65,7 @@ use crate::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::shell::{PauseChanged, ShellPage, StatusAction, StatusChanged};
+use crate::shell::{ShellApi, ShellState};
 use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
@@ -1413,12 +1414,11 @@ fn warning_toast(text: SharedString, cx: &mut App) {
 
 /// A toast of `kind` on the main window.
 fn toast(kind: ToastKind, text: SharedString, cx: &mut App) {
-    let Some(main) = crate::window::main::main_window_view(cx) else {
+    if !ShellState::main_view_open(cx) {
         warn!(target: "tasklens::ui", "no main window for the Processes toast");
         return;
-    };
-    let queue = main.read(cx).toasts().clone();
-    queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
+    }
+    ShellApi::push_toast(cx, kind, text, None, None);
 }
 
 impl Render for ProcessesPage {

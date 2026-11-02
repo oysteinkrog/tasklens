@@ -28,6 +28,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
+use crate::shell::ShellApi;
 use crate::table::tree_table::RowKind;
 
 /// (done, total, failed) to the kind and text of a mixed or failed multi-target result.
@@ -228,8 +229,8 @@ pub fn activate_window_on_main(
 }
 
 fn main_queue(cx: &App) -> Option<WeakEntity<ToastQueue>> {
-    let main = crate::window::main::main_window_view(cx)?;
-    Some(main.read(cx).toasts().downgrade())
+    let main = ShellApi::main_toasts(cx)?.downcast::<ToastQueue>().ok()?;
+    Some(main.downgrade())
 }
 
 /// The texts of a setting that applies to each target: priority, affinity, I/O priority.

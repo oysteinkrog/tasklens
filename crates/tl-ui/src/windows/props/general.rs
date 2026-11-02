@@ -78,11 +78,11 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::main_window_view;
 use crate::windows::actions::{
     KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
     PropsFieldEnd, PropsFieldHome, PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp,
@@ -2173,8 +2173,7 @@ impl GeneralTab {
             switched_tab: None,
         };
         let main = cx.try_global::<ShellState>().and_then(|s| s.main_window);
-        let page = main_window_view(cx)
-            .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes));
+        let page = ShellApi::page::<ProcessesPage>(cx, Tab::Processes);
         let (Some(main), Some(page)) = (main, page) else {
             warn!(target: "tasklens::ui", "no Processes page for Go to parent process");
             return;

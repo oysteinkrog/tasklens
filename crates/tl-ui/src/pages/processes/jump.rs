@@ -34,7 +34,6 @@ use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;
 use crate::shell::ShellState;
-use crate::window::main::main_window_view;
 
 /// The caller's toast texts. An empty or `None` text means this module's default string.
 #[derive(Clone, Debug, Default)]
@@ -357,13 +356,7 @@ fn app_group(processes: &ProcessSnapshot, app_id: &str) -> Option<GroupKey> {
 /// Sets the shell filter box's memory group chip. Deferred: the caller may be inside the main
 /// window's update.
 fn set_group_chip(text: Option<SharedString>, cx: &mut App) {
-    cx.defer(move |cx| {
-        let Some(main) = main_window_view(cx) else {
-            return;
-        };
-        let filter = main.read(cx).filter_box().clone();
-        filter.update(cx, |f, cx| f.set_group_chip(text, cx));
-    });
+    cx.defer(move |cx| ShellApi::set_group_chip(text, cx));
 }
 
 /// The hub's current processes: the freshest identities, whatever the table shows.

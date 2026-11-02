@@ -32,9 +32,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::system::SensorKind;
 use tl_model::units;
 use tl_model::validity::Validity;
-use tl_ui_settings::settings::{
-    DeviceVisibility, FanOverride, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N,
-};
+use tl_ui_settings::settings::{DeviceVisibility, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N};
 
 use super::{CheckSection, PageBuilder, PageId};
 use crate::components::button::{TlButton, TlButtonKind};
@@ -52,7 +50,7 @@ use crate::pages::performance::{
     type_number,
 };
 use crate::selector::TlSelector;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::settings_global::{SettingKey, SettingValue, TlSettings, set_fan_label, set_fan_temp};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 
@@ -756,33 +754,6 @@ fn sensor_options_of(snap: &Snapshot) -> Vec<SensorOption> {
             })
         })
         .collect()
-}
-
-/// Writes `fans[key].label`, the trimmed text, or removes the field when it is empty. The entry
-/// goes when neither field is left.
-pub fn set_fan_label(key: &str, text: &str, cx: &mut App) {
-    let text = text.trim();
-    update_fan(key, cx, |f| {
-        f.label = (!text.is_empty()).then(|| text.to_owned());
-    });
-}
-
-/// Writes `fans[key].temp`, or removes the field for `None`. The entry goes when neither field is
-/// left.
-pub fn set_fan_temp(key: &str, temp: Option<&str>, cx: &mut App) {
-    update_fan(key, cx, |f| f.temp = temp.map(str::to_owned));
-}
-
-fn update_fan(key: &str, cx: &mut App, edit: impl FnOnce(&mut FanOverride)) {
-    TlSettings::update(cx, |d| {
-        let mut fan = d.settings.fans.get(key).cloned().unwrap_or_default();
-        edit(&mut fan);
-        if fan.label.is_none() && fan.temp.is_none() {
-            d.settings.fans.remove(key);
-        } else {
-            d.settings.fans.insert(key.to_owned(), fan);
-        }
-    });
 }
 
 /// The widgets of one fan row, kept across renders.
