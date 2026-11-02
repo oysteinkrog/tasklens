@@ -9,20 +9,21 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::actions::{ActionKind, ActionRequest, ActionTarget};
-use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::details::AffinityInfo;
 use tl_model::ids::ProcessKey;
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
 use tl_model::time::BootId;
-use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::toast::{self, ToastQueue};
-use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
-use tl_ui::demand::GlobalDemand;
-use tl_ui::host::HostContext;
-use tl_ui::windows::affinity::{self, AffinityDialog, affinity_words};
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::demand::GlobalDemand;
+use tl_ui_base::host::HostContext;
+use tl_ui_kit::components::toast::{self, ToastQueue};
+use tl_ui_kit::components::window_frame::{TestClientFrame, frame_bottom};
+use tl_ui_procs::windows::affinity::{self, AffinityDialog, affinity_words};
 use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
+
+use super::common::shell_free_init_with;
 
 struct Host;
 
@@ -33,25 +34,12 @@ impl Render for Host {
 }
 
 fn setup(cx: &mut TestAppContext) -> Arc<FakeEngine> {
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
     // The dialogs here are checked with the kit title bar and the client frame. The default is
     // server decorations (D-035).
     let mut settings = Settings::default();
     settings.appearance.decorations = Decorations::Client;
-    let init = UiInit {
-        settings,
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
+    let (engine, _host) = shell_free_init_with(cx, settings, UiState::default(), AppEnv::test());
     cx.update(|cx| {
-        TasklensUi::init(cx, client, init);
         toast::init(cx);
         cx.set_reduce_motion(true);
     });
@@ -912,6 +900,7 @@ fn affinity_subtitle_forms(cx: &mut TestAppContext) {
 // ---- VirusTotal notice and hashing toast (tasklens-gma.3, UI-PWN-036) ----
 
 mod virustotal {
+    use crate::common::shell_free_init_with;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -922,7 +911,6 @@ mod virustotal {
         WindowHandle, div, px, size,
     };
     use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionRequest, ActionState};
-    use tl_model::client::EngineClient;
     use tl_model::command::Command;
     use tl_model::details::{
         DetailTab, DetailTarget, ElfArch, ExeLocation, GeneralDetail, HashError, HashState,
@@ -933,11 +921,11 @@ mod virustotal {
     use tl_model::table::Total;
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-    use tl_ui::host::HostContext;
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui_procs::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -967,23 +955,10 @@ mod virustotal {
     }
 
     pub(super) fn rig(cx: &mut TestAppContext, accepted: bool) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
         let mut state = UiState::default();
         state.processes.virustotal_notice_accepted = accepted;
-        let init = UiInit {
-            settings: Settings::default(),
-            state,
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
+        let (engine, _host) = shell_free_init_with(cx, Settings::default(), state, AppEnv::test());
         cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
             cx.set_reduce_motion(true);
         });
         cx.run_until_parked();
@@ -1336,13 +1311,13 @@ mod priority {
         ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, SchedPolicy,
     };
     use tl_model::command::Command;
-    use tl_ui::action_tracker::GlobalActionTracker;
-    use tl_ui::components::dialog::TlDialogView;
-    use tl_ui::components::toast::{ToastKey, ToastQueue};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::host::HostContext;
-    use tl_ui::windows::actions::PriorityApply;
-    use tl_ui::windows::priority::{self, PriorityDialog};
+    use tl_ui_base::action_tracker::GlobalActionTracker;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::dialog::TlDialogView;
+    use tl_ui_kit::components::toast::{ToastKey, ToastQueue};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::windows::actions::PriorityApply;
+    use tl_ui_procs::windows::priority::{self, PriorityDialog};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
@@ -1730,17 +1705,17 @@ mod signal {
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::host::HostContext;
-    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
-    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
-    use tl_ui::pages::processes::signal_targets_for_test;
-    use tl_ui::table::tree_table::RowKind;
-    use tl_ui::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenu, TlMenuPopup};
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui_procs::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui_procs::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui_procs::pages::processes::signal_targets_for_test;
+    use tl_ui_procs::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
+    use tl_ui_table::table::tree_table::RowKind;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
@@ -1997,7 +1972,7 @@ mod signal {
         let find = |entries: &[_], label: &str| -> Option<usize> {
             entries
                 .iter()
-                .position(|e: &tl_ui::components::menu::MenuEntryInfo| {
+                .position(|e: &tl_ui_kit::components::menu::MenuEntryInfo| {
                     e.label.as_deref().is_some_and(|l| l.contains(label))
                 })
         };
@@ -2049,7 +2024,7 @@ mod signal {
         let find = |entries: &[_], label: &str| -> Option<usize> {
             entries
                 .iter()
-                .position(|e: &tl_ui::components::menu::MenuEntryInfo| {
+                .position(|e: &tl_ui_kit::components::menu::MenuEntryInfo| {
                     e.label.as_deref().is_some_and(|l| l.contains(label))
                 })
         };
@@ -2427,6 +2402,7 @@ mod signal {
 // ---- Dump confirmation, progress and result toasts (tasklens-gma.36, UI-PWN-034, UI-PWN-035) ----
 
 mod dump {
+    use crate::common::shell_free_init_with;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Duration;
@@ -2440,21 +2416,20 @@ mod dump {
     use tl_model::actions::{
         ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, DumpMode,
     };
-    use tl_model::client::EngineClient;
     use tl_model::command::Command;
     use tl_model::health::HelperState;
     use tl_model::ids::{GroupKey, ProcessKey};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::dialog::TlDialogView;
-    use tl_ui::components::toast::ToastKey;
-    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
-    use tl_ui::windows::notices::{
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_kit::components::dialog::TlDialogView;
+    use tl_ui_kit::components::toast::ToastKey;
+    use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui_procs::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
+    use tl_ui_procs::windows::notices::{
         DUMP_REFRESH, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
     };
     use tl_ui_settings::settings::{Settings, UiState};
@@ -2537,26 +2512,18 @@ mod dump {
         mode: DumpMode,
         mut records: Vec<ProcessRecord>,
     ) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
         let mut settings = Settings::default();
         settings.processes.dump_type = mode;
-        let init = UiInit {
+        let (engine, _host) = shell_free_init_with(
+            cx,
             settings,
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv {
+            UiState::default(),
+            AppEnv {
                 state_dir: state_dir.to_path_buf(),
                 ..AppEnv::test()
             },
-        };
+        );
         cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
             cx.set_reduce_motion(true);
             // The host's Yama setting must not change the refusal text.
             set_test_ptrace_scope(cx, 0);
@@ -2963,7 +2930,7 @@ mod dump {
     /// that engine and the dump request it received.
     fn start_remote(r: &mut Rig, pid: u32) -> (Arc<FakeEngine>, ActionRequest) {
         let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
+        let client: Arc<dyn tl_model::client::EngineClient> = engine.clone();
         r.pcx.update(|window, cx| {
             let host = HostContext::remote(Arc::from("home"), client, 1 << 48, cx);
             start_dump(&host, key(pid), window, cx);
@@ -3240,28 +3207,29 @@ mod dump {
 // ---- UI-PRC-014 texts for every process window trigger (tasklens-gma.38, UI-PWN-025) ----
 
 mod prc014 {
+    use crate::common::shell_free_init_with;
     use std::path::Path;
     use std::sync::Arc;
 
     use gpui_kit::base::Root;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
     use tl_model::actions::{ActionKind, ActionTarget, SchedPolicy};
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::Command;
     use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::host::HostContext;
-    use tl_ui::pages::processes::confirm::{ConfirmKind, ProtectedAction, texts as confirm_texts};
-    use tl_ui::window::main::open_main_window_on;
-    use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
-    use tl_ui::windows::signal::{OtherUserTarget, TargetNames};
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::pages::processes::confirm::{
+        ConfirmKind, ProtectedAction, texts as confirm_texts,
+    };
+    use tl_ui_procs::windows::handle_search::{HandleSearchWindow, open_handle_search};
+    use tl_ui_procs::windows::signal::{OtherUserTarget, TargetNames};
     use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -3331,27 +3299,12 @@ mod prc014 {
     }
 
     fn hs_setup(cx: &mut TestAppContext) -> HsRig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
+        let (engine, _host) =
+            shell_free_init_with(cx, Settings::default(), UiState::default(), AppEnv::test());
         cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
-        let _main = cx
-            .update(|cx| open_main_window_on(Tab::Processes, cx))
-            .expect("the main window opens");
         cx.run_until_parked();
         cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
         cx.run_until_parked();

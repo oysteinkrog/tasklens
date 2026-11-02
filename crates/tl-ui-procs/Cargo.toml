@@ -24,6 +24,7 @@ tl-ui-settings = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
 gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 tl-ui-testkit = { workspace = true }   # FakeEngine for the integration tests
 tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # page host and shared test helpers
 

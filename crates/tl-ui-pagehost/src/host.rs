@@ -123,8 +123,31 @@ impl PageHost {
         cx.update(|cx| Self::install_in(cx, engine, settings))
     }
 
+    /// [`PageHost::install`] with a persisted `state` and an `env`, for the tests that read
+    /// `UiState` or `AppEnv::state_dir`.
+    pub fn install_with(
+        cx: &mut TestAppContext,
+        engine: Arc<FakeEngine>,
+        settings: Settings,
+        state: UiState,
+        env: AppEnv,
+    ) -> Self {
+        cx.update(|cx| Self::install_with_in(cx, engine, settings, state, env))
+    }
+
     /// [`PageHost::install`] on an `App`.
     pub fn install_in(cx: &mut App, engine: Arc<FakeEngine>, settings: Settings) -> Self {
+        Self::install_with_in(cx, engine, settings, UiState::default(), AppEnv::test())
+    }
+
+    /// [`PageHost::install_with`] on an `App`.
+    pub fn install_with_in(
+        cx: &mut App,
+        engine: Arc<FakeEngine>,
+        settings: Settings,
+        state: UiState,
+        env: AppEnv,
+    ) -> Self {
         let client: Arc<dyn EngineClient> = engine.clone();
         gpui_kit::init(cx);
         theme::store::init(cx, &settings.theme, &settings.appearance, Vec::new());
@@ -134,7 +157,7 @@ impl PageHost {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         cx.set_global(BootSettings {
             settings,
-            state: UiState::default(),
+            state,
             persist: None,
             startup_toasts: Vec::new(),
         });
@@ -144,7 +167,7 @@ impl PageHost {
         cx.set_global(GlobalHub(hub.clone()));
         cx.set_global(GlobalDemand(demand.clone()));
         GlobalRegistry::init(cx);
-        cx.set_global(AppEnv::test());
+        cx.set_global(env);
         cx.set_global(ShellLog::default());
         cx.set_global(recording_shell());
         Self {

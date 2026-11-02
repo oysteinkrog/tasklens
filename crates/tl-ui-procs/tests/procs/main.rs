@@ -5,6 +5,7 @@
 
 mod common;
 mod dialogs;
+mod dialogs_process;
 mod process_cells;
 mod process_priority_menu;
 mod process_tooltips;
