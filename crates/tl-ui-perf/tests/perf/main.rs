@@ -22,4 +22,5 @@ mod overview_timeline;
 mod overview_widget_look;
 mod page_range;
 mod page_widgets;
+mod performance;
 mod sidebar;
