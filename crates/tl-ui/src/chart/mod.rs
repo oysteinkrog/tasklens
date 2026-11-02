@@ -253,7 +253,7 @@ pub struct PathSet {
 pub struct ChartCache {
     pub key: ChartGeometryKey,
     /// `ChartGeometryKey::sync` calls that changed the key.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub key_rebuilds: u32,
     /// Newest sample time when built (ADR-009 rule 4).
     pub anchor_ns: u64,

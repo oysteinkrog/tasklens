@@ -139,10 +139,10 @@ pub struct MinigraphCard {
     _hub_sub: Subscription,
     /// Where the menu items go when nothing in the window has focus (cards take no focus).
     menu_focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `cx.notify()` calls made by the card itself, not through its chart.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: std::cell::Cell<u32>,
 }
 
@@ -203,9 +203,9 @@ impl MinigraphCard {
             fitted: None,
             _hub_sub,
             menu_focus: cx.focus_handle(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
         };
         match process {
@@ -539,7 +539,7 @@ impl MinigraphCard {
         if self.gone(view.state) {
             self.latch_ended(cx);
             cx.emit(CardEnded);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
             return;
@@ -556,7 +556,7 @@ impl MinigraphCard {
             changed = true;
         }
         if changed {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
@@ -649,7 +649,7 @@ impl MinigraphCard {
             ]);
         }
         if !first {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
@@ -727,7 +727,7 @@ impl EventEmitter<CardEnded> for MinigraphCard {}
 
 impl Render for MinigraphCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let s = m.ui_scale;

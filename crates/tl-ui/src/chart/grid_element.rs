@@ -266,36 +266,36 @@ pub struct ChartGridView {
     hover: HoverState,
     /// The cell whose plot the pointer was over at the last paint.
     hover_cell: Option<usize>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// Hitboxes the last prepaint inserted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub hitbox_count: std::cell::Cell<u32>,
     /// Geometry rebuilds.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub build_count: std::cell::Cell<u32>,
     /// `paint_path` calls, over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_paints: std::cell::Cell<u32>,
     /// Shapes of heading, value and "Offline" lines, over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub heading_shapes: std::cell::Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub value_shapes: std::cell::Cell<u32>,
     /// Core marks the last paint drew, (cell, icon, left edge).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_marks: RefCell<Vec<(usize, CellMark, Pixels)>>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub offline_shapes: std::cell::Cell<u32>,
     /// Reads of the offline text from the strings.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub offline_reads: std::cell::Cell<u32>,
     /// Dotted-gap spans the last paint drew, (cell, chart-local physical px before the paint
     /// shift), as `ChartView::last_gap_spans`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_gap_spans: RefCell<Vec<(usize, Range<f32>)>>,
     /// Boot marks the last paint drew, over every cell.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_boot_marks: std::cell::Cell<u32>,
 }
 
@@ -332,27 +332,27 @@ impl ChartGridView {
             hovered_cell: None,
             hover: HoverState::default(),
             hover_cell: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             hitbox_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             build_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_paints: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             heading_shapes: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             value_shapes: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_marks: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             offline_shapes: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             offline_reads: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_gap_spans: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_boot_marks: std::cell::Cell::new(0),
         };
         this.resolve(hub.read(cx).current());
@@ -507,7 +507,7 @@ impl ChartGridView {
     }
 
     /// Cell `i`'s value text as last painted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn value_text(&self, i: usize) -> Option<&str> {
         self.values.get(i)?.text()
     }
@@ -523,45 +523,45 @@ impl ChartGridView {
     }
 
     /// Hover pin, shaped lines and the last paint's box (E19-017).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn hover_state(&self) -> &HoverState {
         &self.hover
     }
 
     /// The cell whose plot the pointer was over at the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn hover_cell(&self) -> Option<usize> {
         self.hover_cell
     }
 
     /// Legend `shape_line` calls over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn legend_shapes(&self) -> u32 {
         self.legend.shape_count
     }
 
     /// Fill and stroke sets in the geometry cache, stale sets excluded.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {
         let c = self.cache.borrow();
         (c.fills.len(), c.strokes.len())
     }
 
     /// The offline text as last read from the strings.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn offline_text(&self) -> Option<&SharedString> {
         self.offline_text.as_ref().map(|(_, text)| text)
     }
 
     /// Layout of the last geometry build.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn built_layout(&self) -> Option<GridLayout> {
         self.built_layout.map(|(l, _)| l)
     }
 
     /// Cached path vertices (all sets) inside cell `i`'s box, physical px relative to the
     /// element.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn vertices_in_cell(&self, i: usize) -> usize {
         let Some((layout, sf)) = self.built_layout else {
             return 0;
@@ -587,13 +587,13 @@ impl ChartGridView {
     }
 
     /// The resolved (fill, overlay) series per cell.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn resolved(&self) -> &[CellSeries] {
         &self.series
     }
 
     /// Sets the resolved series directly, one pair per cell, bypassing the hub.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_series_for_test(&mut self, series: Vec<CellSeries>, cx: &mut Context<Self>) {
         self.series = series;
         cx.notify();
@@ -602,7 +602,7 @@ impl ChartGridView {
 
 impl Render for ChartGridView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         ChartGridElement::new(cx.entity())
     }
@@ -718,7 +718,7 @@ impl Element for ChartGridElement {
                     }
                 }
             }
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             view.hitbox_count
                 .set((hitboxes.headings.len() + hitboxes.plots.len()) as u32);
             hitboxes
@@ -1014,7 +1014,7 @@ fn paint_grid_view(
             );
             *built_right_edge_ns = right_edge;
             *built_layout = Some((layout, sf));
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             view.build_count.set(view.build_count.get() + 1);
         }
     }
@@ -1032,7 +1032,7 @@ fn paint_grid_view(
     let dx = map.dx(pw as f32);
     let theme = &*env.theme;
     let hairline = px(1.0 / sf);
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_gap_spans.borrow_mut().clear();
 
     // Background, grid, dotted gaps, baseline and outline per cell. `gaps` is in cell order.
@@ -1075,7 +1075,7 @@ fn paint_grid_view(
             if *cell_i == i {
                 // `paint_gaps` clips to the plot width, so no content mask is needed.
                 grid::paint_gaps(window, &gp, std::slice::from_ref(span));
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 view.last_gap_spans.borrow_mut().push((i, span.clone()));
             }
         }
@@ -1094,7 +1094,7 @@ fn paint_grid_view(
                     ..set.color
                 };
                 window.paint_path(translated(&set.path, offset, sf), color);
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 view.path_paints.set(view.path_paints.get() + 1);
             }
         };
@@ -1128,7 +1128,7 @@ fn paint_grid_view(
             _boot_marks += grid::paint_boots(window, &gp, boots);
         }
     }
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_boot_marks.set(_boot_marks);
 
     // Labels: heading left and value right in row 1, the offline text in the middle, legend in
@@ -1148,13 +1148,13 @@ fn paint_grid_view(
         color: theme.text_primary,
         tnum: false,
     };
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_marks.borrow_mut().clear();
     for (i, cell) in spec.cells.iter().enumerate() {
         let b = cell_bounds(bounds, &layout, i, cell_h, gap);
         let row1 = b.top() + pad;
         let _shaped = headings[i].sync(window, &cell.heading, heading_style);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if _shaped {
             view.heading_shapes.set(view.heading_shapes.get() + 1);
         }
@@ -1172,7 +1172,7 @@ fn paint_grid_view(
                 theme.text_secondary,
                 cx,
             );
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             view.last_marks.borrow_mut().push((i, icon, x));
         }
 
@@ -1190,12 +1190,12 @@ fn paint_grid_view(
                     None => SharedString::new_static(OFFLINE_KEY),
                 };
                 *offline_text = Some((version, text));
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 view.offline_reads.set(view.offline_reads.get() + 1);
             }
             let text = offline_text.as_ref().map_or("", |(_, t)| t.as_ref());
             let _shaped = offline.sync(window, text, style);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             if _shaped {
                 view.offline_shapes.set(view.offline_shapes.get() + 1);
             }
@@ -1253,7 +1253,7 @@ fn paint_grid_view(
             tnum: true,
         };
         let _shaped = values[i].sync(window, value_text, style);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if _shaped {
             view.value_shapes.set(view.value_shapes.get() + 1);
         }
@@ -1338,7 +1338,7 @@ fn paint_grid_view(
         hover::paint(window, cx, hover_state, &hp);
     } else {
         hover_state.index = None;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             hover_state.last_box = None;
             hover_state.last_marker_x = None;

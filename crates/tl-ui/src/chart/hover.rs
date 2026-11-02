@@ -59,16 +59,16 @@ pub struct HoverState {
     /// Reused formatter buffer.
     scratch: String,
     /// `shape_line` calls over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub shape_count: u32,
     /// The value box of the last paint, `None` when nothing was painted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_box: Option<Bounds<Pixels>>,
     /// The marker x of the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_marker_x: Option<Pixels>,
     /// True when the last prepaint inserted a hitbox.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub hitbox_inserted: bool,
 }
 
@@ -79,18 +79,18 @@ impl HoverState {
     }
 
     /// The text line `i` was last shaped from (offset, labels, values, stats, count).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn line_text(&self, i: usize) -> Option<&str> {
         self.lines.get(i).and_then(CachedLine::text)
     }
 
     fn sync(&mut self, window: &mut Window, i: usize, style: LineStyle) {
         let shaped = self.lines[i].sync(window, &self.scratch, style);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if shaped {
             self.shape_count += 1;
         }
-        #[cfg(not(any(test, feature = "test-hooks")))]
+        #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
         let _ = shaped;
     }
 }
@@ -290,7 +290,7 @@ pub fn paint_linked(
     p: &HoverPaint,
     follow_t_ns: Option<u64>,
 ) {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         state.last_box = None;
         state.last_marker_x = None;
@@ -433,7 +433,7 @@ pub fn paint_linked(
         labels::paint_line(window, cx, &state.lines[2 * n + 2], point(lx, y), row);
     });
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         state.last_box = own.then_some(panel);
         state.last_marker_x = Some(x);

@@ -3478,7 +3478,7 @@ The ADR-001 rule 1 closure for tl-ui applies to every `tl-ui-*` crate: no tl-eng
 - Reader: a function that returns state.
 - Switch: a hook that changes behaviour, such as a fake clock, a forced state or injected data. A switch must do nothing until a test sets it: its state is an `Option`, a flag or a GPUI global that is off by default, or it is a function that no app code calls.
 
-`scripts/split/hooks_gate.py` moves a file's gates to the rule above. Recorders that grow for the app's life are acceptable in debug builds: `ActionTracker::pushed` and `opened_details` (`action_tracker.rs`) and `SysActions::pushed` (`pages/sys_table.rs`) keep one entry per toast or Details dialog. The recorders a test turns on (`table/cells.rs:698` `record_painted_texts`, `anim.rs:207` `AnimationDriver::install_paint_log`) record nothing until then: their log is an `Option` that starts as `None`.
+`scripts/split/hooks_gate.py` moves a file's gates to the rule above. Recorders that grow for the app's life are acceptable in debug builds: `ActionTracker::pushed` and `opened_details` (`action_tracker.rs`) and `SysActions::pushed` (`pages/sys_table.rs`) and `MinigraphPanel::toasts` (`pages/minigraph/panel.rs:141`) keep one entry per toast or Details dialog. The recorders a test turns on (`table/cells.rs:698` `record_painted_texts`, `anim.rs:207` `AnimationDriver::install_paint_log`) record nothing until then: their log is an `Option` that starts as `None`.
 
 Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None needed a fix:
 
@@ -3497,6 +3497,8 @@ Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None ne
 | `window/titlebar.rs:152` `TitleBarProbe`, read at `titlebar.rs:172`, `:186`, `:209`, `:218` and `main.rs:1022`, `:2806` | window decorations, maximized state and controls; skips `minimize_window`; counts moves, zooms and minimizes | a GPUI global the app never sets; every read is `try_global` or `has_global`, false until a test sets it |
 | `window/settings/mod.rs:247` `TestPages` (settings), read at `settings/mod.rs:239` | extra pages after the real settings pages | a GPUI global the app never sets |
 | `window/main.rs:2243` `set_picking_for_test`, `main.rs:2431` `apply_close_for_test`, `main.rs:2518` `scale_factor_changed_for_test` | window picking, a window close, a scale factor change | only tests call them |
+| `chart/element.rs:165` `PLOTS`, set by `element.rs:174` `take_plots`, written at `element.rs:156` | collects the plot of every chart paint (CS-B3 fix: it was a `Vec` that grew on every paint in a debug app) | the thread-local is `None` until a test's first `take_plots` call; the paint writes only when it is `Some` |
+| `chart/view.rs:642` `ChartView::set_series_for_test`, `chart/grid_element.rs:597` `ChartGridView::set_series_for_test` | replaces the series a chart shows | only tests call them |
 
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 

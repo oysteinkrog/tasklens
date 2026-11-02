@@ -49,7 +49,7 @@ pub struct OwnWindowBridge {
     pending: BTreeMap<u32, (i32, i32)>,
     save_task: Option<Task<()>>,
     /// Positions written to the panel state.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub writes: u32,
 }
 
@@ -78,7 +78,7 @@ impl OwnWindowBridge {
                 seen: HashMap::new(),
                 pending: BTreeMap::new(),
                 save_task: None,
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 writes: 0,
             }
         });
@@ -151,11 +151,11 @@ impl OwnWindowBridge {
         };
         for (id, (x, y)) in pending {
             let wrote = panel.update(cx, |p, cx| p.set_window_position(id, x, y, cx));
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             if wrote {
                 self.writes += 1;
             }
-            #[cfg(not(any(test, feature = "test-hooks")))]
+            #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
             let _ = wrote;
         }
     }

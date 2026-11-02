@@ -103,7 +103,7 @@ impl Element for ChartElement {
             let (frame, _) = frame_of(view, bounds, ui_scale);
             window.insert_hitbox(frame.inset(px(1.0)), HitboxBehavior::Normal)
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.view
             .update(cx, |v, _| v.hover.hitbox_inserted = hitbox.is_some());
         hitbox
@@ -139,7 +139,7 @@ impl Element for ChartElement {
             AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
         }
 
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if let Some(driver) = AnimationDriver::try_global(window, cx) {
             driver.update(cx, |d, _| {
                 if let Some(log) = d.paint_log.as_mut() {
@@ -152,8 +152,12 @@ impl Element for ChartElement {
             });
         }
 
-        #[cfg(any(test, feature = "test-hooks"))]
-        PLOTS.with(|p| p.borrow_mut().push((view_id, out.plot.dilate(px(1.0)))));
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        PLOTS.with(|p| {
+            if let Some(plots) = p.borrow_mut().as_mut() {
+                plots.push((view_id, out.plot.dilate(px(1.0))));
+            }
+        });
 
         if let Some(hitbox) = hitbox.clone() {
             register_hover_events(&self.view, hitbox, &out, env.scale_factor, window);
@@ -161,17 +165,22 @@ impl Element for ChartElement {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+type PlotLog = Vec<(gpui_kit::EntityId, Bounds<Pixels>)>;
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
-    static PLOTS: std::cell::RefCell<Vec<(gpui_kit::EntityId, Bounds<Pixels>)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// `None` until the first `take_plots` call, so the app never collects plots.
+    static PLOTS: std::cell::RefCell<Option<PlotLog>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The plots that charts painted on this thread since the last call, each with its 1 px
-/// outline, with their chart's entity, in paint order (tasklens-o55.54).
-#[cfg(any(test, feature = "test-hooks"))]
-pub fn take_plots() -> Vec<(gpui_kit::EntityId, Bounds<Pixels>)> {
-    PLOTS.with(|p| std::mem::take(&mut *p.borrow_mut()))
+/// outline, with their chart's entity, in paint order (tasklens-o55.54). The first call turns
+/// collection on and returns nothing.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub fn take_plots() -> PlotLog {
+    PLOTS.with(|p| p.borrow_mut().replace(Vec::new()).unwrap_or_default())
 }
 
 /// Pointer moves over the plot pin the sample time nearest the pointer; leaving the plot drops
@@ -272,7 +281,7 @@ struct PaintOut {
     /// The sample grid the hover pin snaps to.
     grid: hover::SampleGrid,
     #[cfg_attr(
-        not(any(test, feature = "test-hooks")),
+        not(any(test, debug_assertions, feature = "test-hooks")),
         allow(dead_code, reason = "read by the bench paint hook only")
     )]
     newest_ns: u64,
@@ -406,7 +415,7 @@ fn paint_view(
                 curved: env.curved,
             },
         );
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if key_changed {
             cache.key_rebuilds += 1;
         }
@@ -441,7 +450,7 @@ fn paint_view(
             geometry::build(&input, &mut cache, scratch);
             *built_right_edge_ns = right_edge;
             line_state.dirty = true;
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             view_hook_build(&view.build_count);
         }
         // A line set's peaks and highlighted line follow the main geometry (tasklens-o55.57).
@@ -517,7 +526,7 @@ fn paint_view(
 
     grid::paint_background(window, frame, env.theme.graph.chart_bg, radius);
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.path_colors.borrow_mut().clear();
 
     // Failed, Restricted, Unsupported: background, outline and a dotted baseline across the
@@ -532,9 +541,9 @@ fn paint_view(
         grid::paint_gaps(window, &gp, &whole);
         grid::paint_outline(window, &gp);
         labels::paint(window, cx, text, &label_paint, last_value_text);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         view_hook_quads(&view.last_grid_quads, &view.last_gap_spans, 0, &whole);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         view.last_right_edge_ns.set(right_edge);
         hover_state.clear();
         return PaintOut {
@@ -548,7 +557,7 @@ fn paint_view(
     }
 
     grid::paint_grid(window, &gp);
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view_hook_quads(
         &view.last_grid_quads,
         &view.last_gap_spans,
@@ -569,7 +578,7 @@ fn paint_view(
                     ..set.color
                 };
                 window.paint_path(translated(&set.path, offset, sf), color);
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 {
                     view.path_paints.set(view.path_paints.get() + 1);
                     view.path_colors.borrow_mut().push(color);
@@ -631,7 +640,7 @@ fn paint_view(
     } else {
         0
     };
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_boot_marks.set(_boot_marks);
 
     grid::paint_baseline(window, &gp);
@@ -690,7 +699,7 @@ fn paint_view(
             .saturating_add(one_px_ns)
             > now;
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     view.last_right_edge_ns.set(right_edge);
 
     PaintOut {
@@ -703,7 +712,7 @@ fn paint_view(
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl ChartView {
     /// Hover pin, shaped lines and the last paint's box (E19-016).
     pub fn hover_state(&self) -> &hover::HoverState {
@@ -716,13 +725,13 @@ impl ChartView {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 fn view_hook_build(count: &std::cell::Cell<u32>) {
     count.set(count.get() + 1);
 }
 
 /// Records the grid quad count and the dotted spans of this paint.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 fn view_hook_quads(
     quads: &std::cell::Cell<u32>,
     spans: &std::cell::RefCell<SmallVec<[std::ops::Range<f32>; 4]>>,
@@ -736,10 +745,10 @@ fn view_hook_quads(
 }
 
 /// Counts quads without painting them (test hook).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 struct QuadCount(u32);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl grid::QuadSink for QuadCount {
     fn quad(&mut self, _: gpui_kit::PaintQuad) {
         self.0 += 1;

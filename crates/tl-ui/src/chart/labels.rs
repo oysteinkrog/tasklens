@@ -138,14 +138,14 @@ impl CachedLine {
     }
 
     /// The text this line was last shaped from.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub(crate) fn text(&self) -> Option<&str> {
         self.line.is_some().then_some(self.text.as_str())
     }
 }
 
 /// Which label a test record is for.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelKind {
     Heading,
@@ -163,7 +163,7 @@ pub enum LabelKind {
 }
 
 /// One label painted by the last paint (test hook).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaintedLabel {
     pub kind: LabelKind,
@@ -174,7 +174,7 @@ pub struct PaintedLabel {
     pub color: Hsla,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl PaintedLabel {
     /// The label's rectangle: its width over the row it is centred in.
     pub fn bounds(&self) -> Bounds<Pixels> {
@@ -193,33 +193,33 @@ pub struct LabelCache {
     x_ticks: [CachedLine; TICK_COUNT],
     y_ticks: [CachedLine; TICK_COUNT],
     /// `shape_line` calls over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub shape_count: u32,
     /// Labels painted by the last paint, in paint order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub painted: SmallVec<[PaintedLabel; 8]>,
     /// The plot of the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub plot: Bounds<Pixels>,
 }
 
 impl LabelCache {
     /// The value label's text as last shaped.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn value_text(&self) -> Option<&str> {
         self.value.text()
     }
 
     fn shaped(&mut self, shaped: bool) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if shaped {
             self.shape_count += 1;
         }
-        #[cfg(not(any(test, feature = "test-hooks")))]
+        #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
         let _ = shaped;
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn record(
         &mut self,
         kind: LabelKind,
@@ -238,7 +238,7 @@ impl LabelCache {
     }
 
     /// The text `kind` was last shaped from.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn text(&self, kind: LabelKind) -> Option<&str> {
         let line = match kind {
             LabelKind::Heading => &self.heading,
@@ -254,7 +254,7 @@ impl LabelCache {
     }
 
     /// The last paint record for `kind`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn painted(&self, kind: LabelKind) -> Option<PaintedLabel> {
         self.painted.iter().find(|p| p.kind == kind).copied()
     }
@@ -344,7 +344,7 @@ pub fn paint(
     p: &LabelPaint,
     scratch: &mut String,
 ) {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         cache.painted.clear();
         cache.plot = p.plot;
@@ -383,7 +383,7 @@ pub fn paint(
         cache.shaped(shaped);
         let origin = point(b.left() + inset, title_y);
         paint_line(window, cx, &cache.heading, origin, title_h);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         cache.record(
             LabelKind::Heading,
             origin,
@@ -420,7 +420,7 @@ pub fn paint(
                 p.theme.text_secondary,
                 cx,
             );
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             cache.record(
                 LabelKind::Lock,
                 bounds.origin,
@@ -472,7 +472,7 @@ pub fn paint(
             };
             let origin = point(x, title_y);
             paint_line(window, cx, &cache.value, origin, title_h);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             cache.record(LabelKind::Value, origin, w, title_h, color);
         }
     }
@@ -563,7 +563,7 @@ pub fn paint(
             };
             if let Some((origin, h)) = at {
                 paint_line(window, cx, &cache.axis_max, origin, h);
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 cache.record(LabelKind::AxisMax, origin, w, h, style.color);
             }
         }
@@ -578,7 +578,7 @@ pub fn paint(
         cache.shaped(shaped);
         let origin = point(b.right() - pad - cache.axis_max.width(), row2);
         paint_line(window, cx, &cache.axis_max, origin, row);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         cache.record(
             LabelKind::AxisMax,
             origin,
@@ -618,7 +618,7 @@ pub fn paint(
             let frac = (i + 1) as f32 / (TICK_COUNT + 1) as f32;
             let origin = point(p.plot.left() + p.plot.size.width * frac - w / 2.0, y);
             paint_line(window, cx, &cache.x_ticks[i], origin, h);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             cache.record(LabelKind::XTick(i), origin, w, h, ticks.color);
         }
     }
@@ -636,7 +636,7 @@ pub fn paint(
                 p.plot.top() + p.plot.size.height * frac + px(1.0),
             );
             paint_line(window, cx, &cache.y_ticks[i], origin, row);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             cache.record(LabelKind::YTick(i), origin, w, row, ticks.color);
         }
     }
@@ -649,7 +649,7 @@ pub fn paint(
         cache.shaped(shaped);
         let origin = point(b.left() + pad, b.bottom() - pad - row);
         paint_line(window, cx, &cache.range, origin, row);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         cache.record(
             LabelKind::Range,
             origin,
@@ -704,7 +704,7 @@ pub(crate) fn paint_legend(
         let origin = point(x + px(SWATCH_W * s) + m.sp[2], y);
         paint_line(window, cx, &cache.legend[i], origin, row);
         let width = cache.legend[i].width();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         cache.record(LabelKind::Legend(i), origin, width, row, secondary.color);
         if stack {
             y += row;

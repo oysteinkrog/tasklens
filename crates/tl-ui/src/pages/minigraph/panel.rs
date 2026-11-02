@@ -135,10 +135,10 @@ pub struct MinigraphPanel {
     /// The panel bounds of the last paint, for the slot under a release.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     _settings_sub: Option<Subscription>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// Every toast the panel pushed, in order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub toasts: Vec<(ToastKind, gpui_kit::SharedString)>,
 }
 
@@ -227,9 +227,9 @@ impl MinigraphPanel {
             own_space: false,
             bounds: Rc::default(),
             _settings_sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             toasts: Vec::new(),
         };
         this.entries
@@ -968,7 +968,7 @@ impl MinigraphPanel {
     }
 
     fn toast_text(&mut self, kind: ToastKind, text: SharedString, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.toasts.push((kind, text.clone()));
         cx.defer(move |cx| push_main_toast(cx, kind, text, None, None));
     }
@@ -1151,7 +1151,7 @@ pub(crate) fn gpu_order(cx: &App) -> Vec<DeviceKey> {
 
 impl Render for MinigraphPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The host mounts the panel cached with an `absolute().inset_0()` style over the
         // Processes table; a cached view lays out as its own root, so the root fills that box.

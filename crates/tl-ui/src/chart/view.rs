@@ -94,28 +94,28 @@ pub struct ChartView {
     /// While `history` is set: the CLOCK_REALTIME start of every boot inside the served range,
     /// drawn as boot markers (UI-PRF-055). Empty otherwise.
     pub(crate) boots: Arc<[i64]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub build_count: std::cell::Cell<u32>,
     /// `paint_path` calls, over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_paints: std::cell::Cell<u32>,
     /// Colours handed to `paint_path` by the last paint, in paint order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub path_colors: RefCell<SmallVec<[gpui_kit::Hsla; 8]>>,
     /// Right edge of the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_right_edge_ns: std::cell::Cell<u64>,
     /// Grid quads of the last paint (vertical and horizontal hairlines).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_grid_quads: std::cell::Cell<u32>,
     /// Dotted baseline spans of the last paint, chart-local physical px before the paint shift.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_gap_spans: RefCell<SmallVec<[std::ops::Range<f32>; 4]>>,
     /// Boot markers of the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_boot_marks: std::cell::Cell<u32>,
 }
 
@@ -159,21 +159,21 @@ impl ChartView {
             hover_link: None,
             line_set: None,
             lines: lines::LinesState::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             build_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_paints: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             path_colors: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_right_edge_ns: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_grid_quads: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_gap_spans: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_boot_marks: std::cell::Cell::new(0),
         };
         this.resolve(hub.read(cx).current());
@@ -487,13 +487,13 @@ impl ChartView {
     }
 
     /// The shaped labels of the last paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn label_cache(&self) -> &labels::LabelCache {
         &self.text
     }
 
     /// The value label's text as last painted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn painted_value_text(&self) -> Option<&str> {
         self.text.value_text()
     }
@@ -504,7 +504,7 @@ impl ChartView {
     }
 
     /// The cached stroke paths' smallest vertex y, chart-local physical px (0 is the plot top).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn stroke_top_y(&self) -> Option<f32> {
         self.cache
             .borrow()
@@ -516,7 +516,7 @@ impl ChartView {
     }
 
     /// The cached stroke paths' largest vertex x, chart-local physical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn stroke_right_x(&self) -> Option<f32> {
         self.cache
             .borrow()
@@ -528,7 +528,7 @@ impl ChartView {
     }
 
     /// The cached stroke paths' smallest vertex x, chart-local physical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn stroke_left_x(&self) -> Option<f32> {
         self.cache
             .borrow()
@@ -540,7 +540,7 @@ impl ChartView {
     }
 
     /// Fill and stroke sets in the geometry cache, stale sets excluded.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {
         let c = self.cache.borrow();
         (c.fills.len(), c.strokes.len())
@@ -638,7 +638,7 @@ impl ChartView {
     }
 
     /// Sets the resolved series directly, one per `spec.series` entry, bypassing the hub.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_series_for_test(
         &mut self,
         series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
@@ -649,20 +649,20 @@ impl ChartView {
     }
 
     /// The resolved series, one per `spec.series` entry.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn resolved(&self) -> &[Option<Arc<SeriesView>>] {
         &self.series
     }
 
     /// Number of built paths in the geometry cache (fills, strokes and their stale sets).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cached_path_count(&self) -> usize {
         let c = self.cache.borrow();
         c.fills.len() + c.strokes.len() + c.stale_fills.len() + c.stale_strokes.len()
     }
 
     /// True while the geometry cache still holds its default key.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cache_key_is_default(&self) -> bool {
         self.cache.borrow().key == super::ChartGeometryKey::default()
     }
@@ -670,7 +670,7 @@ impl ChartView {
 
 impl Render for ChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let chart = ChartElement::new(cx.entity());
         if self.line_set.is_none() || self.hover.pinned_t_ns.is_none() {
