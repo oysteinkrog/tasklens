@@ -14,7 +14,7 @@ use unic_langid::LanguageIdentifier;
 use crate::i18n::{Strings, tr_args, tr_en};
 
 /// Stand-ins for the arguments of a [`Template`]: private-use characters no translation has.
-pub(crate) const HOLES: [&str; 4] = ["\u{E000}", "\u{E001}", "\u{E002}", "\u{E003}"];
+pub const HOLES: [&str; 4] = ["\u{E000}", "\u{E001}", "\u{E002}", "\u{E003}"];
 
 /// A translated message whose arguments are left as holes, so a new value is spliced in
 /// without going through Fluent. Numbers never pass through Fluent anyway (R-081).
@@ -241,7 +241,7 @@ fn holes<'a>(names: &[&'a str]) -> SmallVec<[(&'a str, FluentValue<'static>); 4]
 }
 
 /// The byte offset and index of the first hole in `s`.
-pub(crate) fn next_hole(s: &str) -> Option<(usize, usize)> {
+pub fn next_hole(s: &str) -> Option<(usize, usize)> {
     s.char_indices().find_map(|(at, c)| {
         let i = (c as u32).checked_sub(0xE000)? as usize;
         (i < HOLES.len()).then_some((at, i))

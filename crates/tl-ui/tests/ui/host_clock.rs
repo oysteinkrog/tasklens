@@ -382,7 +382,7 @@ fn collector_health_ages_use_the_offset_learned_after_open(cx: &mut TestAppConte
 
 /// Files that may read this PC's boot clock: the host clock itself, and the bench engine, which
 /// publishes snapshots like an engine does.
-const CLOCK_OWNERS: [&str; 2] = ["src/hub.rs", "src/bench/"];
+const CLOCK_OWNERS: [&str; 2] = ["tl-ui-base/src/hub.rs", "tl-ui/src/bench/"];
 
 #[test]
 fn ui_reads_now_only_through_the_host_clock() {
@@ -391,9 +391,21 @@ fn ui_reads_now_only_through_the_host_clock() {
         concat!("now_boot_ns", "()"),
         concat!("ClockId::", "Boottime"),
     ];
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Every tl-ui crate's sources; paths are relative to `crates/`.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
     let mut hits = Vec::new();
-    let mut dirs = vec![root.join("src")];
+    let mut dirs: Vec<_> = std::fs::read_dir(root)
+        .expect("read crates dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("tl-ui"))
+        })
+        .map(|path| path.join("src"))
+        .filter(|src| src.is_dir())
+        .collect();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).expect("read tl-ui source dir") {
             let path = entry.expect("dir entry").path();

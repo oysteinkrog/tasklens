@@ -42,7 +42,7 @@ pub fn main_window_title(host: &HostContext) -> String {
 }
 
 /// The window picker's "No window selected" text (E20-027).
-pub(crate) const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
+pub const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
 
 /// Implemented by every page entity (E22, E24, E27, E28). Inherent methods of the same name may
 /// exist; the impl forwards to them.

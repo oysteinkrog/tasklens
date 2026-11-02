@@ -62,8 +62,8 @@ pub fn assert_none_drawn_twice(vcx: &mut VisualTestContext, what: &str) -> BTree
     drawn
 }
 
-/// No file in `crates/tl-ui/src` calls GPUI's `debug_selector` outside the helper module, so
-/// the drawn-selector count sees every selector.
+/// No file in tl-ui or the other tl-ui crates calls GPUI's `debug_selector` outside the helper
+/// module, so the drawn-selector count sees every selector.
 #[test]
 fn every_selector_goes_through_the_helper() {
     fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
@@ -84,15 +84,24 @@ fn every_selector_goes_through_the_helper() {
             }
         }
     }
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let helper = src.join("selector.rs");
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let helper = crates.join("tl-ui-base/src/selector.rs");
     let text = std::fs::read_to_string(&helper).expect("helper module");
     assert!(
         text.contains(".debug_selector("),
         "the helper module sets the selector"
     );
     let mut calls = Vec::new();
-    walk(&src, &mut calls);
+    for krate in std::fs::read_dir(&crates).expect("crates dir") {
+        let src = krate.expect("dir entry").path().join("src");
+        let ui = src
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|name| name.to_string_lossy().starts_with("tl-ui"));
+        if ui && src.is_dir() {
+            walk(&src, &mut calls);
+        }
+    }
     let helper = format!("{}:", helper.display());
     calls.retain(|c| !c.starts_with(&helper));
     assert!(

@@ -3,6 +3,9 @@
 //! ADR-020 splits tl-ui into layered crates. Before the split, every file under
 //! `crates/tl-ui/src` already belongs to one target crate (the layer table below). A file may
 //! name modules of its own crate and of the crates its ADR-020 row allows, nothing else.
+//! An extracted crate's files keep their paths relative to `src/` (ADR-020 move method), so the
+//! check joins tl-ui's tree and the extracted crates' trees (`UI_SRCS`) into one module tree, and
+//! fails when a file sits in another crate's tree than its layer names.
 //!
 //! The check reads every `.rs` file and finds each module path it names: `crate::`, `self::` and
 //! `super::` chains, with the `use` brace groups under them, over several lines when needed.
@@ -25,8 +28,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 
-/// The source tree the check reads, relative to the workspace root.
+/// tl-ui's source tree, relative to the workspace root. Files of crates not yet extracted live
+/// here.
 pub const UI_SRC: &str = "crates/tl-ui/src";
+
+/// The source trees the check reads, relative to the workspace root: tl-ui's and one per extracted
+/// crate. Each extraction bead adds its crate (scripts/split/extract.py prints the line).
+const UI_SRCS: &[(&str, &str)] = &[(SHELL, UI_SRC), ("tl-ui-base", "crates/tl-ui-base/src")];
 
 /// The allowlist of today's upward edges, relative to the workspace root.
 const ALLOWLIST: &str = "xtask/check_layers_allow.txt";
@@ -39,11 +47,11 @@ const SHELL: &str = "tl-ui";
 /// that names it fails, as a normal dependency on it fails check-deps (no row lists it).
 const TESTKIT: &str = "tl-ui-testkit";
 
-/// ADR-020 "Where each file goes": path prefix under `crates/tl-ui/src` and its crate. A prefix
-/// that ends in `/` is a directory and also matches the module file next to it (`a/` matches
-/// `a.rs`). Any other prefix is one file. The longest matching prefix wins. The table holds the
-/// files that the cycle beads create too (`template.rs`, `app_env.rs`, `registry.rs`,
-/// `shell.rs`, `motion.rs`, `toast_types.rs`, `pages/performance/core/`).
+/// ADR-020 "Where each file goes": path prefix under `src/` (tl-ui's or the extracted crate's)
+/// and its crate. A prefix that ends in `/` is a directory and also matches the module file next
+/// to it (`a/` matches `a.rs`). Any other prefix is one file. The longest matching prefix wins.
+/// The table holds the files that the cycle beads create too (`template.rs`, `app_env.rs`,
+/// `registry.rs`, `shell.rs`, `motion.rs`, `toast_types.rs`, `pages/performance/core/`).
 const LAYERS: &[(&str, &str)] = &[
     // tl-ui-base
     ("theme/", "tl-ui-base"),
@@ -239,7 +247,7 @@ fn edge_allowed(src: &str, dst: &str, test: bool) -> bool {
     src == dst || may_depend(src, dst) || (test && dst == TESTKIT)
 }
 
-/// The crate of a file under `crates/tl-ui/src`, by the longest matching layer prefix.
+/// The crate of a file, from its path under `src/` and the longest matching layer prefix.
 fn layer_of(file: &str) -> Option<&'static str> {
     let as_dir = file.strip_suffix(".rs").map(|stem| format!("{stem}/"));
     LAYERS
@@ -277,7 +285,7 @@ pub fn run(args: Vec<String>) -> anyhow::Result<()> {
         }
     }
     let root = workspace_root();
-    let tree = read_tree(&root.join(UI_SRC))?;
+    let tree = read_trees(&root)?;
     let scan = scan_tree(&tree);
     if !scan.unmapped.is_empty() {
         for file in &scan.unmapped {
@@ -324,6 +332,54 @@ pub fn run(args: Vec<String>) -> anyhow::Result<()> {
 fn workspace_root() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.parent().unwrap_or(manifest_dir).to_path_buf()
+}
+
+/// Every `.rs` file of every tree in `UI_SRCS`, keyed by its path relative to its `src/`. An
+/// extracted crate's `lib.rs` only declares its modules and imports the lower crates' modules, so
+/// it is skipped: tl-ui's `lib.rs` stays the root of the joined tree. A file must sit in the tree
+/// of the crate its layer names, so a file left behind in tl-ui or moved to the wrong crate fails.
+fn read_trees(root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut tree = BTreeMap::new();
+    let mut misplaced = Vec::new();
+    for &(krate, dir) in UI_SRCS {
+        for (file, text) in read_tree(&root.join(dir))? {
+            if krate != SHELL && file == "lib.rs" {
+                continue;
+            }
+            match layer_of(&file) {
+                Some(layer) if src_dir(layer) != dir => misplaced.push(format!(
+                    "{dir}/{file}: ADR-020 puts this file in {layer}, whose sources are in {}",
+                    src_dir(layer)
+                )),
+                None if krate != SHELL => misplaced.push(format!(
+                    "{dir}/{file}: no ADR-020 crate for this file; add a row to ADR-020 and to \
+                     LAYERS in xtask/src/check_layers.rs"
+                )),
+                _ => {}
+            }
+            if tree.insert(file.clone(), text).is_some() {
+                bail!("check-layers: {file} is in two source trees");
+            }
+        }
+    }
+    if !misplaced.is_empty() {
+        for line in &misplaced {
+            println!("{line}");
+        }
+        bail!(
+            "check-layers: {} file(s) in the wrong crate",
+            misplaced.len()
+        );
+    }
+    Ok(tree)
+}
+
+/// The source tree that holds a crate's files: its own once it is extracted, tl-ui's until then.
+fn src_dir(krate: &str) -> &'static str {
+    UI_SRCS
+        .iter()
+        .find(|(name, _)| *name == krate)
+        .map_or(UI_SRC, |(_, dir)| *dir)
 }
 
 /// Every `.rs` file under `src`, keyed by its path relative to `src` with `/` separators.
@@ -1076,7 +1132,8 @@ fn check(edges: &[Edge], allowlist: &[AllowEntry]) -> Vec<String> {
         .filter(|edge| !allowed.contains(&(edge.file.as_str(), edge.module.as_str())))
         .map(|edge| {
             format!(
-                "{UI_SRC}/{}:{}: {} -> {} via {}",
+                "{}/{}:{}: {} -> {} via {}",
+                src_dir(edge.src),
                 edge.file,
                 edge.line,
                 shown(edge.src),
@@ -1293,7 +1350,7 @@ mod tests {
         assert_eq!(
             check(&scan.edges, &allow),
             vec![
-                "crates/tl-ui/src/theme/store.rs:2: tl-ui-base -> tl-ui (shell) via \
+                "crates/tl-ui-base/src/theme/store.rs:2: tl-ui-base -> tl-ui (shell) via \
                  crate::window::main::ShellState"
                     .to_owned()
             ]
@@ -1376,7 +1433,7 @@ mod tests {
         assert_eq!(
             check(&scan.edges, &allow),
             vec![
-                "crates/tl-ui/src/theme/store.rs:1: tl-ui-base -> tl-ui (shell) via \
+                "crates/tl-ui-base/src/theme/store.rs:1: tl-ui-base -> tl-ui (shell) via \
                  crate::window::main::ShellState"
                     .to_owned()
             ]
@@ -1419,7 +1476,7 @@ mod tests {
         assert_eq!(
             check(&scan.edges, &allow),
             vec![
-                "crates/tl-ui/src/theme/store.rs:2: tl-ui-base -> tl-ui-testkit via \
+                "crates/tl-ui-base/src/theme/store.rs:2: tl-ui-base -> tl-ui-testkit via \
                  crate::testing::fake::Fake"
                     .to_owned()
             ]

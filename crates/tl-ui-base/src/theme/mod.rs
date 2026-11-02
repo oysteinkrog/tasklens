@@ -314,8 +314,9 @@ impl TlTheme {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+// Debug builds keep `test_theme` so the unit tests of the crates above can use it (ADR-020).
+#[cfg(any(test, debug_assertions))]
+pub mod tests {
     use super::*;
     use gpui_kit::rgb;
 
@@ -324,7 +325,7 @@ pub(crate) mod tests {
     }
 
     /// A theme with a distinct colour in every slot, for tests.
-    pub(crate) fn test_theme(mode: ThemeMode) -> TlTheme {
+    pub fn test_theme(mode: ThemeMode) -> TlTheme {
         let c = hex(0x808080);
         let mut t = TlTheme {
             name: "Test".into(),
@@ -385,6 +386,7 @@ pub(crate) mod tests {
         t
     }
 
+    #[cfg(test)]
     fn def_with_window_bg(window_bg: u32) -> ThemeDef {
         let mut slots = [hex(0x808080); 22];
         slots[ThemeSlot::WindowBg as usize] = hex(window_bg);

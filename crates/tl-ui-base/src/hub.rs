@@ -230,7 +230,7 @@ pub struct LinkChanged {
 }
 
 /// Chips report -128 °C or exactly 0 °C for a pin with nothing connected.
-pub(crate) fn is_dead_reading(celsius: f32) -> bool {
+pub fn is_dead_reading(celsius: f32) -> bool {
     celsius <= -128.0 || celsius == 0.0
 }
 

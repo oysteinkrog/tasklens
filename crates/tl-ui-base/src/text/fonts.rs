@@ -268,9 +268,19 @@ mod tests {
     fn no_bold_in_tl_ui() {
         // Built from two parts so this file does not match its own scan.
         let needle = concat!("FontWeight", "::BOLD");
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Every tl-ui crate's sources (ADR-020 split them out of tl-ui).
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut hits = Vec::new();
-        let mut dirs = vec![src];
+        let mut dirs: Vec<_> = std::fs::read_dir(&crates)
+            .expect("read crates dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("tl-ui"))
+            })
+            .map(|path| path.join("src"))
+            .filter(|src| src.is_dir())
+            .collect();
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).expect("read tl-ui source dir") {
                 let path = entry.expect("dir entry").path();

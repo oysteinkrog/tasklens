@@ -94,7 +94,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
 | tl-ui | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), intl_pluralrules (plural rules in `pages/performance/details.rs`, in use since o55.37), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
 | tl-ui-settings | tl-model | serde, toml (`LayoutEntry::Kept`, ADR-019), bitflags (`layout.rs`) |
-| tl-ui-base | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, unic-langid, async-channel, unicode-segmentation |
+| tl-ui-base | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, unic-langid, intl_pluralrules (plural rules in `template.rs`), async-channel, unicode-segmentation |
 | tl-ui-kit | tl-model, tl-ui-settings, tl-ui-base | gpui-kit, tracing, smallvec, rustc-hash, fluent-bundle |
 | tl-ui-chart | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit | gpui-kit, smallvec, jiff |
 | tl-ui-table | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle |

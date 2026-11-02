@@ -8185,6 +8185,28 @@ dependencies = [
  "smallvec",
  "tempfile",
  "tl-model",
+ "tl-ui-base",
+ "tl-ui-settings",
+ "tl-ui-testkit",
+ "tracing",
+ "unic-langid",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "tl-ui-base"
+version = "1.3.0"
+dependencies = [
+ "async-channel",
+ "fluent-bundle",
+ "gpui-kit",
+ "intl_pluralrules",
+ "proptest",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tl-model",
  "tl-ui-settings",
  "tl-ui-testkit",
  "tracing",

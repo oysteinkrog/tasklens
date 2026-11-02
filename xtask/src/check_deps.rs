@@ -139,6 +139,25 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "image",
         ],
     ),
+    // ADR-020 base layer, moved out of tl-ui (CS-E1). intl_pluralrules: plural rules in
+    // `template.rs` (`Template`, moved down by CS-C5).
+    (
+        "tl-ui-base",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "serde_json",
+            "fluent-bundle",
+            "unic-langid",
+            "intl_pluralrules",
+            "async-channel",
+            "unicode-segmentation",
+        ],
+    ),
     (
         "tl-app",
         &[
@@ -218,7 +237,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
 /// Members whose normal-dependency closure may contain asupersync (ADR-001 rule 2, ADR-018).
 const ASUPERSYNC_ALLOWED: &[&str] = &["tl-engine", "tl-app", "tl-server"];
 
-/// Names that must not be in tl-ui's normal-dependency closure (ADR-001 check 2).
+/// Names that must not be in the normal-dependency closure of tl-ui or any tl-ui-* crate (ADR-001
+/// check 2, ADR-020).
 const UI_CLOSURE_BANNED: &[&str] = &["tl-engine", "tl-collect", "tl-ops", "arc-swap", "zbus"];
 
 /// tl-ui closure names that count only on a path that avoids gpui-kit. They reach tl-ui through
@@ -575,7 +595,8 @@ fn rows_and_closures(metadata: &serde_json::Value) -> anyhow::Result<Vec<String>
         if closure.contains("asupersync") && !ASUPERSYNC_ALLOWED.contains(&member) {
             violations.push(format!("asupersync in the closure of {member}"));
         }
-        if member == "tl-ui" {
+        // The tl-ui closure rule applies to every tl-ui-* crate (ADR-020).
+        if check_layers::is_ui_crate(member) {
             let without_gpui_kit = graph.closure(id, &["gpui-kit"]);
             for &name in UI_CLOSURE_BANNED {
                 let reached = if UI_CLOSURE_VIA_GPUI_KIT_OK.contains(&name) {
@@ -584,7 +605,7 @@ fn rows_and_closures(metadata: &serde_json::Value) -> anyhow::Result<Vec<String>
                     &closure
                 };
                 if reached.contains(name) {
-                    violations.push(format!("tl-ui closure contains {name}"));
+                    violations.push(format!("{member} closure contains {name}"));
                 }
             }
         }
