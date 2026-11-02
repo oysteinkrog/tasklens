@@ -44,6 +44,7 @@ const UI_SRCS: &[(&str, &str)] = &[
     ("tl-ui-overview", "crates/tl-ui-overview/src"),
     ("tl-ui-perf", "crates/tl-ui-perf/src"),
     ("tl-ui-procs", "crates/tl-ui-procs/src"),
+    ("tl-ui-sys", "crates/tl-ui-sys/src"),
 ];
 
 /// Modules that an extracted crate holds at a shorter path than tl-ui's module tree names them:

@@ -15,6 +15,7 @@ tl-ui-perf-core = { workspace = true }
 tl-ui-overview = { workspace = true }
 tl-ui-perf = { workspace = true }
 tl-ui-procs = { workspace = true }
+tl-ui-sys = { workspace = true }
 gpui-kit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -41,7 +42,7 @@ tempfile = { workspace = true }
 default = []
 bench = ["test-hooks", "gpui-kit/profiler", "tl-ui-kit/bench", "tl-ui-perf/bench"]     # frame histograms and paint log for --bench (ADR-014, E01-OI-6)
 render-tests = ["bench", "gpui-kit/test-support", "dep:image", "tl-ui-testkit/render"]   # headless screenshot tests (ADR-013)
-test-hooks = ["tl-ui-base/test-hooks", "tl-ui-kit/test-hooks", "tl-ui-chart/test-hooks", "tl-ui-table/test-hooks", "tl-ui-perf-core/test-hooks", "tl-ui-overview/test-hooks", "tl-ui-perf/test-hooks", "tl-ui-procs/test-hooks"]
+test-hooks = ["tl-ui-base/test-hooks", "tl-ui-kit/test-hooks", "tl-ui-chart/test-hooks", "tl-ui-table/test-hooks", "tl-ui-perf-core/test-hooks", "tl-ui-overview/test-hooks", "tl-ui-perf/test-hooks", "tl-ui-procs/test-hooks", "tl-ui-sys/test-hooks"]
 
 [lints]
 workspace = true

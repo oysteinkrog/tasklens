@@ -242,6 +242,20 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "jiff",
         ],
     ),
+    // ADR-020 sys layer, moved out of tl-ui (CS-E9).
+    (
+        "tl-ui-sys",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "fluent-bundle",
+            "jiff",
+        ],
+    ),
     (
         "tl-app",
         &[

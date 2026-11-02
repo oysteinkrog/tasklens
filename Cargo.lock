@@ -8194,6 +8194,7 @@ dependencies = [
  "tl-ui-perf-core",
  "tl-ui-procs",
  "tl-ui-settings",
+ "tl-ui-sys",
  "tl-ui-table",
  "tl-ui-testkit",
  "tracing",
@@ -8350,6 +8351,27 @@ dependencies = [
  "serde",
  "tl-model",
  "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "tl-ui-sys"
+version = "1.3.0"
+dependencies = [
+ "fluent-bundle",
+ "gpui-kit",
+ "jiff",
+ "rustc-hash 2.1.3",
+ "serde",
+ "smallvec",
+ "tl-model",
+ "tl-ui-base",
+ "tl-ui-chart",
+ "tl-ui-kit",
+ "tl-ui-perf-core",
+ "tl-ui-procs",
+ "tl-ui-settings",
+ "tl-ui-table",
+ "tracing",
 ]
 
 [[package]]
