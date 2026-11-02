@@ -3,6 +3,7 @@
 //!
 //! Run one area with `cargo test -p tl-ui --test ui -- overview::`.
 
+mod action_links;
 mod actions;
 mod anim;
 mod battery_page;
