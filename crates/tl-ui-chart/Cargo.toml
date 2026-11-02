@@ -14,6 +14,8 @@ tl-ui-base = { workspace = true }
 tl-ui-kit = { workspace = true }
 
 [dev-dependencies]
+tl-ui-testkit = { workspace = true }
+fastrand = "2.5"   # seeded noise in chart and render tests
 gpui-kit = { workspace = true, features = ["test-support"] }
 
 [features]

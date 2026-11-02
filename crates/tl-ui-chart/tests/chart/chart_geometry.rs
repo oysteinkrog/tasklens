@@ -6,12 +6,12 @@ use std::sync::Arc;
 use gpui_kit::{Hsla, hsla};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
-use tl_ui::chart::geometry::{
+use tl_ui_chart::chart::geometry::{
     BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, build_cell, decimate, emit_run,
     finish_grid, is_stale, mean_samples, right_edge_ns, split_runs, stale_age_ns, window_start,
     y_of,
 };
-use tl_ui::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
+use tl_ui_chart::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
 const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000_000_000;
@@ -1195,8 +1195,8 @@ fn many_series_no_per_rebuild_allocation() {
 
 /// Y scale rules and axis text (tasklens-yrf.6, UI-PRF-006).
 mod scale {
-    use tl_ui::chart::scale::{ScaleResult, ScaleState, compute};
-    use tl_ui::chart::{ValueFormat, YScale};
+    use tl_ui_chart::chart::scale::{ScaleResult, ScaleState, compute};
+    use tl_ui_chart::chart::{ValueFormat, YScale};
     use tl_ui_settings::settings::NetworkUnit;
 
     const SEC: u64 = 1_000_000_000;

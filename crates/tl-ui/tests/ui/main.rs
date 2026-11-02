@@ -9,7 +9,6 @@ mod anim;
 mod battery_page;
 mod bench_scenes;
 mod chart;
-mod chart_geometry;
 mod common;
 mod components;
 mod connections;
