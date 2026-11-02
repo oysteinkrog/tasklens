@@ -55,7 +55,6 @@ mod process_priority_menu;
 mod process_tooltips;
 mod processes;
 mod props;
-mod render_gallery;
 mod render_perf;
 mod render_support;
 mod run;

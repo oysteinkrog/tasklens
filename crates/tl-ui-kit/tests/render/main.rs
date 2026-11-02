@@ -3,4 +3,5 @@
 //!
 //! Run with `cargo test -p tl-ui-kit --features render-tests --test render`.
 
+mod render_gallery;
 mod render_theme;

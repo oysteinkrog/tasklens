@@ -3,16 +3,24 @@
 //! `TL_UPDATE_GOLDEN=1` rewrites them. Reduced motion is forced on by the harness, so animations
 //! show their end state. Captures are at device scale 2.0 (R-291).
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_gallery::`.
-
-#![cfg(feature = "render-tests")]
+//! Run with `cargo test -p tl-ui-kit --features render-tests --test render -- render_gallery::`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{AppContext as _, TestAppContext, px, size};
-use tl_ui::components::gallery::{self, GALLERY_PAGES, GalleryView, WINDOW_HEIGHT, WINDOW_WIDTH};
+use tl_ui_kit::components::gallery::{
+    self, GALLERY_PAGES, GalleryView, WINDOW_HEIGHT, WINDOW_WIDTH,
+};
+use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+
+/// Where this crate's golden PNGs live.
+const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
+
+/// Compares `img` with `tests/golden/<name>.png`, or writes it when `TL_UPDATE_GOLDEN=1`.
+fn assert_golden(name: &str, img: &tl_ui_testkit::render::RgbaImage) {
+    tl_ui_pagehost::render::assert_golden(std::path::Path::new(GOLDEN_DIR), name, img);
+}
 
 /// UI-FND-023: at most 2 spinners or indeterminate bars per window.
 const ANIMATED_BUDGET: usize = 2;
@@ -49,7 +57,7 @@ fn gallery_pages_match_goldens() {
 fn animated_element_budget(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

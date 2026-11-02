@@ -24,7 +24,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 default = []
 bench = ["test-hooks"]   # the component gallery and static toast cards for --bench
 test-hooks = ["tl-ui-base/test-hooks"]
-render-tests = ["tl-ui-pagehost/render-tests"]   # headless screenshot tests (ADR-013)
+render-tests = ["tl-ui-pagehost/render-tests", "bench"]   # headless screenshot tests (ADR-013); the gallery is behind bench
 
 [[test]]
 name = "render"
