@@ -1,8 +1,11 @@
 //! `cargo xtask check-layers`: no upward module paths inside tl-ui (ADR-020, tasklens-zljr5.2).
 //!
-//! ADR-020 splits tl-ui into layered crates. Before the split, every file under
-//! `crates/tl-ui/src` already belongs to one target crate (the layer table below). A file may
-//! name modules of its own crate and of the crates its ADR-020 row allows, nothing else.
+//! ADR-020 splits tl-ui into layered crates. Every file under `crates/tl-ui/src` and the
+//! extracted crates' `src/` belongs to one crate (the layer table below). A file may name modules
+//! of its own crate and of the crates its ADR-020 row allows, nothing else. The shell keeps
+//! `lib.rs`, `app.rs`, `window/`, `pages/mod.rs`, `pages/information/`, `windows/mod.rs`,
+//! `windows/{run, run_history, low_memory, smart}.rs` and `bench/`; any other file left in
+//! crates/tl-ui/src fails.
 //! An extracted crate's files keep their paths relative to `src/` (ADR-020 move method), so the
 //! check joins tl-ui's tree and the extracted crates' trees (`UI_SRCS`) into one module tree, and
 //! fails when a file sits in another crate's tree than its layer names.
@@ -21,7 +24,11 @@
 //! list from the current tree, and `--summary` prints the entry count per crate pair.
 //!
 //! The allowed-edges map is also where check-deps takes the tl-ui-* dependencies of every tl-ui
-//! crate from, so the two checks cannot disagree.
+//! crate from, so the two checks cannot disagree. The check also holds the map to the page-crate
+//! sibling rule (`PAGE_CRATES`): page crates depend on no other page crate except
+//! tl-ui-perf on tl-ui-overview and tl-ui-sys on tl-ui-procs. Since check-deps holds every Cargo
+//! dependency to the map, an edge such as tl-ui-procs -> tl-ui-overview cannot compile, and the
+//! output says so.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -160,7 +167,8 @@ const LAYERS: &[(&str, &str)] = &[
     ("windows/low_memory.rs", SHELL),
     ("windows/smart.rs", SHELL),
     ("bench/", SHELL),
-    // tl-ui-testkit (CS-B1 moves it out)
+    // tl-ui-testkit is its own crate since CS-B1. The row stays so a `crate::testing` path still
+    // counts as a testkit edge, which only test code may have.
     ("testing/", TESTKIT),
 ];
 
@@ -257,6 +265,51 @@ pub const EDGES: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// ADR-020 page crates. They depend on no other page crate, except the pairs in
+/// `PAGE_SIBLING_EDGES`.
+const PAGE_CRATES: &[&str] = &["tl-ui-overview", "tl-ui-perf", "tl-ui-procs", "tl-ui-sys"];
+
+/// The two page-crate edges ADR-020 allows: perf on overview and sys on procs.
+const PAGE_SIBLING_EDGES: &[(&str, &str)] = &[
+    ("tl-ui-perf", "tl-ui-overview"),
+    ("tl-ui-sys", "tl-ui-procs"),
+];
+
+/// `EDGES` rows that break the page-crate sibling rule, one line each.
+fn sibling_violations(edges: &[(&str, &[&str])]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (src, row) in edges {
+        if !PAGE_CRATES.contains(src) {
+            continue;
+        }
+        for dst in *row {
+            if PAGE_CRATES.contains(dst) && !PAGE_SIBLING_EDGES.contains(&(*src, *dst)) {
+                out.push(format!(
+                    "xtask/src/check_layers.rs EDGES: page crate {src} lists page crate {dst}; \
+                     ADR-020 allows only tl-ui-perf -> tl-ui-overview and \
+                     tl-ui-sys -> tl-ui-procs"
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The line `run` prints when the sibling rule holds.
+fn sibling_rule_line() -> String {
+    format!(
+        "check-layers: page crates {} depend on no other page crate except {}; check-deps holds \
+         every Cargo dependency to EDGES, so another edge between them (such as tl-ui-procs -> \
+         tl-ui-overview) cannot compile",
+        PAGE_CRATES.join(", "),
+        PAGE_SIBLING_EDGES
+            .iter()
+            .map(|(src, dst)| format!("{src} -> {dst}"))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    )
+}
+
 /// True for `tl-ui` and every `tl-ui-*` crate name.
 pub fn is_ui_crate(name: &str) -> bool {
     name == SHELL || name.starts_with("tl-ui-")
@@ -346,13 +399,15 @@ pub fn run(args: Vec<String>) -> anyhow::Result<()> {
         }
     }
 
-    let violations = check(&scan.edges, &allowlist);
+    let mut violations = check(&scan.edges, &allowlist);
+    violations.extend(sibling_violations(EDGES));
     for violation in &violations {
         println!("{violation}");
     }
     if !violations.is_empty() {
         bail!("check-layers: {} violation(s)", violations.len());
     }
+    println!("{}", sibling_rule_line());
     println!("check-layers: ok ({} allowlisted edge(s))", allowlist.len());
     Ok(())
 }
@@ -1595,6 +1650,54 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn page_sibling_rule_holds_for_edges() {
+        assert_eq!(sibling_violations(EDGES), Vec::<String>::new());
+        let bad: &[(&str, &[&str])] = &[
+            ("tl-ui-procs", &["tl-ui-overview", "tl-ui-kit"]),
+            ("tl-ui-perf", &["tl-ui-overview"]),
+        ];
+        assert_eq!(
+            sibling_violations(bad),
+            vec![
+                "xtask/src/check_layers.rs EDGES: page crate tl-ui-procs lists page crate \
+                 tl-ui-overview; ADR-020 allows only tl-ui-perf -> tl-ui-overview and \
+                 tl-ui-sys -> tl-ui-procs"
+                    .to_owned()
+            ]
+        );
+        assert!(
+            sibling_rule_line()
+                .contains("except tl-ui-perf -> tl-ui-overview and tl-ui-sys -> tl-ui-procs")
+        );
+    }
+
+    #[test]
+    fn shell_files_map_to_the_shell() {
+        // ADR-020 "Where each file goes", tl-ui (shell) row.
+        for file in [
+            "lib.rs",
+            "app.rs",
+            "window/main.rs",
+            "window/settings/mod.rs",
+            "pages/mod.rs",
+            "pages/information/mod.rs",
+            "windows/mod.rs",
+            "windows/run.rs",
+            "windows/run_history.rs",
+            "windows/low_memory.rs",
+            "windows/smart.rs",
+            "bench/mod.rs",
+        ] {
+            assert_eq!(layer_of(file), Some(SHELL), "{file}");
+        }
+        // Files that moved out are not shell files, so one left behind in tl-ui fails.
+        assert_eq!(layer_of("windows/props/general.rs"), Some("tl-ui-procs"));
+        assert_eq!(layer_of("windows/mini.rs"), None);
+        assert_eq!(layer_of("pages/minigraph/panel.rs"), None);
+        assert_eq!(src_dir(SHELL), UI_SRC);
     }
 
     #[test]
