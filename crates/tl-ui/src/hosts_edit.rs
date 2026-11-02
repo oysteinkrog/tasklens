@@ -5,7 +5,7 @@
 //! window watches the settings and adds, removes or renames the tabs without a restart.
 
 use gpui_kit::App;
-use tl_model::settings::{HostEntry, HostError, check_hosts};
+use tl_ui_settings::settings::{HostEntry, HostError, check_hosts};
 
 use crate::host::HostRegistry;
 use crate::settings_global::TlSettings;

@@ -22,9 +22,9 @@ use tl_model::client::EngineClient as _;
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, NetKind};
 use tl_model::ids::{MetricId, SeriesId};
-use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::Snapshot;
 use tl_ui::net_totals::NetTotal;
+use tl_ui_settings::settings::PerformanceSettings;
 
 /// How long the engine gets to publish matching totals to both sessions. The net worker samples
 /// once a second; a debug build on a loaded machine gets more time.

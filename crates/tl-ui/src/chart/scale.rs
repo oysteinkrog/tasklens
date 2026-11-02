@@ -8,8 +8,8 @@
 use core::fmt::Write;
 
 use gpui_kit::SharedString;
-use tl_model::settings::NetworkUnit;
 use tl_model::units::{ceil_125, ceil_pow2};
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::{ValueFormat, YScale};
 

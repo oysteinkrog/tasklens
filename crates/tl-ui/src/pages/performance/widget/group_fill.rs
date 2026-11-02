@@ -17,7 +17,7 @@
 //! window px; the functions take the UI scale.
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
-use tl_model::layout::{FormSet, GroupItems};
+use tl_ui_settings::layout::{FormSet, GroupItems};
 
 use super::compose::{Composition, ROW_H, group_item_composition, group_item_min};
 use crate::pages::performance::overview::layout::Arrange;

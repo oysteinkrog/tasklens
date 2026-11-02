@@ -36,10 +36,10 @@ use tl_model::actions::{ActionKind, ActionTarget, Signal};
 use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{ProcessSnapshot, ServicesSnapshot, Snapshot, WindowEntry};
 use tl_model::table::{Manager, UnitRef};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{Settings, UiState};
 use tracing::warn;
 
 use self::actions::{

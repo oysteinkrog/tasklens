@@ -70,7 +70,7 @@ use crate::table::tree_table::{
 };
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_model::settings::MemoryView;
+use tl_ui_settings::settings::MemoryView;
 
 /// Debug selectors of the chart boxes.
 pub const PHYSICAL_ID: &str = "perf-mem-physical";

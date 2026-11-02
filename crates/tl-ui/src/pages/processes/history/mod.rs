@@ -41,9 +41,9 @@ use tl_model::history::{
     HistoryLoadProblem, HistoryMetric, HistoryRange, HistoryStoreState, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
-use tl_model::settings::{Settings, UiState};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
+use tl_ui_settings::settings::{Settings, UiState};
 
 use self::actions::{
     DeleteFromHistory, HISTORY_CONTEXT, HistoryClearProcess, HistoryLive, HistoryMetricCpu,

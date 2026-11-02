@@ -13,13 +13,6 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::layout::{
-    ContainerLayout, DISK_BOX_CONTAINER, GroupKind, WidgetContent, box_layout, convert_old_settings,
-};
-use tl_model::layout_boxes::{DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
@@ -44,6 +37,15 @@ use tl_ui::pages::performance::widget::group_widget::{GroupFlowLook, GroupState}
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 use tl_ui::pages::performance::widget::source::Availability;
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    ContainerLayout, DISK_BOX_CONTAINER, GroupKind, WidgetContent, box_layout, convert_old_settings,
+};
+use tl_ui_settings::layout_boxes::{
+    DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
+};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f64 = 1024. * 1024.;

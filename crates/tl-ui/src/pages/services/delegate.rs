@@ -22,7 +22,6 @@ use tl_model::demand::{ColumnSet, Demand};
 use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessRecord};
-use tl_model::settings::{Settings, SortState, UiState};
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ProcessSnapshot, ServiceBackend, ServiceStatus,
     ServicesSnapshot, Snapshot, StartupType, UnitRecord,
@@ -35,6 +34,7 @@ use tl_model::time::BootId;
 use tl_model::units;
 use tl_model::units::LocalDateTime;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{Settings, SortState, UiState};
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};

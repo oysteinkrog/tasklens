@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHasher;
 use smallvec::SmallVec;
-use tl_model::settings::Settings;
+use tl_ui_settings::settings::Settings;
 
 use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
 use crate::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat};

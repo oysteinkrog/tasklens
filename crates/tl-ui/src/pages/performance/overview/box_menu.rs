@@ -27,12 +27,12 @@ use gpui_kit::{
 };
 
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     CPU_BOX_CONTAINER, DISK_BOX_CONTAINER, GPU_BOX_CONTAINER, MEMORY_BOX_CONTAINER,
     NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER, TIMELINE_BOX_CONTAINER, reset_to_default,
 };
-use tl_model::layout_boxes::{convert_box, fixed_box_default};
-use tl_model::settings::TimelineClick;
+use tl_ui_settings::layout_boxes::{convert_box, fixed_box_default};
+use tl_ui_settings::settings::TimelineClick;
 
 use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind, PowerPlacement};

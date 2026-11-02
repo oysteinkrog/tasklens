@@ -120,7 +120,7 @@ fn measure(text: &str, font: Font, size: Pixels, window: &Window) -> Pixels {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{TestAppContext, TestDispatcher};
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::text::fonts::load_bundled_fonts;

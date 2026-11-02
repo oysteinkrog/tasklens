@@ -3,23 +3,27 @@
 //! `tl-app` loads and saves `settings.toml` and `state.toml`; this module only defines their
 //! shape, defaults and clamp rules. TOML section names are the `Settings` and `UiState` field
 //! names and keys are the struct field names. The few types the engine also uses live in
-//! [`crate::settings`]; this module builds on them, never the other way round.
+//! [`tl_model::settings`] and are re-exported here; this crate builds on them, never the other
+//! way round.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::actions::DumpMode;
-use crate::command::Tab;
-use crate::demand::DeviceRange;
-use crate::devices::NetKind;
-use crate::remote_proto::HostSettingsValues;
-use crate::settings::{
+use tl_model::actions::DumpMode;
+use tl_model::command::Tab;
+use tl_model::demand::DeviceRange;
+use tl_model::devices::NetKind;
+use tl_model::remote_proto::HostSettingsValues;
+use tl_model::table::{ServiceStateFilter, TableMode, TableSettings, UnitType};
+
+use crate::layout::{self, LayoutsSetting};
+
+/// The engine's settings types and ranges, so UI code imports every setting from this module.
+pub use tl_model::settings::{
     EngineSettings, HISTORY_RETENTION_H_RANGE, HistorySettings, NetworkUnit,
     PROCESS_INTERVAL_MS_DEFAULT, PROCESS_INTERVAL_MS_RANGE, clamp_key,
 };
-use crate::table::{ServiceStateFilter, TableMode, TableSettings, UnitType};
-use crate::ui::layout::{self, LayoutsSetting};
 
 /// First line of `settings.toml` and `state.toml`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -2188,7 +2192,7 @@ impl Settings {
             c.push(LAYOUTS_KEY);
         }
         let boxes = layout::convert_old_settings(&mut self.performance);
-        let pages = crate::ui::layout_pages::convert_old_page_settings(&mut self.performance);
+        let pages = crate::layout_pages::convert_old_page_settings(&mut self.performance);
         if boxes || pages {
             c.push(LAYOUTS_CONVERTED_KEY);
         }

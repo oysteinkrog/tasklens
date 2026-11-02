@@ -22,7 +22,6 @@ use tl_model::demand::{Demand, TrayDemand};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{NetworkUnit, PerformanceSettings, TrayGraphState as TrayGraphEntry};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::TimeNs;
 use tl_model::tray::{
@@ -30,6 +29,9 @@ use tl_model::tray::{
     TrayModel, TrayUiEnd,
 };
 use tl_model::units;
+use tl_ui_settings::settings::{
+    NetworkUnit, PerformanceSettings, TrayGraphState as TrayGraphEntry,
+};
 
 use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
 use crate::chart::scale::{self, ScaleState};

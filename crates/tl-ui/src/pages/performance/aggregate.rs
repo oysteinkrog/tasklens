@@ -28,14 +28,14 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId};
-use tl_model::layout::{
-    ContainerLayout, FixedWidget, WidgetSetting, container_layout, reset_to_default,
-};
-use tl_model::layout_pages::page_container;
 use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::system::Metric;
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
+    ContainerLayout, FixedWidget, WidgetSetting, container_layout, reset_to_default,
+};
+use tl_ui_settings::layout_pages::page_container;
 
 use super::actions::{PerfWidgetEditStart, PerfWidgetResetPage};
 use super::details::{Fallback, KeyValueModel};

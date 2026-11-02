@@ -6,10 +6,10 @@
 //! its value bits or validity change. No total has words, so no string is translated here.
 
 use tl_model::ids::ColumnId;
-use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::table::{TableTotals, Total};
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use super::cells::ProcColumn;
 use crate::table::cells::CellOut;

@@ -12,14 +12,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, GroupKind, WidgetContent,
-};
-use tl_model::layout_boxes::{METRIC_CPU_KERNEL, METRIC_FREQ};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::anim::AnimationDriver;
@@ -42,6 +35,13 @@ use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id
 use tl_ui::pages::performance::widget::edit::WidgetEditor;
 use tl_ui::pages::performance::widget::metric_widget::widget_id;
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    CPU_BOX_CONTAINER, ContainerLayout, DeviceSelector, GroupKind, WidgetContent,
+};
+use tl_ui_settings::layout_boxes::{METRIC_CPU_KERNEL, METRIC_FREQ};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The first logical CPU's device index; core `n` is at `CORE0 + n`.
@@ -172,7 +172,7 @@ fn open(cx: &mut TestAppContext, cores: u16, w: f32, h: f32) -> Rig<'_> {
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
         // Raw core values: two samples a few ms apart barely move a smoothed bar.
-        settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
+        settings.performance.overview_core_smoothing = tl_ui_settings::settings::CoreSmoothing::Off;
         // Leave the Memory, Disk and Network boxes out, so the CPU box has their room. Widget
         // selectors have the container id (tasklens-6swdr.10), so other boxes do not shadow them.
         let mut overview = OverviewLayoutSetting::grid_default();

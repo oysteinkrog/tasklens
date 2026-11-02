@@ -106,7 +106,7 @@ mod tests {
     use gpui_kit::{Hsla, TestAppContext, rgb};
     use proptest::prelude::*;
     use serde_json::json;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
     use crate::theme::user_store::{PersistTheme, ThemePersist};

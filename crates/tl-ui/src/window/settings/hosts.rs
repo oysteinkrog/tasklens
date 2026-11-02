@@ -16,7 +16,7 @@ use gpui_kit::{
     App, AppContext as _, AsyncApp, Context, Entity, Global, IntoElement, ParentElement as _,
     Render, SharedString, Styled as _, Subscription, WeakEntity, Window, WindowId, div, px,
 };
-use tl_model::settings::HostEntry;
+use tl_ui_settings::settings::HostEntry;
 
 use super::{PageBuilder, PageId};
 use crate::app::AppEnv;

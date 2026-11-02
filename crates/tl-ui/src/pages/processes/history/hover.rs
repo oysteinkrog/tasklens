@@ -26,9 +26,9 @@ use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, HistoryWhat};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop, HistoryView};
-use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, NetUnit};
+use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use super::{HistoryPage, NS_PER_SEC, QUERY_TIMEOUT, clock};
 use crate::chart::labels::{CachedLine, LineStyle, paint_line};

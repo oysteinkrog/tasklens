@@ -2141,7 +2141,7 @@ mod tests {
 
     use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
     use crate::components::slider::TlSliderEvent;

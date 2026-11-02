@@ -42,12 +42,12 @@ use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
     SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
-use tl_model::layout::{
+use tl_model::snapshot::ComponentMask;
+use tl_ui_settings::layout::{
     DeviceSelector, FormSet, GroupItems, GroupKind, GroupSelector, MetricKey, SourceSelector,
     WidgetContent, WidgetSetting,
 };
-use tl_model::layout_boxes::{DeviceKind, METRIC_FREQ, METRIC_LOAD};
-use tl_model::snapshot::ComponentMask;
+use tl_ui_settings::layout_boxes::{DeviceKind, METRIC_FREQ, METRIC_LOAD};
 
 use super::compose::{Composition, group_item_composition};
 use super::group_fill::{GroupFill, fitted_into, group_fill, rows_fill_min};
@@ -506,7 +506,7 @@ impl GroupWidget {
         let mask = box_mask(ev.mask, cx);
         let engines = self
             .group()
-            .is_some_and(|g| g.members == tl_model::layout::GroupKind::Engines);
+            .is_some_and(|g| g.members == tl_ui_settings::layout::GroupKind::Engines);
         let wanted = if engines {
             MEMBERS_MASK
         } else {

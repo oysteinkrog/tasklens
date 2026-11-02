@@ -16,27 +16,27 @@
 //! inventory. This module does no drawing and keeps no state.
 
 use tl_model::ids::{DeviceIdx, SeriesId};
-use tl_model::layout::{
+use tl_model::snapshot::Snapshot;
+use tl_model::system::{GpuTotals, Metric};
+use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
     FormSet, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
 };
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout_boxes::{
     DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE,
     METRIC_DISK_IO, METRIC_DISK_READ, METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD,
     METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION,
     METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX,
     METRIC_POWER_CORES, METRIC_POWER_DRAW, METRIC_PRESSURE,
 };
-use tl_model::layout_pages::{
+use tl_ui_settings::layout_pages::{
     METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_DIRTY,
     METRIC_FAN, METRIC_FREQ_MAX, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PERCENT,
     METRIC_PHYSICAL, METRIC_PWM, METRIC_RESPONSE, METRIC_RPM, METRIC_SIGNAL, METRIC_SPEED,
     METRIC_TOTAL_READ, METRIC_TOTAL_RX, METRIC_TOTAL_TX, METRIC_TOTAL_WRITTEN, METRIC_UTIL,
     METRIC_VRAM_SHARED,
 };
-use tl_model::settings::OverviewRange;
-use tl_model::snapshot::Snapshot;
-use tl_model::system::{GpuTotals, Metric};
-use tl_model::validity::Validity;
+use tl_ui_settings::settings::OverviewRange;
 
 use crate::chart::labels::{NetFormat, format_value};
 use crate::chart::{ValueFormat, YScale};
@@ -1137,7 +1137,6 @@ mod tests {
 
     use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
     use tl_model::ids::{DeviceIdx, MetricId};
-    use tl_model::layout_boxes::{BOX_METRICS, metric_series};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::SystemSnapshot;
     use tl_model::snapshot::{DeviceHistory, HistPoint, SeriesSet};
@@ -1146,6 +1145,7 @@ mod tests {
     use tl_model::table::Total;
     use tl_model::time::BootId;
     use tl_model::units;
+    use tl_ui_settings::layout_boxes::{BOX_METRICS, metric_series};
 
     use super::*;
 
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn every_phase_3_key_has_metadata() {
-        use tl_model::layout_pages::PAGE_METRICS;
+        use tl_ui_settings::layout_pages::PAGE_METRICS;
         for (kind, key) in PAGE_METRICS {
             let key = MetricKey::new(key);
             let meta = MetricMeta::of(kind, &key)

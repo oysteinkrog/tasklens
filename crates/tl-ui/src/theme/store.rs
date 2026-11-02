@@ -22,7 +22,7 @@ use gpui_kit::{
     Action, AnyWindowHandle, App, AppContext as _, Entity, Global, Hsla, SharedString, Window, gpui,
 };
 use serde::Deserialize;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 use tracing::warn;
 
 use super::builtin::{self, TS_THEME_ORDER};
@@ -612,7 +612,7 @@ pub fn names(cx: &App) -> Vec<(Arc<str>, bool)> {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{Context, IntoElement, Render, TestAppContext, VisualTestContext, div, px, rgb};
-    use tl_model::settings::{Settings, UiState};
+    use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
     use crate::app::BootSettings;

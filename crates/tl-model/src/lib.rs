@@ -51,7 +51,3 @@ pub mod request;
 pub mod tray;
 
 pub mod remote_proto;
-
-pub mod ui;
-
-pub use crate::ui::{layout, layout_boxes, layout_pages};

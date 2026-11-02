@@ -42,12 +42,14 @@ use std::sync::Arc;
 use fluent_bundle::FluentValue;
 use gpui_kit::{App, SharedString, Window};
 use tl_model::ids::DeviceIdx;
-use tl_model::layout::{
+use tl_model::snapshot::Snapshot;
+use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FormSet, GROUP_LIMIT_RANGE, GroupItems, GroupKind,
     GroupOptions, GroupSelector, METRIC_CLOCK_GFX, METRIC_CLOCK_MEM, METRIC_ENGINE_ANY,
     METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey, WidgetContent, WidgetOptions, WidgetSetting,
 };
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout_boxes::{
     CPU_LOGICAL_PREFIX, DEVICE_CPU, DEVICE_DISKS, DEVICE_MEMORY, DEVICE_NETS, DeviceKind,
     METRIC_CORE_CLOCKS, METRIC_CPU_KERNEL, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO,
     METRIC_DISK_READ, METRIC_DISK_WRITE, METRIC_FREQ, METRIC_LOAD, METRIC_MEM_AVAILABLE,
@@ -55,8 +57,6 @@ use tl_model::layout_boxes::{
     METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, METRIC_POWER_CORES, METRIC_POWER_DRAW,
     METRIC_PRESSURE,
 };
-use tl_model::snapshot::Snapshot;
-use tl_model::validity::Validity;
 
 use super::grid::{self, InnerGrid, SlotDevice};
 use super::members::{Members, members};
@@ -852,7 +852,7 @@ pub fn add_items(
 /// pages offer one, added by their page beads). A page kind whose page bead has not come yet
 /// lists nothing.
 pub fn page_source_groups(container: &str, snap: &Snapshot, cx: &App) -> Vec<SourceGroup> {
-    let Some(key) = tl_model::layout_pages::page_key(container) else {
+    let Some(key) = tl_ui_settings::layout_pages::page_key(container) else {
         return Vec::new();
     };
     let groups = match DeviceKind::of_key(key) {
@@ -1163,13 +1163,13 @@ pub fn widget_menu(
 /// The box name for `{$box}`: "GPU" for the GPU box.
 fn box_name(container: &str, cx: &App) -> SharedString {
     match container {
-        tl_model::layout::GPU_BOX_CONTAINER => tr(cx, "perf-overview-box-gpu"),
-        tl_model::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
-        tl_model::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
-        tl_model::layout::DISK_BOX_CONTAINER => tr(cx, "perf-overview-box-disks"),
-        tl_model::layout::NET_BOX_CONTAINER => tr(cx, "perf-overview-box-network"),
-        tl_model::layout::PROCESSES_BOX_CONTAINER => tr(cx, "perf-overview-box-processes"),
-        tl_model::layout::TIMELINE_BOX_CONTAINER => tr(cx, "perf-overview-box-timeline"),
+        tl_ui_settings::layout::GPU_BOX_CONTAINER => tr(cx, "perf-overview-box-gpu"),
+        tl_ui_settings::layout::CPU_BOX_CONTAINER => tr(cx, "perf-card-heading-cpu"),
+        tl_ui_settings::layout::MEMORY_BOX_CONTAINER => tr(cx, "perf-card-heading-memory"),
+        tl_ui_settings::layout::DISK_BOX_CONTAINER => tr(cx, "perf-overview-box-disks"),
+        tl_ui_settings::layout::NET_BOX_CONTAINER => tr(cx, "perf-overview-box-network"),
+        tl_ui_settings::layout::PROCESSES_BOX_CONTAINER => tr(cx, "perf-overview-box-processes"),
+        tl_ui_settings::layout::TIMELINE_BOX_CONTAINER => tr(cx, "perf-overview-box-timeline"),
         other => SharedString::from(other.to_string()),
     }
 }
@@ -1283,8 +1283,8 @@ pub fn confirm_preset(
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::{CPU_BOX_CONTAINER, LAYOUT_VERSION, WidgetCell};
-    use tl_model::layout_boxes::{DEVICE_CPU, DEVICE_DISKS};
+    use tl_ui_settings::layout::{CPU_BOX_CONTAINER, LAYOUT_VERSION, WidgetCell};
+    use tl_ui_settings::layout_boxes::{DEVICE_CPU, DEVICE_DISKS};
 
     use super::*;
 

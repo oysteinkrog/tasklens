@@ -11,10 +11,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpui_kit::App;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui::components::icons::TlAssets;
 use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::theme::store::{self, ActivateSource};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui_testkit::render::{self as kit, RenderSetup, RgbaImage};
 
 pub use tl_ui_testkit::render::run_on_lavapipe;
@@ -32,7 +32,7 @@ impl RenderHarness {
             assets: Arc::new(TlAssets),
             init,
             set_theme,
-            apply_metrics: store::apply_metrics,
+            apply_metrics,
         }))
     }
 }
@@ -57,10 +57,20 @@ impl DerefMut for RenderHarness {
     }
 }
 
-fn init(appearance: &AppearanceSettings, cx: &mut App) {
+fn init(cx: &mut App) -> u16 {
+    let appearance = AppearanceSettings::default();
     load_bundled_fonts(cx);
     gpui_kit::init(cx);
-    store::init(cx, &ThemeSettings::default(), appearance, Vec::new());
+    store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+    appearance.ui_scale_pct
+}
+
+fn apply_metrics(ui_scale_pct: u16, cx: &mut App) {
+    let appearance = AppearanceSettings {
+        ui_scale_pct,
+        ..AppearanceSettings::default()
+    };
+    store::apply_metrics(&appearance, cx);
 }
 
 fn set_theme(name: &str, cx: &mut App) {

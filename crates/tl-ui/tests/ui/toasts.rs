@@ -11,12 +11,12 @@ use gpui_kit::{
     SharedString, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
 };
 use tl_model::client::EngineClient;
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui::app::BootSettings;
 use tl_ui::components::toast::{self, ToastAction, ToastKey, ToastKind, ToastQueue};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::settings_global::{TlSettings, animations_on};
 use tl_ui::theme::metrics::metrics;
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 gpui_kit::actions!(ui_toasts_test, [Retry]);

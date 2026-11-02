@@ -1306,7 +1306,7 @@ pub fn paint_group_header_cell(cell: NameCell, expanded: Option<bool>, ctx: &Cel
 #[cfg(test)]
 mod tests {
     use gpui_kit::px;
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::theme::ThemeMode;

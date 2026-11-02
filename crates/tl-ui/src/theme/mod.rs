@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use gpui_kit::Hsla;
 use serde::{Deserialize, Serialize};
-use tl_model::settings::AppearanceSettings;
+use tl_ui_settings::settings::AppearanceSettings;
 
 pub use derived::{Derived, rebuild_derived};
 pub use metrics::{UiMetrics, bump_style_version, metrics};

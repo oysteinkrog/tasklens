@@ -10,7 +10,7 @@
 //! the host's values and stay disabled until the engine has given them.
 
 use gpui_kit::{App, SharedString};
-use tl_model::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
+use tl_ui_settings::settings::{HISTORY_RETENTION_MENU_H, PROCESS_INTERVAL_MENU_MS};
 
 use super::{PageBuilder, PageId};
 use crate::components::banner::TlBannerKind;

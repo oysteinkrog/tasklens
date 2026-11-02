@@ -10,7 +10,7 @@
 //! never touched. No setting value is logged.
 
 use gpui_kit::{App, SharedString, Window};
-use tl_model::settings::Settings;
+use tl_ui_settings::settings::Settings;
 use tracing::warn;
 
 use crate::app::AppEnv;

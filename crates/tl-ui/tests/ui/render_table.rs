@@ -21,7 +21,6 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
 use tl_ui::components::menu::TlMenu;
@@ -36,6 +35,7 @@ use tl_ui::table::tree_table::{
 use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
 use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 /// The seven states, in the order the rows cycle them.
 const STATES: [Validity; 7] = [

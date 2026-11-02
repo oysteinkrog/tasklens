@@ -12,9 +12,6 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, FanOverride, NetworkUnit, Settings, ThemeSettings, UiState,
-};
 use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -30,6 +27,9 @@ use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::sensors::{CHOOSE_SENSOR_ID, FanPage, NO_VALUE_ID, TEMPERATURE_ID};
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{
+    AppearanceSettings, FanOverride, NetworkUnit, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const FAN1: DeviceIdx = DeviceIdx(10);

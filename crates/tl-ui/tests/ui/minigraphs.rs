@@ -184,7 +184,6 @@ mod card {
     };
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
     use tl_model::time::{BootId, now_boot_ns};
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
@@ -196,6 +195,7 @@ mod card {
         GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource,
     };
     use tl_ui::pages::performance::DeviceKey;
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const CPU: DeviceIdx = DeviceIdx(0);
@@ -1152,9 +1152,6 @@ mod panel {
     use tl_model::demand::CpuDemand;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::{
-        AppearanceSettings, MinigraphState, Settings, ThemeSettings, UiState,
-    };
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::toast::ToastKind;
@@ -1170,6 +1167,9 @@ mod panel {
         MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui_settings::settings::{
+        AppearanceSettings, MinigraphState, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
@@ -1325,7 +1325,7 @@ mod panel {
             })
         }
 
-        fn graphs(&mut self) -> tl_model::settings::GraphsSettings {
+        fn graphs(&mut self) -> tl_ui_settings::settings::GraphsSettings {
             self.vcx
                 .update(|_, cx| TlSettings::settings(cx).graphs.clone())
         }
@@ -1854,7 +1854,7 @@ mod panel {
 
     #[gpui_kit::test]
     fn card_long_range_from_state(cx: &mut TestAppContext) {
-        use tl_model::settings::MinigraphState;
+        use tl_ui_settings::settings::MinigraphState;
 
         let state = UiState {
             minigraphs: vec![MinigraphState {
@@ -1974,7 +1974,7 @@ mod panel {
 
     #[gpui_kit::test]
     fn card_color_from_state(cx: &mut TestAppContext) {
-        use tl_model::settings::MinigraphState;
+        use tl_ui_settings::settings::MinigraphState;
 
         let state = UiState {
             minigraphs: vec![MinigraphState {
@@ -2861,7 +2861,6 @@ mod mounted {
     use tl_model::command::Tab;
     use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
@@ -2872,6 +2871,7 @@ mod mounted {
     use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn record(pid: u32) -> ProcessRecord {

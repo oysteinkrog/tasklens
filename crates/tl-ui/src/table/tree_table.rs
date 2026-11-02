@@ -69,7 +69,7 @@ use crate::text_cache::CellTextCache;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
-pub use tl_model::settings::ColumnResize as ColumnResizeMode;
+pub use tl_ui_settings::settings::ColumnResize as ColumnResizeMode;
 
 /// Name cell padding before tree level 0 (R-190).
 pub const NAME_PAD: f32 = 20.0;

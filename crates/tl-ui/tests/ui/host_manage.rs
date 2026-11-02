@@ -11,7 +11,6 @@ use gpui_kit::{
     WindowHandle, px,
 };
 use tl_model::client::EngineClient;
-use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_ui::actions::{DisconnectHost, EditHost, ReconnectHost, RemoveHost};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::menu::open_context_menu;
@@ -22,6 +21,7 @@ use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::hosts::{HostsEditor, TestLine, open_editor};
 use tl_ui::window::settings::{PageId, open_settings_on};
+use tl_ui_settings::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// What the fake host manager was asked, and the engines it handed out.

@@ -5,7 +5,6 @@ use gpui_kit::{
     Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
     VisualTestContext, Window, div, px,
 };
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::validity::Validity;
 use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::components::kv_grid::{self, KvWords, shown_text_in};
@@ -13,6 +12,7 @@ use tl_ui::pages::performance::details::{
     DetailWords, Fallback, KeyValueModel, fallback_word, render_details,
 };
 use tl_ui::theme::metrics;
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 const ROW: &str = "Speed";
 
@@ -241,7 +241,6 @@ mod page_frame {
     use smallvec::SmallVec;
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{
         DeviceDetailsSnapshot, DiskDetails, InventorySnapshot, NetworkAdapter, ProcessorInfo,
         Snapshot,
@@ -259,6 +258,7 @@ mod page_frame {
     use tl_ui::pages::performance::page::{DevicePage, DevicePageFrame, PageWords, header_text};
     use tl_ui::pages::performance::{DeviceKey, DeviceKind};
     use tl_ui::theme::{current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     fn valid(text: &str) -> Total<Arc<str>> {
         Total {
@@ -1250,7 +1250,7 @@ mod perf_keys {
         });
     }
 
-    /// The three graph Actions with a `tl_model::settings` field load from JSON (crw.31).
+    /// The three graph Actions with a `tl_ui_settings::settings` field load from JSON (crw.31).
     #[gpui_kit::test]
     fn graph_actions_load_from_keymap_json(cx: &mut TestAppContext) {
         let key = DeviceKey(Arc::from("gpu:GPU-0"));
@@ -1304,7 +1304,6 @@ mod tab {
     use tl_model::client::EngineClient;
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::kv_grid;
@@ -1317,6 +1316,7 @@ mod tab {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
@@ -1376,7 +1376,7 @@ mod tab {
         let mut s = Settings::default();
         s.performance.device_overrides.insert(
             tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
-            tl_model::settings::DeviceVisibility::Hide,
+            tl_ui_settings::settings::DeviceVisibility::Hide,
         );
         s
     }
@@ -1752,9 +1752,6 @@ mod summary {
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{
-        AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
-    };
     use tl_model::snapshot::SeriesSet;
     use tl_model::system::Metric;
     use tl_model::validity::Validity;
@@ -1774,6 +1771,9 @@ mod summary {
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GPU: &str = "gpu:pci:0000:2d:00.0";
@@ -2895,7 +2895,7 @@ mod summary {
         assert_eq!(state.performance.selected_device, "disk:sdc");
         assert_eq!(
             state.performance,
-            tl_model::settings::PerformanceState {
+            tl_ui_settings::settings::PerformanceState {
                 nav_width: 252,
                 selected_device: "disk:sdc".to_owned(),
             },

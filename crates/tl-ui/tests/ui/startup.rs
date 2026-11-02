@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{App, TestAppContext, px};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::snapshot::{
     ComponentHeader, Impact, ImpactDetail, Snapshot, StartupEntry, StartupKind, StartupScope,
     StartupSnapshot, StartupStatus,
@@ -22,6 +21,7 @@ use tl_ui::table::cells::CellOut;
 use tl_ui::table::columns::TableColumn as _;
 use tl_ui::table::tree_table::{NameIcon, TreeTableDelegate as _};
 use tl_ui::theme::{TlTheme, current};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -435,8 +435,6 @@ mod page {
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
     use tl_model::journal::{JournalHandle, JournalQuery};
-    use tl_model::settings::EngineSettings;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{Snapshot, StartupCounts};
     use tl_model::{actions::ActionEvent, table::SysTable};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -455,6 +453,8 @@ mod page {
     use tl_ui::window::main::{
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
+    use tl_ui_settings::settings::EngineSettings;
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
@@ -2081,11 +2081,11 @@ fn startup_keymap_registered(cx: &mut TestAppContext) {
     use gpui_kit::{AppContext as _, VisualTestContext};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::startup::StartupPage;
     use tl_ui::pages::startup::actions::StartupDelete;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
@@ -2135,13 +2135,13 @@ mod props {
     use gpui_kit::{Modifiers, VisualTestContext, WindowHandle};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::hub::GlobalHub;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
     use tl_ui::windows::startup_properties::{StartupPropertiesView, open_startup_properties};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -2514,7 +2514,6 @@ mod main_window {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::StartupCounts;
     use tl_model::table::SysTable;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2523,6 +2522,7 @@ mod main_window {
     use tl_ui::pages::startup::StartupPage;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
     use tl_ui::window::registry::{CapClass, GlobalRegistry};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {

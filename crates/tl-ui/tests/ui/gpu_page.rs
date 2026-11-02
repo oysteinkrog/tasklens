@@ -11,7 +11,6 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{GraphicsAdapter, InvField};
 use tl_model::system::{GpuStaticInfo, GpuTotals, Metric};
 use tl_model::validity::Validity;
@@ -26,6 +25,7 @@ use tl_ui::pages::performance::gpu::{GpuPage, GpuVendor, ProbeState};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GPU: DeviceIdx = DeviceIdx(7);
@@ -1267,10 +1267,10 @@ fn gpu_uuid_truncates_with_tooltip(cx: &mut TestAppContext) {
 /// The optional Power and Clocks row (E25-023, UI-PRF-032 row 3).
 mod optional {
     use gpui_kit::{Focusable as _, TestAppContext};
-    use tl_model::settings::GpuOptionalGraph;
     use tl_model::system::ClockEventReasons;
     use tl_ui::pages::performance::actions::PerfToggleGpuOptionalGraph;
     use tl_ui::pages::performance::gpu::{CLOCKS_ID, ENGINES_ID, POWER_ID};
+    use tl_ui_settings::settings::GpuOptionalGraph;
 
     use super::*;
 

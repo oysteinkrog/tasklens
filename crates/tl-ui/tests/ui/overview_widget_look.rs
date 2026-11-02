@@ -15,14 +15,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, GPU_BOX_CONTAINER, WidgetContent, WidgetSetting,
-    reset_to_default,
-};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemGroupBand, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
@@ -51,6 +44,13 @@ use tl_ui::pages::performance::widget::edit::{
 use tl_ui::pages::performance::widget::group_widget::GroupFlowLook;
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, part_id, widget_id};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    CPU_BOX_CONTAINER, ContainerLayout, GPU_BOX_CONTAINER, WidgetContent, WidgetSetting,
+    reset_to_default,
+};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The first logical CPU's device index; core `n` is at `CORE0 + n`.
@@ -343,7 +343,7 @@ fn open_with(cx: &mut TestAppContext, gpu: bool) -> Rig<'_> {
         cx.set_global(EngineGlobal(Arc::clone(&client)));
         let mut settings = Settings::default();
         settings.motion.smooth_graphs = false;
-        settings.performance.overview_core_smoothing = tl_model::settings::CoreSmoothing::Off;
+        settings.performance.overview_core_smoothing = tl_ui_settings::settings::CoreSmoothing::Off;
         settings.performance.cpu_kernel = true;
         // Every box, the Top processes box too.
         settings.performance.overview = Some(OverviewLayoutSetting::with_top_procs(

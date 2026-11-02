@@ -23,9 +23,6 @@ use tl_model::history::{
     HistoryTotals, HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
-use tl_model::settings::{
-    AppearanceSettings, HistorySettings, Settings, SortState, ThemeSettings, UiState,
-};
 use tl_model::snapshot::ComponentHeader;
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
@@ -42,6 +39,9 @@ use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate};
 use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
+use tl_ui_settings::settings::{
+    AppearanceSettings, HistorySettings, Settings, SortState, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: TimeNs = 1_000_000_000;

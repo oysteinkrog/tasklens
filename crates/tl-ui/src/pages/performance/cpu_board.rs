@@ -20,10 +20,10 @@ use gpui_kit::{
     px, size,
 };
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{CoreSmoothing, CoreSort};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::Metric;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{CoreSmoothing, CoreSort};
 
 use super::cpu::logical_devices;
 use super::overview::cpu_box::{CoreAverage, KEY_CORE, core_spec, newest};

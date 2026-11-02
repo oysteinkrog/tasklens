@@ -83,7 +83,7 @@ pub fn t_xl(m: &UiMetrics) -> TextStyleRefinement {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{AbsoluteLength, DefiniteLength};
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::theme::metrics::compute;

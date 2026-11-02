@@ -34,7 +34,7 @@ use gpui_kit::{
     Styled as _, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::{SmallVec, smallvec};
-use tl_model::settings::OVERVIEW_GRID_ROWS_MAX;
+use tl_ui_settings::settings::OVERVIEW_GRID_ROWS_MAX;
 
 use super::OverviewPage;
 use super::layout::{BoxKind, GRID_COLS, GridBox, GridMetrics, OverviewLayout, PlacedBox};

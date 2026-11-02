@@ -12,7 +12,7 @@ use gpui_kit::{App, Global, Hsla, Rgba, SharedString};
 use serde::Serialize;
 use serde::ser::SerializeMap;
 use serde_json::Value;
-use tl_model::settings::ThemeSettings;
+use tl_ui_settings::settings::ThemeSettings;
 use tracing::warn;
 
 use super::builtin::{parse_hex, parse_theme_object};
@@ -466,7 +466,7 @@ mod tests {
 
     use gpui_kit::{TestAppContext, rgb};
     use serde_json::json;
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::theme::{builtin, current};

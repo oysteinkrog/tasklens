@@ -7,12 +7,12 @@
 //! `PAGE_KINDS` is empty until the page beads add their kinds, so these tests run the `*_for`
 //! functions with every page kind, as a build with every page would.
 
-use tl_model::layout::{ContainerLayout, DeviceSelector, LayoutEntry, WidgetContent};
-use tl_model::layout_boxes::DeviceKind;
-use tl_model::layout_pages::{
+use tl_ui_settings::layout::{ContainerLayout, DeviceSelector, LayoutEntry, WidgetContent};
+use tl_ui_settings::layout_boxes::DeviceKind;
+use tl_ui_settings::layout_pages::{
     PAGE_DEVICE_KINDS, convert_old_page_settings_for, convert_page, page_needs_conversion_for,
 };
-use tl_model::settings::Settings;
+use tl_ui_settings::settings::Settings;
 
 const ALL: &[DeviceKind] = &PAGE_DEVICE_KINDS;
 const GPU: &str = "page.gpu:GPU-0a1b2c3d";

@@ -30,11 +30,11 @@ use tl_model::demand::{Demand, DetailDemand};
 use tl_model::details::{AppGeneralDetail, AppKind, DetailTab, DetailTarget, TabPayload};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{GroupRow, ProcFlags, ProcessRecord, is_row_member};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, ProcessSnapshot, Snapshot};
 use tl_model::table::Total;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
+use tl_ui_settings::settings::NetworkUnit;
 use tracing::warn;
 
 use super::actions::{

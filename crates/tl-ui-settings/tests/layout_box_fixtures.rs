@@ -4,10 +4,10 @@
 //! converting twice must change nothing, and the old keys must stay in the file for an older
 //! build.
 
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, GroupItems, WidgetContent, overview_container,
 };
-use tl_model::settings::{LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, Settings};
+use tl_ui_settings::settings::{LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, Settings};
 
 fn fixture(name: &str) -> String {
     let path = format!(

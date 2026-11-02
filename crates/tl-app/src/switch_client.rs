@@ -35,9 +35,9 @@ use tl_model::demand::Demand;
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::remote_proto::{HostSettingsChanges, SetHostSettingsReply};
 use tl_model::request::RequestEvent;
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{SysTableQuery, TableQuery};
+use tl_ui_settings::settings::EngineSettings;
 use tracing::warn;
 
 /// Action events waiting for the UI, as in the in-process engine. Beyond this a progress event

@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::HelloTail;
-use tl_model::settings::{HostEntry, check_hosts};
 use tl_remote::client::{BACKOFF, ClientConfig, Connector, LinkStatus, RemoteClient};
 use tl_remote::ssh::{SSH_PROGRAM_ENV, SshConnector, ssh_program, validate_target};
 use tl_ui::hosts_api::{HostLinkStatus, HostTestResult, HostsApi};
+use tl_ui_settings::settings::{HostEntry, check_hosts};
 use tracing::{info, warn};
 
 /// Builds the connector for one entry.

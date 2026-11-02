@@ -24,8 +24,8 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _,
 };
-use tl_model::layout::{ContainerLayout, FixedWidget, WidgetContent};
-use tl_model::layout_boxes::fixed_box_default;
+use tl_ui_settings::layout::{ContainerLayout, FixedWidget, WidgetContent};
+use tl_ui_settings::layout_boxes::fixed_box_default;
 
 use super::parts::{box_frame, edit_chrome};
 use super::range::RangeText;

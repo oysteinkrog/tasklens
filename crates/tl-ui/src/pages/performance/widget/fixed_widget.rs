@@ -27,7 +27,7 @@ use gpui_kit::{
     AnyView, App, Context, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
     StyleRefinement, Styled as _, Window, div, px,
 };
-use tl_model::layout::{FixedWidget, WidgetContent, WidgetSetting};
+use tl_ui_settings::layout::{FixedWidget, WidgetContent, WidgetSetting};
 
 use super::metric_widget::{part_id, widget_id};
 use crate::i18n::tr;

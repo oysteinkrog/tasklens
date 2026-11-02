@@ -28,11 +28,13 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 use tl_model::devices::{DeviceIdentity, DeviceKind};
-use tl_model::settings::{DeviceVisibility, FanOverride, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::SensorKind;
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{
+    DeviceVisibility, FanOverride, GRAPH_RANGES_S, MEMORY_BY_APP_TOP_N,
+};
 
 use super::{CheckSection, PageBuilder, PageId};
 use crate::components::button::{TlButton, TlButtonKind};

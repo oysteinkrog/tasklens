@@ -17,7 +17,6 @@ use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
@@ -29,6 +28,7 @@ use tl_ui::host::HostContext;
 use tl_ui::hub::{HostClock, SnapshotHub};
 use tl_ui::window::collector_health::{CollectorHealthWindow, open_collector_health};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MS: u64 = 1_000_000;

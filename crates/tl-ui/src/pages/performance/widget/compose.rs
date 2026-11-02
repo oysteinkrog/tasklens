@@ -23,7 +23,7 @@
 //! multiply. This module does no drawing and keeps no state.
 
 use gpui_kit::{Pixels, Size, px, size};
-use tl_model::layout::{FixedWidget, FormSet, GroupItems, WidgetContent, WidgetSetting};
+use tl_ui_settings::layout::{FixedWidget, FormSet, GroupItems, WidgetContent, WidgetSetting};
 
 /// The header line of a Cell: name at the left, value at the right.
 pub const CELL_HEADER_H: f32 = 18.;

@@ -1,7 +1,7 @@
 //! Tints derived from the theme slots and the appearance settings (UI-FND-001).
 
 use gpui_kit::{Hsla, Rgba};
-use tl_model::settings::AppearanceSettings;
+use tl_ui_settings::settings::AppearanceSettings;
 
 use super::{ThemeMode, TlTheme};
 

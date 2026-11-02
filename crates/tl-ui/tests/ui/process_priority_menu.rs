@@ -9,7 +9,6 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::time::BootId;
 use tl_ui::components::menu::{MENU_MAX_W, TlMenu, context_menu_layer, open_context_menu_at};
 use tl_ui::host::HostContext;
@@ -18,6 +17,7 @@ use tl_ui::pages::processes::menu::priority_submenu;
 use tl_ui::table::tree_table::RowKind;
 use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
 use tl_ui::theme::metrics;
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 /// The en-US autogroup note, the first line of the submenu.
 const NOTE: &str = "With autogroup on, nice only orders processes within the same session.";

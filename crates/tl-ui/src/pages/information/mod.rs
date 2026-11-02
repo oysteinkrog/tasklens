@@ -50,9 +50,9 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, Tab};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::{HelperState, SourceId};
-use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::ComponentMask;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::PerformanceSettings;
 use tracing::debug;
 
 use self::actions::{

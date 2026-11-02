@@ -13,7 +13,6 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{PublicIpState, SystemSnapshot};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
@@ -31,6 +30,7 @@ use tl_ui::pages::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID}
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The interface in the fake catalog.

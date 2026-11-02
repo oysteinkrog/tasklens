@@ -21,11 +21,11 @@ use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::SmallVec;
-use tl_model::layout::{ContainerLayout, GroupKind, WidgetContent, WidgetSetting, grid_cols};
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout::{ContainerLayout, GroupKind, WidgetContent, WidgetSetting, grid_cols};
+use tl_ui_settings::layout_boxes::{
     DEVICE_CPU, METRIC_CORE_CLOCKS, METRIC_CPU_TOTAL, METRIC_POWER_DRAW, convert_cpu_box,
 };
-use tl_model::settings::OverviewGridSetting;
+use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::{Arrange, PowerPlacement};
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
@@ -65,7 +65,7 @@ pub fn flow_layout(keys: CpuFlowKeys<'_>) -> ContainerLayout {
 fn is_cpu_metric(w: &WidgetSetting, metric: &str) -> bool {
     w.content.metric().is_some_and(|s| {
         s.metric.as_str() == metric
-            && matches!(&s.device, tl_model::layout::DeviceSelector::Key(k) if &**k == DEVICE_CPU)
+            && matches!(&s.device, tl_ui_settings::layout::DeviceSelector::Key(k) if &**k == DEVICE_CPU)
     })
 }
 
@@ -358,8 +358,8 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::{CPU_BOX_CONTAINER, FormSet, GroupItems};
-    use tl_model::layout_boxes::METRIC_LOAD;
+    use tl_ui_settings::layout::{CPU_BOX_CONTAINER, FormSet, GroupItems};
+    use tl_ui_settings::layout_boxes::METRIC_LOAD;
 
     use super::*;
 
@@ -428,7 +428,7 @@ mod tests {
         CpuPlan {
             look,
             m: crate::theme::metrics::compute(
-                &tl_model::settings::AppearanceSettings::default(),
+                &tl_ui_settings::settings::AppearanceSettings::default(),
                 0,
             ),
             side: true,

@@ -13,8 +13,8 @@ use smallvec::SmallVec;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::SeriesView;
-use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::{DeviceTimeline, HistPoint, Snapshot, TimelineBand};
+use tl_ui_settings::settings::PerformanceSettings;
 
 use crate::chart::view::derived_view;
 

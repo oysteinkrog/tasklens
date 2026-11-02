@@ -40,7 +40,7 @@ use gpui_kit::{
     WeakEntity, Window, WindowId, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 
-use tl_model::settings::Settings;
+use tl_ui_settings::settings::Settings;
 
 use super::main::{UI_SCALE_TOAST, push_main_toast};
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};

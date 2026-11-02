@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tl_model::command::AppRequest;
-use tl_model::settings::{Settings, UiState};
+use tl_ui_settings::settings::{Settings, UiState};
 use tracing::{info, warn};
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};

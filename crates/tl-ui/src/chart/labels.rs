@@ -14,9 +14,9 @@ use gpui_kit::{
     TextAlign, TextRun, TransformationMatrix, Window, fill, point, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::settings::NetworkUnit;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::{ChartLabels, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat, YScale};
 use crate::components::icons::TlIcon;

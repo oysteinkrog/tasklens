@@ -11,7 +11,7 @@
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
-use tl_model::settings::{OverviewGridSetting, OverviewLayoutSetting};
+use tl_ui_settings::settings::{OverviewGridSetting, OverviewLayoutSetting};
 
 use super::super::page::PAGE_PAD;
 use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box, timeline};
@@ -988,7 +988,7 @@ fn fill_row_width(shown: &[GridBox], grid: &GridMetrics, placed: &mut [PlacedBox
 
 #[cfg(test)]
 mod tests {
-    use tl_model::settings::{OVERVIEW_KIND_MIN, OVERVIEW_MIN_SPAN};
+    use tl_ui_settings::settings::{OVERVIEW_KIND_MIN, OVERVIEW_MIN_SPAN};
 
     use super::*;
 
@@ -1187,7 +1187,7 @@ mod tests {
     fn overview_grid_converts_rows() {
         // UI-PRF-056: the UI-PRF-018 default rows load as exactly the default grid without the
         // timeline.
-        let mut settings = tl_model::settings::Settings::default();
+        let mut settings = tl_ui_settings::settings::Settings::default();
         settings.performance.overview = Some(OverviewLayoutSetting::rows_default());
         assert!(settings.clamp().is_empty());
         let mut want = OverviewLayout::grid_default();
@@ -1215,7 +1215,7 @@ mod tests {
         }
         assert_eq!(BoxKind::from_frame_id("perf-overview-box-other"), None);
         let keys: Vec<&str> = BoxKind::ALL.iter().map(|k| k.key()).collect();
-        assert_eq!(keys, tl_model::settings::OVERVIEW_BOX_KINDS);
+        assert_eq!(keys, tl_ui_settings::settings::OVERVIEW_BOX_KINDS);
         // The kind minimums match the ones the profile load converts old rows with.
         let mins: Vec<(&str, u32, u32)> = BoxKind::ALL
             .iter()

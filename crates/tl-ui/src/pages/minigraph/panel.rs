@@ -29,7 +29,7 @@ use gpui_kit::{
 };
 use tl_model::demand::{CpuDemand, Demand, GRAPH_TARGETS_MAX};
 use tl_model::process::ProcFlags;
-use tl_model::settings::{DetachedWindowState, GraphsSettings};
+use tl_ui_settings::settings::{DetachedWindowState, GraphsSettings};
 
 use super::GraphColor;
 use super::actions::{

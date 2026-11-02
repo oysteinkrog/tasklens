@@ -14,15 +14,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER, WidgetContent, box_layout,
-    convert_old_settings,
-};
-use tl_model::layout_boxes::{METRIC_MEM_SWAP, METRIC_PRESSURE};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::MemGroupBand;
 use tl_model::time::now_boot_ns;
@@ -50,6 +42,14 @@ use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id
 use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER, WidgetContent, box_layout,
+    convert_old_settings,
+};
+use tl_ui_settings::layout_boxes::{METRIC_MEM_SWAP, METRIC_PRESSURE};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GIB: u64 = 1024 * 1024 * 1024;

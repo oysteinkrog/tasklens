@@ -27,9 +27,9 @@ use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::ids::ProcessKey;
-use tl_model::layout::{FixedWidget, PROCESSES_BOX_CONTAINER};
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
+use tl_ui_settings::layout::{FixedWidget, PROCESSES_BOX_CONTAINER};
 use tracing::warn;
 
 use super::fit::whole_rows;

@@ -844,7 +844,7 @@ mod tests {
     use std::cell::RefCell;
 
     use gpui_kit::{Modifiers, TestAppContext};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
     use crate::theme::ThemeMode;

@@ -23,13 +23,13 @@ use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, GroupKind, WidgetContent, WidgetSetting, grid_cols,
 };
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout_boxes::{
     DEVICE_NETS, METRIC_NET_RX, METRIC_NET_TRAFFIC, METRIC_NET_TX, convert_net_box,
 };
-use tl_model::settings::OverviewGridSetting;
+use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::Arrange;
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
@@ -258,7 +258,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::{FormSet, GroupItems, NET_BOX_CONTAINER};
+    use tl_ui_settings::layout::{FormSet, GroupItems, NET_BOX_CONTAINER};
 
     use super::*;
 

@@ -439,7 +439,7 @@ mod tests {
         AppContext as _, Bounds, Modifiers, MouseButton, Point, Render, TestAppContext,
         VisualTestContext, point,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

@@ -244,10 +244,10 @@ fn detached_part_survives_hidden(cx: &mut TestAppContext) {
 
 /// Save power on battery (wlf.32): the merged demand and the charts' [`PowerSaving`].
 mod battery {
-    use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::demand::power_saving;
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
 

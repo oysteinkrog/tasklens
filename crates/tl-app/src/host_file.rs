@@ -26,8 +26,8 @@ use tl_model::demand::Demand;
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::remote_proto::{HostSettings, HostSettingsChanges, SetHostSettingsReply};
 use tl_model::request::RequestEvent;
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
+use tl_ui_settings::settings::EngineSettings;
 use tracing::{info, warn};
 
 use crate::engine_link::LocalEngine;

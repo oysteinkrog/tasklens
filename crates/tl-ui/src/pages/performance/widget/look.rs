@@ -28,8 +28,8 @@ use std::sync::Arc;
 use gpui_kit::{App, Hsla, SharedString, px, white};
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{MetricId, SeriesId};
-use tl_model::layout::{FormSet, WidgetOptions};
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout::{FormSet, WidgetOptions};
+use tl_ui_settings::layout_boxes::{
     DeviceKind, METRIC_CPU_TOTAL, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_MEM_AVAILABLE,
     METRIC_MEM_CACHED, METRIC_MEM_COMMIT, METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED,
     METRIC_NET_TX,

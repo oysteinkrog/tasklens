@@ -6,7 +6,7 @@
 //! app). This module holds the plain serde data, the GPU metric keys, the load rules that
 //! `Settings::clamp` runs, the conversion of the GPU box's old settings and the reset to the
 //! default. The other boxes' metric keys, preset lists and conversions are in
-//! [`crate::ui::layout_boxes`], the device pages' in [`crate::ui::layout_pages`]. `tl-ui` turns the
+//! [`crate::layout_boxes`], the device pages' in [`crate::layout_pages`]. `tl-ui` turns the
 //! data into its views.
 //!
 //! As deserialized, every entry is [`LayoutEntry::Kept`]. `Settings::clamp` reads the entries
@@ -17,17 +17,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 
-use crate::ids::MetricId;
-use crate::system::GpuEngine;
-use crate::ui::layout_boxes::{self, DeviceKind, convert_box};
-use crate::ui::layout_pages::{
+use crate::layout_boxes::{self, DeviceKind, convert_box};
+use crate::layout_pages::{
     PAGE_CONTAINER_PREFIX, PAGE_GRID_COLS, PAGE_KINDS, default_page_layout, is_page_container_for,
     page_kind, page_presets, reset_page_to_default,
 };
-use crate::ui::settings::{
+use crate::settings::{
     OVERVIEW_ARRANGES, OVERVIEW_BOX_MODES, OVERVIEW_POWER_PLACEMENTS, OVERVIEW_POWER_SPLIT_RANGE,
     OVERVIEW_SPLIT_RANGE, OverviewGridSetting, PerformanceSettings,
 };
+use tl_model::ids::MetricId;
+use tl_model::system::GpuEngine;
 
 /// The newest layout schema version this build reads and writes. It reads versions 1 and 2.
 pub const LAYOUT_VERSION: u32 = 2;
@@ -122,7 +122,7 @@ pub struct ContainerLayout {
 pub struct PresetSetting {
     /// A mode id of the container's kind in [`OVERVIEW_BOX_MODES`] (for the GPU box
     /// "engine_charts", "chart_engines" or "chart"), or for a page an id of
-    /// [`crate::ui::layout_pages::page_presets`].
+    /// [`crate::layout_pages::page_presets`].
     pub id: String,
     /// An id from [`OVERVIEW_ARRANGES`]; `None` is the preset's default.
     pub arrange: Option<String>,
@@ -1453,7 +1453,7 @@ pub fn reset_to_default(perf: &mut PerformanceSettings, container: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::settings::{LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, OVERVIEW_KEY, Settings};
+    use crate::settings::{LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, OVERVIEW_KEY, Settings};
 
     /// Loads `text` as `settings.toml` the way load steps 3 and 4 do.
     fn load(text: &str) -> (Settings, Vec<&'static str>) {

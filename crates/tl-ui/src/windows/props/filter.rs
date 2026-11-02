@@ -382,7 +382,7 @@ mod tests {
     use gpui_kit::{
         FocusHandle, Modifiers, Render, TestAppContext, VisualTestContext, prelude::FluentBuilder,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

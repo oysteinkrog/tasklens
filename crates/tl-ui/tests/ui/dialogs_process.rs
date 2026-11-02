@@ -13,7 +13,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::details::AffinityInfo;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
 use tl_model::time::BootId;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -22,6 +21,7 @@ use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
 use tl_ui::demand::GlobalDemand;
 use tl_ui::host::HostContext;
 use tl_ui::windows::affinity::{self, AffinityDialog, affinity_words};
+use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
@@ -929,7 +929,6 @@ mod virustotal {
         IdTriple, PackageCheck, Relro, Seccomp, TabPayload, TabSlot, TargetDetail,
     };
     use tl_model::ids::ProcessKey;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::system::CpuSet;
     use tl_model::table::Total;
     use tl_model::time::BootId;
@@ -939,6 +938,7 @@ mod virustotal {
     use tl_ui::host::HostContext;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;
@@ -2445,7 +2445,6 @@ mod dump {
     use tl_model::health::HelperState;
     use tl_model::ids::{GroupKey, ProcessKey};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2458,6 +2457,7 @@ mod dump {
     use tl_ui::windows::notices::{
         DUMP_REFRESH, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
     };
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     pub(super) const GIB: u64 = 1024 * 1024 * 1024;
@@ -3251,7 +3251,6 @@ mod prc014 {
     use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
@@ -3263,6 +3262,7 @@ mod prc014 {
     use tl_ui::window::main::open_main_window_on;
     use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
     use tl_ui::windows::signal::{OtherUserTarget, TargetNames};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::{dump, priority, signal, virustotal};

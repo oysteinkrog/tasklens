@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::DeviceVisibility;
 use tl_model::system::{SensorKind, SensorReading};
+use tl_ui_settings::settings::DeviceVisibility;
 
 use self::actions::{
     PERFORMANCE_CONTEXT, PerfCopyDeviceInfo, PerfCopyValue, PerfJumpToType, PerfSelectDevice,
@@ -451,7 +451,7 @@ pub struct PerformancePage {
     /// placements (UI-PRF-054).
     status: Entity<StatusBar>,
     /// `performance.status_bar` at the last render, so a change renders again.
-    status_placement: tl_model::settings::StatusBarPlacement,
+    status_placement: tl_ui_settings::settings::StatusBarPlacement,
     _subs: SmallVec<[Subscription; 2]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn title_value_is_lg_semibold_tnum() {
-        let m = metrics::compute(&tl_model::settings::AppearanceSettings::default(), 0);
+        let m = metrics::compute(&tl_ui_settings::settings::AppearanceSettings::default(), 0);
         let style = overview::parts::title_value_style(&m);
         assert_eq!(style.font_weight, Some(gpui_kit::FontWeight::SEMIBOLD));
         assert_eq!(style.font_size, Some(m.text.lg.into()));

@@ -13,7 +13,6 @@ use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::journal::JournalAccess;
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{OverviewLayoutSetting, OverviewRange, TimelineClick};
 use tl_model::snapshot::{
     ComponentHeader, DeviceHistory, DeviceTimeline, HistPoint, ProcessSnapshot, SeriesSet,
     TimelineEvent, TimelineEventKind,
@@ -31,6 +30,7 @@ use tl_ui::pages::performance::overview::timeline::{
     PauseKind, Paused, TimelineBox, click_choices, click_mode, set_paused, set_test_clock,
 };
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{OverviewLayoutSetting, OverviewRange, TimelineClick};
 
 use super::overview_range::{Rig, box_charts, click, draw, open, overview, pick, set_range};
 

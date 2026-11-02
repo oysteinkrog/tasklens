@@ -3,7 +3,7 @@
 //! A file with a `schema_version` lower than the current one runs each migration in order
 //! before it is deserialized. A later schema change only adds a function to `MIGRATIONS`.
 
-use tl_model::settings::SCHEMA_VERSION;
+use tl_ui_settings::settings::SCHEMA_VERSION;
 use tracing::{info, warn};
 
 /// One migration step. It edits the raw table in place.

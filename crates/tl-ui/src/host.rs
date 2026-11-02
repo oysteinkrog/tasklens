@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use gpui_kit::{App, AppContext as _, Entity, Global, SharedString};
 use tl_model::client::EngineClient;
-use tl_model::settings::HostEntry;
+use tl_ui_settings::settings::HostEntry;
 use tracing::{info, warn};
 
 use crate::action_tracker::{ActionTracker, GlobalActionTracker};

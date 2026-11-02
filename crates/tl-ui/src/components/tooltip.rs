@@ -560,7 +560,7 @@ mod tests {
         KeyBinding, Modifiers, StatefulInteractiveElement as _, TestAppContext, TestDispatcher,
         VisualTestContext,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
     use crate::text::fonts::load_bundled_fonts;

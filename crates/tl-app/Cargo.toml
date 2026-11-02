@@ -13,6 +13,7 @@ path = "src/main.rs"
 tl-model  = { workspace = true }
 tl-engine = { workspace = true }
 tl-ui     = { workspace = true }
+tl-ui-settings = { workspace = true }   # settings.toml and state.toml types (ADR-020)
 tl-ops    = { workspace = true }   # write_atomic (R-130)
 tl-tray   = { workspace = true }   # tray thread (E31-008)
 tl-remote = { workspace = true }   # the engine service client (ADR-018)

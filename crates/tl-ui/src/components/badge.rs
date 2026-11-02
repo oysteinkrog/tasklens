@@ -179,7 +179,7 @@ mod tests {
     use gpui_kit::{
         Context, Entity, Render, TestAppContext, TextOverflow, VisualTestContext, WhiteSpace,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

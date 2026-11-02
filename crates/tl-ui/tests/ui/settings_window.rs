@@ -17,7 +17,6 @@ use tl_model::command::Command;
 use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{Decorations, NetworkUnit, Settings, StartTab, UiState};
 use tl_model::table::TableMode;
 use tl_ui::actions::{OpenAdditionalSetup, OpenSettings};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -33,6 +32,7 @@ use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{
     PageBuilder, PageId, SIDEBAR_W, SettingsWindow, TestPages, all_pages,
 };
+use tl_ui_settings::settings::{Decorations, NetworkUnit, Settings, StartTab, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::is_open;
@@ -1367,8 +1367,10 @@ fn device_list_reset_and_show_all(cx: &mut TestAppContext) {
         TlSettings::update(cx, |d| {
             let p = &mut d.settings.performance;
             p.device_order = vec!["memory".into(), "cpu".into()];
-            p.device_overrides
-                .insert("cpu".into(), tl_model::settings::DeviceVisibility::Hide);
+            p.device_overrides.insert(
+                "cpu".into(),
+                tl_ui_settings::settings::DeviceVisibility::Hide,
+            );
         })
     });
     let (mut vcx, queue) = device_probe(cx);
@@ -2303,7 +2305,7 @@ fn publish_fan(engine: &FakeEngine, with_fan: bool, cx: &mut TestAppContext) {
 
 fn fans(
     cx: &mut TestAppContext,
-) -> std::collections::BTreeMap<String, tl_model::settings::FanOverride> {
+) -> std::collections::BTreeMap<String, tl_ui_settings::settings::FanOverride> {
     cx.update(|cx| TlSettings::settings(cx).fans.clone())
 }
 
@@ -2398,7 +2400,7 @@ fn fans_remove_entry(cx: &mut TestAppContext) {
         tl_ui::settings_global::TlSettings::update(cx, |d| {
             d.settings.fans.insert(
                 FAN_KEY.into(),
-                tl_model::settings::FanOverride {
+                tl_ui_settings::settings::FanOverride {
                     label: Some("CPU fan".into()),
                     temp: Some("k10temp:/devices/pci0000:00/0000:00:18.3:temp1".into()),
                 },

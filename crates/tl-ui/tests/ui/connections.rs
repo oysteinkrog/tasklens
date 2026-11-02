@@ -9,7 +9,6 @@ use smallvec::SmallVec;
 use tl_model::actions::{Family, FourTuple, Proto};
 use tl_model::ids::ProcessKey;
 use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::snapshot::{
     ComponentHeader, ConnRecord, ConnState, ConnectionsSnapshot, ProcessSnapshot, RemoteHost,
     Snapshot,
@@ -26,6 +25,7 @@ use tl_ui::table::cells::{CellCtx, CellOut, name_look};
 use tl_ui::table::columns::TableColumn as _;
 use tl_ui::table::tree_table::{NameIcon, RowFlags, TreeTableDelegate as _};
 use tl_ui::theme::{current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -482,7 +482,6 @@ mod page {
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
     use tl_model::journal::{JournalHandle, JournalQuery};
-    use tl_model::settings::{EngineSettings, Settings, UiState};
     use tl_model::snapshot::{ConnCounts, Snapshot};
     use tl_model::table::{Manager, SysColumnId, SysTable, UnitRef};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -496,6 +495,7 @@ mod page {
     use tl_ui::pages::processes::actions::CopyDetails;
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
+    use tl_ui_settings::settings::{EngineSettings, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
@@ -1942,10 +1942,10 @@ fn connections_page_registered(cx: &mut TestAppContext) {
     use gpui_kit::{AppContext as _, VisualTestContext};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::connections::ConnectionsPage;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
@@ -1987,7 +1987,6 @@ mod jump {
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_model::ids::NodeId;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{
         ConnCounts, ServiceStatus, ServicesSnapshot, StartupType, UnitRecord,
     };
@@ -2002,6 +2001,7 @@ mod jump {
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -2442,7 +2442,6 @@ mod props {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
-    use tl_model::settings::{Decorations, Settings, UiState};
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
@@ -2452,6 +2451,7 @@ mod props {
     use tl_ui::windows::connection_properties::{
         ConnectionPropertiesView, open_connection_properties,
     };
+    use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
@@ -2893,7 +2893,6 @@ mod main_window {
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_model::ids::NodeId;
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::ConnCounts;
     use tl_model::table::{ProcessTableView, SysTable, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2904,6 +2903,7 @@ mod main_window {
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const FIREFOX_COOKIE: u64 = 2;

@@ -9,7 +9,7 @@
 //! except `UiMetrics::hairline`, chart geometry keys and text cache invalidation.
 
 use gpui_kit::{App, Global, Pixels, Window, px};
-use tl_model::settings::AppearanceSettings;
+use tl_ui_settings::settings::AppearanceSettings;
 
 /// Text sizes: 11 12 13 14 16 20 × ui_scale.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -29,8 +29,8 @@ use std::time::Duration;
 use paths::Paths;
 use settings_store::{LoadNotice, RunHistoryFile, Store, load_settings, load_state};
 use tempfile::TempDir;
-use tl_model::settings::{Settings, UiState};
 use tl_ui::{ImportSummary, PersistTheme, RunHistoryEntry, RunHistoryStore};
+use tl_ui_settings::settings::{Settings, UiState};
 
 const NOW: u64 = 1_759_500_000;
 

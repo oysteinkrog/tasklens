@@ -2,17 +2,12 @@
 //! their ranges and clamp rule (ADR-011 canonical table (a)). No file I/O.
 //!
 //! tl-engine, tl-server and tl-remote need only this part. The window's settings and state
-//! (`Settings`, `UiState` and the rest of `settings.toml` and `state.toml`) live in
-//! `ui::settings` and are re-exported below so their old paths keep working. Outside `ui/`, only
-//! the re-export lines here and in `lib.rs` name a path under `ui`. Check with
-//! `rg -n "crate::ui" crates/tl-model/src --glob '!ui/**' --glob '!lib.rs'`: it finds this
-//! note and the re-export line below, nothing else.
+//! (`Settings`, `UiState` and the rest of `settings.toml` and `state.toml`) live in the
+//! tl-ui-settings crate, which re-exports the items here (ADR-020).
 
 use std::ops::{Add, Div, Mul};
 
 use serde::{Deserialize, Serialize};
-
-pub use crate::ui::settings::*;
 
 /// `processes.interval_ms`: min, max and step.
 pub const PROCESS_INTERVAL_MS_RANGE: (u32, u32, u32) = (250, 10_000, 1);

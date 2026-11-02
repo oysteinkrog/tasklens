@@ -3,13 +3,13 @@
 use gpui_kit::TestAppContext;
 use rustc_hash::FxHashSet;
 use tl_model::ids::ColumnId;
-use tl_model::settings::ColumnTables;
 use tl_ui::i18n::{init_strings, tr};
 use tl_ui::pages::processes::cells::{
     DEFAULT_VISIBLE, HeatRef, NO_SOURCE, PROCESS_COLUMNS, PickerGroup, ProcColumnKind,
     process_column,
 };
 use tl_ui::table::columns::ColumnAlign;
+use tl_ui_settings::settings::ColumnTables;
 
 const UNSORTABLE: [ColumnId; 6] = [
     ColumnId::Pss,
@@ -247,7 +247,6 @@ mod values {
         GroupKind, GroupRow, GroupRowKind, PackageInfo, PackageStatus, ProcFlags, ProcState,
         ProcessExtras, ProcessExtrasP2, ProcessMeta, ProcessRecord,
     };
-    use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, WindowEntry, WindowsSnapshot};
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
@@ -261,6 +260,7 @@ mod values {
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::tree_table::RowKind;
     use tl_ui::text_cache::CellTextCache;
+    use tl_ui_settings::settings::Settings;
 
     fn meta() -> ProcessMeta {
         let a = |s: &str| Arc::<str>::from(s);
@@ -554,7 +554,7 @@ mod values {
         auto.settings.units.network_auto_scale = true;
         assert_eq!(auto.text(ColumnId::Network), "0.4 Kbps");
         let mut bytes = with(|r| r.net_tx_bps = 1_572_864.0);
-        bytes.settings.units.network = tl_model::settings::NetworkUnit::Bytes;
+        bytes.settings.units.network = tl_ui_settings::settings::NetworkUnit::Bytes;
         assert_eq!(bytes.text(ColumnId::NetSendRate), "1.5 MiB/s");
         bytes.settings.units.network_auto_scale = true;
         assert_eq!(bytes.text(ColumnId::NetSendRate), "1.5 MiB/s");
@@ -1425,7 +1425,6 @@ mod paint {
         SharedString, Styled, TestAppContext, VisualTestContext, Window, div, px,
     };
     use tl_model::ids::ColumnId;
-    use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings};
     use tl_model::system::CpuSet;
     use tl_model::table::ProcessTableView;
     use tl_model::validity::Validity;
@@ -1440,6 +1439,7 @@ mod paint {
     use tl_ui::table::columns::{ColumnAlign, ColumnKind};
     use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, metric_cell_opacity};
     use tl_ui::theme::{TlTheme, current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings};
 
     struct Env {
         view: ProcessTableView,
@@ -2148,7 +2148,6 @@ mod name_cell {
         TestAppContext, VisualTestContext, Window, div, point, px, size,
     };
     use proptest::prelude::*;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::delegate::sibling_pass;
     use tl_ui::pages::processes::name_cell::{
@@ -2158,6 +2157,7 @@ mod name_cell {
     use tl_ui::table::cells::{CellCtx, IconSourceCache, guide_quads, name_look};
     use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind, STALE_OPACITY};
     use tl_ui::theme::{current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     fn data(kind: RowKind, depth: u8, expandable: Option<bool>) -> NameCellData {
         NameCellData {
@@ -2654,7 +2654,6 @@ mod group_fields {
     use tl_model::actions::SchedPolicy;
     use tl_model::ids::{ColumnId, GroupKey, NodeId};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcessExtras};
-    use tl_model::settings::Settings;
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ProcessTableView, UnitRef};
     use tl_model::validity::{FieldValidity, Validity};
@@ -2663,6 +2662,7 @@ mod group_fields {
     };
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::tree_table::RowKind;
+    use tl_ui_settings::settings::Settings;
 
     fn group(kind: GroupRowKind) -> GroupRow {
         GroupRow {
@@ -2908,12 +2908,12 @@ mod group_fields {
 
 mod header_totals {
     use tl_model::ids::ColumnId;
-    use tl_model::settings::{NetworkUnit, Settings};
     use tl_model::table::{TableTotals, Total};
     use tl_model::validity::Validity;
     use tl_ui::pages::processes::cells::process_column;
     use tl_ui::pages::processes::header_totals::header_total;
     use tl_ui::table::cells::CellOut;
+    use tl_ui_settings::settings::{NetworkUnit, Settings};
 
     fn valid<T>(value: T) -> Total<T> {
         Total {
@@ -3123,7 +3123,6 @@ mod highlight {
     use tl_model::process::{
         GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
     };
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
     use tl_model::system::CpuSet;
     use tl_model::table::{ProcessTableView, TableRow};
@@ -3140,6 +3139,7 @@ mod highlight {
     use tl_ui::table::cells::{CellCtx, CellOut, name_look};
     use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, TlTreeTable, TreeTableDelegate};
     use tl_ui::theme::{current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     const MS: TimeNs = 1_000_000;
 
@@ -3699,7 +3699,6 @@ mod row_tooltip {
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
         ProcessRecord,
     };
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{
         ComponentHeader, ProcessSnapshot, ServiceStatus, ServicesSnapshot, Snapshot, StartupType,
         UnitRecord,
@@ -3714,6 +3713,7 @@ mod row_tooltip {
     use tl_ui::pages::processes::delegate::ProcessDelegate;
     use tl_ui::pages::processes::tooltip::{RowTipWords, TipLine, row_tooltip_lines};
     use tl_ui::table::tree_table::{RowKind, TlTreeTable};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     fn a(s: &str) -> Arc<str> {
         Arc::from(s)
@@ -4176,7 +4176,6 @@ mod live {
     };
     use tl_model::ids::{ColumnId, NodeId, ProcessKey};
     use tl_model::process::GroupRowKind;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
@@ -4188,6 +4187,7 @@ mod live {
     use tl_ui::table::cells::{CellCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color};
     use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
     use tl_ui::theme::{current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     use super::values::{extras, group, record};
 

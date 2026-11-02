@@ -47,14 +47,14 @@ use gpui_kit::{
     point, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FixedWidget, FormSet,
     LAYOUT_VERSION, MEMORY_BOX_CONTAINER, MetricKey, NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER,
     SourceSelector, TIMELINE_BOX_CONTAINER, WidgetCell, WidgetContent, WidgetOptions,
     WidgetSetting, default_box_layout, overview_kind, reset_to_default,
 };
-use tl_model::layout_boxes::DeviceKind;
-use tl_model::layout_pages::default_page_layout;
+use tl_ui_settings::layout_boxes::DeviceKind;
+use tl_ui_settings::layout_pages::default_page_layout;
 
 use super::container::WidgetContainer;
 use super::fixed_widget::PAGE_FIXED_NAMES;
@@ -1178,7 +1178,7 @@ impl WidgetEditor {
         cx: &mut Context<Self>,
     ) -> Option<u32> {
         self.edit.as_ref()?;
-        let members = tl_model::layout::GroupKind::from_name(group);
+        let members = tl_ui_settings::layout::GroupKind::from_name(group);
         let name = self
             .slots
             .iter()
@@ -1870,7 +1870,7 @@ impl Render for WidgetEditor {
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::GPU_BOX_CONTAINER;
+    use tl_ui_settings::layout::GPU_BOX_CONTAINER;
 
     use super::*;
 
@@ -1900,7 +1900,7 @@ mod tests {
     fn layout(widgets: Vec<WidgetSetting>) -> ContainerLayout {
         ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
+            version: tl_ui_settings::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             next_id: widgets.iter().map(|w| w.id + 1).max().unwrap_or(1),
             widgets,

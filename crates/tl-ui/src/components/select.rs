@@ -829,7 +829,7 @@ mod tests {
     use std::cell::RefCell;
 
     use gpui_kit::{Modifiers, Render, TestAppContext, VisualTestContext};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

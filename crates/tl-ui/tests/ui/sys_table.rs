@@ -6,13 +6,13 @@ use gpui_kit::{
     App, Background, Context, Hsla, IntoElement, ParentElement, Render, Styled, TestAppContext,
     VisualTestContext, Window, div, px,
 };
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::sys_status::{
     ConnStateClass, DotStyle, LabelTone, STALE_DOT_ALPHA, StatusLook, SysStatus, cell_colors,
     conn_state_tone, status_cell, status_label, status_look, tone_color,
 };
 use tl_ui::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
@@ -1537,7 +1537,6 @@ mod frame {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::health::SourceId;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{ComponentHeader, ComponentMask, Snapshot, StartupSnapshot};
     use tl_model::table::{StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
     use tl_model::validity::Validity;
@@ -1558,6 +1557,7 @@ mod frame {
     };
     use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
     use tl_ui::window::status::CHIP_H;
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const NAME: SysColumnId = SysColumnId::Startup(StartupColumn::Name);

@@ -67,9 +67,9 @@ use smallvec::SmallVec;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout_boxes::convert_box;
-use tl_model::settings::{OverviewRange, StatusBarPlacement};
 use tl_model::snapshot::ComponentMask;
+use tl_ui_settings::layout_boxes::convert_box;
+use tl_ui_settings::settings::{OverviewRange, StatusBarPlacement};
 
 use self::cpu_box::{CpuBox, PowerSplitChanged};
 use self::disk_box::DiskBox;

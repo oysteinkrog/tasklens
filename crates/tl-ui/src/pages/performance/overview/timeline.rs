@@ -46,12 +46,12 @@ use smallvec::SmallVec;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryTop};
 use tl_model::journal::JournalAccess;
-use tl_model::layout::{FixedWidget, TIMELINE_BOX_CONTAINER};
-use tl_model::settings::{OverviewRange, PerformanceSettings, TimelineClick};
 use tl_model::snapshot::{
     DeviceTimeline, HistPoint, TimelineBand, TimelineEvent, TimelineEventKind,
 };
 use tl_model::time::TimeNs;
+use tl_ui_settings::layout::{FixedWidget, TIMELINE_BOX_CONTAINER};
+use tl_ui_settings::settings::{OverviewRange, PerformanceSettings, TimelineClick};
 
 use super::fit::whole_rows;
 use super::fixed_box::FixedBoxSpec;

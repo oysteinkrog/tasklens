@@ -14,7 +14,6 @@ use tl_model::client::EngineClient;
 
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{AppearanceSettings, DeviceVisibility, NetworkUnit, ThemeSettings};
 use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails, Snapshot, SystemSnapshot};
 use tl_model::system::{DiskTotals, LinkState, Metric, NetTotals};
 use tl_model::table::Total;
@@ -32,6 +31,7 @@ use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, is_visible, sidebar_order,
 };
 use tl_ui::theme::current;
+use tl_ui_settings::settings::{AppearanceSettings, DeviceVisibility, NetworkUnit, ThemeSettings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const CARD_W: f32 = 244.;
@@ -623,7 +623,6 @@ mod sidebar {
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::{MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
@@ -639,6 +638,7 @@ mod sidebar {
     use tl_ui::pages::performance::overview::OVERVIEW_KEY as OVERVIEW;
     use tl_ui::pages::performance::sidebar::{CardAnim, DeviceSidebar, SidebarEvent};
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
 
@@ -2658,13 +2658,13 @@ mod sidebar {
     // ---- Card menu and page visibility (E24-011 part 1, UI-PRF-014, PERF-002) ----
 
     use gpui_kit::{Action, SharedString};
-    use tl_model::settings::DeviceVisibility;
     use tl_ui::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
     use tl_ui::pages::performance::actions::{
         PerfAddTrayGraph, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
         PerfMoveDevice, PerfResetPagesToDefault, PerfSetPageVisible, bind_keys_performance,
     };
     use tl_ui::pages::performance::menu::card_menu;
+    use tl_ui_settings::settings::DeviceVisibility;
 
     fn key(s: &str) -> DeviceKey {
         DeviceKey(Arc::from(s))

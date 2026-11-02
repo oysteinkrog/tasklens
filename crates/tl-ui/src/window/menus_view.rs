@@ -26,8 +26,8 @@ use gpui_kit::{Action, App, Entity, FocusHandle, SharedString, Window, gpui, px}
 use serde::Deserialize;
 use tl_model::command::Tab;
 use tl_model::devices::DeviceKind;
-use tl_model::settings::{ColumnResize, ProcessesSettings};
 use tl_model::table::TableMode;
+use tl_ui_settings::settings::{ColumnResize, ProcessesSettings};
 
 use super::main::{ShellState, WINDOW_TITLE};
 use super::menubar::{HEAT_INTENSITY, MenuSliders, ROW_HEIGHT, SHADOW_INTENSITY, UI_SCALE};

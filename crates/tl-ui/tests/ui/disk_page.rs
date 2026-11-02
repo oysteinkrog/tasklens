@@ -13,7 +13,6 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{DiskDetails, PartitionRow, PartitionTable, SmartKind};
 use tl_model::table::Total;
 use tl_model::time::now_boot_ns;
@@ -36,6 +35,7 @@ use tl_ui::settings_global::TlSettings;
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{RowFlags, TreeTableDelegate};
 use tl_ui::theme::{current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f32 = 1024. * 1024.;

@@ -53,11 +53,11 @@ mod grid {
         App, Bounds, Context, IntoElement, PaintQuad, Pixels, Quad, Render, TestAppContext, Window,
         canvas, point, px, size,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::chart::GridStyle;
     use tl_ui::chart::geometry::TimeMap;
     use tl_ui::chart::grid::{GridPaint, grid_k_range, paint_baseline, paint_gaps, paint_grid};
     use tl_ui::theme::{TlTheme, current};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     const S: u64 = 1_000_000_000;
 
@@ -239,11 +239,11 @@ mod element {
     use smallvec::{SmallVec, smallvec};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -422,9 +422,9 @@ mod element {
     #[gpui_kit::test]
     fn curved_toggle_rebuilds_once(cx: &mut TestAppContext) {
         use tl_model::client::EngineClient;
-        use tl_model::settings::{Settings, UiState};
         use tl_ui::app::{BootSettings, EngineGlobal};
         use tl_ui::settings_global::TlSettings;
+        use tl_ui_settings::settings::{Settings, UiState};
 
         cx.update(|cx| {
             let client: Arc<dyn EngineClient> = FakeEngine::new();
@@ -578,10 +578,10 @@ mod binding {
     };
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_ui::chart::view::{ChartView, search_series};
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -865,13 +865,13 @@ mod anchor {
     use smallvec::{SmallVec, smallvec};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::geometry::y_of;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -1231,7 +1231,6 @@ mod labels {
         point, px, size,
     };
     use smallvec::{SmallVec, smallvec};
-    use tl_model::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
     use tl_model::validity::Validity;
     use tl_ui::chart::labels::{
         LabelCache, LabelKind, LabelPaint, LabelRows, format_value, paint, range_label,
@@ -1241,6 +1240,7 @@ mod labels {
         YScale,
     };
     use tl_ui::theme::{TlTheme, UiMetrics, current};
+    use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
 
     const S: u64 = 1_000_000_000;
 
@@ -1758,11 +1758,11 @@ mod key_in_place {
     use smallvec::SmallVec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const SERIES: usize = 16;
@@ -1878,13 +1878,13 @@ mod grid_element {
     use smallvec::smallvec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::LegendStyle;
     use tl_ui::chart::grid_element::{
         ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
     };
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -2210,10 +2210,10 @@ mod grid_offline_and_gaps {
     };
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SampleFlags, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -2440,12 +2440,12 @@ mod tier_1hz {
     use smallvec::smallvec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
     use tl_ui::chart::view::{ChangedRuns, ChartView, search_series};
     use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -2733,7 +2733,6 @@ mod hover {
     use smallvec::smallvec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SampleFlags, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::geometry::TimeMap;
@@ -2742,6 +2741,7 @@ mod hover {
     };
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -3141,9 +3141,9 @@ mod grid_hover {
     };
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
@@ -3394,11 +3394,11 @@ mod cpu_grid_hover {
     use smallvec::smallvec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::cpu_grid::CpuGrid;
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;

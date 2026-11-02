@@ -22,9 +22,9 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, DeviceKind};
 use tl_model::ids::{ColumnId, GraphTarget};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::PerformanceSettings;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::GraphColor;

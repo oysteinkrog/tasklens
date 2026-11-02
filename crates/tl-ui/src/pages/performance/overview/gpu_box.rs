@@ -54,14 +54,14 @@ use gpui_kit::{
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
-};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{
+    ContainerLayout, FormSet, GPU_BOX_CONTAINER, METRIC_POWER, METRIC_TEMP, METRIC_VRAM,
+};
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::super::DeviceKey;
 use super::super::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines};
@@ -925,7 +925,7 @@ impl GpuBox {
         let mode = self.mode;
         layout.widgets.retain(|w| {
             let slot = match w.content.device() {
-                Some(tl_model::layout::DeviceSelector::Slot(n)) => usize::from(*n),
+                Some(tl_ui_settings::layout::DeviceSelector::Slot(n)) => usize::from(*n),
                 _ => return true,
             };
             let Some(section) = sections.get(slot) else {

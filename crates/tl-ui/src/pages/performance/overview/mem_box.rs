@@ -41,12 +41,12 @@ use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::MemoryTotals;
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER};
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::super::DeviceKey;
 use super::super::memory_apps::{AppsPlace, MemoryAppsChart};

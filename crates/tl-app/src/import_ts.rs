@@ -11,9 +11,9 @@ use std::fmt;
 use std::io::Read;
 use std::path::Path;
 
-use tl_model::settings::{Settings, UiState};
 use tl_ui::app::{ImportSummary, ImportedSettings};
 use tl_ui::theme::share_code::MAX_IMPORT_BYTES;
+use tl_ui_settings::settings::{Settings, UiState};
 use tracing::{debug, info};
 
 /// The largest `UserSettings.ini` accepted, 1 MiB.

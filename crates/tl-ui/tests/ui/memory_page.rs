@@ -13,7 +13,6 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::SystemSnapshot;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -31,6 +30,7 @@ use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GIB: u64 = 1 << 30;
@@ -870,7 +870,6 @@ mod details {
 
 /// UI-PRF-060: the memory-by-app chart and its legend.
 mod by_app {
-    use tl_model::settings::{GroupColor, MemoryView, OverviewRange};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::system::{MemGroupBand, WineGroupInfo};
     use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
@@ -879,6 +878,7 @@ mod by_app {
         legend_fit, legend_order, pick_colors, split_top,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue};
+    use tl_ui_settings::settings::{GroupColor, MemoryView, OverviewRange};
 
     use super::*;
 

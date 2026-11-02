@@ -34,12 +34,12 @@ use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::health::{EngineCaps, SourceId};
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
-use tl_model::settings::UiState;
 use tl_model::snapshot::{
     ComponentMask, ProcessSnapshot, ServiceBackend, ServiceCounts, Snapshot, StartupType,
 };
 use tl_model::table::{SysColumnId, SysNodeId, UnitRef};
 use tl_model::units;
+use tl_ui_settings::settings::UiState;
 
 use self::actions::{
     JumpOrigin, SERVICE_TABLE_CONTEXT, ServiceFileProperties, ServiceJumpToProcess,

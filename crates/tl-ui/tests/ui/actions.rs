@@ -19,7 +19,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::table::{Manager, UnitRef};
 use tl_model::time::BootId;
 use tl_ui::action_tracker::{
@@ -30,6 +29,7 @@ use tl_ui::components::dialog::TlDialogView;
 use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::hub::{GlobalHub, SnapshotHub};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
@@ -822,13 +822,13 @@ fn owner_results_keep_the_last_16(cx: &mut TestAppContext) {
 mod with_shell {
     use gpui_kit::{EventEmitter, FocusHandle, InteractiveElement as _};
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, UiState};
     use tl_ui::app::BootSettings;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, ShellPage, open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
 

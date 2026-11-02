@@ -41,11 +41,11 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FixedWidget, GroupKind, WidgetCell, WidgetContent,
     WidgetSetting, grid_cols,
 };
-use tl_model::layout_boxes::DeviceKind;
+use tl_ui_settings::layout_boxes::DeviceKind;
 
 use super::fixed_widget::{FixedContent, FixedWidgetView};
 use super::grid::{self, InnerGrid, InnerPlacement, PlacedWidget};

@@ -11,8 +11,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{AppContext as _, TestAppContext, px, size};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui::components::gallery::{self, GALLERY_PAGES, GalleryView, WINDOW_HEIGHT, WINDOW_WIDTH};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 /// UI-FND-023: at most 2 spinners or indeterminate bars per window.
 const ANIMATED_BUDGET: usize = 2;

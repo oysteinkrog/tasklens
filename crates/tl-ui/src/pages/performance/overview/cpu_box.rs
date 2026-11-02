@@ -38,11 +38,11 @@ use gpui_kit::{
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{CPU_BOX_CONTAINER, ContainerLayout};
 use tl_model::series::Sample;
-use tl_model::settings::{CoreSmoothing, NetworkUnit};
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{CPU_BOX_CONTAINER, ContainerLayout};
+use tl_ui_settings::settings::{CoreSmoothing, NetworkUnit};
 
 use super::super::DeviceKey;
 use super::super::core_clocks::CoreClocks;

@@ -18,7 +18,6 @@ use gpui_kit::{App, SharedString};
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceCatalog, NetKind};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::PerformanceSettings;
 use tl_model::snapshot::{
     DisplayMode, FirmwareType, InvField, InventorySnapshot, NetworkAdapter, PublicIpState,
     SystemSnapshot,
@@ -26,6 +25,7 @@ use tl_model::snapshot::{
 use tl_model::system::Metric;
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::PerformanceSettings;
 
 use super::section::InfoRow;
 use crate::actions::OpenAdditionalSetup;

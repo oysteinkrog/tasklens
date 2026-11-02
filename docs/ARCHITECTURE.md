@@ -87,12 +87,12 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 
 | Crate | Workspace deps allowed | External deps allowed |
 |---|---|---|
-| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`), toml (`LayoutEntry::Kept` in `layout.rs`, ADR-019; moves to tl-ui-settings with `layout.rs` in CS-D2) |
+| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal), bitflags (`CpuFlags`, R-285) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P2 for ADR-017 device history, P3 for ADR-012) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, libc (`close_range` in the GPU probe child only, R-290), postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
-| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), intl_pluralrules (plural rules in `pages/performance/details.rs`, in use since o55.37), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
+| tl-ui | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), intl_pluralrules (plural rules in `pages/performance/details.rs`, in use since o55.37), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
 | tl-ui-settings | tl-model | serde, toml (`LayoutEntry::Kept`, ADR-019), bitflags (`layout.rs`) |
 | tl-ui-base | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, unic-langid, async-channel, unicode-segmentation |
 | tl-ui-kit | tl-model, tl-ui-settings, tl-ui-base | gpui-kit, tracing, smallvec, rustc-hash, fluent-bundle |
@@ -105,7 +105,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-ui-sys | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-chart, tl-ui-table, tl-ui-perf-core, tl-ui-procs | gpui-kit, tracing, smallvec, rustc-hash, serde, fluent-bundle, jiff |
 | tl-ui-testkit | tl-model | gpui-kit (feature `test-support` only behind its `render` feature), async-channel, image (optional, `render` only, PNG goldens) |
 | tl-ui-pagehost | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-testkit | gpui-kit |
-| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142), wgpu `=29.0.4` (Rendering GPU adapter probe, R-142) |
+| tl-app | tl-model, tl-engine, tl-ui, tl-ui-settings (`settings.toml` and `state.toml` types), tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142), wgpu `=29.0.4` (Rendering GPU adapter probe, R-142) |
 | tl-watch | none | libc (the low-memory watcher is std plus libc only, R-152) |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni, async-channel (R-278) |
@@ -113,12 +113,12 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-netmon | tl-model | decided in its own ADR when that phase starts |
 | xtask | none | serde, serde_json, anyhow |
 
-The tl-ui-* rows are reserved now, like the P3 rows; each crate is created by its extraction bead (ADR-020). Their external lists are what each crate's files used on 2026-11-01, found by grep. An extraction bead that finds another crate from the tl-ui row in use adds it to this table and to `xtask/src/check_deps.rs` in the same commit. Any crate outside the tl-ui row (the tl-model row for tl-ui-settings) needs an ADR change. After the split the tl-ui row covers only the shell; CS-E10 writes its final list. Until CS-D2, the UI settings and layout types stay in tl-model.
+The tl-ui-* rows are reserved now, like the P3 rows; each crate is created by its extraction bead (ADR-020). Their external lists are what each crate's files used on 2026-11-01, found by grep. An extraction bead that finds another crate from the tl-ui row in use adds it to this table and to `xtask/src/check_deps.rs` in the same commit. Any crate outside the tl-ui row (the tl-model row for tl-ui-settings) needs an ADR change. After the split the tl-ui row covers only the shell; CS-E10 writes its final list. The UI settings and layout types moved from tl-model to tl-ui-settings in CS-D2.
 
 **Dependency direction rule.** Edges only point toward `tl-model`:
 
 ```text
-tl-app -> tl-ui -> tl-model
+tl-app -> tl-ui -> tl-ui-settings -> tl-model
 tl-app -> tl-engine -> {tl-collect, tl-ops, tl-history} -> tl-model
 tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-ops; tl-helper also -> tl-collect)
 ```

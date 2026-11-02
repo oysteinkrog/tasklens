@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use gpui_kit::{Action, App, KeyContext, Keystroke, TestAppContext};
 use tl_model::client::EngineClient;
-use tl_model::settings::{Settings, UiState};
 use tl_model::table::TableMode;
 use tl_ui::actions::{
     CancelWindowPick, CloseWindow, EscapeChain, FilterAccept, FilterEscape, FocusFilter, MenuId,
@@ -16,6 +15,7 @@ use tl_ui::actions::{
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::slider::{SliderBigStepDown, SliderBigStepUp, SliderStepDown, SliderStepUp};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The Action the keymap resolves `keys` to with `contexts` as the stack (outermost first).

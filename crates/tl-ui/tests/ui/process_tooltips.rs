@@ -14,7 +14,6 @@ use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
     ProcessMeta, ProcessRecord,
 };
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow};
@@ -29,6 +28,7 @@ use tl_ui::pages::processes::cells::{
 use tl_ui::pages::processes::delegate::ProcessDelegate;
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
 const MIB: u64 = 1 << 20;
 const APP_MEMORY: &str = "Anonymous memory charged to this app's cgroup";

@@ -10,10 +10,10 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::journal::{JournalHandle, JournalQuery};
-use tl_model::settings::{EngineSettings, Settings, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::time::BootId;
 use tl_ui::{AppEnv, OpenMode, StartOptions, UiInit, UiLaunch};
+use tl_ui_settings::settings::{EngineSettings, Settings, UiState};
 use tracing::info;
 
 /// Opens the gallery window and runs GPUI until it closes. Returns the exit code (always 0).

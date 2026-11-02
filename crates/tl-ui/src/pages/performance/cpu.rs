@@ -29,10 +29,10 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
 use tl_model::snapshot::{CpuStaticInfo, RaplState, Snapshot};
 use tl_model::system::{CpuTopology, Metric};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
 use super::core_clocks::CoreClocks;

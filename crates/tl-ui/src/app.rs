@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use gpui_kit::{App, AppContext, AsyncApp, BorrowAppContext as _, Global, QuitMode, SharedString};
 use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
-use tl_model::settings::{Settings, StartTab, UiState};
+use tl_ui_settings::settings::{Settings, StartTab, UiState};
 use tracing::{debug, error, info, warn};
 
 use crate::components::icons::TlAssets;

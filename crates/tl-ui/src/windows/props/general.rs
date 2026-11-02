@@ -52,12 +52,12 @@ use tl_model::details::{
 };
 use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
-use tl_model::settings::{NetworkUnit, UnitsSettings};
 use tl_model::snapshot::{FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
 use tl_model::table::{Manager, Total, UnitRef};
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
+use tl_ui_settings::settings::{NetworkUnit, UnitsSettings};
 use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};

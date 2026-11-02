@@ -19,7 +19,6 @@ use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, S
 use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
@@ -38,6 +37,7 @@ use tl_ui::windows::actions::{HandleSearchEndProcess, HandleSearchEndTask};
 use tl_ui::windows::handle_search::{
     HANDLE_HIT_CAP, HandleSearchOpenLocation, HandleSearchWindow, SearchStatus, open_handle_search,
 };
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{actions_sent, publish_helper, searches};

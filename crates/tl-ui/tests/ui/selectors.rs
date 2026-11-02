@@ -17,7 +17,6 @@ use tl_model::command::Tab;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, NodeId};
 use tl_model::process::ProcessRecord;
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
@@ -30,6 +29,7 @@ use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::selector::{TlSelector as _, tag_frame, untag_frame};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::window::main::{self as shell, MainWindow, main_window_view, open_main_window};
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use crate::common::{key, record};

@@ -22,14 +22,14 @@ use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FixedWidget, FormSet, WidgetContent, WidgetSetting, grid_cols,
 };
-use tl_model::layout_boxes::{
+use tl_ui_settings::layout_boxes::{
     DEVICE_MEMORY, METRIC_MEM_AVAILABLE, METRIC_MEM_CACHED, METRIC_MEM_COMMIT,
     METRIC_MEM_COMPOSITION, METRIC_MEM_SWAP, METRIC_MEM_USED, convert_memory_box,
 };
-use tl_model::settings::OverviewGridSetting;
+use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::Arrange;
 use super::mem_box::{ROWS, charts_fit, row_min_h};
@@ -337,7 +337,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::MEMORY_BOX_CONTAINER;
+    use tl_ui_settings::layout::MEMORY_BOX_CONTAINER;
 
     use super::*;
 
@@ -389,7 +389,7 @@ mod tests {
         MemPlan {
             look,
             m: crate::theme::metrics::compute(
-                &tl_model::settings::AppearanceSettings::default(),
+                &tl_ui_settings::settings::AppearanceSettings::default(),
                 0,
             ),
             side: false,

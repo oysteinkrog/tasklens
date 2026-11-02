@@ -17,13 +17,13 @@ use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, PackageStatus, ProcFlags, ProcState, ProcessExtras,
     ProcessExtrasP2, ProcessRecord,
 };
-use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::snapshot::{Snapshot, WindowsSnapshot};
 use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
+use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use crate::components::motion::{M_SLOW, ease_out_cubic};
 use crate::components::validity::copy_text;

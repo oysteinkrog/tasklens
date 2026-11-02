@@ -195,7 +195,7 @@ mod tests {
 
     use gpui_kit::px;
     use serde_json::Value;
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::theme::metrics::compute;

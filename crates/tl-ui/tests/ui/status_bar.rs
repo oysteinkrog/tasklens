@@ -11,9 +11,6 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{
-    AppearanceSettings, Settings, StatusBarPlacement, ThemeSettings, UiState,
-};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, GpuTotals, Metric};
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -30,6 +27,9 @@ use tl_ui::pages::performance::status_bar::rules::{ChipKind, MachineState, Tone}
 use tl_ui::pages::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_settings::settings::{
+    AppearanceSettings, Settings, StatusBarPlacement, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const NS: u64 = 1_000_000_000;
@@ -631,7 +631,7 @@ mod main_window {
         let mut settings = Settings::default();
         settings.performance.status_bar = StatusBarPlacement::AllTabs;
         settings.motion.tab_switch_ms = 0;
-        settings.general.start_tab = tl_model::settings::StartTab::Processes;
+        settings.general.start_tab = tl_ui_settings::settings::StartTab::Processes;
         install(cx, &client, settings);
         cx.update(|cx| {
             let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));

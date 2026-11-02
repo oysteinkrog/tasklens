@@ -5,9 +5,9 @@ use gpui_kit::component::h_flex;
 use gpui_kit::{AnyElement, App, IntoElement, ParentElement, Styled, Window, div, px};
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
-use tl_model::settings::ServicesSettings;
 use tl_model::snapshot::{ServiceStatus, StartupType, UnitRecord};
 use tl_model::table::{Manager, ServiceFilter, ServiceStateFilter, UnitType};
+use tl_ui_settings::settings::ServicesSettings;
 
 use super::actions::{
     ManagerArg, ServicesRemoveFilters, ServicesResetUnitTypes, ServicesToggleManagerFilter,

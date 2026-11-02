@@ -47,10 +47,10 @@ use tl_model::command::Tab;
 use tl_model::devices::DeviceIdentity;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
-use tl_model::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tl_model::snapshot::Snapshot;
 use tl_model::system::WineGroupInfo;
 use tl_model::units;
+use tl_ui_settings::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tracing::warn;
 
 use super::details::Template;

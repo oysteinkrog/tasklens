@@ -12,14 +12,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, GroupKey, ProcessKey};
-use tl_model::layout::{
-    ContainerLayout, FixedWidget, PROCESSES_BOX_CONTAINER, TIMELINE_BOX_CONTAINER, WidgetContent,
-};
-use tl_model::layout_boxes::METRIC_CPU_TOTAL;
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
@@ -40,6 +33,13 @@ use tl_ui::pages::performance::widget::container::WidgetContainer;
 use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
 use tl_ui::pages::performance::widget::metric_widget::widget_id;
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    ContainerLayout, FixedWidget, PROCESSES_BOX_CONTAINER, TIMELINE_BOX_CONTAINER, WidgetContent,
+};
+use tl_ui_settings::layout_boxes::METRIC_CPU_TOTAL;
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host {

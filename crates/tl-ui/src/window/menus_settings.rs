@@ -46,7 +46,7 @@ use gpui_kit::{
     SharedString, Subscription, Window, px,
 };
 use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
-use tl_model::settings::{
+use tl_ui_settings::settings::{
     HISTORY_RETENTION_MENU_H, NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab,
 };
 use tracing::warn;

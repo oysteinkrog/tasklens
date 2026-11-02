@@ -714,12 +714,12 @@ mod grid {
         Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
     };
     use tl_model::client::EngineClient;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::chart::LegendStyle;
     use tl_ui::chart::grid_element::grid_layout;
     use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::performance::cpu_grid::{CpuGrid, GRID_ID, TRIGGER_ID};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
@@ -967,8 +967,6 @@ mod page {
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
-    use tl_model::settings::CpuSecondaryGraph;
-    use tl_model::settings::{AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState};
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::chart::YScale;
     use tl_ui::chart::grid_element::grid_layout;
@@ -988,6 +986,10 @@ mod page {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::CpuSecondaryGraph;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
@@ -1433,10 +1435,10 @@ mod page {
 
     #[gpui_kit::test]
     fn cpu_stacked_axis_text(cx: &mut TestAppContext) {
-        use tl_model::settings::NetworkUnit;
         use tl_model::time::now_boot_ns;
         use tl_ui::chart::YScale;
         use tl_ui::chart::scale::{ScaleState, compute};
+        use tl_ui_settings::settings::NetworkUnit;
 
         let r = open(cx, with_mode(CpuGraphMode::AllCoresStacked));
         let page = r.page.clone();
@@ -1747,7 +1749,7 @@ mod page {
             0,
             &mut ScaleState::default(),
             labels.value_fmt,
-            tl_model::settings::NetworkUnit::Bits,
+            tl_ui_settings::settings::NetworkUnit::Bits,
             &mut axis,
         );
         assert_eq!(axis, "5050 MHz");
@@ -1782,12 +1784,12 @@ mod page {
 
     use gpui_kit::Modifiers;
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{CoreSmoothing, CoreSort};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::pages::performance::cpu::{BOARD_AREA_ID, BOARD_CHART_ID};
     use tl_ui::pages::performance::cpu_board::{BOARD_ID, CpuBoard};
     use tl_ui::pages::performance::overview::parts::{core_spark_id, take_core_labels};
+    use tl_ui_settings::settings::{CoreSmoothing, CoreSort};
 
     /// The Core board mode with `sort`, and no smoothing, so the rows show the published loads.
     fn board_settings(sort: CoreSort) -> Settings {

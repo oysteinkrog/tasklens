@@ -388,7 +388,7 @@ mod tests {
         AppContext as _, Bounds, FocusHandle, Modifiers, Pixels, Render, ScrollDelta,
         TestAppContext, TouchPhase, VisualTestContext, point,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

@@ -15,7 +15,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
-use tl_model::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
 use tl_model::snapshot::{ServiceBackend, ServicesSnapshot, Snapshot};
 use tl_model::table::{
     Manager, ServiceColumn, ServiceStateFilter, SysColumnId, SysNodeId, SysRow, SysTable, UnitRef,
@@ -38,6 +37,7 @@ use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::columns::ColumnLayout;
 use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
+use tl_ui_settings::settings::{AppearanceSettings, ServicesSettings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
@@ -1656,8 +1656,8 @@ mod menu_tests {
 
 #[gpui_kit::test]
 fn init_binds_services_keys(cx: &mut TestAppContext) {
-    use tl_model::settings::Settings;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui_settings::settings::Settings;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
@@ -1698,7 +1698,6 @@ mod flows {
     use tl_model::command::Tab;
     use tl_model::ids::NodeId;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, StartupType, UnitRecord};
     use tl_model::table::{Manager, UnitRef};
     use tl_model::table::{ProcessTableView, TableRow, Total};
@@ -1715,6 +1714,7 @@ mod flows {
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+    use tl_ui_settings::settings::Settings;
 
     use super::*;
 
@@ -2885,7 +2885,6 @@ mod page {
     use tl_model::health::{ManagerState, SourceId};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{ProcFlags, ProcessRecord};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{
         ComponentHeader, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
         UnitRecord,
@@ -2917,6 +2916,7 @@ mod page {
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::{child_key, child_process, record};
@@ -4862,10 +4862,10 @@ mod page {
 mod main_window {
     use super::*;
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, StartTab};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::services::ServicesPage;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab};
 
     fn boot(cx: &mut TestAppContext) -> (VisualTestContext, Entity<MainWindow>) {
         let engine = FakeEngine::new();

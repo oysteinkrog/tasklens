@@ -598,7 +598,7 @@ mod tests {
     use gpui_kit::{
         Context, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, VisualTestContext,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

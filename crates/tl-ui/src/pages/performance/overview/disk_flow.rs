@@ -19,11 +19,11 @@ use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px};
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, GroupKind, WidgetContent, WidgetSetting, grid_cols,
 };
-use tl_model::layout_boxes::{DEVICE_DISKS, METRIC_DISK_IO, convert_disk_box};
-use tl_model::settings::OverviewGridSetting;
+use tl_ui_settings::layout_boxes::{DEVICE_DISKS, METRIC_DISK_IO, convert_disk_box};
+use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::Arrange;
 use crate::pages::performance::widget::container::{FlowInput, FlowPlace, list_flow};
@@ -205,7 +205,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
 #[cfg(test)]
 mod tests {
     use gpui_kit::size;
-    use tl_model::layout::{DISK_BOX_CONTAINER, FormSet, GroupItems};
+    use tl_ui_settings::layout::{DISK_BOX_CONTAINER, FormSet, GroupItems};
 
     use super::*;
 
@@ -217,7 +217,7 @@ mod tests {
         }
     }
 
-    fn group(l: &ContainerLayout) -> &tl_model::layout::GroupSelector {
+    fn group(l: &ContainerLayout) -> &tl_ui_settings::layout::GroupSelector {
         let w = l.widgets.iter().find(|w| Some(w.id) == disks_of(l));
         match w.map(|w| &w.content) {
             Some(WidgetContent::Group(g)) => g,

@@ -18,7 +18,6 @@ use gpui_kit::{
 use gpui_kit::{InteractiveElement as _, Role};
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
 use tl_ui::components::menu::{TlMenu, context_menu_layer};
@@ -44,6 +43,7 @@ use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::text::metrics::TextMetricsCache;
 use tl_ui::theme::{current, metrics};
 use tl_ui::window::registry::GlobalRegistry;
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn cosmic_cx() -> TestAppContext {
     let text_system = gpui_kit::platform::current_platform(true).text_system();

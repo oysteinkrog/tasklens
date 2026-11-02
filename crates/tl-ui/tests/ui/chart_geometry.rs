@@ -1195,9 +1195,9 @@ fn many_series_no_per_rebuild_allocation() {
 
 /// Y scale rules and axis text (tasklens-yrf.6, UI-PRF-006).
 mod scale {
-    use tl_model::settings::NetworkUnit;
     use tl_ui::chart::scale::{ScaleResult, ScaleState, compute};
     use tl_ui::chart::{ValueFormat, YScale};
+    use tl_ui_settings::settings::NetworkUnit;
 
     const SEC: u64 = 1_000_000_000;
     const MIB: f32 = 1024.0 * 1024.0;

@@ -14,7 +14,6 @@ use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{
     BatteryDetails, DeviceDetailsSnapshot, DiskDetails, DisplayConnector, DisplayMode,
     GraphicsAdapter, InvField, InventorySnapshot, MemoryDetails, MemoryModule, SwapDevice,
@@ -64,6 +63,7 @@ use tl_ui::pages::performance::{
 };
 use tl_ui::settings_global::TlSettings;
 use tl_ui::theme::metrics;
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GPU: &str = "gpu:pci:0000:2d:00.0";
@@ -151,7 +151,7 @@ fn hidden_overview() -> Settings {
     let mut s = Settings::default();
     s.performance.device_overrides.insert(
         tl_ui::pages::performance::overview::OVERVIEW_KEY.to_owned(),
-        tl_model::settings::DeviceVisibility::Hide,
+        tl_ui_settings::settings::DeviceVisibility::Hide,
     );
     s
 }
@@ -416,12 +416,12 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
 mod shared_range {
     use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
     use tl_model::ids::{MetricId, SeriesId};
-    use tl_model::settings::OverviewRange;
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
     use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, trigger_id};
     use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
+    use tl_ui_settings::settings::OverviewRange;
 
     use super::*;
 

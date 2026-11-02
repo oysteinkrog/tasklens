@@ -18,7 +18,6 @@ use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{CpuSet, CpuTopology, Metric};
 use tl_model::time::now_boot_ns;
@@ -35,6 +34,7 @@ use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::theme::current;
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const WIDTH: f32 = 1280.;

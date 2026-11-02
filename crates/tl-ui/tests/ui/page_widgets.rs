@@ -16,10 +16,7 @@ use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{FixedWidget, WidgetContent};
-use tl_model::layout_boxes::{DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::time::now_boot_ns;
@@ -47,6 +44,11 @@ use tl_ui::pages::performance::widget::grid::{PAGE_GUTTER, PAGE_ROW_UNIT};
 use tl_ui::pages::performance::widget::metric_widget::widget_id;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{FixedWidget, WidgetContent};
+use tl_ui_settings::layout_boxes::{
+    DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
+};
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f64 = 1024. * 1024.;

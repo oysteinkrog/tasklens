@@ -26,8 +26,8 @@ use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
 use tl_model::ids::SeriesId;
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::OverviewRange;
 use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
+use tl_ui_settings::settings::OverviewRange;
 
 use super::timeline::{self, Paused};
 use crate::chart::view::{derived_view, find_tiered};

@@ -14,13 +14,6 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
-use tl_model::layout::{
-    ContainerLayout, GroupKind, NET_BOX_CONTAINER, WidgetContent, box_layout, convert_old_settings,
-};
-use tl_model::layout_boxes::{DEVICE_NETS, METRIC_NET_RX, METRIC_NET_TRAFFIC};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
@@ -45,6 +38,13 @@ use tl_ui::pages::performance::widget::group_widget::{GroupFlowLook, GroupState}
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 use tl_ui::pages::performance::widget::source::Availability;
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    ContainerLayout, GroupKind, NET_BOX_CONTAINER, WidgetContent, box_layout, convert_old_settings,
+};
+use tl_ui_settings::layout_boxes::{DEVICE_NETS, METRIC_NET_RX, METRIC_NET_TRAFFIC};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The network total's catalog index.

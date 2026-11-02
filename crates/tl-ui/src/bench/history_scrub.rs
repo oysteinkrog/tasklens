@@ -34,10 +34,10 @@ use tl_model::history::{
 };
 use tl_model::ids::ProcessKey;
 use tl_model::journal::{JournalHandle, JournalQuery};
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{ComponentHeader, Snapshot};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::EngineSettings;
 
 use super::scenes::{BenchError, BenchOptions, BenchScene, WINDOW_H, WINDOW_W, fixture};
 use super::stats::{

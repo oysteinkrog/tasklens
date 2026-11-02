@@ -3,8 +3,8 @@
 //! give the expected flow layout, converting twice must change nothing, and the old keys must
 //! stay in the file for an older build.
 
-use tl_model::layout::{DeviceSelector, GPU_BOX_CONTAINER};
-use tl_model::settings::{LAYOUTS_CONVERTED_KEY, Settings};
+use tl_ui_settings::layout::{DeviceSelector, GPU_BOX_CONTAINER};
+use tl_ui_settings::settings::{LAYOUTS_CONVERTED_KEY, Settings};
 
 fn fixture(name: &str) -> String {
     let path = format!(

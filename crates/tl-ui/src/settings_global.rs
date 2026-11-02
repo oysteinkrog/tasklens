@@ -19,7 +19,7 @@ use std::sync::Arc;
 use gpui_kit::{App, BorrowAppContext, Global, SharedString};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
-use tl_model::settings::{Settings, UiState};
+use tl_ui_settings::settings::{Settings, UiState};
 use tracing::{debug, warn};
 
 use crate::app::{BootSettings, PersistFn};

@@ -29,9 +29,9 @@ use tl_model::command::Tab;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceCatalog;
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{OverviewRange, StatusBarPlacement};
 use tl_model::snapshot::Snapshot;
 use tl_model::units;
+use tl_ui_settings::settings::{OverviewRange, StatusBarPlacement};
 
 use self::rules::{
     Chip, ChipKind, MachineState, Reading, Reason, Source, StatusRules, Tone, chips,

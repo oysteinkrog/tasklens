@@ -48,10 +48,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::remote_proto::{HelloTail, Want};
-use tl_model::settings::StartTab;
 use tl_ui::app::ToastKindTag;
 use tl_ui::engine_link::{EngineLinkApi, EngineLinkState};
 use tl_ui::{AppEnv, OpenMode, StartOptions, UiExit, UiInit, UiLaunch};
+use tl_ui_settings::settings::StartTab;
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;

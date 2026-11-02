@@ -27,8 +27,8 @@ use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec};
 use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::{DeviceVisibility, Settings, UiState};
 use tl_model::time::now_boot_ns;
+use tl_ui_settings::settings::{DeviceVisibility, Settings, UiState};
 use tracing::info;
 
 use super::engine::{BenchEngine, BenchFeed, DEV_MEMORY, DEV_PACKAGE, MEM_TOTAL_BYTES};
@@ -199,7 +199,7 @@ pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
         state.performance.selected_device = DeviceKey::OVERVIEW.to_owned();
         let unit = settings.performance.overview_row_unit_px;
         settings.performance.overview = (scene == BenchScene::PerfOverviewProcs)
-            .then(|| tl_model::settings::OverviewLayoutSetting::with_top_procs(unit));
+            .then(|| tl_ui_settings::settings::OverviewLayoutSetting::with_top_procs(unit));
     } else {
         // The Overview card stays hidden, so the scenes keep the phase-0 card count (D-022).
         settings

@@ -40,12 +40,12 @@ use gpui_kit::{
     Bounds, Pixels, Refineable as _, Size, TextStyleRefinement, Window, point, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::layout::{
+use tl_model::system::GpuEngine;
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FormSet, METRIC_POWER, METRIC_TEMP, METRIC_VRAM, MetricKey,
     WidgetSetting, convert_gpu_box, grid_cols,
 };
-use tl_model::settings::OverviewGridSetting;
-use tl_model::system::GpuEngine;
+use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::gpu_box::{
     Kept, MAX_GPUS, SectionRows, cell_min, charts_fit, charts_fixed_h, engine_lines, fit, kept,
@@ -693,7 +693,7 @@ fn place(cell: &PlanCell, input: &FlowInput<'_>) -> InnerPlacement {
 
 #[cfg(test)]
 mod tests {
-    use tl_model::layout::GPU_BOX_CONTAINER;
+    use tl_ui_settings::layout::GPU_BOX_CONTAINER;
 
     use super::super::gpu_box::{CELL_MIN_H, CELL_MIN_W};
 

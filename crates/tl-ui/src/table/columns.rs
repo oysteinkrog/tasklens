@@ -16,8 +16,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::ColumnId;
-use tl_model::settings::ColumnState;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec, SysTable};
+use tl_ui_settings::settings::ColumnState;
 
 use crate::table::tree_table::ColumnResizeMode;
 use crate::text::metrics::TextMetricsCache;
@@ -670,7 +670,7 @@ mod tests {
     use std::sync::Mutex;
 
     use gpui_kit::{TestAppContext, TestDispatcher};
-    use tl_model::settings::AppearanceSettings;
+    use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
     use crate::text::fonts::load_bundled_fonts;

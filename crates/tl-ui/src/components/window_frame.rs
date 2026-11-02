@@ -34,8 +34,8 @@ use gpui_kit::{
 use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
-use tl_model::settings::Decorations;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::Decorations;
 
 use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};

@@ -401,7 +401,7 @@ mod tests {
         AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
         div, rgb,
     };
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     use super::*;
     use crate::app::BootSettings;

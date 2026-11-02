@@ -17,8 +17,8 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId};
 use tl_model::process::GroupKind;
-use tl_model::settings::{Settings, SortState, UiState};
 use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery, TableSettings};
+use tl_ui_settings::settings::{Settings, SortState, UiState};
 use tracing::{debug, warn};
 
 use super::cells::ProcColumnKind;

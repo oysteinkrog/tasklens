@@ -14,7 +14,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::SeriesView;
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{SeriesSet, Snapshot};
 use tl_ui::app::{
     AppRequestHandler, BootSettings, EngineGlobal, QuitCalls, UiExitSlot, open_first_for_test,
@@ -32,6 +31,7 @@ use tl_ui::windows::low_memory::{FailLowMemoryOpen, init_low_memory};
 use tl_ui::{
     AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
 };
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 fn hub_with_engine(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Entity<SnapshotHub>) {

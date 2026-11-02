@@ -5,7 +5,7 @@
 //! one Action declared here, all in the `tasklens` namespace with a `Perf` prefix. Later beads
 //! add handlers, not Actions.
 //!
-//! Actions that carry a `tl_model::settings` enum keep the model type as the field, and read
+//! Actions that carry a `tl_ui_settings::settings` enum keep the model type as the field, and read
 //! and describe their JSON through a mirror enum declared here: tl-model has no JSON schema
 //! derive (ADR-001).
 
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::{Deserialize, Deserializer};
-pub use tl_model::settings::{
+pub use tl_ui_settings::settings::{
     CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph, OverviewRange, StatusBarPlacement,
 };
 
@@ -539,7 +539,7 @@ fn via<'de, D: Deserializer<'de>, M: Deserialize<'de> + Into<T>, T>(d: D) -> Res
     M::deserialize(d).map(Into::into)
 }
 
-/// Declares a JSON mirror of a `tl_model::settings` enum with `From` both ways. The serde
+/// Declares a JSON mirror of a `tl_ui_settings::settings` enum with `From` both ways. The serde
 /// renaming must match the model enum, so the keymap and settings spell values the same way.
 macro_rules! json_mirror {
     ($(#[$meta:meta])* $mirror:ident <-> $model:ident, $case:literal, [$($v:ident),+ $(,)?]) => {

@@ -25,7 +25,6 @@ use tl_model::details::{
     DetailTab, DetailTarget, HandleHit, HandleKind, HandlePhase, HandleSearchState, TargetDetail,
 };
 use tl_model::health::{HelperStartOutcome, HelperState};
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::validity::Validity;
 use tl_ui::action_tracker::{GlobalActionTracker, ToastTexts};
@@ -47,6 +46,7 @@ use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{PageId, SettingsWindow, all_pages};
 use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::{AccessButton, PropsWindow, open_process_properties};
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{

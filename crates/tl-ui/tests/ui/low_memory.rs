@@ -21,7 +21,6 @@ use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
     LowMemGroup, LowMemoryInfo, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
 };
-use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::action_tracker::GlobalActionTracker;
@@ -33,6 +32,7 @@ use tl_ui::theme::current;
 use tl_ui::window::settings::{PageId, all_pages};
 use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
+use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{is_open, toasts};

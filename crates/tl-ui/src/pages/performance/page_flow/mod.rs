@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{Bounds, point, px, size};
-use tl_model::layout::{FixedWidget, FormSet, WidgetContent, WidgetSetting};
+use tl_ui_settings::layout::{FixedWidget, FormSet, WidgetContent, WidgetSetting};
 
 use super::page::{DETAILS_GAP, GRAPH_H_STACKED, PAGE_PAD};
 use super::widget::compose::ROW_H;
@@ -192,7 +192,7 @@ mod tests {
     use std::sync::Arc;
 
     use gpui_kit::size;
-    use tl_model::layout::{
+    use tl_ui_settings::layout::{
         ContainerLayout, DeviceSelector, MetricKey, PresetSetting, SourceSelector, WidgetOptions,
     };
 
@@ -223,7 +223,7 @@ mod tests {
     fn layout(widgets: Vec<WidgetSetting>) -> ContainerLayout {
         ContainerLayout {
             container: "page.aggregate:disk".to_owned(),
-            version: tl_model::layout::LAYOUT_VERSION,
+            version: tl_ui_settings::layout::LAYOUT_VERSION,
             preset: Some(PresetSetting::default()),
             next_id: widgets.len() as u32 + 1,
             widgets,

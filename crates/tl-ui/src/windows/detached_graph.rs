@@ -14,7 +14,7 @@ use gpui_kit::{
     size,
 };
 use tl_model::demand::Demand;
-use tl_model::settings::DetachedWindowState;
+use tl_ui_settings::settings::DetachedWindowState;
 
 use crate::actions::{Quit, ShowMainWindow};
 use crate::anim::AnimationDriver;

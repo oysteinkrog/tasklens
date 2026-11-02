@@ -10,9 +10,6 @@ use tl_model::ids::{
 };
 use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, Settings, ThemeSettings, TrayGraphState as TrayGraphEntry, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, ProcessSeriesSet, ProcessSnapshot, SeriesSet};
 use tl_model::time::BootId;
 use tl_model::tray::{
@@ -27,6 +24,9 @@ use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::tray_bridge::{
     self, AddTrayGraph, RemoveTrayGraph, TRAY_TICK, TrayBridge, TrayStatus, main_window_target,
     tray_source_of_card,
+};
+use tl_ui_settings::settings::{
+    AppearanceSettings, Settings, ThemeSettings, TrayGraphState as TrayGraphEntry, UiState,
 };
 use tl_ui_testkit::fake_engine::FakeEngine;
 

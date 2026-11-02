@@ -9,13 +9,13 @@ use gpui_kit::SharedString;
 use smallvec::SmallVec;
 use tl_model::ids::{ColumnId, NodeId};
 use tl_model::process::ProcessRecord;
-use tl_model::settings::Settings;
 use tl_model::snapshot::{ServiceStatus, StartupType, UnitRecord};
 use tl_model::system::CpuSet;
 use tl_model::table::{
     ProcessTableView, ServiceColumn, SysColumnId, SysNodeId, TableRow, UnitType,
 };
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::Settings;
 
 use super::delegate::ServicesDelegate;
 use crate::i18n::tr_en;

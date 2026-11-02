@@ -51,8 +51,8 @@ use gpui_kit::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::{AppRequest, Command, CommandError, DeviceCommand, KWinCommand, Tab};
-use tl_model::settings::{Decorations, StartTab, WindowState};
 use tl_model::table::{Manager, TableMode, UnitRef};
+use tl_ui_settings::settings::{Decorations, StartTab, WindowState};
 use tracing::{debug, error, info, warn};
 
 use super::filter::{FilterBox, ReturnFocus, shown_on};
@@ -1347,7 +1347,7 @@ pub struct MainWindow {
     /// "all_tabs"` (UI-PRF-054). `None` without a hub.
     machine_status: Option<Entity<StatusBar>>,
     /// `performance.status_bar` at the last settings change.
-    status_placement: tl_model::settings::StatusBarPlacement,
+    status_placement: tl_ui_settings::settings::StatusBarPlacement,
     /// The page container's opacity at the last render.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     page_opacity: f32,

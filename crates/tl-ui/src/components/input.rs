@@ -474,7 +474,7 @@ mod tests {
         AnyElement, AppContext as _, Context, FocusHandle, KeyBinding, Render, Subscription,
         TestAppContext, VisualTestContext,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

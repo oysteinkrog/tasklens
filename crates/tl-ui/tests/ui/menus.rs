@@ -19,9 +19,6 @@ use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionState, Launc
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, SetupPhase, SetupStep, Tab};
 use tl_model::remote_proto::HostSettingsValues;
-use tl_model::settings::{
-    AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
-};
 use tl_model::table::TableMode;
 use tl_ui::actions::{
     MenuId, OpenAdditionalSetup, OpenCollectorHealth, OpenHandleSearch, OpenRunDialog,
@@ -50,6 +47,9 @@ use tl_ui::window::menus_file::SystemMonitor;
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
+use tl_ui_settings::settings::{
+    AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{passwordless, publish_polkit};
@@ -750,7 +750,7 @@ fn sub_highlighted(cx: &mut VisualTestContext) -> Vec<String> {
 
 fn set_processes(
     cx: &mut VisualTestContext,
-    f: impl FnOnce(&mut tl_model::settings::ProcessesSettings),
+    f: impl FnOnce(&mut tl_ui_settings::settings::ProcessesSettings),
 ) {
     cx.update(|_, cx| TlSettings::update(cx, |d| f(&mut d.settings.processes)));
 }

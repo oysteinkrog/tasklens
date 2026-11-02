@@ -27,7 +27,6 @@ use tl_model::history::HistoryView;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::series::{Sample, SeriesRing, SeriesView};
-use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ConnectionsSnapshot, InventorySnapshot, ProcessSnapshot, SeriesSet,
     ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, WindowsSnapshot,
@@ -39,6 +38,7 @@ use tl_model::system::{
 use tl_model::table::ProcessTableView;
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::EngineSettings;
 
 use super::synth::{
     BenchRng, CORES, CpuFrame, CpuSynth, DeviceFrame, DeviceSynth, PrefilledSeries, StatsFrame,

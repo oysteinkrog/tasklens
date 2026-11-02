@@ -32,9 +32,9 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
-use tl_model::settings::OverviewRange;
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::OverviewRange;
 
 use super::actions::PerfShowMiniWindow;
 use super::aggregate::{AggregateDiskPage, AggregateGpuPage};

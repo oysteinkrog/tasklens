@@ -9,7 +9,6 @@ use gpui_kit::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::health::{HelperStartOutcome, HelperState};
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::shield::{EndHelperSession, StartHelperSession};
@@ -21,6 +20,7 @@ use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::windows::actions::HandleSearchAll;
 use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::open_process_properties;
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{CANCELLED, FAILED, key, publish_helper, record, sent, starts_sent};

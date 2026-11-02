@@ -14,7 +14,6 @@ use tl_model::details::{
 };
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{AppearanceSettings, Decorations, ThemeSettings};
 use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
 use tl_model::table::Total;
@@ -29,6 +28,7 @@ use tl_ui::theme::{current, metrics};
 use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
 use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
+use tl_ui_settings::settings::{AppearanceSettings, Decorations, ThemeSettings};
 
 const KEY: ProcessKey = ProcessKey {
     start_ticks: 77,
@@ -1273,7 +1273,6 @@ mod window {
     use tl_model::health::{HelperStartOutcome, HelperState};
     use tl_model::ids::{ColumnId, NodeId};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -1295,6 +1294,7 @@ mod window {
         ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, AccessButton,
         PropsWindow, open_process_properties, props_words,
     };
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
@@ -5224,10 +5224,10 @@ mod threads {
     /// change never reaches `state.toml`, so it cannot overwrite the Processes layout.
     #[gpui_kit::test]
     fn threads_layout_never_persisted(cx: &mut TestAppContext) {
-        use tl_model::settings::{Settings, UiState};
         use tl_ui::app::BootSettings;
         use tl_ui::settings_global::TlSettings;
         use tl_ui::table::TreeTableDelegate as _;
+        use tl_ui_settings::settings::{Settings, UiState};
         cx.update(|cx| {
             cx.set_global(BootSettings {
                 settings: Settings::default(),

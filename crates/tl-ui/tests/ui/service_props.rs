@@ -22,7 +22,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, Tab};
 use tl_model::health::HelperState;
 use tl_model::journal::{JournalAccess, JournalControl, JournalEntry, JournalError, JournalEvent};
-use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::snapshot::{
     DepEntry, PidIds, RecoveryKeySet, RecoverySettings, Relation, ServiceBackend, ServiceStatus,
     StartupType, UnitDetails, UnitRecord,
@@ -46,6 +45,7 @@ use tl_ui::windows::service_properties::{
     LogsStatusForTest, LogsView, RecoveryForm, RecoveryTab, RestartPolicy, ServicePropertiesWindow,
     ServicePropsTab, ServicePropsTabView, changed_keys, validate_on_failure,
 };
+use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use tl_ui::pages::services::actions::ServicePropsOk;

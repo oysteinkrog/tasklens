@@ -187,7 +187,7 @@ mod tests {
         Render, TestAppContext, TestDispatcher, TextOverflow, TextRun, VisualTestContext,
         WhiteSpace, black, font,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
     use crate::text::fonts::{UI_FAMILY, load_bundled_fonts};

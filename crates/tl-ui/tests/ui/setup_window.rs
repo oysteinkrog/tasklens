@@ -12,7 +12,6 @@ use tl_model::command::{
     Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
 };
 use tl_model::health::SourceId;
-use tl_model::settings::{Settings, UiState};
 use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::badge::TlBadgeKind;
@@ -25,6 +24,7 @@ use tl_ui::window::setup::{
     CardView, SETUP_SCRIPT, ScriptWindow, SetupRow, SetupWindow, confirm_words, open_script_window,
     row_status,
 };
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{toasts, window_count};

@@ -201,7 +201,7 @@ mod tests {
         Context, FocusHandle, InteractiveElement, Modifiers, Render, TestAppContext,
         VisualTestContext, px,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

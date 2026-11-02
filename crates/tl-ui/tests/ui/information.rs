@@ -10,13 +10,13 @@ use gpui_kit::{
     Modifiers, MouseButton, ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled,
     TestAppContext, VisualTestContext, Window, div, px,
 };
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::validity::Validity;
 use tl_ui::components::kv_grid::{KvWords, TlValue, UnsupportedWord, kv_words, value_look_in};
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::information::actions::CopyInformationSection;
 use tl_ui::pages::information::section::{InfoRow, InfoSection, InfoSectionId, value_copy_text};
 use tl_ui::theme::{current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 type Dispatched = Rc<RefCell<Vec<InfoSectionId>>>;
 
@@ -1050,7 +1050,6 @@ mod hardware_builders {
     use super::*;
     use tl_model::devices::{DeviceCatalog, NetKind};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::PerformanceSettings;
     use tl_model::snapshot::{
         DiskDrive, DisplayConnector, DisplayMode, GraphicsAdapter, InvField, InventorySnapshot,
         MemoryModule, NetworkAdapter, PublicIpState, SystemSnapshot,
@@ -1062,6 +1061,7 @@ mod hardware_builders {
         build_memory, build_modules, build_motherboard, build_network, build_os, build_processor,
         build_system, net_kinds_of,
     };
+    use tl_ui_settings::settings::PerformanceSettings;
 
     const GIB: u64 = 1 << 30;
 
@@ -2450,11 +2450,11 @@ mod copy_text {
 fn information_keymap_registered(cx: &mut TestAppContext) {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::information::InformationPage;
     use tl_ui::pages::information::actions::{CopyInformationAll, InformationScrollBottom};
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
@@ -2516,7 +2516,6 @@ mod main_window {
     use tl_model::client::EngineClient;
     use tl_model::command::{Command, DeviceCommand, Tab};
     use tl_model::health::SourceId;
-    use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::{InventorySnapshot, SystemSnapshot};
     use tl_ui::actions::ShowSystemInformation;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -2525,6 +2524,7 @@ mod main_window {
     use tl_ui::pages::information::actions::CopyInformationAll;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_settings::settings::{Settings, StartTab, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {

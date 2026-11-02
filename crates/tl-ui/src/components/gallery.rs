@@ -33,9 +33,9 @@ use gpui_kit::{
     SharedString, Styled, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use tl_model::health::HelperState;
-use tl_model::settings::AppearanceSettings;
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::AppearanceSettings;
 
 use super::badge::{TlBadge, TlBadgeKind, count_text};
 use super::banner::{TlBanner, TlBannerKind};

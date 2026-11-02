@@ -12,9 +12,6 @@ use tl_model::demand::{DeviceHistoryRequest, DeviceRange};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, OverviewRange, Settings, StatusBarPlacement, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
@@ -36,6 +33,9 @@ use tl_ui::window::main::{
     self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
 };
 use tl_ui::window::titlebar::TitleBarProbe;
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewRange, Settings, StatusBarPlacement, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: u64 = 1_000_000_000;

@@ -39,11 +39,11 @@ use tl_model::devices::{DeviceIdentity, DeviceKind};
 use tl_model::health::{EngineCaps, SourceId};
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
-use tl_model::settings::{NetworkUnit, Settings, UiState};
 use tl_model::snapshot::{Snapshot, WindowEntry};
 use tl_model::table::{SortSpec, TableRow, UnitRef};
 use tl_model::time::TimeNs;
 use tl_model::validity::{FieldValidity, Validity};
+use tl_ui_settings::settings::{NetworkUnit, Settings, UiState};
 
 use super::actions::CapturedTargets;
 use super::cells::{
@@ -751,7 +751,7 @@ impl ProcessDelegate {
     fn sync_devices(
         &mut self,
         snapshot: &Snapshot,
-        state: Option<&tl_model::settings::ColumnState>,
+        state: Option<&tl_ui_settings::settings::ColumnState>,
     ) -> bool {
         let devices = &snapshot.devices;
         if self.devices_version == Some(devices.version) && state.is_none() {

@@ -42,9 +42,9 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::ids::{MetricId, SeriesId};
-use tl_model::settings::{DeviceVisibility, NetworkUnit};
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{DeviceVisibility, NetworkUnit};
 
 use super::actions::{
     PERFORMANCE_CONTEXT, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,

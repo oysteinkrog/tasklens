@@ -23,11 +23,11 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::history::{HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryView};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::process::ProcFlags;
-use tl_model::settings::{NetworkUnit, Settings, SortState, UiState};
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::table::SortSpec;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::{NetworkUnit, Settings, SortState, UiState};
 
 use super::actions::{DeleteFromHistory, HistoryShowInLiveTable};
 use crate::components::icons::TlIcon;

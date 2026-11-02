@@ -249,7 +249,7 @@ fn static_spinner(size: Pixels, color: Hsla) -> Div {
 mod tests {
     use gpui_kit::component::v_flex;
     use gpui_kit::{Context, DefiniteLength, Length, Render, TestAppContext, size};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

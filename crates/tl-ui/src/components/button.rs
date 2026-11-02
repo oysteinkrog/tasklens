@@ -567,7 +567,7 @@ mod tests {
         AnyElement, Background, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels,
         Render, TestAppContext, VisualTestContext, point,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

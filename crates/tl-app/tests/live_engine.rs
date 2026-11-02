@@ -34,8 +34,6 @@ use tl_model::demand::Demand;
 use tl_model::health::{ManagerState, SourceId};
 use tl_model::ids::ProcessKey;
 use tl_model::journal::{JournalHandle, JournalQuery};
-use tl_model::settings::EngineSettings;
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{ServicesSnapshot, Snapshot};
 use tl_model::table::{
     Manager, ServiceColumn, StartupColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec, SysTable,
@@ -56,6 +54,8 @@ use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _};
 use tl_ui::window::main::{
     MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
 };
+use tl_ui_settings::settings::EngineSettings;
+use tl_ui_settings::settings::{Settings, UiState};
 
 /// How long the engine gets to fill the table. The bead asks for 2 s in the real app; a debug
 /// test build under a loaded machine gets more.

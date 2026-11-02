@@ -7,13 +7,13 @@ use tl_model::client::EngineClient;
 use tl_model::command::Command;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::GroupKind;
-use tl_model::settings::{NetworkUnit, Settings, UiState};
 use tl_model::table::{ProcessTableView, SortSpec, TableMode, TableQuery, TableSettings};
 use tl_model::time::BootId;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::pages::processes::cells::ProcColumnKind;
 use tl_ui::pages::processes::table::{GroupHeader, ProcessQuery};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{NetworkUnit, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 fn query() -> ProcessQuery {
@@ -300,7 +300,6 @@ mod delegate {
     use tl_model::process::{
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
     };
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
     use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
     use tl_model::time::BootId;
@@ -317,6 +316,7 @@ mod delegate {
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::columns::TableId;
     use tl_ui::table::tree_table::{IconSlot, RowKind, TlTreeTable, TreeTableDelegate};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     pub(super) fn setup(cx: &mut TestAppContext) {
@@ -1908,7 +1908,6 @@ mod shell {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, StartTab, ThemeSettings, UiState};
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::toast;
@@ -1922,6 +1921,9 @@ mod shell {
         open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, Settings, StartTab, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{every_kind, snapshot};
@@ -2094,7 +2096,6 @@ mod toolbar {
     };
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings, UiState};
     use tl_model::table::TableMode;
     use tl_ui::actions::{CycleViewMode, ToggleHideSystem};
     use tl_ui::components::icons::TlIcon;
@@ -2103,6 +2104,7 @@ mod toolbar {
         HIDE_SYSTEM_ID, ProcessesButtons, ProcessesToolbar, VIEW_MODE_ID, toolbar_words,
     };
     use tl_ui::window::toolbar::{Toolbar, ToolbarContent, ToolbarModel};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings, UiState};
 
     use super::shell::{open_with, select};
 
@@ -2354,7 +2356,6 @@ mod jump {
     use tl_model::command::Tab;
     use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessRecord};
-    use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::{TableMode, TableQuery, TableRow};
     use tl_ui::pages::processes::ProcessesPage;
@@ -2364,6 +2365,7 @@ mod jump {
     use tl_ui::pages::processes::table::GroupHeader;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{ShellPage, main_window_view};
+    use tl_ui_settings::settings::UiState;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{group, key, record, row, snapshot};
@@ -2635,7 +2637,6 @@ mod jump {
         use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
         use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
         use tl_model::series::{Sample, SeriesView};
-        use tl_model::settings::{MemoryView, UiState};
         use tl_model::snapshot::{ComponentHeader, SeriesSet};
         use tl_model::system::MemGroupBand;
         use tl_model::time::now_boot_ns;
@@ -2650,6 +2651,7 @@ mod jump {
         use tl_ui::settings_global::TlSettings;
         use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage, main_window_view};
         use tl_ui::window::status::StatusChanged;
+        use tl_ui_settings::settings::{MemoryView, UiState};
         use tl_ui_testkit::fake_engine::FakeEngine;
 
         use super::super::shell::{open_on_perf, open_with_perf, select};
@@ -3194,13 +3196,13 @@ mod filter {
     use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
     use tl_model::client::EngineClient as _;
     use tl_model::command::Tab;
-    use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::TableMode;
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::filter::include_children_visible;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+    use tl_ui_settings::settings::UiState;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::snapshot;
@@ -3340,7 +3342,7 @@ mod filter {
     /// A `units` change reaches the engine as a new table query (tasklens-q4x76.22).
     #[gpui_kit::test]
     fn units_change_sends_table_query(cx: &mut TestAppContext) {
-        use tl_model::settings::NetworkUnit;
+        use tl_ui_settings::settings::NetworkUnit;
         let mut r = rig(cx);
         let last = |r: &Rig| super::sent(&r.engine).pop().expect("a query was sent");
         let before = last(&r).generation;
@@ -3412,10 +3414,10 @@ mod pause {
     use tl_model::command::Tab;
     use tl_model::ids::NodeId;
     use tl_model::process::ProcFlags;
-    use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::window::main::{ShellState, main_window_view};
+    use tl_ui_settings::settings::UiState;
 
     use super::delegate::{key, record, row, snapshot};
     use super::shell::open_with;
@@ -3583,7 +3585,6 @@ mod status {
     use tl_model::health::HelperState;
     use tl_model::ids::{NodeId, PseudoKind};
     use tl_model::process::{GroupRowKind, ProcFlags};
-    use tl_model::settings::UiState;
     use tl_model::snapshot::Snapshot;
     use tl_model::table::TableRow;
     use tl_ui::actions::{EndHelperSession, StartHelperSession};
@@ -3591,6 +3592,7 @@ mod status {
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
     use tl_ui::window::status::{StatusActionKind, StatusChanged};
+    use tl_ui_settings::settings::UiState;
 
     use super::delegate::{group, key, record, row, snapshot};
     use super::shell::open_with;
@@ -3882,7 +3884,6 @@ mod keys {
     use tl_model::command::{Command, Tab};
     use tl_model::ids::NodeId;
     use tl_model::process::ProcFlags;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::Snapshot;
     use tl_ui::actions::FocusFilter;
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -3891,6 +3892,7 @@ mod keys {
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{key, record, row, snapshot};
@@ -4108,7 +4110,6 @@ mod pick {
     use tl_model::command::{Command, KWinCommand, Tab};
     use tl_model::ids::NodeId;
     use tl_model::process::{ProcFlags, ProcessRecord};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{ComponentHeader, PickOutcome, PickResult, Snapshot, WindowsSnapshot};
     use tl_model::validity::Validity;
     use tl_ui::actions::StartWindowPick;
@@ -4120,6 +4121,7 @@ mod pick {
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window_on, set_test_page};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{key, record, row, snapshot};

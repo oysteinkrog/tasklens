@@ -55,10 +55,11 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "smallvec",
             "rustix",
             "rustc-hash",
-            // ADR-019: `LayoutEntry::Kept` keeps a layout entry as read.
-            "toml",
         ],
     ),
+    // UI settings and layouts, moved from tl-model (ADR-020). toml: `LayoutEntry::Kept` keeps
+    // a layout entry as read (ADR-019).
+    ("tl-ui-settings", &["tl-model", "serde", "bitflags", "toml"]),
     (
         "tl-collect",
         &[
@@ -144,6 +145,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "tl-model",
             "tl-engine",
             "tl-ui",
+            "tl-ui-settings",
             "tl-ops",
             "tl-tray",
             "tl-remote",

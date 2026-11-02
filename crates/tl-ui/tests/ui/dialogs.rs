@@ -13,7 +13,6 @@ use gpui_kit::{
     px, size,
 };
 use tl_model::client::EngineClient;
-use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
@@ -24,6 +23,7 @@ use tl_ui::components::window_frame::{
 };
 use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
 use tl_ui::windows::frame::{PwnWindow, spec as pwn_spec};
+use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{is_open, window_count};

@@ -54,8 +54,8 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px, relative, size,
 };
 use tl_model::ids::SeriesId;
-use tl_model::layout::{FormSet, WidgetSetting};
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{FormSet, WidgetSetting};
 
 use super::compose::{
     CELL_BAR_PAD, CELL_HEADER_H, CELL_STATS_H, Composed, Composition, ROW_BAR_MIN_W, ROW_GAP,

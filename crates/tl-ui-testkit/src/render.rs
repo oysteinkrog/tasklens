@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use gpui_kit::{App, AssetSource, Entity, HeadlessAppContext, Pixels, Render, Size, Window, size};
 pub use image::{Rgba, RgbaImage};
-use tl_model::settings::AppearanceSettings;
 
 /// Where a failed compare writes `<name>.actual.png` and `<name>.diff.png`.
 pub const DIFF_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/golden-diff");
@@ -66,12 +65,13 @@ pub fn run_on_lavapipe(test_path: &str, body: impl FnOnce()) {
 pub struct RenderSetup {
     /// The asset source of the app.
     pub assets: Arc<dyn AssetSource>,
-    /// Loads the fonts, inits gpui-kit and the theme store with these appearance settings.
-    pub init: fn(&AppearanceSettings, &mut App),
+    /// Loads the fonts, inits gpui-kit and the theme store with default appearance settings.
+    /// Returns their `ui_scale_pct`.
+    pub init: fn(&mut App) -> u16,
     /// Switches the theme at once, without a crossfade. Panics on an unknown name.
     pub set_theme: fn(&str, &mut App),
-    /// Applies the appearance settings' metrics (`ui_scale`).
-    pub apply_metrics: fn(&AppearanceSettings, &mut App),
+    /// Applies the metrics of default appearance settings with this `ui_scale_pct`.
+    pub apply_metrics: fn(u16, &mut App),
 }
 
 /// A headless app set up by a `RenderSetup` with default appearance settings, and reduced motion
@@ -79,7 +79,8 @@ pub struct RenderSetup {
 pub struct RenderHarness {
     cx: HeadlessAppContext,
     setup: RenderSetup,
-    appearance: AppearanceSettings,
+    /// The appearance `ui_scale_pct`; the other appearance settings stay at their defaults.
+    ui_scale_pct: u16,
 }
 
 impl RenderHarness {
@@ -95,18 +96,18 @@ impl RenderHarness {
         let mut cx = HeadlessAppContext::with_platform(text_system, setup.assets.clone(), || {
             gpui_kit::platform::current_headless_renderer()
         });
-        let appearance = AppearanceSettings::default();
-        cx.update(|cx| {
-            (setup.init)(&appearance, cx);
+        let ui_scale_pct = cx.update(|cx| {
+            let ui_scale_pct = (setup.init)(cx);
             // The UI ANDs `motion.animations` with this, so it stands in for
             // `motion.animations = false`.
             cx.set_reduce_motion(true);
+            ui_scale_pct
         });
         cx.run_until_parked();
         Self {
             cx,
             setup,
-            appearance,
+            ui_scale_pct,
         }
     }
 
@@ -120,16 +121,16 @@ impl RenderHarness {
     /// Sets `ui_scale` (ADR-013 renders at 1.0 and 1.1). This is tasklens' metrics scale, not
     /// the device scale, which stays 2.0 (R-291).
     pub fn set_scale(&mut self, scale: f32) {
-        self.appearance.ui_scale_pct = (scale * 100.0).round() as u16;
-        let appearance = self.appearance.clone();
+        self.ui_scale_pct = (scale * 100.0).round() as u16;
+        let ui_scale_pct = self.ui_scale_pct;
         let apply_metrics = self.setup.apply_metrics;
-        self.cx.update(|cx| apply_metrics(&appearance, cx));
+        self.cx.update(|cx| apply_metrics(ui_scale_pct, cx));
         self.cx.run_until_parked();
     }
 
     /// The `ui_scale` set with `set_scale`.
     pub fn scale(&self) -> f32 {
-        f32::from(self.appearance.ui_scale_pct) / 100.0
+        f32::from(self.ui_scale_pct) / 100.0
     }
 
     /// Opens a window of `size × ui_scale` logical px, draws the view and captures it. The image

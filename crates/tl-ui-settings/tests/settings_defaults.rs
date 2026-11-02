@@ -3,7 +3,7 @@
 //! `[[minigraphs]]`, `[[detached_windows]]` and `[[tray_graphs]]` examples are commented out,
 //! because those arrays are empty by default.
 
-use tl_model::settings::{ColumnTables, Settings, UiState};
+use tl_ui_settings::settings::{ColumnTables, Settings, UiState};
 
 const SETTINGS_TOML: &str = r#"schema_version = 1
 

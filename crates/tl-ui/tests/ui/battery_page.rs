@@ -11,7 +11,6 @@ use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId};
-use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{BatteryDetails, DeviceDetailsSnapshot, InvField};
 use tl_model::validity::Validity;
 use tl_ui::anim::AnimationDriver;
@@ -27,6 +26,7 @@ use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::sensors::BatteryPage;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const BAT: DeviceIdx = DeviceIdx(30);

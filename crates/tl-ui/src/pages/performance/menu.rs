@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use gpui_kit::{App, Global, SharedString, Window};
-use tl_model::settings::OverviewRange;
+use tl_ui_settings::settings::OverviewRange;
 
 use super::actions::{
     PerfAddTrayGraph, PerfCopyDeviceInfo, PerfCopyValue, PerfEnterEditMode, PerfJumpToType,

@@ -15,7 +15,6 @@ use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signa
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::ids::NodeId;
-use tl_model::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::validity::Validity;
@@ -34,6 +33,7 @@ use tl_ui::table::tree_table::TreeTableDelegate as _;
 use tl_ui::window::main::{MainWindow, main_window_title, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::windows::props::{PropsWindow, open_process_properties};
+use tl_ui_settings::settings::{HostEntry, Settings, StartTab, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{key, record, toasts};

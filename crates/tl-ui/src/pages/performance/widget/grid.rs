@@ -32,10 +32,10 @@ use std::sync::Arc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
-use tl_model::layout::{
+use tl_ui_settings::layout::{
     ContainerLayout, DeviceSelector, FormSet, WidgetCell, WidgetContent, WidgetSetting, grid_cols,
 };
-use tl_model::layout_pages::PAGE_CONTAINER_PREFIX;
+use tl_ui_settings::layout_pages::PAGE_CONTAINER_PREFIX;
 
 use super::compose::{smallest, widget_smallest};
 
@@ -577,7 +577,7 @@ pub fn set_cell(
 /// Widget `id`'s cell moved `dx` columns and `dy` rows, inside the columns (Alt+arrow keys).
 pub fn moved_by(layout: &ContainerLayout, id: u32, dx: i32, dy: i32) -> Option<WidgetCell> {
     let c = layout.widgets.iter().find(|w| w.id == id)?.cell?;
-    let cols = tl_model::layout::grid_cols(&layout.container);
+    let cols = tl_ui_settings::layout::grid_cols(&layout.container);
     Some(WidgetCell {
         col: shift(c.col, dx, 0, cols.saturating_sub(c.cols)),
         row: shift(c.row, dy, 0, u16::MAX - c.rows),
@@ -589,7 +589,7 @@ pub fn moved_by(layout: &ContainerLayout, id: u32, dx: i32, dy: i32) -> Option<W
 /// bottom edge (Alt+Shift+arrow keys).
 pub fn grown_by(layout: &ContainerLayout, id: u32, dw: i32, dh: i32) -> Option<WidgetCell> {
     let c = layout.widgets.iter().find(|w| w.id == id)?.cell?;
-    let cols = tl_model::layout::grid_cols(&layout.container);
+    let cols = tl_ui_settings::layout::grid_cols(&layout.container);
     Some(WidgetCell {
         cols: shift(c.cols, dw, 1, cols.saturating_sub(c.col).max(1)),
         rows: shift(c.rows, dh, 1, u16::MAX - c.row),
@@ -724,7 +724,7 @@ pub fn pin(
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use tl_model::layout::{
+    use tl_ui_settings::layout::{
         GPU_BOX_CONTAINER, MetricKey, PresetSetting, SourceSelector, WidgetContent, WidgetOptions,
     };
 
@@ -760,7 +760,7 @@ mod tests {
     fn grid_layout(cells: &[(u32, FormSet, WidgetCell)]) -> ContainerLayout {
         ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
+            version: tl_ui_settings::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: None,
             widgets: cells
                 .iter()
@@ -1029,7 +1029,7 @@ mod tests {
         *second.content.device_mut().expect("a metric") = DeviceSelector::Slot(1);
         let flow = ContainerLayout {
             container: GPU_BOX_CONTAINER.to_owned(),
-            version: tl_model::layout::LAYOUT_VERSION_GPU_ONLY,
+            version: tl_ui_settings::layout::LAYOUT_VERSION_GPU_ONLY,
             preset: Some(PresetSetting {
                 id: "engine_charts".to_owned(),
                 ..PresetSetting::default()
@@ -1192,7 +1192,7 @@ mod tests {
         let value = widget(0, FormSet::VALUE, None);
         assert_eq!(widget_default_span_in(PAGE, &value), (12, PAGE_METRIC_ROWS));
         let fixed = WidgetSetting {
-            content: WidgetContent::Fixed(tl_model::layout::FixedWidget::Details),
+            content: WidgetContent::Fixed(tl_ui_settings::layout::FixedWidget::Details),
             ..widget(0, FormSet::empty(), None)
         };
         assert_eq!(widget_default_span_in(PAGE, &fixed), (12, PAGE_GROUP_ROWS));

@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tl_model::devices::DeviceIdentity;
-use tl_model::layout::{
+use tl_model::snapshot::Snapshot;
+use tl_ui_settings::layout::{
     DeviceSelector, GroupKind, GroupSelector, METRIC_ENGINE_ANY, MetricKey, SourceSelector,
 };
-use tl_model::layout_boxes::CPU_LOGICAL_PREFIX;
-use tl_model::settings::PerformanceSettings;
-use tl_model::snapshot::Snapshot;
+use tl_ui_settings::layout_boxes::CPU_LOGICAL_PREFIX;
+use tl_ui_settings::settings::PerformanceSettings;
 
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
 use crate::pages::performance::sidebar::retain_whole_disks;
@@ -184,7 +184,7 @@ fn sidebar_rows(
         .collect()
 }
 
-type Overrides = HashMap<DeviceKey, tl_model::settings::DeviceVisibility>;
+type Overrides = HashMap<DeviceKey, tl_ui_settings::settings::DeviceVisibility>;
 
 /// `device_order` and `device_overrides` as the sidebar reads them.
 fn view_parts(perf: Option<&PerformanceSettings>) -> (Vec<DeviceKey>, Overrides) {
@@ -225,11 +225,11 @@ fn settings_view<'a>(
 mod tests {
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, NetKind};
     use tl_model::ids::DeviceIdx;
-    use tl_model::layout::{GroupItems, GroupOptions};
-    use tl_model::layout_boxes::{
+    use tl_model::time::BootId;
+    use tl_ui_settings::layout::{GroupItems, GroupOptions};
+    use tl_ui_settings::layout_boxes::{
         DEVICE_CPU, DEVICE_DISKS, DEVICE_NETS, METRIC_DISK_IO, METRIC_LOAD, METRIC_NET_TRAFFIC,
     };
-    use tl_model::time::BootId;
 
     use super::*;
 

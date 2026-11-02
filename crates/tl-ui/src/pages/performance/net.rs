@@ -33,12 +33,12 @@ use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{InvField, NetDetails, PublicIpState, Snapshot, WifiInfo};
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
 use super::details::{Fallback, KeyValueModel, Template};

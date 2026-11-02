@@ -32,7 +32,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::demand::Demand;
-use tl_model::settings::Decorations;
+use tl_ui_settings::settings::Decorations;
 
 use crate::actions::{ShowMainWindow, ToggleMiniWindow};
 use crate::anim::AnimationDriver;

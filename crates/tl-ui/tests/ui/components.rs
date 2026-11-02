@@ -11,13 +11,13 @@ use gpui_kit::{
     IntoElement, KeyBinding, Modifiers, ParentElement, Pixels, Render, Styled, TestAppContext,
     VisualTestContext, Window, div, px,
 };
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_ui::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui::components::checkbox::{TlCheckbox, bind_keys_components};
 use tl_ui::components::input::{TlInputSize, TlTextInput};
 use tl_ui::components::switch::TlSwitch;
 use tl_ui::components::tabs::{TlTabSpec, TlTabs};
 use tl_ui::theme::current;
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 gpui_kit::actions!(tl_components_test, [FocusNext, FocusPrev]);
 

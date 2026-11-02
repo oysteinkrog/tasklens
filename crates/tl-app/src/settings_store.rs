@@ -21,13 +21,13 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tl_model::ids::ColumnId;
-use tl_model::settings::{
-    ColumnState, LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, OVERVIEW_KEY, SCHEMA_VERSION, Settings,
-    StartupSettings, UiState,
-};
 use tl_model::table::{SysColumnId, SysTable};
 use tl_ui::theme::user_store::serialize_user_themes;
 use tl_ui::{PersistTheme, RunHistoryEntry, RunHistoryStore};
+use tl_ui_settings::settings::{
+    ColumnState, LAYOUTS_CONVERTED_KEY, LAYOUTS_KEY, OVERVIEW_KEY, SCHEMA_VERSION, Settings,
+    StartupSettings, UiState,
+};
 use tracing::{info, warn};
 
 use crate::paths::{FILE_MODE, Paths, ensure_dir};
@@ -335,7 +335,7 @@ fn deserialize_by_section<T: Stored>(kind: FileKind, mut table: toml::Table) -> 
 /// converted old settings to widget layouts (ADR-019): `.pre-layouts-v{LAYOUT_VERSION}`, now
 /// `.pre-layouts-v2`. A copy an older build kept under another version stays as it is.
 pub fn pre_layouts_suffix() -> String {
-    format!(".pre-layouts-v{}", tl_model::layout::LAYOUT_VERSION)
+    format!(".pre-layouts-v{}", tl_ui_settings::layout::LAYOUT_VERSION)
 }
 
 /// How long the store waits after the last change before it saves (ADR-011 Save).

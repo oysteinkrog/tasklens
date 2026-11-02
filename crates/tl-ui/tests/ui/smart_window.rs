@@ -7,7 +7,6 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, DeviceCommand, Tab};
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
-use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{DiskDetails, SmartAttr, SmartData};
 use tl_model::table::Total;
 use tl_model::validity::Validity;
@@ -17,6 +16,7 @@ use tl_ui::pages::performance::actions::PerfShowSmart;
 use tl_ui::theme::current;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::windows::smart::{SmartColumn, SmartWindow, find_smart};
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const IDX: DeviceIdx = DeviceIdx(3);

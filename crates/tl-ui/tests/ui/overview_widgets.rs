@@ -14,16 +14,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
-    MetricKey, PresetSetting, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
-    WidgetSetting,
-};
-use tl_model::layout::{box_layout, convert_old_settings};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{
-    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-};
 use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot, SystemSnapshot};
 use tl_model::system::{GpuEngine, GpuTotals, Metric};
 use tl_model::time::now_boot_ns;
@@ -51,6 +42,15 @@ use tl_ui::pages::performance::widget::source::{
     Availability, AvailabilityChanged, SourceData, SourceStore,
 };
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
+    MetricKey, PresetSetting, SourceSelector, WidgetCell, WidgetContent, WidgetOptions,
+    WidgetSetting,
+};
+use tl_ui_settings::layout::{box_layout, convert_old_settings};
+use tl_ui_settings::settings::{
+    AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GIB: u64 = 1 << 30;
@@ -2193,9 +2193,9 @@ fn overview_widget_add_menu_adds(cx: &mut TestAppContext) {
     let WidgetContent::Group(g) = &w.content else {
         panic!("a group widget: {w:?}");
     };
-    assert_eq!(g.members, tl_model::layout::GroupKind::Engines);
+    assert_eq!(g.members, tl_ui_settings::layout::GroupKind::Engines);
     assert_eq!(g.device, DeviceSelector::Key(key(1)));
-    assert_eq!(g.options.items, tl_model::layout::GroupItems::Cells);
+    assert_eq!(g.options.items, tl_ui_settings::layout::GroupItems::Cells);
     assert_eq!(w.device_name.as_deref(), Some("Card A"));
     assert_eq!(w.cell.map(|c| c.cols), Some(6));
     assert_eq!(r.selected(&e), Some(6));
@@ -3027,10 +3027,10 @@ fn overview_widget_box_sources_read_their_records(cx: &mut TestAppContext) {
 /// follows the setting and the source notifies.
 #[gpui_kit::test]
 fn overview_widget_net_source_follows_unit(cx: &mut TestAppContext) {
-    use tl_model::settings::NetworkUnit;
     use tl_model::system::{LinkState, NetTotals};
     use tl_ui::chart::ValueFormat;
     use tl_ui::chart::labels::{NetFormat, format_value};
+    use tl_ui_settings::settings::NetworkUnit;
     let mut r = open(cx);
     r.publish(|s| s.devices = Arc::new(box_catalog(2)));
     r.system(|sys| {
@@ -3213,8 +3213,8 @@ fn net_series(r: &mut Rig, rx: &[f32], tx: &[f32]) {
 #[gpui_kit::test]
 fn overview_widget_source_state_sweep(cx: &mut TestAppContext) {
     use tl_model::devices::{AggregateKind, NetKind};
-    use tl_model::settings::NetworkUnit;
     use tl_ui::pages::performance::overview::timeline::{PauseKind, Paused, set_paused};
+    use tl_ui_settings::settings::NetworkUnit;
     let mut r = open(cx);
     r.vcx.update(|_, cx| {
         TlSettings::update(cx, |d| d.settings.performance.show_network_virtual = false);

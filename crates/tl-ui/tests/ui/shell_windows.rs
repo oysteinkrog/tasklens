@@ -12,7 +12,6 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
-use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
@@ -33,6 +32,7 @@ use tl_ui::window::shortcuts::{
     Heading, LISTED_CONTEXTS, ShortcutsWindow, build_rows, first_context,
 };
 use tl_ui::window::theme_editor::{EditTheme, ThemeEditor, ThemeEditorDone};
+use tl_ui_settings::settings::{Decorations, Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Parent;
@@ -1306,7 +1306,6 @@ mod reset_settings {
         WindowHandle, div, px, size,
     };
     use tl_model::client::EngineClient;
-    use tl_model::settings::{Decorations, Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::{
@@ -1315,6 +1314,7 @@ mod reset_settings {
     use tl_ui::settings_global::TlSettings;
     use tl_ui::theme::ThemeStore;
     use tl_ui::window::confirm::ResetSettings;
+    use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;
@@ -1635,13 +1635,13 @@ mod crash_report {
     use tl_model::actions::ActionKind;
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
-    use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, CrashReport, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
     use tl_ui::window::crash_report::{
         CopyCrashReport, CrashReportWindow, OpenCrashLogFolder, show_pending,
     };
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Main;
@@ -1857,12 +1857,12 @@ mod public_ip {
         VisualTestContext, Window, WindowHandle, div, px, size,
     };
     use tl_model::client::EngineClient;
-    use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::public_ip::request_public_ip_fetch;
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;

@@ -281,11 +281,11 @@ mod drawn {
         App, Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
         VisualTestContext, Window, div, hsla, px, size,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::pages::performance::overview::mem_box::{METER_ROW_LABEL_ID, MeterRow, meter_row};
     use tl_ui::pages::performance::overview::parts::{
         CoreBars, CoreBarsModel, METER_H, Meter, take_meter_quads,
     };
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     enum Part {
         Meter(Option<f32>),
@@ -474,7 +474,6 @@ mod boxes {
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot};
     use tl_model::system::Metric;
     use tl_model::time::now_boot_ns;
@@ -489,6 +488,7 @@ mod boxes {
     use tl_ui::pages::performance::overview::mem_box::{MEM_BOX_ID, MemBox};
     use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell, core_spark_id};
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
@@ -1377,7 +1377,7 @@ mod boxes {
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
                 d.settings.performance.overview_core_smoothing =
-                    tl_model::settings::CoreSmoothing::Off;
+                    tl_ui_settings::settings::CoreSmoothing::Off;
             });
         });
         publish_train(&mut r, &flicker());
@@ -1584,7 +1584,6 @@ mod bottom {
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{
         ComponentHeader, DeviceDetailsSnapshot, DiskDetails, GraphicsAdapter, InvField, SeriesSet,
         Snapshot, SystemSnapshot,
@@ -1610,6 +1609,7 @@ mod bottom {
     use tl_ui::pages::performance::overview::net_box::NetBox;
     use tl_ui::pages::performance::overview::parts::{BOX_CHROME, GridFit, body_id, fill_grid};
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
@@ -1995,7 +1995,7 @@ mod bottom {
     /// hidden GPU is skipped and a third is never placed (tasklens-lhliq.7).
     #[gpui_kit::test]
     fn overview_gpu_widget_slots_follow_shown_gpus(cx: &mut TestAppContext) {
-        use tl_model::layout::DeviceSelector;
+        use tl_ui_settings::layout::DeviceSelector;
 
         let shown = |idx: &[u16]| -> Devices {
             idx.iter()
@@ -3108,7 +3108,7 @@ mod bottom {
         tl_ui::chart::format_value(
             tl_ui::chart::ValueFormat::Percent,
             v,
-            tl_model::settings::NetworkUnit::default(),
+            tl_ui_settings::settings::NetworkUnit::default(),
             &mut s,
         );
         s
@@ -3306,7 +3306,7 @@ mod bottom {
         tl_ui::chart::format_value(
             tl_ui::chart::ValueFormat::RateNetwork,
             1000.,
-            tl_model::settings::NetworkUnit::default(),
+            tl_ui_settings::settings::NetworkUnit::default(),
             &mut down,
         );
         assert_eq!(texts[0], down);
@@ -3371,7 +3371,7 @@ mod bottom {
         publish_net_series(r);
     }
 
-    fn rate(unit: tl_model::settings::NetworkUnit, v: f32) -> String {
+    fn rate(unit: tl_ui_settings::settings::NetworkUnit, v: f32) -> String {
         let mut out = String::new();
         tl_ui::chart::format_value(tl_ui::chart::ValueFormat::RateNetwork, v, unit, &mut out);
         out
@@ -3382,7 +3382,7 @@ mod bottom {
         let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
         two_adapters(&mut r);
         let (_, _, net) = r.boxes();
-        let unit = tl_model::settings::NetworkUnit::default();
+        let unit = tl_ui_settings::settings::NetworkUnit::default();
         let (texts, copy) = r.vcx.update(|_, cx| {
             let n = net.read(cx);
             let mut copy = String::new();
@@ -3419,7 +3419,7 @@ mod bottom {
         r.vcx.update(|window, _| window.activate_window());
         let _ = take_fit_texts();
         draw(r.vcx);
-        let unit = tl_model::settings::NetworkUnit::default();
+        let unit = tl_ui_settings::settings::NetworkUnit::default();
         let peak = format!(", peak {}", rate(unit, 8000.));
         let texts = take_fit_texts();
         assert!(
@@ -3450,7 +3450,7 @@ mod bottom {
 
     #[gpui_kit::test]
     fn net_box_formats_like_network_page(cx: &mut TestAppContext) {
-        use tl_model::settings::NetworkUnit;
+        use tl_ui_settings::settings::NetworkUnit;
         let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
         two_adapters(&mut r);
         let (_, _, net) = r.boxes();
@@ -3590,10 +3590,6 @@ mod page {
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{
-        AppearanceSettings, OverviewGridSetting, OverviewLayoutSetting, Settings, ThemeSettings,
-        UiState,
-    };
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
@@ -3630,6 +3626,10 @@ mod page {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, OverviewGridSetting, OverviewLayoutSetting, Settings, ThemeSettings,
+        UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const CPUS: u16 = 4;
@@ -4254,7 +4254,7 @@ mod page {
             self.vcx.update(|_, cx| page.read(cx).layout().clone())
         }
 
-        fn saved(&mut self) -> Option<tl_model::settings::OverviewLayoutSetting> {
+        fn saved(&mut self) -> Option<tl_ui_settings::settings::OverviewLayoutSetting> {
             self.vcx
                 .update(|_, cx| TlSettings::settings(cx).performance.overview.clone())
         }
@@ -4384,7 +4384,9 @@ mod page {
         assert_eq!(r.saved(), Some(before));
     }
 
-    fn cpu_split_of(setting: &Option<tl_model::settings::OverviewLayoutSetting>) -> Option<f64> {
+    fn cpu_split_of(
+        setting: &Option<tl_ui_settings::settings::OverviewLayoutSetting>,
+    ) -> Option<f64> {
         setting.as_ref().and_then(|s| s.grid[0].split)
     }
 
@@ -6717,7 +6719,7 @@ mod page {
             .flat_map(|pct| [(1200., 900.), (900., 560.), (500., 900.)].map(|wh| (pct, wh)))
         {
             let gap = r.vcx.update(|_, cx| {
-                let appearance = tl_model::settings::AppearanceSettings {
+                let appearance = tl_ui_settings::settings::AppearanceSettings {
                     ui_scale_pct: pct,
                     ..Default::default()
                 };
@@ -8400,7 +8402,6 @@ mod page {
     #[gpui_kit::test]
     fn overview_gpu_flow_matches_modes(cx: &mut TestAppContext) {
         use gpui_kit::Pixels;
-        use tl_model::layout::{DeviceSelector, GPU_BOX_CONTAINER};
         use tl_ui::pages::performance::actions::PerfWidgetEditStart;
         use tl_ui::pages::performance::overview::gpu_box::{
             chart_id, engine_cell_id, engine_row_id,
@@ -8408,6 +8409,7 @@ mod page {
         use tl_ui::pages::performance::overview::gpu_flow::{chart_of, engine_widget, widget_of};
         use tl_ui::pages::performance::widget::container::container_id;
         use tl_ui::pages::performance::widget::metric_widget::widget_id;
+        use tl_ui_settings::layout::{DeviceSelector, GPU_BOX_CONTAINER};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         leave_out_disk_and_net(&mut r);
@@ -8563,12 +8565,12 @@ mod page {
     /// formats; a part the box does not draw has none.
     #[gpui_kit::test]
     fn overview_gpu_presets_render_through_widgets(cx: &mut TestAppContext) {
-        use tl_model::layout::{DeviceSelector, GPU_BOX_CONTAINER};
         use tl_ui::pages::performance::overview::gpu_box::{
             chart_id, engine_cell_id, engine_row_id,
         };
         use tl_ui::pages::performance::overview::gpu_flow::{chart_of, engine_widget, widget_of};
         use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
+        use tl_ui_settings::layout::{DeviceSelector, GPU_BOX_CONTAINER};
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         leave_out_disk_and_net(&mut r);
@@ -8752,9 +8754,9 @@ mod page {
     /// so the GPU box has their room. Widget selectors have the container id
     /// (tasklens-6swdr.10), so other boxes do not shadow them.
     fn leave_out_disk_and_net(r: &mut Rig) {
-        use tl_model::settings::OverviewLayoutSetting;
         use tl_ui::pages::performance::overview::disk_box::DISK_BOX_ID;
         use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
+        use tl_ui_settings::settings::OverviewLayoutSetting;
         r.vcx.update(|_, cx| {
             TlSettings::update(cx, |d| {
                 let perf = &mut d.settings.performance;
@@ -8781,9 +8783,9 @@ mod page {
         what: &str,
     ) {
         use gpui_kit::Pixels;
-        use tl_model::layout::GPU_BOX_CONTAINER;
         use tl_ui::pages::performance::widget::container::container_id;
         use tl_ui::pages::performance::widget::metric_widget::widget_id;
+        use tl_ui_settings::layout::GPU_BOX_CONTAINER;
 
         let (placed, drawn) = r.vcx.update(|_, cx| {
             let g = gpu.read(cx);
@@ -8973,10 +8975,10 @@ mod page {
     #[gpui_kit::test]
     fn gpu_box_split_resize_draws_the_placed_chart(cx: &mut TestAppContext) {
         use gpui_kit::Pixels;
-        use tl_model::layout::GPU_BOX_CONTAINER;
         use tl_ui::pages::performance::overview::gpu_box::{GPU_SPLITTER_ID, chart_id};
         use tl_ui::pages::performance::overview::gpu_flow::chart_of;
         use tl_ui::pages::performance::widget::container::container_id;
+        use tl_ui_settings::layout::GPU_BOX_CONTAINER;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         leave_out_disk_and_net(&mut r);
@@ -9049,12 +9051,12 @@ mod page {
     /// container, and the chart reads the VRAM history.
     #[gpui_kit::test]
     fn overview_gpu_vram_chart_widget_draws_history(cx: &mut TestAppContext) {
-        use tl_model::layout::{
+        use tl_ui::pages::performance::overview::gpu_box::EMPTY_ID;
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
+        use tl_ui_settings::layout::{
             ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
             MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
         };
-        use tl_ui::pages::performance::overview::gpu_box::EMPTY_ID;
-        use tl_ui::pages::performance::widget::metric_widget::widget_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         let page = r.page.clone();
@@ -9170,11 +9172,11 @@ mod page {
     /// and returns; the saved layout is never touched, and the widget is drawn again.
     #[gpui_kit::test]
     fn overview_gpu_hotplug_keeps_the_saved_layout(cx: &mut TestAppContext) {
-        use tl_model::layout::{
+        use tl_ui::pages::performance::widget::metric_widget::widget_id;
+        use tl_ui_settings::layout::{
             ContainerLayout, DeviceSelector, FormSet, GPU_BOX_CONTAINER, LAYOUT_VERSION_GPU_ONLY,
             MetricKey, SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
         };
-        use tl_ui::pages::performance::widget::metric_widget::widget_id;
 
         let mut r = open_rooted(cx, true, 1200., 900.);
         let page = r.page.clone();
@@ -9533,9 +9535,6 @@ mod wired {
     use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{
-        AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
-    };
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, SeriesSet};
     use tl_model::time::{BootId, now_boot_ns};
     use tl_model::validity::{FieldValidity, Validity};
@@ -9570,6 +9569,9 @@ mod wired {
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, OverviewLayoutSetting, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
@@ -10875,13 +10877,13 @@ mod title_row {
         Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
         VisualTestContext, Window, div, px, size,
     };
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::pages::performance::overview::net_box::NET_BOX_ID;
     use tl_ui::pages::performance::overview::parts::{
         box_frame, figures_id, title_line_id, title_name_id, title_row_id, title_value_id,
     };
     use tl_ui::pages::performance::overview::range::RangeText;
     use tl_ui::theme::{current, metrics};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     const LONG: &str = "Realtek Semiconductor Co., Ltd. RTL8125 2.5GbE Controller";
 
@@ -10999,7 +11001,6 @@ mod sweep {
     use tl_model::client::EngineClient;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::DeviceIdx;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
     use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
     use tl_model::validity::Validity;
@@ -11029,6 +11030,7 @@ mod sweep {
         self, BANDS_ID, MARKER_ROW_ID, TICK_ROW_ID, TimelineBox,
     };
     use tl_ui::settings_global::TlSettings;
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
@@ -11812,7 +11814,6 @@ mod mem_by_app_box {
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState};
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint, SeriesSet};
     use tl_model::system::MemGroupBand;
     use tl_model::time::now_boot_ns;
@@ -11826,6 +11827,9 @@ mod mem_by_app_box {
     use tl_ui::pages::performance::overview::mem_box::{MEM_APPS_ID, MemBox};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::theme::metrics;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, OverviewRange, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MIB: f32 = 1_048_576.;

@@ -165,7 +165,7 @@ fn static_bar(width: Length, height: Pixels, radius: Pixels, color: Hsla) -> Div
 #[cfg(test)]
 mod tests {
     use gpui_kit::{Context, Render, TestAppContext, size};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

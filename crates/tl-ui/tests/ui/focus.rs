@@ -68,7 +68,6 @@ mod esc_chain {
         div, point, px,
     };
     use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::table::TableMode;
     use tl_ui::actions::{EscapeChain, RefreshCurrentTab};
     use tl_ui::app::{BootSettings, UiExit, UiExitSlot};
@@ -80,6 +79,7 @@ mod esc_chain {
         main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     struct FakePage {
         focus: FocusHandle,

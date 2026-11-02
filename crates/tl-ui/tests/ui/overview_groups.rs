@@ -13,14 +13,7 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{
-    CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FormSet, GroupItems,
-    GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, METRIC_ENGINE_ANY, MetricKey,
-    SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
-};
-use tl_model::layout_boxes::{DEVICE_CPU, DEVICE_DISKS, METRIC_DISK_IO, METRIC_LOAD};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, CoreSmoothing, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::time::now_boot_ns;
 use tl_ui::anim::AnimationDriver;
@@ -38,6 +31,15 @@ use tl_ui::pages::performance::widget::group_widget::{
 use tl_ui::pages::performance::widget::metric_widget::{part_id, widget_id};
 use tl_ui::pages::performance::widget::source::SourceStore;
 use tl_ui::settings_global::TlSettings;
+use tl_ui_settings::layout::{
+    CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FormSet, GroupItems,
+    GroupKind, GroupOptions, GroupSelector, LAYOUT_VERSION, METRIC_ENGINE_ANY, MetricKey,
+    SourceSelector, WidgetCell, WidgetContent, WidgetOptions, WidgetSetting,
+};
+use tl_ui_settings::layout_boxes::{DEVICE_CPU, DEVICE_DISKS, METRIC_DISK_IO, METRIC_LOAD};
+use tl_ui_settings::settings::{
+    AppearanceSettings, CoreSmoothing, Settings, ThemeSettings, UiState,
+};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The first logical CPU's device index; core `n` is at `CORE0 + n`.

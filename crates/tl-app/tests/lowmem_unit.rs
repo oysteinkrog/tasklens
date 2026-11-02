@@ -190,7 +190,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use lowmem_unit::{Installed, LowmemUnitError, PersistFn, UnitOps};
-use tl_model::settings::{Settings, UiState};
+use tl_ui_settings::settings::{Settings, UiState};
 
 const WAIT: Duration = Duration::from_secs(5);
 

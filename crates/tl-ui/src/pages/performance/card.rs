@@ -25,11 +25,11 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::DeviceIdx;
 use tl_model::series::SeriesView;
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{DiskDetails, DiskDrive, Snapshot};
 use tl_model::system::{LinkState, Metric, SensorKind, SensorReading};
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::PerfSelectDevice;
 use super::details::Template;

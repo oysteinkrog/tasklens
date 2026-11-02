@@ -8,12 +8,12 @@ use std::sync::Arc;
 use gpui_kit::TestAppContext;
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
-use tl_model::settings::{Settings, UiState};
 use tl_model::table::TableMode;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::settings_global::{
     Section, SettingKey, SettingKind, SettingValue, TlSettings, animations_on,
 };
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// Installs `EngineGlobal` and `BootSettings` with `settings`, then `TlSettings`. Returns the
@@ -329,7 +329,6 @@ mod toolbar {
     use smallvec::SmallVec;
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::table::TableMode;
     use tl_ui::components::icons::TlIcon;
     use tl_ui::components::tooltip::DELAY_CONTROL;
@@ -337,6 +336,7 @@ mod toolbar {
     use tl_ui::window::toolbar::{
         DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_icon, toolbar_toggle,
     };
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     gpui_kit::actions!(tl_toolbar_test, [Go]);
 
@@ -649,7 +649,6 @@ mod titlebar {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::health::HelperState;
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::table::TableMode;
     use tl_model::validity::Validity;
     use tl_ui::actions::CloseWindow;
@@ -660,6 +659,7 @@ mod titlebar {
         MenuBarFactory, MenuRowHeight, TitleBarProbe, TitleBarView, keep_above_supported,
     };
     use tl_ui::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_toggle};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     gpui_kit::actions!(tl_titlebar_test, [Go]);
@@ -1162,7 +1162,6 @@ mod tabstrip {
     use smallvec::SmallVec;
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_model::table::TableMode;
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal};
@@ -1174,6 +1173,7 @@ mod tabstrip {
     use tl_ui::window::tabstrip::{
         AccentRuleProbe, FILTER_GAP, OVERFLOW_BUTTON, OVERFLOW_SLOT, TabStrip,
     };
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const W: f32 = 1280.;
@@ -1911,10 +1911,10 @@ mod status {
         prelude::FluentBuilder as _, px, size,
     };
     use smallvec::{SmallVec, smallvec};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::components::badge::{TlBadgeKind, badge_colors};
     use tl_ui::theme::current;
     use tl_ui::window::status::{StatusAction, StatusActionKind, StatusChip};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     gpui_kit::actions!(tl_status_test, [ShowRestricted, ShowAdmin]);
 
@@ -2530,9 +2530,6 @@ mod main_window {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{
-        AppearanceSettings, Decorations, Settings, StartTab, ThemeSettings, UiState, WindowState,
-    };
     use tl_ui::actions::{
         CloseWindow, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab,
         ShowMainWindow, ToggleMainWindow, ZoomWindow,
@@ -2554,6 +2551,9 @@ mod main_window {
     use tl_ui::window::titlebar::TitleBarProbe;
     use tl_ui::windows::detached_graph::detached_window_options;
     use tl_ui::windows::mini::mini_window_options;
+    use tl_ui_settings::settings::{
+        AppearanceSettings, Decorations, Settings, StartTab, ThemeSettings, UiState, WindowState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
@@ -4881,7 +4881,6 @@ mod startup_items {
     use tl_model::command::{AppRequest, Command, KWinCommand, Tab};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::{
         ComponentHeader, FrameGeometry, ProcessSnapshot, WindowEntry, WindowsSnapshot,
     };
@@ -4898,6 +4897,7 @@ mod startup_items {
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const PID: u32 = 4242;
@@ -5074,7 +5074,7 @@ mod startup_items {
 
     fn select_pid(pid: u32) -> StartOptions {
         StartOptions {
-            tab: Some(tl_model::settings::StartTab::Performance),
+            tab: Some(tl_ui_settings::settings::StartTab::Performance),
             select_pid: Some(pid),
             ..StartOptions::default()
         }
@@ -5335,7 +5335,7 @@ mod startup_items {
     #[gpui_kit::test]
     fn app_request_select_pid(cx: &mut TestAppContext) {
         let start = StartOptions {
-            tab: Some(tl_model::settings::StartTab::Performance),
+            tab: Some(tl_ui_settings::settings::StartTab::Performance),
             ..StartOptions::default()
         };
         let mut r = init(cx, Vec::new(), false, start);

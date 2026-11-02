@@ -11,7 +11,6 @@ use gpui_kit::{
     div, px, size,
 };
 use tl_model::client::EngineClient;
-use tl_model::settings::{Settings, UiState};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast;
@@ -20,6 +19,7 @@ use tl_ui::i18n::init_strings;
 use tl_ui::pages::processes::confirm::{
     ConfirmKind, ConfirmResult, ConfirmTexts, ProtectedAction, confirm, texts,
 };
+use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::is_open;
@@ -445,7 +445,6 @@ mod toasts {
     use tl_model::health::HelperState;
     use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::ProcFlags;
-    use tl_model::settings::{Settings, UiState};
     use tl_model::system::CpuSet;
     use tl_model::time::BootId;
     use tl_ui::action_tracker::{GlobalActionTracker, PushedToast, RetryActionAsAdmin};
@@ -459,6 +458,7 @@ mod toasts {
     };
     use tl_ui::table::tree_table::RowKind;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_settings::settings::{Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn key(pid: u32) -> ProcessKey {
@@ -1107,7 +1107,6 @@ mod end {
         ProcessRecord,
     };
     use tl_model::process::{ProcessExtras, ProcessExtrasP2};
-    use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, WindowEntry, WindowsSnapshot};
     use tl_model::snapshot::{DeviceDetailsSnapshot, DiskDetails};
     use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
@@ -1143,6 +1142,7 @@ mod end {
     use tl_ui::windows::actions::{OpenCustomPriority, SetAffinity};
     use tl_ui::windows::affinity::AffinityDialog;
     use tl_ui::windows::priority::PriorityDialog;
+    use tl_ui_settings::settings::Settings;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::toasts::{actions_sent, emit, open, visible};

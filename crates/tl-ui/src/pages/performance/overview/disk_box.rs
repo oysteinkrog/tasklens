@@ -43,10 +43,10 @@ use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::layout::{ContainerLayout, DISK_BOX_CONTAINER};
-use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{InvField, Snapshot};
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::{ContainerLayout, DISK_BOX_CONTAINER};
+use tl_ui_settings::settings::NetworkUnit;
 
 use super::super::DeviceKey;
 use super::cpu_box::value_text;
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     fn m() -> UiMetrics {
-        crate::theme::metrics::compute(&tl_model::settings::AppearanceSettings::default(), 0)
+        crate::theme::metrics::compute(&tl_ui_settings::settings::AppearanceSettings::default(), 0)
     }
 
     fn body(h: f32) -> Size<Pixels> {

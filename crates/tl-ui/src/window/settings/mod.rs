@@ -1715,7 +1715,7 @@ impl SettingsWindow {
 
 /// Applies `value` to `key` in `settings` through the same path as `TlSettings::set`, for the
 /// in-memory slider preview.
-fn set_in(settings: &mut tl_model::settings::Settings, key: SettingKey, value: SettingValue) {
+fn set_in(settings: &mut tl_ui_settings::settings::Settings, key: SettingKey, value: SettingValue) {
     let mut probe = serde_json::to_value(&*settings).unwrap_or(serde_json::Value::Null);
     let pointer = format!("/{}", key.as_str().replace('.', "/"));
     let new = match value {

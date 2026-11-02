@@ -1527,7 +1527,7 @@ mod tests {
 
     use gpui_kit::base::TextSelectionLayer;
     use gpui_kit::{Bounds, Context, Modifiers, Render, TestAppContext, VisualTestContext, point};
-    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
 

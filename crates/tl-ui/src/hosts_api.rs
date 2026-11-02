@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tl_model::client::EngineClient;
-use tl_model::settings::HostEntry;
+use tl_ui_settings::settings::HostEntry;
 
 /// Where one host's connection is.
 #[derive(Clone, PartialEq, Eq, Debug)]

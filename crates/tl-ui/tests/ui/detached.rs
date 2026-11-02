@@ -14,7 +14,6 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
-use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::time::now_boot_ns;
 use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -31,6 +30,7 @@ use tl_ui::window::titlebar::TitleBarProbe;
 use tl_ui::windows::detached_graph::{
     DetachedGraphWindow, detached_window_options, open_detached, window_size,
 };
+use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MS: u64 = 1_000_000;
@@ -233,9 +233,6 @@ mod detach {
         Window, div, point, px, size,
     };
     use tl_model::client::EngineClient;
-    use tl_model::settings::{
-        AppearanceSettings, DetachedWindowState, MinigraphState, Settings, ThemeSettings, UiState,
-    };
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
     use tl_ui::components::toast::ToastKind;
@@ -250,6 +247,9 @@ mod detach {
     use tl_ui::settings_global::TlSettings;
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::windows::detached_graph::{DetachedGraphWindow, window_size};
+    use tl_ui_settings::settings::{
+        AppearanceSettings, DetachedWindowState, MinigraphState, Settings, ThemeSettings, UiState,
+    };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::catalog;
@@ -952,9 +952,6 @@ mod mini {
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
-    use tl_model::settings::{
-        AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
-    };
     use tl_model::snapshot::{
         ComponentHeader, FrameGeometry, SeriesSet, WindowEntry, WindowsSnapshot,
     };
@@ -981,6 +978,9 @@ mod mini {
     use tl_ui::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
     use tl_ui::windows::mini::{
         MINI_WINDOW_TITLE, MiniWindow, is_mini_open, mini_height, open_mini,
+    };
+    use tl_ui_settings::settings::{
+        AppearanceSettings, DeviceVisibility, Settings, ThemeSettings, UiState,
     };
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1386,7 +1386,7 @@ mod mini {
         draw(&mut vcx);
         draw(&mut vcx);
         let frame = f32::from(tl_ui::components::window_frame::client_frame_extra(
-            tl_model::settings::Decorations::Client,
+            tl_ui_settings::settings::Decorations::Client,
         ));
         assert_eq!(frame, 42.);
         let width = f32::from(vcx.update(|window, _| window.bounds().size.width));
@@ -1707,7 +1707,6 @@ mod keep {
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui::actions::CloseWindow;
     use tl_ui::app::{BootSettings, EngineGlobal, UiExitSlot};
     use tl_ui::components::toast;
@@ -1723,6 +1722,7 @@ mod keep {
     use tl_ui::window::registry::GlobalRegistry;
     use tl_ui::window::status::StatusChanged;
     use tl_ui::windows::detached_graph::open_detached;
+    use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::cpu_entry;
