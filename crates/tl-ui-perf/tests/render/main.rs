@@ -3,4 +3,5 @@
 //!
 //! Run with `cargo test -p tl-ui-perf --features render-tests --test render`.
 
+mod render_harness;
 mod render_perf;
