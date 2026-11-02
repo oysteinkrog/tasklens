@@ -2415,7 +2415,6 @@ mod delegate {
 
     use std::sync::Arc;
 
-
     use tl_model::ids::{GroupKey, NodeId, ProcessKey, PseudoKind};
     use tl_model::process::{
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,

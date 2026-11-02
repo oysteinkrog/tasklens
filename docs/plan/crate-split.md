@@ -348,3 +348,42 @@ the summary view in place of the page, and the context menu layer over both. Lik
 `gpui_kit::open_window`, the rig wraps that view in gpui-kit `Root`, which owns the window's text
 selection. The page gets the whole 1600 × 1000 px window rather than the area under the title
 bar and tab strip. All 34 moved tests pass with their assertions unchanged.
+
+### What zljr5.42 moved
+
+Counts from the module before the move and from each binary after it.
+
+| Module | Before | After in tl-ui-procs (`procs`) | Stayed in tl-ui, and why |
+|---|---|---|---|
+| dialogs | 28 | 28 | none |
+| dialogs_process | 62 | 62 | none. The Handle Search rig no longer opens MainWindow |
+| handle_search | 15 | 15 | none |
+| helper_flow | 9 | 9 | none |
+| process_menu | 77 | 77 | none |
+| props | 135 | 131 | `props_shell` 4: the two Go to service tests (the main window switches to Services and the Services page answers), Go to connection not found (the Connections page lookup), props_pin_sends_keep_above (the shell's pin bridge) |
+| history | 82 | 69 | `history_shell` 13: mode 6 (History mode through MainWindow, the tab strip label, Ctrl-pause), settings window 4, bench 2, filter_typed_before_history_mode_applies (the shell filter box) |
+| processes | 89 | 41 (top level 8, delegate 15, page 14, keys 4) | `processes_shell` 48: shell 2, toolbar 5, jump 15, filter 6, pause 4, status 5, pick 10, and keys_ignored_when_input_focused (`FocusFilter` moves the focus to the shell's filter box) |
+
+shield (24) stays: it tests the shield in MainWindow and the Settings Privileges page.
+
+The 297 tests in `procs` before props, history and processes plus the converted modules come to 497.
+
+The process rigs need more than `PageHost::install`. `tests/procs/common.rs` adds
+`install_shell_services` (the toast layer, the key bindings, the action tracker, the request ends,
+the helper flow, the Handle Search open hook and `GlobalShellEvents`) and `open_stand_in`. The
+stand-in is one 1200 × 800 px window in a kit `Root` with the real Processes page. Its toast queue
+answers `ShellApi::main_toasts` and `push_toast` (so repeats merge as in the app, and toasts pushed
+while the window is built are kept), its page answers `ShellApi::page`, `ShellState` points at it,
+and its root view keeps the `Global` key context, the Ctrl-pause rule and the context menu layer.
+`ShellApi::select_tab` sets the tab in `ShellState` and the page's active state. Shared helpers
+moved to `tl_ui_testkit::fixtures` (`key`, `record`, `sent`, `starts_sent`, `actions_sent`,
+`searches`, `CANCELLED`, `FAILED`) and `tl_ui_pagehost::helpers` (`publish_helper`, `is_open`,
+`window_count`, `toasts`). `PageHost::install_with` takes a persisted `UiState` and an `AppEnv`.
+
+The three copy goldens (`copy_details.txt`, `copy_all_metrics.txt`, `copy_rows.tsv`) moved to
+`crates/tl-ui-procs/tests/golden`. `.gitattributes` gets the same `-whitespace` lines as tl-ui's
+goldens, because `copy_rows.tsv` has trailing tabs.
+
+The three `*_shell` files hold the fixtures their tests need, copied from the moved files (about
+1,100 lines for props, 1,000 for history, 2,800 for processes): those tests need MainWindow, so
+they cannot run on the page host, and the fixtures cannot sit in a crate below tl-ui.
