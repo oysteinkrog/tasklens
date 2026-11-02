@@ -43,6 +43,7 @@ use super::input::TlTextInput;
 use super::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
 };
+use crate::action_tracker::ConfirmDialog;
 use crate::selector::TlSelector;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -191,6 +192,30 @@ pub struct TlDialog {
     cancel: bool,
     cancel_label: SharedString,
     input: Option<DialogInput>,
+}
+
+/// The action tracker's confirmations (the root confirmation, the Details list), which the base
+/// layer describes without naming the kit (ADR-020, CS-C6).
+impl From<ConfirmDialog> for TlDialog {
+    fn from(spec: ConfirmDialog) -> Self {
+        let mut dialog = TlDialog::confirm(spec.text, spec.action_label);
+        if spec.destructive {
+            dialog = dialog.destructive();
+        }
+        if !spec.cancel {
+            dialog = dialog.without_cancel();
+        }
+        if let Some(lines) = spec.lines {
+            dialog = dialog.extra(move |_, _| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(lines.iter().map(|line| div().child(line.clone())))
+                    .into_any_element()
+            });
+        }
+        dialog
+    }
 }
 
 impl TlDialog {

@@ -43,7 +43,7 @@ const TESTKIT: &str = "tl-ui-testkit";
 /// that ends in `/` is a directory and also matches the module file next to it (`a/` matches
 /// `a.rs`). Any other prefix is one file. The longest matching prefix wins. The table holds the
 /// files that the cycle beads create too (`template.rs`, `app_env.rs`, `registry.rs`,
-/// `shell.rs`, `motion.rs`, `pages/performance/core/`).
+/// `shell.rs`, `motion.rs`, `toast_types.rs`, `pages/performance/core/`).
 const LAYERS: &[(&str, &str)] = &[
     // tl-ui-base
     ("theme/", "tl-ui-base"),
@@ -54,8 +54,8 @@ const LAYERS: &[(&str, &str)] = &[
     ("util.rs", "tl-ui-base"),
     ("focus.rs", "tl-ui-base"),
     ("anim.rs", "tl-ui-base"),
-    ("components/motion.rs", "tl-ui-base"),
     ("motion.rs", "tl-ui-base"),
+    ("toast_types.rs", "tl-ui-base"),
     ("hub.rs", "tl-ui-base"),
     ("demand.rs", "tl-ui-base"),
     ("settings_global.rs", "tl-ui-base"),

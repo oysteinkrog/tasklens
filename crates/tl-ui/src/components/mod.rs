@@ -14,7 +14,7 @@ pub mod input;
 pub mod kv_grid;
 pub mod link;
 pub mod menu;
-pub mod motion;
+pub use crate::motion;
 pub mod progress;
 pub mod radio;
 pub mod select;

@@ -41,10 +41,12 @@ use smallvec::SmallVec;
 use tracing::{debug, warn};
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
+use super::dialog::{DialogResult, TlDialog};
 use super::icons::{TlIcon, icon};
 use super::motion::{M_BASE, ease_out_cubic};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::action_tracker::{ConfirmDialog, OnConfirm, TrackerUi};
 use crate::host::HostContext;
 use crate::i18n::tr_args;
 use crate::selector::TlSelector;
@@ -105,28 +107,16 @@ impl Render for ToastLayer {
 
 impl RootPlugin for ToastLayer {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ToastKind {
-    Info,
-    Success,
-    Warning,
-    Error,
-    /// An action in flight. Never auto-dismissed and never takes one of the 4 slots (R-197).
-    Progress,
+pub use crate::toast_types::{ToastAction, ToastKey, ToastKind};
+
+/// The queue's rules per kind. `ToastKind` lives in base (`toast_types.rs`), so these stay here
+/// as a private trait.
+trait KindRules {
+    fn tooltip_key(self) -> &'static str;
+    fn is_minor(&self) -> bool;
 }
 
-impl ToastKind {
-    /// The kind spelled out in English, for logs.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Info => "Info",
-            Self::Success => "Success",
-            Self::Warning => "Warning",
-            Self::Error => "Error",
-            Self::Progress => "Progress",
-        }
-    }
-
+impl KindRules for ToastKind {
     /// The string key of the tooltip, which puts the kind before the text ("Error: …").
     fn tooltip_key(self) -> &'static str {
         match self {
@@ -139,33 +129,43 @@ impl ToastKind {
     }
 
     /// Info and Success toasts may be dropped from the wait list or evicted by an Error.
-    fn is_minor(self) -> bool {
+    fn is_minor(&self) -> bool {
         matches!(self, Self::Info | Self::Success)
     }
 }
 
-/// An owner's toast identity. Pushing again with the same key replaces the toast in place.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ToastKey(pub u64);
+/// The action tracker pushes to the queue and opens its confirmations through this (CS-C6).
+impl TrackerUi for ToastQueue {
+    fn push_toast(
+        &mut self,
+        kind: ToastKind,
+        text: SharedString,
+        key: Option<ToastKey>,
+        button: Option<ToastAction>,
+        cx: &mut Context<Self>,
+    ) {
+        self.push(kind, text, key, button, cx);
+    }
+
+    fn remove_toast(&mut self, key: ToastKey, cx: &mut Context<Self>) {
+        self.remove(key, cx);
+    }
+
+    fn open_confirm(
+        dialog: ConfirmDialog,
+        parent: &mut Window,
+        cx: &mut App,
+        on_result: OnConfirm,
+    ) -> gpui_kit::Result<()> {
+        TlDialog::from(dialog).open(parent, cx, move |result, window, cx| {
+            on_result(matches!(result, DialogResult::Confirmed { .. }), window, cx);
+        })
+    }
+}
 
 /// The kit notification id type for a keyed desktop notification:
 /// `Notification::id1::<ToastKeyTag>(key.0)`.
 pub struct ToastKeyTag;
-
-/// An optional button under the text. It dispatches `action`, then closes the toast.
-pub struct ToastAction {
-    pub label: SharedString,
-    pub action: Box<dyn Action>,
-}
-
-impl Clone for ToastAction {
-    fn clone(&self) -> Self {
-        Self {
-            label: self.label.clone(),
-            action: self.action.boxed_clone(),
-        }
-    }
-}
 
 /// The user closed the keyed toast `.0` with its close or action button. A timer, a replace or
 /// [`ToastQueue::remove`] emits nothing.

@@ -52,8 +52,7 @@ use std::time::{Duration, Instant};
 use fluent_bundle::FluentValue;
 use gpui_kit::{
     Action, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global,
-    IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Task,
-    WeakEntity, Window, div,
+    SharedString, Subscription, Task, WeakEntity, Window,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -66,13 +65,12 @@ use tl_model::command::{Command, CommandError};
 use tl_model::health::HelperState;
 use tracing::{debug, warn};
 
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::host::{HostContext, HostRegistry};
 use crate::hub::{LinkChanged, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::shell::ShellApi;
 use crate::template::Template;
+use crate::toast_types::{ToastAction, ToastKey, ToastKind};
 
 /// The Warning text "Not sent while reconnecting to <host>." while `host`'s session has ended
 /// and the first snapshot of the next one is not installed (ADR-018 Reconnect); `None` while a
@@ -207,10 +205,144 @@ impl SummaryTexts {
     }
 }
 
+/// A confirmation the tracker asks its queue's kit to open (ADR-020, CS-C6): this base module
+/// describes the dialog and the kit builds its `TlDialog` from it.
+#[derive(Clone, Debug)]
+pub struct ConfirmDialog {
+    pub text: SharedString,
+    /// The action button's label.
+    pub action_label: SharedString,
+    /// A Danger action button, the Warning icon and focus on Cancel.
+    pub destructive: bool,
+    /// False drops the Cancel button; Esc, Ctrl+W and the close button still cancel.
+    pub cancel: bool,
+    /// One line each under the text, as the Details list shows the failed targets.
+    pub lines: Option<Rc<[SharedString]>>,
+}
+
+/// Gets `true` when the user confirmed a [`ConfirmDialog`], `false` when they cancelled.
+pub type OnConfirm = Box<dyn FnOnce(bool, &mut Window, &mut App)>;
+
+/// What the tracker needs from a toast queue. The kit's `ToastQueue` implements it, so this base
+/// module never names the kit view or its dialog (ADR-020, CS-C6).
+pub trait TrackerUi: Sized + 'static {
+    /// Shows or replaces a toast, as `ToastQueue::push`.
+    fn push_toast(
+        &mut self,
+        kind: ToastKind,
+        text: SharedString,
+        key: Option<ToastKey>,
+        button: Option<ToastAction>,
+        cx: &mut Context<Self>,
+    );
+
+    /// Closes the keyed toast, as `ToastQueue::remove`.
+    fn remove_toast(&mut self, key: ToastKey, cx: &mut Context<Self>);
+
+    /// Opens `dialog` as a modal window of `parent`, as `TlDialog::open`: `on_result` runs once
+    /// when it ends, and never when the window cannot open.
+    fn open_confirm(
+        dialog: ConfirmDialog,
+        parent: &mut Window,
+        cx: &mut App,
+        on_result: OnConfirm,
+    ) -> gpui_kit::Result<()>;
+}
+
+/// The toast queue a request reports to: a weak handle to any [`TrackerUi`] view. Owners pass
+/// their `WeakEntity<ToastQueue>`; it converts with `into()`. A queue that is gone shows
+/// nothing, but its kit still opens dialogs.
+#[derive(Clone)]
+pub struct TrackerQueue(Rc<dyn QueueHandle>);
+
+impl<Q: TrackerUi> From<WeakEntity<Q>> for TrackerQueue {
+    fn from(queue: WeakEntity<Q>) -> Self {
+        Self(Rc::new(queue))
+    }
+}
+
+impl TrackerQueue {
+    fn push_toast(
+        &self,
+        kind: ToastKind,
+        text: SharedString,
+        key: Option<ToastKey>,
+        button: Option<ToastAction>,
+        cx: &mut App,
+    ) {
+        self.0.push_toast(kind, text, key, button, cx);
+    }
+
+    fn remove_toast(&self, key: ToastKey, cx: &mut App) {
+        self.0.remove_toast(key, cx);
+    }
+
+    fn open_confirm(
+        &self,
+        dialog: ConfirmDialog,
+        parent: &mut Window,
+        cx: &mut App,
+        on_result: OnConfirm,
+    ) -> gpui_kit::Result<()> {
+        self.0.open_confirm(dialog, parent, cx, on_result)
+    }
+}
+
+/// [`TrackerUi`] behind a weak handle, without its type.
+trait QueueHandle {
+    fn push_toast(
+        &self,
+        kind: ToastKind,
+        text: SharedString,
+        key: Option<ToastKey>,
+        button: Option<ToastAction>,
+        cx: &mut App,
+    );
+    fn remove_toast(&self, key: ToastKey, cx: &mut App);
+    fn open_confirm(
+        &self,
+        dialog: ConfirmDialog,
+        parent: &mut Window,
+        cx: &mut App,
+        on_result: OnConfirm,
+    ) -> gpui_kit::Result<()>;
+}
+
+impl<Q: TrackerUi> QueueHandle for WeakEntity<Q> {
+    fn push_toast(
+        &self,
+        kind: ToastKind,
+        text: SharedString,
+        key: Option<ToastKey>,
+        button: Option<ToastAction>,
+        cx: &mut App,
+    ) {
+        if let Some(queue) = self.upgrade() {
+            queue.update(cx, |q, cx| q.push_toast(kind, text, key, button, cx));
+        }
+    }
+
+    fn remove_toast(&self, key: ToastKey, cx: &mut App) {
+        if let Some(queue) = self.upgrade() {
+            queue.update(cx, |q, cx| q.remove_toast(key, cx));
+        }
+    }
+
+    fn open_confirm(
+        &self,
+        dialog: ConfirmDialog,
+        parent: &mut Window,
+        cx: &mut App,
+        on_result: OnConfirm,
+    ) -> gpui_kit::Result<()> {
+        Q::open_confirm(dialog, parent, cx, on_result)
+    }
+}
+
 /// One request in flight.
 pub struct PendingAction {
     pub request: ActionRequest,
-    pub queue: WeakEntity<ToastQueue>,
+    pub queue: TrackerQueue,
     pub texts: ToastTexts,
     pub started_at: Instant,
     /// `None` never times out (service jobs, `Dump`).
@@ -313,7 +445,7 @@ pub enum ActionTrackerEvent {
 /// The failed targets of a finished request, for its "Retry as administrator" button.
 struct RetryRecord {
     request: ActionRequest,
-    queue: WeakEntity<ToastQueue>,
+    queue: TrackerQueue,
     texts: ToastTexts,
 }
 
@@ -346,7 +478,8 @@ pub struct ActionTracker {
     pending: FxHashMap<ActionId, PendingAction>,
     next_id: AtomicU64,
     retries: VecDeque<(ActionId, RetryRecord)>,
-    details: VecDeque<(ActionId, DetailsRecord)>,
+    /// Each record keeps its request's queue, whose kit opens the Details dialog.
+    details: VecDeque<(ActionId, DetailsRecord, TrackerQueue)>,
     /// The final state of every target of the last finished `owner_toasts` requests, for
     /// `results` after `Finished`.
     finished: VecDeque<(ActionId, FinalStates)>,
@@ -500,7 +633,7 @@ impl ActionTracker {
     pub fn track(
         &mut self,
         mut request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: impl Into<TrackerQueue>,
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Result<ActionId, CommandError> {
@@ -522,7 +655,7 @@ impl ActionTracker {
             id,
             PendingAction {
                 request,
-                queue,
+                queue: queue.into(),
                 texts,
                 started_at: cx.background_executor().now(),
                 deadline,
@@ -546,7 +679,7 @@ impl ActionTracker {
     pub fn track_or_toast(
         &mut self,
         request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: impl Into<TrackerQueue>,
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
@@ -559,7 +692,7 @@ impl ActionTracker {
     pub fn track_or_toast_then(
         &mut self,
         request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: impl Into<TrackerQueue>,
         texts: ToastTexts,
         on_sent: Option<OnSentId>,
         cx: &mut Context<Self>,
@@ -572,12 +705,13 @@ impl ActionTracker {
     pub fn track_or_toast_in(
         &mut self,
         request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: impl Into<TrackerQueue>,
         texts: ToastTexts,
         window: Option<AnyWindowHandle>,
         on_sent: Option<OnSentId>,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
+        let queue = queue.into();
         if let Some(host) = self.remote_root_host(&request) {
             self.confirm_then_send(request, queue, texts, host, window, on_sent, cx);
             return None;
@@ -605,7 +739,7 @@ impl ActionTracker {
     fn confirm_then_send(
         &mut self,
         request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: TrackerQueue,
         texts: ToastTexts,
         host: Arc<str>,
         window: Option<AnyWindowHandle>,
@@ -618,10 +752,11 @@ impl ActionTracker {
         };
         let this = cx.weak_entity();
         let dialog = root_confirm_dialog(&request.kind, &host, cx);
+        let opener = queue.clone();
         // The button's window is being updated while its action runs.
         cx.defer(move |cx| {
-            let on_result = move |result: DialogResult, _: &mut Window, cx: &mut App| {
-                if !matches!(result, DialogResult::Confirmed { .. }) {
+            let on_result = move |confirmed: bool, _: &mut Window, cx: &mut App| {
+                if !confirmed {
                     return;
                 }
                 let sent = this.update(cx, |t, cx| t.send_or_toast(request, queue, texts, cx));
@@ -629,7 +764,9 @@ impl ActionTracker {
                     cx.defer(move |cx| on_sent(id, cx));
                 }
             };
-            let opened = window.update(cx, |_, window, cx| dialog.open(window, cx, on_result));
+            let opened = window.update(cx, |_, window, cx| {
+                opener.open_confirm(dialog, window, cx, Box::new(on_result))
+            });
             if !matches!(opened, Ok(Ok(()))) {
                 warn!(target: "tasklens::ui", "root confirmation did not open; nothing sent");
             }
@@ -639,7 +776,7 @@ impl ActionTracker {
     fn send_or_toast(
         &mut self,
         request: ActionRequest,
-        queue: WeakEntity<ToastQueue>,
+        queue: TrackerQueue,
         texts: ToastTexts,
         cx: &mut Context<Self>,
     ) -> Option<ActionId> {
@@ -836,10 +973,8 @@ impl ActionTracker {
                         self.push(&queue, kind, text, Some(target_key), button, cx);
                     }
                 }
-                if entry.texts.started.is_some()
-                    && let Some(queue) = queue.upgrade()
-                {
-                    queue.update(cx, |q, cx| q.remove(key, cx));
+                if entry.texts.started.is_some() {
+                    queue.remove_toast(key, cx);
                 }
             }
             Mode::Summary => {
@@ -871,6 +1006,7 @@ impl ActionTracker {
                                 text: text.clone(),
                                 lines,
                             },
+                            queue.clone(),
                         );
                         ToastAction {
                             label: words.details.clone(),
@@ -1037,11 +1173,11 @@ impl ActionTracker {
     }
 
     fn show_details(&mut self, id: ActionId, cx: &mut Context<Self>) {
-        let Some(record) = self
+        let Some((record, opener)) = self
             .details
             .iter()
-            .find(|(r, _)| *r == id)
-            .map(|(_, d)| d.clone())
+            .find(|(r, _, _)| *r == id)
+            .map(|(_, d, q)| (d.clone(), q.clone()))
         else {
             return;
         };
@@ -1052,19 +1188,18 @@ impl ActionTracker {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.opened_details.push(record.clone());
         let close = action_words(cx).close.clone();
-        let lines: Rc<[SharedString]> = record.lines.into();
-        let dialog = TlDialog::confirm(record.text, close)
-            .without_cancel()
-            .extra(move |_, _| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(lines.iter().map(|line| div().child(line.clone())))
-                    .into_any_element()
-            });
+        let dialog = ConfirmDialog {
+            text: record.text,
+            action_label: close,
+            destructive: false,
+            cancel: false,
+            lines: Some(record.lines.into()),
+        };
         // The button's window is being updated while its action runs.
         cx.defer(move |cx| {
-            let opened = window.update(cx, |_, window, cx| dialog.open(window, cx, |_, _, _| {}));
+            let opened = window.update(cx, |_, window, cx| {
+                opener.open_confirm(dialog, window, cx, Box::new(|_, _, _| {}))
+            });
             if !matches!(opened, Ok(Ok(()))) {
                 warn!(target: "tasklens::ui", "action details dialog did not open");
             }
@@ -1090,16 +1225,16 @@ impl ActionTracker {
         self.retries.push_back((id, record));
     }
 
-    fn keep_details(&mut self, id: ActionId, record: DetailsRecord) {
+    fn keep_details(&mut self, id: ActionId, record: DetailsRecord, queue: TrackerQueue) {
         if self.details.len() == KEEP_FINISHED {
             self.details.pop_front();
         }
-        self.details.push_back((id, record));
+        self.details.push_back((id, record, queue));
     }
 
     fn push(
         &mut self,
-        queue: &WeakEntity<ToastQueue>,
+        queue: &TrackerQueue,
         kind: ToastKind,
         text: SharedString,
         key: Option<ToastKey>,
@@ -1116,9 +1251,7 @@ impl ActionTracker {
             key,
             button: button.as_ref().map(|b| b.label.clone()),
         });
-        if let Some(queue) = queue.upgrade() {
-            queue.update(cx, |q, cx| q.push(kind, text, key, button, cx));
-        }
+        queue.push_toast(kind, text, key, button, cx);
     }
 
     /// Every toast pushed so far, oldest first.
@@ -1258,8 +1391,9 @@ fn is_eperm_retry(err: &ActionError, retry: bool) -> bool {
 }
 
 /// The confirmation before a root action on remote host `host` (ADR-018): "End task as root on
-/// home?" and a "Run as root" button. Shared by every owner that sends root actions.
-pub fn root_confirm_dialog(kind: &ActionKind, host: &str, cx: &App) -> TlDialog {
+/// home?" and a "Run as root" button. Shared by every owner that sends root actions; an owner
+/// in the kit or above opens it as `TlDialog::from(root_confirm_dialog(..))`.
+pub fn root_confirm_dialog(kind: &ActionKind, host: &str, cx: &App) -> ConfirmDialog {
     let key = match kind {
         ActionKind::Signal(Signal::Kill) => "fnd-action-root-what-end-process",
         ActionKind::Signal(_) => "fnd-action-root-what-end-task",
@@ -1283,7 +1417,13 @@ pub fn root_confirm_dialog(kind: &ActionKind, host: &str, cx: &App) -> TlDialog 
         ]
     };
     let text = tr_args(cx, "fnd-action-root-confirm-text", &args(tr(cx, key)));
-    TlDialog::confirm(text, tr(cx, "fnd-action-root-confirm-button")).destructive()
+    ConfirmDialog {
+        text,
+        action_label: tr(cx, "fnd-action-root-confirm-button"),
+        destructive: true,
+        cancel: true,
+        lines: None,
+    }
 }
 
 /// True for the kinds that act on a PC's desktop: open a link or folder, show a file in the file

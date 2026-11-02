@@ -33,7 +33,7 @@ use super::{
     rebuild_derived,
 };
 use crate::anim::AnimationDriver;
-use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::motion::{M_BASE, ease_out_cubic};
 use crate::settings_global::animations_on;
 
 /// The theme used when no other name resolves.

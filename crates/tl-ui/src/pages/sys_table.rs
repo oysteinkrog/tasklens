@@ -623,7 +623,7 @@ impl SysActions {
         let Some(host) = self.tracker.read(cx).remote_root_host(&probe) else {
             return self.send(kind, tag, targets, texts, window, cx);
         };
-        let dialog = root_confirm_dialog(&kind, &host, cx);
+        let dialog = TlDialog::from(root_confirm_dialog(&kind, &host, cx));
         let this = cx.weak_entity();
         let opened = dialog.open(window, cx, move |result, window, cx| {
             if !matches!(result, DialogResult::Confirmed { .. }) {

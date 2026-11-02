@@ -23,9 +23,9 @@ use tl_model::validity::Validity;
 use tracing::debug;
 
 pub use crate::app_env::APP_ID;
-use crate::components::toast::{ToastAction, ToastKey, ToastKind};
 use crate::host::HostContext;
 use crate::registry::WindowKey;
+use crate::toast_types::{ToastAction, ToastKey, ToastKind};
 
 /// The window title the KWin task switcher shows.
 pub const WINDOW_TITLE: &str = "tasklens";

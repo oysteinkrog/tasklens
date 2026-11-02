@@ -887,7 +887,12 @@ mod with_shell {
         let id = vcx
             .update(|_, cx| {
                 tracker.update(cx, |t, cx| {
-                    t.track(end_task(2), WeakEntity::new_invalid(), texts, cx)
+                    t.track(
+                        end_task(2),
+                        WeakEntity::<ToastQueue>::new_invalid(),
+                        texts,
+                        cx,
+                    )
                 })
             })
             .expect("sent");
