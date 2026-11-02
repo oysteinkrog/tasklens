@@ -66,7 +66,6 @@ use crate::net_totals::NetTotal;
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::core_clocks::core_lines;
 use crate::pages::performance::cpu::logical_devices;
-use crate::pages::performance::details::Template;
 use crate::pages::performance::gpu::{GpuVendor, gpu_totals};
 use crate::pages::performance::overview::cpu_box::CoreAverage;
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
@@ -74,6 +73,7 @@ use crate::pages::performance::overview::range::{Figures, current_range, figures
 use crate::pages::performance::overview::timeline::{OverviewPause, paused};
 use crate::pages::performance::sensors::{default_sensor, sensor_device};
 use crate::settings_global::TlSettings;
+use crate::template::Template;
 
 /// The name of VRAM.
 const KEY_VRAM: &str = "perf-overview-gpu-vram";

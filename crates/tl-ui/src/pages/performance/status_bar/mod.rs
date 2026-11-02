@@ -48,10 +48,10 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;
+use crate::template::Template;
 use crate::text::style::{label_style, numeric_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 

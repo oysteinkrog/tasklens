@@ -28,10 +28,10 @@ use tl_ui_settings::settings::{NetworkUnit, Settings};
 use crate::components::motion::{M_SLOW, ease_out_cubic};
 use crate::components::validity::copy_text;
 use crate::i18n::{tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::table::cells::{CellOut, CellSuffix};
 use crate::table::columns::ColumnAlign;
 use crate::table::tree_table::RowKind;
+use crate::template::Template;
 use crate::theme::TlTheme;
 
 /// What a process cell holds. The cell formatter dispatches on it.

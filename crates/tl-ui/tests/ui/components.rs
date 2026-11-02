@@ -776,7 +776,7 @@ perf-cpu-time-unknown = <unknown>
     /// (o55.37).
     #[gpui_kit::test]
     fn counted_template_plural_forms(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::details::Template;
+        use tl_ui::template::Template;
 
         const KEY: &str = "perf-gpu-enc-sessions";
         fn written(t: &Template, n: u64) -> String {

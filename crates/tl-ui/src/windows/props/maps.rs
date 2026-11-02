@@ -43,7 +43,6 @@ use crate::components::tooltip::TlTooltip;
 use crate::components::validity::copy_text;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::table::actions::CopyRow;
@@ -55,6 +54,7 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
+use crate::template::Template;
 
 gpui_kit::actions!(
     tasklens_maps,

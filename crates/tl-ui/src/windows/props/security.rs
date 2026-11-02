@@ -52,7 +52,6 @@ use crate::components::kv_grid::{
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
@@ -63,6 +62,7 @@ use crate::table::tree_table::{
     HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort,
     TlTreeTable, TreeTableDelegate, TreeTableEvent,
 };
+use crate::template::Template;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::label_style;
 use crate::theme::{UiMetrics, current, metrics};

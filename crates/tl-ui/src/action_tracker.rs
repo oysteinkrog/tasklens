@@ -71,8 +71,8 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::host::{HostContext, HostRegistry};
 use crate::hub::{LinkChanged, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::pages::performance::details::Template;
 use crate::shell::ShellApi;
+use crate::template::Template;
 
 /// The Warning text "Not sent while reconnecting to <host>." while `host`'s session has ended
 /// and the first snapshot of the next one is not installed (ADR-018 Reconnect); `None` while a

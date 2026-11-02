@@ -27,9 +27,9 @@ use crate::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words}
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::shell::ShellApi;
 use crate::table::tree_table::RowKind;
+use crate::template::Template;
 
 /// (done, total, failed) to the kind and text of a mixed or failed multi-target result.
 /// `failed` holds one (count, reason) per distinct reason, in the order of first occurrence,

@@ -32,7 +32,6 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::PerfSelectDevice;
-use super::details::Template;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{
     ChartBg, ChartLabels, ChartView, GridStyle, NetFormat, ValueAlign, ValueFormat, format_value,
@@ -43,6 +42,7 @@ use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::overview::parts::title_value_style;
 use crate::selector::TlSelector;
+use crate::template::Template;
 use crate::text::ellipsis::ELLIPSIS;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style};

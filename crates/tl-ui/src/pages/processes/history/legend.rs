@@ -28,8 +28,8 @@ use super::scrubber::series_color;
 use super::{HistoryUiState, MAX_SERIES};
 use crate::components::icons::{TlIcon, icon};
 use crate::i18n::{tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
+use crate::template::Template;
 use crate::theme::{TlTheme, current, metrics};
 
 /// Chip height, × ui_scale.

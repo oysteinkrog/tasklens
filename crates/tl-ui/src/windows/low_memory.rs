@@ -52,9 +52,9 @@ use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowS
 use crate::host::HostContext;
 use crate::hub::{GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{self, Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::template::Template;
 use crate::text::style::{label_style, numeric_style, t_base};
 use crate::theme::user_store::ThemePersist;
 use crate::theme::{self, TlTheme, UiMetrics, current, metrics};

@@ -53,7 +53,6 @@ use tl_ui_settings::layout::{ContainerLayout, NET_BOX_CONTAINER};
 use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use super::super::DeviceKey;
-use super::super::details::Template;
 use super::cpu_box::value_text;
 use super::disk_box::more_line;
 use super::fit::{fit_text, whole_rows};
@@ -83,6 +82,7 @@ use crate::pages::performance::widget::metric_widget::FlowLook;
 use crate::pages::performance::widget::source::SourceStore;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
+use crate::template::Template;
 use crate::text::style::{label_style, numeric_style, t_xs};
 use crate::theme::derived::blend_over;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};

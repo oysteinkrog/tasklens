@@ -1557,8 +1557,8 @@ mod hardware_builders {
 
     #[test]
     fn info_public_ip_shared_with_network_page() {
-        use tl_ui::pages::performance::details::Template;
         use tl_ui::pages::performance::net::public_ip_text;
+        use tl_ui::template::Template;
         let template = Template::en("perf-net-ip-fetched", &["ip", "time"]);
         for (v4, v6) in [
             (Some("203.0.113.4"), None),

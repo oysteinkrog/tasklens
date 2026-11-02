@@ -41,7 +41,7 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
-use super::details::{Fallback, KeyValueModel, Template};
+use super::details::{Fallback, KeyValueModel};
 use super::page::{
     DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
     page_history_request, page_range_ns, page_words,
@@ -64,6 +64,7 @@ use crate::i18n::{Strings, tr};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::shell::ShellApi;
+use crate::template::Template;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Debug selector of the chart box.

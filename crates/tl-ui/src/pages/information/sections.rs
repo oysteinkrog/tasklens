@@ -31,8 +31,8 @@ use super::section::InfoRow;
 use crate::actions::OpenAdditionalSetup;
 use crate::components::kv_grid::{TlValue, UnsupportedWord};
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::pages::performance::net::public_ip_text;
+use crate::template::Template;
 
 /// What the builders read.
 pub struct InfoInputs<'a> {

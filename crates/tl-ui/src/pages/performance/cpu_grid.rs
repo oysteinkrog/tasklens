@@ -39,7 +39,7 @@ use crate::i18n::{Strings, tr, tr_en};
 use crate::selector::TlSelector;
 use crate::theme::{TlTheme, metrics};
 
-use super::details::Template;
+use crate::template::Template;
 
 /// Debug selector of the box around the grid.
 pub const GRID_ID: &str = "perf-cpu-grid";

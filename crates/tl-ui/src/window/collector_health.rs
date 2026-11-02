@@ -25,8 +25,8 @@ use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowS
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, HostClock, SnapshotChanged};
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
+use crate::template::Template;
 use crate::text::style::{numeric_style, t_sm};
 use crate::text::untrusted::debug_assert_clean;
 use crate::theme::{TlTheme, current, metrics};

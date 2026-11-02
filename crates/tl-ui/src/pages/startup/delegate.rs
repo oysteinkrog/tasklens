@@ -32,7 +32,6 @@ use super::menu::{StartupMenuTargets, row_menu};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
 use crate::pages::sys_table::SysDelegate;
 use crate::table::cells::CellOut;
@@ -42,6 +41,7 @@ use crate::table::columns::{
 use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
+use crate::template::Template;
 use crate::theme::{TlTheme, current};
 
 /// The seven columns in display order (UI-SYS-041).

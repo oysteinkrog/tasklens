@@ -40,7 +40,7 @@ use super::actions::PerfShowMiniWindow;
 use super::aggregate::{AggregateDiskPage, AggregateGpuPage};
 use super::card::CardValue;
 use super::cpu::CpuPage;
-use super::details::{KeyValueModel, Template, render_details};
+use super::details::{KeyValueModel, render_details};
 use super::disk::DiskPage;
 use super::gpu::GpuPage;
 use super::memory::MemoryPage;
@@ -63,6 +63,7 @@ use crate::pages::performance::overview::range::{
 use crate::pages::performance::widget::edit::WidgetEditor;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::template::Template;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 

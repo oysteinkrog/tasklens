@@ -41,7 +41,6 @@ use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::host::HostContext;
 use crate::hub::HostClock;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::pages::processes::cells::{
     CellCtx, CellWords, GroupMembers, PaintState, RowRef, boot_time_s, copy_all_metrics,
 };
@@ -59,6 +58,7 @@ use crate::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,
 };
+use crate::template::Template;
 use crate::theme::{TlTheme, current};
 
 /// Static metadata for one Services column.

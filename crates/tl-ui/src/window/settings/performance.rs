@@ -399,7 +399,7 @@ pub fn device_list_rows(host: &HostContext, cx: &mut App) -> Vec<DeviceListRow> 
 /// The type word of a row: the card heading for single devices, the PERF-054 type for network
 /// interfaces.
 fn kind_text(row: &DeviceRow, rows: &[DeviceRow], words: &CardWords) -> SharedString {
-    let numbered = |template: &crate::pages::performance::details::Template| {
+    let numbered = |template: &crate::template::Template| {
         let mut out = String::new();
         let _ = template.write(&mut out, &[&type_number(rows, &row.key)]);
         SharedString::from(out)

@@ -55,7 +55,6 @@ use crate::components::stepper::TlStepper;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
@@ -66,6 +65,7 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
+use crate::template::Template;
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{

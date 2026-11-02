@@ -34,9 +34,9 @@ use super::{HistoryPage, NS_PER_SEC, QUERY_TIMEOUT, clock};
 use crate::chart::labels::{CachedLine, LineStyle, paint_line};
 use crate::host::HostContext;
 use crate::i18n::Strings;
-use crate::pages::performance::details::Template;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::cells::IconSourceCache;
+use crate::template::Template;
 use crate::theme::{TlTheme, UiMetrics};
 
 /// TopAt query ids start here, so they never equal a Frame query id. With no last view the

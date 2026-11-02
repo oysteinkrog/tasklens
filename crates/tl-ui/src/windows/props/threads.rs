@@ -36,7 +36,6 @@ use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::selector::TlSelector;
 use crate::table::actions::CopyRow;
@@ -48,6 +47,7 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
+use crate::template::Template;
 use crate::windows::actions::{
     OpenCustomPriority, SetAffinity, SetThreadNice, SetThreadSched, SignalThread,
 };

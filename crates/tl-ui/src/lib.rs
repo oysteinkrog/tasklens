@@ -25,6 +25,7 @@ pub mod selector;
 pub mod settings_global;
 pub mod shell;
 pub mod table;
+pub mod template;
 pub mod text;
 pub mod text_cache;
 pub mod theme;

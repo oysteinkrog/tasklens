@@ -48,8 +48,8 @@ use crate::components::window_frame::TlSecondaryWindow;
 use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
-use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
+use crate::template::Template;
 use crate::text::style::{label_style, t_sm, t_xs};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{

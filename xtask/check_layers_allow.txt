@@ -12,9 +12,6 @@ actions.rs -> components::shield
 actions.rs -> components::window_frame
 shell.rs -> components::toast
 
-# tl-ui-base -> tl-ui-perf-core: 1
-action_tracker.rs -> pages::performance::details
-
 # tl-ui-overview -> tl-ui-perf: 30
 pages/performance/memory_apps.rs -> pages::performance::page
 pages/performance/overview/box_menu.rs -> pages::performance::cpu

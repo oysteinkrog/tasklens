@@ -35,7 +35,6 @@ use crate::components::menu::TlMenu;
 use crate::components::validity::copy_text;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::details::Template;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::cells::process_column;
 use crate::pages::processes::delegate::ValidityTips;
@@ -48,6 +47,7 @@ use crate::table::columns::{
 use crate::table::tree_table::{
     IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
+use crate::template::Template;
 use crate::theme::metrics;
 
 /// The columns in default order (UI-PRC-031). Ids are the R-007 `ColumnId` strings.

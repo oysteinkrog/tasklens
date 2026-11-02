@@ -67,10 +67,10 @@ use crate::components::window_frame::TlSecondaryWindow;
 use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
-use crate::pages::performance::details::Template;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::shell::ShellApi;
+use crate::template::Template;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::windows::actions::{

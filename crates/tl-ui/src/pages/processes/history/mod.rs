@@ -60,7 +60,6 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::jump::JumpTexts;
@@ -70,6 +69,7 @@ use crate::shell::FilterChanged;
 use crate::shell::ShellApi;
 use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
+use crate::template::Template;
 use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 

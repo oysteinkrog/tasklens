@@ -88,7 +88,7 @@ use super::actions::{
     PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfOverviewSetTimelineClick,
     PerfSetStatusBar,
 };
-use super::details::{KeyValueModel, Template};
+use super::details::KeyValueModel;
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
 use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
@@ -102,6 +102,7 @@ use crate::i18n::tr;
 use crate::net_totals::NetTotal;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::template::Template;
 use crate::theme::{current, metrics};
 
 /// The Overview page's key.

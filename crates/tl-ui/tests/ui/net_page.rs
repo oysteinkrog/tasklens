@@ -841,10 +841,7 @@ mod public_ip {
     fn public_ip_formatter_is_shared() {
         let at = at_1402();
         assert_eq!(local_hh_mm(at), "14:02");
-        let template = tl_ui::pages::performance::details::Template::en(
-            "perf-net-ip-fetched",
-            &["ip", "time"],
-        );
+        let template = tl_ui::template::Template::en("perf-net-ip-fetched", &["ip", "time"]);
         assert_eq!(
             public_ip_text(&template, Some("203.0.113.4"), None, at),
             "203.0.113.4 (fetched 14:02)"

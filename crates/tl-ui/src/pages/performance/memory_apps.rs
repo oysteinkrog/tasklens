@@ -53,7 +53,6 @@ use tl_model::units;
 use tl_ui_settings::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tracing::warn;
 
-use super::details::Template;
 use super::overview::parts::{ChartSettings, box_chart, class_probe};
 use super::overview::timeline::{self, OverviewPause};
 use super::page::page_range_ns;
@@ -69,6 +68,7 @@ use crate::pages::processes::ProcessesPage;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::shell::{ShellApi, ShellState};
+use crate::template::Template;
 use crate::text::style::{numeric_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
 

@@ -60,7 +60,6 @@ use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
 use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
@@ -78,6 +77,7 @@ use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate,
 };
+use crate::template::Template;
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
 
