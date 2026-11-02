@@ -9,6 +9,8 @@
 //! `self::` and `super::` are resolved against the file's own module path and the inline `mod`
 //! blocks around them. Each path maps to the file that holds its deepest module, and that file to
 //! its crate. Comments and string literals are skipped. `mod` declarations are not edges.
+//! Only `#[cfg(test)]` code (an item under that attribute, or a file module declared under it)
+//! may name the dev-only tl-ui-testkit.
 //!
 //! Today's upward edges are listed in `xtask/check_layers_allow.txt`, one `<file> -> <module>` per
 //! line. The list may only shrink: an entry that no longer matches an upward edge fails the check,
@@ -33,8 +35,8 @@ const ALLOWLIST: &str = "xtask/check_layers_allow.txt";
 const SHELL: &str = "tl-ui";
 
 /// The dev-only test kit. Every tl-ui crate may use it from unit tests (ADR-020), as a
-/// dev-dependency, so an edge into it is never upward. check-deps rows hold normal and build
-/// dependencies only, so a normal dependency on it still fails there.
+/// dev-dependency, so an edge into it is allowed from `#[cfg(test)]` code only. Production code
+/// that names it fails, as a normal dependency on it fails check-deps (no row lists it).
 const TESTKIT: &str = "tl-ui-testkit";
 
 /// ADR-020 "Where each file goes": path prefix under `crates/tl-ui/src` and its crate. A prefix
@@ -237,9 +239,10 @@ pub fn may_depend(src: &str, dst: &str) -> bool {
         .is_some_and(|(_, row)| row.contains(&dst))
 }
 
-/// True when code in crate `src` may name a module of crate `dst`.
-fn edge_allowed(src: &str, dst: &str) -> bool {
-    src == dst || dst == TESTKIT || may_depend(src, dst)
+/// True when code in crate `src` may name a module of crate `dst`. `test` is true for
+/// `#[cfg(test)]` code, the only code that may name the dev-only test kit.
+fn edge_allowed(src: &str, dst: &str, test: bool) -> bool {
+    src == dst || may_depend(src, dst) || (test && dst == TESTKIT)
 }
 
 /// The crate of a file under `crates/tl-ui/src`, by the longest matching layer prefix.
@@ -381,25 +384,31 @@ struct Scan {
 /// Scans every file in `tree` and keeps the edges that ADR-020 does not allow.
 fn scan_tree(tree: &BTreeMap<String, String>) -> Scan {
     let names: BTreeSet<String> = tree.keys().cloned().collect();
+    let scans: BTreeMap<&str, FileScan> = tree
+        .iter()
+        .map(|(file, source)| (file.as_str(), scan_paths(file, source)))
+        .collect();
+    let test_files = test_files(&scans, &names);
     let mut scan = Scan::default();
-    for (file, source) in tree {
+    for (file, file_scan) in &scans {
         let Some(src) = layer_of(file) else {
-            scan.unmapped.push(file.clone());
+            scan.unmapped.push((*file).to_owned());
             continue;
         };
-        for hit in scan_paths(file, source) {
+        let test_file = test_files.contains(*file);
+        for hit in &file_scan.hits {
             let (target, module) = resolve(&hit.path, &names);
             // A target with no crate is an unmapped file, which is reported on its own.
             let Some(dst) = layer_of(&target) else {
                 continue;
             };
-            if edge_allowed(src, dst) {
+            if edge_allowed(src, dst, hit.test || test_file) {
                 continue;
             }
             scan.edges.push(Edge {
                 src,
                 dst,
-                file: file.clone(),
+                file: (*file).to_owned(),
                 module: module_name(&module),
                 line: hit.line,
                 path: module_name(&hit.path),
@@ -410,6 +419,33 @@ fn scan_tree(tree: &BTreeMap<String, String>) -> Scan {
         .sort_by(|a, b| (&a.file, a.line, &a.path).cmp(&(&b.file, b.line, &b.path)));
     scan.edges.dedup();
     scan
+}
+
+/// The files that only test builds compile: a file module declared under `#[cfg(test)]`
+/// (`#[cfg(test)] mod tests;`), and every file module declared inside such a file.
+fn test_files(scans: &BTreeMap<&str, FileScan>, names: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut test = BTreeSet::new();
+    loop {
+        let before = test.len();
+        for (file, file_scan) in scans {
+            let file_is_test = test.contains(*file);
+            for decl in &file_scan.mods {
+                if !(decl.test || file_is_test) {
+                    continue;
+                }
+                let stem = decl.path.join("/");
+                let child = [format!("{stem}.rs"), format!("{stem}/mod.rs")]
+                    .into_iter()
+                    .find(|candidate| names.contains(candidate));
+                if let Some(child) = child {
+                    test.insert(child);
+                }
+            }
+        }
+        if test.len() == before {
+            return test;
+        }
+    }
 }
 
 /// `a::b` for a module path, `crate` for the root.
@@ -454,16 +490,33 @@ fn resolve(segments: &[String], files: &BTreeSet<String>) -> (String, Vec<String
     (file, segments[..used].to_vec())
 }
 
-/// One module path named in a file: its segments from the crate root, items included, and the
-/// 1-based line of its last segment.
+/// One module path named in a file: its segments from the crate root, items included, the 1-based
+/// line of its last segment, and whether it sits in `#[cfg(test)]` code.
 #[derive(Debug, PartialEq, Eq)]
 struct Hit {
     line: usize,
     path: Vec<String>,
+    test: bool,
 }
 
-/// Every `crate::`, `self::` and `super::` path in one file, with `use` groups expanded.
-fn scan_paths(file: &str, source: &str) -> Vec<Hit> {
+/// A `mod name;` declaration: the module path of the file it pulls in, and whether the
+/// declaration sits in `#[cfg(test)]` code.
+#[derive(Debug, PartialEq, Eq)]
+struct ModDecl {
+    path: Vec<String>,
+    test: bool,
+}
+
+/// What one file names: its module paths and its `mod name;` declarations.
+#[derive(Debug, Default)]
+struct FileScan {
+    hits: Vec<Hit>,
+    mods: Vec<ModDecl>,
+}
+
+/// Every `crate::`, `self::` and `super::` path in one file, with `use` groups expanded, and every
+/// `mod name;` declaration.
+fn scan_paths(file: &str, source: &str) -> FileScan {
     let code = code_only(source);
     let mut line_of = Vec::with_capacity(code.len());
     let mut line = 1;
@@ -473,12 +526,14 @@ fn scan_paths(file: &str, source: &str) -> Vec<Hit> {
             line += 1;
         }
     }
+    let test_mask = cfg_test_mask(&code);
     let base = file_module(file);
     let mut parser = PathParser {
         code: &code,
         line_of: &line_of,
         hits: Vec::new(),
     };
+    let mut mods = Vec::new();
 
     let mut depth = 0usize;
     // Inline `mod name { ... }` blocks around the current position, with the brace depth inside.
@@ -500,16 +555,33 @@ fn scan_paths(file: &str, source: &str) -> Vec<Hit> {
         } else if is_ident_start(c) && (i == 0 || !is_ident_char(code[i - 1])) {
             let end = ident_end(&code, i);
             let word: String = code[i..end].iter().collect();
+            let current = || {
+                let mut path = base.clone();
+                path.extend(inline.iter().map(|(name, _)| name.clone()));
+                path
+            };
             match word.as_str() {
-                "mod" => {
-                    if let Some((name, brace)) = mod_block(&code, end) {
-                        pending_mod = Some((brace, name));
+                "mod" => match mod_item(&code, end) {
+                    Some((name, next)) if code[next] == '{' => pending_mod = Some((next, name)),
+                    Some((name, next)) if code[next] == ';' => {
+                        let mut path = current();
+                        path.push(name);
+                        mods.push(ModDecl {
+                            path,
+                            test: test_mask[i],
+                        });
                     }
-                }
+                    _ => {}
+                },
                 "crate" | "self" | "super" if !after_path_sep(&code, i) => {
-                    let mut current = base.clone();
-                    current.extend(inline.iter().map(|(name, _)| name.clone()));
-                    parser.root(&word, end, &current);
+                    let first = parser.hits.len();
+                    let path_end = parser.root(&word, end, &current());
+                    for hit in &mut parser.hits[first..] {
+                        hit.test = test_mask[i];
+                    }
+                    // A path holds balanced braces only, so skipping it keeps `depth` right.
+                    i = path_end.max(end);
+                    continue;
                 }
                 _ => {}
             }
@@ -518,7 +590,10 @@ fn scan_paths(file: &str, source: &str) -> Vec<Hit> {
         }
         i += 1;
     }
-    parser.hits
+    FileScan {
+        hits: parser.hits,
+        mods,
+    }
 }
 
 /// Walks one path from its root keyword and records the full paths it names.
@@ -531,33 +606,17 @@ struct PathParser<'a> {
 impl PathParser<'_> {
     /// `word` is `crate`, `self` or `super` and ends at `end`. `current` is the module path of
     /// the code around it. A root not followed by `::` (`pub(crate)`, `self.x`) names nothing.
-    fn root(&mut self, word: &str, end: usize, current: &[String]) {
-        let Some(mut pos) = self.sep(end) else {
-            return;
+    /// Returns the end of the path, so a `use` group is not scanned a second time.
+    fn root(&mut self, word: &str, end: usize, current: &[String]) -> usize {
+        let Some(pos) = self.sep(end) else {
+            return end;
         };
-        let mut prefix = match word {
+        let prefix = match word {
             "crate" => Vec::new(),
             "self" => current.to_vec(),
             _ => parent(current),
         };
-        if word == "super" {
-            loop {
-                let start = self.skip_ws(pos);
-                if self.ident_at(start).as_deref() != Some("super") {
-                    break;
-                }
-                prefix = parent(&prefix);
-                let after = ident_end(self.code, start);
-                match self.sep(after) {
-                    Some(next) => pos = next,
-                    None => {
-                        self.emit(prefix, start);
-                        return;
-                    }
-                }
-            }
-        }
-        self.after_sep(prefix, pos);
+        self.after_sep(prefix, pos)
     }
 
     /// Parses what follows a `::`: a name, a `{` group, `*` or a turbofish. Returns the end.
@@ -571,8 +630,7 @@ impl PathParser<'_> {
             }
             Some(&c) if is_ident_start(c) => {
                 let end = ident_end(self.code, pos);
-                let mut path = prefix;
-                path.push(self.name(pos, end));
+                let path = extend(prefix, self.name(pos, end));
                 match self.sep(end) {
                     Some(next) => self.after_sep(path, next),
                     None => {
@@ -604,16 +662,12 @@ impl PathParser<'_> {
                 Some(&c) if is_ident_start(c) => {
                     let end = ident_end(self.code, pos);
                     let name = self.name(pos, end);
-                    if name == "self" {
-                        self.emit(prefix.to_vec(), pos);
-                        pos = end;
-                    } else if name == "as" {
+                    if name == "as" {
                         // Skip the alias.
                         let alias = self.skip_ws(end);
                         pos = ident_end(self.code, alias).max(alias + 1);
                     } else {
-                        let mut path = prefix.to_vec();
-                        path.push(name);
+                        let path = extend(prefix.to_vec(), name);
                         pos = match self.sep(end) {
                             Some(next) => self.after_sep(path, next),
                             None => {
@@ -635,7 +689,11 @@ impl PathParser<'_> {
             .or(self.line_of.last())
             .copied()
             .unwrap_or(1);
-        self.hits.push(Hit { line, path });
+        self.hits.push(Hit {
+            line,
+            path,
+            test: false,
+        });
     }
 
     /// The position just past `::` when it follows `pos` after optional whitespace.
@@ -645,16 +703,8 @@ impl PathParser<'_> {
             .then_some(pos + 2)
     }
 
-    fn skip_ws(&self, mut pos: usize) -> usize {
-        while self.code.get(pos).is_some_and(|c| c.is_whitespace()) {
-            pos += 1;
-        }
-        pos
-    }
-
-    fn ident_at(&self, pos: usize) -> Option<String> {
-        let c = *self.code.get(pos)?;
-        is_ident_start(c).then(|| self.name(pos, ident_end(self.code, pos)))
+    fn skip_ws(&self, pos: usize) -> usize {
+        skip_ws(self.code, pos)
     }
 
     /// The identifier in `pos..end`, without a raw `r#` prefix.
@@ -664,6 +714,20 @@ impl PathParser<'_> {
             start += 2;
         }
         self.code[start..end].iter().collect()
+    }
+}
+
+/// `path` with one more segment. `super` goes one level up, `self` stays and `crate` goes to the
+/// root, wherever they stand, so `super::{super::x}` and `self::super::x` resolve like rustc.
+fn extend(mut path: Vec<String>, name: String) -> Vec<String> {
+    match name.as_str() {
+        "super" => parent(&path),
+        "self" => path,
+        "crate" => Vec::new(),
+        _ => {
+            path.push(name);
+            path
+        }
     }
 }
 
@@ -705,14 +769,10 @@ fn after_path_sep(code: &[char], pos: usize) -> bool {
     back >= 2 && code[back - 1] == ':' && code[back - 2] == ':'
 }
 
-/// For a `mod` keyword ending at `end`: the module name and the position of its `{` when this is
-/// an inline module block. `mod name;` returns `None`.
-fn mod_block(code: &[char], end: usize) -> Option<(String, usize)> {
-    let mut pos = end;
-    while code.get(pos).is_some_and(|c| c.is_whitespace()) {
-        pos += 1;
-    }
-    let start = pos;
+/// For a `mod` keyword ending at `end`: the module name and the position of the first character
+/// after it (`{` for an inline block, `;` for a file module). `None` when no name follows.
+fn mod_item(code: &[char], end: usize) -> Option<(String, usize)> {
+    let start = skip_ws(code, end);
     if !code.get(start).is_some_and(|&c| is_ident_start(c)) {
         return None;
     }
@@ -721,11 +781,111 @@ fn mod_block(code: &[char], end: usize) -> Option<(String, usize)> {
     if let Some(raw) = name.strip_prefix("r#") {
         name = raw.to_owned();
     }
-    pos = name_end;
+    let next = skip_ws(code, name_end);
+    (next < code.len()).then_some((name, next))
+}
+
+fn skip_ws(code: &[char], mut pos: usize) -> usize {
     while code.get(pos).is_some_and(|c| c.is_whitespace()) {
         pos += 1;
     }
-    (code.get(pos) == Some(&'{')).then_some((name, pos))
+    pos
+}
+
+/// True for the code under a `#[cfg(test)]` (or `#[cfg(all(test, ..))]`) attribute: the item
+/// that follows it, or the rest of the enclosing block for an inner `#![cfg(test)]`. Only that
+/// code may name tl-ui-testkit, which is a dev-dependency (ADR-020).
+fn cfg_test_mask(code: &[char]) -> Vec<bool> {
+    let mut mask = vec![false; code.len()];
+    let mut i = 0;
+    while i < code.len() {
+        if code[i] != '#' {
+            i += 1;
+            continue;
+        }
+        let mut pos = skip_ws(code, i + 1);
+        let inner = code.get(pos) == Some(&'!');
+        if inner {
+            pos = skip_ws(code, pos + 1);
+        }
+        if code.get(pos) != Some(&'[') {
+            i += 1;
+            continue;
+        }
+        let close = attr_end(code, pos);
+        let attr: String = code[pos + 1..close]
+            .iter()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        if attr == "cfg(test)" || attr.starts_with("cfg(all(test,") {
+            let end = if inner {
+                block_end(code, close + 1)
+            } else {
+                item_end(code, close + 1)
+            };
+            mask[i..end].fill(true);
+        }
+        i = close + 1;
+    }
+    mask
+}
+
+/// The `]` that closes the attribute opened at `open`, or the end of the code.
+fn attr_end(code: &[char], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (pos, &c) in code.iter().enumerate().skip(open) {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            _ => {}
+        }
+    }
+    code.len()
+}
+
+/// The end of the item that starts at `from`: just past its first top-level `;` or past the `}`
+/// of its first top-level block. Other attributes in between belong to the same item.
+fn item_end(code: &[char], from: usize) -> usize {
+    let mut depth = 0usize;
+    for (pos, &c) in code.iter().enumerate().skip(from) {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                // A close with nothing open ends the enclosing block, so the item ends here.
+                let Some(next) = depth.checked_sub(1) else {
+                    return pos;
+                };
+                depth = next;
+                if c == '}' && depth == 0 {
+                    return pos + 1;
+                }
+            }
+            ';' if depth == 0 => return pos + 1,
+            _ => {}
+        }
+    }
+    code.len()
+}
+
+/// The end of the block that `from` sits in: the `}` that closes it, or the end of the code.
+fn block_end(code: &[char], from: usize) -> usize {
+    let mut depth = 0usize;
+    for (pos, &c) in code.iter().enumerate().skip(from) {
+        match c {
+            '{' => depth += 1,
+            '}' => match depth.checked_sub(1) {
+                Some(next) => depth = next,
+                None => return pos,
+            },
+            _ => {}
+        }
+    }
+    code.len()
 }
 
 /// The source with comments, string literals and char literals replaced by spaces. Newlines
@@ -956,6 +1116,7 @@ mod tests {
 
     fn paths(file: &str, source: &str) -> Vec<(usize, String)> {
         scan_paths(file, source)
+            .hits
             .into_iter()
             .map(|hit| (hit.line, hit.path.join("::")))
             .collect()
@@ -1195,11 +1356,94 @@ mod tests {
     }
 
     #[test]
-    fn edges_into_testkit_are_allowed() {
-        assert!(edge_allowed("tl-ui-base", TESTKIT));
-        assert!(!edge_allowed(TESTKIT, "tl-ui-base"));
+    fn super_inside_use_group() {
+        // `theme/store.rs` is module theme::store, so `super::{super::x}` is the crate root.
+        let source = "use super::{super::window::main::ShellState, Local};\nuse self::super::Up;\n";
+        assert_eq!(
+            paths("theme/store.rs", source),
+            vec![
+                (1, "window::main::ShellState".to_owned()),
+                (1, "theme::Local".to_owned()),
+                (2, "theme::Up".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_super_cannot_bypass_the_check() {
+        let mut files = tree(SAMPLE);
+        files.insert(
+            "theme/store.rs".to_owned(),
+            "use super::{super::window::main::ShellState};\n".to_owned(),
+        );
+        let scan = scan_tree(&files);
+        let allow = parse_allowlist("theme/mod.rs -> components::button\n").unwrap();
+        assert_eq!(
+            check(&scan.edges, &allow),
+            vec![
+                "crates/tl-ui/src/theme/store.rs:1: tl-ui-base -> tl-ui (shell) via \
+                 crate::window::main::ShellState"
+                    .to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn edges_into_testkit_are_allowed_from_tests_only() {
+        assert!(edge_allowed("tl-ui-base", TESTKIT, true));
+        assert!(!edge_allowed("tl-ui-base", TESTKIT, false));
+        assert!(!edge_allowed(TESTKIT, "tl-ui-base", true));
         assert!(may_depend(SHELL, "tl-ui-sys"));
         assert!(!may_depend("tl-ui-procs", "tl-ui-sys"));
         assert!(!may_depend("tl-ui-overview", "tl-ui-perf"));
+    }
+
+    #[test]
+    fn testkit_from_production_code_is_reported() {
+        let mut files = tree(SAMPLE);
+        files.insert("testing/mod.rs".to_owned(), "pub mod fake;\n".to_owned());
+        files.insert("testing/fake.rs".to_owned(), String::new());
+        files.insert(
+            "theme/store.rs".to_owned(),
+            "#[cfg(any(test, feature = \"test-hooks\"))]\nuse crate::testing::fake::Fake;\n\
+             #[cfg(test)]\nmod tests {\n    use crate::testing::fake::InTest;\n}\n\
+             #[cfg(test)]\nuse crate::testing::fake::TestUse;\n\
+             #[cfg(test)]\nmod more;\n"
+                .to_owned(),
+        );
+        files.insert(
+            "theme/store/more.rs".to_owned(),
+            "mod deeper;\nuse crate::testing::fake::FromTestFile;\n".to_owned(),
+        );
+        files.insert(
+            "theme/store/more/deeper.rs".to_owned(),
+            "use crate::testing::fake::Deeper;\n".to_owned(),
+        );
+        let scan = scan_tree(&files);
+        let allow = parse_allowlist("theme/mod.rs -> components::button\n").unwrap();
+        assert_eq!(
+            check(&scan.edges, &allow),
+            vec![
+                "crates/tl-ui/src/theme/store.rs:2: tl-ui-base -> tl-ui-testkit via \
+                 crate::testing::fake::Fake"
+                    .to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn cfg_test_mask_covers_the_item_only() {
+        let source = "#[cfg(test)]\nconst A: [u8; 2] = [1, 2];\nfn after() {}\n";
+        let code: Vec<char> = source.chars().collect();
+        let mask = cfg_test_mask(&code);
+        let a = source.find("A:").unwrap();
+        let after = source.find("after").unwrap();
+        assert!(mask[a]);
+        assert!(!mask[after]);
+        let inner = "mod m {\n    #![cfg(test)]\n    fn t() {}\n}\nfn out() {}\n";
+        let code: Vec<char> = inner.chars().collect();
+        let mask = cfg_test_mask(&code);
+        assert!(mask[inner.find("fn t").unwrap()]);
+        assert!(!mask[inner.find("fn out").unwrap()]);
     }
 }
