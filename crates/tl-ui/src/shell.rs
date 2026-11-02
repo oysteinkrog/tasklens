@@ -222,7 +222,8 @@ pub fn keep_above_supported(cx: &App) -> bool {
     })
 }
 
-/// The shell's toast service: the same arguments as `window::main::push_main_toast`.
+/// The shell's toast service: kind, text, optional owner key and optional action button. The
+/// shell installs the function that pushes to the main window's toast queue.
 pub type PushToastFn = fn(&mut App, ToastKind, SharedString, Option<ToastKey>, Option<ToastAction>);
 
 /// Shell services that lower layers call without naming the shell (ADR-020 "ShellApi").
