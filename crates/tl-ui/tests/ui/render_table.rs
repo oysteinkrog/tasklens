@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::ops::Range;
 
+use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent,
     ParentElement, Pixels, Render, SharedString, Styled, TestAppContext, TestDispatcher, TextRun,
@@ -32,7 +33,6 @@ use tl_ui::table::columns::{
 use tl_ui::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
-use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
 use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
 use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};

@@ -32,10 +32,10 @@ use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::pages::processes::delegate::ProcRowId;
 use tl_ui::pages::services::ServicesPage;
 use tl_ui::table::tree_table::TreeTableDelegate as _;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{MainWindow, main_window_title, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::windows::props::{PropsWindow, open_process_properties};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{key, record, toasts};
 
@@ -762,7 +762,7 @@ fn host_tab_reconnect_disables_actions(cx: &mut TestAppContext) {
     // Back on home: still reconnecting. The first snapshot of the next session ends it.
     rig.select_host(1);
     assert_eq!(rig.banner().as_deref(), Some("Reconnecting to home"));
-    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    let mut fresh = tl_ui_testkit::fake_engine::empty_snapshot();
     fresh.sequence = 1;
     rig.statuses
         .lock()
@@ -819,7 +819,7 @@ fn host_tab_fast_reconnect_ends_lost_actions(cx: &mut TestAppContext) {
     assert_eq!(rig.vcx.read_entity(&tracker, |t, _| t.pending_len()), 1);
 
     // The next session's first snapshot arrives before the check.
-    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    let mut fresh = tl_ui_testkit::fake_engine::empty_snapshot();
     fresh.sequence = 1;
     rig.remotes["home"].restart(fresh);
     rig.draw();
@@ -898,7 +898,7 @@ fn host_tab_refused_send_ends_lost_actions(cx: &mut TestAppContext) {
     );
 
     // The next session sends again.
-    let mut fresh = tl_ui::testing::fake_engine::empty_snapshot();
+    let mut fresh = tl_ui_testkit::fake_engine::empty_snapshot();
     fresh.sequence = 1;
     rig.remotes["home"].restart(fresh);
     rig.draw();

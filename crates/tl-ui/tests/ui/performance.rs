@@ -714,7 +714,7 @@ mod page_frame {
         use tl_ui::hub::SnapshotHub;
         use tl_ui::pages::performance::DeviceRow;
         use tl_ui::pages::performance::page::build_page;
-        use tl_ui::testing::fake_engine::FakeEngine;
+        use tl_ui_testkit::fake_engine::FakeEngine;
 
         struct Host(AnyView);
         impl Render for Host {
@@ -1323,7 +1323,7 @@ mod tab {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
         DeviceEntry {
@@ -1777,11 +1777,11 @@ mod summary {
     use tl_ui::pages::performance::summary::{MARKER_ID, SummaryView, tile_grid};
     use tl_ui::pages::performance::{DeviceKey, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GPU: &str = "gpu:pci:0000:2d:00.0";
 

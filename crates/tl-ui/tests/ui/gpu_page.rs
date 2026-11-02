@@ -28,7 +28,7 @@ use tl_ui::pages::performance::gpu::{GpuPage, GpuVendor, ProbeState};
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GPU: DeviceIdx = DeviceIdx(7);
 const GIB: u64 = 1 << 30;

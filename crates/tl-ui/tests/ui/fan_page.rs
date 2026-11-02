@@ -32,7 +32,7 @@ use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::sensors::{CHOOSE_SENSOR_ID, FanPage, NO_VALUE_ID, TEMPERATURE_ID};
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const FAN1: DeviceIdx = DeviceIdx(10);
 const TEMP1: DeviceIdx = DeviceIdx(20);

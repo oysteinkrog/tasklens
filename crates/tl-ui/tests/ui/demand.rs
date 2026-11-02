@@ -15,7 +15,7 @@ use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
 use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
 use tl_ui::hub::SnapshotHub;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Rig {
     engine: Arc<FakeEngine>,

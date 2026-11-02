@@ -65,8 +65,8 @@ use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
 };
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::metrics;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GPU: &str = "gpu:pci:0000:2d:00.0";
 const DISKS: [&str; 4] = ["disk:sda", "disk:sdb", "disk:sdc", "disk:sdd"];

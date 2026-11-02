@@ -31,7 +31,7 @@ use tl_ui::pages::performance::status_bar::rules::{ChipKind, MachineState, Tone}
 use tl_ui::pages::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const NS: u64 = 1_000_000_000;
 

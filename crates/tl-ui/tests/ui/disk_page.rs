@@ -37,8 +37,8 @@ use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{RowFlags, TreeTableDelegate};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::{current, metrics};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f32 = 1024. * 1024.;
 /// The disk in the fake catalog.

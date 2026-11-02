@@ -1635,7 +1635,7 @@ mod page {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::information::actions::{CopyInformationSection, bind_keys_information};
     use tl_ui::pages::information::{InformationPage, REFRESH_TOAST_AFTER};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const S: u64 = 1_000_000_000;
 
@@ -2458,8 +2458,8 @@ fn information_keymap_registered(cx: &mut TestAppContext) {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::information::InformationPage;
     use tl_ui::pages::information::actions::{CopyInformationAll, InformationScrollBottom};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
@@ -2528,9 +2528,9 @@ mod main_window {
     use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::pages::information::InformationPage;
     use tl_ui::pages::information::actions::CopyInformationAll;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,

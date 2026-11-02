@@ -1190,8 +1190,8 @@ fn boot_time_s(up_time_s: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::fake_engine::{FakeEngine, empty_snapshot};
     use std::time::Instant;
+    use tl_ui_testkit::fake_engine::{FakeEngine, empty_snapshot};
 
     fn memory_id() -> SeriesId {
         SeriesId {

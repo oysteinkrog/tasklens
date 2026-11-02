@@ -19,11 +19,11 @@ use tl_ui::components::menu::open_context_menu;
 use tl_ui::host::HostContext;
 use tl_ui::hosts_api::{HostLinkStatus, HostsApi};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::hosts::{HostsEditor, TestLine, open_editor};
 use tl_ui::window::settings::{PageId, open_settings_on};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// What the fake host manager was asked, and the engines it handed out.
 #[derive(Default)]

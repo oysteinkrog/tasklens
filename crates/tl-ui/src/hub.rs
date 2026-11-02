@@ -502,8 +502,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::testing::fake_engine::{FakeEngine, empty_snapshot};
     use gpui_kit::{AppContext, TestAppContext};
+    use tl_ui_testkit::fake_engine::{FakeEngine, empty_snapshot};
 
     #[test]
     fn refresh_while_hidden_starts_off() {

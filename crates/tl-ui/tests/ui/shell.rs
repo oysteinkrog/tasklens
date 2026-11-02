@@ -16,7 +16,7 @@ use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::settings_global::{
     Section, SettingKey, SettingKind, SettingValue, TlSettings, animations_on,
 };
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// Installs `EngineGlobal` and `BootSettings` with `settings`, then `TlSettings`. Returns the
 /// engine and the persist call count.
@@ -657,12 +657,12 @@ mod titlebar {
     use tl_ui::actions::CloseWindow;
     use tl_ui::components::icons::TlIcon;
     use tl_ui::hub::{GlobalHub, SnapshotHub};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
     use tl_ui::window::titlebar::{
         MenuBarFactory, MenuRowHeight, TitleBarProbe, TitleBarView, keep_above_supported,
     };
     use tl_ui::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_toggle};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     gpui_kit::actions!(tl_titlebar_test, [Go]);
 
@@ -1171,12 +1171,12 @@ mod tabstrip {
     use tl_ui::components::menu::context_menu_layer;
     use tl_ui::pages::information::actions::CopyInformationAll;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
     use tl_ui::window::filter::FilterBox;
     use tl_ui::window::tabstrip::{
         AccentRuleProbe, FILTER_GAP, OVERFLOW_BUTTON, OVERFLOW_SLOT, TabStrip,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const W: f32 = 1280.;
 
@@ -2546,7 +2546,6 @@ mod main_window {
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         self as shell, CloseOutcome, GlobalShellEvents, MainWindow, PageFactory, PageSlot,
         PauseChanged, ShellPage, ShellState, first_frame_ms_from, main_window_options,
@@ -2557,6 +2556,7 @@ mod main_window {
     use tl_ui::window::titlebar::TitleBarProbe;
     use tl_ui::windows::detached_graph::detached_window_options;
     use tl_ui::windows::mini::mini_window_options;
+    use tl_ui_testkit::fake_engine::FakeEngine;
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
@@ -4509,8 +4509,8 @@ mod main_window {
         use tl_ui::actions::{CycleViewMode, SetViewMode, ToggleHideSystem};
         use tl_ui::app::EngineGlobal;
         use tl_ui::settings_global::TlSettings;
-        use tl_ui::testing::fake_engine::FakeEngine;
         use tl_ui::window::main::view_mode_tooltip;
+        use tl_ui_testkit::fake_engine::FakeEngine;
 
         use super::{Opts, act, main, open, setup};
 
@@ -4893,7 +4893,6 @@ mod startup_items {
         AppEnv, CrashReport, StartOptions, TasklensUi, ToastKindTag, UiExit, UiExitSlot, UiInit,
     };
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         CloseOutcome, MainWindow, PageSlot, SELECT_PID_WAIT, ShellPage, main_window_view,
         open_main_window, set_test_page,
@@ -4901,6 +4900,7 @@ mod startup_items {
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const PID: u32 = 4242;
 

@@ -19,9 +19,9 @@ use tl_ui::host::HostContext;
 use tl_ui::host_settings::{self, HOST_KEYS};
 use tl_ui::pages::performance::overview::timeline::click_mode;
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::menus_settings;
 use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// Every `settings.toml` write, in order.
 type Persisted = Rc<RefCell<Vec<Settings>>>;

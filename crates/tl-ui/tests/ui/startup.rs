@@ -452,11 +452,11 @@ mod page {
     use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::table::actions::OpenProperties;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
         page: Entity<StartupPage>,
@@ -2087,8 +2087,8 @@ fn startup_keymap_registered(cx: &mut TestAppContext) {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::startup::StartupPage;
     use tl_ui::pages::startup::actions::StartupDelete;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
@@ -2142,10 +2142,10 @@ mod props {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::hub::GlobalHub;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
     use tl_ui::windows::startup_properties::{StartupPropertiesView, open_startup_properties};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
@@ -2525,9 +2525,9 @@ mod main_window {
     use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
     use tl_ui::demand::DEMAND_COALESCE;
     use tl_ui::pages::startup::StartupPage;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
     use tl_ui::window::registry::{CapClass, GlobalRegistry};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,

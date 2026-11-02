@@ -149,9 +149,9 @@ fn scheme_change_from_snapshot_switches_theme(cx: &mut TestAppContext) {
 
     use tl_model::client::EngineClient;
     use tl_model::settings::{Settings, UiState};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::metrics;
     use tl_ui::{AppEnv, TasklensUi, UiInit};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();

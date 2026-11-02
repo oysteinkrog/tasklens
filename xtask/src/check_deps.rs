@@ -191,6 +191,11 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
         ],
     ),
     ("tl-tray", &["tl-model", "ksni", "async-channel"]),
+    // Dev only (ADR-020): FakeEngine, and the render helpers with PNG goldens behind `render`.
+    (
+        "tl-ui-testkit",
+        &["tl-model", "gpui-kit", "async-channel", "image"],
+    ),
     (
         "tl-helper",
         &[

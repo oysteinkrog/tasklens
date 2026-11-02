@@ -23,8 +23,8 @@ use tl_ui::components::toast::{self, ToastQueue};
 use tl_ui::components::window_frame::{TestClientFrame, frame_bottom};
 use tl_ui::demand::GlobalDemand;
 use tl_ui::host::HostContext;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::windows::affinity::{self, AffinityDialog, affinity_words};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
 
@@ -940,8 +940,8 @@ mod virustotal {
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
     use tl_ui::host::HostContext;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;
 
@@ -1343,9 +1343,9 @@ mod priority {
     use tl_ui::components::toast::{ToastKey, ToastQueue};
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::host::HostContext;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::actions::PriorityApply;
     use tl_ui::windows::priority::{self, PriorityDialog};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
 
@@ -1742,8 +1742,8 @@ mod signal {
     use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
     use tl_ui::pages::processes::signal_targets_for_test;
     use tl_ui::table::tree_table::RowKind;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::signal::{self, RtSignalDialog, SIGNALS, SignalRefusal, TargetNames};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
 
@@ -2457,10 +2457,10 @@ mod dump {
     use tl_ui::host::HostContext;
     use tl_ui::hub::GlobalHub;
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::windows::notices::{
         DUMP_REFRESH, DumpToast, set_test_home, set_test_ptrace_scope, start_dump,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     pub(super) const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -3260,10 +3260,10 @@ mod prc014 {
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::host::HostContext;
     use tl_ui::pages::processes::confirm::{ConfirmKind, ProtectedAction, texts as confirm_texts};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::open_main_window_on;
     use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
     use tl_ui::windows::signal::{OtherUserTarget, TargetNames};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::{dump, priority, signal, virustotal};
 

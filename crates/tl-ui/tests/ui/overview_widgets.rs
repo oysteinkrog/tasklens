@@ -53,7 +53,7 @@ use tl_ui::pages::performance::widget::source::{
     Availability, AvailabilityChanged, SourceData, SourceStore,
 };
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GIB: u64 = 1 << 30;
 const GPU_A: u16 = 10;

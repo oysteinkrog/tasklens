@@ -34,11 +34,11 @@ use tl_ui::pages::performance::overview::{
 use tl_ui::pages::performance::status_bar::BAR_ID;
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{
     self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
 };
 use tl_ui::window::titlebar::TitleBarProbe;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: u64 = 1_000_000_000;
 const MIN: i64 = 60 * S as i64;

@@ -23,9 +23,9 @@ use tl_ui::components::window_frame::{
     APP_ID, PIN_TOOLTIP_OFF, PIN_TOOLTIP_ON, PIN_TOOLTIP_UNSUPPORTED, PinLook, TlSecondaryWindow,
     TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, client_frame_extra, window_options,
 };
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
 use tl_ui::windows::frame::{PwnWindow, spec as pwn_spec};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{is_open, window_count};
 

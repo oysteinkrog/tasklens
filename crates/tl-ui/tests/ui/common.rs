@@ -16,7 +16,7 @@ use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The toast after a cancelled helper start.
 pub const CANCELLED: &str = "Authentication cancelled";

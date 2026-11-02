@@ -49,7 +49,7 @@ use tl_ui::pages::performance::widget::grid::{PAGE_GUTTER, PAGE_ROW_UNIT};
 use tl_ui::pages::performance::widget::metric_widget::widget_id;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MIB: f64 = 1024. * 1024.;
 const PAGE: &str = "page.aggregate:disk";

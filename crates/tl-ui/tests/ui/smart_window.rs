@@ -16,10 +16,10 @@ use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::actions::PerfShowSmart;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::windows::smart::{SmartColumn, SmartWindow, find_smart};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const IDX: DeviceIdx = DeviceIdx(3);
 

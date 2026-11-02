@@ -51,7 +51,7 @@ use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id
 use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: f32 = 1024. * 1024.;

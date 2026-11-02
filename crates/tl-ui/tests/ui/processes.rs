@@ -15,7 +15,7 @@ use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::pages::processes::cells::ProcColumnKind;
 use tl_ui::pages::processes::table::{GroupHeader, ProcessQuery};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 fn query() -> ProcessQuery {
     ProcessQuery::new(&Settings::default(), &UiState::default())
@@ -318,7 +318,7 @@ mod delegate {
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::columns::TableId;
     use tl_ui::table::tree_table::{IconSlot, RowKind, TlTreeTable, TreeTableDelegate};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     pub(super) fn setup(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -1345,8 +1345,8 @@ mod page {
     use tl_ui::pages::processes::table::GroupHeader;
     use tl_ui::table::actions::{CollapseAll, OpenProperties};
     use tl_ui::table::tree_table::HEADER_H_TWO;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, ShellEvents};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{every_kind, firefox, key, record, redraw, row, setup, snapshot};
 
@@ -1918,12 +1918,12 @@ mod shell {
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::settings_global::TlSettings;
     use tl_ui::table::tree_table::TreeTableDelegate as _;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageFactory, PageSlot, ShellPage, main_window_view,
         open_main_window, set_test_page,
     };
     use tl_ui::window::status::StatusChanged;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{every_kind, snapshot};
 
@@ -2364,8 +2364,8 @@ mod jump {
     use tl_ui::pages::processes::jump::JumpTexts;
     use tl_ui::pages::processes::table::GroupHeader;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{ShellPage, main_window_view};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{group, key, record, row, snapshot};
     use super::shell::{open_with, select};
@@ -2649,9 +2649,9 @@ mod jump {
         use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
         use tl_ui::pages::processes::ProcessesPage;
         use tl_ui::settings_global::TlSettings;
-        use tl_ui::testing::fake_engine::FakeEngine;
         use tl_ui::window::main::{MainWindow, PageFactory, PageSlot, ShellPage, main_window_view};
         use tl_ui::window::status::StatusChanged;
+        use tl_ui_testkit::fake_engine::FakeEngine;
 
         use super::super::shell::{open_on_perf, open_with_perf, select};
         use super::rig_on;
@@ -3201,8 +3201,8 @@ mod filter {
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::filter::include_children_visible;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::snapshot;
     use super::shell::open_with;
@@ -3422,7 +3422,7 @@ mod pause {
     use super::shell::open_with;
 
     struct Rig {
-        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        engine: Arc<tl_ui_testkit::fake_engine::FakeEngine>,
         vcx: VisualTestContext,
         page: Entity<ProcessesPage>,
         version: u64,
@@ -3597,7 +3597,7 @@ mod status {
     use super::shell::open_with;
 
     struct Rig {
-        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        engine: Arc<tl_ui_testkit::fake_engine::FakeEngine>,
         vcx: VisualTestContext,
         page: Entity<ProcessesPage>,
         version: u64,
@@ -3891,8 +3891,8 @@ mod keys {
     use tl_ui::pages::processes::actions::{CopyDetails, EndProcess, EndTask};
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{key, record, row, snapshot};
 
@@ -4120,8 +4120,8 @@ mod pick {
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::confirm::{ConfirmKind, texts as confirm_texts};
     use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window_on, set_test_page};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::delegate::{key, record, row, snapshot};
 

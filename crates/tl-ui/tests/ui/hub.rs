@@ -26,7 +26,6 @@ use tl_ui::demand::GlobalDemand;
 use tl_ui::hub::GlobalHub;
 use tl_ui::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
 use tl_ui::i18n::Strings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::BundledFontStatus;
 use tl_ui::theme::{ThemeStore, UiMetrics};
 use tl_ui::window::main::FailMainOpen;
@@ -34,6 +33,7 @@ use tl_ui::windows::low_memory::{FailLowMemoryOpen, init_low_memory};
 use tl_ui::{
     AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 fn hub_with_engine(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Entity<SnapshotHub>) {
     let engine = FakeEngine::new();

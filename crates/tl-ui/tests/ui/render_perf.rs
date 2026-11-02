@@ -12,6 +12,7 @@ compile_error!("render_perf needs --features render-tests,test-hooks (R-291)");
 
 use std::sync::Arc;
 
+use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     AnyView, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     Styled as _, Window, div, px, size,
@@ -36,9 +37,8 @@ use tl_ui::pages::performance::page::PerfSidebar;
 use tl_ui::pages::performance::sidebar::DeviceSidebar;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
-use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
 use tl_ui::theme::current;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const WIDTH: f32 = 1280.;
 const HEIGHT: f32 = 800.;

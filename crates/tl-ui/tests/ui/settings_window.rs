@@ -29,13 +29,13 @@ use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
 use tl_ui::host::HostContext;
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::ThemeStore;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{
     PageBuilder, PageId, SIDEBAR_W, SettingsWindow, TestPages, all_pages,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::is_open;
 

@@ -283,7 +283,7 @@ mod query_and_demand {
     use tl_ui::host::HostContext;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::sys_table::{SysPageState, SysQuery};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn query() -> SysQuery {
         let sort = SysSortSpec {
@@ -477,7 +477,7 @@ mod body_states {
         SysBody, SysBodyInput, SysEmptyButton, SysPageState, render_empty, skeleton_rows, sys_body,
         sys_empty_content,
     };
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn input(tab: Tab, first: bool, rows: usize) -> SysBodyInput<'static> {
         SysBodyInput {
@@ -879,7 +879,7 @@ mod sys_actions {
     use tl_ui::action_tracker::{ActionTracker, PushedToast, ToastTexts};
     use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
     use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host;
 
@@ -1562,9 +1562,9 @@ mod frame {
         HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
         TreeTableDelegate,
     };
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
     use tl_ui::window::status::CHIP_H;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const NAME: SysColumnId = SysColumnId::Startup(StartupColumn::Name);
     const CONTEXT: &str = "StartupTable";

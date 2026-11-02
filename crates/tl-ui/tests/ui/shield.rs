@@ -41,7 +41,6 @@ use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::host::HostContext;
 use tl_ui::pages::processes::ProcessesPage;
 use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::UI_FAMILY;
 use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};
@@ -50,6 +49,7 @@ use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{PageId, SettingsWindow, all_pages};
 use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
 use tl_ui::windows::props::{AccessButton, PropsWindow, open_process_properties};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{
     CANCELLED, FAILED, actions_sent, key, passwordless, publish_helper, publish_polkit, record,

@@ -32,8 +32,8 @@ use tl_ui::pages::performance::card::{
 use tl_ui::pages::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, is_visible, sidebar_order,
 };
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const CARD_W: f32 = 244.;
 /// 40 characters (crw.57 AC).

@@ -43,7 +43,7 @@ use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id
 use tl_ui::pages::performance::widget::edit::WidgetEditor;
 use tl_ui::pages::performance::widget::metric_widget::widget_id;
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The first logical CPU's device index; core `n` is at `CORE0 + n`.
 const CORE0: u16 = 100;

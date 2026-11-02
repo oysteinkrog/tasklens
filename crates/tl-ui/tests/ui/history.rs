@@ -43,8 +43,8 @@ use tl_ui::pages::processes::history::{
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::settings::{PageBuilder, PageId, all_pages};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const S: TimeNs = 1_000_000_000;
 

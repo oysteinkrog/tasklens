@@ -21,6 +21,7 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
+tl-ui-testkit = { workspace = true }   # FakeEngine; render helpers with `render-tests`
 gpui-kit = { workspace = true, features = ["test-support"] }
 fastrand = "2.5"   # seeded noise for render_chart goldens (tasklens-yrf.13)
 proptest = { workspace = true }
@@ -29,7 +30,7 @@ tempfile = { workspace = true }
 [features]
 default = []
 bench = ["test-hooks", "gpui-kit/profiler"]     # frame histograms and paint log for --bench (ADR-014, E01-OI-6)
-render-tests = ["bench", "gpui-kit/test-support", "dep:image"]   # headless screenshot tests (ADR-013)
+render-tests = ["bench", "gpui-kit/test-support", "dep:image", "tl-ui-testkit/render"]   # headless screenshot tests (ADR-013)
 test-hooks = []
 
 [lints]

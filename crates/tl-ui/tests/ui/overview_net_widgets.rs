@@ -46,7 +46,7 @@ use tl_ui::pages::performance::widget::group_widget::{GroupFlowLook, GroupState}
 use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
 use tl_ui::pages::performance::widget::source::Availability;
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The network total's catalog index.
 const NET_AGG: u16 = 51;

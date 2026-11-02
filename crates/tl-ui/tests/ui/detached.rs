@@ -27,13 +27,13 @@ use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::pages::minigraph::GraphColor;
 use tl_ui::pages::minigraph::sources::{GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::APP_ID;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::titlebar::TitleBarProbe;
 use tl_ui::windows::detached_graph::{
     DetachedGraphWindow, detached_window_options, open_detached, window_size,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MS: u64 = 1_000_000;
 
@@ -250,9 +250,9 @@ mod detach {
     use tl_ui::pages::minigraph::panel::{MinigraphPanel, any_detached_open};
     use tl_ui::pages::minigraph::sources::{MinigraphId, MinigraphSource};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::windows::detached_graph::{DetachedGraphWindow, window_size};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::catalog;
     use std::time::Duration;
@@ -976,7 +976,6 @@ mod mini {
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
     use tl_ui::pages::performance::{DeviceKey, DeviceKind};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         self as shell, ShellState, main_window_view, open_main_window, set_test_page,
     };
@@ -985,6 +984,7 @@ mod mini {
     use tl_ui::windows::mini::{
         MINI_WINDOW_TITLE, MiniWindow, is_mini_open, mini_height, open_mini,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Empty;
 
@@ -1718,7 +1718,6 @@ mod keep {
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::pages::minigraph::panel::any_detached_open;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageFactory, PageSlot, ShellPage, ShellState, open_main_window,
         set_test_page,
@@ -1726,6 +1725,7 @@ mod keep {
     use tl_ui::window::registry::GlobalRegistry;
     use tl_ui::window::status::StatusChanged;
     use tl_ui::windows::detached_graph::open_detached;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::cpu_entry;
 

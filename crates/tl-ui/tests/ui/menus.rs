@@ -42,7 +42,6 @@ use tl_ui::table::actions::{
     TABLE_CONTEXT, bind_keys_table,
 };
 use tl_ui::table::columns::TableId;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 use tl_ui::theme::user_store::{PersistTheme, ThemePersist};
 use tl_ui::window::about::OpenAbout;
@@ -53,6 +52,7 @@ use tl_ui::window::menus_file::SystemMonitor;
 use tl_ui::window::menus_view::{CopyTheme, DeleteTheme, ImportTheme};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
 use tl_ui::window::{menus_debug, menus_file, menus_help, menus_settings, menus_view};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{passwordless, publish_polkit};
 

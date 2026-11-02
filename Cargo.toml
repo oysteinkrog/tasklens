@@ -10,6 +10,7 @@ members = [
   "crates/tl-server",
   "crates/tl-gpu-probe",
   "crates/tl-ui",
+  "crates/tl-ui-testkit",
   "crates/tl-app",
   "crates/tl-helper",
   "crates/tl-tray",
@@ -91,6 +92,7 @@ tl-collect = { path = "crates/tl-collect" }
 tl-ops     = { path = "crates/tl-ops" }
 tl-engine  = { path = "crates/tl-engine" }
 tl-ui      = { path = "crates/tl-ui" }
+tl-ui-testkit = { path = "crates/tl-ui-testkit" }   # dev only (ADR-020)
 tl-history = { path = "crates/tl-history" }
 tl-remote  = { path = "crates/tl-remote" }
 tl-tray    = { path = "crates/tl-tray" }

@@ -197,7 +197,7 @@ mod card {
         GraphColumn, MinigraphEntry, MinigraphId, MinigraphSource,
     };
     use tl_ui::pages::performance::DeviceKey;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const CPU: DeviceIdx = DeviceIdx(0);
     const MEMORY: DeviceIdx = DeviceIdx(1);
@@ -1175,7 +1175,7 @@ mod panel {
         MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
     };
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
         DeviceEntry {
@@ -2877,8 +2877,8 @@ mod mounted {
     use tl_ui::pages::minigraph::panel::MinigraphPanel;
     use tl_ui::pages::minigraph::sources::{MinigraphSource, default_entries};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn record(pid: u32) -> ProcessRecord {
         let a = |s: &str| Arc::<str>::from(s);

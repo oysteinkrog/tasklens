@@ -721,7 +721,7 @@ mod grid {
     use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::performance::cpu_grid::{CpuGrid, GRID_ID, TRIGGER_ID};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
 
@@ -990,7 +990,7 @@ mod page {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
 

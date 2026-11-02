@@ -21,12 +21,12 @@ use tl_ui::components::dialog::{DialogButton, TlDialogView};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::i18n::tr;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::setup::{
     CardView, SETUP_SCRIPT, ScriptWindow, SetupRow, SetupWindow, confirm_words, open_script_window,
     row_status,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{toasts, window_count};
 

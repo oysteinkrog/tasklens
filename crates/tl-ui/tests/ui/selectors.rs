@@ -29,8 +29,8 @@ use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::selector::{TlSelector as _, tag_frame, untag_frame};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{self as shell, MainWindow, main_window_view, open_main_window};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use crate::common::{key, record};
 

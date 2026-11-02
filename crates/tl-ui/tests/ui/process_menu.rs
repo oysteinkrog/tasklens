@@ -21,7 +21,7 @@ use tl_ui::i18n::init_strings;
 use tl_ui::pages::processes::confirm::{
     ConfirmKind, ConfirmResult, ConfirmTexts, ProtectedAction, confirm, texts,
 };
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::is_open;
 
@@ -459,8 +459,8 @@ mod toasts {
         ActionToastTexts, exited_toast, refusal_reason, refusal_text, refuse, submit, texts_for,
     };
     use tl_ui::table::tree_table::RowKind;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn key(pid: u32) -> ProcessKey {
         ProcessKey {
@@ -1140,11 +1140,11 @@ mod end {
     use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
     use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
     use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
     use tl_ui::windows::actions::{OpenCustomPriority, SetAffinity};
     use tl_ui::windows::affinity::AffinityDialog;
     use tl_ui::windows::priority::PriorityDialog;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::toasts::{actions_sent, emit, open, visible};
 

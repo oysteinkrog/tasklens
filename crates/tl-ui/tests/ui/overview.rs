@@ -493,7 +493,7 @@ mod boxes {
     use tl_ui::pages::performance::overview::mem_box::{MEM_BOX_ID, MemBox};
     use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell, core_spark_id};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
     const CPUS: u16 = 4;
@@ -1615,7 +1615,7 @@ mod bottom {
     use tl_ui::pages::performance::overview::net_box::NetBox;
     use tl_ui::pages::performance::overview::parts::{BOX_CHROME, GridFit, body_id, fill_grid};
     use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
     const MIB: f64 = 1024. * 1024.;
@@ -3636,7 +3636,7 @@ mod page {
     use tl_ui::pages::performance::page::DevicePage as _;
     use tl_ui::pages::performance::sidebar::DeviceSidebar;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const CPUS: u16 = 4;
 
@@ -9571,12 +9571,12 @@ mod wired {
         DeviceKey, DeviceKind, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID,
     };
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
     };
     use tl_ui::window::titlebar::TitleBarProbe;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
         DeviceEntry {
@@ -11035,7 +11035,7 @@ mod sweep {
         self, BANDS_ID, MARKER_ROW_ID, TICK_ROW_ID, TimelineBox,
     };
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const GIB: u64 = 1 << 30;
     const CPUS: u16 = 8;
@@ -11831,8 +11831,8 @@ mod mem_by_app_box {
     };
     use tl_ui::pages::performance::overview::mem_box::{MEM_APPS_ID, MemBox};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::metrics;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MIB: f32 = 1_048_576.;
     const GIB: u64 = 1 << 30;

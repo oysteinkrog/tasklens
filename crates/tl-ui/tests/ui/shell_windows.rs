@@ -24,7 +24,6 @@ use tl_ui::components::window_frame::{
     has_modal_child,
 };
 use tl_ui::i18n::{set_test_catalogue, tr_calls};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::share_code::{decode_tl1, encode_tl1};
 use tl_ui::theme::user_store::serialize_user_themes;
 use tl_ui::theme::{ThemeDef, ThemeStore, builtin, current, metrics};
@@ -35,6 +34,7 @@ use tl_ui::window::shortcuts::{
     Heading, LISTED_CONTEXTS, ShortcutsWindow, build_rows, first_context,
 };
 use tl_ui::window::theme_editor::{EditTheme, ThemeEditor, ThemeEditorDone};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Parent;
 
@@ -1314,9 +1314,9 @@ mod reset_settings {
         TestClientFrame, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
     };
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::ThemeStore;
     use tl_ui::window::confirm::ResetSettings;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;
 
@@ -1639,11 +1639,11 @@ mod crash_report {
     use tl_model::settings::{Settings, UiState};
     use tl_ui::app::{AppEnv, CrashReport, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::crash_report::{
         CopyCrashReport, CrashReportWindow, OpenCrashLogFolder, show_pending,
     };
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Main;
 
@@ -1863,8 +1863,8 @@ mod public_ip {
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::public_ip::request_public_ip_fetch;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Body;
 

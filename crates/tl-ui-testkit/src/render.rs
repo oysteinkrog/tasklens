@@ -7,23 +7,18 @@
 //! grows the window by the same factor, so a 100 × 40 view captures as 200 × 80 at 1.0 and
 //! 220 × 88 at 1.1.
 //!
-//! Integration tests reach this module with `--features render-tests,test-hooks`, because
-//! `testing` is compiled only for unit tests and `test-hooks`.
+//! The harness knows nothing of the crate under test (ADR-020: the testkit depends only on
+//! tl-model and gpui-kit). That crate passes a `RenderSetup` with its assets and its font and
+//! theme setup, and gives `assert_golden` its own golden directory.
 
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use gpui_kit::{App, Entity, HeadlessAppContext, Pixels, Render, Size, Window, size};
-use image::{Rgba, RgbaImage};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
+use gpui_kit::{App, AssetSource, Entity, HeadlessAppContext, Pixels, Render, Size, Window, size};
+pub use image::{Rgba, RgbaImage};
+use tl_model::settings::AppearanceSettings;
 
-use crate::components::icons::TlAssets;
-use crate::text::fonts::load_bundled_fonts;
-use crate::theme::store::{self, ActivateSource};
-
-/// Where the golden PNGs live.
-pub const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
 /// Where a failed compare writes `<name>.actual.png` and `<name>.diff.png`.
 pub const DIFF_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/golden-diff");
 /// At most 0.1% of pixels may differ.
@@ -43,7 +38,7 @@ const LAVAPIPE_ICDS: [&str; 2] = [
 /// the test `test_path` again in a child process with `VK_ICD_FILENAMES` set to the lavapipe ICD,
 /// because setting the variable in a running test process is not thread safe. When no lavapipe
 /// ICD exists, the test is skipped with a printed reason. `test_path` is the full test name, for
-/// example `testing::render::tests::solid_fill_matches_window_bg`.
+/// example `render_support::solid_fill_matches_window_bg`.
 pub fn run_on_lavapipe(test_path: &str, body: impl FnOnce()) {
     if std::env::var_os("VK_ICD_FILENAMES").is_some() {
         body();
@@ -67,16 +62,29 @@ pub fn run_on_lavapipe(test_path: &str, body: impl FnOnce()) {
     );
 }
 
-/// A headless app with the bundled fonts, the kit and the Default Dark theme, and reduced motion
+/// What `RenderHarness` needs from the crate under test.
+pub struct RenderSetup {
+    /// The asset source of the app.
+    pub assets: Arc<dyn AssetSource>,
+    /// Loads the fonts, inits gpui-kit and the theme store with these appearance settings.
+    pub init: fn(&AppearanceSettings, &mut App),
+    /// Switches the theme at once, without a crossfade. Panics on an unknown name.
+    pub set_theme: fn(&str, &mut App),
+    /// Applies the appearance settings' metrics (`ui_scale`).
+    pub apply_metrics: fn(&AppearanceSettings, &mut App),
+}
+
+/// A headless app set up by a `RenderSetup` with default appearance settings, and reduced motion
 /// forced on so animated widths and fades render their final state.
 pub struct RenderHarness {
     cx: HeadlessAppContext,
+    setup: RenderSetup,
     appearance: AppearanceSettings,
 }
 
 impl RenderHarness {
     /// Builds the app. Panics when no headless renderer is available.
-    pub fn new() -> Self {
+    pub fn new(setup: RenderSetup) -> Self {
         match gpui_kit::platform::current_headless_renderer() {
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => {
@@ -84,27 +92,28 @@ impl RenderHarness {
             }
         }
         let text_system = gpui_kit::platform::current_platform(true).text_system();
-        let mut cx = HeadlessAppContext::with_platform(text_system, Arc::new(TlAssets), || {
+        let mut cx = HeadlessAppContext::with_platform(text_system, setup.assets.clone(), || {
             gpui_kit::platform::current_headless_renderer()
         });
         let appearance = AppearanceSettings::default();
         cx.update(|cx| {
-            load_bundled_fonts(cx);
-            gpui_kit::init(cx);
-            store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            (setup.init)(&appearance, cx);
             // The UI ANDs `motion.animations` with this, so it stands in for
             // `motion.animations = false`.
             cx.set_reduce_motion(true);
         });
         cx.run_until_parked();
-        Self { cx, appearance }
+        Self {
+            cx,
+            setup,
+            appearance,
+        }
     }
 
     /// Switches the theme at once, without a crossfade. Panics on an unknown name.
     pub fn set_theme(&mut self, name: &str) {
-        self.cx
-            .update(|cx| store::activate(name, ActivateSource::User, cx))
-            .unwrap_or_else(|err| panic!("theme {name}: {err:?}"));
+        let set_theme = self.setup.set_theme;
+        self.cx.update(|cx| set_theme(name, cx));
         self.cx.run_until_parked();
     }
 
@@ -113,7 +122,8 @@ impl RenderHarness {
     pub fn set_scale(&mut self, scale: f32) {
         self.appearance.ui_scale_pct = (scale * 100.0).round() as u16;
         let appearance = self.appearance.clone();
-        self.cx.update(|cx| store::apply_metrics(&appearance, cx));
+        let apply_metrics = self.setup.apply_metrics;
+        self.cx.update(|cx| apply_metrics(&appearance, cx));
         self.cx.run_until_parked();
     }
 
@@ -148,24 +158,12 @@ impl RenderHarness {
     }
 }
 
-impl Default for RenderHarness {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Compares `img` with `tests/golden/<name>.png`, or writes the golden when
+/// Compares `img` with `<golden_dir>/<name>.png`, or writes the golden when
 /// `TL_UPDATE_GOLDEN=1`. On a failed compare it writes `target/golden-diff/<name>.actual.png`
 /// and `<name>.diff.png` (differing pixels red on black) and panics with the count.
-pub fn assert_golden(name: &str, img: &RgbaImage) {
+pub fn assert_golden(golden_dir: &Path, name: &str, img: &RgbaImage) {
     let update = std::env::var("TL_UPDATE_GOLDEN").is_ok_and(|v| v == "1");
-    if let Err(msg) = check_golden(
-        Path::new(GOLDEN_DIR),
-        Path::new(DIFF_DIR),
-        name,
-        img,
-        update,
-    ) {
+    if let Err(msg) = check_golden(golden_dir, Path::new(DIFF_DIR), name, img, update) {
         panic!("{msg}");
     }
 }
@@ -246,44 +244,7 @@ fn save(img: &RgbaImage, path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{AppContext, Context, IntoElement, Styled, div, px};
-
     use super::*;
-    use crate::theme;
-
-    /// A view filled with the theme's `window_bg`.
-    struct Fill;
-
-    impl Render for Fill {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().bg(theme::current(cx).window_bg)
-        }
-    }
-
-    #[test]
-    fn solid_fill_matches_window_bg() {
-        run_on_lavapipe(
-            "testing::render::tests::solid_fill_matches_window_bg",
-            || {
-                let mut harness = RenderHarness::new();
-                let expected = Rgba([0x19, 0x1B, 0x1D, 0xFF]);
-                for (scale, w, h) in [(1.0, 200, 80), (1.1, 220, 88)] {
-                    harness.set_scale(scale);
-                    let img = harness.render(size(px(100.), px(40.)), |_, cx| cx.new(|_| Fill));
-                    assert_eq!(img.dimensions(), (w, h), "scale {scale}");
-                    let off = img
-                        .pixels()
-                        .filter(|p| {
-                            p.0.iter()
-                                .zip(expected.0)
-                                .any(|(a, b)| a.abs_diff(b) > CHANNEL_TOLERANCE)
-                        })
-                        .count();
-                    assert_eq!(off, 0, "scale {scale}: {off} pixels are not #191B1D");
-                }
-            },
-        );
-    }
 
     /// A 100 × 100 grey image with `n` pixels changed by 10/255 in the red channel.
     fn with_changed(base: &RgbaImage, n: u32) -> RgbaImage {

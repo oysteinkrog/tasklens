@@ -31,11 +31,11 @@ use tl_ui::app::{AppEnv, OpenHooks, TasklensUi, UiExit, UiExitSlot, UiInit, star
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::host::HostContext;
 use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 use tl_ui::window::settings::{PageId, all_pages};
 use tl_ui::windows::low_memory::{LowMemoryWindow, MAX_ROWS, RowId, init_low_memory};
 use tl_ui::{OpenMode, StartOptions, UiLaunch};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use super::common::{is_open, toasts};
 

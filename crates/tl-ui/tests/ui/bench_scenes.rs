@@ -25,7 +25,7 @@ use tl_ui::demand::GlobalDemand;
 use tl_ui::pages::performance::DeviceKey;
 use tl_ui::pages::performance::cpu::CpuPage;
 use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 static FAKE_CPU: AtomicU64 = AtomicU64::new(0);
 

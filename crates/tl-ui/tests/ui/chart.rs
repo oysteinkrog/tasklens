@@ -10,7 +10,7 @@ use tl_model::client::EngineClient;
 use tl_ui::chart::view::ChartView;
 use tl_ui::chart::{ChartLabels, ChartSeries, ChartSpec, ValueAlign, ValueFormat};
 use tl_ui::hub::SnapshotHub;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// A hub over `engine`; installs the engine's latest snapshot.
 fn hub_for(engine: &Arc<FakeEngine>, cx: &mut App) -> Entity<SnapshotHub> {
@@ -246,7 +246,7 @@ mod element {
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -584,7 +584,7 @@ mod binding {
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_ui::chart::view::{ChartView, search_series};
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -781,7 +781,7 @@ mod binding {
         }
         assert!(search_series(&views, |v| v.id.cmp(&sid(50, MetricId::CPU_TOTAL))).is_none());
 
-        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        let mut snap = tl_ui_testkit::fake_engine::empty_snapshot();
         set_series(&mut snap, views);
         let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
         let chart =
@@ -808,7 +808,7 @@ mod binding {
     fn chart_state_warming_up_then_live_then_stale(cx: &mut TestAppContext) {
         let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
         let chart = cx.new(|cx| ChartView::new(spec_for(&[B]), super::labels(), &hub, cx));
-        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        let mut snap = tl_ui_testkit::fake_engine::empty_snapshot();
         let newest = 100 * S;
 
         chart.update(cx, |v, _| {
@@ -832,7 +832,7 @@ mod binding {
     fn owner_state_wins(cx: &mut TestAppContext) {
         let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
         let chart = cx.new(|cx| ChartView::new(spec_for(&[B]), super::labels(), &hub, cx));
-        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        let mut snap = tl_ui_testkit::fake_engine::empty_snapshot();
         let newest = 100 * S;
         chart.update(cx, |v, cx| {
             v.set_state(ChartState::Restricted, cx);
@@ -874,7 +874,7 @@ mod anchor {
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::geometry::y_of;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -1765,7 +1765,7 @@ mod key_in_place {
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const SERIES: usize = 16;
     const PERIOD: u64 = 1_000_000_000;
@@ -1887,7 +1887,7 @@ mod grid_element {
     use tl_ui::chart::grid_element::{
         ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
     };
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
 
@@ -2216,7 +2216,7 @@ mod grid_offline_and_gaps {
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
 
@@ -2448,7 +2448,7 @@ mod tier_1hz {
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
     use tl_ui::chart::view::{ChangedRuns, ChartView, search_series};
     use tl_ui::chart::{ChartSeries, ChartSpec};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -2744,7 +2744,7 @@ mod hover {
     };
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -3146,7 +3146,7 @@ mod grid_hover {
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
 
@@ -3401,7 +3401,7 @@ mod cpu_grid_hover {
     use tl_model::time::now_boot_ns;
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::cpu_grid::CpuGrid;
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;

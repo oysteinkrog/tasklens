@@ -169,11 +169,3 @@ table/columns_window.rs -> window::registry
 # tl-ui-table -> tl-ui-sys: 2
 table/columns.rs -> pages::connections::delegate
 table/columns.rs -> pages::startup::delegate
-
-# tl-ui-testkit -> tl-ui-base: 3
-testing/render.rs -> text::fonts
-testing/render.rs -> theme
-testing/render.rs -> theme::store
-
-# tl-ui-testkit -> tl-ui-kit: 1
-testing/render.rs -> components::icons

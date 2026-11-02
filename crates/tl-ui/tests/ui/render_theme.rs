@@ -3,20 +3,20 @@
 //! compared with `tests/golden/theme_<name>_<scale>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
 //! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_theme::`.
-//! The render helpers live in `tl_ui::testing`, which needs `test-hooks` (R-291).
+//! The render helpers live in `tl_ui_testkit::render`, set up for tl-ui in `render_support`.
 
 #![cfg(feature = "render-tests")]
 
 #[cfg(not(feature = "test-hooks"))]
 compile_error!("render_theme needs --features render-tests,test-hooks (R-291)");
 
+use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{
     AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Render, Styled, Window, div, px,
     size,
 };
-use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
 use tl_ui::text::fonts::UI_FAMILY;
 use tl_ui::theme::{GraphPalette, StatusColors, ThemeSlot, current, metrics};
 

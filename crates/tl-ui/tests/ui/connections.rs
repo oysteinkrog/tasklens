@@ -497,8 +497,8 @@ mod page {
     use tl_ui::pages::connections::{ConnectionsPage, REFRESH_TOAST_AFTER};
     use tl_ui::pages::processes::actions::CopyDetails;
     use tl_ui::pages::sys_table::SysBody;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
         page: Entity<ConnectionsPage>,
@@ -1948,8 +1948,8 @@ fn connections_page_registered(cx: &mut TestAppContext) {
     use tl_model::settings::{Settings, StartTab, UiState};
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
@@ -2005,8 +2005,8 @@ mod jump {
     };
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::settings_global::TlSettings;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
@@ -2452,12 +2452,12 @@ mod props {
     use tl_ui::app::{AppEnv, TasklensUi, UiInit};
     use tl_ui::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
     use tl_ui::demand::GlobalDemand;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
     use tl_ui::windows::connection_properties::{
         ConnectionPropertiesView, open_connection_properties,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
@@ -2908,9 +2908,9 @@ mod main_window {
     use tl_ui::pages::connections::ConnectionsPage;
     use tl_ui::pages::processes::ProcessesPage;
     use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     const FIREFOX_COOKIE: u64 = 2;
 
@@ -3358,7 +3358,7 @@ mod remote_host {
     use tl_ui::table::columns::Availability;
     use tl_ui::table::columns_window::PickerColumn;
     use tl_ui::table::tree_table::{TlTreeTable, demand_window};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn foreign_record(cookie: u64, host: RemoteHost) -> ConnRecord {
         let mut record = connection(cookie, SmallVec::new());

@@ -26,11 +26,11 @@ use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
 use tl_ui::host::HostContext;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::settings_global::{SettingKey, TlSettings};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::tray_bridge::{
     self, AddTrayGraph, RemoveTrayGraph, TRAY_TICK, TrayBridge, TrayStatus, main_window_target,
     tray_source_of_card,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const NOW_NS: u64 = 10_000_000_000;
 const SAMPLE_NS: u64 = 9_000_000_000;

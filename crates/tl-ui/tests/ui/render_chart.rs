@@ -16,6 +16,7 @@ compile_error!("render_chart needs --features render-tests,test-hooks (R-291)");
 
 use std::sync::Arc;
 
+use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px,
     size,
@@ -31,9 +32,8 @@ use tl_ui::chart::{
     LegendStyle, ValueAlign, ValueFormat, YScale,
 };
 use tl_ui::hub::SnapshotHub;
-use tl_ui::testing::fake_engine::FakeEngine;
-use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
 use tl_ui::theme::{current, metrics};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MS: u64 = 1_000_000;
 const S: u64 = 1_000 * MS;

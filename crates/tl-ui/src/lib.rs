@@ -32,8 +32,6 @@ pub mod windows;
 
 #[cfg(feature = "bench")]
 pub mod bench;
-#[cfg(any(test, feature = "test-hooks"))]
-pub mod testing;
 
 pub use app::{
     AdapterInfo, AppEnv, BuildInfo, CrashReport, GlobalShortcutApi, ImportSummary,

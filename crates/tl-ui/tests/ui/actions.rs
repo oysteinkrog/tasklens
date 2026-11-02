@@ -31,7 +31,7 @@ use tl_ui::components::dialog::TlDialogView;
 use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
 

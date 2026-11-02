@@ -33,7 +33,7 @@ use tl_ui::pages::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID}
 use tl_ui::pages::performance::page::DevicePage as _;
 use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui::settings_global::TlSettings;
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// The interface in the fake catalog.
 const NET: DeviceIdx = DeviceIdx(1);

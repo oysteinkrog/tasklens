@@ -40,7 +40,7 @@ use tl_ui::pages::sys_table::{SysDelegate, SysQuery};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::columns::ColumnLayout;
 use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
-use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 struct Host;
 
@@ -2914,12 +2914,12 @@ mod page {
     use tl_ui::pages::services::{REFRESH_TOAST_AFTER, ServicesPage};
     use tl_ui::pages::sys_table::SysBody;
     use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::filter::FILTER_DEBOUNCE;
     use tl_ui::window::main::{
         MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
     };
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::{child_key, child_process, record};
 

@@ -40,7 +40,6 @@ use tl_ui::demand::GlobalDemand;
 use tl_ui::host::HostContext;
 use tl_ui::pages::sys_status::{DotStyle, LabelTone};
 use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
 use tl_ui::window::setup::SetupRow;
@@ -49,6 +48,7 @@ use tl_ui::windows::service_properties::{
     LogsStatusForTest, LogsView, RecoveryForm, RecoveryTab, RestartPolicy, ServicePropertiesWindow,
     ServicePropsTab, ServicePropsTabView, changed_keys, validate_on_failure,
 };
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 use tl_ui::pages::services::actions::ServicePropsOk;
 

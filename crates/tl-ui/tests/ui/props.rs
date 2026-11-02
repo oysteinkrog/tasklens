@@ -1290,7 +1290,6 @@ mod window {
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
     use tl_ui::table::tree_table::RowKind;
-    use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{main_window_view, open_main_window_on};
     use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
     use tl_ui::windows::app_props::{
@@ -1300,6 +1299,7 @@ mod window {
         ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, AccessButton,
         PropsWindow, open_process_properties, props_words,
     };
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
 

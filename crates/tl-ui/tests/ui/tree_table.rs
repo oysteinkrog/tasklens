@@ -2472,7 +2472,7 @@ fn render_counter_unchanged_without_new_version() {
 
     use tl_model::client::EngineClient;
     use tl_ui::hub::{SnapshotChanged, SnapshotHub};
-    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui_testkit::fake_engine::FakeEngine;
 
     let mut cx = cosmic_cx();
     let engine = FakeEngine::new();

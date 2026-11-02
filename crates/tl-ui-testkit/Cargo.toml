@@ -1,0 +1,23 @@
+[package]
+name = "tl-ui-testkit"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+# Dev only (ADR-020): tl-ui crates use it as a dev-dependency, never as a normal one.
+
+[dependencies]
+tl-model = { workspace = true }
+gpui-kit = { workspace = true }
+async-channel = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }   # render only (R-291)
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+render = ["gpui-kit/test-support", "dep:image"]   # headless screenshot helpers (ADR-013)
+
+[lints]
+workspace = true

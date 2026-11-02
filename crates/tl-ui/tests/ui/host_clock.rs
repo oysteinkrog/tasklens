@@ -29,9 +29,9 @@ use tl_ui::chart::{ChartLabels, ChartSeries, ChartSpec, ChartState, ValueAlign, 
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::host::HostContext;
 use tl_ui::hub::{HostClock, SnapshotHub};
-use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::window::collector_health::{CollectorHealthWindow, open_collector_health};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+use tl_ui_testkit::fake_engine::FakeEngine;
 
 const MS: u64 = 1_000_000;
 const S: u64 = 1_000_000_000;
