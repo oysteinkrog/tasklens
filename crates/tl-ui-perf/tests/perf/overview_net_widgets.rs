@@ -16,28 +16,28 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentit
 use tl_model::ids::DeviceIdx;
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::actions::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_kit::components::kv_grid;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{
     PerfOverviewSetBoxArrange, PerfOverviewSetBoxMode, PerfWidgetEditBox, WidgetSource,
 };
-use tl_ui::pages::performance::overview::net_box::{
+use tl_ui_overview::overview::net_box::{
     COMBINED_CHART_ID, DOWN_RATE_ID, GRID_ID, NetBox, UP_RATE_ID, cell_id,
 };
-use tl_ui::pages::performance::overview::net_flow::{adapters_of, down_of, traffic_of, up_of};
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui::pages::performance::sidebar::DeviceSidebar;
-use tl_ui::pages::performance::widget::container::{WidgetContainer, container_id};
-use tl_ui::pages::performance::widget::edit::{WidgetEditor, default_layout};
-use tl_ui::pages::performance::widget::group_widget::{GroupFlowLook, GroupState};
-use tl_ui::pages::performance::widget::metric_widget::{FlowLook, widget_id};
-use tl_ui::pages::performance::widget::source::Availability;
-use tl_ui::settings_global::TlSettings;
+use tl_ui_overview::overview::net_flow::{adapters_of, down_of, traffic_of, up_of};
+use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_overview::widget::container::{WidgetContainer, container_id};
+use tl_ui_overview::widget::edit::{WidgetEditor, default_layout};
+use tl_ui_overview::widget::group_widget::{GroupFlowLook, GroupState};
+use tl_ui_overview::widget::metric_widget::{FlowLook, widget_id};
+use tl_ui_overview::widget::source::Availability;
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     ContainerLayout, GroupKind, NET_BOX_CONTAINER, WidgetContent, box_layout, convert_old_settings,
 };
@@ -170,13 +170,13 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));

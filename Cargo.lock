@@ -8302,6 +8302,7 @@ dependencies = [
  "tl-ui-perf-core",
  "tl-ui-settings",
  "tl-ui-table",
+ "tl-ui-testkit",
  "tracing",
 ]
 

@@ -21,29 +21,29 @@ use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::{ChartState, ChartView};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::actions::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_chart::chart::{ChartState, ChartView};
+use tl_ui_kit::components::kv_grid;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_perf_core::core::actions::{
     PerfEnterEditMode, PerfWidgetEditStart, PerfWidgetResetPage, WidgetSource,
 };
-use tl_ui::pages::performance::aggregate::AggregateDiskPage;
-use tl_ui::pages::performance::details::KeyValueModel;
-use tl_ui::pages::performance::page::{
+use tl_ui_perf::performance::aggregate::AggregateDiskPage;
+use tl_ui_perf_core::core::details::KeyValueModel;
+use tl_ui_perf::performance::page::{
     DevicePage, PAGE_BODY_ID, PAGE_HEADER_H, PAGE_PAD, PerfSidebar,
 };
-use tl_ui::pages::performance::sidebar::DeviceSidebar;
-use tl_ui::pages::performance::widget::container::WidgetContainer;
-use tl_ui::pages::performance::widget::details_widget::{DetailsShown, DetailsView, details_id};
-use tl_ui::pages::performance::widget::edit::{TOOLBAR_ID, WidgetEditor, saved_layout};
-use tl_ui::pages::performance::widget::grid::{PAGE_GUTTER, PAGE_ROW_UNIT};
-use tl_ui::pages::performance::widget::metric_widget::widget_id;
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui::settings_global::TlSettings;
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_overview::widget::container::WidgetContainer;
+use tl_ui_overview::widget::details_widget::{DetailsShown, DetailsView, details_id};
+use tl_ui_overview::widget::edit::{TOOLBAR_ID, WidgetEditor, saved_layout};
+use tl_ui_overview::widget::grid::{PAGE_GUTTER, PAGE_ROW_UNIT};
+use tl_ui_overview::widget::metric_widget::widget_id;
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{FixedWidget, WidgetContent};
 use tl_ui_settings::layout_boxes::{
     DEVICE_DISKS, METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_DISK_READ,
@@ -196,13 +196,13 @@ fn open(cx: &mut TestAppContext, w: f32, h: f32) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -467,14 +467,14 @@ fn page_widget_details_rows_match_grid(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let model: &KeyValueModel = page.read(cx).details();
         let strings = cx
-            .try_global::<tl_ui::i18n::Strings>()
+            .try_global::<tl_ui_base::i18n::Strings>()
             .map(|s| s.strings_version);
         let expected = DetailsShown::of(model, strings);
         assert_eq!(details.read(cx).shown(), &expected);
         let labels: Vec<_> = model.rows.iter().map(|r| r.label).collect();
         assert_eq!(
             labels,
-            tl_ui::pages::performance::aggregate::DISK_ROWS.to_vec()
+            tl_ui_perf::performance::aggregate::DISK_ROWS.to_vec()
         );
     });
     // The Active time row has a value.
@@ -483,7 +483,7 @@ fn page_widget_details_rows_match_grid(cx: &mut TestAppContext) {
             .details()
             .rows
             .iter()
-            .find(|row| row.label == tl_ui::pages::performance::disk::ROW_ACTIVE)
+            .find(|row| row.label == tl_ui_perf::performance::disk::ROW_ACTIVE)
             .map(|row| (row.value.to_string(), row.hidden))
     });
     let (value, hidden) = active.expect("the Active time row");

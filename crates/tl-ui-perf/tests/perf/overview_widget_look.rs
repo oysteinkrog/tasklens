@@ -20,30 +20,30 @@ use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemGroupBand, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::ChartView;
-use tl_ui::chart::labels::LabelKind;
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::DeviceKey;
-use tl_ui::pages::performance::actions::{PerfOverviewSetBoxMode, PerfWidgetEditBox};
-use tl_ui::pages::performance::memory_apps;
-use tl_ui::pages::performance::overview::cpu_box::core_chart_id;
-use tl_ui::pages::performance::overview::mem_box::MemRowsRef;
-use tl_ui::pages::performance::overview::parts::{CoreCellFit, core_cell};
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui::pages::performance::overview::{disk_box, net_box, timeline};
-use tl_ui::pages::performance::sidebar::DeviceSidebar;
-use tl_ui::pages::performance::widget::container::WidgetContainer;
-use tl_ui::pages::performance::widget::edit::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_chart::chart::ChartView;
+use tl_ui_chart::chart::labels::LabelKind;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{PerfOverviewSetBoxMode, PerfWidgetEditBox};
+use tl_ui_overview::overview::memory_apps;
+use tl_ui_overview::overview::cpu_box::core_chart_id;
+use tl_ui_overview::overview::mem_box::MemRowsRef;
+use tl_ui_overview::overview::parts::{CoreCellFit, core_cell};
+use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_overview::overview::{disk_box, net_box, timeline};
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_overview::widget::container::WidgetContainer;
+use tl_ui_overview::widget::edit::{
     WidgetEditor, corner_id, editor_id, frame_id, gear_id, grip_id,
 };
-use tl_ui::pages::performance::widget::group_widget::GroupFlowLook;
-use tl_ui::pages::performance::widget::metric_widget::{FlowLook, part_id, widget_id};
-use tl_ui::settings_global::TlSettings;
+use tl_ui_overview::widget::group_widget::GroupFlowLook;
+use tl_ui_overview::widget::metric_widget::{FlowLook, part_id, widget_id};
+use tl_ui_base::settings_global::TlSettings;
 use tl_ui_settings::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, GPU_BOX_CONTAINER, WidgetContent, WidgetSetting,
     reset_to_default,
@@ -331,13 +331,13 @@ fn open_with(cx: &mut TestAppContext, gpu: bool) -> Rig<'_> {
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -893,7 +893,7 @@ fn masked_widget(grid: &WidgetLook, flow: &WidgetLook) -> WidgetLook {
 #[gpui_kit::test]
 fn overview_widget_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     let mut r = open(cx);
-    let graph = r.vcx.update(|_, cx| tl_ui::theme::current(cx).graph);
+    let graph = r.vcx.update(|_, cx| tl_ui_base::theme::current(cx).graph);
     for (kind, container_id, presets) in BOXES {
         for preset in presets {
             // Back to the built-in flow layout, then the preset.
@@ -1325,7 +1325,7 @@ impl Rig<'_> {
                 ui_scale_pct: pct,
                 ..AppearanceSettings::default()
             };
-            let _ = tl_ui::theme::metrics::recompute(&appearance, cx);
+            let _ = tl_ui_base::theme::metrics::recompute(&appearance, cx);
         });
         draw(self.vcx);
     }
