@@ -12,11 +12,11 @@
 //! 10 at the same whole percents renders nothing. A click on a row selects that process on the
 //! Processes tab. Pointer movement never notifies.
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::hash::{Hash as _, Hasher as _};
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::rc::Rc;
 
 use gpui_kit::{
@@ -134,12 +134,12 @@ pub struct ProcsBox {
     strings_version: u64,
     hub: Entity<SnapshotHub>,
     _subs: [Subscription; 4],
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
     /// The process the last row click asked the Processes tab to select.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_jump: Rc<Cell<Option<ProcessKey>>>,
 }
 
@@ -160,11 +160,11 @@ impl ProcsBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_jump: Rc::new(Cell::new(None)),
         };
         this.sync_rows(&snap.processes, true);
@@ -202,7 +202,7 @@ impl ProcsBox {
         }
         let snap = box_snapshot(&hub, cx);
         if self.sync_rows(&snap.processes, false) {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
@@ -213,7 +213,7 @@ impl ProcsBox {
     fn on_pause(&mut self, cx: &mut Context<Self>) {
         let snap = box_snapshot(&self.hub, cx);
         if self.sync_rows(&snap.processes, false) {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
@@ -312,7 +312,9 @@ fn row_element(
     fraction: Option<f32>,
     m: &UiMetrics,
     theme: &TlTheme,
-    #[cfg(any(test, feature = "test-hooks"))] last_jump: &Rc<Cell<Option<ProcessKey>>>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))] last_jump: &Rc<
+        Cell<Option<ProcessKey>>,
+    >,
 ) -> AnyElement {
     let s = m.ui_scale;
     let header = key.is_none();
@@ -368,11 +370,11 @@ fn row_element(
     let Some(key) = key else {
         return row.into_any_element();
     };
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     let last_jump = Rc::clone(last_jump);
     row.tl_selector(move || format!("{PROC_ROW_ID_PREFIX}{}", key.pid))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_jump.set(Some(key));
             select_process(key, window, cx);
         })
@@ -381,7 +383,7 @@ fn row_element(
 
 impl Render for ProcsBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
@@ -393,7 +395,7 @@ impl Render for ProcsBox {
             None,
             &m,
             &theme,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             &self.last_jump,
         ));
         for r in &self.rows {
@@ -403,7 +405,7 @@ impl Render for ProcsBox {
                 Some(r.fraction),
                 &m,
                 &theme,
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 &self.last_jump,
             ));
         }

@@ -269,9 +269,9 @@ pub struct OverviewPage {
     _activation: Option<Subscription>,
     /// The widget editors whose start and end re-render the page (UI-PRF-061).
     widget_edit_subs: SmallVec<[(EntityId, Subscription); 2]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -431,9 +431,9 @@ impl OverviewPage {
             _subs: subs,
             _activation: None,
             widget_edit_subs: SmallVec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         // The boxes start with their range text, so the first sample notifies only its box.
@@ -1146,7 +1146,7 @@ impl OverviewPage {
     }
 
     fn notify(&self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1357,7 +1357,7 @@ impl OverviewPage {
 
 impl Render for OverviewPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();

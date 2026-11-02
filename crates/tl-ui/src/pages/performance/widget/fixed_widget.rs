@@ -100,9 +100,9 @@ pub struct FixedWidgetView {
     content: Option<AnyView>,
     /// Edit Widgets is on: the content keeps the edit chrome's margins free.
     edit_inset: bool,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: std::cell::Cell<u32>,
 }
 
@@ -114,9 +114,9 @@ impl FixedWidgetView {
             container,
             content,
             edit_inset: false,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
         }
     }
@@ -176,7 +176,7 @@ impl FixedWidgetView {
     }
 
     fn notify(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -184,7 +184,7 @@ impl FixedWidgetView {
 
 impl Render for FixedWidgetView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let id = self.setting.id;

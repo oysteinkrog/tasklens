@@ -123,24 +123,27 @@ pub(crate) fn clock_text(bucket: u16, mark: bool) -> SharedString {
     out.into()
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
-    static METER_QUADS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+    /// `None` until the first `take_meter_quads` call, so the app never collects quads.
+    static METER_QUADS: RefCell<Option<Vec<Bounds<Pixels>>>> = const { RefCell::new(None) };
 }
 
-/// The quads every [`Meter`] painted on this thread since the last call, track first.
-#[cfg(any(test, feature = "test-hooks"))]
+/// The quads every [`Meter`] painted on this thread since the last call, track first. The
+/// first call turns collection on and returns nothing.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn take_meter_quads() -> Vec<Bounds<Pixels>> {
-    METER_QUADS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+    METER_QUADS.with(|q| q.borrow_mut().replace(Vec::new()).unwrap_or_default())
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
-    static CORE_LABELS: RefCell<Vec<CoreLabelPaint>> = const { RefCell::new(Vec::new()) };
+    /// `None` until the first `take_core_labels` call, so the app never collects labels.
+    static CORE_LABELS: RefCell<Option<Vec<CoreLabelPaint>>> = const { RefCell::new(None) };
 }
 
 /// Where [`CoreBars`] painted one core's labels.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CoreLabelPaint {
     pub core: usize,
@@ -153,10 +156,11 @@ pub struct CoreLabelPaint {
     pub row_h: Pixels,
 }
 
-/// The core labels every [`CoreBars`] painted on this thread since the last call.
-#[cfg(any(test, feature = "test-hooks"))]
+/// The core labels every [`CoreBars`] painted on this thread since the last call. The first
+/// call turns collection on and returns nothing.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn take_core_labels() -> Vec<CoreLabelPaint> {
-    CORE_LABELS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+    CORE_LABELS.with(|q| q.borrow_mut().replace(Vec::new()).unwrap_or_default())
 }
 
 /// A horizontal meter as wide as its parent and `METER_H` high: a track quad (`theme.divider`)
@@ -193,8 +197,12 @@ fn paint_meter(
 ) {
     let corners = Corners::all(radius);
     window.paint_quad(fill(b, track).corner_radii(corners));
-    #[cfg(any(test, feature = "test-hooks"))]
-    METER_QUADS.with(|q| q.borrow_mut().push(b));
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    METER_QUADS.with(|q| {
+        if let Some(q) = q.borrow_mut().as_mut() {
+            q.push(b);
+        }
+    });
     let Some(f) = fraction else {
         return;
     };
@@ -204,8 +212,12 @@ fn paint_meter(
     }
     let fb = Bounds::new(b.origin, size(w, b.size.height));
     window.paint_quad(fill(fb, color).corner_radii(corners));
-    #[cfg(any(test, feature = "test-hooks"))]
-    METER_QUADS.with(|q| q.borrow_mut().push(fb));
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    METER_QUADS.with(|q| {
+        if let Some(q) = q.borrow_mut().as_mut() {
+            q.push(fb);
+        }
+    });
 }
 
 impl IntoElement for Meter {
@@ -301,10 +313,10 @@ pub struct CoreBarsModel {
     hovered: Option<usize>,
     hover_sink: Option<RowHoverSink>,
     /// Paints of the element.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub paint_count: Cell<u32>,
     /// Lines shaped while painting.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub shape_count: Cell<u32>,
 }
 
@@ -906,7 +918,7 @@ impl Element for CoreBars {
         let s = m.ui_scale;
         let mut model = self.model.borrow_mut();
         let model = &mut *model;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         model.paint_count.set(model.paint_count.get() + 1);
 
         let n = model.names.len();
@@ -984,20 +996,22 @@ impl Element for CoreBars {
                 let ghz_x = x + l.cell_w - ghz.width();
                 labels::paint_line(window, cx, ghz, point(ghz_x, y), l.row_h);
             }
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 model.shape_count.set(model.shape_count.get() + shaped);
                 CORE_LABELS.with(|q| {
-                    q.borrow_mut().push(CoreLabelPaint {
-                        core: i,
-                        name: point(x, y),
-                        pct_right: x + parts.pct_right,
-                        ghz: parts.ghz,
-                        row_h: l.row_h,
-                    });
+                    if let Some(q) = q.borrow_mut().as_mut() {
+                        q.push(CoreLabelPaint {
+                            core: i,
+                            name: point(x, y),
+                            pct_right: x + parts.pct_right,
+                            ghz: parts.ghz,
+                            row_h: l.row_h,
+                        });
+                    }
                 });
             }
-            #[cfg(not(any(test, feature = "test-hooks")))]
+            #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
             let _ = shaped;
         }
     }

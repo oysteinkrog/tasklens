@@ -597,9 +597,9 @@ pub struct MemBox {
     plan: PlanCell,
     _subs: [Subscription; 5],
     _widget_subs: [Subscription; 2],
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -758,9 +758,9 @@ impl MemBox {
             container,
             plan,
             _widget_subs: widget_subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         this.sync_text(&snap.system.memory, true, cx);
@@ -908,7 +908,7 @@ impl MemBox {
     }
 
     fn notify(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1113,7 +1113,7 @@ impl MemBox {
     fn on_pause(&mut self, cx: &mut Context<Self>) {
         let snap = box_snapshot(&self.hub, cx);
         self.sync_text(&snap.system.memory, true, cx);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1920,7 +1920,7 @@ impl MemBox {
 
 impl Render for MemBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();

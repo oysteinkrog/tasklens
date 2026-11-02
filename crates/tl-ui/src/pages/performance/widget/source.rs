@@ -607,10 +607,10 @@ pub struct SourceData {
     /// Bumped each time the source notifies.
     revision: u64,
     _subs: [Subscription; 4],
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: std::cell::Cell<u32>,
     /// How many times the stats were worked out.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub stats_count: std::cell::Cell<u32>,
 }
 
@@ -674,9 +674,9 @@ impl SourceData {
                 cx.observe_global::<TlSettings>(Self::on_settings),
                 cx.observe_global::<Strings>(Self::on_strings),
             ],
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             stats_count: std::cell::Cell::new(0),
         };
         let snap = box_snapshot(hub, cx);
@@ -929,7 +929,7 @@ impl SourceData {
 
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1117,7 +1117,7 @@ impl SourceData {
         let figures = if availability != Availability::Available {
             None
         } else if stats || self.state.reading.availability != Availability::Available {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.stats_count.set(self.stats_count.get() + 1);
             let range = self.state.followed.range;
             // `self.state.minus` itself: the reading's availability is still the last one here.

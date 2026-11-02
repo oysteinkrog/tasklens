@@ -29,7 +29,7 @@
 //! after Apply) is drawn by the box's [`WidgetEditor`] and its `WidgetContainer`; so is the box
 //! while Edit Widgets is on.
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::cell::{Cell as StdCell, RefCell};
 use std::hash::{Hash as _, Hasher as _};
@@ -559,7 +559,7 @@ impl NetModel {
 
     /// The counted adapters' cells: interface index, rate text ("1.2 Mbps / 3.4 Mbps") and
     /// chart.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn adapter_cells(&self) -> Vec<(DeviceIdx, SharedString, Entity<ChartView>)> {
         self.adapters
             .iter()
@@ -644,9 +644,9 @@ pub struct NetBox {
     plan: PlanCell,
     _subs: [Subscription; 5],
     _editor_sub: Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -774,9 +774,9 @@ impl NetBox {
             container,
             plan,
             _editor_sub: editor_sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         this.sync_peaks(&snap, true);
@@ -895,7 +895,7 @@ impl NetBox {
     }
 
     fn notify(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -2050,7 +2050,7 @@ impl NetBox {
 
 impl Render for NetBox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();

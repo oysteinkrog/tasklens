@@ -235,12 +235,12 @@ pub struct WidgetContainer {
     /// The UI scale of the last placement.
     scale: f32,
     _metrics_sub: Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: std::cell::Cell<u32>,
     /// Placements run, so a test can tell a fixed-work render from one that placed widgets.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub relayout_count: std::cell::Cell<u32>,
 }
 
@@ -272,11 +272,11 @@ impl WidgetContainer {
             scroll: ScrollHandle::new(),
             scale: metrics(cx).ui_scale,
             _metrics_sub: cx.observe_global::<UiMetrics>(Self::on_metrics),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             relayout_count: std::cell::Cell::new(0),
         };
         this.sync_sources(cx);
@@ -614,7 +614,7 @@ impl WidgetContainer {
     }
 
     fn notify(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -681,7 +681,7 @@ impl WidgetContainer {
     /// that left drop theirs, and kept ones take their settings and size in place. Returns
     /// whether anything the container draws changed.
     fn relayout(&mut self, cx: &mut Context<Self>) -> bool {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.relayout_count.set(self.relayout_count.get() + 1);
         let scale = metrics(cx).ui_scale;
         self.scale = scale;
@@ -847,7 +847,7 @@ impl WidgetContainer {
 
 impl Render for WidgetContainer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let this = cx.entity().downgrade();
         // After the frame: a notify during the frame is lost.

@@ -781,9 +781,9 @@ pub struct GpuBox {
     plan: PlanCell,
     _subs: [Subscription; 5],
     _editor_sub: Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -871,9 +871,9 @@ impl GpuBox {
             store,
             plan,
             _editor_sub: editor_sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         this.build_sections(gpus, cx);
@@ -961,7 +961,7 @@ impl GpuBox {
                 self.show_saved(cx);
             }
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -983,7 +983,7 @@ impl GpuBox {
             return;
         }
         self.show_saved(cx);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1022,7 +1022,7 @@ impl GpuBox {
         }
         self.build_sections(gpus, cx);
         self.sync_slots(gpus, cx);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1058,7 +1058,7 @@ impl GpuBox {
         let snap = box_snapshot(&self.hub, cx);
         self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1409,7 +1409,7 @@ impl GpuBox {
         let snap = box_snapshot(&hub, cx);
         let rows = self.sync_engines(&snap, cx);
         if self.sync_text(&snap, rows) {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.notify_count.set(self.notify_count.get() + 1);
             cx.notify();
         }
@@ -1420,7 +1420,7 @@ impl GpuBox {
         let snap = box_snapshot(&self.hub, cx);
         self.sync_engines(&snap, cx);
         self.sync_text(&snap, true);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -1479,7 +1479,7 @@ impl GpuBox {
             let snap = box_snapshot(&self.hub, cx);
             if self.sync_engines(&snap, cx) {
                 self.sync_text(&snap, true);
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 self.notify_count.set(self.notify_count.get() + 1);
                 cx.notify();
             }
@@ -2340,7 +2340,7 @@ impl GpuBox {
 
 impl Render for GpuBox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();

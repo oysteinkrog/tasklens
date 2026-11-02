@@ -29,7 +29,7 @@
 //! a drag changes. A tick that leaves those alone renders nothing.
 
 use std::cell::Cell;
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -183,7 +183,7 @@ pub fn set_paused(p: Option<Paused>, cx: &mut App) {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
     static TEST_CLOCK: Cell<Option<(i64, TimeNs)>> = const { Cell::new(None) };
 }
@@ -191,14 +191,14 @@ thread_local! {
 /// Pins the clocks the timeline and the paused view read on this thread: CLOCK_REALTIME at
 /// `realtime_ns` and CLOCK_BOOTTIME at `boot_ns`. `None` reads the real clocks again. Tests use
 /// it so they do not depend on the host's clock or uptime.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn set_test_clock(clock: Option<(i64, TimeNs)>) {
     TEST_CLOCK.set(clock);
 }
 
 /// CLOCK_REALTIME now.
 pub fn now_realtime_ns() -> i64 {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some((realtime, _)) = TEST_CLOCK.get() {
         return realtime;
     }
@@ -207,7 +207,7 @@ pub fn now_realtime_ns() -> i64 {
 
 /// CLOCK_BOOTTIME now on the host `clock` belongs to (tasklens-q4x76.35).
 pub fn now_boot(clock: &HostClock) -> TimeNs {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some((_, boot)) = TEST_CLOCK.get() {
         return boot;
     }
@@ -596,19 +596,19 @@ pub struct TimelineBox {
     style_version: u64,
     strings_version: u64,
     _subs: [Subscription; 5],
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// Painted band runs of the last paint, per band.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_cells: RefCell<[SmallVec<[BandRun; 32]>; 4]>,
     /// Markers of the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_markers: RefCell<SmallVec<[Marker; 16]>>,
     /// The text of the last toast the box pushed.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_toast: RefCell<Option<SharedString>>,
     /// The time the last `history` click opened History mode at, boot clock.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_history_at: Cell<Option<TimeNs>>,
 }
 
@@ -638,15 +638,15 @@ impl TimelineBox {
                 cx.observe_global::<UiMetrics>(Self::sync_style),
                 cx.observe_global::<Strings>(Self::sync_strings),
             ],
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_cells: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_markers: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_toast: RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_history_at: Cell::new(None),
         }
     }
@@ -925,7 +925,7 @@ impl TimelineBox {
             self.no_history(cx);
             return;
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.last_history_at.set(Some(ask.t));
         let (t, window) = (ask.t, ask.window);
         cx.defer(move |cx| {
@@ -938,7 +938,7 @@ impl TimelineBox {
     /// The toast "No process history at that time".
     fn no_history(&self, cx: &mut App) {
         let text = tr(cx, "perf-overview-timeline-no-history");
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.last_toast.replace(Some(text.clone()));
         push_main_toast(cx, ToastKind::Info, text, None, None);
     }
@@ -946,7 +946,7 @@ impl TimelineBox {
 
 impl Render for TimelineBox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
@@ -1065,7 +1065,7 @@ impl TimelineBox {
                             );
                             window.paint_quad(fill(b, colors[i].alpha(a)));
                         }
-                        #[cfg(any(test, feature = "test-hooks"))]
+                        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                         {
                             entity.read(cx).last_cells.borrow_mut()[i] = cells;
                         }
@@ -1128,7 +1128,7 @@ impl TimelineBox {
         let s = m.ui_scale;
         let mut root = div().relative().size_full();
         let Some(d) = self.data.as_ref().filter(|_| width > 0.) else {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.last_markers.borrow_mut().clear();
             return root.into_any_element();
         };
@@ -1142,7 +1142,7 @@ impl TimelineBox {
             .collect();
         let xs: SmallVec<[f32; 16]> = shown.iter().map(|(_, x)| *x).collect();
         let merged = merge_markers(&xs, s);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.last_markers.replace(merged.clone());
         for (n, mk) in merged.iter().enumerate() {
             let group = &shown[mk.first..mk.first + mk.count];

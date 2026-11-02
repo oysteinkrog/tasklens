@@ -90,9 +90,9 @@ pub struct DetailsView {
     /// The height the heading and the grid take at the view's width, logical px; 0 before the
     /// first paint.
     natural: Rc<Cell<f32>>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -106,9 +106,9 @@ impl DetailsView {
             shown,
             draw,
             natural: Rc::new(Cell::new(0.)),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         }
     }
@@ -120,7 +120,7 @@ impl DetailsView {
             return false;
         }
         self.shown = shown;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
         true
@@ -139,7 +139,7 @@ impl DetailsView {
 
 impl Render for DetailsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let scale = metrics(cx).ui_scale;
         let content = (self.draw)(window, cx);

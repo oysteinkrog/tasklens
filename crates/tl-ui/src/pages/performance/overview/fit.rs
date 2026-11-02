@@ -354,14 +354,16 @@ impl Element for FitText {
             _ => bounds.right() - line.width(),
         };
         let origin = point(x, bounds.top());
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         FIT_TEXTS.with_borrow_mut(|log| {
-            log.push(FitTextPaint {
-                bounds: Bounds::new(origin, size(line.width(), *line_h)),
-                mask: window.content_mask().bounds,
-                text: line.text.clone(),
-                whole: self.text.clone(),
-            });
+            if let Some(log) = log.as_mut() {
+                log.push(FitTextPaint {
+                    bounds: Bounds::new(origin, size(line.width(), *line_h)),
+                    mask: window.content_mask().bounds,
+                    text: line.text.clone(),
+                    whole: self.text.clone(),
+                });
+            }
         });
         let _ = line.paint(origin, *line_h, TextAlign::Left, None, window, cx);
     }
@@ -369,7 +371,7 @@ impl Element for FitText {
 
 /// Where [`FitText`] painted a value: the text's bounds, the clip it painted under, the text
 /// drawn and the whole value.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug)]
 pub struct FitTextPaint {
     pub bounds: Bounds<Pixels>,
@@ -378,14 +380,16 @@ pub struct FitTextPaint {
     pub whole: SharedString,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
-    static FIT_TEXTS: std::cell::RefCell<Vec<FitTextPaint>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// `None` until the first `take_fit_texts` call, so the app never collects texts.
+    static FIT_TEXTS: std::cell::RefCell<Option<Vec<FitTextPaint>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// The values every [`FitText`] painted on this thread since the last call, in paint order.
-#[cfg(any(test, feature = "test-hooks"))]
+/// The values every [`FitText`] painted on this thread since the last call, in paint order. The
+/// first call turns collection on and returns nothing.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn take_fit_texts() -> Vec<FitTextPaint> {
-    FIT_TEXTS.with(|t| std::mem::take(&mut *t.borrow_mut()))
+    FIT_TEXTS.with(|t| t.borrow_mut().replace(Vec::new()).unwrap_or_default())
 }

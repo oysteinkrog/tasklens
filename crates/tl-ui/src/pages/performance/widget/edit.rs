@@ -541,7 +541,7 @@ pub struct WidgetEditor {
     scroll: ScrollHandle,
     add_bounds: Rc<Cell<Bounds<Pixels>>>,
     _container_sub: gpui_kit::Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -580,7 +580,7 @@ impl WidgetEditor {
             scroll: ScrollHandle::new(),
             add_bounds: Rc::new(Cell::new(Bounds::default())),
             _container_sub: sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         }
     }
@@ -1758,7 +1758,7 @@ impl WidgetEditor {
 
 impl Render for WidgetEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let id = editor_id(&self.id);
         let container = self

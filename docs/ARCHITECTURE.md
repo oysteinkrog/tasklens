@@ -3500,6 +3500,13 @@ Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None ne
 | `chart/element.rs:165` `PLOTS`, set by `element.rs:174` `take_plots`, written at `element.rs:156` | collects the plot of every chart paint (CS-B3 fix: it was a `Vec` that grew on every paint in a debug app) | the thread-local is `None` until a test's first `take_plots` call; the paint writes only when it is `Some` |
 | `chart/view.rs:642` `ChartView::set_series_for_test`, `chart/grid_element.rs:597` `ChartGridView::set_series_for_test` | replaces the series a chart shows | only tests call them |
 
+Switches in `pages/performance/overview/` and `pages/performance/widget/` (CS-B6; paths under `crates/tl-ui/src/pages/performance/`). The other hooks in these directories are recorders (`render_count`, `notify_count`, `relayout_count`, `stats_count`, `paint_count`, `shape_count`, `last_jump`, `last_toast`, `last_history_at`) or readers (`adapter_cells`). `last_cells` and `last_markers` in `overview/timeline.rs` are overwritten on each paint, so they do not grow. Two fixes:
+
+| Hook | What it changes | Guard |
+|---|---|---|
+| `overview/timeline.rs:188` `TEST_CLOCK`, set by `timeline.rs:195` `set_test_clock`, read at `now_realtime_ns` and `now_boot` | the clocks the timeline and the paused view read | the thread-local is `None` until a test sets it; the app never calls the setter |
+| `overview/parts.rs:129` `METER_QUADS`, `parts.rs:142` `CORE_LABELS`, `overview/fit.rs:386` `FIT_TEXTS`, each read and reset by its `take_*` function | collects the quads, core labels and fit texts of every paint (CS-B6 fix: each was a `Vec` that grew on every paint in a debug app) | each thread-local is `None` until the first `take_*` call; the paint writes only when it is `Some` |
+
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 
 **Move method.** A crate extraction is one commit:
