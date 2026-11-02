@@ -197,7 +197,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::pages::performance::widget::container::FlowItem;
+    use crate::performance::widget::container::FlowItem;
 
     fn metric(id: u32, forms: FormSet) -> WidgetSetting {
         WidgetSetting {

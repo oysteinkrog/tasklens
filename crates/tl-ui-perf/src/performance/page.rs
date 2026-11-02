@@ -56,12 +56,12 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::overview::parts::title_value_style;
-use crate::pages::performance::overview::range::{
+use crate::performance::overview::parts::title_value_style;
+use crate::performance::overview::range::{
     PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
 // page_range_ns moved to overview/range.rs (tasklens-zljr5.22). This keeps the old path working.
-pub use crate::pages::performance::overview::range::page_range_ns;
+pub use crate::performance::overview::range::page_range_ns;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::template::Template;
@@ -584,7 +584,7 @@ pub fn details_part(
 /// `DetailsView`. `None` once the page is gone.
 pub fn details_draw<P: DevicePage + Render>(
     page: WeakEntity<P>,
-) -> crate::pages::performance::widget::details_widget::DetailsDraw {
+) -> crate::performance::widget::details_widget::DetailsDraw {
     Rc::new(move |_window: &mut Window, cx: &mut App| {
         let page = page.upgrade()?;
         let heading = page_words(cx).details.clone();

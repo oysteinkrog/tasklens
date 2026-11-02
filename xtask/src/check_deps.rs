@@ -214,6 +214,19 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "jiff",
         ],
     ),
+    // ADR-020 perf layer, moved out of tl-ui (CS-E7).
+    (
+        "tl-ui-perf",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "fluent-bundle",
+            "jiff",
+        ],
+    ),
     (
         "tl-app",
         &[

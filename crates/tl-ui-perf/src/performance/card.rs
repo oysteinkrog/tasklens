@@ -40,7 +40,7 @@ use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::performance::overview::parts::title_value_style;
+use crate::performance::overview::parts::title_value_style;
 use crate::selector::TlSelector;
 use crate::template::Template;
 use crate::text::ellipsis::ELLIPSIS;

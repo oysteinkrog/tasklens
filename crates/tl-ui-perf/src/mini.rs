@@ -44,12 +44,12 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::pages::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
-use crate::pages::minigraph::bridge::{MiniKeepAbove, OwnWindowBridge};
-use crate::pages::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
-use crate::pages::performance::card::{CARD_H, CardLines, CardView};
-use crate::pages::performance::sidebar::DeviceSidebar;
-use crate::pages::performance::{DeviceKey, PerformancePage};
+use crate::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
+use crate::minigraph::bridge::{MiniKeepAbove, OwnWindowBridge};
+use crate::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
+use crate::performance::card::{CARD_H, CardLines, CardView};
+use crate::performance::sidebar::DeviceSidebar;
+use crate::performance::{DeviceKey, PerformancePage};
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
@@ -69,7 +69,7 @@ const HEIGHT_CAP: f32 = 0.9;
 
 /// The window caption. It moved to the KWin bridge (tasklens-zljr5.22); this keeps the old path
 /// working.
-pub use crate::pages::minigraph::bridge::MINI_WINDOW_TITLE;
+pub use crate::minigraph::bridge::MINI_WINDOW_TITLE;
 /// The key context of the window's one focus handle.
 pub const MINI_CONTEXT: &str = "MiniWindow";
 /// Element id of the scrolling card list.

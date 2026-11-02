@@ -42,6 +42,7 @@ const UI_SRCS: &[(&str, &str)] = &[
     ("tl-ui-table", "crates/tl-ui-table/src"),
     ("tl-ui-perf-core", "crates/tl-ui-perf-core/src"),
     ("tl-ui-overview", "crates/tl-ui-overview/src"),
+    ("tl-ui-perf", "crates/tl-ui-perf/src"),
 ];
 
 /// Modules that an extracted crate holds at a shorter path than tl-ui's module tree names them:
@@ -49,13 +50,16 @@ const UI_SRCS: &[(&str, &str)] = &[
 /// the old path (`pub use tl_ui_perf_core::core;` in `pages/performance/mod.rs`), so code above
 /// still names the old path. The check rewrites an old path to the new one before it looks for the
 /// file. tasklens-zljr5.29 moved perf-core's modules to its crate root, tasklens-zljr5.30
-/// overview's.
+/// overview's and tasklens-zljr5.31 perf's. The first matching row wins, so the rows for modules
+/// under `pages::performance` come before the row for `pages::performance` itself.
 const ALIASES: &[(&[&str], &[&str])] = &[
     (&["pages", "performance", "core"], &["core"]),
     (&["pages", "minigraph"], &["minigraph"]),
     (&["windows", "detached_graph"], &["detached_graph"]),
     (&["pages", "performance", "overview"], &["overview"]),
     (&["pages", "performance", "widget"], &["widget"]),
+    (&["pages", "performance"], &["performance"]),
+    (&["windows", "mini"], &["mini"]),
 ];
 
 /// The allowlist of today's upward edges, relative to the workspace root.
@@ -118,9 +122,9 @@ const LAYERS: &[(&str, &str)] = &[
     // overview/ since tasklens-zljr5.22.
     ("overview/", "tl-ui-overview"),
     ("widget/", "tl-ui-overview"),
-    // tl-ui-perf
-    ("pages/performance/", "tl-ui-perf"),
-    ("windows/mini.rs", "tl-ui-perf"),
+    // tl-ui-perf, at its crate root (ALIASES maps the old module paths)
+    ("performance/", "tl-ui-perf"),
+    ("mini.rs", "tl-ui-perf"),
     // tl-ui-procs
     ("pages/processes/", "tl-ui-procs"),
     ("windows/props/", "tl-ui-procs"),
@@ -1305,7 +1309,8 @@ mod tests {
 
     #[test]
     fn layer_table_longest_prefix_wins() {
-        assert_eq!(layer_of("pages/performance/mod.rs"), Some("tl-ui-perf"));
+        assert_eq!(layer_of("performance/mod.rs"), Some("tl-ui-perf"));
+        assert_eq!(layer_of("mini.rs"), Some("tl-ui-perf"));
         assert_eq!(layer_of("core/actions.rs"), Some("tl-ui-perf-core"));
         assert_eq!(layer_of("core/keys.rs"), Some("tl-ui-perf-core"));
         assert_eq!(layer_of("minigraph/panel.rs"), Some("tl-ui-perf-core"));
@@ -1326,13 +1331,14 @@ mod tests {
     fn old_module_paths_resolve_to_the_new_crate_root() {
         let files = tree(&[
             ("lib.rs", "pub mod pages;\n"),
-            ("pages/mod.rs", "pub mod performance;\n"),
+            ("pages/mod.rs", "pub use tl_ui_perf::performance;\n"),
             (
-                "pages/performance/mod.rs",
+                "performance/mod.rs",
                 "pub use tl_ui_overview::overview;\npub mod page;\nuse self::core::DeviceKind;\n\
-                 use crate::pages::performance::overview::OverviewPage;\n",
+                 use crate::performance::overview::OverviewPage;\n",
             ),
-            ("pages/performance/page.rs", "pub struct Page;\n"),
+            ("performance/page.rs", "pub struct Page;\n"),
+            ("mini.rs", "use crate::performance::page::Page;\n"),
             (
                 "overview/mod.rs",
                 "use crate::pages::performance::core::DeviceKey;\n\
@@ -1346,7 +1352,8 @@ mod tests {
             ("minigraph/mod.rs", "pub mod panel;\n"),
             (
                 "minigraph/panel.rs",
-                "use crate::core::DeviceKey;\nuse crate::pages::performance::page::Page;\n",
+                "use crate::core::DeviceKey;\nuse crate::pages::performance::page::Page;\n\
+                 use crate::windows::mini::MiniWindow;\n",
             ),
             (
                 "detached_graph.rs",
@@ -1358,7 +1365,7 @@ mod tests {
         assert!(scan.unmapped.is_empty());
         // perf -> overview and overview -> perf-core through the old paths are allowed. The old
         // widget path resolves to tl-ui-overview's widget/, so perf-core -> overview is upward,
-        // as is perf-core -> perf.
+        // as are perf-core -> perf through `pages::performance` and `windows::mini`.
         let edges: Vec<(&str, &str, &str)> = scan
             .edges
             .iter()
@@ -1368,6 +1375,7 @@ mod tests {
             edges,
             vec![
                 ("detached_graph.rs", "tl-ui-perf-core", "tl-ui-overview"),
+                ("minigraph/panel.rs", "tl-ui-perf-core", "tl-ui-perf"),
                 ("minigraph/panel.rs", "tl-ui-perf-core", "tl-ui-perf"),
             ]
         );

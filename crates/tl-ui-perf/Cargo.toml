@@ -1,0 +1,32 @@
+[package]
+name = "tl-ui-perf"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tl-model = { workspace = true }
+gpui-kit = { workspace = true }
+smallvec = { workspace = true }
+rustc-hash = { workspace = true }
+tracing = { workspace = true }
+jiff = { workspace = true }
+fluent-bundle = { workspace = true }
+tl-ui-overview = { workspace = true }
+tl-ui-perf-core = { workspace = true }
+tl-ui-chart = { workspace = true }
+tl-ui-table = { workspace = true }
+tl-ui-kit = { workspace = true }
+tl-ui-base = { workspace = true }
+tl-ui-settings = { workspace = true }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+default = []
+bench = []
+test-hooks = []
+
+[lints]
+workspace = true
