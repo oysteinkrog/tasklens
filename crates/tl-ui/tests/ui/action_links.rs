@@ -54,27 +54,62 @@ fn keymap_actions_resolve(cx: &mut TestAppContext) {
             names.len()
         );
         let mut missing = Vec::new();
-        let mut built = 0;
+        let mut unbuilt = BTreeMap::new();
         for name in &names {
             match cx.build_action(name, None) {
-                Ok(_) => built += 1,
+                Ok(_) => {}
                 Err(ActionBuildError::NotFound { .. }) => missing.push(*name),
-                // The name resolves. An action with data (`SelectTab(n)`, `OpenMenu(id)`) does
-                // not build from the empty input `None` stands for.
-                Err(ActionBuildError::BuildError { .. }) => {}
+                Err(err @ ActionBuildError::BuildError { .. }) => {
+                    unbuilt.insert(*name, err.to_string());
+                }
             }
         }
         assert!(
             missing.is_empty(),
             "bound actions that do not resolve by name: {missing:?}"
         );
+        let expected: BTreeSet<&str> = DATA_ACTIONS.iter().copied().collect();
+        let unexpected: BTreeMap<_, _> = unbuilt
+            .iter()
+            .filter(|(name, _)| !expected.contains(**name))
+            .collect();
         assert!(
-            built * 2 > names.len(),
-            "only {built} of {} bound actions built",
-            names.len()
+            unexpected.is_empty(),
+            "bound actions that do not build from no input and are not in DATA_ACTIONS: \
+             {unexpected:#?}"
+        );
+        let stale: Vec<&str> = expected
+            .iter()
+            .copied()
+            .filter(|name| !unbuilt.contains_key(name))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "DATA_ACTIONS entries that are not bound or now build from no input: {stale:?}"
         );
     });
 }
+
+/// The bound actions that carry data, such as `SelectTab(n)` or `PerfWidgetMove { dx, dy }`.
+/// They resolve by name but do not build from the empty input `None` stands for. Every other
+/// bound action must build. Keep this list exact: `keymap_actions_resolve` fails on a name
+/// that is missing here and on a name here that is not bound or builds.
+const DATA_ACTIONS: &[&str] = &[
+    "tasklens::MoveFocusEdge",
+    "tasklens::MoveFocusPage",
+    "tasklens::OpenMenu",
+    "tasklens::PerfMoveFocusedDevice",
+    "tasklens::PerfOverviewMoveBox",
+    "tasklens::PerfOverviewResizeBox",
+    "tasklens::PerfSelectVisibleDevice",
+    "tasklens::PerfWidgetMove",
+    "tasklens::PerfWidgetResize",
+    "tasklens::PrioritySliderStep",
+    "tasklens::PropsSelectTab",
+    "tasklens::SelectHost",
+    "tasklens::SelectTab",
+    "tasklens::ServicePropsSelectTab",
+];
 
 #[test]
 fn every_crate_with_actions_is_initialised() {
