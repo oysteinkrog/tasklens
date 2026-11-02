@@ -23,11 +23,18 @@ tl-ui-settings = { workspace = true }
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 tl-ui-testkit = { workspace = true }   # FakeEngine for the integration tests
+tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # render helpers
 
 [features]
 default = []
 bench = []
 test-hooks = []
+render-tests = ["tl-ui-pagehost/render-tests", "test-hooks"]   # headless screenshot tests (ADR-013)
+
+[[test]]
+name = "render"
+path = "tests/render/main.rs"
+required-features = ["render-tests"]
 
 [lints]
 workspace = true

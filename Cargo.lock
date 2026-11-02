@@ -8299,6 +8299,7 @@ dependencies = [
  "tl-ui-chart",
  "tl-ui-kit",
  "tl-ui-overview",
+ "tl-ui-pagehost",
  "tl-ui-perf-core",
  "tl-ui-settings",
  "tl-ui-table",

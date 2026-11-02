@@ -3,13 +3,10 @@
 //! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
 //! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_perf::`.
-
-#![cfg(feature = "render-tests")]
+//! Run with `cargo test -p tl-ui-perf --features render-tests --test render`.
 
 use std::sync::Arc;
 
-use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     AnyView, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
     Styled as _, Window, div, px, size,
@@ -22,20 +19,29 @@ use tl_model::snapshot::{ComponentHeader, SeriesSet};
 use tl_model::system::{CpuSet, CpuTopology, Metric};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::cpu::CpuPage;
-use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage};
-use tl_ui::pages::performance::page::PerfSidebar;
-use tl_ui::pages::performance::sidebar::DeviceSidebar;
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui::settings_global::TlSettings;
-use tl_ui::theme::current;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::current;
+use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
+use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
+use tl_ui_perf::performance::cpu::CpuPage;
+use tl_ui_perf::performance::page::PerfSidebar;
+use tl_ui_perf::performance::sidebar::DeviceSidebar;
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
+
+/// Where this crate's golden PNGs live.
+const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
+
+/// Compares `img` with `tests/golden/<name>.png`, or writes it when `TL_UPDATE_GOLDEN=1`.
+fn assert_golden(name: &str, img: &tl_ui_testkit::render::RgbaImage) {
+    tl_ui_pagehost::render::assert_golden(std::path::Path::new(GOLDEN_DIR), name, img);
+}
 
 const WIDTH: f32 = 1280.;
 const HEIGHT: f32 = 800.;
@@ -270,7 +276,7 @@ fn check_at(page: Page, theme: &str, name: &str, width: f32, height: f32) {
 /// The CPU page's Up time value, in device pixels (2 × logical): x 16..416 and y 584..604
 /// logical. The page reads CLOCK_BOOTTIME itself, so this value differs on every run. It is
 /// painted over with the page background taken from the padding left of it.
-fn blank_up_time(img: &mut image::RgbaImage) {
+fn blank_up_time(img: &mut tl_ui_testkit::render::RgbaImage) {
     let bg = *img.get_pixel(16, 1168);
     for y in 1168..1208 {
         for x in 32..832 {
