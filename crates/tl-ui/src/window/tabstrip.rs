@@ -102,7 +102,7 @@ pub const COPY_GAP: f32 = 6.0;
 pub const COPY_HIT: f32 = 22.0;
 
 /// The Copy all icon as last drawn. Tests read it through `TabStrip::drawn_copy`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnCopy {
     pub color: Hsla,
@@ -111,7 +111,7 @@ pub struct DrawnCopy {
 }
 
 /// The History icon as last drawn. Tests read it through `TabStrip::drawn_history`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnHistory {
     pub color: Hsla,
@@ -181,7 +181,7 @@ struct AccentRuleKey {
 }
 
 /// The cached rule as tests see it.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccentRuleProbe {
     pub active: Bounds<Pixels>,
@@ -228,18 +228,18 @@ pub struct TabStrip {
     style_version: u64,
     strings_version: u64,
     _subs: SmallVec<[Subscription; 4]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn: SmallVec<[SharedString; 6]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn_history: Option<DrawnHistory>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn_copy: Option<DrawnCopy>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     rule_builds: u32,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     label_shapes: u32,
     /// Animation frames the slide asked for.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     anim_frames: u32,
 }
 
@@ -313,17 +313,17 @@ impl TabStrip {
             style_version: metrics(cx).style_version,
             strings_version: strings_version(cx),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn: SmallVec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn_history: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn_copy: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             rule_builds: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             label_shapes: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             anim_frames: 0,
         }
     }
@@ -360,7 +360,7 @@ impl TabStrip {
     }
 
     /// Animation frames the slide asked for.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn anim_frames(&self) -> u32 {
         self.anim_frames
     }
@@ -446,13 +446,13 @@ impl TabStrip {
     }
 
     /// The History icon as last drawn; `None` when the Processes tab was not shown.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_history(&self) -> Option<&DrawnHistory> {
         self.drawn_history.as_ref()
     }
 
     /// The Copy all icon as last drawn; `None` when it was not shown.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_copy(&self) -> Option<&DrawnCopy> {
         self.drawn_copy.as_ref()
     }
@@ -466,7 +466,7 @@ impl TabStrip {
         let s = m.ui_scale;
         let tooltip = self.words.copy_all.clone();
         let (hover, primary) = (theme.tab_hover, theme.text_primary);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn_copy = Some(DrawnCopy {
                 color: theme.text_secondary,
@@ -528,7 +528,7 @@ impl TabStrip {
         } else {
             self.words.show_history.clone()
         };
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn_history = Some(DrawnHistory {
                 color,
@@ -604,13 +604,13 @@ impl TabStrip {
     }
 
     /// The labels as last drawn, left to right.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_labels(&self) -> &[SharedString] {
         &self.drawn
     }
 
     /// The cached accent rule, `None` before the first paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn accent_rule(&self) -> Option<AccentRuleProbe> {
         self.rule.as_ref().map(|(key, path)| AccentRuleProbe {
             active: key.active,
@@ -624,20 +624,20 @@ impl TabStrip {
     }
 
     /// How many times the rule path was built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rule_builds(&self) -> u32 {
         self.rule_builds
     }
 
     /// How many times the labels were translated and shaped.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn label_shapes(&self) -> u32 {
         self.label_shapes
     }
 
     /// Translates the labels and shapes them.
     fn shape_labels(&mut self, m: &UiMetrics, window: &Window, cx: &App) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.label_shapes += 1;
         }
@@ -717,7 +717,7 @@ impl Render for TabStrip {
         let avail = strip_w - self.fit.filter - px((FILTER_GAP + OVERFLOW_SLOT) * s);
         let (visible, hidden) = self.visible_tabs(avail);
         self.hidden = hidden;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn = visible
                 .iter()
@@ -726,7 +726,7 @@ impl Render for TabStrip {
         }
 
         let height = px(TAB_STRIP_H * s);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn_history = None;
             self.drawn_copy = None;
@@ -946,7 +946,7 @@ impl Element for AccentRule {
                 strip.anim = None;
                 return target;
             };
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 strip.anim_frames += 1;
             }
@@ -986,7 +986,7 @@ impl Element for AccentRule {
             if strip.rule.as_ref().is_some_and(|(k, _)| *k == key) {
                 return;
             }
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 strip.rule_builds += 1;
             }

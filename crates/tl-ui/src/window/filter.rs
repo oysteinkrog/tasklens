@@ -168,7 +168,7 @@ pub struct FilterBox {
     /// and the memory group chip belong to that host.
     events: Option<Entity<ShellEvents>>,
     _subs: SmallVec<[Subscription; 4]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
 }
 
@@ -232,7 +232,7 @@ impl FilterBox {
             input_drawn: Rc::new(Cell::new(px(0.))),
             events,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             outline: gpui_kit::Hsla::default(),
         }
     }
@@ -335,7 +335,7 @@ impl FilterBox {
     }
 
     /// The outline colour of the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn outline_color(&self) -> gpui_kit::Hsla {
         self.outline
     }
@@ -416,7 +416,7 @@ impl Render for FilterBox {
         } else {
             theme.divider
         };
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.outline = outline;
         }

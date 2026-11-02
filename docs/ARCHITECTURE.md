@@ -3492,6 +3492,11 @@ Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None ne
 | `app.rs:174` `AppEnv::test`, `app.rs:645` `open_first_for_test`, `app.rs:651` `start_for_test` | test app settings and app start | only tests call them |
 | `pages/startup/copy.rs:162` `copy_rows_as_table_for_test` | runs the page's "Copy rows as table" | only tests call it |
 | `table/mod.rs:10` module `test_delegate` | a fake table delegate | only tests build one |
+| `window/main.rs:363` `TestPages`, set by `main.rs:370` `set_test_page`, read at `main.rs:377` | the page a main window tab builds | a GPUI global the app never sets; `try_global` is `None` until a test sets it |
+| `window/main.rs:782` `FailMainOpen`, read at `main.rs:790` | makes the first main window open fail | a GPUI global the app never sets |
+| `window/titlebar.rs:152` `TitleBarProbe`, read at `titlebar.rs:172`, `:186`, `:209`, `:218` and `main.rs:1022`, `:2806` | window decorations, maximized state and controls; skips `minimize_window`; counts moves, zooms and minimizes | a GPUI global the app never sets; every read is `try_global` or `has_global`, false until a test sets it |
+| `window/settings/mod.rs:247` `TestPages` (settings), read at `settings/mod.rs:239` | extra pages after the real settings pages | a GPUI global the app never sets |
+| `window/main.rs:2243` `set_picking_for_test`, `main.rs:2431` `apply_close_for_test`, `main.rs:2518` `scale_factor_changed_for_test` | window picking, a window close, a scale factor change | only tests call them |
 
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 

@@ -220,7 +220,7 @@ impl PageId {
 pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
     // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
     // Services, Startup and window, Privileges, Hosts, Advanced.
-    #[allow(unused_mut, reason = "test-hooks appends the test pages")]
+    #[allow(unused_mut, reason = "the test hooks append the test pages")]
     let mut pages: Vec<PageBuilder> = vec![
         general::page(host, cx),
         appearance::page(host, cx),
@@ -235,7 +235,7 @@ pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
         hosts::page(host, cx),
         advanced::page(host, cx),
     ];
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
         pages.extend(test(cx));
     }
@@ -243,10 +243,10 @@ pub fn all_pages(host: &HostContext, cx: &mut App) -> Vec<PageBuilder> {
 }
 
 /// Extra pages for tests, appended after the real ones.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct TestPages(pub fn(&mut App) -> Vec<PageBuilder>);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TestPages {}
 
 /// A slider item's range and step, so `SettingsWindow::new` can create its state.
@@ -316,46 +316,46 @@ pub struct PageBuilder {
     commit_next: Option<SliderCommit>,
     description: Option<SharedString>,
     /// The switch and checkbox setters, the same closures the kit calls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     bool_setters: Vec<(SettingKey, BoolSetter)>,
     /// The number input setters, the same closures the kit calls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     numbers: Vec<(SettingKey, NumberSetter)>,
     /// The dropdown option labels and setters, the same closure the kit calls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     dropdowns: Vec<(SettingKey, Vec<SharedString>, PickSetter)>,
     /// The description each item shows.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     descriptions: Vec<(SettingKey, SharedString)>,
     /// The keys of the disabled items.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     disabled: Vec<SettingKey>,
     /// The banner texts, top first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     banners: Vec<SharedString>,
     /// The checklist setters by key and value, the same closures the checkboxes call.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     checks: Vec<(SettingKey, SharedString, BoolSetter)>,
     /// The empty texts the checklists show.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     empty_texts: Vec<(SettingKey, SharedString)>,
     /// The button labels and actions.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     buttons: Vec<(SharedString, Rc<dyn Action>)>,
     /// The keyless switches by label.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     locals: Vec<(SharedString, LocalSwitch)>,
     /// The click handlers of the callback buttons by label.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     button_fns: Vec<(SharedString, ClickHandler)>,
     /// The custom item labels and their render closures.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     customs: Vec<(SharedString, CustomRender)>,
     /// The indent of each indented switch, in px before the UI scale.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     indents: Vec<(SettingKey, f32)>,
     /// The tooltip of each switch that has one.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     tooltips: Vec<(SettingKey, SharedString)>,
 }
 
@@ -391,33 +391,33 @@ impl PageBuilder {
             restart_toast_next: None,
             commit_next: None,
             description: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             bool_setters: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             numbers: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             dropdowns: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             descriptions: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             disabled: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             banners: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             checks: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             empty_texts: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             buttons: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             locals: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             button_fns: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             customs: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             indents: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             tooltips: Vec::new(),
         }
     }
@@ -490,7 +490,7 @@ impl PageBuilder {
         kind: TlBannerKind,
         text: SharedString,
     ) -> &mut Self {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.banners.push(text.clone());
         let item = SettingItem::render(move |_, _, _| TlBanner::new(kind, text.clone()));
         self.push_item(group, item);
@@ -530,7 +530,7 @@ impl PageBuilder {
                 (section.heading, options)
             })
             .collect();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             for (_, options) in sections.iter() {
                 for (_, value, set) in options {
@@ -615,7 +615,7 @@ impl PageBuilder {
                     .collect()
             })
             .collect();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         for (_, value, set) in columns.iter().flatten() {
             self.checks.push((key, value.clone(), set.clone()));
         }
@@ -648,7 +648,7 @@ impl PageBuilder {
     /// Sets the description of the last item.
     pub fn description(&mut self, text: impl Into<SharedString>) -> &mut Self {
         let text = text.into();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if let Some(key) = self.keys.last() {
             self.descriptions.push((*key, text.clone()));
         }
@@ -699,7 +699,7 @@ impl PageBuilder {
                 dispatch_deferred(action(), cx);
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.bool_setters.push((key, setter.clone()));
         let host = self.host.clone();
         let get: BoolGetter = Rc::new(move |cx| read_bool(&host, cx, key));
@@ -725,7 +725,7 @@ impl PageBuilder {
                 info_toast(note.clone(), cx);
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.bool_setters.push((key, setter.clone()));
         let host = self.host.clone();
         let get: BoolGetter = Rc::new(move |cx| read(&host, cx, key).as_str() == Some(on));
@@ -809,7 +809,7 @@ impl PageBuilder {
                 on_pick(value, cx);
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.dropdowns.push((
             key,
             options.iter().map(|(label, _)| label.clone()).collect(),
@@ -910,7 +910,7 @@ impl PageBuilder {
                 info_toast(note.clone(), cx);
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.numbers.push((key, setter.clone()));
         let host = self.host.clone();
         let field = SettingField::number_input(
@@ -933,7 +933,7 @@ impl PageBuilder {
         self.keys.extend_from_slice(keys);
         let render: CustomRender = Rc::new(render);
         let label: SharedString = label.into();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.customs.push((label.clone(), render.clone()));
         let item = SettingItem::new(
             label,
@@ -952,7 +952,7 @@ impl PageBuilder {
     ) -> &mut Self {
         let render: CustomRender = Rc::new(render);
         let label: SharedString = label.into();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.customs.push((label.clone(), render.clone()));
         let item = SettingItem::render(move |_, window, cx| render(window, cx)).keywords([label]);
         self.push_item(group, item);
@@ -970,7 +970,7 @@ impl PageBuilder {
         let label: SharedString = label.into();
         let text = label.clone();
         let action: Rc<dyn Action> = Rc::from(action);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.buttons.push((label.clone(), action.clone()));
         let item = SettingItem::new(
             label,
@@ -996,7 +996,7 @@ impl PageBuilder {
         let label: SharedString = label.into();
         let text = label.clone();
         let on_click: ClickHandler = Rc::new(on_click);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.button_fns.push((label.clone(), on_click.clone()));
         let item = SettingItem::new(
             label,
@@ -1020,7 +1020,7 @@ impl PageBuilder {
         local: LocalSwitch,
     ) -> &mut Self {
         let label: SharedString = label.into();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.locals.push((label.clone(), local.clone()));
         let title = label.clone();
         let disabled = local.disabled;
@@ -1141,7 +1141,7 @@ impl PageBuilder {
     }
 
     /// Runs the switch or checkbox setter of `key` as a click on it would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_bool(&self, key: SettingKey, on: bool, cx: &mut App) {
         if let Some((_, setter)) = self.bool_setters.iter().find(|(k, _)| *k == key) {
             setter(on, cx);
@@ -1150,7 +1150,7 @@ impl PageBuilder {
 
     /// Runs the number input setter of `key` as typing `v` would. It snaps to the nearest step
     /// from the minimum and clamps to the range.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_number(&self, key: SettingKey, v: f64, cx: &mut App) {
         if let Some((_, setter)) = self.numbers.iter().find(|(k, _)| *k == key) {
             setter(v, cx);
@@ -1158,7 +1158,7 @@ impl PageBuilder {
     }
 
     /// The option labels of the dropdown of `key`, in order. Empty when there is none.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn dropdown_labels(&self, key: SettingKey) -> Vec<SharedString> {
         self.dropdowns
             .iter()
@@ -1168,7 +1168,7 @@ impl PageBuilder {
     }
 
     /// Picks the option labelled `label` in the dropdown of `key`, as a click on it would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn pick(&self, key: SettingKey, label: &str, cx: &mut App) {
         if let Some((_, labels, setter)) = self.dropdowns.iter().find(|(k, _, _)| *k == key)
             && let Some(i) = labels.iter().position(|l| l.as_ref() == label)
@@ -1178,7 +1178,7 @@ impl PageBuilder {
     }
 
     /// Runs the checklist setter of `value` in `key`, as a click on its checkbox would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_check(&self, key: SettingKey, value: &str, on: bool, cx: &mut App) {
         if let Some((_, _, set)) = self
             .checks
@@ -1190,7 +1190,7 @@ impl PageBuilder {
     }
 
     /// The checklist values of `key`, in order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn check_values(&self, key: SettingKey) -> Vec<SharedString> {
         self.checks
             .iter()
@@ -1200,7 +1200,7 @@ impl PageBuilder {
     }
 
     /// Dispatches the action of the button labelled `label`, as a click on it would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn press(&self, label: &str, window: &mut Window, cx: &mut App) {
         if let Some((_, on_click)) = self.button_fns.iter().find(|(l, _)| l.as_ref() == label) {
             on_click(window, cx);
@@ -1210,25 +1210,25 @@ impl PageBuilder {
     }
 
     /// Whether the keyless switch labelled `label` is on. `false` when there is none.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn local_on(&self, label: &str) -> bool {
         self.local(label).is_some_and(|l| (l.get)())
     }
 
     /// The description the keyless switch labelled `label` shows now, if any.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn local_description(&self, label: &str) -> Option<SharedString> {
         self.local(label).and_then(|l| (l.description)())
     }
 
     /// True when the keyless switch labelled `label` is disabled.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn local_disabled(&self, label: &str) -> bool {
         self.local(label).is_some_and(|l| l.disabled)
     }
 
     /// Runs the setter of the keyless switch labelled `label`, as a click on it would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_local(&self, label: &str, on: bool, cx: &mut App) {
         if let Some(local) = self.local(label) {
             (local.set)(on, cx);
@@ -1236,7 +1236,7 @@ impl PageBuilder {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn local(&self, label: &str) -> Option<&LocalSwitch> {
         self.locals
             .iter()
@@ -1245,7 +1245,7 @@ impl PageBuilder {
     }
 
     /// The element of the custom item labelled `label`, as the page renders it.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_custom(
         &self,
         label: &str,
@@ -1259,7 +1259,7 @@ impl PageBuilder {
     }
 
     /// The text the checklist of `key` shows when it has no option.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn empty_text(&self, key: SettingKey) -> Option<SharedString> {
         self.empty_texts
             .iter()
@@ -1268,13 +1268,13 @@ impl PageBuilder {
     }
 
     /// True when the item of `key` is disabled.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn is_disabled(&self, key: SettingKey) -> bool {
         self.disabled.contains(&key)
     }
 
     /// The indent of the switch of `key`, in px before the UI scale; 0 when it has none.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn indent_of(&self, key: SettingKey) -> f32 {
         self.indents
             .iter()
@@ -1283,7 +1283,7 @@ impl PageBuilder {
     }
 
     /// The tooltip of the switch of `key`, if any.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn tooltip_of(&self, key: SettingKey) -> Option<SharedString> {
         self.tooltips
             .iter()
@@ -1292,13 +1292,13 @@ impl PageBuilder {
     }
 
     /// The banner texts, top first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn banners(&self) -> &[SharedString] {
         &self.banners
     }
 
     /// The group titles, in page order. An untitled group has an empty title.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn group_titles(&self) -> Vec<SharedString> {
         self.groups.iter().map(|(title, _)| title.clone()).collect()
     }
@@ -1309,7 +1309,7 @@ impl PageBuilder {
     }
 
     /// The description the item of `key` shows, if any.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn description_of(&self, key: SettingKey) -> Option<SharedString> {
         self.descriptions
             .iter()
@@ -1327,7 +1327,7 @@ impl PageBuilder {
                 info_toast(note.clone(), cx);
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.bool_setters.push((key, setter.clone()));
         setter
     }
@@ -1364,7 +1364,7 @@ impl PageBuilder {
             let field = SettingField::switch(move |cx| get(cx), move |on, cx| set(on, cx));
             return self.push(group, key, label, description, restart, field);
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             if indent != 0. {
                 self.indents.push((key, indent));
@@ -1377,12 +1377,12 @@ impl PageBuilder {
         self.restart_toast_next = None;
         let label: SharedString = label.into();
         let description = restart.or(description);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if let Some(text) = &description {
             self.descriptions.push((key, text.clone()));
         }
         let disabled = std::mem::take(&mut self.disable_next);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if disabled {
             self.disabled.push(key);
         }
@@ -1434,12 +1434,12 @@ impl PageBuilder {
         self.restart_toast_next = None;
         let mut item = SettingItem::new(label, field);
         if let Some(text) = restart.or(description) {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.descriptions.push((key, text.clone()));
             item = item.description(text);
         }
         if std::mem::take(&mut self.disable_next) {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.disabled.push(key);
             item = item.disabled(true);
         }
@@ -1620,7 +1620,7 @@ pub struct SettingsWindow {
     /// later (or before the first render) are never taken for the search field.
     _search_capture: Option<Subscription>,
     _search_sub: Option<Subscription>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u64,
     _slider_subs: Vec<Subscription>,
     _settings_sub: Subscription,
@@ -1692,7 +1692,7 @@ impl SettingsWindow {
             search,
             _search_capture: None,
             _search_sub: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
             _slider_subs: slider_subs,
             _settings_sub: settings_sub,
@@ -1707,7 +1707,7 @@ impl SettingsWindow {
     }
 
     /// How often the window rendered.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u64 {
         self.renders
     }
@@ -1762,7 +1762,7 @@ impl SettingsWindow {
     }
 
     /// Sets the search text as typing it would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.search.borrow().clone().expect("search field exists");
         input.update(cx, |state, cx| state.set_value(text.to_owned(), window, cx));
@@ -1772,7 +1772,7 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }

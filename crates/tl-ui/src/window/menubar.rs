@@ -28,7 +28,7 @@
 //! minigraph card menu and any in-app graph menu fill a submenu with it.
 
 use fluent_bundle::FluentValue;
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use gpui_kit::Hsla;
 use gpui_kit::base::POPUP_PRIORITY;
 use gpui_kit::base::actions::{SelectLeft, SelectRight};
@@ -379,7 +379,7 @@ pub struct MenuBar {
     dismiss: Option<Subscription>,
     _activation: Subscription,
     _sliders: Vec<Subscription>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn_label_color: Option<Hsla>,
 }
 
@@ -398,7 +398,7 @@ impl MenuBar {
             dismiss: None,
             _activation: activation,
             _sliders: slider_subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn_label_color: None,
         }
     }
@@ -414,7 +414,7 @@ impl MenuBar {
     }
 
     /// The menu slider states (tests check they are reused across opens).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn sliders(&self) -> &MenuSliders {
         &self.sliders
     }
@@ -425,7 +425,7 @@ impl MenuBar {
     }
 
     /// The label colour of the last frame.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_label_color(&self) -> Option<Hsla> {
         self.drawn_label_color
     }
@@ -644,7 +644,7 @@ impl Render for MenuBar {
             t.text_secondary
         };
         let divider = t.divider;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn_label_color = Some(fg);
         }

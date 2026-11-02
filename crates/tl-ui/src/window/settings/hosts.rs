@@ -66,7 +66,7 @@ struct EditorSlot(WindowId, Entity<HostsEditor>);
 impl Global for EditorSlot {}
 
 /// The editor of the open Settings window, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn open_editor(cx: &App) -> Option<Entity<HostsEditor>> {
     cx.try_global::<EditorSlot>().map(|s| s.1.clone())
 }
@@ -281,7 +281,7 @@ impl HostsEditor {
 }
 
 /// Test hooks: the same calls the buttons and fields make.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl HostsEditor {
     /// Types `text` in row `index`'s name field.
     pub fn type_name(

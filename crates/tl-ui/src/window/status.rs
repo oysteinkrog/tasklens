@@ -316,11 +316,11 @@ pub struct StatusChip {
     strings_version: u64,
     style_version: u64,
     _subs: SmallVec<[Subscription; 3]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn: Vec<(SharedString, Hsla)>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     text_layout: Option<gpui_kit::TextLayout>,
 }
 
@@ -383,11 +383,11 @@ impl StatusChip {
             strings_version: strings_version(cx),
             style_version: metrics(cx).style_version,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             text_layout: None,
         }
     }
@@ -668,27 +668,27 @@ impl StatusChip {
     }
 
     /// Renders since creation.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn renders(&self) -> u32 {
         self.renders
     }
 
     /// The chip's parts as last rendered, left to right, with their text colours. A badge
     /// reports its label in its text colour.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn(&self) -> &[(SharedString, Hsla)] {
         &self.drawn
     }
 
     /// The chip's text as last rendered: every part joined.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_text(&self) -> String {
         self.drawn.iter().map(|(s, _)| s.as_ref()).collect()
     }
 
     /// The text element's text as laid out in the last frame, with any "…" cut. `None` while
     /// hidden. Call it only after a draw: GPUI's `TextLayout::text` panics before layout.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn laid_out_text(&self) -> Option<String> {
         self.text_layout.as_ref().map(|layout| layout.text())
     }
@@ -788,7 +788,7 @@ impl StatusChip {
         [lead, div().flex_none().child(part)]
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fn record(&mut self, theme: &TlTheme) {
         let mut drawn = Vec::new();
         let mut at = 0;
@@ -853,15 +853,15 @@ fn stop(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
 
 impl Render for StatusChip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }
         let theme = current(cx).clone();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.record(&theme);
         if !self.is_visible() {
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 self.text_layout = None;
             }
@@ -873,7 +873,7 @@ impl Render for StatusChip {
         let hairline: AbsoluteLength = UiMetrics::hairline(window).into();
 
         let text = StyledText::new(self.text.clone()).with_highlights(self.highlights(&theme));
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.text_layout = Some(text.layout().clone());
         }

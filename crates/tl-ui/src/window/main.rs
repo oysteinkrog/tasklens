@@ -61,7 +61,7 @@ use super::registry::{GlobalRegistry, WindowKey};
 use super::settings;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::{TabStrip, tween_progress};
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use super::titlebar::TitleBarProbe;
 use super::titlebar::{
     TitleBarView, bar_height_of, is_client, keep_above_supported, minimize_main, zoom,
@@ -288,7 +288,7 @@ pub type PageFactory = fn(&mut Window, &mut Context<MainWindow>) -> PageSlot;
 #[derive(Clone, Copy)]
 enum PageSource {
     Page(PageBuilder),
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     Test(PageFactory),
 }
 
@@ -301,7 +301,7 @@ impl PageSource {
     ) -> PageSlot {
         match self {
             Self::Page(build) => build(host, window, cx),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             Self::Test(build) => build(window, cx),
         }
     }
@@ -358,22 +358,22 @@ fn toolbar_for(tab: Tab) -> Box<dyn ToolbarContent> {
 }
 
 /// Fake pages for shell tests. Checked before `page_factory`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Default)]
 struct TestPages([Option<PageFactory>; 6]);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TestPages {}
 
 /// Builds `tab` with `factory` instead of its page arm.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn set_test_page(cx: &mut App, tab: Tab, factory: PageFactory) {
     cx.default_global::<TestPages>().0[tab as usize] = Some(factory);
 }
 
 /// The source for `tab`: a test page if one is set, else the page match.
 fn factory_for(tab: Tab, cx: &App) -> Option<PageSource> {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(factory) = cx
         .try_global::<TestPages>()
         .and_then(|pages| pages.0[tab as usize])
@@ -778,15 +778,15 @@ fn step_ui_scale(cx: &mut App, step: impl FnOnce(u16) -> u16) {
 }
 
 /// Makes the first main window open fail with this text, for the open-failure tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct FailMainOpen(pub String);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for FailMainOpen {}
 
 /// Opens the first main window. The error text on failure.
 fn open_first_main(cx: &mut App) -> Result<(), String> {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(fail) = cx.try_global::<FailMainOpen>() {
         return Err(fail.0.clone());
     }
@@ -1018,7 +1018,7 @@ fn size_state(bounds: WindowBounds) -> WindowState {
 /// `window.window_bounds()`. The test window is never maximized, so tests set
 /// `TitleBarProbe.maximized` instead.
 fn window_bounds_of(window: &Window, cx: &App) -> WindowBounds {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if cx.try_global::<TitleBarProbe>().and_then(|p| p.maximized) == Some(true) {
         return WindowBounds::Maximized(window.bounds());
     }
@@ -1349,24 +1349,24 @@ pub struct MainWindow {
     /// `performance.status_bar` at the last settings change.
     status_placement: tl_model::settings::StatusBarPlacement,
     /// The page container's opacity at the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     page_opacity: f32,
     /// The reconnect banner text at the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     reconnect_banner: Option<SharedString>,
     /// The reconnect cover's color and the window background at the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     reconnect_cover: Option<(gpui_kit::Hsla, gpui_kit::Hsla)>,
     /// Animation frames the fade asked for.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fade_frames: u32,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     first_frames: u32,
     /// `select_by_pid` calls made by `run_select_pid`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     select_pid_jumps: u32,
     /// `minimize_window` calls made for `--start-minimized`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     start_minimizes: u32,
 }
 
@@ -1578,19 +1578,19 @@ impl MainWindow {
             fade: None,
             machine_status,
             status_placement: machine_status::placement(cx),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             page_opacity: 1.0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             reconnect_banner: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             reconnect_cover: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             fade_frames: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             first_frames: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             select_pid_jumps: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             start_minimizes: 0,
         };
         this.sync_fps(cx);
@@ -1642,32 +1642,32 @@ impl MainWindow {
     }
 
     /// The page container's opacity at the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn page_opacity(&self) -> f32 {
         self.page_opacity
     }
 
     /// The reconnect banner text at the last render; `None` while the shown host is live.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn reconnect_banner(&self) -> Option<&SharedString> {
         self.reconnect_banner.as_ref()
     }
 
     /// The reconnect cover's color and the window background at the last render; `None` while
     /// the shown host is live.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn reconnect_cover(&self) -> Option<(gpui_kit::Hsla, gpui_kit::Hsla)> {
         self.reconnect_cover
     }
 
     /// Animation frames the page fade asked for.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn fade_frames(&self) -> u32 {
         self.fade_frames
     }
 
     /// The tab strip, for the animation tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn tabstrip_view(&self) -> &Entity<TabStrip> {
         &self.tabstrip
     }
@@ -2239,13 +2239,13 @@ impl MainWindow {
     }
 
     /// Sets window picking for tests until E20-027 owns it.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_picking_for_test(&mut self, picking: bool) {
         self.picking = picking;
     }
 
     /// The title bar view, for the pin tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn titlebar_view(&self) -> &Entity<TitleBarView> {
         &self.titlebar
     }
@@ -2256,19 +2256,19 @@ impl MainWindow {
     }
 
     /// `after_first_frame` runs.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn first_frames(&self) -> u32 {
         self.first_frames
     }
 
     /// `select_by_pid` calls made by `run_select_pid`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn select_pid_jumps(&self) -> u32 {
         self.select_pid_jumps
     }
 
     /// `minimize_window` calls made for `--start-minimized`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn start_minimizes(&self) -> u32 {
         self.start_minimizes
     }
@@ -2337,7 +2337,7 @@ impl MainWindow {
         page.update(cx, |p, cx| {
             p.select_by_pid(pid, JumpTexts::default(), window, cx)
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.select_pid_jumps += 1;
         }
@@ -2427,7 +2427,7 @@ impl MainWindow {
     }
 
     /// `apply_close` for tests that need a removed main window.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn apply_close_for_test(
         &mut self,
         outcome: CloseOutcome,
@@ -2514,7 +2514,7 @@ impl MainWindow {
     }
 
     /// Reports a window scale factor change; the test window's factor is fixed.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn scale_factor_changed_for_test(&mut self, factor: f32, cx: &mut Context<Self>) {
         self.on_scale_factor(factor, cx);
     }
@@ -2757,7 +2757,7 @@ impl MainWindow {
 
     /// UI-SHL-110 step 11. Runs once per window, after its first frame.
     fn after_first_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.first_frames += 1;
         }
@@ -2802,14 +2802,14 @@ impl MainWindow {
         // step 11: --start-minimized without tray (E20-018), once per process
         if first_minimize && options.start_minimized && !start_hidden(cx) {
             // The GPUI test window panics on minimize_window; TitleBarProbe stands in for it.
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             let probe = cx.has_global::<super::titlebar::TitleBarProbe>();
-            #[cfg(not(any(test, feature = "test-hooks")))]
+            #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
             let probe = false;
             if !probe {
                 window.minimize_window();
             }
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 self.start_minimizes += 1;
             }
@@ -3023,19 +3023,19 @@ impl Render for MainWindow {
         });
         if opacity.is_some() {
             window.request_animation_frame();
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 self.fade_frames += 1;
             }
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.page_opacity = opacity.unwrap_or(1.0);
         }
         // While the shown host reconnects its page keeps the last data, dimmed, under the
         // banner, and takes no clicks (UI-SHL-008, ADR-018 Reconnect).
         let reconnect = self.reconnect_text(cx);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.reconnect_banner = reconnect.clone();
         }
@@ -3053,7 +3053,7 @@ impl Render for MainWindow {
         // opacity without drawing it again (a cached page keeps its cache). It blocks clicks,
         // hover and drags, and lets the wheel scroll the last data.
         let cover = bg.opacity(1.0 - RECONNECT_OPACITY);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.reconnect_cover = reconnect.as_ref().map(|_| (cover, bg));
         }

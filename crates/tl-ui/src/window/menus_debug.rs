@@ -64,7 +64,7 @@ pub fn continuous_on(cx: &App) -> bool {
 }
 
 /// Frames requested by continuous rendering since the session began.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn continuous_requested(cx: &App) -> u64 {
     cx.try_global::<ContinuousRendering>()
         .map_or(0, |c| c.requested)

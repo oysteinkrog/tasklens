@@ -122,7 +122,7 @@ struct CaptionStrings {
 }
 
 /// One caption button as last drawn. Tests read it through `TitleBarView::drawn_captions`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnCaption {
     /// "minimize", "maximize" or "close".
@@ -134,7 +134,7 @@ pub struct DrawnCaption {
 }
 
 /// The pin as last drawn. Tests read it through `TitleBarView::drawn_pin`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnPin {
     pub on: bool,
@@ -147,7 +147,7 @@ pub struct DrawnPin {
 /// `zoom_window`, `minimize_window` and `show_window_menu`, always reports server decorations
 /// and is never maximized. When this Global is installed the shell records those four calls here
 /// instead of making them, and reads the overrides below.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Default)]
 pub struct TitleBarProbe {
     /// Overrides `window.window_decorations()`: true for client decorations.
@@ -166,13 +166,13 @@ pub struct TitleBarProbe {
     pub window_menus: Vec<Point<Pixels>>,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TitleBarProbe {}
 
 fn probe_installed(cx: &App) -> bool {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     return cx.has_global::<TitleBarProbe>();
-    #[cfg(not(any(test, feature = "test-hooks")))]
+    #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
     {
         let _ = cx;
         false
@@ -182,7 +182,7 @@ fn probe_installed(cx: &App) -> bool {
 /// True when the window reports client decorations (the client bar), false for server
 /// decorations (the menu row).
 pub(crate) fn is_client(window: &Window, cx: &App) -> bool {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(client) = cx.try_global::<TitleBarProbe>().and_then(|p| p.client) {
         return client;
     }
@@ -205,7 +205,7 @@ pub fn bar_height(window: &Window, cx: &App) -> Pixels {
 }
 
 fn is_maximized(window: &Window, cx: &App) -> bool {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(maximized) = cx.try_global::<TitleBarProbe>().and_then(|p| p.maximized) {
         return maximized;
     }
@@ -214,7 +214,7 @@ fn is_maximized(window: &Window, cx: &App) -> bool {
 }
 
 fn window_controls(window: &Window, cx: &App) -> gpui_kit::WindowControls {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(controls) = cx.try_global::<TitleBarProbe>().and_then(|p| p.controls) {
         return controls;
     }
@@ -224,7 +224,7 @@ fn window_controls(window: &Window, cx: &App) -> gpui_kit::WindowControls {
 
 fn start_move(window: &Window, cx: &mut App) {
     if probe_installed(cx) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             cx.global_mut::<TitleBarProbe>().moves += 1;
         }
@@ -235,7 +235,7 @@ fn start_move(window: &Window, cx: &mut App) {
 
 pub(crate) fn zoom(window: &Window, cx: &mut App) {
     if probe_installed(cx) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             cx.global_mut::<TitleBarProbe>().zooms += 1;
         }
@@ -246,7 +246,7 @@ pub(crate) fn zoom(window: &Window, cx: &mut App) {
 
 fn window_menu(window: &Window, position: Point<Pixels>, cx: &mut App) {
     if probe_installed(cx) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             cx.global_mut::<TitleBarProbe>().window_menus.push(position);
         }
@@ -273,7 +273,7 @@ pub fn minimize_main(window: &mut Window, cx: &mut App) {
         return;
     }
     if probe_installed(cx) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             cx.global_mut::<TitleBarProbe>().minimizes += 1;
         }
@@ -351,9 +351,9 @@ pub struct TitleBarView {
     keep_above: bool,
     settings_versions: (u64, u64),
     _subs: SmallVec<[Subscription; 4]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn: Vec<DrawnCaption>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn_pin: Option<DrawnPin>,
 }
 
@@ -430,9 +430,9 @@ impl TitleBarView {
             keep_above: keep_above_supported(cx),
             settings_versions: settings_versions(cx),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             drawn_pin: None,
         }
     }
@@ -484,13 +484,13 @@ impl TitleBarView {
     }
 
     /// The caption buttons as last drawn, left to right.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_captions(&self) -> &[DrawnCaption] {
         &self.drawn
     }
 
     /// The pin as last drawn; `None` before the first render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_pin(&self) -> Option<&DrawnPin> {
         self.drawn_pin.as_ref()
     }
@@ -510,7 +510,7 @@ impl TitleBarView {
             (true, true) => self.strings.pin_on.clone(),
             (true, false) => self.strings.pin_off.clone(),
         };
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn_pin = Some(DrawnPin {
                 on,
@@ -584,7 +584,7 @@ impl TitleBarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.drawn.push(DrawnCaption {
             id,
             icon,
@@ -813,7 +813,7 @@ impl TitleBarView {
 impl Render for TitleBarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.drawn.clear();
             self.drawn_pin = None;

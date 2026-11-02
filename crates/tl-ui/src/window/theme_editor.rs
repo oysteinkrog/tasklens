@@ -1155,7 +1155,7 @@ impl ThemeEditor {
     }
 
     /// The 4 row backgrounds the preview table painted last: normal, alternate, hover, selected.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn preview_row_bgs(&self) -> [Hsla; 4] {
         self.painted_rows
     }

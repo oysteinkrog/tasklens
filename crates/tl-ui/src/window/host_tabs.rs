@@ -50,7 +50,7 @@ pub struct HostTabInfo {
 }
 
 /// One tab as last drawn, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnHostTab {
     pub label: SharedString,
@@ -68,7 +68,7 @@ pub struct HostTabs {
     pulse_on: bool,
     /// Where the context menu sends its actions: the tab row, which sits inside the window.
     focus: Option<FocusHandle>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     drawn: Vec<DrawnHostTab>,
 }
 
@@ -126,7 +126,7 @@ impl HostTabs {
     }
 
     /// The tabs as last drawn.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn(&self) -> &[DrawnHostTab] {
         &self.drawn
     }
@@ -188,7 +188,7 @@ impl Render for HostTabs {
         let m = *metrics(cx);
         let s = m.ui_scale;
         let theme = current(cx).clone();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.drawn.clear();
         let view = cx.weak_entity();
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
@@ -204,7 +204,7 @@ impl Render for HostTabs {
             let selected = i == self.selected;
             let (name, cpu) = Self::label(info);
             let tooltip = Self::tooltip(info, cx);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             self.drawn.push(DrawnHostTab {
                 label: match &cpu {
                     Some(cpu) => format!("{name} {cpu}").into(),
