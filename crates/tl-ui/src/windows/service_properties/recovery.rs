@@ -32,6 +32,7 @@ use tracing::warn;
 use super::ServicePropsTabView;
 use crate::action_tracker::ActionTrackerEvent;
 use crate::actions::OpenAdditionalSetup;
+use crate::actions::SetupRow;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::input::TlTextInput;
@@ -48,7 +49,6 @@ use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::setup::SetupRow;
 
 /// Label column width at 100% scale.
 const LABEL_WIDTH: f32 = 200.;

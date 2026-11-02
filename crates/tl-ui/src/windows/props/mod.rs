@@ -68,11 +68,11 @@ use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::windows::actions::{
     PROPS_WINDOW_CONTEXT, PropsCancelStringScan, PropsCloseWindow, PropsEscape, PropsFocusFilter,
     PropsNextTab, PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsStartStringScan,

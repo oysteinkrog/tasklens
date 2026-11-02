@@ -53,11 +53,11 @@ use crate::pages::processes::actions::{CapturedTargets, EndProcess, EndTask};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};
 use crate::pages::processes::toasts::toast_words;
+use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::text::style::{label_style, t_base, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, WindowKey};
 
 /// Window size, × ui_scale.
 pub const SIZE: (f32, f32) = (520., 400.);

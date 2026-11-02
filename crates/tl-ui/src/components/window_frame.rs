@@ -44,11 +44,11 @@ use super::toast::ToastQueue;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
+use crate::registry::WindowKey;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, current, metrics};
-use crate::window::registry::WindowKey;
 
 /// The Wayland app id and X11 class of every tasklens window.
 pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";

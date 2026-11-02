@@ -45,11 +45,11 @@ use crate::components::tooltip::TlTooltip;
 use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
+use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::text::style::{t_base, t_xs};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, WindowKey};
 
 /// Popup row height, × ui_scale.
 pub const ROW_H: f32 = 26.;

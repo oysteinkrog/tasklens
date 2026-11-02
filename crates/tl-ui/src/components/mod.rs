@@ -25,6 +25,7 @@ pub mod stepper;
 pub mod switch;
 pub mod tabs;
 pub mod toast;
+pub mod toolbar_button;
 pub mod tooltip;
 pub mod validity;
 pub mod window_frame;

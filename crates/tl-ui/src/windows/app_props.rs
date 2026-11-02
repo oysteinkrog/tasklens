@@ -66,6 +66,7 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::table::actions::CopyRowsAsTable;
@@ -80,7 +81,6 @@ use crate::table::tree_table::{
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::{ShellState, main_window_view, push_main_toast};
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 gpui_kit::actions!(
     tasklens,

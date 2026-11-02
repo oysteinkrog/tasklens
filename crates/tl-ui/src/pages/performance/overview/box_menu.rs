@@ -38,6 +38,7 @@ use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind, PowerPlacement};
 use super::parts::{TITLE_ROW, TITLE_TOP};
 use super::timeline;
+use crate::actions::OpenAdditionalSetup;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -55,7 +56,6 @@ use crate::pages::performance::widget::menu::{confirm_preset, confirm_reset_now}
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::theme::metrics;
-use crate::window::setup::OpenAdditionalSetup;
 
 /// The title line a right-click opens the box menu on: the 1 px top border, the space above the
 /// title row and the title row of the box frame, logical px.

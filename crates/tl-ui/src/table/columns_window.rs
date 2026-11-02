@@ -29,11 +29,11 @@ use crate::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
 use crate::i18n::{tr, tr_args};
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::table::columns::{Availability, ColumnError, TableId};
 use crate::text::style::{label_style, t_base, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// Default window size, × ui_scale (R-106).
 pub const PICKER_SIZE: (f32, f32) = (420., 560.);

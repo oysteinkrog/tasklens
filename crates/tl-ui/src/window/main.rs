@@ -42,11 +42,11 @@ use fluent_bundle::FluentValue;
 use gpui_kit::base::Root;
 use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
-    AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Global, InteractiveElement, IntoElement, KeyDownEvent, ModifiersChangedEvent,
-    ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task,
-    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
+    AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, FocusHandle,
+    Global, InteractiveElement, IntoElement, KeyDownEvent, ModifiersChangedEvent, ParentElement,
+    Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
+    point, prelude::FluentBuilder as _, px, size,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -114,6 +114,11 @@ use crate::tray_bridge::{TrayBridge, TrayStatus};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
+pub(crate) use crate::shell::PICK_NONE_TEXT;
+pub use crate::shell::{
+    APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
+    ShellEvents, ShellPage, WINDOW_TITLE,
+};
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
 /// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
@@ -140,9 +145,6 @@ const RECONNECT_OPACITY: f32 = 0.6;
 /// The window's smallest size in logical px (ADR-010).
 pub const MIN_W: f32 = 800.0;
 pub const MIN_H: f32 = 500.0;
-pub use crate::app_env::APP_ID;
-/// The window title the KWin task switcher shows.
-pub const WINDOW_TITLE: &str = "tasklens";
 /// Gap between the tab strip and the toast stack's top edge, × ui_scale (UI-SHL-100).
 const TOAST_GAP: f32 = 8.0;
 /// The toast stack's top edge (UI-SHL-100): the bar height for the decoration kind, the tab
@@ -163,7 +165,6 @@ fn single_char(text: &str) -> Option<char> {
 /// (E20-027).
 pub const PICK_TOAST: ToastKey = ToastKey(0x7069_636b_0000_0001);
 const PICK_START_TEXT: &str = "shell-toast-pick-start";
-pub(crate) const PICK_NONE_TEXT: &str = "shell-toast-pick-none";
 const PICK_FAILED_TEXT: &str = "shell-toast-pick-failed";
 
 /// The UI scale toast's key. Fixed, so repeated presses replace one toast (UI-SHL-130).
@@ -192,26 +193,6 @@ pub enum CloseOutcome {
     RemoveWindow,
     /// Row 1 or minimize to tray: remove the window and show the main tray icon.
     HideToTray,
-}
-
-/// Implemented by every page entity (E22, E24, E27, E28). Inherent methods of the same name may
-/// exist; the impl forwards to them.
-pub trait ShellPage: Render + EventEmitter<StatusChanged> + Sized + 'static {
-    /// UI-SHL-050. Default: no text.
-    fn status_text(&self, _out: &mut String) {}
-    /// Clickable chip parts (E20-006).
-    fn status_actions(&self) -> SmallVec<[StatusAction; 2]> {
-        SmallVec::new()
-    }
-    /// UI-SHL-121 initial focus.
-    fn primary_focus(&self) -> FocusHandle;
-    fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
-        SmallVec::new()
-    }
-    /// Demand on or off (ADR-008).
-    fn set_active(&mut self, _active: bool, _cx: &mut Context<Self>) {}
-    /// F5, `RefreshCurrentTab`.
-    fn refresh(&mut self, _cx: &mut Context<Self>) {}
 }
 
 /// Object-safe forwarding of the [`ShellPage`] methods through the page's `Entity`.
@@ -390,34 +371,6 @@ fn built_tabs(cx: &App) -> SmallVec<[Tab; 6]> {
         .collect()
 }
 
-/// The shell-wide event bus.
-pub struct ShellEvents;
-
-/// Emitted by E20-009 after its 100 ms debounce.
-#[derive(Clone, Debug)]
-pub struct FilterChanged {
-    pub tab: Tab,
-    pub text: SharedString,
-}
-
-/// Emitted by E20-012.
-#[derive(Clone, Copy, Debug)]
-pub struct PauseChanged(pub bool);
-
-/// Emitted when the user clears the Processes memory group chip with its x or with Esc in the
-/// empty filter box (D-036, UI-PRF-060).
-#[derive(Clone, Copy, Debug)]
-pub struct MemGroupCleared;
-
-impl EventEmitter<FilterChanged> for ShellEvents {}
-impl EventEmitter<PauseChanged> for ShellEvents {}
-impl EventEmitter<MemGroupCleared> for ShellEvents {}
-
-/// The local host's shell event bus. Read only through [`crate::host::HostContext`].
-pub struct GlobalShellEvents(pub Entity<ShellEvents>);
-
-impl Global for GlobalShellEvents {}
-
 /// Shell state other parts of the UI read.
 pub struct ShellState {
     /// `gpui_kit::open_window` roots every window in the kit `Root`, so the handle is typed on
@@ -465,12 +418,6 @@ impl Global for FirstFrameLogged {}
 
 /// Where the privileged helper is installed (ADR-006).
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
-
-/// The privileged helper is installed: [`HELPER_PATH`] exists. Checked once per process in
-/// [`init`]; a test may set it first.
-pub struct HelperInstalled(pub bool);
-
-impl Global for HelperInstalled {}
 
 /// Set once the launch unlock dispatched `StartHelperSession` (E20-026).
 struct LaunchUnlockRequested;

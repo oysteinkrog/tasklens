@@ -66,11 +66,12 @@ use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::jump::JumpTexts;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
+use crate::shell::FilterChanged;
 use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, main_window_view, push_main_toast};
+use crate::window::main::{main_window_view, push_main_toast};
 
 use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};

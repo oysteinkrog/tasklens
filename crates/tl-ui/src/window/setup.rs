@@ -29,6 +29,7 @@ use tracing::warn;
 
 use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::action_tracker::host_send_allowed;
+pub use crate::actions::{OpenAdditionalSetup, SetupRow};
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};
@@ -67,16 +68,6 @@ const OUTPUT_MAX_HEIGHT: f32 = 160.;
 
 const TITLE: &str = "setup-title";
 
-/// The cards of the window.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SetupRow {
-    CpuPower,
-    JournalAccess,
-    AdminHelper,
-    FanSensors,
-    ProcessNetwork,
-}
-
 /// The shown cards, top to bottom.
 const CARDS: [SetupRow; 5] = [
     SetupRow::CpuPower,
@@ -86,39 +77,29 @@ const CARDS: [SetupRow; 5] = [
     SetupRow::ProcessNetwork,
 ];
 
-impl SetupRow {
-    /// The index of the card, or `None` for a row without a card.
-    fn card_index(self) -> Option<usize> {
-        CARDS.iter().position(|r| *r == self)
-    }
+/// The index of the card of `row`, or `None` for a row without a card.
+fn card_index(row: SetupRow) -> Option<usize> {
+    CARDS.iter().position(|r| *r == row)
+}
 
-    fn title_key(self) -> &'static str {
-        match self {
-            Self::CpuPower => "setup-row-cpu-title",
-            Self::JournalAccess => "setup-row-journal-title",
-            Self::AdminHelper => "setup-row-helper-title",
-            Self::FanSensors => "setup-row-fan-title",
-            Self::ProcessNetwork => "setup-row-network-title",
-        }
-    }
-
-    fn description_key(self) -> &'static str {
-        match self {
-            Self::CpuPower => "setup-row-cpu-description",
-            Self::JournalAccess => "setup-row-journal-description",
-            Self::AdminHelper => "setup-row-helper-description",
-            Self::FanSensors => "setup-row-fan-description",
-            Self::ProcessNetwork => "setup-row-network-description",
-        }
+fn title_key(row: SetupRow) -> &'static str {
+    match row {
+        SetupRow::CpuPower => "setup-row-cpu-title",
+        SetupRow::JournalAccess => "setup-row-journal-title",
+        SetupRow::AdminHelper => "setup-row-helper-title",
+        SetupRow::FanSensors => "setup-row-fan-title",
+        SetupRow::ProcessNetwork => "setup-row-network-title",
     }
 }
 
-/// Opens the Additional Setup window, or focuses it. `focus_row` scrolls that card into view and
-/// flashes its border.
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(namespace = tasklens, no_json)]
-pub struct OpenAdditionalSetup {
-    pub focus_row: Option<SetupRow>,
+fn description_key(row: SetupRow) -> &'static str {
+    match row {
+        SetupRow::CpuPower => "setup-row-cpu-description",
+        SetupRow::JournalAccess => "setup-row-journal-description",
+        SetupRow::AdminHelper => "setup-row-helper-description",
+        SetupRow::FanSensors => "setup-row-fan-description",
+        SetupRow::ProcessNetwork => "setup-row-network-description",
+    }
 }
 
 /// Opens the confirmation of a setup step, from a card button.
@@ -623,8 +604,8 @@ struct SetupWords {
 impl SetupWords {
     fn new(cx: &App) -> Self {
         Self {
-            titles: CARDS.map(|r| tr(cx, r.title_key())),
-            descriptions: CARDS.map(|r| tr(cx, r.description_key())),
+            titles: CARDS.map(|r| tr(cx, title_key(r))),
+            descriptions: CARDS.map(|r| tr(cx, description_key(r))),
             fan_missing: tr(cx, "setup-row-fan-description-no-lm-sensors"),
         }
     }
@@ -823,7 +804,7 @@ impl SetupWindow {
     /// Scrolls the card of `row` into view and flashes its border for `M_SLOW`. With reduced
     /// motion the border does not flash.
     pub fn focus(&mut self, row: SetupRow, cx: &mut Context<Self>) {
-        let Some(ix) = row.card_index() else {
+        let Some(ix) = card_index(row) else {
             return;
         };
         self.scroll.scroll_to_item(ix);
@@ -1024,7 +1005,7 @@ impl RenderOnce for SetupRowCard {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let s = m.ui_scale;
-        let ix = self.row.card_index().unwrap_or_default();
+        let ix = card_index(self.row).unwrap_or_default();
 
         let mut title = div().flex_1().min_w_0().child(self.title);
         *title.text_style() = t_md(&m);

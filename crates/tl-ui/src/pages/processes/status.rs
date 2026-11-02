@@ -9,7 +9,7 @@ use tl_model::table::ProcessTableView;
 
 use crate::actions::{EndHelperSession, StartHelperSession};
 use crate::i18n::{tr, tr_args};
-use crate::window::status::{StatusAction, StatusActionKind};
+use crate::shell::{StatusAction, StatusActionKind};
 
 /// What the chip text shows. The text is rebuilt only when this changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

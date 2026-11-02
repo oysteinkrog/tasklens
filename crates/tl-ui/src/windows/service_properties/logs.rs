@@ -40,6 +40,7 @@ use tracing::warn;
 use super::ServicePropsTabView;
 use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
 use crate::actions::OpenAdditionalSetup;
+use crate::actions::SetupRow;
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::empty::{TlEmptyState, TlEmptyTone};
@@ -58,7 +59,6 @@ use crate::selector::TlSelector;
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::fonts::MONO_FAMILY;
 use crate::theme::{TlTheme, current, metrics};
-use crate::window::setup::SetupRow;
 
 /// Quiet time after the last keystroke before the filter applies.
 pub const FILTER_DEBOUNCE: Duration = Duration::from_millis(100);

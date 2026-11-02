@@ -51,7 +51,7 @@ use crate::app_env::{AppEnv, UiInit};
 use crate::host::HostContext;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::history::HistoryPage;
-use crate::window::main::APP_ID;
+use crate::shell::APP_ID;
 
 const NS_PER_S: u64 = 1_000_000_000;
 const NS_PER_MS: f64 = 1_000_000.0;

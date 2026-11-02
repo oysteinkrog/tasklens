@@ -73,11 +73,10 @@ use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::{FilterChanged, ShellPage, StatusChanged};
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{FilterChanged, ShellPage};
-use crate::window::status::StatusChanged;
 
 /// Content width from which the sections sit in two columns, × ui_scale.
 const TWO_COLUMNS_FROM: f32 = 880.;

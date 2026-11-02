@@ -50,9 +50,9 @@ use crate::pages::performance::cpu::CpuPage;
 use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::delegate::ProcessDelegate;
+use crate::shell::APP_ID;
 use crate::table::tree_table::TlTreeTable;
 use crate::theme::current;
-use crate::window::main::APP_ID;
 
 /// Phase-0 fixture window size, logical px.
 pub const WINDOW_W: f32 = 1600.;

@@ -66,6 +66,7 @@ use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
+use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -78,7 +79,6 @@ use crate::table::tree_table::{
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::{ShellState, main_window_view};
-use crate::window::registry::{GlobalRegistry, WindowKey};
 
 gpui_kit::actions!(tasklens_handles, [HandleSearchOpenLocation]);
 

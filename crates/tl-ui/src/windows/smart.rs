@@ -51,6 +51,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::DeviceKey;
 use crate::pages::performance::actions::{PerfShowSmart, PerfSmartReadSmartctl, PerfSmartRefresh};
+use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -63,7 +64,6 @@ use crate::table::tree_table::{
 use crate::text::style::{label_style, t_base, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, WindowKey};
 
 /// Default and minimum window size, × ui_scale.
 pub const SIZE: (f32, f32) = (760., 520.);

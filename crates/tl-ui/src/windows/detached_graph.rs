@@ -34,9 +34,9 @@ use crate::pages::minigraph::card::{CardEnded, MINI_CARD_H, MINI_CARD_W, Minigra
 use crate::pages::minigraph::menu::{color_submenu, range_submenu};
 use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
 use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// The `sp[2]` spacing at ui_scale 1: the window padding and the gap between cards.
 const SP2: f32 = 4.;
@@ -396,9 +396,8 @@ pub fn open_detached(
 
 fn start_move(window: &Window, cx: &mut App) {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    if cx.has_global::<crate::window::titlebar::TitleBarProbe>() {
-        cx.global_mut::<crate::window::titlebar::TitleBarProbe>()
-            .moves += 1;
+    if cx.has_global::<crate::shell::TitleBarProbe>() {
+        cx.global_mut::<crate::shell::TitleBarProbe>().moves += 1;
         return;
     }
     let _ = cx;

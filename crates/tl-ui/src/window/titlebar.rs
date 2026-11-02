@@ -31,7 +31,6 @@ use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::health::HelperState;
 use tl_model::table::TableMode;
-use tl_model::validity::Validity;
 
 use super::main::{WINDOW_TITLE, hide_main_to_tray, tray_available};
 use super::registry::WindowKey;
@@ -47,6 +46,10 @@ use crate::i18n::tr;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub use crate::shell::TitleBarProbe;
+pub use crate::shell::keep_above_supported;
 
 /// Title bar height, × ui_scale.
 pub const TITLEBAR_H: f32 = 34.0;
@@ -143,32 +146,6 @@ pub struct DrawnPin {
     pub tooltip: SharedString,
 }
 
-/// Test stand-in for the platform window. The GPUI test window panics on `start_window_move`,
-/// `zoom_window`, `minimize_window` and `show_window_menu`, always reports server decorations
-/// and is never maximized. When this Global is installed the shell records those four calls here
-/// instead of making them, and reads the overrides below.
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-#[derive(Default)]
-pub struct TitleBarProbe {
-    /// Overrides `window.window_decorations()`: true for client decorations.
-    pub client: Option<bool>,
-    /// Overrides `window.is_maximized()`.
-    pub maximized: Option<bool>,
-    /// Overrides `window.window_controls()`.
-    pub controls: Option<gpui_kit::WindowControls>,
-    /// `start_window_move` calls.
-    pub moves: u32,
-    /// `zoom_window` calls.
-    pub zooms: u32,
-    /// `minimize_window` calls.
-    pub minimizes: u32,
-    /// `show_window_menu` positions.
-    pub window_menus: Vec<Point<Pixels>>,
-}
-
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-impl Global for TitleBarProbe {}
-
 fn probe_installed(cx: &App) -> bool {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     return cx.has_global::<TitleBarProbe>();
@@ -253,17 +230,6 @@ fn window_menu(window: &Window, position: Point<Pixels>, cx: &mut App) {
         return;
     }
     window.show_window_menu(position);
-}
-
-/// True when the pin can work: `Snapshot.windows.header.validity` is Valid or Stale (KWin bridge
-/// up). False without a hub. The pin acts on this PC's own windows, so the local host's hub.
-pub fn keep_above_supported(cx: &App) -> bool {
-    HostContext::local_hub(cx).is_some_and(|hub| {
-        matches!(
-            hub.read(cx).current().windows.header.validity,
-            Validity::Valid | Validity::Stale
-        )
-    })
 }
 
 /// The Minimize caption button's behaviour. E20-A1's `MinimizeWindow` handler calls it.

@@ -73,11 +73,11 @@ use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::selector::TlSelector;
 use crate::settings_global::{TlSettings, animations_on};
+use crate::shell::{ShellPage, StatusChanged};
 use crate::theme::palette::{DeviceAccent, accent_color};
 use crate::theme::{TlTheme, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{ShellPage, main_window_title};
-use crate::window::status::StatusChanged;
+use crate::window::main::main_window_title;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
 pub use tl_model::devices::NetKind as NetClass;

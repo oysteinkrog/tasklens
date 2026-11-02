@@ -25,7 +25,8 @@ use super::{ProcessesPage, record_target};
 use crate::components::toast::ToastKind;
 use crate::host::HostContext;
 use crate::i18n::tr;
-use crate::window::main::{MainWindow, PICK_NONE_TEXT, PICK_TOAST};
+use crate::shell::PICK_NONE_TEXT;
+use crate::window::main::{MainWindow, PICK_TOAST};
 
 const NO_WINDOW_TEXT: &str = "prc-055-no-window-found";
 const UNKNOWN_TEXT: &str = "prc-055-unknown-process";

@@ -9,17 +9,14 @@
 //! path. A mouse-down on any slot stops there, so it never starts a title bar drag (UI-SHL-004).
 
 use gpui_kit::{
-    Action, AnyElement, App, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, InteractiveElement, IntoElement, MouseButton, ParentElement, RenderOnce,
+    Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
-use tl_model::command::Tab;
-use tl_model::health::HelperState;
-use tl_model::table::TableMode;
 
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
+pub use crate::components::toolbar_button::{toolbar_icon, toolbar_toggle};
 use crate::selector::TlSelector;
+pub use crate::shell::{ToolbarContent, ToolbarModel};
 use crate::theme::metrics;
 
 /// Toolbar button side, × ui_scale.
@@ -29,42 +26,6 @@ pub const TOOLBAR_GAP: f32 = 7.0;
 /// Toolbar icon size: `i_md`.
 pub const TOOLBAR_ICON: f32 = 16.0;
 
-/// What the toolbar needs to know to draw its buttons. The title bar keeps it current.
-#[derive(Clone, PartialEq, Debug)]
-pub struct ToolbarModel {
-    /// The open tab.
-    pub tab: Tab,
-    /// `UiState.processes.history_mode`.
-    pub history_mode: bool,
-    /// `settings.processes.hide_system`.
-    pub hide_system: bool,
-    /// `settings.processes.mode`.
-    pub mode: TableMode,
-    /// `HealthSnapshot.helper`. `Missing` before P3.
-    pub helper: HelperState,
-    /// `/usr/lib/tasklens/tl-helper` exists. Checked once at startup by E20-026; false until then.
-    pub helper_installed: bool,
-    /// `Snapshot.windows.header.validity != Unsupported`.
-    pub picker_available: bool,
-    /// Window picking mode is on.
-    pub picking: bool,
-    /// The main window is the active window.
-    pub window_active: bool,
-}
-
-/// The page buttons of one tab. One per page epic that has page buttons. Registered in
-/// `window/main.rs` (`toolbar_for`).
-pub trait ToolbarContent: 'static {
-    /// Page buttons for slots 2 and 3, left to right, at most 2. Build them with
-    /// [`toolbar_toggle`] and [`toolbar_icon`].
-    fn buttons(
-        &self,
-        model: &ToolbarModel,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> SmallVec<[AnyElement; 2]>;
-}
-
 /// No page buttons. Used for every tab without a registration.
 pub struct DefaultToolbar;
 
@@ -72,58 +33,6 @@ impl ToolbarContent for DefaultToolbar {
     fn buttons(&self, _: &ToolbarModel, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 2]> {
         SmallVec::new()
     }
-}
-
-/// The rules every toolbar button shares: 24 × 24, `i_md` icon, not a Tab stop, a tooltip with
-/// the Action's key hint, and a `text_secondary` icon while the window is inactive.
-fn toolbar_button(
-    id: impl Into<ElementId>,
-    kind: TlButtonKind,
-    icon: TlIcon,
-    tooltip: SharedString,
-    action: Box<dyn Action>,
-    model: &ToolbarModel,
-) -> TlButton {
-    TlButton::new(id, kind)
-        .size(TlButtonSize::Sm)
-        .icon(icon)
-        .tab_stop(false)
-        .tooltip(tooltip)
-        .action(action)
-        .icon_muted(!model.window_active)
-}
-
-/// A toolbar Toggle button: `TlButton::Toggle { on }`, 24 × 24, icon `i_md`, not a Tab stop,
-/// tooltip with the Action's key hint, icon colour `text_secondary` when the window is inactive.
-pub fn toolbar_toggle(
-    id: impl Into<ElementId>,
-    icon: TlIcon,
-    on: bool,
-    tooltip: SharedString,
-    action: Box<dyn Action>,
-    model: &ToolbarModel,
-) -> TlButton {
-    toolbar_button(
-        id,
-        TlButtonKind::Toggle { on },
-        icon,
-        tooltip,
-        action,
-        model,
-    )
-}
-
-/// A toolbar Icon button: `TlButton::Icon`, same sizes and rules as [`toolbar_toggle`]. A
-/// disabled button keeps its tooltip and dispatches nothing.
-pub fn toolbar_icon(
-    id: impl Into<ElementId>,
-    icon: TlIcon,
-    tooltip: SharedString,
-    action: Box<dyn Action>,
-    disabled: bool,
-    model: &ToolbarModel,
-) -> TlButton {
-    toolbar_button(id, TlButtonKind::Icon, icon, tooltip, action, model).disabled(disabled)
 }
 
 /// The toolbar row: `[shield?][page..][picker?]`, centred, gap 7 × ui_scale.

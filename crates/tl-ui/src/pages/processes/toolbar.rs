@@ -16,8 +16,9 @@ use tl_model::table::TableMode;
 
 use crate::actions::{CycleViewMode, ToggleHideSystem};
 use crate::components::icons::TlIcon;
+use crate::components::toolbar_button::{toolbar_icon, toolbar_toggle};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_icon, toolbar_toggle};
+use crate::shell::{ToolbarContent, ToolbarModel};
 
 /// Element id of the Hide system processes toggle. Its debug selector is `TlButton-<id>`.
 pub const HIDE_SYSTEM_ID: &str = "processes-hide-system";

@@ -51,11 +51,11 @@ use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{tr, tr_args};
 use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::theme::metrics;
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, WindowKey};
 use crate::windows::detached_graph::{DetachedGraphWindow, open_detached, window_size};
 
 /// Space between the grid and the table's bottom and right edges, before `ui_scale`.

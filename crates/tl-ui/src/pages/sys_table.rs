@@ -51,10 +51,10 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args, tr_en};
 use crate::selector::TlSelector;
+use crate::shell::CHIP_H;
 use crate::table::TreeTableDelegate;
 use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::status::CHIP_H;
 
 /// Query owner for one system table. Generations start at 1 and only grow.
 pub struct SysQuery {

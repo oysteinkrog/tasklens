@@ -8,7 +8,6 @@
 //! Declared by their owners, not here (GPUI fails on a duplicate name in one namespace):
 //! - `StartHelperSession`, `EndHelperSession`: `components/shield.rs` (E16-010), re-exported
 //!   below.
-//! - `OpenAdditionalSetup { focus_row }`: `window/setup.rs` (E29-A3), re-exported below.
 //! - `ToggleAlwaysOnTop { window: WindowKey }`, `CloseSecondaryWindow`:
 //!   `components/window_frame.rs` (E16-008).
 //! - `OpenProperties` and the other table Actions: `table/actions.rs` (E18).
@@ -21,7 +20,6 @@ use tl_model::table::TableMode;
 pub use crate::components::shield::{EndHelperSession, StartHelperSession};
 use crate::components::{checkbox, window_frame};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-pub use crate::window::setup::OpenAdditionalSetup;
 
 gpui_kit::actions!(
     tasklens,
@@ -100,6 +98,24 @@ pub struct EditHost(pub String);
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = tasklens, no_json)]
 pub struct RemoveHost(pub String);
+
+/// The cards of the Additional Setup window (`window/setup.rs`, E29-A3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SetupRow {
+    CpuPower,
+    JournalAccess,
+    AdminHelper,
+    FanSensors,
+    ProcessNetwork,
+}
+
+/// Opens the Additional Setup window, or focuses it. `focus_row` scrolls that card into view and
+/// flashes its border. Handled in `window/setup.rs` (E29-A3).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct OpenAdditionalSetup {
+    pub focus_row: Option<SetupRow>,
+}
 
 /// A top-level menu of the menu bar.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

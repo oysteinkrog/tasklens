@@ -35,11 +35,11 @@ use crate::host::{HostRegistry, with_host_name};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{tr, tr_args};
 use crate::pages::startup::delegate::StartupWords;
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (860., 520.);

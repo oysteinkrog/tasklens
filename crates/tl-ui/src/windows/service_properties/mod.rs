@@ -53,10 +53,10 @@ use crate::pages::services::actions::{
     ServicePropsSelectTab,
 };
 use crate::pages::sys_table::SysActions;
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (720., 560.);

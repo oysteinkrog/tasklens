@@ -18,7 +18,7 @@ use crate::components::toast::ToastKind;
 use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::settings_global::TlSettings;
-use crate::window::main::{FilterChanged, MemGroupCleared};
+use crate::shell::{FilterChanged, MemGroupCleared};
 
 /// "Include children" shows while the filter has text or the mode is Tree (UI-SHL-025). The
 /// shell's checkbox applies the same rule.

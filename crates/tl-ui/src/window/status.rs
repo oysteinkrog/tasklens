@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use gpui_kit::accesskit::Role;
 use gpui_kit::{
-    AbsoluteLength, Action, App, Context, Div, ElementId, FocusHandle, HighlightStyle, Hsla,
+    AbsoluteLength, App, Context, Div, ElementId, FocusHandle, HighlightStyle, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
@@ -54,8 +54,8 @@ use crate::text::style::numeric_style;
 use crate::text::untrusted::debug_assert_clean;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
-/// Chip height, × ui_scale. Tables add this as bottom padding (UI-SHL-050).
-pub const CHIP_H: f32 = 26.0;
+pub use crate::shell::{CHIP_H, StatusAction, StatusActionKind, StatusChanged};
+
 /// The chip's max width is the page width minus this, × ui_scale.
 pub const CHIP_RESERVE: f32 = 200.0;
 
@@ -227,50 +227,6 @@ fn item_keys(health: &HealthSnapshot, tab: Tab, now_ns: TimeNs) -> SmallVec<[Ite
         }
     }
     keys
-}
-
-/// Emitted by a page entity when its `status_text` output changed (counts or selection size).
-#[derive(Clone, Copy, Debug)]
-pub struct StatusChanged;
-
-/// How a [`StatusAction`] is drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatusActionKind {
-    /// " | " and then the label, underlined on hover.
-    Link,
-    /// A `TlBadge` Info, one space after the text before it.
-    Badge,
-}
-
-/// A clickable part a page adds after its text (for example E22's " | 42 restricted" link and its
-/// "Administrator mode" badge, P3). Returned by `ShellPage::status_actions` (E20-008).
-pub struct StatusAction {
-    pub kind: StatusActionKind,
-    pub label: SharedString,
-    pub tooltip: SharedString,
-    /// Dispatched on click, Enter or Space.
-    pub action: Box<dyn Action>,
-}
-
-impl Clone for StatusAction {
-    fn clone(&self) -> Self {
-        Self {
-            kind: self.kind,
-            label: self.label.clone(),
-            tooltip: self.tooltip.clone(),
-            action: self.action.boxed_clone(),
-        }
-    }
-}
-
-impl PartialEq for StatusAction {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.label == other.label
-            && self.tooltip == other.tooltip
-            && self.action.name() == other.action.name()
-            && self.action.partial_eq(other.action.as_ref())
-    }
 }
 
 /// The floating status chip.

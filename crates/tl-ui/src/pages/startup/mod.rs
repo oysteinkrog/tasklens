@@ -38,11 +38,10 @@ use crate::pages::sys_copy::CopyTexts;
 use crate::pages::sys_table::{
     ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
 };
+use crate::shell::{FilterChanged, ShellPage, StatusChanged};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::OpenProperties;
 use crate::table::tree_table::TreeTableEvent;
-use crate::window::main::{FilterChanged, ShellPage};
-use crate::window::status::StatusChanged;
 use crate::windows::startup_properties::open_startup_properties_all;
 
 /// The latest a manual refresh waits for a new Startup component version.

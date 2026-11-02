@@ -17,8 +17,8 @@ use tl_model::snapshot::FrameGeometry;
 use super::panel::MinigraphPanel;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::window::registry::{GlobalRegistry, WindowKey};
-use crate::window::titlebar::keep_above_supported;
+use crate::registry::{GlobalRegistry, WindowKey};
+use crate::shell::keep_above_supported;
 use crate::windows::mini::{MINI_WINDOW_TITLE, MiniWindow};
 
 /// The last move of a detached window is saved this long after it.

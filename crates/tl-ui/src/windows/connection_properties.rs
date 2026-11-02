@@ -39,11 +39,11 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::connections::actions::ConnectionJumpToProcess;
 use crate::pages::connections::jump_to_owner;
+use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::push_main_toast;
-use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (560., 520.);
