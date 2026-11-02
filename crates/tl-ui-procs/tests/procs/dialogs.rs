@@ -12,21 +12,21 @@ use gpui_kit::{
     TestDispatcher, VisualTestContext, Window, WindowDecorations, WindowHandle, WindowKind, div,
     px, size,
 };
-use tl_model::client::EngineClient;
 use tl_model::validity::Validity;
-use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
-use tl_ui::components::toast::{self, ToastKind};
-use tl_ui::components::window_frame::{
+use tl_ui_base::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
+use tl_ui_kit::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::window_frame::{
     APP_ID, PIN_TOOLTIP_OFF, PIN_TOOLTIP_ON, PIN_TOOLTIP_UNSUPPORTED, PinLook, TlSecondaryWindow,
     TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, client_frame_extra, window_options,
 };
-use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
-use tl_ui::windows::frame::{PwnWindow, spec as pwn_spec};
-use tl_ui_settings::settings::{Decorations, Settings, UiState};
+use tl_ui_procs::windows::frame::{PwnWindow, spec as pwn_spec};
+use tl_ui_settings::settings::{Decorations, Settings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
-use super::common::{is_open, window_count};
+use tl_ui_pagehost::helpers::{is_open, window_count};
+
+use super::common::shell_free_init;
 
 struct Body;
 
@@ -38,29 +38,9 @@ impl Render for Body {
 
 type Frame = TlSecondaryWindow<Body>;
 
-/// `TasklensUi::init` with `settings` against a new `FakeEngine`.
+/// The page host and the shell services with `settings`, on a new `FakeEngine`.
 fn setup(cx: &mut TestAppContext, settings: Settings) -> Arc<FakeEngine> {
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let init = UiInit {
-        settings,
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
-    cx.update(|cx| {
-        TasklensUi::init(cx, client, init);
-        // Until the shell calls it from init.
-        toast::init(cx);
-        cx.set_reduce_motion(true);
-    });
-    cx.run_until_parked();
-    engine
+    shell_free_init(cx, settings).0
 }
 
 /// Settings with client decorations, for tests of the kit title bar. The default is server
@@ -426,8 +406,8 @@ fn narrow_title_ends_with_ellipsis() {
 #[gpui_kit::test]
 fn init_binds_frame_keys_before_any_open(cx: &mut TestAppContext) {
     setup(cx, Settings::default());
-    // `TasklensUi::init` binds the frame keys; no secondary window has opened yet.
-    let close = tl_ui::components::window_frame::CloseSecondaryWindow;
+    // `install_shell_services` binds the frame keys; no secondary window has opened yet.
+    let close = tl_ui_kit::components::window_frame::CloseSecondaryWindow;
     let bound = cx.update(|cx| {
         cx.key_bindings()
             .borrow()

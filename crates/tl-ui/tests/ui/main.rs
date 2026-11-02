@@ -13,7 +13,6 @@ mod connections;
 mod demand;
 mod detached;
 mod device_pages;
-mod dialogs;
 mod dialogs_process;
 mod focus;
 mod handle_search;

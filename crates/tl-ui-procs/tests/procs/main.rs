@@ -3,6 +3,8 @@
 //!
 //! Run with `cargo test -p tl-ui-procs --test procs`.
 
+mod common;
+mod dialogs;
 mod process_cells;
 mod process_priority_menu;
 mod process_tooltips;

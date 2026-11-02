@@ -8343,9 +8343,11 @@ dependencies = [
  "tl-ui-base",
  "tl-ui-chart",
  "tl-ui-kit",
+ "tl-ui-pagehost",
  "tl-ui-perf-core",
  "tl-ui-settings",
  "tl-ui-table",
+ "tl-ui-testkit",
  "tracing",
 ]
 
