@@ -12,6 +12,7 @@ members = [
   "crates/tl-ui-settings",
   "crates/tl-ui-base",
   "crates/tl-ui-kit",
+  "crates/tl-ui-chart",
   "crates/tl-ui",
   "crates/tl-ui-testkit",
   "crates/tl-ui-pagehost",
@@ -96,6 +97,7 @@ tl-collect = { path = "crates/tl-collect" }
 tl-ops     = { path = "crates/tl-ops" }
 tl-engine  = { path = "crates/tl-engine" }
 tl-ui      = { path = "crates/tl-ui" }
+tl-ui-chart = { path = "crates/tl-ui-chart" }
 tl-ui-base = { path = "crates/tl-ui-base" }
 tl-ui-kit = { path = "crates/tl-ui-kit" }
 tl-ui-settings = { path = "crates/tl-ui-settings" }   # UI settings and layouts (ADR-020)

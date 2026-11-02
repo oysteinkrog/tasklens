@@ -38,6 +38,7 @@ const UI_SRCS: &[(&str, &str)] = &[
     (SHELL, UI_SRC),
     ("tl-ui-base", "crates/tl-ui-base/src"),
     ("tl-ui-kit", "crates/tl-ui-kit/src"),
+    ("tl-ui-chart", "crates/tl-ui-chart/src"),
 ];
 
 /// The allowlist of today's upward edges, relative to the workspace root.

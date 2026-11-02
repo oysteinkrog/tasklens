@@ -53,14 +53,14 @@ pub(crate) const TICK_COUNT: usize = 3;
 /// A range from this length on labels its x ticks in minutes, else in seconds.
 const TICK_MINUTES_FROM_S: u64 = 300;
 
-pub(crate) static WARMING: &str = "…";
+pub static WARMING: &str = "…";
 pub(crate) static UNSUPPORTED: &str = "n/a";
 pub(crate) static MISSING: &str = "-";
 pub(crate) static FAILED: &str = "!";
 
 /// One label and what it was shaped from.
 #[derive(Debug)]
-pub(crate) struct CachedLine {
+pub struct CachedLine {
     text: String,
     line: Option<ShapedLine>,
     font_size: Pixels,
@@ -82,17 +82,17 @@ impl Default for CachedLine {
 
 /// How one line is drawn.
 #[derive(Clone, Copy)]
-pub(crate) struct LineStyle {
-    pub(crate) size: Pixels,
-    pub(crate) weight: FontWeight,
-    pub(crate) color: Hsla,
-    pub(crate) tnum: bool,
+pub struct LineStyle {
+    pub size: Pixels,
+    pub weight: FontWeight,
+    pub color: Hsla,
+    pub tnum: bool,
 }
 
 impl CachedLine {
     /// Re-shapes when `text`, the size, the weight or the colour changed. Returns whether it
     /// shaped. The text compare is a byte compare; on a change the buffer is reused.
-    pub(crate) fn sync(&mut self, window: &mut Window, text: &str, style: LineStyle) -> bool {
+    pub fn sync(&mut self, window: &mut Window, text: &str, style: LineStyle) -> bool {
         if self.line.is_some()
             && self.text == text
             && self.font_size == style.size
@@ -133,13 +133,13 @@ impl CachedLine {
         true
     }
 
-    pub(crate) fn width(&self) -> Pixels {
+    pub fn width(&self) -> Pixels {
         self.line.as_ref().map_or(px(0.), |l| l.width)
     }
 
     /// The text this line was last shaped from.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    pub(crate) fn text(&self) -> Option<&str> {
+    pub fn text(&self) -> Option<&str> {
         self.line.is_some().then_some(self.text.as_str())
     }
 }
@@ -714,7 +714,7 @@ pub(crate) fn paint_legend(
     }
 }
 
-pub(crate) fn paint_line(
+pub fn paint_line(
     window: &mut Window,
     cx: &mut App,
     line: &CachedLine,

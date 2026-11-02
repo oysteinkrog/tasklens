@@ -172,6 +172,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "fluent-bundle",
         ],
     ),
+    // ADR-020 chart layer, moved out of tl-ui (CS-E3).
+    ("tl-ui-chart", &["tl-model", "gpui-kit", "smallvec", "jiff"]),
     (
         "tl-app",
         &[

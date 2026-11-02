@@ -41,14 +41,14 @@ pub struct ChartView {
     /// the element rebuilds when it moves while a series is stale.
     pub(crate) built_right_edge_ns: u64,
     /// Y scale memory across rebuilds (E19-004, R-262).
-    pub(crate) scale_state: scale::ScaleState,
+    pub scale_state: scale::ScaleState,
     /// Reused axis max text buffer for `scale::compute`.
     pub(crate) axis_text: String,
     /// Filled by E19-009; empty struct until then.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) text: labels::LabelCache,
     /// Resolved from the newest snapshot, one per `spec.series` entry.
-    pub(crate) series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
+    pub series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
     /// True when the range wants the 1 Hz tier but a series resolved to its fast view because
     /// the snapshot has no 1 Hz view for it (P1 engine). The chart then draws the last 60 s.
     pub tier_fallback: bool,
@@ -781,7 +781,7 @@ impl HistoryClock {
 /// so extrema would add a series to itself, and the maxima of different series need not happen
 /// together (the bands could top the total). The version is the component's, so a new publish
 /// rebuilds the geometry.
-pub(crate) fn history_view(
+pub fn history_view(
     id: SeriesId,
     points: &[HistPoint],
     hist: &DeviceHistory,
@@ -868,7 +868,7 @@ pub fn derived_view<'a>(
 /// `id` in `set` for a chart of `range_ns`. Over 60 s it looks up the 1 Hz view first and falls
 /// back to the fast view when the snapshot has none; the bool is true when that fallback found
 /// the fast view.
-pub(crate) fn find_tiered(
+pub fn find_tiered(
     set: &SeriesSet,
     id: SeriesId,
     range_ns: u64,
@@ -891,7 +891,7 @@ pub(crate) fn find_tiered(
 
 /// The process series `id` for a chart of `range_ns`: over 60 s the 1 Hz view, falling back to
 /// the fast view when the set has no 1 Hz view (the bool is then true), else the fast view.
-pub(crate) fn find_process_tiered<'a>(
+pub fn find_process_tiered<'a>(
     set: &'a ProcessSeriesSet,
     id: &ProcessSeriesId,
     range_ns: u64,
@@ -951,7 +951,7 @@ impl<'a> ChangedRuns<'a> {
 }
 
 /// `id` in `set`: the 1 Hz tier list when the id carries the tier bit, else the fast list.
-pub(crate) fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
+pub fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
     let views = if id.metric.is_tier_1hz() {
         &set.slow
     } else {
