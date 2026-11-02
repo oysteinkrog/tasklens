@@ -8,18 +8,11 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
     StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
-use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, GpuTotals, Metric};
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::kv_grid;
 use tl_ui::components::menu::{close_context_menu, open_context_menu};
-use tl_ui::demand::DemandAggregator;
-use tl_ui::host::HostContext;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::overview::layout::BoxKind;
 use tl_ui::pages::performance::overview::{OVERVIEW_KEY, OverviewPage, edge_id};
 use tl_ui::pages::performance::sidebar::DeviceSidebar;
@@ -27,9 +20,8 @@ use tl_ui::pages::performance::status_bar::rules::{ChipKind, MachineState, Tone}
 use tl_ui::pages::performance::status_bar::{BAR_ID, PILL_ID, StatusBar, WARNINGS_ID, chip_id};
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-use tl_ui_settings::settings::{
-    AppearanceSettings, Settings, StatusBarPlacement, ThemeSettings, UiState,
-};
+use tl_ui_pagehost::PageHost;
+use tl_ui_settings::settings::{Settings, StatusBarPlacement};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const NS: u64 = 1_000_000_000;
@@ -95,31 +87,6 @@ fn calm(s: &mut Snapshot, t_s: u64) {
     });
 }
 
-/// Globals every rig needs, with `settings`.
-fn install(cx: &mut TestAppContext, client: &Arc<dyn EngineClient>, settings: Settings) {
-    let client = Arc::clone(client);
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        tl_ui::theme::store::init(
-            cx,
-            &ThemeSettings::default(),
-            &AppearanceSettings::default(),
-            Vec::new(),
-        );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-        init_strings(cx, "en-US");
-        kv_grid::init(cx);
-        cx.set_global(EngineGlobal(client));
-        cx.set_global(BootSettings {
-            settings,
-            state: UiState::default(),
-            persist: None,
-            startup_toasts: Vec::new(),
-        });
-        TlSettings::init(cx);
-    });
-}
-
 fn draw(cx: &mut VisualTestContext) {
     for _ in 0..2 {
         cx.run_until_parked();
@@ -152,15 +119,11 @@ mod performance_tab {
             s.devices = Arc::new(catalog(None));
             calm(s, 100);
         });
-        let client: Arc<dyn EngineClient> = engine.clone();
-        install(cx, &client, Settings::default());
-        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
-        // Only EngineGlobal is installed here, so the host has the client, hub and demand.
-        let host = HostContext::from_parts(Some(client), Some(hub), Some(demand), None, None);
-        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
-        vcx.simulate_scale_factor_change(1.0);
-        vcx.simulate_resize(size(px(1280.), px(800.)));
+        let pages = PageHost::install(cx, Arc::clone(&engine), Settings::default());
+        let host = pages.host();
+        let (page, vcx) = pages.open(cx, size(px(1280.), px(800.)), move |_, cx| {
+            PerformancePage::new(&host, cx)
+        });
         draw(vcx);
         let mut r = Rig { engine, page, vcx };
         r.select(OVERVIEW_KEY);
@@ -507,11 +470,9 @@ mod overview {
             s.devices = Arc::new(catalog(None));
             calm(s, 100);
         });
-        let client: Arc<dyn EngineClient> = engine.clone();
-        install(cx, &client, Settings::default());
-        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let (host, vcx) = cx.add_window_view(move |_, cx| {
+        let pages = PageHost::install(cx, Arc::clone(&engine), Settings::default());
+        let (hub, demand) = (pages.hub.clone(), pages.demand.clone());
+        let (host, vcx) = pages.open(cx, size(px(1200.), px(900.)), move |_, cx| {
             let sidebar = cx.new(|cx| DeviceSidebar::new(hub.clone(), demand.clone(), cx));
             let page = cx.new(|cx| {
                 OverviewPage::new(
@@ -524,8 +485,6 @@ mod overview {
             });
             Host { page, sidebar }
         });
-        vcx.simulate_scale_factor_change(1.0);
-        vcx.simulate_resize(size(px(1200.), px(900.)));
         draw(vcx);
         let page = vcx.read_entity(&host, |h, _| h.page.clone());
         let theme = vcx.update(|_, cx| tl_ui::theme::current(cx).clone());
@@ -588,7 +547,6 @@ mod main_window {
     use gpui_kit::{EventEmitter, FocusHandle, InteractiveElement as _};
     use tl_model::command::Tab;
     use tl_ui::demand::GlobalDemand;
-    use tl_ui::hub::GlobalHub;
     use tl_ui::window::main::{
         self as shell, MainWindow, PageSlot, ShellPage, open_main_window, set_test_page,
     };
@@ -627,17 +585,13 @@ mod main_window {
             s.devices = Arc::new(catalog(None));
             calm(s, 100);
         });
-        let client: Arc<dyn EngineClient> = engine.clone();
         let mut settings = Settings::default();
         settings.performance.status_bar = StatusBarPlacement::AllTabs;
         settings.motion.tab_switch_ms = 0;
         settings.general.start_tab = tl_ui_settings::settings::StartTab::Processes;
-        install(cx, &client, settings);
+        // The page host installs the hub and demand globals; `shell::init` replaces its ShellApi.
+        let _pages = PageHost::install(cx, Arc::clone(&engine), settings);
         cx.update(|cx| {
-            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
-            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-            cx.set_global(GlobalHub(hub));
-            cx.set_global(GlobalDemand(demand));
             tl_ui::components::toast::init(cx);
             tl_ui::actions::bind_keys_global(cx);
             for tab in [Tab::Processes, Tab::Services] {

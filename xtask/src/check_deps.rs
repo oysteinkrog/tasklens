@@ -234,6 +234,10 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
         "tl-ui-testkit",
         &["tl-model", "gpui-kit", "async-channel", "image"],
     ),
+    // Dev only (ADR-020): mounts one page for integration tests. It is a dev-dependency of tl-ui
+    // crates and never a normal dependency of a shipped binary; its tl-ui crates come from
+    // check_layers::EDGES.
+    ("tl-ui-pagehost", &["tl-model", "gpui-kit"]),
     (
         "tl-helper",
         &[

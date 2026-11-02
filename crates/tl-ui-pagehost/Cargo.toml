@@ -1,0 +1,29 @@
+[package]
+name = "tl-ui-pagehost"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+# Dev only (ADR-020): integration tests under tests/ use it as a dev-dependency with the feature
+# `test-support`. It is never a normal dependency of a tl-ui crate or a shipped binary.
+
+[dependencies]
+tl-model = { workspace = true }
+tl-ui-settings = { workspace = true }
+tl-ui-base = { workspace = true }
+tl-ui-kit = { workspace = true }
+tl-ui-testkit = { workspace = true }
+gpui-kit = { workspace = true }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+default = []
+# The host itself. It needs gpui-kit `test-support`, so it is a feature: packaging runs
+# `cargo build --release --workspace`, and a plain dependency with `test-support` would turn it
+# on for the shipped app as well.
+test-support = ["gpui-kit/test-support"]
+
+[lints]
+workspace = true

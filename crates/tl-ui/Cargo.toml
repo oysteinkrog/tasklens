@@ -25,6 +25,7 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 tl-ui-testkit = { workspace = true }   # FakeEngine; render helpers with `render-tests`
+tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # one page without MainWindow
 gpui-kit = { workspace = true, features = ["test-support"] }
 fastrand = "2.5"   # seeded noise for render_chart goldens (tasklens-yrf.13)
 proptest = { workspace = true }

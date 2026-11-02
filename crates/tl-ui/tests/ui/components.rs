@@ -17,7 +17,6 @@ use tl_ui::components::input::{TlInputSize, TlTextInput};
 use tl_ui::components::switch::TlSwitch;
 use tl_ui::components::tabs::{TlTabSpec, TlTabs};
 use tl_ui::theme::current;
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 gpui_kit::actions!(tl_components_test, [FocusNext, FocusPrev]);
 
@@ -33,13 +32,7 @@ const ORDER: [&str; 5] = [
 ];
 
 fn setup(cx: &mut App) {
-    gpui_kit::init(cx);
-    tl_ui::theme::store::init(
-        cx,
-        &ThemeSettings::default(),
-        &AppearanceSettings::default(),
-        Vec::new(),
-    );
+    tl_ui_pagehost::install_theme(cx);
     bind_keys_components(cx);
     cx.bind_keys([
         KeyBinding::new("tab", FocusNext, Some(ROOT_CONTEXT)),

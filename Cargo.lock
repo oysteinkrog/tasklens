@@ -8187,6 +8187,7 @@ dependencies = [
  "tl-model",
  "tl-ui-base",
  "tl-ui-kit",
+ "tl-ui-pagehost",
  "tl-ui-settings",
  "tl-ui-testkit",
  "tracing",
@@ -8228,6 +8229,18 @@ dependencies = [
  "tl-ui-base",
  "tl-ui-settings",
  "tracing",
+]
+
+[[package]]
+name = "tl-ui-pagehost"
+version = "1.3.0"
+dependencies = [
+ "gpui-kit",
+ "tl-model",
+ "tl-ui-base",
+ "tl-ui-kit",
+ "tl-ui-settings",
+ "tl-ui-testkit",
 ]
 
 [[package]]
