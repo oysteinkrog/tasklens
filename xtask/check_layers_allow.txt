@@ -4,9 +4,8 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-base -> tl-ui (shell): 2
+# tl-ui-base -> tl-ui (shell): 1
 action_tracker.rs -> window::main
-host.rs -> window::main
 
 # tl-ui-base -> tl-ui-kit: 5
 action_tracker.rs -> components::dialog
@@ -90,7 +89,7 @@ pages/performance/actions.rs -> pages::performance
 pages/performance/core_clocks.rs -> pages::performance::cpu
 tray_bridge.rs -> pages::performance
 
-# tl-ui-procs -> tl-ui (shell): 13
+# tl-ui-procs -> tl-ui (shell): 12
 pages/processes/history/mod.rs -> window::main
 pages/processes/jump.rs -> window::main
 pages/processes/menu.rs -> window::main
@@ -101,7 +100,6 @@ pages/processes/toasts.rs -> window::main
 windows/app_props.rs -> window::main
 windows/disk_in_use.rs -> window::main
 windows/handle_search.rs -> window::main
-windows/props/fds.rs -> window::main
 windows/props/general.rs -> window::main
 windows/props/mod.rs -> window::main
 
@@ -114,12 +112,10 @@ windows/notices.rs -> pages::startup::delegate
 windows/props/fds.rs -> pages::connections::actions
 windows/props/general.rs -> pages::services::actions
 
-# tl-ui-sys -> tl-ui (shell): 7
+# tl-ui-sys -> tl-ui (shell): 5
 pages/connections/flows.rs -> window::main
-pages/connections/mod.rs -> window::main
 pages/services/flows.rs -> window::main
 windows/connection_properties.rs -> window::main
-windows/service_properties/general.rs -> window::main
 windows/service_properties/mod.rs -> window::main
 windows/startup_properties.rs -> window::main
 

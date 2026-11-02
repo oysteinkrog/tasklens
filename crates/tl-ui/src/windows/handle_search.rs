@@ -68,6 +68,7 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellState;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -78,7 +79,7 @@ use crate::table::tree_table::{
 };
 use crate::text::style::{numeric_style, t_base, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::{ShellState, main_window_view};
+use crate::window::main::main_window_view;
 
 gpui_kit::actions!(tasklens_handles, [HandleSearchOpenLocation]);
 

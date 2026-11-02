@@ -48,7 +48,6 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
     point, prelude::FluentBuilder as _, px, size,
 };
-use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::{AppRequest, Command, CommandError, DeviceCommand, KWinCommand, Tab};
 use tl_model::table::{Manager, TableMode, UnitRef};
@@ -117,7 +116,7 @@ pub use super::titlebar::TITLEBAR_H;
 pub(crate) use crate::shell::PICK_NONE_TEXT;
 pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
-    ShellEvents, ShellPage, WINDOW_TITLE,
+    ShellEvents, ShellPage, ShellState, WINDOW_TITLE,
 };
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
@@ -369,46 +368,6 @@ fn built_tabs(cx: &App) -> SmallVec<[Tab; 6]> {
         .into_iter()
         .filter(|tab| factory_for(*tab, cx).is_some())
         .collect()
-}
-
-/// Shell state other parts of the UI read.
-pub struct ShellState {
-    /// `gpui_kit::open_window` roots every window in the kit `Root`, so the handle is typed on
-    /// `Root`. `main_view` is the `MainWindow` inside it.
-    pub main_window: Option<WindowHandle<Root>>,
-    /// Read through [`main_window_view`]. Works inside the window's own updates, where the
-    /// window's root cannot be read.
-    pub main_view: Option<WeakEntity<MainWindow>>,
-    pub active_tab: Tab,
-    /// `Tab::ALL` filtered by `page_factory`, R-023 order.
-    pub built_tabs: SmallVec<[Tab; 6]>,
-    /// Mirror of `UiState.processes.history_mode`.
-    pub history_mode: bool,
-    /// Ctrl-pause (E20-012).
-    pub paused: bool,
-    /// Keep-above of the open secondary windows, in memory only (E20-029, R-073). A key is
-    /// dropped when its window leaves the registry.
-    pub secondary_pins: FxHashMap<WindowKey, bool>,
-    /// The host the main window shows, set when it opens and on every host switch. Read
-    /// through [`HostContext::shown`].
-    pub shown_host: Option<HostContext>,
-}
-
-impl Global for ShellState {}
-
-impl Default for ShellState {
-    fn default() -> Self {
-        Self {
-            main_window: None,
-            main_view: None,
-            active_tab: Tab::Processes,
-            built_tabs: SmallVec::new(),
-            history_mode: false,
-            paused: false,
-            secondary_pins: FxHashMap::default(),
-            shown_host: None,
-        }
-    }
 }
 
 /// Set once the first frame's `first_frame_ms` is logged, so a reopened window does not log again.
@@ -973,7 +932,12 @@ fn window_bounds_of(window: &Window, cx: &App) -> WindowBounds {
 
 /// The `MainWindow` view of the open main window.
 pub fn main_window_view(cx: &App) -> Option<Entity<MainWindow>> {
-    cx.try_global::<ShellState>()?.main_view.as_ref()?.upgrade()
+    let view = cx
+        .try_global::<ShellState>()?
+        .main_view
+        .as_ref()?
+        .upgrade()?;
+    view.downcast::<MainWindow>().ok()
 }
 
 /// The tab the window opens on (UI-SHL-002): `--tab`, else `general.start_tab`, where
@@ -1131,7 +1095,7 @@ pub fn open_main_window_on(start: Tab, cx: &mut App) -> gpui_kit::Result<WindowH
     let handle = WindowHandle::<Root>::new(handle.window_id());
     let state = cx.default_global::<ShellState>();
     state.main_window = Some(handle);
-    state.main_view = Some(view.downgrade());
+    state.main_view = Some(view.downgrade().into());
     // A new window is not kept above until `KeepAbove` reaches it.
     cx.default_global::<KeepAboveState>().apply_pending = true;
     Ok(handle)

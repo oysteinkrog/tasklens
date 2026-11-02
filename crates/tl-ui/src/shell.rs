@@ -1,17 +1,19 @@
 //! Shell types that pages, windows and other lower layers name (ADR-020, tasklens-zljr5.15).
 //!
 //! The shell (`window/`) owns the main window, the status chip, the toolbar and the title bar.
-//! This module holds the parts of them that lower layers use as plain types: the page trait and
-//! the shell events, the status chip's event and action types, the toolbar's content trait and
-//! model, and the title bar's keep-above check and test probe. The `window/` modules re-export
-//! each item at its old path.
+//! This module holds the parts of them that lower layers use as plain types: the page trait, the
+//! shell events and the shell state, the status chip's event and action types, the toolbar's
+//! content trait and model, and the title bar's keep-above check and test probe. The `window/`
+//! modules re-export each item at its old path.
 
+use gpui_kit::base::Root;
 use gpui_kit::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Global, Render,
-    SharedString, Window,
+    Action, AnyElement, AnyWeakEntity, App, Context, Entity, EventEmitter, FocusHandle, Global,
+    Render, SharedString, Window, WindowHandle,
 };
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use gpui_kit::{Pixels, Point};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::health::HelperState;
@@ -20,6 +22,7 @@ use tl_model::validity::Validity;
 
 pub use crate::app_env::APP_ID;
 use crate::host::HostContext;
+use crate::registry::WindowKey;
 
 /// The window title the KWin task switcher shows.
 pub const WINDOW_TITLE: &str = "tasklens";
@@ -80,6 +83,47 @@ impl Global for GlobalShellEvents {}
 pub struct HelperInstalled(pub bool);
 
 impl Global for HelperInstalled {}
+
+/// Shell state other parts of the UI read.
+pub struct ShellState {
+    /// `gpui_kit::open_window` roots every window in the kit `Root`, so the handle is typed on
+    /// `Root`. `main_view` is the `MainWindow` inside it.
+    pub main_window: Option<WindowHandle<Root>>,
+    /// The `MainWindow` view, type-erased so this module does not name the shell. Read through
+    /// `window::main::main_window_view`, which downcasts it. Works inside the window's own
+    /// updates, where the window's root cannot be read.
+    pub main_view: Option<AnyWeakEntity>,
+    pub active_tab: Tab,
+    /// `Tab::ALL` filtered by `page_factory`, R-023 order.
+    pub built_tabs: SmallVec<[Tab; 6]>,
+    /// Mirror of `UiState.processes.history_mode`.
+    pub history_mode: bool,
+    /// Ctrl-pause (E20-012).
+    pub paused: bool,
+    /// Keep-above of the open secondary windows, in memory only (E20-029, R-073). A key is
+    /// dropped when its window leaves the registry.
+    pub secondary_pins: FxHashMap<WindowKey, bool>,
+    /// The host the main window shows, set when it opens and on every host switch. Read
+    /// through [`HostContext::shown`].
+    pub shown_host: Option<HostContext>,
+}
+
+impl Global for ShellState {}
+
+impl Default for ShellState {
+    fn default() -> Self {
+        Self {
+            main_window: None,
+            main_view: None,
+            active_tab: Tab::Processes,
+            built_tabs: SmallVec::new(),
+            history_mode: false,
+            paused: false,
+            secondary_pins: FxHashMap::default(),
+            shown_host: None,
+        }
+    }
+}
 
 /// Chip height, × ui_scale. Tables add this as bottom padding (UI-SHL-050).
 pub const CHIP_H: f32 = 26.0;

@@ -32,7 +32,8 @@ use crate::components::toast::{ToastAction, ToastKind};
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
-use crate::window::main::{ShellState, main_window_view, push_main_toast};
+use crate::shell::ShellState;
+use crate::window::main::{main_window_view, push_main_toast};
 
 /// The caller's toast texts. An empty or `None` text means this module's default string.
 #[derive(Clone, Debug, Default)]

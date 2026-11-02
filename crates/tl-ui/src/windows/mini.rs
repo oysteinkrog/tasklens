@@ -53,9 +53,10 @@ use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellState;
 use crate::shell::keep_above_supported;
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::{ShellState, main_window_view, push_main_toast};
+use crate::window::main::{main_window_view, push_main_toast};
 
 /// The window width at ui_scale 1 (PERF-093).
 pub const MINI_W: f32 = 260.;

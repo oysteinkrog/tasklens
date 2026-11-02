@@ -34,8 +34,8 @@ use crate::hosts_api::HostLinkStatus;
 use crate::hub::{GlobalHub, HostClock, SnapshotHub};
 use crate::i18n::tr_args;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellState;
 use crate::shell::{GlobalShellEvents, ShellEvents};
-use crate::window::main::ShellState;
 
 /// One host's engine client, snapshot hub, demand aggregator, action tracker and shell event bus.
 /// Cheap to clone: every part is a handle.

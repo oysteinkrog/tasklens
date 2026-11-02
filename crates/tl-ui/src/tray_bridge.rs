@@ -51,8 +51,9 @@ use crate::pages::minigraph::sources::{
 use crate::pages::performance::actions::PerfAddTrayGraph;
 use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
+use crate::shell::ShellState;
 use crate::theme::current;
-use crate::window::main::{ShellState, push_main_toast};
+use crate::window::main::push_main_toast;
 
 /// Time between two models.
 pub const TRAY_TICK: Duration = Duration::from_millis(1000);

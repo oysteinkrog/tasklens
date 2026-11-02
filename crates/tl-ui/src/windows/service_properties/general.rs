@@ -53,9 +53,9 @@ use crate::pages::sys_status::{
 };
 use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
 use crate::selector::TlSelector;
+use crate::shell::ShellState;
 use crate::text::style::t_base;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::main::ShellState;
 
 /// Label column width at 100% scale.
 const LABEL_WIDTH: f32 = 120.;

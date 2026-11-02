@@ -78,10 +78,11 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellState;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::{ShellState, main_window_view};
+use crate::window::main::main_window_view;
 use crate::windows::actions::{
     KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
     PropsFieldEnd, PropsFieldHome, PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp,

@@ -48,13 +48,13 @@ use crate::pages::processes::actions::CopyDetails;
 use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
 use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::selector::TlSelector;
+use crate::shell::ShellState;
 use crate::shell::{FilterChanged, HelperInstalled, PauseChanged, ShellPage, StatusChanged};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::TreeTableEvent;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::ShellState;
 use crate::windows::connection_properties::open_connection_properties;
 
 /// The most Properties windows one command opens (the window cap).

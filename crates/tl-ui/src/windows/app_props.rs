@@ -69,6 +69,7 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellState;
 use crate::table::actions::CopyRowsAsTable;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -80,7 +81,7 @@ use crate::table::tree_table::{
 };
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::{ShellState, main_window_view, push_main_toast};
+use crate::window::main::{main_window_view, push_main_toast};
 
 gpui_kit::actions!(
     tasklens,

@@ -46,6 +46,7 @@ use crate::i18n::{Strings, tr};
 use crate::pages::connections::actions::GoToConnection;
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use crate::shell::ShellState;
 use crate::table::actions::CopyRow;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
@@ -57,7 +58,6 @@ use crate::table::tree_table::{
 };
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
-use crate::window::main::ShellState;
 
 gpui_kit::actions!(
     tasklens_fds,
