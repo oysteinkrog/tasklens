@@ -12,6 +12,16 @@ pub fn clipboard_write(cx: &mut App, text: String) -> Result<(), ()> {
     Ok(())
 }
 
+/// `path` with a leading `home` shown as `~`, or `None` when it does not start with `home`.
+pub fn home_tilde(path: &str, home: &str) -> Option<String> {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return None;
+    }
+    let rest = path.strip_prefix(home)?;
+    (rest.is_empty() || rest.starts_with('/')).then(|| format!("~{rest}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -23,5 +33,17 @@ mod tests {
         assert_eq!(result, Ok(()));
         let text = cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()));
         assert_eq!(text.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn tilde_only_at_a_path_boundary() {
+        assert_eq!(
+            home_tilde("/home/u/.config/autostart", "/home/u").as_deref(),
+            Some("~/.config/autostart")
+        );
+        assert_eq!(home_tilde("/home/u", "/home/u/").as_deref(), Some("~"));
+        assert_eq!(home_tilde("/home/user2/x", "/home/u"), None);
+        assert_eq!(home_tilde("/etc/xdg/autostart", "/home/u"), None);
+        assert_eq!(home_tilde("/etc", ""), None);
     }
 }

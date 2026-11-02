@@ -62,6 +62,7 @@ use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
 use crate::action_tracker::ToastTexts;
+use crate::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
@@ -74,7 +75,6 @@ use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
-use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;

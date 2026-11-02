@@ -13,8 +13,14 @@
 //! - `OpenProperties` and the other table Actions: `table/actions.rs` (E18).
 //! - `ActivateTheme`: `theme/store.rs` (E17).
 //! - Page Actions: each page's `actions.rs`.
+//!
+//! The jump Actions `GoToService` and `GoToConnection` (with `ManagerArg` and `JumpOrigin`) live
+//! here, not in the Services and Connections pages, because Processes and its windows dispatch
+//! them too. Those pages re-export them at their old paths.
 
-use gpui_kit::{Action, App, KeyBinding};
+use gpui_kit::gpui::private::schemars::JsonSchema;
+use gpui_kit::{Action, App, KeyBinding, SharedString, gpui};
+use serde::Deserialize;
 use tl_model::table::TableMode;
 
 pub use crate::components::shield::{EndHelperSession, StartHelperSession};
@@ -148,6 +154,40 @@ pub struct ToggleSetting(pub SettingKey);
 pub struct SetSetting {
     pub key: SettingKey,
     pub value: SettingValue,
+}
+
+/// systemd manager represented by a Services filter toggle or jump target.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "gpui::private::schemars")]
+pub enum ManagerArg {
+    System,
+    User,
+}
+
+/// Page from which a jump to a service originated.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "gpui::private::schemars")]
+pub enum JumpOrigin {
+    Processes,
+    Connections,
+}
+
+/// Opens or reveals a service and records the page to return to.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct GoToService {
+    pub manager: ManagerArg,
+    pub name: SharedString,
+    pub origin: JumpOrigin,
+}
+
+/// Selects the Connections row whose socket has `inode` and activates the main window.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct GoToConnection {
+    pub inode: u64,
 }
 
 /// Binds the Global rows of canonical table (b), the Picker and ShellFilter rows, and the

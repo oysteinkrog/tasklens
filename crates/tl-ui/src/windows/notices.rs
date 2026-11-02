@@ -53,12 +53,11 @@ use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::confirm::{self, ConfirmKind};
-use crate::pages::startup::delegate::home_tilde;
 use crate::settings_global::TlSettings;
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::{UiMetrics, metrics};
-use crate::util::clipboard_write;
+use crate::util::{clipboard_write, home_tilde};
 use crate::windows::actions::OpenDumpFolder;
 
 /// How long the hash may take before the "Computing SHA-256…" toast shows.

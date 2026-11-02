@@ -43,6 +43,8 @@ use crate::table::tree_table::{
 };
 use crate::template::Template;
 use crate::theme::{TlTheme, current};
+/// Moved to `util` so the process windows can use it without naming this page.
+pub use crate::util::home_tilde;
 
 /// The seven columns in display order (UI-SYS-041).
 pub const STARTUP_COLUMNS: [StartupColumn; 7] = [
@@ -106,16 +108,6 @@ pub fn fallback_icon(kind: StartupKind) -> IconName {
         StartupKind::UserUnit => IconName::Cog,
         StartupKind::PlasmaPreStartup | StartupKind::PlasmaLogout => IconName::FileCode,
     }
-}
-
-/// `path` with a leading `home` shown as `~`, or `None` when it does not start with `home`.
-pub fn home_tilde(path: &str, home: &str) -> Option<String> {
-    let home = home.trim_end_matches('/');
-    if home.is_empty() {
-        return None;
-    }
-    let rest = path.strip_prefix(home)?;
-    (rest.is_empty() || rest.starts_with('/')).then(|| format!("~{rest}"))
 }
 
 /// The text colour role of an impact (UI-SYS-041): High `status.warning`, Medium and Low
@@ -892,22 +884,5 @@ impl SysDelegate for StartupDelegate {
 
     fn mask(&self) -> ComponentMask {
         ComponentMask::STARTUP
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tilde_only_at_a_path_boundary() {
-        assert_eq!(
-            home_tilde("/home/u/.config/autostart", "/home/u").as_deref(),
-            Some("~/.config/autostart")
-        );
-        assert_eq!(home_tilde("/home/u", "/home/u/").as_deref(), Some("~"));
-        assert_eq!(home_tilde("/home/user2/x", "/home/u"), None);
-        assert_eq!(home_tilde("/etc/xdg/autostart", "/home/u"), None);
-        assert_eq!(home_tilde("/etc", ""), None);
     }
 }

@@ -15,9 +15,3 @@ pages/performance/disk.rs -> windows::disk_in_use
 
 # tl-ui-procs -> tl-ui-perf: 1
 windows/disk_in_use.rs -> pages::performance
-
-# tl-ui-procs -> tl-ui-sys: 4
-pages/processes/menu.rs -> pages::services::actions
-windows/notices.rs -> pages::startup::delegate
-windows/props/fds.rs -> pages::connections::actions
-windows/props/general.rs -> pages::services::actions

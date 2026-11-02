@@ -1,9 +1,10 @@
 //! Connections actions and key bindings (UI-SYS-060 to UI-SYS-067, R-128).
 
-use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, App, KeyBinding, gpui};
-use serde::Deserialize;
+use gpui_kit::{App, KeyBinding};
 
+/// `GoToConnection` moved to the shared `actions` module, so the process windows can dispatch it
+/// without naming this page. Re-exported here for the Connections page.
+pub use crate::actions::GoToConnection;
 use crate::pages::processes::actions::CopyDetails;
 
 gpui_kit::actions!(
@@ -20,14 +21,6 @@ gpui_kit::actions!(
         ConnectionNetnsAll,
     ]
 );
-
-/// Selects the Connections row whose socket has `inode` and activates the main window.
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = tasklens)]
-#[schemars(crate = "gpui::private::schemars")]
-pub struct GoToConnection {
-    pub inode: u64,
-}
 
 /// Binds Ctrl+C to `CopyDetails` for the row menu hint. The table's own `Table` context binds
 /// Ctrl+C to CopyRow; bound later at the same depth, this one wins the menu hint.

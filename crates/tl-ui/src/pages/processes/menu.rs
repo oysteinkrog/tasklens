@@ -30,13 +30,13 @@ use super::{
     SuspendLabel, group_frozen, group_targets, plasma_restart_unit, suspend_or_resume,
     topmost_window,
 };
+use crate::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::components::menu::TlMenu;
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::pages::minigraph::sources::{GraphColumn, MinigraphSource};
-use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 use crate::table::tree_table::RowKind;
 use crate::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge, tray_available};

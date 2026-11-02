@@ -5,8 +5,12 @@
 //! bindings are registered by their owners and are not repeated here.
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, App, KeyBinding, SharedString, gpui};
+use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::Deserialize;
+
+/// The jump Actions moved to the shared `actions` module, so Processes can dispatch them without
+/// naming this page. Re-exported here for the Services and Connections pages.
+pub use crate::actions::{GoToService, JumpOrigin, ManagerArg};
 
 /// Key context of the Services table.
 pub const SERVICE_TABLE_CONTEXT: &str = "ServiceTable";
@@ -75,14 +79,6 @@ pub enum StateFilterArg {
 #[schemars(crate = "gpui::private::schemars")]
 pub struct ServicesToggleStateFilter {
     pub state: StateFilterArg,
-}
-
-/// systemd manager represented by a Services filter toggle or jump target.
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-#[schemars(crate = "gpui::private::schemars")]
-pub enum ManagerArg {
-    System,
-    User,
 }
 
 /// Toggles one Services manager filter.
@@ -158,24 +154,6 @@ pub struct ServicesToggleUnitType {
 #[schemars(crate = "gpui::private::schemars")]
 pub struct ServicePropsSelectTab {
     pub index: u8,
-}
-
-/// Page from which a jump to a service originated.
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-#[schemars(crate = "gpui::private::schemars")]
-pub enum JumpOrigin {
-    Processes,
-    Connections,
-}
-
-/// Opens or reveals a service and records the page to return to.
-#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = tasklens)]
-#[schemars(crate = "gpui::private::schemars")]
-pub struct GoToService {
-    pub manager: ManagerArg,
-    pub name: SharedString,
-    pub origin: JumpOrigin,
 }
 
 /// Binds the Services rows of canonical table (b).

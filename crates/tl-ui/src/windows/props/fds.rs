@@ -34,6 +34,7 @@ use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
 use crate::action_tracker::ToastTexts;
+use crate::actions::GoToConnection;
 use crate::components::checkbox::TlCheckbox;
 use crate::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
@@ -43,7 +44,6 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::TlTooltip;
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr};
-use crate::pages::connections::actions::GoToConnection;
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 use crate::shell::ShellState;
