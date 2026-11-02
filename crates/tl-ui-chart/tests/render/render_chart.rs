@@ -7,13 +7,10 @@
 //! fixed phase of a 60 s boundary a little in the future, so the chart is never stale while it
 //! renders and the 6 s grid lines land on the same pixels on every run.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_chart::`.
-
-#![cfg(feature = "render-tests")]
+//! Run with `cargo test -p tl-ui-chart --features render-tests --test render`.
 
 use std::sync::Arc;
 
-use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px,
     size,
@@ -23,14 +20,16 @@ use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_model::time::now_boot_ns;
-use tl_ui::chart::view::ChartView;
-use tl_ui::chart::{
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_chart::chart::view::ChartView;
+use tl_ui_chart::chart::{
     ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, GridCellSpec, GridStyle,
     LegendStyle, ValueAlign, ValueFormat, YScale,
 };
-use tl_ui::hub::SnapshotHub;
-use tl_ui::theme::{current, metrics};
+use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
 use tl_ui_testkit::fake_engine::FakeEngine;
+use tl_ui_testkit::render::RgbaImage;
 
 const MS: u64 = 1_000_000;
 const S: u64 = 1_000 * MS;
@@ -61,6 +60,14 @@ const CELL_H: f32 = 112.;
 
 /// Newest sample time: 3.4 s past a 60 s boundary at least a minute ahead of the clock. Only the
 /// phase against 6 s shows in the image, so every run draws the same pixels.
+/// Where this crate's golden PNGs live.
+const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
+
+/// Compares `img` with `tests/golden/<name>.png`, or writes it when `TL_UPDATE_GOLDEN=1`.
+fn assert_golden(name: &str, img: &RgbaImage) {
+    tl_ui_pagehost::render::assert_golden(std::path::Path::new(GOLDEN_DIR), name, img);
+}
+
 fn newest_ns() -> u64 {
     (now_boot_ns() / (60 * S) + 2) * 60 * S + 3_400 * MS
 }
@@ -219,7 +226,7 @@ fn chart_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
 /// The 16-cell CPU grid with kernel overlays; cell 5 is offline and has no series. Sizes follow
 /// `ui_scale`, as the window does.
 fn grid_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartGridView>> {
-    tl_ui::i18n::init_strings(cx, "en-US");
+    tl_ui_base::i18n::init_strings(cx, "en-US");
     let m = *metrics(cx);
     let graph = current(cx).graph;
     let spec = ChartGridSpec {
