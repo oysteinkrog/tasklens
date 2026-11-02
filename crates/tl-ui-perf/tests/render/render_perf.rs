@@ -3,6 +3,10 @@
 //! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
 //! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
+//! The Overview timeline labels its hours from CLOCK_REALTIME in the local time zone, so every
+//! test runs with `TZ=UTC` and the timeline clock pinned at [`NOW`] and [`BOOT`]
+//! ([`run_pinned`]). A golden then does not change with the hour or the host's zone.
+//!
 //! Run with `cargo test -p tl-ui-perf --features render-tests --test render`.
 
 use std::sync::Arc;
@@ -26,6 +30,7 @@ use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::theme::current;
 use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::overview::timeline::set_test_clock;
 use tl_ui_overview::overview::{OVERVIEW_KEY, OverviewPage};
 use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
 use tl_ui_perf::performance::cpu::CpuPage;
@@ -48,6 +53,12 @@ const HEIGHT: f32 = 800.;
 
 const S: u64 = 1_000_000_000;
 const MS: u64 = 1_000_000;
+/// The pinned CLOCK_REALTIME now: 2026-10-28 09:20 UTC, as in tl-ui's `overview_timeline` tests.
+const NOW: i64 = 1_793_179_200 * S as i64;
+/// The pinned CLOCK_BOOTTIME now: the machine booted 2 hours ago.
+const BOOT: u64 = 2 * 3600 * S;
+/// The time zone every test renders in.
+const TEST_TZ: &str = "UTC";
 const GIB: u64 = 1 << 30;
 /// Sample period of every fixture series.
 const PERIOD_NS: u64 = 500 * MS;
@@ -258,6 +269,33 @@ fn build(page: Page, cx: &mut gpui_kit::App) -> Entity<Shot> {
     })
 }
 
+/// Runs `body` on lavapipe with `TZ=UTC` and the timeline clock pinned at [`NOW`] and [`BOOT`].
+///
+/// When `TZ` is not `UTC`, the test binary runs the test `test_path` again in a child process
+/// with `TZ=UTC`, because setting the variable in a running test process is not thread safe.
+/// jiff reads `TZ` when it first looks up the system zone.
+fn run_pinned(test_path: &str, body: impl FnOnce()) {
+    if std::env::var_os("TZ").is_some_and(|tz| tz == TEST_TZ) {
+        run_on_lavapipe(test_path, || {
+            set_test_clock(Some((NOW, BOOT)));
+            body();
+        });
+        return;
+    }
+    let exe = std::env::current_exe().expect("test binary path");
+    let output = std::process::Command::new(exe)
+        .args([test_path, "--exact", "--nocapture", "--test-threads=1"])
+        .env("TZ", TEST_TZ)
+        .output()
+        .expect("run the test again with TZ=UTC");
+    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{test_path} failed with TZ={TEST_TZ}"
+    );
+}
+
 fn check(page: Page, theme: &str, name: &str) {
     check_at(page, theme, name, WIDTH, HEIGHT);
 }
@@ -287,21 +325,21 @@ fn blank_up_time(img: &mut tl_ui_testkit::render::RgbaImage) {
 
 #[test]
 fn overview_dark() {
-    run_on_lavapipe("render_perf::overview_dark", || {
+    run_pinned("render_perf::overview_dark", || {
         check(Page::Overview, "Default Dark", "perf_overview_dark")
     });
 }
 
 #[test]
 fn overview_light() {
-    run_on_lavapipe("render_perf::overview_light", || {
+    run_pinned("render_perf::overview_light", || {
         check(Page::Overview, "Default Light", "perf_overview_light")
     });
 }
 
 #[test]
 fn overview_1920_dark() {
-    run_on_lavapipe("render_perf::overview_1920_dark", || {
+    run_pinned("render_perf::overview_1920_dark", || {
         check_at(
             Page::Overview,
             "Default Dark",
@@ -314,7 +352,7 @@ fn overview_1920_dark() {
 
 #[test]
 fn overview_1920_light() {
-    run_on_lavapipe("render_perf::overview_1920_light", || {
+    run_pinned("render_perf::overview_1920_light", || {
         check_at(
             Page::Overview,
             "Default Light",
@@ -327,14 +365,14 @@ fn overview_1920_light() {
 
 #[test]
 fn cpu_page_dark() {
-    run_on_lavapipe("render_perf::cpu_page_dark", || {
+    run_pinned("render_perf::cpu_page_dark", || {
         check(Page::Cpu, "Default Dark", "perf_cpu_dark")
     });
 }
 
 #[test]
 fn cpu_page_light() {
-    run_on_lavapipe("render_perf::cpu_page_light", || {
+    run_pinned("render_perf::cpu_page_light", || {
         check(Page::Cpu, "Default Light", "perf_cpu_light")
     });
 }
