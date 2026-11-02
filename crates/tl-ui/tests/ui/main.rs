@@ -14,7 +14,6 @@ mod demand;
 mod detached;
 mod device_pages;
 mod focus;
-mod handle_search;
 mod helper_flow;
 mod history;
 mod host_clock;

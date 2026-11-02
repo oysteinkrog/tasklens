@@ -13,8 +13,7 @@ use gpui_kit::{
 use tl_model::actions::{
     ActionEvent, ActionKind, ActionRequest, ActionState, ActionTarget, Signal,
 };
-use tl_model::client::EngineClient;
-use tl_model::command::{Command, Tab};
+use tl_model::command::Command;
 use tl_model::details::{HandleHit, HandleKind, HandlePhase, HandleSearchState, SearchId};
 use tl_model::health::HelperState;
 use tl_model::ids::ProcessKey;
@@ -22,54 +21,43 @@ use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRec
 use tl_model::snapshot::ProcessSnapshot;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::dialog::TlDialogView;
-use tl_ui::components::menu::{MenuEntryKind, TlMenu};
-use tl_ui::components::shield::StartHelperSession;
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::host::HostContext;
-use tl_ui::pages::processes::ProcessesPage;
-use tl_ui::pages::processes::confirm::{ConfirmKind, texts};
-use tl_ui::table::tree_table::TreeTableDelegate as _;
-use tl_ui::window::main::{main_window_view, open_main_window_on};
-use tl_ui::windows::actions::{HandleSearchEndProcess, HandleSearchEndTask};
-use tl_ui::windows::handle_search::{
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::host::HostContext;
+use tl_ui_kit::components::dialog::TlDialogView;
+use tl_ui_kit::components::menu::{MenuEntryKind, TlMenu};
+use tl_ui_kit::components::shield::StartHelperSession;
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+use tl_ui_procs::pages::processes::confirm::{ConfirmKind, texts};
+use tl_ui_procs::windows::actions::{HandleSearchEndProcess, HandleSearchEndTask};
+use tl_ui_procs::windows::handle_search::{
     HANDLE_HIT_CAP, HandleSearchOpenLocation, HandleSearchWindow, SearchStatus, open_handle_search,
 };
 use tl_ui_settings::settings::{Settings, UiState};
+use tl_ui_table::table::tree_table::TreeTableDelegate as _;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
-use super::common::{actions_sent, publish_helper, searches};
+use tl_ui_pagehost::helpers::publish_helper;
+use tl_ui_testkit::fixtures::{actions_sent, searches};
+
+use super::common::{StandIn, open_stand_in, shell_free_init_with};
 
 struct Rig {
     engine: Arc<FakeEngine>,
     win: VisualTestContext,
     view: Entity<HandleSearchWindow>,
+    /// The window with the real Processes page, in place of the main window.
+    stand_in: StandIn,
 }
 
 fn setup(cx: &mut TestAppContext) -> Rig {
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let init = UiInit {
-        settings: Settings::default(),
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
+    let (engine, host) =
+        shell_free_init_with(cx, Settings::default(), UiState::default(), AppEnv::test());
     cx.update(|cx| {
-        TasklensUi::init(cx, client, init);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_reduce_motion(true);
     });
-    let _main = cx
-        .update(|cx| open_main_window_on(Tab::Processes, cx))
-        .expect("the main window opens");
+    let (stand_in, _stand_in_cx) = open_stand_in(cx, &host);
     cx.run_until_parked();
     cx.update(|cx| open_handle_search(&HostContext::local(cx), cx));
     cx.run_until_parked();
@@ -77,7 +65,12 @@ fn setup(cx: &mut TestAppContext) -> Rig {
     let mut win = VisualTestContext::from_window(handle.into(), cx);
     win.update(|window, _| window.activate_window());
     win.run_until_parked();
-    Rig { engine, win, view }
+    Rig {
+        engine,
+        win,
+        view,
+        stand_in,
+    }
 }
 
 fn find(cx: &mut TestAppContext) -> Option<(WindowHandle<Root>, Entity<HandleSearchWindow>)> {
@@ -234,7 +227,10 @@ fn handle_search_stop_keeps_results(cx: &mut TestAppContext) {
     let id = begin(cx, &mut rig);
     publish(cx, &rig.engine, payload(id, HandlePhase::Searching, 5, 0));
     rig.win.update(|window, cx| {
-        window.dispatch_action(Box::new(tl_ui::windows::actions::StopHandleSearch), cx);
+        window.dispatch_action(
+            Box::new(tl_ui_procs::windows::actions::StopHandleSearch),
+            cx,
+        );
     });
     rig.win.run_until_parked();
     assert!(matches!(
@@ -311,7 +307,7 @@ fn handle_search_all_privileged_after_session(cx: &mut TestAppContext) {
     publish(cx, &rig.engine, payload(id, HandlePhase::Done, 2, 118));
 
     rig.win.update(|window, cx| {
-        window.dispatch_action(Box::new(tl_ui::windows::actions::HandleSearchAll), cx);
+        window.dispatch_action(Box::new(tl_ui_procs::windows::actions::HandleSearchAll), cx);
     });
     rig.win.run_until_parked();
     assert_eq!(starts.get(), 1);
@@ -690,11 +686,7 @@ fn handle_go_to_process_dispatches_entry_point(cx: &mut TestAppContext) {
             hit_of(300, 4, "/var/log/b.log"),
         ],
     );
-    let page = rig.win.update(|_, cx| {
-        main_window_view(cx)
-            .and_then(|v| v.read(cx).page_entity::<ProcessesPage>(Tab::Processes))
-            .expect("the Processes page is built")
-    });
+    let page = rig.stand_in.page.clone();
     let generation = |rig: &mut Rig| {
         rig.win
             .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
