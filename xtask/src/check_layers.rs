@@ -67,12 +67,12 @@ const LAYERS: &[(&str, &str)] = &[
     ("registry.rs", "tl-ui-base"),
     ("app_env.rs", "tl-ui-base"),
     ("shell.rs", "tl-ui-base"),
-    ("actions.rs", "tl-ui-base"),
     ("engine_link.rs", "tl-ui-base"),
     ("request_ends.rs", "tl-ui-base"),
     // tl-ui-kit
     ("components/", "tl-ui-kit"),
     ("helper_flow.rs", "tl-ui-kit"),
+    ("actions.rs", "tl-ui-kit"),
     // tl-ui-chart
     ("chart/", "tl-ui-chart"),
     ("net_totals.rs", "tl-ui-chart"),
@@ -1233,7 +1233,8 @@ mod tests {
             layer_of("pages/performance/widget/grid.rs"),
             Some("tl-ui-overview")
         );
-        assert_eq!(layer_of("components/motion.rs"), Some("tl-ui-base"));
+        assert_eq!(layer_of("motion.rs"), Some("tl-ui-base"));
+        assert_eq!(layer_of("actions.rs"), Some("tl-ui-kit"));
         assert_eq!(layer_of("components/button.rs"), Some("tl-ui-kit"));
         assert_eq!(layer_of("pages/mod.rs"), Some(SHELL));
         assert_eq!(layer_of("theme/mod.rs"), Some("tl-ui-base"));

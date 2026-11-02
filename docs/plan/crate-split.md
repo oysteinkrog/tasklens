@@ -38,8 +38,8 @@ Twelve new crates. The workspace grows from 14 to 26 members.
 | Crate | Holds (paths are today's, under crates/tl-ui/src unless noted) | Lines (about) |
 |---|---|---|
 | tl-ui-settings | UI half of tl-model `settings.rs`, plus `layout.rs`, `layout_boxes.rs`, `layout_pages.rs` (from crates/tl-model) | 7.5k |
-| tl-ui-base | theme/, text/, i18n.rs, template.rs (Template), selector.rs, util.rs, focus.rs, anim.rs, motion, hub.rs, demand.rs, settings_global.rs, host.rs, host_settings.rs, hosts_api.rs, hosts_edit.rs, action_tracker.rs, registry.rs, app_env.rs, shell.rs (shell types and ShellApi), actions.rs, engine_link.rs, request_ends.rs | 14k |
-| tl-ui-kit | components/, helper_flow.rs | 22k |
+| tl-ui-base | theme/, text/, i18n.rs, template.rs (Template), selector.rs, util.rs, focus.rs, anim.rs, motion, hub.rs, demand.rs, settings_global.rs, host.rs, host_settings.rs, hosts_api.rs, hosts_edit.rs, action_tracker.rs, registry.rs, app_env.rs, shell.rs (shell types and ShellApi), toast_types.rs, engine_link.rs, request_ends.rs | 14k |
+| tl-ui-kit | components/, helper_flow.rs, actions.rs | 22k |
 | tl-ui-chart | chart/, net_totals.rs | 9k |
 | tl-ui-table | table/, text_cache.rs, sys_table.rs, sys_status.rs, sys_copy.rs | 10k |
 | tl-ui-perf-core | pages/performance/core/ (DeviceKey, DeviceKind, perf actions, details, core_clocks, shared consts and helpers moved down), pages/minigraph/, tray_bridge.rs, windows/detached_graph.rs | 10k |
@@ -51,8 +51,13 @@ Twelve new crates. The workspace grows from 14 to 26 members.
 | tl-ui-testkit (dev) | FakeEngine; render helpers behind feature `render` | 0.8k |
 | tl-ui-pagehost (dev) | a host that mounts one page with its globals, without MainWindow | 0.5k |
 
-If CS-C6 cannot break the base and kit loop cleanly, base and kit merge into one tl-ui-kit (about
-36k lines). The plan still works; a component edit then rebuilds 36k lines instead of 22k.
+CS-C6 (tasklens-zljr5.19) chose Option A: base stays below kit, as two crates. Option A changed
+no behaviour and needed about 400 changed lines, under the bead's 600-line limit, so the merge
+(Option B, one tl-ui-kit of about 36k lines) was not needed. With two crates a component edit
+rebuilds about 22k lines instead of 36k. Motion moved to base as `motion.rs`, the toast data types
+to base as `toast_types.rs`, and the action tracker reaches the toast queue and confirm dialog
+through the base trait `TrackerUi`. actions.rs moved to kit, because `bind_keys_global` binds the
+component keys and no base or kit file uses actions.rs. ADR-020 has the details.
 
 ### Allowed edges
 
@@ -102,7 +107,7 @@ Checked with grep on 2026-11-01 at commit e977d49c.
 4. A seventh loop was missing: settings_global uses host::HostContext; host holds an ActionTracker;
    ActionTracker uses components::dialog and components::toast; components use settings_global and
    host. FINDINGS put settings_global in base and host and action_tracker in kit, which is an
-   upward edge from base to kit. Bead CS-C6 breaks it or merges base and kit.
+   upward edge from base to kit. CS-C6 broke it with Option A (section 2).
 5. net_totals.rs uses chart::view::derived_view, so it belongs with the chart, not in base.
 6. Cycle 5 is deeper than four helpers. Device pages build on widget (page_flow, aggregate, page,
    sidebar and menu use widget::{container, edit, grid, compose, source}), which is the allowed

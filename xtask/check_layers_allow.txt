@@ -4,11 +4,6 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-base -> tl-ui-kit: 6
-actions.rs -> components::checkbox
-actions.rs -> components::shield
-actions.rs -> components::window_frame
-
 # tl-ui-overview -> tl-ui-perf: 30
 pages/performance/memory_apps.rs -> pages::performance::page
 pages/performance/overview/box_menu.rs -> pages::performance::cpu
