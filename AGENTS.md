@@ -39,6 +39,17 @@ stop, leave the bead open, and report the question in your final message.
 - Run every cargo build, check, clippy, test, doc and bench through `heavy-build`, for example
   `heavy-build cargo test -p tl-model`. It waits for the machine-wide build lock and caps memory.
   On exit 137 (OOM kill) retry once, then report. On exit 75 (low disk) stop and report.
+- Lane commands (ADR-020, Dev builds): `heavy-build cargo lclippy -p <crates> -- -D warnings` and
+  `heavy-build cargo ltest -p <crates> [--test <name>] -- <filter>`. Use the same `-p` list in both,
+  so the two commands reuse one build of GPUI and of the workspace crates. A lane does not run
+  `cargo build`, `cargo check` or `cargo clippy` without `--all-targets`: each builds a second GPUI
+  variant without gpui-kit `test-support`. A lane builds tl-app only when its bead asks for a
+  screenshot or a smoke check.
+- `cargo gclippy -- -D warnings` (that is `cargo clippy -p tl-app` without `--all-targets`) and
+  `cargo build -p tl-app` are leader-gate commands. They replace the 2026-11-01 rule that lanes also
+  run `cargo check -p tl-app` without features.
+- The aliases pass `--locked`, which fails when Cargo.lock must change. A bead that changes
+  dependencies runs plain `cargo` once to update Cargo.lock and commits it.
 - Bench and profiling builds use the `perf` profile (thin LTO, ADR-002). Packaging (PKGBUILD) still builds `--release`.
 - Never set `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` or `build.build-dir`. Use the workspace
   `target/`.
@@ -52,8 +63,8 @@ stop, leave the bead open, and report the question in your final message.
 - A module that has no `mod` line yet is tested through a temporary integration test that pulls
   it in with `#[path]`. Name it `tests/tmp_<bead>_<name>.rs`, never commit it, and delete it
   before you close the bead.
-- Before closing: `cargo fmt --check`, `cargo clippy -p <crate> --all-targets -- -D warnings` and
-  the bead's tests must pass.
+- Before closing: `cargo fmt --check`, `cargo lclippy -p <crate> -- -D warnings` and the bead's
+  tests must pass.
 
 ## Safety
 

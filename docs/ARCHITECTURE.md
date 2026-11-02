@@ -3541,7 +3541,60 @@ These root re-exports stay during the split. CS-J1 rewrites them to direct crate
 
 **Tests.** Each crate has one integration test binary, `crates/<crate>/tests/<short>/main.rs`, where `<short>` is the crate name without `tl-ui-` (for example `crates/tl-ui-kit/tests/kit/main.rs`). Tests that need the shell (`MainWindow`, app init, more than one page) stay in tl-ui's `tests/ui`. Page tests use tl-ui-pagehost. A test move takes the golden files only that test uses and reads them through `CARGO_MANIFEST_DIR`. Golden files shared between crates stay where they are, and the tests that read them name them in a comment.
 
-**Lane commands after the split.** `heavy-build cargo test -p tl-ui-<crate>` for the crate a bead touches, plus `cargo clippy -p tl-ui-<crate> --all-targets -- -D warnings`. CS-B9 writes the final commands and the leader-gate rule into AGENTS.md.
+**Lane commands after the split.** `heavy-build cargo ltest -p tl-ui-<crate>` for the crate a bead touches, plus `heavy-build cargo lclippy -p tl-ui-<crate> -- -D warnings`. The aliases and the leader-gate rule are in Dev builds below and in AGENTS.md.
+
+### Dev builds
+
+CS-B9 (tasklens-zljr5.11) measured how many variants of GPUI and of the workspace crates the lane commands build, on 2026-11-02, with a warm `target/` that other lanes were also using.
+
+**Measured.** Counts are rustc units that cargo ran (`Running` lines in `-v` output).
+
+| Command | Run after | rustc units | gpui-kit units | tl_ui | Time |
+|---|---|---|---|---|---|
+| `cargo build -p tl-app -v` | `cargo test -p tl-ui --no-run` (fresh, 0 s) | 10 | 8 | 1 | 57 s |
+| `cargo test -p tl-ui --no-run -v` | the build above | 0 | 0 | 0 | 1 s |
+| `cargo clippy -p tl-app --all-targets -v` | `cargo clippy -p tl-ui --all-targets` | 19 | 0 | 1 | 25 s |
+| `cargo clippy -p tl-app -v` | the clippy above | 10 | 8 | 1 | 38 s |
+| `cargo clippy -p tl-ui --all-targets -v` | the two clippy runs above | 0 | 0 | 0 | 1 s |
+
+`cargo --unit-graph` (run with `RUSTC_BOOTSTRAP=1`; it prints the units without compiling) shows why. The gpui-kit closure has 13 GPUI units. Units are the same only when their features and the features of every dependency are the same:
+
+| Selections compared | GPUI units shared |
+|---|---|
+| `check -p tl-ui --all-targets` and `check -p tl-app --all-targets` | 4 of 13 |
+| `check -p tl-app --all-targets` and `check -p tl-app` | 5 of 13 |
+| `check -p tl-app --all-targets` and `check -p tl-ui -p tl-app --all-targets` | 13 of 13 |
+| `test -p tl-ui --test ui` and `build -p tl-app` | 4 of 13 |
+| `test -p tl-ui --test ui` and `test -p tl-ui` | 13 of 13 |
+
+The shared units are the two GPUI proc-macro crates, `gpui-pre-util` and (in one row) `gpui-pre-shared-string`: they do not depend on any crate whose features differ.
+
+So the GPUI stack has two variants from gpui-kit `test-support` (a dev-dependency feature of tl-ui and tl-app), and two more from the `-p` selection. `cargo tree` finds 22 crates in tl-ui's closure (576 crates with dev-dependencies) whose features differ between `-p tl-ui`, `-p tl-app` and `--workspace`. 14 of them are inside the gpui-kit closure, so they change every GPUI unit above them. Under `-p tl-app` they gain features from crates that only tl-app's closure has:
+
+- `libc` gains `extra_traits` (from asupersync's `nix`), and `zeroize` gains `derive` (from asupersync).
+- `zbus` and `zbus_macros` gain `blocking-api` (from tl-app and tl-engine).
+- `tracing-subscriber` gains `env-filter` (from tl-app), which turns on `dfa-build` and `dfa-search` in `regex-automata`.
+- `cc` gains `parallel` (from zstd-sys).
+- `hashbrown` 0.17, `getrandom` 0.4, `crypto-common`, `digest`, `sha2`, `block-buffer` and `percent-encoding` gain default or extra features.
+
+`-p tl-app --all-targets` and `--workspace --all-targets` differ only in `tracing-log` (`default`) and `zbus` (`p2p`). The tl_ui unit depends on all of these, so each selection also compiles tl-ui once more after every tl-ui edit (the `clippy -p tl-app --all-targets` row: 0 GPUI units, but tl_ui again). Variants of one selection stay in `target/` side by side: rerunning the first command rebuilt nothing (the 0-unit rows).
+
+**Decision: one GPUI variant per lane.** A lane runs only commands that include dev-dependencies, so it always builds the `test-support` variant:
+
+- `cargo lclippy -p <crates> -- -D warnings` (alias for `clippy --locked --all-targets`)
+- `cargo ltest -p <crates> [--test <name>] -- <filter>` (alias for `test --locked`)
+
+Both use the same `-p` list. The feature-less app variant (`cargo build -p tl-app`, and `cargo gclippy`, the alias for `clippy --locked -p tl-app`) is built by the leader gate and by the smoke harness, not by every lane. This replaces the 2026-11-01 lane rule "lanes also run `cargo check -p tl-app` without features"; per lane that saves the 8 GPUI units and the third tl-ui compile of the `cargo clippy -p tl-app` row whenever the app variant is stale. A lane builds tl-app only when its bead asks for a screenshot or a smoke check. `test-support` stays out of release builds. `cargo gclippy` is a dev-profile build, so it compiles the debug test hooks; it checks that tl-app builds without `test-support` and without dev-dependencies. Only a release-profile build (packaging) compiles without the hooks.
+
+**Decision: no feature pins, no workspace-hack crate.** Pinning features on the `[workspace.dependencies]` lines cannot make the selections agree. A pin acts only on crates that use the line, and no crate in tl-ui's closure (tl-ui, tl-model, tl-ui-testkit) declares any of the 14 crates. To pin them, tl-ui would have to depend on `libc`, `zbus`, `zeroize`, `tracing-subscriber` and the rest directly, which ADR-001 rule 1 forbids for `zbus` and the allowed-dependency table does not allow for the others. A lane keeps one `-p` list for all its commands instead, so within a lane every command reuses the same units. The remaining cost is between lanes: a lane whose `-p` list differs from the last one compiles the workspace crates of its own selection once more after an edit. GPUI itself is not rebuilt while its variant is in `target/`.
+
+**Aliases.** `.cargo/config.toml` defines `lclippy`, `ltest` and `gclippy` next to `xtask`. They pass `--locked`, which fails when Cargo.lock must change: a bead that changes dependencies runs plain `cargo` once to update Cargo.lock and commits it.
+
+**Rejected.**
+
+- Enabling `test-support` in normal builds (a default feature of tl-ui or tl-app). It ships test code. Packaging runs `cargo build --release --workspace`, so a default feature cannot be turned off for tl-app alone without also turning off tl-gpu-probe's default features.
+- Feature pins in `[workspace.dependencies]`. They do not reach the 14 crates, as above.
+- cargo-hakari (a workspace-hack crate). Not adopted: it needs Oystein's approval of the new member and of a check-deps exception (crate-split.md section 9 item 4). Its hack crate would hold `zbus` with `blocking-api` and asupersync's `libc` and `zeroize` features, and every tl-ui crate would depend on it. It would remove the per-selection variants between lanes; within a lane the one-list rule already does.
 
 ### Consequences
 

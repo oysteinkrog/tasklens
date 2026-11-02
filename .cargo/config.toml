@@ -1,5 +1,11 @@
 [alias]
 xtask = "run -p xtask --"
+# Dev build commands (ADR-020, Dev builds). A lane runs only lclippy and ltest, with the same
+# -p list in both, so it builds one GPUI variant (with gpui-kit test-support). gclippy is the
+# leader gate: it builds tl-app without dev-dependencies, the GPUI variant the app uses.
+lclippy = "clippy --locked --all-targets"
+ltest = "test --locked"
+gclippy = "clippy --locked -p tl-app"
 
 # mold links the tl-ui test binary in about 0.6 s against 1.1 s for rust-lld, at the same
 # 1.5 GiB peak (tasklens-ccu0y). makepkg sets RUSTFLAGS, which overrides this, so release
