@@ -3442,6 +3442,8 @@ A new file goes to the crate that holds its directory. A new file at the root of
 
 The `action_tracker.rs` loop (settings_global uses host, host holds an `ActionTracker`, `ActionTracker` uses `components::dialog` and `components::toast`, components use settings_global and host) is broken by CS-C6. If CS-C6 cannot break it cleanly, tl-ui-base and tl-ui-kit merge into one `tl-ui-kit` of about 36k lines, and every rule below reads "kit" for "base".
 
+**ShellApi.** Code below the shell reaches shell services through `ShellApi`, a GPUI Global in `src/shell.rs` (base). Each field is a plain function pointer with no shell type in its signature. `window::main::init` installs it, and `open_main_window_on` installs it again so a test that opens a main window without `init` still gets toasts. Callers use a wrapper such as `ShellApi::push_toast(cx, kind, text, key, action)`, which does nothing (with a debug log) when no shell is installed, as in a page-host test. CS-C3 (tasklens-zljr5.16) added the `toast` field: it has the same arguments as `window::main::push_main_toast`, which stays for shell callers and is the code the field runs. CS-C4 adds the fields for the other shell services. Until CS-C6 moves `ToastKind`, `ToastKey` and `ToastAction` to base, `shell.rs` names them from `components::toast`; that edge is one line in the check-layers allowlist.
+
 **Allowed edges.** Each crate may depend on the tl-ui crates in its row, plus tl-model and gpui-kit. No other workspace crate is allowed.
 
 | Crate | May depend on |

@@ -72,7 +72,7 @@ use crate::host::{HostContext, HostRegistry};
 use crate::hub::{LinkChanged, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::performance::details::Template;
-use crate::window::main::push_main_toast;
+use crate::shell::ShellApi;
 
 /// The Warning text "Not sent while reconnecting to <host>." while `host`'s session has ended
 /// and the first snapshot of the next one is not installed (ADR-018 Reconnect); `None` while a
@@ -107,7 +107,7 @@ pub fn host_send_allowed(host: &HostContext, cx: &mut App) -> bool {
         return true;
     };
     debug!(target: "tasklens::ui", host = ?host.remote_name(), "command not sent: the host is reconnecting");
-    push_main_toast(cx, ToastKind::Warning, text, None, None);
+    ShellApi::push_toast(cx, ToastKind::Warning, text, None, None);
     false
 }
 

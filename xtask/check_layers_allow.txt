@@ -7,23 +7,20 @@
 # tl-ui-base -> tl-ui (shell): 1
 action_tracker.rs -> window::main
 
-# tl-ui-base -> tl-ui-kit: 5
+# tl-ui-base -> tl-ui-kit: 6
 action_tracker.rs -> components::dialog
 action_tracker.rs -> components::toast
 actions.rs -> components::checkbox
 actions.rs -> components::shield
 actions.rs -> components::window_frame
+shell.rs -> components::toast
 
 # tl-ui-base -> tl-ui-perf-core: 1
 action_tracker.rs -> pages::performance::details
 
-# tl-ui-kit -> tl-ui (shell): 1
-helper_flow.rs -> window::main
-
-# tl-ui-overview -> tl-ui (shell): 3
+# tl-ui-overview -> tl-ui (shell): 2
 pages/performance/memory_apps.rs -> window::main
 pages/performance/overview/procs_box.rs -> window::main
-pages/performance/overview/timeline.rs -> window::main
 
 # tl-ui-overview -> tl-ui-perf: 30
 pages/performance/memory_apps.rs -> pages::performance::page
@@ -73,12 +70,9 @@ windows/mini.rs -> window::main
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
 
-# tl-ui-perf-core -> tl-ui (shell): 5
+# tl-ui-perf-core -> tl-ui (shell): 2
 pages/minigraph/menu.rs -> window::main
 pages/minigraph/menu.rs -> window::menubar
-pages/minigraph/panel.rs -> window::main
-tray_bridge.rs -> window::main
-windows/detached_graph.rs -> window::main
 
 # tl-ui-perf-core -> tl-ui-perf: 7
 pages/minigraph/bridge.rs -> windows::mini
@@ -89,7 +83,7 @@ pages/performance/actions.rs -> pages::performance
 pages/performance/core_clocks.rs -> pages::performance::cpu
 tray_bridge.rs -> pages::performance
 
-# tl-ui-procs -> tl-ui (shell): 12
+# tl-ui-procs -> tl-ui (shell): 10
 pages/processes/history/mod.rs -> window::main
 pages/processes/jump.rs -> window::main
 pages/processes/menu.rs -> window::main
@@ -98,10 +92,8 @@ pages/processes/pick.rs -> window::main
 pages/processes/run.rs -> window::main
 pages/processes/toasts.rs -> window::main
 windows/app_props.rs -> window::main
-windows/disk_in_use.rs -> window::main
 windows/handle_search.rs -> window::main
 windows/props/general.rs -> window::main
-windows/props/mod.rs -> window::main
 
 # tl-ui-procs -> tl-ui-perf: 1
 windows/disk_in_use.rs -> pages::performance
@@ -112,12 +104,9 @@ windows/notices.rs -> pages::startup::delegate
 windows/props/fds.rs -> pages::connections::actions
 windows/props/general.rs -> pages::services::actions
 
-# tl-ui-sys -> tl-ui (shell): 5
+# tl-ui-sys -> tl-ui (shell): 2
 pages/connections/flows.rs -> window::main
 pages/services/flows.rs -> window::main
-windows/connection_properties.rs -> window::main
-windows/service_properties/mod.rs -> window::main
-windows/startup_properties.rs -> window::main
 
 # tl-ui-table -> tl-ui-sys: 2
 table/columns.rs -> pages::connections::delegate

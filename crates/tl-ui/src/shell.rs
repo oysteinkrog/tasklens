@@ -4,7 +4,8 @@
 //! This module holds the parts of them that lower layers use as plain types: the page trait, the
 //! shell events and the shell state, the status chip's event and action types, the toolbar's
 //! content trait and model, and the title bar's keep-above check and test probe. The `window/`
-//! modules re-export each item at its old path.
+//! modules re-export each item at its old path. [`ShellApi`] holds the shell services lower
+//! layers call (tasklens-zljr5.16).
 
 use gpui_kit::base::Root;
 use gpui_kit::{
@@ -19,8 +20,10 @@ use tl_model::command::Tab;
 use tl_model::health::HelperState;
 use tl_model::table::TableMode;
 use tl_model::validity::Validity;
+use tracing::debug;
 
 pub use crate::app_env::APP_ID;
+use crate::components::toast::{ToastAction, ToastKey, ToastKind};
 use crate::host::HostContext;
 use crate::registry::WindowKey;
 
@@ -217,6 +220,36 @@ pub fn keep_above_supported(cx: &App) -> bool {
             Validity::Valid | Validity::Stale
         )
     })
+}
+
+/// The shell's toast service: the same arguments as `window::main::push_main_toast`.
+pub type PushToastFn = fn(&mut App, ToastKind, SharedString, Option<ToastKey>, Option<ToastAction>);
+
+/// Shell services that lower layers call without naming the shell (ADR-020 "ShellApi").
+/// `window::main::init` installs it. CS-C4 adds more fields.
+pub struct ShellApi {
+    /// Pushes a toast to the main window's queue.
+    pub toast: PushToastFn,
+}
+
+impl Global for ShellApi {}
+
+impl ShellApi {
+    /// Pushes a toast to the main window's queue. Does nothing when no shell is installed (a
+    /// page-host test) or when the main window is closed.
+    pub fn push_toast(
+        cx: &mut App,
+        kind: ToastKind,
+        text: impl Into<SharedString>,
+        key: Option<ToastKey>,
+        action: Option<ToastAction>,
+    ) {
+        let Some(toast) = cx.try_global::<ShellApi>().map(|api| api.toast) else {
+            debug!(target: "tasklens::ui", ?kind, "no shell, toast dropped");
+            return;
+        };
+        toast(cx, kind, text.into(), key, action);
+    }
 }
 
 /// Test stand-in for the platform window. The GPUI test window panics on `start_window_move`,

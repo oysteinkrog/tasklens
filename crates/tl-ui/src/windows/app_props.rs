@@ -69,6 +69,7 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::table::actions::CopyRowsAsTable;
 use crate::table::cells::CellOut;
@@ -81,7 +82,7 @@ use crate::table::tree_table::{
 };
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::{main_window_view, push_main_toast};
+use crate::window::main::main_window_view;
 
 gpui_kit::actions!(
     tasklens,
@@ -234,7 +235,7 @@ pub fn open_app_properties(host: &HostContext, group: GroupKey, cx: &mut App) {
                     q.push(ToastKind::Warning, words.too_many.clone(), None, None, cx)
                 });
             } else {
-                push_main_toast(cx, ToastKind::Warning, words.too_many.clone(), None, None);
+                ShellApi::push_toast(cx, ToastKind::Warning, words.too_many.clone(), None, None);
             }
         }
         OpenOutcome::Failed => {

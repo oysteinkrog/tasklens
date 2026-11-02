@@ -37,9 +37,9 @@ use crate::i18n::{tr, tr_args};
 use crate::pages::startup::delegate::StartupWords;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::push_main_toast;
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (860., 520.);
@@ -272,7 +272,7 @@ fn open(r: StartupRef, hub: &Entity<SnapshotHub>, cx: &mut App) -> OpenOutcome {
         OpenOutcome::Opened | OpenOutcome::Focused => {}
         OpenOutcome::CapReached(_) => {
             let text = tr(cx, "startup-props-too-many-windows");
-            push_main_toast(cx, ToastKind::Warning, text, None, None);
+            ShellApi::push_toast(cx, ToastKind::Warning, text, None, None);
         }
         OpenOutcome::Failed => {
             warn!(target: "tasklens::ui", "startup properties window did not open");

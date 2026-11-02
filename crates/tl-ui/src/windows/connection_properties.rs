@@ -41,9 +41,9 @@ use crate::pages::connections::actions::ConnectionJumpToProcess;
 use crate::pages::connections::jump_to_owner;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::push_main_toast;
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (560., 520.);
@@ -422,7 +422,7 @@ pub fn open_connection_properties(host: &HostContext, cookie: u64, cx: &mut App)
         OpenOutcome::Opened | OpenOutcome::Focused => {}
         OpenOutcome::CapReached(_) => {
             let text = tr(cx, "connections-props-too-many-windows");
-            push_main_toast(cx, ToastKind::Warning, text, None, None);
+            ShellApi::push_toast(cx, ToastKind::Warning, text, None, None);
         }
         OpenOutcome::Failed => {
             warn!(target: "tasklens::ui", "connection properties window did not open");

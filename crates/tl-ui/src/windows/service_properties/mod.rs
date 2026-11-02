@@ -55,8 +55,8 @@ use crate::pages::services::actions::{
 use crate::pages::sys_table::SysActions;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::theme::{current, metrics};
-use crate::window::main::push_main_toast;
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (720., 560.);
@@ -339,7 +339,7 @@ impl ServicePropertiesWindow {
             }
             OpenOutcome::CapReached(_) => {
                 let text = tr(cx, "services-sys030-too-many-windows");
-                push_main_toast(cx, ToastKind::Warning, text, None, None);
+                ShellApi::push_toast(cx, ToastKind::Warning, text, None, None);
             }
             OpenOutcome::Failed => {
                 warn!(target: "tasklens::ui", "service properties window did not open");

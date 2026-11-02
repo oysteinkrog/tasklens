@@ -32,8 +32,9 @@ use crate::components::toast::{ToastAction, ToastKind};
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
-use crate::window::main::{main_window_view, push_main_toast};
+use crate::window::main::main_window_view;
 
 /// The caller's toast texts. An empty or `None` text means this module's default string.
 #[derive(Clone, Debug, Default)]
@@ -468,5 +469,5 @@ fn not_found(texts: &JumpTexts, cx: &mut App) {
 
 /// Deferred, so a caller inside a main window update does not read the window mid-update.
 fn defer_toast(kind: ToastKind, text: SharedString, action: Option<ToastAction>, cx: &mut App) {
-    cx.defer(move |cx| push_main_toast(cx, kind, text, None, action));
+    cx.defer(move |cx| ShellApi::push_toast(cx, kind, text, None, action));
 }

@@ -29,7 +29,7 @@ use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_en};
-use crate::window::main::push_main_toast;
+use crate::shell::ShellApi;
 
 const AUTH_CANCELLED_TEXT: &str = "fnd-shield-auth-cancelled";
 const START_FAILED_TEXT: &str = "fnd-shield-start-failed";
@@ -163,7 +163,7 @@ fn toast_in(window: Option<AnyWindowHandle>, kind: ToastKind, text: SharedString
     });
     match queue {
         Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
-        None => push_main_toast(cx, kind, text, None, None),
+        None => ShellApi::push_toast(cx, kind, text, None, None),
     }
 }
 

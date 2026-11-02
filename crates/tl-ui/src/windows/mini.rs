@@ -53,10 +53,11 @@ use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::shell::keep_above_supported;
 use crate::theme::{UiMetrics, current, metrics};
-use crate::window::main::{main_window_view, push_main_toast};
+use crate::window::main::main_window_view;
 
 /// The window width at ui_scale 1 (PERF-093).
 pub const MINI_W: f32 = 260.;
@@ -505,7 +506,7 @@ pub fn open_mini(cx: &mut App) -> OpenOutcome {
     OwnWindowBridge::ensure(cx);
     let toast_failed = |cx: &mut App| {
         let text = tr(cx, "mini-window-toast-open-failed");
-        push_main_toast(cx, ToastKind::Error, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Error, text, None, None);
     };
     // The mini window is not opened from a host: it shows the local host.
     let host = HostContext::local(cx);

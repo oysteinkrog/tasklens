@@ -35,8 +35,8 @@ use crate::pages::minigraph::menu::{color_submenu, range_submenu};
 use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
 use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use crate::shell::ShellApi;
 use crate::theme::{current, metrics};
-use crate::window::main::push_main_toast;
 
 /// The `sp[2]` spacing at ui_scale 1: the window padding and the gap between cards.
 const SP2: f32 = 4.;
@@ -343,7 +343,7 @@ pub fn open_detached(
     OwnWindowBridge::ensure(cx);
     let toast_failed = |cx: &mut App| {
         let text = tr(cx, "minigraph-toast-detach-failed");
-        push_main_toast(cx, ToastKind::Error, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Error, text, None, None);
     };
     // `WindowKey::DetachedGraph` holds a `u8`, so ids above 255 are refused.
     let (Ok(key_id), true) = (u8::try_from(window_id), host.hub().is_some()) else {

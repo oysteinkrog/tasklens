@@ -55,9 +55,9 @@ use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};
 use crate::pages::processes::toasts::toast_words;
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::text::style::{label_style, t_base, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::main::push_main_toast;
 
 /// Window size, × ui_scale.
 pub const SIZE: (f32, f32) = (520., 400.);
@@ -199,7 +199,7 @@ fn toast(kind: ToastKind, text: SharedString, cx: &mut App) {
     if cx.has_global::<EjectToasts>() {
         cx.global_mut::<EjectToasts>().0.push((kind, text.clone()));
     }
-    push_main_toast(cx, kind, text, None, None);
+    ShellApi::push_toast(cx, kind, text, None, None);
 }
 
 /// The open "Disk is in use" window of `idx`, with its content.

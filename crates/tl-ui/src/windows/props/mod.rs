@@ -70,9 +70,9 @@ use crate::i18n::Strings;
 use crate::pages::performance::details::Template;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
+use crate::shell::ShellApi;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
-use crate::window::main::push_main_toast;
 use crate::windows::actions::{
     PROPS_WINDOW_CONTEXT, PropsCancelStringScan, PropsCloseWindow, PropsEscape, PropsFocusFilter,
     PropsNextTab, PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsStartStringScan,
@@ -472,11 +472,11 @@ pub fn open_process_properties(host: &HostContext, key: ProcessKey, cx: &mut App
                 Some(queue) => {
                     queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx))
                 }
-                None => push_main_toast(cx, ToastKind::Warning, text, None, None),
+                None => ShellApi::push_toast(cx, ToastKind::Warning, text, None, None),
             }
         }
         OpenOutcome::Failed => {
-            push_main_toast(cx, ToastKind::Error, words.open_failed.clone(), None, None);
+            ShellApi::push_toast(cx, ToastKind::Error, words.open_failed.clone(), None, None);
         }
     }
 }

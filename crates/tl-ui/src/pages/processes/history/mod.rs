@@ -67,11 +67,12 @@ use crate::pages::processes::jump::JumpTexts;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::shell::FilterChanged;
+use crate::shell::ShellApi;
 use crate::table::actions::{CopyCell, OpenProperties};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{TlTheme, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::{main_window_view, push_main_toast};
+use crate::window::main::main_window_view;
 
 use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};
@@ -532,7 +533,7 @@ fn problem_key(p: HistoryLoadProblem) -> &'static str {
 
 /// Pushes a toast after the current update, because the main window may be mid-update.
 fn defer_toast(kind: ToastKind, text: SharedString, action: Option<ToastAction>, cx: &mut App) {
-    cx.defer(move |cx| push_main_toast(cx, kind, text, None, action));
+    cx.defer(move |cx| ShellApi::push_toast(cx, kind, text, None, action));
 }
 
 /// The colours of the Live button in one state.
@@ -681,7 +682,7 @@ impl HistoryPage {
                 }
                 TreeTableEvent::CopiedRows { .. } => {
                     let text = tr(cx, "processes-toast-copied");
-                    push_main_toast(cx, ToastKind::Success, text, None, None);
+                    ShellApi::push_toast(cx, ToastKind::Success, text, None, None);
                 }
                 TreeTableEvent::CopyFailed | TreeTableEvent::PressReleased => {}
             },
@@ -1326,7 +1327,7 @@ impl HistoryPage {
             (CopyKind::AllMetrics, true) => "processes-toast-many-metrics-copied",
         };
         let text = tr(cx, key);
-        push_main_toast(cx, ToastKind::Success, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Success, text, None, None);
     }
 
     fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
@@ -1360,7 +1361,7 @@ impl HistoryPage {
             1 => tr(cx, "history-toast-deleted"),
             n => tr_args(cx, "history-toast-deleted-n", &[("count", n.into())]),
         };
-        push_main_toast(cx, ToastKind::Success, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Success, text, None, None);
         let selected = self
             .state
             .selected
@@ -1428,7 +1429,7 @@ impl HistoryPage {
             }
         }
         let text = tr(cx, "history-not-running");
-        push_main_toast(cx, ToastKind::Warning, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Warning, text, None, None);
     }
 
     fn loading(&self) -> bool {

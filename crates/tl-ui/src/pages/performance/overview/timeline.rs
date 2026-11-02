@@ -65,10 +65,10 @@ use crate::net_totals;
 use crate::pages::performance::details::Template;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::text::style::t_xs;
 use crate::theme::palette::DeviceAccent;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::window::main::push_main_toast;
 
 /// The box's debug selector.
 pub const TIMELINE_BOX_ID: &str = "perf-overview-box-timeline";
@@ -940,7 +940,7 @@ impl TimelineBox {
         let text = tr(cx, "perf-overview-timeline-no-history");
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.last_toast.replace(Some(text.clone()));
-        push_main_toast(cx, ToastKind::Info, text, None, None);
+        ShellApi::push_toast(cx, ToastKind::Info, text, None, None);
     }
 }
 

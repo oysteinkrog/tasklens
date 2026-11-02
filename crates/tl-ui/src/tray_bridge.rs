@@ -51,9 +51,9 @@ use crate::pages::minigraph::sources::{
 use crate::pages::performance::actions::PerfAddTrayGraph;
 use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
+use crate::shell::ShellApi;
 use crate::shell::ShellState;
 use crate::theme::current;
-use crate::window::main::push_main_toast;
 
 /// Time between two models.
 pub const TRAY_TICK: Duration = Duration::from_millis(1000);
@@ -145,7 +145,7 @@ pub fn install(cx: &mut App, end: TrayUiEnd) {
     cx.on_action(
         |a: &PerfAddTrayGraph, cx| match tray_source_of_card(&a.source) {
             Some(source) => add_graph(cx, source.into(), "cpu".into()),
-            None => push_main_toast(
+            None => ShellApi::push_toast(
                 cx,
                 ToastKind::Error,
                 tr(cx, "tray-toast-add-failed"),
@@ -181,7 +181,7 @@ pub fn tray_source_of_card(key: &DeviceKey) -> Option<String> {
 
 fn toast(cx: &mut App, kind: ToastKind, key: &str) {
     let text = tr(cx, key);
-    push_main_toast(cx, kind, text, None, None);
+    ShellApi::push_toast(cx, kind, text, None, None);
 }
 
 fn add_graph(cx: &mut App, source: SharedString, column: SharedString) {

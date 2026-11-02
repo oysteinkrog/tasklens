@@ -114,6 +114,7 @@ use crate::tray_bridge::{TrayBridge, TrayStatus};
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
 pub(crate) use crate::shell::PICK_NONE_TEXT;
+use crate::shell::ShellApi;
 pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
     ShellEvents, ShellPage, ShellState, WINDOW_TITLE,
@@ -432,6 +433,7 @@ fn auto_fetch_public_ip(cx: &mut App) {
 /// Installs `GlobalShellEvents` and `ShellState`, the app-level window actions and the main open
 /// hook.
 pub fn init(cx: &mut App) {
+    install_shell_api(cx);
     let events = cx.new(|_| ShellEvents);
     cx.set_global(GlobalShellEvents(events));
     let history_mode = cx
@@ -1088,6 +1090,8 @@ pub fn open_main_window_on(start: Tab, cx: &mut App) -> gpui_kit::Result<WindowH
         built.first().copied().unwrap_or(start)
     };
     cx.default_global::<ShellState>().built_tabs = built;
+    // Tests may open a main window without `init`; the window still takes toasts.
+    install_shell_api(cx);
     let options = main_window_options(cx);
     let (handle, view) = gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| MainWindow::new(start, window, cx))
@@ -1126,6 +1130,13 @@ fn metrics_key(cx: &App) -> MetricsKey {
         a.rounded_corners,
         a.shadow_intensity_pct,
     )
+}
+
+/// Installs the shell services lower layers call through [`ShellApi`].
+fn install_shell_api(cx: &mut App) {
+    cx.set_global(ShellApi {
+        toast: |cx, kind, text, key, action| push_main_toast(cx, kind, text, key, action),
+    });
 }
 
 /// Pushes a toast to the main window's queue. Without a main window the toast is dropped.
