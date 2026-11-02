@@ -201,6 +201,19 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "unicode-segmentation",
         ],
     ),
+    // ADR-020 overview layer, moved out of tl-ui (CS-E6).
+    (
+        "tl-ui-overview",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "fluent-bundle",
+            "jiff",
+        ],
+    ),
     (
         "tl-app",
         &[

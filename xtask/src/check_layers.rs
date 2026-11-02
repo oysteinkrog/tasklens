@@ -41,17 +41,21 @@ const UI_SRCS: &[(&str, &str)] = &[
     ("tl-ui-chart", "crates/tl-ui-chart/src"),
     ("tl-ui-table", "crates/tl-ui-table/src"),
     ("tl-ui-perf-core", "crates/tl-ui-perf-core/src"),
+    ("tl-ui-overview", "crates/tl-ui-overview/src"),
 ];
 
 /// Modules that an extracted crate holds at a shorter path than tl-ui's module tree names them:
 /// the old module path and the path of its files in the new crate's tree. tl-ui re-exports each at
 /// the old path (`pub use tl_ui_perf_core::core;` in `pages/performance/mod.rs`), so code above
 /// still names the old path. The check rewrites an old path to the new one before it looks for the
-/// file. tasklens-zljr5.29 moved perf-core's modules to its crate root.
+/// file. tasklens-zljr5.29 moved perf-core's modules to its crate root, tasklens-zljr5.30
+/// overview's.
 const ALIASES: &[(&[&str], &[&str])] = &[
     (&["pages", "performance", "core"], &["core"]),
     (&["pages", "minigraph"], &["minigraph"]),
     (&["windows", "detached_graph"], &["detached_graph"]),
+    (&["pages", "performance", "overview"], &["overview"]),
+    (&["pages", "performance", "widget"], &["widget"]),
 ];
 
 /// The allowlist of today's upward edges, relative to the workspace root.
@@ -110,10 +114,10 @@ const LAYERS: &[(&str, &str)] = &[
     ("minigraph/", "tl-ui-perf-core"),
     ("tray_bridge.rs", "tl-ui-perf-core"),
     ("detached_graph.rs", "tl-ui-perf-core"),
-    // tl-ui-overview
-    ("pages/performance/overview/", "tl-ui-overview"),
-    ("pages/performance/widget/", "tl-ui-overview"),
-    ("pages/performance/memory_apps.rs", "tl-ui-overview"),
+    // tl-ui-overview, at its crate root (ALIASES maps the old module paths). memory_apps.rs is in
+    // overview/ since tasklens-zljr5.22.
+    ("overview/", "tl-ui-overview"),
+    ("widget/", "tl-ui-overview"),
     // tl-ui-perf
     ("pages/performance/", "tl-ui-perf"),
     ("windows/mini.rs", "tl-ui-perf"),
@@ -1306,10 +1310,8 @@ mod tests {
         assert_eq!(layer_of("core/keys.rs"), Some("tl-ui-perf-core"));
         assert_eq!(layer_of("minigraph/panel.rs"), Some("tl-ui-perf-core"));
         assert_eq!(layer_of("detached_graph.rs"), Some("tl-ui-perf-core"));
-        assert_eq!(
-            layer_of("pages/performance/widget/grid.rs"),
-            Some("tl-ui-overview")
-        );
+        assert_eq!(layer_of("widget/grid.rs"), Some("tl-ui-overview"));
+        assert_eq!(layer_of("overview/memory_apps.rs"), Some("tl-ui-overview"));
         assert_eq!(layer_of("motion.rs"), Some("tl-ui-base"));
         assert_eq!(layer_of("actions.rs"), Some("tl-ui-kit"));
         assert_eq!(layer_of("components/button.rs"), Some("tl-ui-kit"));
@@ -1327,26 +1329,36 @@ mod tests {
             ("pages/mod.rs", "pub mod performance;\n"),
             (
                 "pages/performance/mod.rs",
-                "pub mod overview;\npub mod page;\nuse self::core::DeviceKind;\n",
+                "pub use tl_ui_overview::overview;\npub mod page;\nuse self::core::DeviceKind;\n\
+                 use crate::pages::performance::overview::OverviewPage;\n",
             ),
             ("pages/performance/page.rs", "pub struct Page;\n"),
             (
-                "pages/performance/overview/mod.rs",
+                "overview/mod.rs",
                 "use crate::pages::performance::core::DeviceKey;\n\
                  use crate::pages::minigraph::panel::Panel;\n\
-                 use crate::windows::detached_graph::Window;\n",
+                 use crate::windows::detached_graph::Window;\n\
+                 use crate::widget::grid::Grid;\n",
             ),
+            ("widget/mod.rs", "pub mod grid;\n"),
+            ("widget/grid.rs", "pub struct Grid;\n"),
             ("core/mod.rs", "pub struct DeviceKey;\n"),
             ("minigraph/mod.rs", "pub mod panel;\n"),
             (
                 "minigraph/panel.rs",
                 "use crate::core::DeviceKey;\nuse crate::pages::performance::page::Page;\n",
             ),
-            ("detached_graph.rs", "use crate::minigraph::panel::Panel;\n"),
+            (
+                "detached_graph.rs",
+                "use crate::minigraph::panel::Panel;\n\
+                 use crate::pages::performance::widget::grid::Grid;\n",
+            ),
         ]);
         let scan = scan_tree(&files);
         assert!(scan.unmapped.is_empty());
-        // overview -> perf-core through the old paths is allowed; perf-core -> perf is upward.
+        // perf -> overview and overview -> perf-core through the old paths are allowed. The old
+        // widget path resolves to tl-ui-overview's widget/, so perf-core -> overview is upward,
+        // as is perf-core -> perf.
         let edges: Vec<(&str, &str, &str)> = scan
             .edges
             .iter()
@@ -1354,7 +1366,10 @@ mod tests {
             .collect();
         assert_eq!(
             edges,
-            vec![("minigraph/panel.rs", "tl-ui-perf-core", "tl-ui-perf")]
+            vec![
+                ("detached_graph.rs", "tl-ui-perf-core", "tl-ui-overview"),
+                ("minigraph/panel.rs", "tl-ui-perf-core", "tl-ui-perf"),
+            ]
         );
     }
 

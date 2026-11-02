@@ -8188,6 +8188,7 @@ dependencies = [
  "tl-ui-base",
  "tl-ui-chart",
  "tl-ui-kit",
+ "tl-ui-overview",
  "tl-ui-pagehost",
  "tl-ui-perf-core",
  "tl-ui-settings",
@@ -8243,6 +8244,25 @@ dependencies = [
  "smallvec",
  "tl-model",
  "tl-ui-base",
+ "tl-ui-settings",
+ "tracing",
+]
+
+[[package]]
+name = "tl-ui-overview"
+version = "1.3.0"
+dependencies = [
+ "fluent-bundle",
+ "gpui-kit",
+ "jiff",
+ "proptest",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "tl-model",
+ "tl-ui-base",
+ "tl-ui-chart",
+ "tl-ui-kit",
+ "tl-ui-perf-core",
  "tl-ui-settings",
  "tracing",
 ]

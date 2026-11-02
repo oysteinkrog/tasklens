@@ -19,13 +19,13 @@ pub mod memory;
 pub mod memory_bar;
 pub mod menu;
 pub mod net;
-pub mod overview;
+pub use tl_ui_overview::overview;
 pub mod page;
 pub mod page_flow;
 pub mod sensors;
 pub mod sidebar;
 pub mod summary;
-pub mod widget;
+pub use tl_ui_overview::widget;
 
 // The shared base moved to `core/` (tasklens-zljr5.21). These keep the old paths working.
 pub use self::core::{
