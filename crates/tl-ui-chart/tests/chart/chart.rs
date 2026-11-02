@@ -5,9 +5,9 @@ use std::sync::Arc;
 use gpui_kit::{App, AppContext, Entity, TestAppContext};
 use smallvec::smallvec;
 use tl_model::client::EngineClient;
-use tl_ui::chart::view::ChartView;
-use tl_ui::chart::{ChartLabels, ChartSeries, ChartSpec, ValueAlign, ValueFormat};
-use tl_ui::hub::SnapshotHub;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_chart::chart::view::ChartView;
+use tl_ui_chart::chart::{ChartLabels, ChartSeries, ChartSpec, ValueAlign, ValueFormat};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 /// A hub over `engine`; installs the engine's latest snapshot.
@@ -53,10 +53,12 @@ mod grid {
         App, Bounds, Context, IntoElement, PaintQuad, Pixels, Quad, Render, TestAppContext, Window,
         canvas, point, px, size,
     };
-    use tl_ui::chart::GridStyle;
-    use tl_ui::chart::geometry::TimeMap;
-    use tl_ui::chart::grid::{GridPaint, grid_k_range, paint_baseline, paint_gaps, paint_grid};
-    use tl_ui::theme::{TlTheme, current};
+    use tl_ui_base::theme::{TlTheme, current};
+    use tl_ui_chart::chart::GridStyle;
+    use tl_ui_chart::chart::geometry::TimeMap;
+    use tl_ui_chart::chart::grid::{
+        GridPaint, grid_k_range, paint_baseline, paint_gaps, paint_grid,
+    };
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     const S: u64 = 1_000_000_000;
@@ -64,7 +66,7 @@ mod grid {
     fn theme(cx: &mut TestAppContext) -> Arc<TlTheme> {
         cx.update(|cx: &mut App| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
@@ -240,9 +242,9 @@ mod element {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::time::now_boot_ns;
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::chart::view::ChartView;
-    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_chart::chart::view::ChartView;
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -306,13 +308,13 @@ mod element {
     fn rig(cx: &mut TestAppContext, spec: ChartSpec) -> Rig<'_> {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let labels = super::labels();
         let (root, vcx) = cx.add_window_view(|window, cx| {
@@ -422,8 +424,8 @@ mod element {
     #[gpui_kit::test]
     fn curved_toggle_rebuilds_once(cx: &mut TestAppContext) {
         use tl_model::client::EngineClient;
-        use tl_ui::app::{BootSettings, EngineGlobal};
-        use tl_ui::settings_global::TlSettings;
+        use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+        use tl_ui_base::settings_global::TlSettings;
         use tl_ui_settings::settings::{Settings, UiState};
 
         cx.update(|cx| {
@@ -507,7 +509,7 @@ mod element {
     fn power_saving_disables_sliding(cx: &mut TestAppContext) {
         let mut r = rig(cx, spec(true, false));
         r.vcx
-            .update(|_, cx| cx.set_global(tl_ui::demand::PowerSaving(true)));
+            .update(|_, cx| cx.set_global(tl_ui_base::demand::PowerSaving(true)));
         let newest = now_boot_ns() - 50 * MS;
         r.set(view_of(600, newest, 100 * MS, 1), ChartState::Live);
         r.draw();
@@ -579,8 +581,8 @@ mod binding {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{SeriesSet, Snapshot};
-    use tl_ui::chart::view::{ChartView, search_series};
-    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_chart::chart::view::{ChartView, search_series};
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -655,13 +657,13 @@ mod binding {
     ) -> (Entity<ChartView>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let spec = spec_for(ids);
         let (root, vcx) = cx.add_window_view(|_, cx| {
@@ -868,9 +870,9 @@ mod anchor {
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::chart::geometry::y_of;
-    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_chart::chart::geometry::y_of;
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -889,13 +891,13 @@ mod anchor {
     fn init(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
     }
 
@@ -1232,14 +1234,14 @@ mod labels {
     };
     use smallvec::{SmallVec, smallvec};
     use tl_model::validity::Validity;
-    use tl_ui::chart::labels::{
+    use tl_ui_base::theme::{TlTheme, UiMetrics, current};
+    use tl_ui_chart::chart::labels::{
         LabelCache, LabelKind, LabelPaint, LabelRows, format_value, paint, range_label,
     };
-    use tl_ui::chart::{
+    use tl_ui_chart::chart::{
         ChartLabels, ChartSeries, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat,
         YScale,
     };
-    use tl_ui::theme::{TlTheme, UiMetrics, current};
     use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
 
     const S: u64 = 1_000_000_000;
@@ -1356,13 +1358,13 @@ mod labels {
     fn rig(cx: &mut TestAppContext, i: Input) -> Rig<'_> {
         let theme = cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             current(cx).clone()
         });
         let cache = Rc::new(RefCell::new(LabelCache::default()));
@@ -1759,9 +1761,9 @@ mod key_in_place {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::time::now_boot_ns;
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::chart::view::ChartView;
-    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_chart::chart::view::ChartView;
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartState};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -1808,13 +1810,13 @@ mod key_in_place {
     fn unchanged_16_series_repaints_do_not_retriangulate(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let spec = ChartSpec {
             series: (0..SERIES).map(|_| ChartSeries::default()).collect(),
@@ -1880,8 +1882,8 @@ mod grid_element {
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
-    use tl_ui::chart::LegendStyle;
-    use tl_ui::chart::grid_element::{
+    use tl_ui_chart::chart::LegendStyle;
+    use tl_ui_chart::chart::grid_element::{
         ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
     };
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
@@ -1997,13 +1999,13 @@ mod grid_element {
     ) -> (Entity<ChartGridView>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let (root, vcx) = cx.add_window_view(|_, cx| {
             let hub = super::hub_for(engine, cx);
@@ -2212,7 +2214,7 @@ mod grid_offline_and_gaps {
     use tl_model::series::{Sample, SampleFlags, SeriesView};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
-    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui_chart::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2312,14 +2314,14 @@ mod grid_offline_and_gaps {
     ) -> (Entity<ChartGridView>, &'a mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let (root, vcx) = cx.add_window_view(|_, cx| {
             let hub = super::hub_for(engine, cx);
@@ -2357,7 +2359,7 @@ mod grid_offline_and_gaps {
         });
 
         // A language change bumps the strings version: one more read, same English text.
-        vcx.update(|_, cx| tl_ui::i18n::set_language(cx, "en-US"));
+        vcx.update(|_, cx| tl_ui_base::i18n::set_language(cx, "en-US"));
         frame(vcx, &grid);
         frame(vcx, &grid);
         vcx.read_entity(&grid, |v, _| {
@@ -2442,9 +2444,9 @@ mod tier_1hz {
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
-    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
-    use tl_ui::chart::view::{ChangedRuns, ChartView, search_series};
-    use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui_chart::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui_chart::chart::view::{ChangedRuns, ChartView, search_series};
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2519,13 +2521,13 @@ mod tier_1hz {
     fn init(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
     }
 
@@ -2734,13 +2736,13 @@ mod hover {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SampleFlags, SeriesView};
     use tl_model::time::now_boot_ns;
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::chart::geometry::TimeMap;
-    use tl_ui::chart::hover::{
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_chart::chart::geometry::TimeMap;
+    use tl_ui_chart::chart::hover::{
         SampleGrid, nearest_index, offset_text, pointer_time, snap_time, window_stats,
     };
-    use tl_ui::chart::view::ChartView;
-    use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui_chart::chart::view::ChartView;
+    use tl_ui_chart::chart::{ChartSeries, ChartSpec};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -2790,13 +2792,13 @@ mod hover {
     ) -> (Entity<ChartView>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let (root, vcx) = cx.add_window_view(|window, cx| {
             let driver = cx.new(AnimationDriver::new);
@@ -3142,7 +3144,7 @@ mod grid_hover {
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::time::now_boot_ns;
-    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui_chart::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -3216,13 +3218,13 @@ mod grid_hover {
     ) -> (Entity<ChartGridView>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         });
         let n = spec.cells.len() as u16;
         let (root, vcx) = cx.add_window_view(|_, cx| {
@@ -3379,181 +3381,5 @@ mod grid_hover {
             assert_eq!(v.hover_cell(), None, "offline cell 9 has no readout");
             assert_eq!(v.hover_state().last_box, None);
         });
-    }
-}
-
-/// tasklens-yrf.21: the CPU per-core grid turns hover on, and the value box flips at the
-/// element's right edge (`HoverPaint::flip_right`), not at the hovered cell's plot edge.
-mod cpu_grid_hover {
-    use std::sync::Arc;
-
-    use gpui_kit::{
-        AppContext as _, Context, IntoElement, Modifiers, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, Window, div, point, px,
-    };
-    use smallvec::smallvec;
-    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-    use tl_model::series::{Sample, SeriesView};
-    use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
-    use tl_model::time::now_boot_ns;
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::performance::cpu_grid::CpuGrid;
-    use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
-    use tl_ui_testkit::fake_engine::FakeEngine;
-
-    const MS: u64 = 1_000_000;
-    const S: u64 = 1_000_000_000;
-
-    /// `n` logical CPUs on `n / 2` cores, all online.
-    fn topology(n: u16) -> CpuTopology {
-        let half = n / 2;
-        let mut online = CpuSet::empty();
-        for id in 0..n {
-            online.insert(id);
-        }
-        CpuTopology {
-            online,
-            cores: (0..half)
-                .map(|c| CoreInfo {
-                    id: c,
-                    logical: smallvec![c, c + half],
-                    l3_group: 0,
-                    kind: CoreKind::Standard,
-                })
-                .collect(),
-        }
-    }
-
-    /// 600 valid samples 100 ms apart on `device`, the newest at `newest`: 60 s of data.
-    fn view_of(device: DeviceIdx, newest: u64, value: f32) -> Arc<SeriesView> {
-        let samples: Vec<Sample> = (0..600u64)
-            .map(|k| Sample::valid(newest - (599 - k) * 100 * MS, value))
-            .collect();
-        Arc::new(SeriesView {
-            id: SeriesId {
-                device,
-                metric: MetricId::CPU_TOTAL,
-            },
-            version: 1,
-            period_ns: 100 * MS,
-            samples: samples.into(),
-        })
-    }
-
-    struct Root {
-        grid: CpuGrid,
-    }
-
-    impl Render for Root {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(1300.)).child(self.grid.element(window, cx))
-        }
-    }
-
-    fn draw(vcx: &mut VisualTestContext) {
-        vcx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-        });
-    }
-
-    fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
-        vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
-        vcx.run_until_parked();
-        draw(vcx);
-    }
-
-    /// A 16-CPU grid in a 1300 px window at scale 1: 6 columns of 210 px with 8 px gaps, rows
-    /// of 112 px. Every cell has 60 s of data.
-    fn rig(cx: &mut TestAppContext) -> (gpui_kit::Entity<Root>, &mut VisualTestContext) {
-        let grid = cx.update(|cx| {
-            gpui_kit::init(cx);
-            tl_ui::theme::store::init(
-                cx,
-                &ThemeSettings::default(),
-                &AppearanceSettings::default(),
-                Vec::new(),
-            );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-            init_strings(cx, "en-US");
-            let hub = super::hub_for(&FakeEngine::new(), cx);
-            let theme = tl_ui::theme::current(cx).clone();
-            let devices: Vec<DeviceIdx> = (0..16).map(|id| DeviceIdx(100 + id)).collect();
-            CpuGrid::new(
-                &hub,
-                Arc::new(topology(16)),
-                &devices,
-                false,
-                60 * S,
-                false,
-                &theme,
-                cx,
-            )
-        });
-        let (root, vcx) = cx.add_window_view(move |_, _| Root { grid });
-        vcx.simulate_scale_factor_change(1.0);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        draw(vcx);
-        let view = vcx.read_entity(&root, |r, _| r.grid.view.clone());
-        let newest = now_boot_ns();
-        view.update(vcx, |v, cx| {
-            let series = (0..16u16)
-                .map(|i| (Some(view_of(DeviceIdx(100 + i), newest, 20.0)), None))
-                .collect();
-            v.set_series_for_test(series, cx);
-        });
-        draw(vcx);
-        draw(vcx);
-        (root, vcx)
-    }
-
-    #[gpui_kit::test]
-    fn cpu_grid_hover_on(cx: &mut TestAppContext) {
-        let (root, vcx) = rig(cx);
-        let view = vcx.read_entity(&root, |r, _| r.grid.view.clone());
-        assert!(
-            vcx.read_entity(&view, |v, _| v.spec.hover),
-            "CPU grid hover on"
-        );
-    }
-
-    #[gpui_kit::test]
-    fn cpu_grid_hover_box_flips_at_element_edge(cx: &mut TestAppContext) {
-        let (root, vcx) = rig(cx);
-        let view = vcx.read_entity(&root, |r, _| r.grid.view.clone());
-        let builds = vcx.read_entity(&view, |v, _| v.build_count.get());
-
-        // Cell 5 is the right-most column, 1090..1300: near the element's right edge the box
-        // flips left of the marker and stays inside the element.
-        hover(vcx, 1290., 60.);
-        vcx.read_entity(&view, |v, _| {
-            assert_eq!(v.hover_cell(), Some(5));
-            let h = v.hover_state();
-            let b = h.last_box.expect("box painted");
-            let x = h.last_marker_x.expect("marker painted");
-            assert!(b.right() < x, "flipped left: {b:?}, marker {x:?}");
-            assert!(
-                b.left() >= px(0.) && b.right() <= px(1300.),
-                "inside: {b:?}"
-            );
-        });
-
-        // Cell 4 (872..1082), near its own right edge: the box stays right of the marker and
-        // passes the cell's edge, since the flip edge is the element's, not the cell plot's.
-        hover(vcx, 1070., 60.);
-        vcx.read_entity(&view, |v, _| {
-            assert_eq!(v.hover_cell(), Some(4));
-            let h = v.hover_state();
-            let b = h.last_box.expect("box painted");
-            assert!(b.left() > h.last_marker_x.unwrap(), "right of the marker");
-            assert!(b.right() > px(1082.) && b.right() <= px(1300.), "{b:?}");
-        });
-
-        hover(vcx, 100., 500.);
-        assert_eq!(
-            vcx.read_entity(&view, |v, _| v.build_count.get()),
-            builds,
-            "hover never rebuilds geometry"
-        );
     }
 }

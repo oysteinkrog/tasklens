@@ -2,4 +2,5 @@
 //!
 //! Run with `cargo test -p tl-ui-chart --features test-hooks --test chart`.
 
+mod chart;
 mod chart_geometry;
