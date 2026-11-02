@@ -119,6 +119,9 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "khronos-egl",
         ],
     ),
+    // The shell's final row (ADR-020, tasklens-zljr5.34): what the files left in crates/tl-ui/src
+    // use. intl_pluralrules, unic-langid and unicode-segmentation moved down with base and
+    // perf-core.
     (
         "tl-ui",
         &[
@@ -130,12 +133,8 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "serde",
             "serde_json",
             "fluent-bundle",
-            "unic-langid",
-            // Plural rules in `pages/performance/core/details.rs`, in use since o55.37 (ADR-001).
-            "intl_pluralrules",
             "async-channel",
             "jiff",
-            "unicode-segmentation",
             "image",
         ],
     ),
@@ -1175,6 +1174,46 @@ mod tests {
             rows_and_closures(&json).unwrap(),
             vec!["tl-ui closure contains zbus"]
         );
+    }
+
+    #[test]
+    fn every_ui_crate_has_a_row_and_an_edge_row() {
+        // ADR-020: each tl-ui crate has an ADR-001 row here and a row in check_layers::EDGES.
+        for (krate, _) in check_layers::EDGES {
+            assert!(
+                ALLOWED.iter().any(|(name, _)| name == krate),
+                "{krate} has an EDGES row but no ADR-001 row"
+            );
+        }
+        for (name, _) in ALLOWED {
+            if check_layers::is_ui_crate(name) {
+                assert!(
+                    check_layers::EDGES.iter().any(|(krate, _)| krate == name),
+                    "{name} has an ADR-001 row but no EDGES row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_closure_rule_runs_for_every_ui_crate() {
+        // The tl-ui closure rule is not only for the shell: a page crate, a lower crate and the
+        // dev crates are held to it too.
+        for member in ["tl-ui-sys", "tl-ui-base", "tl-ui-pagehost"] {
+            let json = metadata(
+                &[member],
+                &[
+                    (member, "gpui-kit", None),
+                    ("gpui-kit", "zbus", None),
+                    (member, "tl-model", None),
+                    ("tl-model", "tl-ops", None),
+                ],
+            );
+            assert_eq!(
+                rows_and_closures(&json).unwrap(),
+                vec![format!("{member} closure contains tl-ops")]
+            );
+        }
     }
 
     #[test]

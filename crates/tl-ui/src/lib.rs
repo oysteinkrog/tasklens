@@ -1,4 +1,9 @@
-//! tl-ui: GPUI views, chart element, process table and theme.
+//! tl-ui, the shell (ADR-020): the main window, app init, the Information page, the run,
+//! low-memory and SMART windows, and the bench.
+//!
+//! The module re-exports below keep the old `tl_ui::x` paths for the shell's own code, tl-app
+//! and the `ui` tests, and each one has a user (tasklens-zljr5.34). Items such as `AdapterInfo`
+//! and `CrashReport` are at `tl_ui::app`. CS-J1 rewrites the users to direct crate paths.
 
 pub use tl_ui_base::action_tracker;
 pub use tl_ui_base::anim;
@@ -14,7 +19,6 @@ pub use tl_ui_base::hosts_api;
 pub use tl_ui_base::hosts_edit;
 pub use tl_ui_base::hub;
 pub use tl_ui_base::i18n;
-pub use tl_ui_base::motion;
 pub use tl_ui_chart::chart;
 pub use tl_ui_chart::net_totals;
 pub use tl_ui_kit::components;
@@ -28,7 +32,6 @@ pub use tl_ui_base::shell;
 pub use tl_ui_base::template;
 pub use tl_ui_base::text;
 pub use tl_ui_base::theme;
-pub use tl_ui_base::toast_types;
 pub use tl_ui_base::util;
 pub use tl_ui_perf_core::tray_bridge;
 pub use tl_ui_table::table;
@@ -40,7 +43,7 @@ pub mod windows;
 pub mod bench;
 
 pub use app::{
-    AdapterInfo, AppEnv, BuildInfo, CrashReport, GlobalShortcutApi, ImportSummary,
-    ImportedSettings, PersistTheme, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit,
+    AppEnv, BuildInfo, ImportSummary, PersistTheme, RunHistoryEntry, RunHistoryStore, TasklensUi,
+    UiInit,
 };
 pub use app::{OpenHooks, OpenMode, StartOptions, UiExit, UiLaunch, request_exit, run};
