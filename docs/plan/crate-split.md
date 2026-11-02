@@ -194,7 +194,7 @@ including review, expect two to three nights, not one.
 
 ## 7. Lane commands
 
-Before CS-B8: `heavy-build cargo test -p tl-ui --features test-hooks --test ui -- <filter>`.
+Test command: `heavy-build cargo test -p tl-ui --test ui -- <filter>` (no feature flag since CS-B8).
 After CS-B8: no feature flag. After CS-B9: the aliases and the leader-gate rule it writes into
 AGENTS.md. After extraction: `heavy-build cargo test -p tl-ui-<crate>` for the crate a bead touches,
 plus `cargo clippy -p tl-ui-<crate> --all-targets -- -D warnings`. Never `--workspace`, never

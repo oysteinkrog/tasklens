@@ -1,5 +1,4 @@
-//! Additional Setup window (E29-A3, UI-SHL-094, UI-PRF-052). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Additional Setup window (E29-A3, UI-SHL-094, UI-PRF-052).
 
 use std::sync::Arc;
 

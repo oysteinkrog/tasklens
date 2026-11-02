@@ -1,7 +1,5 @@
 //! Network page: the Throughput chart, its scale and value, the disconnected gap and the demand
 //! (E25, UI-PRF-031; PERF-054, PERF-055).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

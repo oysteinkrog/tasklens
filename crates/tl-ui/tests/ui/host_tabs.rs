@@ -1,7 +1,6 @@
 //! Host tabs: one tab per host, per-host pages and page state, Ctrl+digit, the failed tooltip,
 //! and windows that stay on the host they were opened from (UI-SHL-008, ADR-018 "Hosts",
-//! tasklens-q4x76.27). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! tasklens-q4x76.27).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

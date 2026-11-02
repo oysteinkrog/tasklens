@@ -1,8 +1,6 @@
 //! Fan page: sensor pairing, the two charts, the Details rows and demand (E25-027, UI-PRF-034;
 //! PERF-076, PERF-077).
 
-#![cfg(feature = "test-hooks")]
-
 use std::sync::Arc;
 
 use gpui_kit::{

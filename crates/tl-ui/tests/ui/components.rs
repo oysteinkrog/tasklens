@@ -646,7 +646,6 @@ mod display {
 
 /// The key/value grid state words and the CPU Details cache and boot time words come from the
 /// catalogue, translated once per strings version (R-132).
-#[cfg(feature = "test-hooks")]
 mod words {
     use gpui_kit::{MouseButton, SharedString, point};
     use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};

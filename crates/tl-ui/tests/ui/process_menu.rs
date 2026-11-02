@@ -1,5 +1,4 @@
-//! Process-action confirmations (UI-PRC-014, UI-PWN-025). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Process-action confirmations (UI-PRC-014, UI-PWN-025).
 
 use std::cell::RefCell;
 use std::rc::Rc;

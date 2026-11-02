@@ -1,6 +1,4 @@
-//! The Overview time range and range figures (UI-PRF-055, D-030). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! The Overview time range and range figures (UI-PRF-055, D-030).
 
 use std::sync::Arc;
 

@@ -415,7 +415,6 @@ fn startup_publisher_user_secondary(cx: &mut TestAppContext) {
 }
 
 /// The StartupPage entity (tasklens-9o0.7, UI-SYS-040, UI-SYS-049).
-#[cfg(feature = "test-hooks")]
 mod page {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -2077,7 +2076,6 @@ fn startup_keymap(cx: &mut TestAppContext) {
 
 /// `TasklensUi::init` binds the Startup keys and the shell builds `StartupPage` for its tab
 /// (tasklens-9o0.13).
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn startup_keymap_registered(cx: &mut TestAppContext) {
     use gpui_kit::{AppContext as _, VisualTestContext};
@@ -2131,7 +2129,6 @@ fn startup_keymap_registered(cx: &mut TestAppContext) {
 }
 
 /// The Startup Properties window (tasklens-9o0.12).
-#[cfg(feature = "test-hooks")]
 mod props {
     use super::*;
     use gpui_kit::base::Root;
@@ -2508,7 +2505,6 @@ mod props {
 
 /// The Startup Apps tab inside `MainWindow`, end to end through the fake engine
 /// (tasklens-9o0.1, UI-SYS-040 to UI-SYS-050, table (b)).
-#[cfg(feature = "test-hooks")]
 mod main_window {
     use super::*;
     use gpui_kit::AppContext as _;

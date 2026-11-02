@@ -1,8 +1,6 @@
 //! The helper session flow (tasklens-qfx.37, UI-FND-028, R-148): shield Actions become engine
 //! commands, and each failed start toasts once, in the window that asked for the last start or
-//! else in the main window. Run with `--features test-hooks`.
-
-#![cfg(feature = "test-hooks")]
+//! else in the main window.
 
 use std::sync::Arc;
 

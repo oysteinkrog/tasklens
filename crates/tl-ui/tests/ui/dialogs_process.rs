@@ -1,6 +1,4 @@
 //! Process action dialogs: Set Affinity for one target (E23-002, UI-PWN-021, PROC-067, ADR-008).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

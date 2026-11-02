@@ -1,6 +1,4 @@
 //! Main window shell tests: the `TlSettings` Global (E20-001, ADR-011, R-017, ADR-013).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::cell::Cell;
 use std::collections::HashSet;

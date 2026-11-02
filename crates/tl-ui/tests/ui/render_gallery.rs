@@ -3,12 +3,9 @@
 //! `TL_UPDATE_GOLDEN=1` rewrites them. Reduced motion is forced on by the harness, so animations
 //! show their end state. Captures are at device scale 2.0 (R-291).
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_gallery::`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_gallery::`.
 
 #![cfg(feature = "render-tests")]
-
-#[cfg(not(feature = "test-hooks"))]
-compile_error!("render_gallery needs --features render-tests,test-hooks (R-291)");
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

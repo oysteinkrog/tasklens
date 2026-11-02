@@ -1,7 +1,5 @@
 //! Overview box widgets (UI-PRF-061, ADR-019): the widget entity, its compositions, the
-//! shared source data, the widget container on its inner grid and Edit Widgets. Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! shared source data, the widget container on its inner grid and Edit Widgets.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

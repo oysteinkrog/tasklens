@@ -1,7 +1,5 @@
 //! `ToastQueue` rules and the stack's look with `TestAppContext` (E16-006, UI-FND-020, UI-SHL-100,
 //! R-195, R-197). Every rule test runs twice: with motion and with reduced motion.
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 use std::time::Duration;

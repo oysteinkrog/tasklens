@@ -1,6 +1,5 @@
 //! SnapshotHub and `TasklensUi::init` integration tests with `FakeEngine` and `TestAppContext`
-//! (E16-003, E16-A1, ADR-005, ADR-010, ADR-013). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! (E16-003, E16-A1, ADR-005, ADR-010, ADR-013).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

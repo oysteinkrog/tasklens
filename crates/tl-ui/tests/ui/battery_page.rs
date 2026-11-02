@@ -1,8 +1,6 @@
 //! Battery page: chart kind by device type, Details rows, the time label, the threshold rows,
 //! the signed power value, copy text and demand (E25-028, UI-PRF-035; PERF-078).
 
-#![cfg(feature = "test-hooks")]
-
 use std::sync::Arc;
 
 use gpui_kit::{

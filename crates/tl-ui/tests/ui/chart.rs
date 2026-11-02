@@ -1,6 +1,4 @@
-//! ChartView construction test with `TestAppContext` (E19, ADR-013). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! ChartView construction test with `TestAppContext` (E19, ADR-013).
 
 use std::sync::Arc;
 

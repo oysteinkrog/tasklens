@@ -1,6 +1,6 @@
 //! Tree-table tests in a real window (UI-PRC-001, ADR-013). The first section covers the generic
 //! cell painters (E18-004), the second the table entity (E18-006); later table beads append their
-//! own sections below. `tree_table_renders_visible_range_only` needs `--features test-hooks`.
+//! own sections below.
 //!
 //! The cells are measured, so the window uses the real text system with the bundled fonts.
 
@@ -727,7 +727,6 @@ fn open_table(
     (table, vcx)
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn tree_table_renders_visible_range_only() {
     let mut cx = cosmic_cx();
@@ -921,7 +920,6 @@ fn name_cell_indent_by_depth() {
 }
 
 /// A depth-0 row and its depth-1 child, guide lines on or off.
-#[cfg(feature = "test-hooks")]
 fn parent_child(guides: bool) -> TDelegate {
     let mut d = TDelegate::new(vec![
         plain(0),
@@ -938,7 +936,6 @@ fn parent_child(guides: bool) -> TDelegate {
     d
 }
 
-#[cfg(feature = "test-hooks")]
 fn guides(
     vcx: &mut VisualTestContext,
     table: &Entity<TlTreeTable<TDelegate>>,
@@ -946,12 +943,10 @@ fn guides(
     vcx.update(|_, cx| table.read(cx).guide_quads.borrow().clone())
 }
 
-#[cfg(feature = "test-hooks")]
 fn line_canvases(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) -> u32 {
     vcx.update(|_, cx| table.read(cx).line_canvases.get())
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn connector_lines_only_when_enabled() {
     let mut cx = cosmic_cx();
@@ -981,7 +976,6 @@ fn connector_lines_only_when_enabled() {
     assert_eq!(line_canvases(vcx, &table), 1);
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn connector_lines_skip_group_headers() {
     let mut d = TDelegate::new(vec![group(0), plain(1)]);
@@ -996,7 +990,6 @@ fn connector_lines_skip_group_headers() {
     assert_eq!(line_canvases(vcx, &table), 0);
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn guides_and_separators_share_one_canvas_per_row() {
     let mut cx = cosmic_cx();
@@ -1981,7 +1974,6 @@ fn demand_resent_after_resort_with_same_range() {
 // rsf.20: file icon image sources are cached per table.
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(feature = "test-hooks")]
 mod icon_cache {
     use std::sync::Arc;
 
@@ -2417,7 +2409,6 @@ fn scroll_handle_clone_scrolls_table() {
     assert_eq!(first, 1000);
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn tree_table_text_cache_hit_rate() {
     let mut cx = cosmic_cx();
@@ -2447,13 +2438,11 @@ fn tree_table_text_cache_hit_rate() {
 }
 
 /// A page that gets snapshots but never installs them into its table.
-#[cfg(feature = "test-hooks")]
 struct SnapshotHost {
     table: Entity<TlTreeTable<TDelegate>>,
     _sub: Subscription,
 }
 
-#[cfg(feature = "test-hooks")]
 impl Render for SnapshotHost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -2465,7 +2454,6 @@ impl Render for SnapshotHost {
     }
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn render_counter_unchanged_without_new_version() {
     use std::sync::Arc;
@@ -2616,7 +2604,6 @@ mod name_cell_fixes {
             std::ptr::eq(a.as_ref(), b.as_ref()),
             "the second call reuses the text"
         );
-        #[cfg(feature = "test-hooks")]
         assert_eq!(cache.names_built, 1);
 
         // A name without a count is shaped as it is.
@@ -2978,7 +2965,6 @@ fn first_visible_row_empty_table() {
 // Column separators (E18-014).
 
 /// Columns Name, PID, CPU, Memory and User: 540 px in all.
-#[cfg(feature = "test-hooks")]
 fn five_columns(rows: Vec<TRow>) -> TDelegate {
     let mut d = TDelegate::new(rows);
     d.specs = vec![
@@ -2999,7 +2985,6 @@ fn five_columns(rows: Vec<TRow>) -> TDelegate {
     d
 }
 
-#[cfg(feature = "test-hooks")]
 fn separators(
     vcx: &mut VisualTestContext,
     table: &Entity<TlTreeTable<TDelegate>>,
@@ -3007,7 +2992,6 @@ fn separators(
     vcx.update(|_, cx| table.read(cx).separator_quads.borrow().clone())
 }
 
-#[cfg(feature = "test-hooks")]
 fn separators_on(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) {
     vcx.update(|_, cx| {
         table.update(cx, |t, cx| {
@@ -3018,7 +3002,6 @@ fn separators_on(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelega
     redraw(vcx);
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn separators_off_by_default() {
     let mut cx = cosmic_cx();
@@ -3031,7 +3014,6 @@ fn separators_off_by_default() {
     assert!(separators(vcx, &table).is_empty());
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn separators_on_one_per_boundary() {
     let mut cx = cosmic_cx();
@@ -3053,7 +3035,6 @@ fn separators_on_one_per_boundary() {
     }
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn separators_skip_group_headers() {
     let mut cx = cosmic_cx();
@@ -3066,7 +3047,6 @@ fn separators_skip_group_headers() {
     assert!(quads.iter().all(|q| q.top() == body.top() + px(ROW_H)));
 }
 
-#[cfg(feature = "test-hooks")]
 #[test]
 fn separators_move_with_horizontal_scroll() {
     let mut cx = cosmic_cx();

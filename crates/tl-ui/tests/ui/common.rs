@@ -1,7 +1,5 @@
 //! Helpers that several test modules used to copy word for word.
 
-#![cfg(feature = "test-hooks")]
-
 use std::sync::Arc;
 
 use gpui_kit::base::Root;

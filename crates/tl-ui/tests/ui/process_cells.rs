@@ -1388,12 +1388,10 @@ mod values {
             );
             assert_eq!(out.arc.as_deref(), Some("oystein"));
         }
-        #[cfg(feature = "test-hooks")]
         assert_eq!(members.builds(), 1);
         let mut view = f.view.clone();
         view.header.version += 1;
         members.refresh(&view, &f.records, &f.extras);
-        #[cfg(feature = "test-hooks")]
         assert_eq!(members.builds(), 2);
     }
 
@@ -3109,7 +3107,7 @@ mod header_totals {
 
 /// NEW and EXITED row highlight (PROC-043, UI-PRC-011): the tint timeline, the linger clamp,
 /// exited row dimming, frame requests and Enter on an exited row. The table checks that fix the
-/// clock or read toasts need `--features test-hooks`.
+/// clock or read toasts.
 mod highlight {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -3364,10 +3362,7 @@ mod highlight {
     struct Rig {
         table: Entity<TlTreeTable<ProcessDelegate>>,
         driver: Entity<AnimationDriver>,
-        /// Read by the Enter check, which needs `test-hooks`.
-        #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
         opened: Rc<Cell<u32>>,
-        #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
         toasts: Entity<tl_ui::components::toast::ToastQueue>,
         vcx: VisualTestContext,
     }
@@ -3529,7 +3524,6 @@ mod highlight {
         assert_eq!(requested(&mut rig), 0);
     }
 
-    #[cfg(feature = "test-hooks")]
     mod hooks {
         use super::*;
 

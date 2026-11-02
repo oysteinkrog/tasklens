@@ -1,6 +1,5 @@
 //! Secondary window frame, confirmations and the window registry (E16-008, E16-007, E16-A2,
-//! UI-FND-021, UI-SHL-090). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! UI-FND-021, UI-SHL-090).
 
 use std::cell::RefCell;
 use std::rc::Rc;

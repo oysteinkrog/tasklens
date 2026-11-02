@@ -704,7 +704,6 @@ mod page_frame {
         assert!(cx.debug_bounds("TlTooltip-text").is_none());
     }
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn build_page_placeholder_for_unknown_kind(cx: &mut TestAppContext) {
         use gpui_kit::{AnyView, AppContext as _};
@@ -749,7 +748,6 @@ mod page_frame {
     // ---- Words through tr, cached per strings version (R-132) ----
 
     /// Every Performance key the details, the grid and the header read, mapped to a marker.
-    #[cfg(feature = "test-hooks")]
     const MARKERS: &str = "
 perf-fallback-collecting = <collecting>
 perf-fallback-restricted = <restricted>
@@ -779,7 +777,6 @@ perf-legend-total = <total>
 perf-legend-kernel = <kernel>
 ";
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn performance_words_follow_test_locale(cx: &mut TestAppContext) {
         use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
@@ -906,7 +903,6 @@ perf-legend-kernel = <kernel>
         });
     }
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn page_menu_tray_item_position(cx: &mut TestAppContext) {
         use tl_ui::components::menu::MenuEntryKind;
@@ -971,7 +967,6 @@ perf-legend-kernel = <kernel>
         assert_eq!(off[1].2.as_deref(), Some("No system tray available"));
     }
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn performance_frames_do_no_tr_calls(cx: &mut TestAppContext) {
         use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
@@ -1296,7 +1291,6 @@ mod perf_keys {
 
 // ---- The Performance tab: split, sidebar toggle, page switching (E24-A1) ----
 
-#[cfg(feature = "test-hooks")]
 mod tab {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1741,7 +1735,6 @@ mod tab {
 
 // ---- Graph summary mode (E24-015) ----
 
-#[cfg(feature = "test-hooks")]
 mod summary {
     use std::cell::RefCell;
     use std::rc::Rc;

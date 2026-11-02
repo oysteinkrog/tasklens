@@ -1,7 +1,5 @@
 //! Overview group widgets (ADR-019 "Group widgets", UI-PRF-061 phase 2): the members of a
 //! group, how the items fill the widget, the "+n more" item, hotplug, and the render contract.
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

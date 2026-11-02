@@ -1,8 +1,7 @@
 //! Host settings in the window (tasklens-q4x76.23, ADR-018 Settings): the window reads
 //! `processes.interval_ms` and `[history]` only from the engine's snapshot, keeps their controls
 //! disabled until it has seen them, writes them with the revision it read, and never writes them
-//! to `settings.toml`. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! to `settings.toml`.
 
 use std::cell::RefCell;
 use std::rc::Rc;

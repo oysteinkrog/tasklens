@@ -1,7 +1,5 @@
 //! Menu bar, File menu and View menu tests (E21-A1, E21-001, E21-003, E21-044, E21-045, UI-SHL-030 to
 //! UI-SHL-034, UI-SHL-039, ADR-013).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

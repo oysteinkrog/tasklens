@@ -1,6 +1,4 @@
-//! Performance tab Overview page (E24, UI-PRF-017, D-022): the drawing parts. Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Performance tab Overview page (E24, UI-PRF-017, D-022): the drawing parts.
 
 use gpui_kit::px;
 use tl_ui::pages::performance::overview::parts::{
@@ -275,7 +273,6 @@ fn core_bars_bucket_change_only() {
     assert!(!model.set_values([Some(13.1), None].into_iter()));
 }
 
-#[cfg(feature = "test-hooks")]
 mod drawn {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -465,7 +462,6 @@ mod drawn {
 
 // The CPU and Memory boxes (crw.38).
 
-#[cfg(feature = "test-hooks")]
 mod boxes {
     use std::sync::Arc;
 
@@ -1577,7 +1573,6 @@ mod boxes {
 
 // The GPU, Disk and Network boxes (crw.39).
 
-#[cfg(feature = "test-hooks")]
 mod bottom {
     use std::sync::Arc;
 
@@ -3578,7 +3573,6 @@ mod bottom {
 
 // The OverviewPage shell (crw.40).
 
-#[cfg(feature = "test-hooks")]
 mod page {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;

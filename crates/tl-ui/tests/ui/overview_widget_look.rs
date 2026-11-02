@@ -3,9 +3,7 @@
 //! preset, the sweep reads what every widget of the flow layout draws, enters Edit Widgets,
 //! applies with no change (the flow layout stays), saves the pinned layout as a grid layout, and
 //! checks each time that every widget kept its accent colour, its chart's series count and
-//! legend, its value text, a core row's clock column, and its forms and options. Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! legend, its value text, a core row's clock column, and its forms and options.
 
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
 //! All tl-ui integration tests in one test binary. Each module was its own `tests/*.rs` file;
 //! one binary links GPUI and wgpu once instead of once per file.
 //!
-//! Run one area with `cargo test -p tl-ui --features test-hooks --test ui -- overview::`.
+//! Run one area with `cargo test -p tl-ui --test ui -- overview::`.
 
 mod actions;
 mod anim;

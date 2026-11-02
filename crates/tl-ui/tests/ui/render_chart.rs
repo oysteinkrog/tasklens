@@ -7,12 +7,9 @@
 //! fixed phase of a 60 s boundary a little in the future, so the chart is never stale while it
 //! renders and the 6 s grid lines land on the same pixels on every run.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_chart::`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_chart::`.
 
 #![cfg(feature = "render-tests")]
-
-#[cfg(not(feature = "test-hooks"))]
-compile_error!("render_chart needs --features render-tests,test-hooks (R-291)");
 
 use std::sync::Arc;
 

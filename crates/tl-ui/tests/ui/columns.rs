@@ -649,7 +649,6 @@ fn boundary_band_sets_resize_cursor() {
 fn drag_persists_once_on_release() {
     let mut cx = cosmic_cx();
     let (table, vcx) = open(&mut cx, HDelegate::new());
-    #[cfg(feature = "test-hooks")]
     let before = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
 
     mouse_down(vcx, header_at(200.), 1);
@@ -666,7 +665,6 @@ fn drag_persists_once_on_release() {
     assert_eq!(stored_width(vcx, &table, ColumnId::Name), px(200.));
     let cursor = vcx.update(|_, cx| table.read(cx).header_state().cursor());
     assert_eq!(cursor, CursorStyle::ResizeColumn);
-    #[cfg(feature = "test-hooks")]
     {
         let misses = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
         assert_eq!(misses, before, "a drag re-formats no cell text");
@@ -846,7 +844,6 @@ fn sorted_cols(
 fn reorder_moves_column_and_persists_once() {
     let mut cx = cosmic_cx();
     let (table, vcx) = open(&mut cx, HDelegate::new());
-    #[cfg(feature = "test-hooks")]
     let before = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
 
     // Grab CPU (380..460) 40 px from its left edge and drag it onto the Name and User boundary.
@@ -887,7 +884,6 @@ fn reorder_moves_column_and_persists_once() {
     assert_eq!(head_line.size.height, px(44.));
     assert_eq!(body_line.origin.y, body.origin.y);
     assert_eq!(body_line.size.height, body.size.height);
-    #[cfg(feature = "test-hooks")]
     {
         let misses = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
         assert_eq!(misses, before, "a drag re-formats no cell text");
@@ -1053,8 +1049,6 @@ impl Render for MenuHost {
 struct MenuRig {
     table: Entity<TlTreeTable<HDelegate>>,
     host: Entity<MenuHost>,
-    /// Read by the toast checks, which need `test-hooks`.
-    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     toasts: Entity<ToastQueue>,
     vcx: VisualTestContext,
 }
@@ -1150,7 +1144,6 @@ fn rows_for(
     })
 }
 
-#[cfg(feature = "test-hooks")]
 fn toast_texts(vcx: &mut VisualTestContext, toasts: &Entity<ToastQueue>) -> Vec<SharedString> {
     vcx.update(|_, cx| toasts.read(cx).visible_texts())
 }
@@ -1277,7 +1270,6 @@ fn hide_column_persists() {
         [ColumnId::Name, ColumnId::Pid, ColumnId::Cpu, ColumnId::Pss]
     );
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
-    #[cfg(feature = "test-hooks")]
     assert!(
         toast_texts(&mut rig.vcx, &rig.toasts).is_empty(),
         "no toast"
@@ -1343,7 +1335,6 @@ fn reset_columns_restores_defaults_and_toasts() {
         .update(|_, cx| rig.table.read(cx).delegate.layout.clone());
     assert_eq!(layout, defaults);
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
-    #[cfg(feature = "test-hooks")]
     assert_eq!(
         toast_texts(&mut rig.vcx, &rig.toasts),
         [SharedString::new_static("Columns reset to default")]
@@ -1370,7 +1361,6 @@ fn reset_columns_without_defaults_propagates() {
         }]
     );
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
-    #[cfg(feature = "test-hooks")]
     assert!(toast_texts(&mut rig.vcx, &rig.toasts).is_empty());
 }
 

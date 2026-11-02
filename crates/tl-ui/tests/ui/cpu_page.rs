@@ -708,7 +708,6 @@ fn cpu_preferred_core_star_and_tooltip() {
     }
 }
 
-#[cfg(feature = "test-hooks")]
 mod grid {
     use gpui_kit::{
         App, AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
@@ -959,7 +958,6 @@ mod grid {
 
 // CPU page entity (E24, UI-PRF-023, UI-PRF-053; ADR-008, R-126).
 
-#[cfg(feature = "test-hooks")]
 mod page {
     use std::time::Duration;
 

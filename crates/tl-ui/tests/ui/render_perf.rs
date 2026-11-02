@@ -3,12 +3,9 @@
 //! `tests/golden/perf_<page>_<theme>.png`. The Overview is also checked at 1920 × 1200
 //! (UI-PRF-059), in `perf_overview_1920_<theme>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_perf::`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_perf::`.
 
 #![cfg(feature = "render-tests")]
-
-#[cfg(not(feature = "test-hooks"))]
-compile_error!("render_perf needs --features render-tests,test-hooks (R-291)");
 
 use std::sync::Arc;
 

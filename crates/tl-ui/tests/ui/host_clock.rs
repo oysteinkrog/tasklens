@@ -3,8 +3,6 @@
 //! this PC's. Covers `HostClock`, a remote host's chart whose boot clock is hours ahead of or
 //! behind this PC's, Collector Health ages on a remote host, and a sweep that fails when UI code
 //! reads this PC's boot clock directly.
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::path::Path;
 use std::sync::Arc;

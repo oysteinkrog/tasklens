@@ -1,5 +1,5 @@
 //! Information section entity (E28-030, UI-SYS-081, UI-SYS-082, UI-FND-025) and the page
-//! (E28-033). The page tests need `--features test-hooks`.
+//! (E28-033).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -333,7 +333,6 @@ fn info_row_menu_copy_section_dispatches(cx: &mut TestAppContext) {
     assert_eq!(dispatched.borrow().as_slice(), &[InfoSectionId::Processor]);
 }
 
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn info_set_rows_same_content_no_rerender(cx: &mut TestAppContext) {
     let (section, _, cx) = host(cx, InfoSectionId::OperatingSystem, 100, os_rows());
@@ -978,7 +977,6 @@ mod names_and_tips {
         }
     }
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn info_copy_button_name_follows_strings(cx: &mut TestAppContext) {
         use tl_ui::i18n::set_test_catalogue;
@@ -1614,7 +1612,6 @@ mod hardware_builders {
 
 /// The InformationPage entity: layout, demand, loading, live refresh, F5 toast, error state and
 /// keyboard scrolling (tasklens-9o0.24).
-#[cfg(feature = "test-hooks")]
 mod page {
     use std::cell::Cell;
     use std::time::Duration;
@@ -2449,7 +2446,6 @@ mod copy_text {
 
 /// `TasklensUi::init` binds the Information keys and the shell builds `InformationPage` for its
 /// tab (tasklens-9o0.27).
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn information_keymap_registered(cx: &mut TestAppContext) {
     use tl_model::client::EngineClient;
@@ -2515,7 +2511,6 @@ fn information_keymap_registered(cx: &mut TestAppContext) {
 
 /// The Information tab inside `MainWindow`, end to end through the fake engine
 /// (tasklens-9o0.3, UI-SYS-080, UI-SYS-096, R-023).
-#[cfg(feature = "test-hooks")]
 mod main_window {
     use super::*;
     use tl_model::client::EngineClient;

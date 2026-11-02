@@ -1,7 +1,5 @@
 //! Disk page: the two charts, the header, the demand and the source failure state (E25,
 //! UI-PRF-029; PERF-047, PERF-048).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

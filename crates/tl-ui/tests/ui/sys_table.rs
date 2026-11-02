@@ -232,7 +232,6 @@ fn conn_state_tones() {
     assert_eq!(conn_state_tone(ConnStateClass::Udp), LabelTone::Secondary);
 }
 
-#[cfg(feature = "test-hooks")]
 mod words {
     use gpui_kit::TestAppContext;
     use tl_ui::i18n::{set_test_catalogue, tr_calls};
@@ -267,7 +266,6 @@ mod words {
 }
 
 /// `SysQuery` and `SysPageState` (tasklens-hk6.6).
-#[cfg(feature = "test-hooks")]
 mod query_and_demand {
     use std::sync::Arc;
 
@@ -457,7 +455,6 @@ mod query_and_demand {
 }
 
 /// Body states: skeleton, rows, empty and error states (tasklens-hk6.7).
-#[cfg(feature = "test-hooks")]
 mod body_states {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -857,7 +854,6 @@ mod action_texts {
 }
 
 /// `SysActions`: system-table action toasts and the pending map (tasklens-hk6.9).
-#[cfg(feature = "test-hooks")]
 mod sys_actions {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1325,7 +1321,6 @@ mod sys_actions {
 }
 
 // `ToastQueue::visible_texts` is a test hook.
-#[cfg(feature = "test-hooks")]
 mod copy {
     use gpui_kit::base::Root;
     use gpui_kit::{
@@ -1530,7 +1525,6 @@ mod copy {
     }
 }
 
-#[cfg(feature = "test-hooks")]
 mod frame {
     use std::sync::Arc;
 

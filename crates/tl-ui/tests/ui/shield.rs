@@ -1,9 +1,7 @@
 //! Shield flows end to end against the fake engine (tasklens-qfx.31, APP-003, PROC-058, PROC-076,
 //! UI-FND-028, UI-SHL-011, UI-SHL-050, UI-PWN-018, UI-PWN-031, R-117, R-148): every entry point
 //! that should start the helper sends the start, the shield follows `HealthSnapshot.helper`, a
-//! failed start toasts once, and nothing escalates on its own. Run with `--features test-hooks`.
-
-#![cfg(feature = "test-hooks")]
+//! failed start toasts once, and nothing escalates on its own.
 
 use std::cell::Cell;
 use std::rc::Rc;

@@ -2,7 +2,7 @@
 //! fonts and theme store, and the golden directory `tests/golden`. The `render_*` modules use
 //! `RenderHarness`, `assert_golden` and `run_on_lavapipe` from here.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_support::`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_support::`.
 
 #![cfg(feature = "render-tests")]
 

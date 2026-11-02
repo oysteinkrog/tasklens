@@ -2,8 +2,7 @@
 //! mode is a flow layout whose widgets draw the 1.2.0 parts where the box drew them, a sample
 //! renders only the widgets whose text changed, an adapter that goes away shows its widget as
 //! unavailable, Edit Widgets adds, removes, moves and applies Network widgets, and a reset
-//! converted box reloads as the built-in default. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! converted box reloads as the built-in default.
 
 use std::sync::Arc;
 

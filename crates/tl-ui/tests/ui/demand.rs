@@ -1,6 +1,5 @@
 //! DemandAggregator integration tests with `FakeEngine` and `TestAppContext` (E16-004, ADR-005,
-//! ADR-008, ADR-013). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! ADR-008, ADR-013).
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,6 +1,4 @@
-//! One time range for the Overview and every device page (crw.105). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! One time range for the Overview and every device page (crw.105).
 
 use std::sync::Arc;
 

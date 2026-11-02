@@ -1,7 +1,5 @@
 //! Low-memory rescue window: frame, texts, filter, eased state, keys, the minimal init, and the
-//! process list with End Task (E32-009, E32-A2, UI-PWN-032, UI-PWN-033, R-243). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! process list with End Task (E32-009, E32-A2, UI-PWN-032, UI-PWN-033, R-243).
 
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};

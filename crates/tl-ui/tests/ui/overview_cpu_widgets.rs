@@ -1,8 +1,7 @@
 //! The Overview CPU box on widgets (ADR-019 phase 2 "Presets", UI-PRF-061 phase 2): each old
 //! mode is a flow layout of the preset's widgets placed where 1.2.0 drew the parts, the cores
 //! group fills the height (D-040), a core sample renders only the cores group, and Edit Widgets
-//! adds, removes, moves and applies CPU widgets. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! adds, removes, moves and applies CPU widgets.
 
 use std::sync::Arc;
 

@@ -170,7 +170,6 @@ fn add_minigraph_from_json(cx: &mut TestAppContext) {
 }
 
 /// `MinigraphCard` for the seven system sources (tasklens-xdh.5, PERF-080, UI-PRF-041).
-#[cfg(feature = "test-hooks")]
 mod card {
     use std::sync::Arc;
 
@@ -628,7 +627,6 @@ mod card {
         );
         let frozen = vcx.update(|_, cx| card.read(cx).chart().read(cx).is_frozen());
         assert!(!frozen, "a no-match card keeps following its series");
-        #[cfg(feature = "test-hooks")]
         {
             let (edge, last_valid) = vcx.update(|_, cx| {
                 let chart = card.read(cx).chart().read(cx);
@@ -714,7 +712,6 @@ mod card {
             chart.derived_state(last_valid + 600 * PERIOD)
         });
         assert_eq!(later, ChartState::Live, "never Stale while frozen");
-        #[cfg(feature = "test-hooks")]
         {
             let (edge, newest_seen) = vcx.update(|_, cx| {
                 let chart = card.read(cx).chart().read(cx);
@@ -1052,7 +1049,6 @@ mod card {
     }
 
     /// Hover readout on the cards (tasklens-xdh.9, UI-PRF-041, PERF-023).
-    #[cfg(feature = "test-hooks")]
     mod hover {
         use gpui_kit::{Modifiers, point, px};
 
@@ -1143,7 +1139,6 @@ mod card {
 }
 
 /// The panel (tasklens-xdh.6, E26-004, UI-PRF-040).
-#[cfg(feature = "test-hooks")]
 mod panel {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -2858,7 +2853,6 @@ mod panel {
 }
 
 /// The panel mounted in the Processes page (tasklens-xdh.8, UI-PRF-040).
-#[cfg(feature = "test-hooks")]
 mod mounted {
     use std::sync::Arc;
 

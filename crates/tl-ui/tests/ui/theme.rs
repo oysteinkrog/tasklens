@@ -142,7 +142,6 @@ fn delete_active_falls_back_by_mode(cx: &mut TestAppContext) {
 }
 
 /// E17-007: `TasklensUi::init` follows the portal color-scheme from the snapshot.
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn scheme_change_from_snapshot_switches_theme(cx: &mut TestAppContext) {
     use std::sync::Arc;

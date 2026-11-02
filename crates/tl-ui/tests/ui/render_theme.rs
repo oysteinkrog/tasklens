@@ -2,13 +2,10 @@
 //! two kit widgets, rendered on lavapipe for both built-in themes at `ui_scale` 1.0 and 1.1 and
 //! compared with `tests/golden/theme_<name>_<scale>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests,test-hooks --test ui -- render_theme::`.
+//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_theme::`.
 //! The render helpers live in `tl_ui_testkit::render`, set up for tl-ui in `render_support`.
 
 #![cfg(feature = "render-tests")]
-
-#[cfg(not(feature = "test-hooks"))]
-compile_error!("render_theme needs --features render-tests,test-hooks (R-291)");
 
 use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::component::button::{Button, ButtonVariants};

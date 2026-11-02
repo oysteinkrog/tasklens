@@ -1,6 +1,5 @@
 //! `AnimationDriver` tests with `TestAppContext` (E19, ADR-009, ADR-010, ADR-014, R-209). The test
 //! platform delivers no frames; `Window::simulate_next_frame` stands in for the compositor.
-//! `driver_paint_log_install_and_take` needs `--features test-hooks`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -220,7 +219,6 @@ fn driver_counts_missed_frames(cx: &mut TestAppContext) {
     );
 }
 
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn driver_paint_log_install_and_take(cx: &mut TestAppContext) {
     let (driver, vcx) = rig(cx);
@@ -233,13 +231,11 @@ fn driver_paint_log_install_and_take(cx: &mut TestAppContext) {
     assert!(vcx.read_entity(&driver, |d, _| d.paint_log.is_none()));
 }
 
-#[cfg(feature = "test-hooks")]
 thread_local! {
     static CPU_CALLS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// A thread CPU clock that counts its calls and moves 1 ms per call.
-#[cfg(feature = "test-hooks")]
 fn counting_clock() -> u64 {
     CPU_CALLS.with(|c| {
         c.set(c.get() + 1);
@@ -247,7 +243,6 @@ fn counting_clock() -> u64 {
     })
 }
 
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn driver_frame_cpu_only_while_sampling(cx: &mut TestAppContext) {
     let (driver, vcx) = rig(cx);
@@ -281,7 +276,6 @@ fn driver_frame_cpu_only_while_sampling(cx: &mut TestAppContext) {
     assert_eq!(CPU_CALLS.with(Cell::get), 3, "stops with sampling");
 }
 
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn driver_frame_cpu_from_the_real_clock(cx: &mut TestAppContext) {
     let (driver, vcx) = rig(cx);

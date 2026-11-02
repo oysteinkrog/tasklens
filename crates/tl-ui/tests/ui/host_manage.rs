@@ -1,8 +1,7 @@
 //! Settings > Hosts and the host tab context menu (UI-SHL-008, ADR-018 "Hosts",
 //! tasklens-q4x76.28). Adding, editing, reordering and removing hosts through the page updates
 //! `[[hosts]]` and the tabs without a restart; the tab menu reconnects, disconnects, opens the
-//! page and removes. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! page and removes.
 
 use std::sync::{Arc, Mutex};
 

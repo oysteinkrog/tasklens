@@ -35,7 +35,7 @@ tempfile = { workspace = true }
 proptest = { workspace = true }
 # tests/live_processes.rs: the real engine wired to the UI (tasklens-pdu.52)
 gpui-kit   = { workspace = true, features = ["test-support"] }
-tl-ui      = { workspace = true, features = ["test-hooks"] }
+tl-ui      = { workspace = true }
 tl-collect = { workspace = true }
 
 [features]

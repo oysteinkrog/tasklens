@@ -921,7 +921,6 @@ fn props_filter_hides_general_fields(cx: &mut TestAppContext) {
 }
 
 /// The Unsupported words come from the catalogue and are kept by variant, not by text (R-132).
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn general_unsupported_words_follow_test_locale(cx: &mut TestAppContext) {
     use tl_ui::components::kv_grid::UnsupportedWord;
@@ -992,7 +991,6 @@ fnd-kv-not-reported = <not-reported>
 
 /// Field labels and value words come from the catalogue (R-132): a swapped key shows in the tab,
 /// in the copy text, and the formatted values use the swapped words.
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn general_labels_and_words_follow_test_locale(cx: &mut TestAppContext) {
     use tl_ui::i18n::set_test_catalogue;
@@ -1037,7 +1035,6 @@ pwn-general-seccomp-filter-many = <filter { $n }>
 
 /// The filter bar resolves its words once per strings version: the General tab with the bar makes
 /// no tr call over 60 frames, and a new catalogue reaches the placeholder and tooltip (R-132).
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn props_filter_bar_words_follow_test_locale(cx: &mut TestAppContext) {
     use tl_ui::i18n::{set_test_catalogue, tr_calls};
@@ -1262,8 +1259,7 @@ mod app_props {
 }
 
 /// The Process Properties window over the real app globals and main window (E23-A1, UI-PWN-002
-/// to UI-PWN-004, UI-PWN-018). Needs `--features test-hooks` for `AppEnv::test`.
-#[cfg(feature = "test-hooks")]
+/// to UI-PWN-004, UI-PWN-018).
 mod window {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4967,7 +4963,6 @@ mod window {
 
 // ---- Threads tab (E23-016, UI-PWN-010) ----
 
-#[cfg(feature = "test-hooks")]
 mod threads {
     use tl_model::actions::ActionTarget;
     use tl_model::details::ThreadRow;
@@ -5753,7 +5748,6 @@ mod security {
         CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
     };
     use tl_ui::components::tooltip::DELAY_CONTROL;
-    #[cfg(feature = "test-hooks")]
     use tl_ui::windows::props::security::CAP_CHECK_SIZE;
     use tl_ui::windows::props::security::{
         CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
@@ -6091,7 +6085,6 @@ mod security {
         );
     }
 
-    #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn security_cap_checks_are_lucide_size_and_centred(cx: &mut TestAppContext) {
         let (view, cx) = open(cx);

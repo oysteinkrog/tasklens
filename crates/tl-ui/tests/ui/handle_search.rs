@@ -1,7 +1,5 @@
 //! The Search File Handles window (tasklens-gma.33, UI-PWN-030) and its result table and row
-//! menu (tasklens-gma.34, UI-PWN-031). Run with `--features test-hooks`.
-
-#![cfg(feature = "test-hooks")]
+//! menu (tasklens-gma.34, UI-PWN-031).
 
 use std::cell::Cell;
 use std::rc::Rc;

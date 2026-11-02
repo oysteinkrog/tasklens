@@ -1,6 +1,4 @@
-//! Settings window frame, page list and `PageBuilder` (E21-018, UI-SHL-060, APP-023). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Settings window frame, page list and `PageBuilder` (E21-018, UI-SHL-060, APP-023).
 
 use std::cell::Cell;
 use std::collections::HashSet;

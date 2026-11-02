@@ -6,8 +6,6 @@
 //! (tasklens-8fx.26), and the minimap (tasklens-8fx.27), and the legend chips (tasklens-8fx.28), and
 //! the Live button, recording-off banner and toast and load-problem toasts (tasklens-8fx.29), and
 //! the Settings window History rows (tasklens-8fx.30).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 use std::time::Duration;

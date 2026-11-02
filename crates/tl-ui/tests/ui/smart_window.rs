@@ -1,6 +1,4 @@
 //! The "tasklens SMART Data" window (E25, PERF-051, UI-PRF-030).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

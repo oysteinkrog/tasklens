@@ -1,7 +1,5 @@
 //! GPU page: probe states, the Memory chart and demand (E25, UI-PRF-032; PERF-062 to PERF-065).
 
-#![cfg(feature = "test-hooks")]
-
 use std::sync::Arc;
 
 use gpui_kit::{

@@ -1,9 +1,7 @@
 //! The Overview Top processes and Timeline boxes on widgets (ADR-019 phase 2 "Fixed widgets",
 //! UI-PRF-061 phase 2): the default layout is the fixed widget alone, filling the body; Edit
 //! Widgets adds a metric widget beside it, removes it and applies; the fixed widget's demand
-//! follows whether it is placed; Reset restores the built-in default. Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! follows whether it is placed; Reset restores the built-in default.
 
 use std::sync::Arc;
 

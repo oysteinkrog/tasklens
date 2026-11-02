@@ -1,5 +1,4 @@
-//! Process table query state (tasklens-pdu.11). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Process table query state (tasklens-pdu.11).
 
 use std::sync::Arc;
 

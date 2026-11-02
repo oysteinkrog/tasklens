@@ -1,6 +1,5 @@
 //! `ActionTracker`: action events to toasts, deadlines, retry and Details (E16-A3, ADR-005,
-//! ADR-006, R-114, R-196, R-197, UI-PRC-015). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! ADR-006, R-114, R-196, R-197, UI-PRC-015).
 
 use std::cell::RefCell;
 use std::rc::Rc;

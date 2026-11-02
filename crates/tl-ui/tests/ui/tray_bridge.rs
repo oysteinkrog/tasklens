@@ -1,6 +1,4 @@
 //! Tray bridge tests (tasklens-wox.9, UI-PRF-050, UI-PRF-051, UI-SHL-113, ADR-008).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

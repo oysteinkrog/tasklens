@@ -2,8 +2,7 @@
 //! mode is a flow layout of the preset's widgets placed where 1.2.0 drew the parts, a memory
 //! sample renders only the rows that changed, the By app widget keeps its legend click, Edit
 //! Widgets adds, removes, moves and applies Memory widgets (Memory by app among them), and a
-//! reset converted box reloads as the built-in default. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! reset converted box reloads as the built-in default.
 
 use std::sync::Arc;
 

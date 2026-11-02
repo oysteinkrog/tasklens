@@ -52,8 +52,7 @@ fn history_roundtrip_through_store() {
     assert!(run_history::load(Some(&store)).is_empty());
 }
 
-/// The Run window (tasklens-gma.32, UI-PWN-028, UI-PWN-029). Run with `--features test-hooks`.
-#[cfg(feature = "test-hooks")]
+/// The Run window (tasklens-gma.32, UI-PWN-028, UI-PWN-029).
 mod window {
     use std::cell::RefCell;
     use std::rc::Rc;

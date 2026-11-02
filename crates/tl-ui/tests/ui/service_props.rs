@@ -1,7 +1,5 @@
 //! Service Properties window frame tests (E27-A3, UI-SYS-030), General tab tests (UI-SYS-031) and
 //! the other tabs' tests up to Logs (UI-SYS-036).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

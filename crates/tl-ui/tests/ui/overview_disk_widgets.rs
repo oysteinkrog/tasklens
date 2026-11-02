@@ -2,8 +2,7 @@
 //! mode is a flow layout whose one widget fills the body and draws the 1.2.0 part, a disk sample
 //! renders only the disks group, a disk that goes away shows its widget as unavailable, Edit
 //! Widgets adds, removes, moves and applies Disk widgets, and a reset converted box reloads as
-//! the built-in default. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! the built-in default.
 
 use std::sync::Arc;
 

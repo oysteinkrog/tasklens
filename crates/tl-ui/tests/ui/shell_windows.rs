@@ -1,6 +1,5 @@
 //! Shell secondary windows: Share Theme (E21-030, UI-SHL-082), Collector Health (E21-007,
-//! UI-SHL-099) and Keyboard Shortcuts (E21-016, UI-SHL-095). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! UI-SHL-099) and Keyboard Shortcuts (E21-016, UI-SHL-095).
 
 use std::sync::Arc;
 use std::time::Duration;

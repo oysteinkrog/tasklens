@@ -1,6 +1,5 @@
 //! Shell keymap tests: the Global rows of canonical table (b) and the two generic setting
-//! Actions (E20-002, UI-SHL-120). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Actions (E20-002, UI-SHL-120).
 
 use std::sync::Arc;
 

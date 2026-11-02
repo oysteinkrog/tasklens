@@ -1,8 +1,6 @@
 //! Device pages through the real Performance tab: `build_page` makes each page kind once, and
 //! each page's demand reaches the engine while it is shown (E25-010, UI-PRF-020; ADR-008,
 //! ADR-009).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 use std::time::Duration;

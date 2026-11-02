@@ -313,7 +313,6 @@ fn conn_row_restricted_lock(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-#[cfg(feature = "test-hooks")]
 fn conn_restricted_tooltip_is_localized(cx: &mut TestAppContext) {
     let mut delegate = cx.update(|cx| {
         setup(cx);
@@ -465,7 +464,6 @@ fn conn_row_ids_stable_by_cookie(cx: &mut TestAppContext) {
 }
 
 /// The ConnectionsPage entity (tasklens-9o0.15, UI-SYS-060 and UI-SYS-067).
-#[cfg(feature = "test-hooks")]
 mod page {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1939,7 +1937,6 @@ mod page {
 
 /// `TasklensUi::init` binds the Connections keys and the shell builds `ConnectionsPage` for its
 /// tab (tasklens-9o0.20).
-#[cfg(feature = "test-hooks")]
 #[gpui_kit::test]
 fn connections_page_registered(cx: &mut TestAppContext) {
     use gpui_kit::{AppContext as _, VisualTestContext};
@@ -1983,7 +1980,6 @@ fn connections_page_registered(cx: &mut TestAppContext) {
 }
 
 /// Jump to process and Go to service from the Connections tab (tasklens-9o0.18).
-#[cfg(feature = "test-hooks")]
 mod jump {
 
     use super::*;
@@ -2439,7 +2435,6 @@ mod jump {
 }
 
 /// The Connection Properties window (tasklens-9o0.19).
-#[cfg(feature = "test-hooks")]
 mod props {
     use super::*;
     use gpui_kit::base::Root;
@@ -2891,7 +2886,6 @@ mod props {
 
 /// The Connections tab inside `MainWindow`, end to end through the fake engine
 /// (tasklens-9o0.2, UI-SYS-060 to UI-SYS-068, table (b)).
-#[cfg(feature = "test-hooks")]
 mod main_window {
     use super::*;
     use gpui_kit::AppContext as _;

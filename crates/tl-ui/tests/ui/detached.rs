@@ -1,6 +1,4 @@
-//! Detached graph window tests (tasklens-xdh.16, PERF-083, UI-PRF-044, R-086). Run with
-//! `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Detached graph window tests (tasklens-xdh.16, PERF-083, UI-PRF-044, R-086).
 
 use std::sync::Arc;
 

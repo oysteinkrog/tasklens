@@ -4,8 +4,6 @@
 //! never fill, Edit Widgets adds, moves and applies, Cancel restores, a sample renders no page
 //! or container, the Details widget shows the 1.3.0 rows and only it notifies when one
 //! changes, Select Pages and Edit Widgets exclude each other, and Reset Page saves the default.
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 

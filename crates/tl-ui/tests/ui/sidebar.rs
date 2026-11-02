@@ -1,5 +1,4 @@
-//! Device sidebar card rendering (E24, UI-PRF-011). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! Device sidebar card rendering (E24, UI-PRF-011).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

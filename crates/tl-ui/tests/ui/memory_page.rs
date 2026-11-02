@@ -1,7 +1,5 @@
 //! Memory page: charts, the Swap chart rules, the menu checks and the demand (E25, UI-PRF-026;
 //! PERF-018, PERF-026, PERF-041).
-//! Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 use std::time::Duration;

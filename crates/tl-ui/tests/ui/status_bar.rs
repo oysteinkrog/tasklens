@@ -1,7 +1,6 @@
 //! The machine status bar (UI-PRF-054): where it shows for each `performance.status_bar`
 //! value, its text, and the Overview box state edges. The state rules have unit tests in
-//! `pages/performance/status_bar/rules.rs`. Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! `pages/performance/status_bar/rules.rs`.
 
 use std::sync::Arc;
 

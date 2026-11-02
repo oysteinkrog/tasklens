@@ -1,5 +1,4 @@
-//! The Overview 24-hour timeline box (UI-PRF-057, D-030). Run with `--features test-hooks`.
-#![cfg(feature = "test-hooks")]
+//! The Overview 24-hour timeline box (UI-PRF-057, D-030).
 
 use std::sync::Arc;
 
