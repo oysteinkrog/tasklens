@@ -57,7 +57,7 @@ use super::menubar::{MenuSliders, TAB_SWITCH};
 use super::public_ip::request_public_ip_fetch;
 use crate::action_tracker::host_send_allowed;
 use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
-use crate::app::{AdapterInfo, AppEnv};
+use crate::app_env::{AdapterInfo, AppEnv};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;

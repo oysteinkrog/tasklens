@@ -54,7 +54,7 @@ impl Global for ContinuousRendering {}
 
 /// Whether the debug flag is set.
 pub fn debug_enabled(cx: &App) -> bool {
-    cx.try_global::<crate::app::AppEnv>()
+    cx.try_global::<crate::app_env::AppEnv>()
         .is_some_and(|e| e.debug)
 }
 

@@ -4,6 +4,7 @@ pub mod action_tracker;
 pub mod actions;
 pub mod anim;
 pub mod app;
+pub mod app_env;
 pub mod chart;
 pub mod components;
 pub mod demand;

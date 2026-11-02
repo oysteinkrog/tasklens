@@ -19,7 +19,7 @@ use gpui_kit::{
 use tl_ui_settings::settings::HostEntry;
 
 use super::{PageBuilder, PageId};
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::switch::TlSwitch;

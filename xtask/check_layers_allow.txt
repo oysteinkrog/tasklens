@@ -4,15 +4,10 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-base -> tl-ui (shell): 8
+# tl-ui-base -> tl-ui (shell): 3
 action_tracker.rs -> window::main
 actions.rs -> window::setup
-engine_link.rs -> app
-host.rs -> app
 host.rs -> window::main
-settings_global.rs -> app
-theme/preview.rs -> app
-theme/store.rs -> app
 
 # tl-ui-base -> tl-ui-kit: 5
 action_tracker.rs -> components::dialog
@@ -24,8 +19,7 @@ actions.rs -> components::window_frame
 # tl-ui-base -> tl-ui-perf-core: 1
 action_tracker.rs -> pages::performance::details
 
-# tl-ui-kit -> tl-ui (shell): 3
-components/window_frame.rs -> app
+# tl-ui-kit -> tl-ui (shell): 2
 components/window_frame.rs -> window::registry
 helper_flow.rs -> window::main
 
@@ -73,13 +67,12 @@ pages/performance/overview/procs_box.rs -> pages::processes
 pages/performance/overview/procs_box.rs -> pages::processes::jump
 pages/performance/overview/timeline.rs -> pages::processes::history
 
-# tl-ui-perf -> tl-ui (shell): 9
+# tl-ui-perf -> tl-ui (shell): 8
 pages/performance/mod.rs -> window::main
 pages/performance/mod.rs -> window::status
 pages/performance/net.rs -> window::public_ip
 pages/performance/sensors.rs -> window::settings
 pages/performance/status_bar/mod.rs -> window::main
-windows/mini.rs -> app
 windows/mini.rs -> window::main
 windows/mini.rs -> window::registry
 windows/mini.rs -> window::titlebar
@@ -87,7 +80,7 @@ windows/mini.rs -> window::titlebar
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
 
-# tl-ui-perf-core -> tl-ui (shell): 11
+# tl-ui-perf-core -> tl-ui (shell): 10
 pages/minigraph/bridge.rs -> window::registry
 pages/minigraph/bridge.rs -> window::titlebar
 pages/minigraph/menu.rs -> window::main
@@ -95,7 +88,6 @@ pages/minigraph/menu.rs -> window::menubar
 pages/minigraph/panel.rs -> window::main
 pages/minigraph/panel.rs -> window::registry
 tray_bridge.rs -> window::main
-windows/detached_graph.rs -> app
 windows/detached_graph.rs -> window::main
 windows/detached_graph.rs -> window::registry
 windows/detached_graph.rs -> window::titlebar

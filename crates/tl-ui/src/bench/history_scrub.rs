@@ -46,7 +46,8 @@ use super::stats::{
 };
 use super::synth::{BenchRng, SEED};
 use crate::anim::AnimationDriver;
-use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::app::TasklensUi;
+use crate::app_env::{AppEnv, UiInit};
 use crate::host::HostContext;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::history::HistoryPage;

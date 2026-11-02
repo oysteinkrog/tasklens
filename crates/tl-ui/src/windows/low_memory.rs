@@ -42,9 +42,8 @@ use tl_model::validity::{ProcessField, Validity};
 use tracing::{debug, warn};
 
 use crate::action_tracker::{ActionTrackerEvent, ToastTexts, reconnecting_refusal};
-use crate::app::{
-    AppRequestHandler, BootSettings, EngineGlobal, OpenHooks, UiExit, UiInit, request_exit,
-};
+use crate::app::{OpenHooks, UiExit, request_exit};
+use crate::app_env::{AppRequestHandler, BootSettings, EngineGlobal, UiInit};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::input::{TlFilterBox, TlInputSize, TlTextInput};
 use crate::components::toast::{self, ToastQueue};

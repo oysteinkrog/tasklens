@@ -38,7 +38,8 @@ use super::stats::{
 };
 use super::synth::SEED;
 use crate::anim::{AnimationDriver, PaintRecord};
-use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::app::TasklensUi;
+use crate::app_env::{AppEnv, UiInit};
 use crate::chart::view::ChartView;
 use crate::chart::{
     ChartLabels, ChartSeries, ChartSpec, GridStyle, ValueAlign, ValueFormat, YScale,

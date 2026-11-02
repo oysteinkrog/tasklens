@@ -30,7 +30,7 @@ use tracing::warn;
 
 use super::registry::{GlobalRegistry, WindowKey};
 use crate::action_tracker::ToastTexts;
-use crate::app::{AppEnv, BuildInfo};
+use crate::app_env::{AppEnv, BuildInfo};
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::icons::AppIcon;
 use crate::components::link::TlLink;

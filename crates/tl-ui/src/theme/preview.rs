@@ -404,7 +404,7 @@ mod tests {
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
     use super::*;
-    use crate::app::BootSettings;
+    use crate::app_env::BootSettings;
     use crate::settings_global::TlSettings;
     use crate::theme::store::{self, ActivateSource, DEFAULT_DARK, DEFAULT_LIGHT};
     use crate::theme::user_store::ThemePersist;

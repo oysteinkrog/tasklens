@@ -615,7 +615,7 @@ mod tests {
     use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
-    use crate::app::BootSettings;
+    use crate::app_env::BootSettings;
     use crate::settings_global::TlSettings;
 
     const WINDOW_BG: usize = ThemeSlot::WindowBg as usize;

@@ -12,7 +12,7 @@ use gpui_kit::{App, SharedString};
 use tracing::warn;
 
 use super::{LocalSwitch, PageBuilder, PageId};
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 use crate::components::window_frame::ToggleAlwaysOnTop;
 use crate::host::HostContext;
 use crate::i18n::tr;

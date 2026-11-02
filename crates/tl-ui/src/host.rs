@@ -28,7 +28,7 @@ use tl_ui_settings::settings::HostEntry;
 use tracing::{info, warn};
 
 use crate::action_tracker::{ActionTracker, GlobalActionTracker};
-use crate::app::{AppEnv, EngineGlobal};
+use crate::app_env::{AppEnv, EngineGlobal};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hosts_api::HostLinkStatus;
 use crate::hub::{GlobalHub, HostClock, SnapshotHub};

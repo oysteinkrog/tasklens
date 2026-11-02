@@ -35,7 +35,7 @@ use super::frame::{PwnWindow, TITLE_RUN, pwn_window_spec};
 use super::run_history;
 use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
 use crate::actions::OpenRunDialog;
-use crate::app::{AppEnv, RunHistoryEntry, RunHistoryStore};
+use crate::app_env::{AppEnv, RunHistoryEntry, RunHistoryStore};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::checkbox::TlCheckbox;
 use crate::components::icons::TlIcon;

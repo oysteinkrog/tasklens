@@ -11,7 +11,7 @@ use std::sync::Arc;
 use gpui_kit::{App, AsyncApp, Global};
 use tracing::info;
 
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 
 gpui_kit::actions!(tasklens, [SwitchToEngineService]);
 

@@ -22,7 +22,7 @@ use serde::de::IntoDeserializer;
 use tl_ui_settings::settings::{Settings, UiState};
 use tracing::{debug, warn};
 
-use crate::app::{BootSettings, PersistFn};
+use crate::app_env::{BootSettings, PersistFn};
 use crate::host::HostContext;
 use crate::{host_settings, i18n};
 

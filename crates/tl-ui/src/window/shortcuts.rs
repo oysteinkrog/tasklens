@@ -32,7 +32,7 @@ use smallvec::SmallVec;
 
 use super::registry::{GlobalRegistry, WindowKey};
 use crate::actions::OpenShortcuts;
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};

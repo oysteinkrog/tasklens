@@ -319,7 +319,7 @@ pub fn window_options(
         kind: spec.kind.window_kind(),
         is_resizable: spec.kind.resizable(),
         window_min_size: Some(min_size),
-        app_id: Some(crate::app::window_app_id(cx)),
+        app_id: Some(crate::app_env::window_app_id(cx)),
         ..base
     }
 }

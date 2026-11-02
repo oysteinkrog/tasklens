@@ -76,9 +76,8 @@ use crate::actions::{
     StartWindowPick, ToggleHideSystem, ToggleHistoryMode, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
-use crate::app::{
-    AppRequestHandler, BootSettings, OpenHooks, StartOptions, ToastKindTag, UiExit, request_exit,
-};
+use crate::app::{OpenHooks, UiExit, request_exit};
+use crate::app_env::{AppRequestHandler, BootSettings, StartOptions, ToastKindTag};
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
@@ -141,8 +140,7 @@ const RECONNECT_OPACITY: f32 = 0.6;
 /// The window's smallest size in logical px (ADR-010).
 pub const MIN_W: f32 = 800.0;
 pub const MIN_H: f32 = 500.0;
-/// The Wayland app id and X11 class; matches the desktop file.
-pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
+pub use crate::app_env::APP_ID;
 /// The window title the KWin task switcher shows.
 pub const WINDOW_TITLE: &str = "tasklens";
 /// Gap between the tab strip and the toast stack's top edge, × ui_scale (UI-SHL-100).
@@ -1151,7 +1149,7 @@ pub fn main_window_options(cx: &App) -> WindowOptions {
         }),
         window_background: WindowBackgroundAppearance::Opaque,
         window_min_size: Some(size(px(MIN_W), px(MIN_H))),
-        app_id: Some(crate::app::window_app_id(cx)),
+        app_id: Some(crate::app_env::window_app_id(cx)),
         window_bounds: Some(restored_bounds(&TlSettings::state(cx).window)),
         focus: !start_hidden,
         show: !start_hidden,

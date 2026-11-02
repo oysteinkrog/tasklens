@@ -24,7 +24,7 @@ use tracing::warn;
 use super::about::{file_uri, send_open_uri};
 use super::registry::{GlobalRegistry, WindowKey};
 use crate::action_tracker::ToastTexts;
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 use crate::components::button::{TlButton, TlButtonKind};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::toast::{ToastKind, ToastQueue};

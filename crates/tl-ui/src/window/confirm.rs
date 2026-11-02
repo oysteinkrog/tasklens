@@ -13,7 +13,7 @@ use gpui_kit::{App, SharedString, Window};
 use tl_ui_settings::settings::Settings;
 use tracing::warn;
 
-use crate::app::AppEnv;
+use crate::app_env::AppEnv;
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::tr;

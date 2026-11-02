@@ -17,7 +17,7 @@ use super::{
     PageBuilder, PageId, PickValue, SettingsWindow, info_toast, kind_toast, read, value_matches,
 };
 use crate::action_tracker::ToastTexts;
-use crate::app::{AdapterInfo, AppEnv};
+use crate::app_env::{AdapterInfo, AppEnv};
 use crate::components::button::TlButtonKind;
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::host::HostContext;

@@ -78,7 +78,7 @@ pub fn detached_window_options(size: Size<Pixels>, cx: &mut App) -> WindowOption
         titlebar: None,
         is_resizable: false,
         is_movable: true,
-        app_id: Some(crate::app::window_app_id(cx)),
+        app_id: Some(crate::app_env::window_app_id(cx)),
         window_background: WindowBackgroundAppearance::Opaque,
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         ..Default::default()
