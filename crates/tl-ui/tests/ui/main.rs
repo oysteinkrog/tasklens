@@ -74,5 +74,4 @@ mod startup;
 mod status_bar;
 mod sys_table;
 mod theme;
-mod toasts;
 mod tray_bridge;

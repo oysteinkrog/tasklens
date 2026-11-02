@@ -11,11 +11,11 @@ use gpui_kit::{
     SharedString, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
 };
 use tl_model::client::EngineClient;
-use tl_ui::app::BootSettings;
-use tl_ui::components::toast::{self, ToastAction, ToastKey, ToastKind, ToastQueue};
-use tl_ui::hub::{GlobalHub, SnapshotHub};
-use tl_ui::settings_global::{TlSettings, animations_on};
-use tl_ui::theme::metrics::metrics;
+use tl_ui_base::app_env::BootSettings;
+use tl_ui_kit::components::toast::{self, ToastAction, ToastKey, ToastKind, ToastQueue};
+use tl_ui_base::hub::{GlobalHub, SnapshotHub};
+use tl_ui_base::settings_global::{TlSettings, animations_on};
+use tl_ui_base::theme::metrics::metrics;
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -75,8 +75,8 @@ fn setup(cx: &mut TestAppContext, appearance: &AppearanceSettings, reduce_motion
         gpui_kit::init(cx);
         toast::init(cx);
         cx.set_reduce_motion(reduce_motion);
-        tl_ui::theme::store::init(cx, &ThemeSettings::default(), appearance, Vec::new());
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::store::init(cx, &ThemeSettings::default(), appearance, Vec::new());
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
 }
 

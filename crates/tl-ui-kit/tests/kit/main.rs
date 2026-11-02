@@ -3,3 +3,4 @@
 //! Run with `cargo test -p tl-ui-kit --test kit`.
 
 mod keymap;
+mod toasts;
