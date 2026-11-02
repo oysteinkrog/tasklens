@@ -29,7 +29,6 @@ mod overview;
 mod overview_range;
 mod overview_timeline;
 mod performance;
-mod process_menu;
 mod processes;
 mod props;
 mod run;

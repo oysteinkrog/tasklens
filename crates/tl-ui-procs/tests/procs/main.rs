@@ -9,5 +9,6 @@ mod dialogs_process;
 mod handle_search;
 mod helper_flow;
 mod process_cells;
+mod process_menu;
 mod process_priority_menu;
 mod process_tooltips;

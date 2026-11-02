@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
@@ -10,19 +9,16 @@ use gpui_kit::{
     Render, SharedString, Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle,
     div, px, size,
 };
-use tl_model::client::EngineClient;
-use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::dialog::{DialogButton, TlDialogView};
-use tl_ui::components::toast;
-use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::processes::confirm::{
+use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use tl_ui_procs::pages::processes::confirm::{
     ConfirmKind, ConfirmResult, ConfirmTexts, ProtectedAction, confirm, texts,
 };
-use tl_ui_settings::settings::{Settings, UiState};
-use tl_ui_testkit::fake_engine::FakeEngine;
+use tl_ui_settings::settings::Settings;
 
-use super::common::is_open;
+use tl_ui_pagehost::helpers::is_open;
+
+use super::common::shell_free_init;
 
 struct Body;
 
@@ -36,26 +32,7 @@ type DialogFrame = TlSecondaryWindow<TlDialogView>;
 type Results = Rc<RefCell<Vec<ConfirmResult>>>;
 
 fn setup(cx: &mut TestAppContext) {
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine;
-    let (_tx, rx) = async_channel::bounded(4);
-    let init = UiInit {
-        settings: Settings::default(),
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
-    cx.update(|cx| {
-        TasklensUi::init(cx, client, init);
-        toast::init(cx);
-        init_strings(cx, "en-US");
-        cx.set_reduce_motion(true);
-    });
-    cx.run_until_parked();
+    shell_free_init(cx, Settings::default());
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -435,30 +412,26 @@ fn picked_second_button_terminate(cx: &mut TestAppContext) {
 mod toasts {
     use std::sync::Arc;
 
+    use crate::common::{open_stand_in, shell_free_init, stand_in_of};
     use gpui_kit::{SharedString, TestAppContext, VisualTestContext};
     use tl_model::actions::{
         ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
         IoPriority, RejectReason, Signal,
     };
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::Command;
     use tl_model::health::HelperState;
     use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::ProcFlags;
     use tl_model::system::CpuSet;
     use tl_model::time::BootId;
-    use tl_ui::action_tracker::{GlobalActionTracker, PushedToast, RetryActionAsAdmin};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::toast::{ToastKey, ToastKind};
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-    use tl_ui::pages::processes::toasts::{
+    use tl_ui_base::action_tracker::{GlobalActionTracker, PushedToast, RetryActionAsAdmin};
+    use tl_ui_kit::components::toast::{ToastKey, ToastKind};
+    use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui_procs::pages::processes::toasts::{
         ActionToastTexts, exited_toast, refusal_reason, refusal_text, refuse, submit, texts_for,
     };
-    use tl_ui::table::tree_table::RowKind;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_table::table::tree_table::RowKind;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn key(pid: u32) -> ProcessKey {
@@ -725,30 +698,8 @@ mod toasts {
 
     /// The real main window on the Processes tab, with the app's tracker.
     pub(super) fn open(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
-        });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Processes, cx))
-            .expect("the main window opens");
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
+        let (engine, host) = shell_free_init(cx, Settings::default());
+        let (_, vcx) = open_stand_in(cx, &host);
         (engine, vcx)
     }
 
@@ -767,11 +718,7 @@ mod toasts {
         let texts = texts(kind.clone(), n);
         let req = request(kind, n);
         let id = vcx.update(|_, cx| {
-            let main = main_window_view(cx).expect("main window");
-            let page = main
-                .read(cx)
-                .page_entity::<ProcessesPage>(Tab::Processes)
-                .expect("the Processes page is built");
+            let page = stand_in_of(cx).page;
             page.update(cx, |p, cx| submit(p, req, texts, cx))
         });
         vcx.run_until_parked();
@@ -801,8 +748,7 @@ mod toasts {
 
     pub(super) fn visible(vcx: &mut VisualTestContext) -> Vec<String> {
         vcx.update(|_, cx| {
-            let main = main_window_view(cx).expect("main window");
-            let texts = main.read(cx).toasts().read(cx).visible_texts();
+            let texts = stand_in_of(cx).toasts.read(cx).visible_texts();
             texts.iter().map(|t| t.to_string()).collect()
         })
     }
@@ -1084,6 +1030,7 @@ mod toasts {
 mod end {
     use std::sync::Arc;
 
+    use crate::common::stand_in_of;
     use gpui_kit::component::kbd::Kbd;
     use gpui_kit::{
         Action, Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, WindowId,
@@ -1095,8 +1042,8 @@ mod end {
     use tl_model::actions::IoPriority;
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
+    use tl_model::command::Command;
     use tl_model::command::KWinCommand;
-    use tl_model::command::{Command, Tab};
     use tl_model::health::{EngineCaps, HelperState};
     use tl_model::ids::ColumnId;
     use tl_model::ids::DeviceIdx;
@@ -1115,34 +1062,33 @@ mod end {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::action_tracker::message;
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::menu::{
+    use tl_ui_base::action_tracker::message;
+    use tl_ui_base::i18n::tr_en;
+    use tl_ui_kit::actions::{GoToService, JumpOrigin, ManagerArg};
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::menu::{
         MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu, open_context_menu_at,
     };
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::i18n::tr_en;
-    use tl_ui::pages::processes::actions::{
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::pages::processes::actions::{
         ActivateWindow, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree,
         EndTask, FileProperties, FreezeApp, GoToParent, IoClass, KillApp, OpenFileLocation,
         OpenVirusTotal, PriorityClass, ProcessesShowHidden, RestartUnit, ResumeProcess,
         SetIoPriorityClass, SetPriority, ShowWindow, SuspendProcess, ThawApp,
     };
-    use tl_ui::pages::processes::cells::{
+    use tl_ui_procs::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
         process_column,
     };
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::pages::processes::menu::window_popup;
-    use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
-    use tl_ui::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
-    use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
-    use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
-    use tl_ui::window::main::main_window_view;
-    use tl_ui::windows::actions::{OpenCustomPriority, SetAffinity};
-    use tl_ui::windows::affinity::AffinityDialog;
-    use tl_ui::windows::priority::PriorityDialog;
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
+    use tl_ui_procs::pages::processes::menu::window_popup;
+    use tl_ui_procs::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
+    use tl_ui_procs::windows::actions::{OpenCustomPriority, SetAffinity};
+    use tl_ui_procs::windows::affinity::AffinityDialog;
+    use tl_ui_procs::windows::priority::PriorityDialog;
     use tl_ui_settings::settings::Settings;
+    use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable};
+    use tl_ui_table::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::toasts::{actions_sent, emit, open, visible};
@@ -1278,13 +1224,7 @@ mod end {
     impl Rig {
         fn new(cx: &mut TestAppContext) -> Self {
             let (engine, mut vcx) = open(cx);
-            let page = vcx.update(|_, cx| {
-                main_window_view(cx)
-                    .expect("main window")
-                    .read(cx)
-                    .page_entity::<ProcessesPage>(Tab::Processes)
-                    .expect("the Processes page is built")
-            });
+            let page = vcx.update(|_, cx| stand_in_of(cx).page);
             Self {
                 engine,
                 vcx,
@@ -2527,7 +2467,7 @@ mod end {
                 .expect("CPU is shown");
             (
                 layout.offsets()[pos] + px(4.),
-                tl_ui::theme::metrics(cx).row_height,
+                tl_ui_base::theme::metrics(cx).row_height,
             )
         });
         let at = point(body.origin.x + x, body.origin.y + row_h * 1.5);
@@ -2996,7 +2936,7 @@ mod end {
     fn row_menu_key_hints_from_process_table_context(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
         rig.vcx
-            .update(|_, cx| tl_ui::pages::processes::bind_keys_processes(cx));
+            .update(|_, cx| tl_ui_procs::pages::processes::bind_keys_processes(cx));
         rig.publish(own(&[300]), &[300], Vec::new());
         let menu = build_menu(&mut rig, &[0], ColumnId::Name);
         let all = entries(&mut rig, &menu);
@@ -3337,7 +3277,7 @@ mod end {
     /// closes the table shows the new order.
     #[gpui_kit::test]
     fn row_order_is_frozen_while_a_row_menu_is_open(cx: &mut TestAppContext) {
-        use tl_ui::table::tree_table::TreeTableDelegate as _;
+        use tl_ui_table::table::tree_table::TreeTableDelegate as _;
         let mut rig = Rig::new(cx);
         rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
         let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
