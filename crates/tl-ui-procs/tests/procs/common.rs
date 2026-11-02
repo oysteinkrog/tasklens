@@ -151,6 +151,16 @@ fn install_stand_in_api(cx: &mut App) {
             queue.update(cx, |q, cx| q.push(kind, text, key, action, cx));
         }
     };
+    // The stand-in shows the Processes tab only: another tab hides the page, so its demand goes.
+    api.select_tab = |tab, _, cx| {
+        cx.default_global::<ShellState>().active_tab = tab;
+        if let Some(page) = cx.global::<StandInSlot>().page.clone() {
+            let page = page.downcast::<ProcessesPage>().ok();
+            if let Some(page) = page {
+                page.update(cx, |p, cx| p.set_active(tab == Tab::Processes, cx));
+            }
+        }
+    };
     api.main_toasts = |cx| cx.global::<StandInSlot>().toasts.clone().map(Into::into);
     api.page = |cx, tab| {
         (tab == Tab::Processes)

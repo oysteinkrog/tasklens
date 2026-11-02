@@ -30,7 +30,7 @@ mod overview_range;
 mod overview_timeline;
 mod performance;
 mod processes;
-mod props;
+mod props_shell;
 mod run;
 mod selectors;
 mod service_props;

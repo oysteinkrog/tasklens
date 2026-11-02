@@ -19,15 +19,15 @@ use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::components::kv_grid::{ValueLook, kv_words, value_look_in};
-use tl_ui::components::window_frame::{client_frame_extra, window_options};
-use tl_ui::host::HostContext;
-use tl_ui::text::fonts::UI_FAMILY;
-use tl_ui::text::style::t_sm;
-use tl_ui::theme::{current, metrics};
-use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
-use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
-use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::kv_grid::{ValueLook, kv_words, value_look_in};
+use tl_ui_kit::components::window_frame::{client_frame_extra, window_options};
+use tl_ui_procs::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
+use tl_ui_procs::windows::props::filter::{PropsFilter, filter_bar};
+use tl_ui_procs::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
 use tl_ui_settings::settings::{AppearanceSettings, Decorations, ThemeSettings};
 
 const KEY: ProcessKey = ProcessKey {
@@ -196,13 +196,13 @@ impl Render for Host {
 fn host(cx: &mut TestAppContext, width: f32) -> (Entity<Host>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
@@ -325,7 +325,7 @@ fn hover(
     let at = gpui_kit::point(panel.right() - px(30.), y);
     cx.simulate_mouse_move(at, None, gpui_kit::Modifiers::none());
     cx.executor()
-        .advance_clock(tl_ui::components::tooltip::DELAY_CONTROL * 2);
+        .advance_clock(tl_ui_kit::components::tooltip::DELAY_CONTROL * 2);
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let tip = cx.debug_bounds("TlTooltip")?;
@@ -480,7 +480,7 @@ fn col2_row(
     tab: &Entity<GeneralTab>,
     cx: &mut VisualTestContext,
     label: &str,
-) -> tl_ui::components::kv_grid::TlKvRow {
+) -> tl_ui_kit::components::kv_grid::TlKvRow {
     cx.update(|_, cx| {
         tab.read(cx)
             .rows(1)
@@ -792,7 +792,7 @@ fn general_restricted_word_and_tooltip(cx: &mut TestAppContext) {
             .into_iter()
             .find(|r| r.label.as_ref() == "Executable:")
             .expect("Executable row");
-        let theme = tl_ui::theme::current(cx);
+        let theme = tl_ui_base::theme::current(cx);
         (
             value_look_in(&row.value, &words, theme).expect("drawn"),
             row.value.tooltip.clone(),
@@ -839,7 +839,7 @@ fn exe_and_pid_looks(
     cx.update(|_, cx| {
         let rows: Vec<_> = (0..3).flat_map(|i| t.read(cx).rows(i)).collect();
         let words = kv_words(cx);
-        let theme = tl_ui::theme::current(cx);
+        let theme = tl_ui_base::theme::current(cx);
         let look = |label: &str| {
             let row = rows
                 .iter()
@@ -923,8 +923,8 @@ fn props_filter_hides_general_fields(cx: &mut TestAppContext) {
 /// The Unsupported words come from the catalogue and are kept by variant, not by text (R-132).
 #[gpui_kit::test]
 fn general_unsupported_words_follow_test_locale(cx: &mut TestAppContext) {
-    use tl_ui::components::kv_grid::UnsupportedWord;
-    use tl_ui::i18n::{set_test_catalogue, tr_calls};
+    use tl_ui_base::i18n::{set_test_catalogue, tr_calls};
+    use tl_ui_kit::components::kv_grid::UnsupportedWord;
 
     const MARKERS: &str = "
 fnd-kv-not-supported = <not-supported>
@@ -932,13 +932,13 @@ fnd-kv-not-reported = <not-reported>
 ";
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         set_test_catalogue(cx, MARKERS);
     });
     // The tab alone: the frame check below is for the tab, not the filter bar.
@@ -959,7 +959,7 @@ fnd-kv-not-reported = <not-reported>
     assert_eq!(value(&t, cx, FieldId::Cgroup), "<not-reported>");
     let (cgroup, cmdline) = cx.update(|_, cx| {
         let words = kv_words(cx);
-        let theme = tl_ui::theme::current(cx);
+        let theme = tl_ui_base::theme::current(cx);
         let row = (0..3)
             .flat_map(|i| t.read(cx).rows(i))
             .find(|r| r.label.as_ref() == "Cgroup:")
@@ -993,7 +993,7 @@ fnd-kv-not-reported = <not-reported>
 /// in the copy text, and the formatted values use the swapped words.
 #[gpui_kit::test]
 fn general_labels_and_words_follow_test_locale(cx: &mut TestAppContext) {
-    use tl_ui::i18n::set_test_catalogue;
+    use tl_ui_base::i18n::set_test_catalogue;
 
     const MARKERS: &str = "
 pwn-general-label-cgroup = <cgroup>:
@@ -1002,13 +1002,13 @@ pwn-general-seccomp-filter-many = <filter { $n }>
 ";
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         set_test_catalogue(cx, MARKERS);
     });
     let (t, cx) = cx.add_window_view(|window, cx| {
@@ -1037,7 +1037,7 @@ pwn-general-seccomp-filter-many = <filter { $n }>
 /// no tr call over 60 frames, and a new catalogue reaches the placeholder and tooltip (R-132).
 #[gpui_kit::test]
 fn props_filter_bar_words_follow_test_locale(cx: &mut TestAppContext) {
-    use tl_ui::i18n::{set_test_catalogue, tr_calls};
+    use tl_ui_base::i18n::{set_test_catalogue, tr_calls};
 
     const MARKERS: &str = "
 pwn-props-filter-placeholder = <filter-placeholder>
@@ -1094,7 +1094,7 @@ impl Render for Dummy {
 fn frame_setup(cx: &mut TestAppContext, ui_scale_pct: u16) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings {
@@ -1103,7 +1103,7 @@ fn frame_setup(cx: &mut TestAppContext, ui_scale_pct: u16) {
             },
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
 }
 
@@ -1169,7 +1169,7 @@ fn run_size_scales_with_ui_scale(cx: &mut TestAppContext) {
 
 mod app_props {
     use tl_model::details::{AppGeneralDetail, AppKind};
-    use tl_ui::windows::app_props::AppGeneralTab;
+    use tl_ui_procs::windows::app_props::AppGeneralTab;
 
     use super::*;
 
@@ -1212,13 +1212,13 @@ mod app_props {
     fn open(cx: &mut TestAppContext, width: f32) -> (Entity<AppHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let (host, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
@@ -1264,10 +1264,10 @@ mod window {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    use crate::common::{open_stand_in, shell_free_init_with, stand_in_of};
     use gpui_kit::{AnyWindowHandle, WindowHandle};
     use tl_model::actions::ActionKind;
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, KWinCommand, Tab};
+    use tl_model::command::{Command, Tab};
     use tl_model::demand::DetailDemand;
     use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
     use tl_model::health::{HelperStartOutcome, HelperState};
@@ -1275,26 +1275,26 @@ mod window {
     use tl_model::process::{GroupKind, GroupRow, GroupRowKind};
     use tl_model::snapshot::ProcessSnapshot;
     use tl_model::table::{ProcessTableView, TableRow};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::TlMenu;
-    use tl_ui::components::shield::StartHelperSession;
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::demand::GlobalDemand;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::pages::processes::menu::{MenuCaps, row_menu};
-    use tl_ui::table::tree_table::RowKind;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
-    use tl_ui::windows::app_props::{
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::demand::GlobalDemand;
+    use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_base::shell::{ShellApi, ShellState};
+    use tl_ui_kit::components::menu::TlMenu;
+    use tl_ui_kit::components::shield::StartHelperSession;
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_procs::pages::processes::ProcessesPage;
+    use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+    use tl_ui_procs::pages::processes::delegate::ProcRowId;
+    use tl_ui_procs::pages::processes::menu::{MenuCaps, row_menu};
+    use tl_ui_procs::windows::app_props::{
         APP_EXITED_BANNER, AppProcsGoTo, AppPropsWindow, open_app_properties,
     };
-    use tl_ui::windows::props::{
+    use tl_ui_procs::windows::props::{
         ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, AccessButton,
         PropsWindow, open_process_properties, props_words,
     };
     use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_table::table::tree_table::RowKind;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     use super::*;
@@ -1312,30 +1312,13 @@ mod window {
 
     /// App globals and the main window on Processes.
     fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
+        let (engine, host) =
+            shell_free_init_with(cx, Settings::default(), UiState::default(), AppEnv::test());
         cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
             cx.set_reduce_motion(true);
         });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Processes, cx))
-            .expect("the main window opens");
-        let mut main = VisualTestContext::from_window(handle.into(), cx);
-        main.update(|window, _| window.activate_window());
-        main.run_until_parked();
+        let (_, main) = open_stand_in(cx, &host);
         (engine, main)
     }
 
@@ -1414,11 +1397,7 @@ mod window {
     }
 
     fn processes_page(main: &mut VisualTestContext) -> Entity<ProcessesPage> {
-        main.update(|_, cx| {
-            main_window_view(cx)
-                .and_then(|view| view.read(cx).page_entity::<ProcessesPage>(Tab::Processes))
-                .expect("the Processes page is built")
-        })
+        main.update(|_, cx| stand_in_of(cx).page)
     }
 
     fn table_row(node: NodeId, record: Option<u32>, group: Option<u32>) -> TableRow {
@@ -1708,8 +1687,7 @@ mod window {
 
     fn main_toasts(main: &mut VisualTestContext) -> Vec<String> {
         main.update(|_, cx| {
-            let view = main_window_view(cx).expect("main window");
-            let texts = view.read(cx).toasts().read(cx).visible_texts();
+            let texts = stand_in_of(cx).toasts.read(cx).visible_texts();
             texts.iter().map(|t| t.to_string()).collect()
         })
     }
@@ -1823,73 +1801,6 @@ mod window {
     /// Pinning Process or App Properties sends `KeepAbove` for that window's caption. Their
     /// frames carry the registry key: without it the pin only changed its look, which the old
     /// `Floating` kind hid (tasklens-fut.25, R-073, D-031).
-    #[gpui_kit::test]
-    fn props_pin_sends_keep_above(cx: &mut TestAppContext) {
-        let (engine, _main) = setup(cx);
-        engine.publish_with(|s| {
-            let windows = Arc::make_mut(&mut s.windows);
-            windows.header.validity = Validity::Valid;
-            windows.header.version += 1;
-        });
-        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
-        let app = app_group("Firefox", GroupRowKind::App, 34);
-        publish_groups(cx, &engine, vec![app.clone()]);
-        let handle = open(cx, 4321).expect("opened");
-        let app_handle = open_app(cx, app.key).expect("app window opened");
-
-        let frame = cx
-            .update(|cx| {
-                TlSecondaryWindow::<PropsWindow>::find(WindowHandle::new(handle.window_id()), cx)
-            })
-            .expect("frame");
-        let app_frame = cx
-            .update(|cx| {
-                TlSecondaryWindow::<AppPropsWindow>::find(
-                    WindowHandle::new(app_handle.window_id()),
-                    cx,
-                )
-            })
-            .expect("app frame");
-        assert_eq!(
-            cx.update(|cx| frame.read(cx).key().cloned()),
-            Some(WindowKey::Properties(key(4321)))
-        );
-        assert_eq!(
-            cx.update(|cx| app_frame.read(cx).key().cloned()),
-            Some(WindowKey::AppProperties(app.key))
-        );
-
-        cx.update_window(handle, |_, window, cx| {
-            frame.update(cx, |f, cx| f.set_pinned(true, window, cx))
-        })
-        .expect("props window");
-        cx.update_window(app_handle, |_, window, cx| {
-            app_frame.update(cx, |f, cx| f.set_pinned(true, window, cx))
-        })
-        .expect("app props window");
-        cx.run_until_parked();
-
-        let keep_above: Vec<KWinCommand> = engine
-            .commands()
-            .into_iter()
-            .filter_map(|c| match c {
-                Command::KWin(k @ KWinCommand::KeepAbove { .. }) => Some(k),
-                _ => None,
-            })
-            .collect();
-        let pinned = |caption: &str| KWinCommand::KeepAbove {
-            pid: std::process::id(),
-            caption: Some(Arc::from(caption)),
-            on: true,
-        };
-        assert_eq!(
-            keep_above,
-            [
-                pinned("Process Properties - firefox - PID 4321"),
-                pinned("App Properties - Firefox"),
-            ]
-        );
-    }
 
     fn member(pid: u32, group: GroupKey) -> ProcessRecord {
         let mut r = rec(pid, ProcFlags::empty());
@@ -2419,10 +2330,7 @@ mod window {
         let (engine, mut main) = setup(cx);
         // The Processes table shows the GPU column by default and asks for the same values
         // (tasklens-rsf.30), so the main window moves to a page that does not.
-        main.update(|window, cx| {
-            let view = main_window_view(cx).expect("main window");
-            view.update(cx, |m, cx| m.select_tab(Tab::Services, window, cx));
-        });
+        main.update(|window, cx| ShellApi::select_tab(Tab::Services, window, cx));
         main.run_until_parked();
         publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
         let gpu_process = |cx: &mut TestAppContext| {
@@ -2807,7 +2715,7 @@ mod window {
             status(cx),
             (
                 "Matches package".to_string(),
-                Some(tl_ui::components::kv_grid::ValueTone::Success)
+                Some(tl_ui_kit::components::kv_grid::ValueTone::Success)
             )
         );
     }
@@ -2884,7 +2792,7 @@ mod window {
             )
             .expect("panel drawn");
         let (sp3, sp4, row_h) = rig.vcx.update(|_, cx| {
-            let m = tl_ui::theme::metrics(cx);
+            let m = tl_ui_base::theme::metrics(cx);
             (m.sp[3], m.sp[4], px(26. * m.ui_scale))
         });
         let label = rig
@@ -2938,14 +2846,7 @@ mod window {
     #[gpui_kit::test]
     fn general_ppid_link_dispatches_goto(cx: &mut TestAppContext) {
         let mut rig = general_rig(cx, |_| {});
-        let page = rig.main.update(|_, cx| {
-            main_window_view(cx)
-                .and_then(|v| {
-                    v.read(cx)
-                        .page_entity::<tl_ui::pages::processes::ProcessesPage>(Tab::Processes)
-                })
-                .expect("processes page")
-        });
+        let page = rig.main.update(|_, cx| stand_in_of(cx).page);
         let generation = |vcx: &mut VisualTestContext| {
             vcx.update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
         };
@@ -3106,33 +3007,8 @@ mod window {
     }
 
     use std::cell::RefCell;
-    use tl_model::details::{AppGeneralDetail, AppKind};
-    use tl_model::snapshot::{ServiceStatus, ServicesSnapshot, StartupType, UnitRecord};
-    use tl_model::table::{Manager, SysNodeId, SysTable, UnitRef, UnitType};
 
-    fn app_detail_for_unit() -> AppGeneralDetail {
-        fn valid<T>(value: T) -> Total<T> {
-            Total {
-                value,
-                validity: Validity::Valid,
-            }
-        }
-        AppGeneralDetail {
-            name: text("Firefox"),
-            kind: AppKind::App,
-            icon_path: None,
-            app_id: Some(text("org.mozilla.firefox")),
-            desktop_file: None,
-            unit: None,
-            cgroup: Some(text("/user.slice/app-firefox.scope")),
-            processes: 34,
-            memory_anon_bytes: valid(1_310_720_000),
-            swap_bytes: valid(0),
-            disk_read_bps: valid(0.0),
-            disk_write_bps: valid(0.0),
-            primary_cmdline: valid(text("/usr/lib/firefox/firefox")),
-        }
-    }
+    use tl_model::table::{Manager, UnitRef};
 
     /// The Unit row sits deep in column 0: make the window tall enough to click it.
     fn grow_tall(rig: &mut GeneralRig) {
@@ -3148,150 +3024,9 @@ mod window {
         }
     }
 
-    /// Publishes the Firefox unit as the only service and collapses both Services groups, so
-    /// the query a jump sends shows which manager group it expanded.
-    fn publish_firefox_unit(cx: &mut TestAppContext, engine: &FakeEngine) {
-        cx.update(|cx| {
-            TlSettings::update(cx, |data| {
-                data.state.services.group_expanded.system = false;
-                data.state.services.group_expanded.user = false;
-            });
-        });
-        let record = UnitRecord {
-            unit: firefox_unit(),
-            kind: UnitType::Service,
-            description: Arc::from("Firefox"),
-            status: ServiceStatus::Running,
-            sub_state: Arc::from("running"),
-            load_state: Arc::from("loaded"),
-            startup: StartupType::Static,
-            main_pid: 4321,
-            user: Arc::from("user"),
-            path: Arc::from("/usr/lib/firefox/firefox"),
-            unit_file: None,
-            active_since_us: None,
-            triggered_by: Arc::from([]),
-            control_group: None,
-            can_reload: false,
-            has_cgroup_procs: false,
-            cgroup_pids: Arc::from([]),
-            cpu_pct: Total::default(),
-            memory_bytes: Total::default(),
-            disk_bps: Total::default(),
-            tasks: Total::default(),
-        };
-        engine.publish_with(|snapshot| {
-            snapshot.services = Arc::new(ServicesSnapshot {
-                units: vec![record].into(),
-                ..ServicesSnapshot::default()
-            });
-        });
-        cx.run_until_parked();
-    }
-
-    /// The expanded rows of the last Services query the page sent.
-    fn services_expanded(engine: &FakeEngine) -> Vec<SysNodeId> {
-        engine
-            .commands()
-            .into_iter()
-            .rev()
-            .find_map(|command| match command {
-                Command::SetSysTableQuery(query) if query.table == SysTable::Services => {
-                    Some(query.expanded.to_vec())
-                }
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    /// How many times the Services page found the unit and said so. The toast queue merges
-    /// repeats into one toast that ends in "(×n)".
-    fn switched_toasts(main: &mut VisualTestContext) -> usize {
-        const TEXT: &str = "Switched to Services tab";
-        main_toasts(main)
-            .iter()
-            .filter_map(|t| match t.strip_prefix(TEXT)? {
-                "" => Some(1),
-                rest => rest.strip_prefix(" (×")?.strip_suffix(')')?.parse().ok(),
-            })
-            .sum()
-    }
-
-    /// The main window's active tab. The main window now handles `GoToService` itself.
+    /// The stand-in window's active tab: the last tab the page asked the shell to select.
     fn main_tab(cx: &mut TestAppContext) -> Tab {
-        cx.update(|cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .active_tab()
-        })
-    }
-
-    fn main_is_active(cx: &mut TestAppContext, main: &mut VisualTestContext) -> bool {
-        let active = cx.update(|cx| cx.active_window().map(|w| w.window_id()));
-        let main_id = main.update(|window, _| window.window_handle().window_id());
-        active == Some(main_id)
-    }
-
-    #[gpui_kit::test]
-    fn general_unit_link_dispatches_go_to_service(cx: &mut TestAppContext) {
-        let mut rig = general_rig(cx, |d| {
-            d.unit = Total {
-                value: Some(firefox_unit()),
-                validity: Validity::Valid,
-            };
-        });
-        publish_firefox_unit(cx, &rig.engine);
-        grow_tall(&mut rig);
-        let row = general_row(&mut rig, 0, "Unit:");
-        let value = rig
-            .vcx
-            .read(|cx| rig.general.read(cx).rows(0)[row].value.clone());
-        assert!(value.link.is_some(), "Unit is a link");
-        assert_eq!(value.tooltip.as_deref(), Some("Go to service"));
-        general_click(&mut rig, 0, row);
-        assert_eq!(
-            main_tab(cx),
-            Tab::Services,
-            "the main window shows Services"
-        );
-        assert_eq!(
-            switched_toasts(&mut rig.main),
-            1,
-            "the page found User app-firefox@1.service: {:?}",
-            main_toasts(&mut rig.main)
-        );
-        assert_eq!(
-            services_expanded(&rig.engine),
-            [SysNodeId::ServiceGroup(Manager::User)],
-            "the jump expanded only the User group"
-        );
-        assert!(
-            main_is_active(cx, &mut rig.main),
-            "the main window is activated"
-        );
-        assert!(
-            clipboard(&mut rig.vcx).is_empty(),
-            "a link click copies nothing"
-        );
-
-        // Enter on the grid cursor runs the same link. Go back to Processes first, so the
-        // check fails when Enter does nothing.
-        rig.main.dispatch_action(tl_ui::actions::SelectTab(0));
-        rig.main.run_until_parked();
-        assert_eq!(main_tab(cx), Tab::Processes, "the tab was reset");
-        focus_fields(&mut rig);
-        rig.vcx
-            .update(|_, cx| rig.general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
-        rig.vcx.simulate_keystrokes("enter");
-        rig.vcx.run_until_parked();
-        assert_eq!(main_tab(cx), Tab::Services);
-        assert_eq!(
-            switched_toasts(&mut rig.main),
-            2,
-            "Enter found the same unit: {:?}",
-            main_toasts(&mut rig.main)
-        );
+        cx.update(|cx| cx.global::<ShellState>().active_tab)
     }
 
     #[gpui_kit::test]
@@ -3326,57 +3061,6 @@ mod window {
         general_click(&mut rig, 0, row);
         assert_eq!(clipboard(&mut rig.vcx), "app-firefox@1.service");
         assert_ne!(main_tab(cx), Tab::Services, "no Go to service when exited");
-    }
-
-    #[gpui_kit::test]
-    fn app_props_unit_link_dispatches_go_to_service(cx: &mut TestAppContext) {
-        let (engine, mut main) = setup(cx);
-        let app = app_group("Firefox", GroupRowKind::App, 34);
-        publish_groups(cx, &engine, vec![app.clone()]);
-        publish_firefox_unit(cx, &engine);
-        let handle = open_app(cx, app.key).expect("app window opened");
-        let general = app_props(cx, handle).read_with(cx, |w, _| w.general().clone());
-        let mut detail = app_detail_for_unit();
-        detail.unit = Some(firefox_unit());
-        let p = Arc::new(TabPayload::AppGeneral(Arc::new(detail)));
-        cx.update(|cx| general.update(cx, |t, cx| t.set_payload(Some(&p), cx)));
-        let mut vcx = VisualTestContext::from_window(handle, cx);
-        vcx.update(|window, _| window.activate_window());
-        draw(&mut vcx);
-        let row = vcx
-            .read(|cx| general.read(cx).rows(0).to_vec())
-            .iter()
-            .position(|r| r.label.as_ref() == "Unit:")
-            .expect("Unit row");
-        let value = vcx.read(|cx| general.read(cx).rows(0)[row].value.clone());
-        assert!(value.link.is_some(), "Unit is a link");
-        assert_eq!(value.tooltip.as_deref(), Some("Go to service"));
-        let focus = vcx.read(|cx| general.read(cx).grid_focus().clone());
-        vcx.update(|window, cx| focus.focus(window, cx));
-        vcx.update(|_, cx| general.update(cx, |g, cx| g.set_cursor(0, row, cx)));
-        draw(&mut vcx);
-        vcx.simulate_keystrokes("enter");
-        vcx.run_until_parked();
-        assert_eq!(
-            main_tab(cx),
-            Tab::Services,
-            "the main window shows Services"
-        );
-        assert!(
-            main_is_active(cx, &mut main),
-            "the main window is activated"
-        );
-        assert_eq!(
-            switched_toasts(&mut main),
-            1,
-            "the page found User app-firefox@1.service: {:?}",
-            main_toasts(&mut main)
-        );
-        assert_eq!(
-            services_expanded(&engine),
-            [SysNodeId::ServiceGroup(Manager::User)],
-            "the jump expanded only the User group"
-        );
     }
 
     #[gpui_kit::test]
@@ -3417,9 +3101,9 @@ mod window {
 
     use gpui_kit::Modifiers;
     use tl_model::details::{FdDetail, FdKind, FdRow};
-    use tl_ui::components::menu::{MenuEntryKind, open_context_menu};
-    use tl_ui::table::actions::{CopyRow, CopyRowsAsTable, OpenContextMenu};
-    use tl_ui::windows::props::fds::FdsTab;
+    use tl_ui_kit::components::menu::{MenuEntryKind, open_context_menu};
+    use tl_ui_procs::windows::props::fds::FdsTab;
+    use tl_ui_table::table::actions::{CopyRow, CopyRowsAsTable, OpenContextMenu};
 
     fn fd(fd: i32, kind: FdKind, name: &str, flags: Option<u32>, pos: Option<u64>) -> FdRow {
         FdRow {
@@ -3590,7 +3274,7 @@ mod window {
         rig.vcx.simulate_click(check.center(), Modifiers::none());
         draw(&mut rig.vcx);
         let on = rig.vcx.read(|cx| {
-            tl_ui::settings_global::TlSettings::settings(cx)
+            tl_ui_base::settings_global::TlSettings::settings(cx)
                 .properties
                 .hide_unnamed_handles
         });
@@ -3684,7 +3368,8 @@ mod window {
             ],
             "pipe row"
         );
-        rig.vcx.update(tl_ui::components::menu::close_context_menu);
+        rig.vcx
+            .update(tl_ui_kit::components::menu::close_context_menu);
         draw(&mut rig.vcx);
 
         select_fds(&mut rig, &[3]);
@@ -3746,7 +3431,7 @@ mod window {
 
     #[gpui_kit::test]
     fn fds_go_to_connection_enabled_only_for_sockets(cx: &mut TestAppContext) {
-        use tl_ui::pages::connections::actions::GoToConnection;
+        use tl_ui_kit::actions::GoToConnection;
         let mut rig = socket_rig(cx);
         let seen = Rc::new(RefCell::new(Vec::new()));
         let sink = seen.clone();
@@ -3766,7 +3451,8 @@ mod window {
             ],
             "file row"
         );
-        rig.vcx.update(tl_ui::components::menu::close_context_menu);
+        rig.vcx
+            .update(tl_ui_kit::components::menu::close_context_menu);
         draw(&mut rig.vcx);
 
         select_fds(&mut rig, &[9]);
@@ -3785,20 +3471,6 @@ mod window {
         rig.vcx.simulate_keystrokes("down down enter");
         draw(&mut rig.vcx);
         assert_eq!(*seen.borrow(), [GoToConnection { inode: 1_234_567 }]);
-    }
-
-    #[gpui_kit::test]
-    fn fds_go_to_connection_not_found_toast(cx: &mut TestAppContext) {
-        let mut rig = socket_rig(cx);
-        select_fds(&mut rig, &[9]);
-        fds_menu(&mut rig);
-        rig.vcx.simulate_keystrokes("down down enter");
-        draw(&mut rig.vcx);
-        rig.vcx.run_until_parked();
-        assert_eq!(
-            main_toasts(&mut rig._main),
-            ["Connection not found in current view"]
-        );
     }
 
     #[gpui_kit::test]
@@ -3920,11 +3592,11 @@ mod window {
     // ---- Environment tab (E23-022, UI-PWN-016, R-099) ----
 
     use tl_model::details::EnvDetail;
-    use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
-    use tl_ui::table::actions::SelectAll;
-    use tl_ui::windows::props::environ::{
+    use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+    use tl_ui_procs::windows::props::environ::{
         EnvCopyAll, EnvironTab, MASK, READ_FAILED_ROW, errno_text,
     };
+    use tl_ui_table::table::actions::SelectAll;
 
     struct EnvRig {
         engine: Arc<FakeEngine>,
@@ -4258,10 +3930,10 @@ mod window {
     // ---- Strings tab (E23-021, UI-PWN-017) ----
 
     use tl_model::details::{ScanId, ScanPhase, StringEncoding, StringHit, StringScanState};
-    use tl_ui::table::TreeTableDelegate as _;
-    use tl_ui::windows::actions::{PropsCancelStringScan, PropsStartStringScan};
-    use tl_ui::windows::props::filter::DEBOUNCE;
-    use tl_ui::windows::props::strings::{StringsColumn, StringsTab, VALUE_CUT};
+    use tl_ui_procs::windows::actions::{PropsCancelStringScan, PropsStartStringScan};
+    use tl_ui_procs::windows::props::filter::DEBOUNCE;
+    use tl_ui_procs::windows::props::strings::{StringsColumn, StringsTab, VALUE_CUT};
+    use tl_ui_table::table::TreeTableDelegate as _;
 
     struct StrRig {
         engine: Arc<FakeEngine>,
@@ -4966,11 +4638,11 @@ mod window {
 mod threads {
     use tl_model::actions::ActionTarget;
     use tl_model::details::ThreadRow;
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
-    use tl_ui::table::TreeTableDelegate as _;
-    use tl_ui::table::actions::{CopyRow, CopyRowsAsTable};
-    use tl_ui::windows::actions::{SchedPolicyWire, SetThreadSched};
-    use tl_ui::windows::props::threads::{ThreadColumn, ThreadsTab};
+    use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
+    use tl_ui_procs::windows::actions::{SchedPolicyWire, SetThreadSched};
+    use tl_ui_procs::windows::props::threads::{ThreadColumn, ThreadsTab};
+    use tl_ui_table::table::TreeTableDelegate as _;
+    use tl_ui_table::table::actions::{CopyRow, CopyRowsAsTable};
 
     use super::*;
 
@@ -4994,14 +4666,14 @@ mod threads {
     fn open(cx: &mut TestAppContext) -> (Entity<ThreadsHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
-            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
+            tl_ui_table::table::actions::bind_keys_table(cx);
         });
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("Threads", window, cx));
@@ -5066,7 +4738,7 @@ mod threads {
     }
 
     fn empty_text(view: &Entity<ThreadsHost>, cx: &mut VisualTestContext) -> Option<String> {
-        use tl_ui::table::TreeTableDelegate as _;
+        use tl_ui_table::table::TreeTableDelegate as _;
         cx.update(|_, cx| {
             let table = view.read(cx).tab.read(cx).table().clone();
             let d = &table.read(cx).delegate;
@@ -5224,10 +4896,10 @@ mod threads {
     /// change never reaches `state.toml`, so it cannot overwrite the Processes layout.
     #[gpui_kit::test]
     fn threads_layout_never_persisted(cx: &mut TestAppContext) {
-        use tl_ui::app::BootSettings;
-        use tl_ui::settings_global::TlSettings;
-        use tl_ui::table::TreeTableDelegate as _;
+        use tl_ui_base::app_env::BootSettings;
+        use tl_ui_base::settings_global::TlSettings;
         use tl_ui_settings::settings::{Settings, UiState};
+        use tl_ui_table::table::TreeTableDelegate as _;
         cx.update(|cx| {
             cx.set_global(BootSettings {
                 settings: Settings::default(),
@@ -5308,7 +4980,7 @@ mod threads {
     #[gpui_kit::test]
     fn threads_main_thread_name_weight_500(cx: &mut TestAppContext) {
         use gpui_kit::FontWeight;
-        use tl_ui::table::TreeTableDelegate as _;
+        use tl_ui_table::table::TreeTableDelegate as _;
         let (view, cx) = open(cx);
         feed(&view, cx, Some(threads(sample())));
         let weights = cx.update(|_, cx| {
@@ -5327,7 +4999,7 @@ mod threads {
     #[gpui_kit::test]
     fn threads_resize_stops_at_column_minimum(cx: &mut TestAppContext) {
         use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
-        use tl_ui::table::columns::TableColumn as _;
+        use tl_ui_table::table::columns::TableColumn as _;
         let (view, cx) = open(cx);
         feed(&view, cx, Some(threads(sample())));
         let table = cx.update(|_, cx| view.read(cx).tab.read(cx).table().clone());
@@ -5411,8 +5083,8 @@ mod threads {
 
     #[gpui_kit::test]
     fn thread_signal_toast_text_single_and_multi(cx: &mut TestAppContext) {
-        cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
-        use tl_ui::windows::props::threads::signal_success_for_test;
+        cx.update(|cx| tl_ui_base::i18n::init_strings(cx, "en-US"));
+        use tl_ui_procs::windows::props::threads::signal_success_for_test;
         assert_eq!(
             signal_success_for_test(10, &[4325]),
             "Sent SIGUSR1 to thread 4325"
@@ -5469,7 +5141,7 @@ mod threads {
 
 mod maps {
     use tl_model::details::{MapNode, MapRegion, MapsDetail};
-    use tl_ui::windows::props::maps::{MapsColumn, MapsTab};
+    use tl_ui_procs::windows::props::maps::{MapsColumn, MapsTab};
 
     use super::*;
 
@@ -5493,14 +5165,14 @@ mod maps {
     fn open(cx: &mut TestAppContext) -> (Entity<MapsHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
-            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui_base::i18n::init_strings(cx, "en-US");
+            tl_ui_table::table::actions::bind_keys_table(cx);
         });
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("Memory maps", window, cx));
@@ -5733,7 +5405,7 @@ mod maps {
     /// rsf.28: the gma.23 minimum widths, logical px at 100%.
     #[test]
     fn maps_columns_have_minimum_widths() {
-        use tl_ui::table::columns::TableColumn as _;
+        use tl_ui_table::table::columns::TableColumn as _;
         let mins: Vec<_> = MapsColumn::ALL.iter().map(|c| c.min_width()).collect();
         let want = [120., 110., 70., 70., 60., 80., 60., 60., 60.];
         assert_eq!(mins, want.map(Some));
@@ -5747,12 +5419,13 @@ mod security {
     use tl_model::details::{
         CapRow, Elevated, GroupMembershipRow, NsKind, NsRow, NsState, SecurityDetail,
     };
-    use tl_ui::components::tooltip::DELAY_CONTROL;
-    use tl_ui::windows::props::security::CAP_CHECK_SIZE;
-    use tl_ui::windows::props::security::{
+    use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+    use tl_ui_procs::windows::props::security::CAP_CHECK_SIZE;
+    use tl_ui_procs::windows::props::security::{
         CapColumn, NO_ID, NS_TIP_SELF, RISKY_TOOLTIP, SecField, SecurityTab,
     };
-    use tl_ui::{table::cells::CellOut, table::tree_table::TreeTableDelegate as _};
+    use tl_ui_table::table::cells::CellOut;
+    use tl_ui_table::table::tree_table::TreeTableDelegate as _;
 
     use super::*;
 
@@ -5776,14 +5449,14 @@ mod security {
     fn open(cx: &mut TestAppContext) -> (Entity<SecurityHost>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::table::actions::bind_keys_table(cx);
-            tl_ui::theme::store::init(
+            tl_ui_table::table::actions::bind_keys_table(cx);
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let (view, cx) = cx.add_window_view(move |window, cx| {
             let filter = cx.new(|cx| PropsFilter::new("Security", window, cx));
@@ -6062,7 +5735,7 @@ mod security {
             assert_eq!(out.tooltip.as_deref(), Some("Risky capability"));
             assert_eq!(
                 out.text_color,
-                Some(tl_ui::theme::current(cx).status.warning)
+                Some(tl_ui_base::theme::current(cx).status.warning)
             );
         });
         let caps = cx
