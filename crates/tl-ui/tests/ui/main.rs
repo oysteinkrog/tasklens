@@ -62,7 +62,6 @@ mod render_chart;
 mod render_gallery;
 mod render_perf;
 mod render_support;
-mod render_table;
 mod render_theme;
 mod run;
 mod selectors;

@@ -16,3 +16,6 @@ mod host;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use host::{LANGUAGE, PageHost, PushedToast, ShellLog, install_theme};
+
+#[cfg(feature = "render-tests")]
+pub mod render;

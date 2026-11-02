@@ -25,5 +25,8 @@ default = []
 # on for the shipped app as well.
 test-support = ["gpui-kit/test-support"]
 
+# Headless screenshot helpers for the `render_*` test targets of the page crates (ADR-013).
+render-tests = ["test-support", "tl-ui-testkit/render"]
+
 [lints]
 workspace = true

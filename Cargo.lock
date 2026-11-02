@@ -8383,6 +8383,7 @@ dependencies = [
  "tl-model",
  "tl-ui-base",
  "tl-ui-kit",
+ "tl-ui-pagehost",
  "tl-ui-settings",
  "tl-ui-testkit",
  "tracing",

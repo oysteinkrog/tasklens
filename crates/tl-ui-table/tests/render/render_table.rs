@@ -6,14 +6,11 @@
 //! The 60 px and RTL cases also have a `TestAppContext` half with the real text system: the
 //! Name tooltip holds the full name, and the count run stays right of the RTL run.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_table::`.
-
-#![cfg(feature = "render-tests")]
+//! Run with `cargo test -p tl-ui-table --features render-tests --test render`.
 
 use std::fmt::Write as _;
 use std::ops::Range;
 
-use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::{
     AnyView, App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent,
     ParentElement, Pixels, Render, SharedString, Styled, TestAppContext, TestDispatcher, TextRun,
@@ -23,19 +20,29 @@ use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
-use tl_ui::components::menu::TlMenu;
-use tl_ui::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use tl_ui::table::cells::{CellOut, IconSourceCache, name_primary_text};
-use tl_ui::table::columns::{
+use tl_ui_base::text::fonts::{UI_FAMILY, load_bundled_fonts};
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
+use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::cells::{CellOut, IconSourceCache, name_primary_text};
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use tl_ui::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
-use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
-use tl_ui::text::style::t_sm;
-use tl_ui::theme::{current, metrics};
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_testkit::render::RgbaImage;
+
+/// Where this crate's golden PNGs live.
+const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
+
+/// Compares `img` with `tests/golden/<name>.png`, or writes it when `TL_UPDATE_GOLDEN=1`.
+fn assert_golden(name: &str, img: &RgbaImage) {
+    tl_ui_pagehost::render::assert_golden(std::path::Path::new(GOLDEN_DIR), name, img);
+}
 
 /// The seven states, in the order the rows cycle them.
 const STATES: [Validity; 7] = [
@@ -289,7 +296,7 @@ fn table_root(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Root> {
-    tl_ui::i18n::init_strings(cx, "en-US");
+    tl_ui_base::i18n::init_strings(cx, "en-US");
     let table = cx.new(|cx| {
         let mut t = TlTreeTable::new(delegate, window, cx);
         if let Some(id) = select {
@@ -433,7 +440,7 @@ fn cosmic_cx() -> TestAppContext {
         let report = load_bundled_fonts(cx);
         assert!(report.ui_ok, "failed faces: {:?}", report.failed);
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
