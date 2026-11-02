@@ -19,18 +19,18 @@ use tl_model::system::{DiskTotals, LinkState, Metric, NetTotals};
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
-use tl_ui::chart::view::ChartView;
-use tl_ui::chart::{ChartSpec, ValueFormat};
-use tl_ui::hub::SnapshotHub;
-use tl_ui::pages::performance::actions::PerfSelectDevice;
-use tl_ui::pages::performance::card::{
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::theme::current;
+use tl_ui_chart::chart::view::ChartView;
+use tl_ui_chart::chart::{ChartSpec, ValueFormat};
+use tl_ui_perf::performance::actions::PerfSelectDevice;
+use tl_ui_perf::performance::card::{
     CARD_CHART_BG, CardLineLayout, CardLines, CardPrepared, CardTextInput, CardWords, DeviceCard,
     card_chart_grid, card_chart_labels, card_lines, card_tooltip,
 };
-use tl_ui::pages::performance::{
+use tl_ui_perf::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, is_visible, sidebar_order,
 };
-use tl_ui::theme::current;
 use tl_ui_settings::settings::{AppearanceSettings, DeviceVisibility, NetworkUnit, ThemeSettings};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -93,13 +93,13 @@ impl Render for Host {
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
-    tl_ui::theme::store::init(
+    tl_ui_base::theme::store::init(
         cx,
         &ThemeSettings::default(),
         &AppearanceSettings::default(),
         Vec::new(),
     );
-    tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+    tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -625,19 +625,19 @@ mod sidebar {
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::chart::ChartState;
-    use tl_ui::chart::labels::format_value;
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::demand::DemandAggregator;
-    use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
-    use tl_ui::pages::performance::actions::{
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+    use tl_ui_base::demand::DemandAggregator;
+    use tl_ui_base::i18n::{init_strings, set_test_catalogue, tr_calls};
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_chart::chart::ChartState;
+    use tl_ui_chart::chart::labels::format_value;
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_overview::overview::OVERVIEW_KEY as OVERVIEW;
+    use tl_ui_perf::performance::actions::{
         PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
     };
-    use tl_ui::pages::performance::overview::OVERVIEW_KEY as OVERVIEW;
-    use tl_ui::pages::performance::sidebar::{CardAnim, DeviceSidebar, SidebarEvent};
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui_perf::performance::sidebar::{CardAnim, DeviceSidebar, SidebarEvent};
     use tl_ui_settings::settings::{Settings, UiState};
 
     use super::*;
@@ -656,8 +656,8 @@ mod sidebar {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let global_escapes = Rc::clone(&self.global_escapes);
             div()
-                .key_context(tl_ui::actions::GLOBAL_CONTEXT)
-                .on_action(move |_: &tl_ui::actions::EscapeChain, _, _| {
+                .key_context(tl_ui_kit::actions::GLOBAL_CONTEXT)
+                .on_action(move |_: &tl_ui_kit::actions::EscapeChain, _, _| {
                     *global_escapes.borrow_mut() += 1
                 })
                 .w(px(self.width.get()))
@@ -806,7 +806,7 @@ mod sidebar {
         let host_w = Rc::new(Cell::new(260.));
         let width = Rc::clone(&host_w);
         let (vcx, toasts) = if rooted {
-            cx.update(tl_ui::components::toast::init);
+            cx.update(tl_ui_kit::components::toast::init);
             let window = cx.add_window(move |window, cx| {
                 let host = cx.new(|_| SidebarHost {
                     sidebar: host,
@@ -826,7 +826,7 @@ mod sidebar {
             });
             (vcx, None)
         };
-        tl_ui::pages::performance::card::count_paints_for_test();
+        tl_ui_perf::performance::card::count_paints_for_test();
         vcx.simulate_scale_factor_change(1.0);
         let focus = vcx.update(|_, cx| sidebar.read(cx).focus_handle(cx));
         vcx.update(|window, cx| focus.focus(window, cx));
@@ -1371,7 +1371,7 @@ mod sidebar {
             draw(r.vcx);
             check(&mut r, &format!("edit mode at nav_width {w}"));
             r.vcx
-                .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
+                .dispatch_action(tl_ui_perf::performance::actions::PerfExitEditMode);
             draw(r.vcx);
         }
     }
@@ -1832,7 +1832,7 @@ mod sidebar {
                 }
                 if edit {
                     r.vcx
-                        .dispatch_action(tl_ui::pages::performance::actions::PerfExitEditMode);
+                        .dispatch_action(tl_ui_perf::performance::actions::PerfExitEditMode);
                     draw(r.vcx);
                 }
             }
@@ -2559,7 +2559,7 @@ mod sidebar {
     /// A 1 Gbps link at full speed, 1.25e8 B/s, reaches the top of a link speed scale.
     #[gpui_kit::test]
     fn net_card_full_link_speed_reaches_top(cx: &mut TestAppContext) {
-        use tl_ui::chart::YScale;
+        use tl_ui_chart::chart::YScale;
         let mut settings = Settings::default();
         settings.performance.network_dynamic_scale = false;
         let mut r = open(cx, nine(), settings, UiState::default());
@@ -2658,12 +2658,12 @@ mod sidebar {
     // ---- Card menu and page visibility (E24-011 part 1, UI-PRF-014, PERF-002) ----
 
     use gpui_kit::{Action, SharedString};
-    use tl_ui::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
-    use tl_ui::pages::performance::actions::{
+    use tl_ui_kit::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
+    use tl_ui_perf::performance::actions::{
         PerfAddTrayGraph, PerfDisableAllPages, PerfEnableAllPages, PerfEnterEditMode,
         PerfMoveDevice, PerfResetPagesToDefault, PerfSetPageVisible, bind_keys_performance,
     };
-    use tl_ui::pages::performance::menu::card_menu;
+    use tl_ui_perf::performance::menu::card_menu;
     use tl_ui_settings::settings::DeviceVisibility;
 
     fn key(s: &str) -> DeviceKey {
@@ -2679,7 +2679,7 @@ mod sidebar {
 
     fn entries(
         window: &Window,
-        menu: &Entity<tl_ui::components::menu::TlMenuPopup>,
+        menu: &Entity<tl_ui_kit::components::menu::TlMenuPopup>,
         cx: &App,
     ) -> Vec<Entry> {
         menu.read(cx)
@@ -3313,7 +3313,7 @@ mod sidebar {
     fn edit_mode_esc_exits_before_global_chain(cx: &mut TestAppContext) {
         let mut r = open(cx, edit_fixture(), Settings::default(), UiState::default());
         r.vcx.update(|_, cx| {
-            tl_ui::actions::bind_keys_global(cx);
+            tl_ui_kit::actions::bind_keys_global(cx);
             bind_keys_performance(cx);
         });
         enter_edit(&mut r);
@@ -3636,7 +3636,7 @@ mod sidebar {
     /// crw.2: Home and End select the first and the last visible card.
     #[gpui_kit::test]
     fn home_end_select_first_last(cx: &mut TestAppContext) {
-        use tl_ui::pages::performance::actions::{PerfSelectFirstDevice, PerfSelectLastDevice};
+        use tl_ui_perf::performance::actions::{PerfSelectFirstDevice, PerfSelectLastDevice};
 
         let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
         assert_eq!(keys(&mut r)[4], "disk:sdb", "the fifth of nine cards");

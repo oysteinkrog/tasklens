@@ -51,7 +51,6 @@ mod setup_window;
 mod shell;
 mod shell_windows;
 mod shield;
-mod sidebar;
 mod smart_window;
 mod startup;
 mod status_bar;

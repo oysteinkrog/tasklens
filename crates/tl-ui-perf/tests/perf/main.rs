@@ -17,3 +17,4 @@ mod overview_mem_widgets;
 mod overview_net_widgets;
 mod overview_widget_look;
 mod page_widgets;
+mod sidebar;
