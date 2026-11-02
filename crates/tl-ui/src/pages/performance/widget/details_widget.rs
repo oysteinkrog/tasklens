@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 use tl_model::validity::Validity;
 
-use crate::pages::performance::details::KeyValueModel;
+use crate::pages::performance::core::details::KeyValueModel;
 use crate::selector::TlSelector;
 use crate::theme::metrics;
 

@@ -38,7 +38,7 @@ use tl_ui_settings::layout_boxes::{
 use super::meta::Lines;
 use crate::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
 use crate::i18n::tr;
-use crate::pages::performance::core_clocks::clock_series;
+use crate::pages::performance::core::core_clocks::clock_series;
 use crate::pages::performance::cpu::{OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
 use crate::pages::performance::memory::DIRTY_ALPHA;
 use crate::pages::performance::overview::cpu_box::SPARK_MEAN_NS;

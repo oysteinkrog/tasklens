@@ -26,7 +26,6 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
-use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{CpuStaticInfo, RaplState, Snapshot};
@@ -35,6 +34,7 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
+pub(crate) use super::core::logical_devices;
 use super::core_clocks::CoreClocks;
 use super::cpu_board::CpuBoard;
 use super::cpu_details::{
@@ -748,21 +748,6 @@ fn all_cores_labels(stacked: bool, words: &Words) -> ChartLabels {
         range_word: words.utilization.clone(),
         legend: SmallVec::new(),
         show_axis_max: stacked,
-    }
-}
-
-/// `DeviceIdx` per logical CPU id from the catalog. An id the catalog skips gets
-/// `DeviceIdx(u16::MAX)`, which matches no series.
-pub(crate) fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
-    out.clear();
-    for e in catalog.entries.iter() {
-        if let DeviceIdentity::CpuLogical { id } = e.identity {
-            let i = usize::from(id);
-            if out.len() <= i {
-                out.resize(i + 1, DeviceIdx(u16::MAX));
-            }
-            out[i] = e.idx;
-        }
     }
 }
 

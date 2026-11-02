@@ -18,7 +18,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::system::CpuTopology;
 use tl_model::validity::Validity;
 
-use super::cpu::logical_devices;
+use super::logical_devices;
 use crate::chart::{
     ChartLabels, ChartSeries, ChartSpec, ChartView, LineSet, ValueAlign, ValueFormat, YScale,
 };

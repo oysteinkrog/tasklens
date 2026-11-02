@@ -71,7 +71,7 @@ use crate::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale
 use crate::components::validity::copy_text;
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr};
-use crate::pages::performance::actions::PerfShowMiniWindow;
+use crate::pages::performance::core::actions::PerfShowMiniWindow;
 use crate::pages::performance::overview::fit::fit_text;
 use crate::pages::performance::overview::gpu_flow::line_style;
 use crate::pages::performance::overview::mem_box::{

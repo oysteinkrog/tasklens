@@ -44,7 +44,7 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
-use crate::pages::performance::actions::{
+use crate::pages::performance::core::actions::{
     PerfOverviewEditDone, PerfOverviewResetBox, PerfOverviewSetBoxArrange,
     PerfOverviewSetBoxClocks, PerfOverviewSetBoxEngine, PerfOverviewSetBoxMode,
     PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement, PerfOverviewSetTimelineClick,

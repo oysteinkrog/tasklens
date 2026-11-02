@@ -40,7 +40,7 @@ use tl_ui_settings::settings::OverviewRange;
 
 use crate::chart::labels::{NetFormat, format_value};
 use crate::chart::{ValueFormat, YScale};
-use crate::pages::performance::core_clocks::ClockScale;
+use crate::pages::performance::core::core_clocks::ClockScale;
 use crate::pages::performance::gpu::gpu_totals;
 use crate::pages::performance::net::throughput_scale;
 use crate::pages::performance::overview::range::{Figures, figures, figures_minus};

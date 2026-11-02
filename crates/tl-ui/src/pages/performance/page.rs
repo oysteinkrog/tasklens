@@ -67,8 +67,7 @@ use crate::template::Template;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
-/// Page padding on every side, × ui_scale. `page_pad`.
-pub const PAGE_PAD: f32 = 16.;
+pub use super::core::PAGE_PAD;
 /// Height of the header row, × ui_scale. `page_header_h`.
 pub const PAGE_HEADER_H: f32 = 36.;
 /// Space between the graph area and the "Details" heading, × ui_scale. `details_gap`.

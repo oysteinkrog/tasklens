@@ -29,8 +29,8 @@ use crate::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, Val
 use crate::components::icons::icon;
 use crate::components::progress::bucket;
 use crate::hub::SnapshotHub;
-use crate::pages::performance::actions::PerfSelectDevice;
-use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::pages::performance::core::actions::PerfSelectDevice;
+use crate::pages::performance::core::{DeviceKey, DeviceKind};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm, t_xs};

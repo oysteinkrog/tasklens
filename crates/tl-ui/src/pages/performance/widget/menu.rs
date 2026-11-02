@@ -65,8 +65,8 @@ use super::source::{box_reading, reading};
 use crate::components::dialog::{DialogResult, TlDialog};
 use crate::components::menu::TlMenu;
 use crate::i18n::{tr, tr_args};
-use crate::pages::performance::DeviceKey;
-use crate::pages::performance::actions::{
+use crate::pages::performance::core::DeviceKey;
+use crate::pages::performance::core::actions::{
     PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm,
     PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
 };

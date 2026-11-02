@@ -44,8 +44,6 @@ use tl_model::validity::Validity;
 use tl_ui_settings::layout::{CPU_BOX_CONTAINER, ContainerLayout};
 use tl_ui_settings::settings::{CoreSmoothing, NetworkUnit};
 
-use super::super::DeviceKey;
-use super::super::core_clocks::CoreClocks;
 use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::cpu_flow::{self, CpuFlowKeys, CpuLook, CpuPlan, PlanCell, PlanPower};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
@@ -69,6 +67,8 @@ use crate::chart::{
 use crate::components::validity::copy_text;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::performance::core::DeviceKey;
+use crate::pages::performance::core::core_clocks::CoreClocks;
 use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;
@@ -955,7 +955,7 @@ impl CpuBox {
         }
         self.clocks = on;
         if on && self.core_clocks.is_none() {
-            let labels = super::super::core_clocks::clocks_labels(false, cx);
+            let labels = crate::pages::performance::core::core_clocks::clocks_labels(false, cx);
             let view = box_chart(clocks_base(&self.settings), labels, &self.hub, cx);
             view.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
             let snap = box_snapshot(&self.hub, cx);

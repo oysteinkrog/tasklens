@@ -48,7 +48,6 @@ use tl_model::validity::Validity;
 use tl_ui_settings::layout::{ContainerLayout, DISK_BOX_CONTAINER};
 use tl_ui_settings::settings::NetworkUnit;
 
-use super::super::DeviceKey;
 use super::cpu_box::value_text;
 use super::disk_flow::{self, DiskFlowKeys, DiskLook, DiskPlan, PlanCell};
 use super::fit::{fit_text, whole_rows};
@@ -69,6 +68,7 @@ use crate::chart::{
 };
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::performance::core::DeviceKey;
 use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;

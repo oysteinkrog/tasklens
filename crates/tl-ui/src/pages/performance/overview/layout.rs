@@ -13,8 +13,8 @@ use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::{SmallVec, smallvec};
 use tl_ui_settings::settings::{OverviewGridSetting, OverviewLayoutSetting};
 
-use super::super::page::PAGE_PAD;
 use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box, timeline};
+use crate::pages::performance::core::PAGE_PAD;
 use crate::theme::DeviceAccent;
 
 /// The grid's columns (UI-PRF-056).

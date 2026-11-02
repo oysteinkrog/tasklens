@@ -4,34 +4,22 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-overview -> tl-ui-perf: 30
+# tl-ui-overview -> tl-ui-perf: 18
 pages/performance/memory_apps.rs -> pages::performance::page
 pages/performance/overview/box_menu.rs -> pages::performance::cpu
-pages/performance/overview/cpu_box.rs -> pages::performance
 pages/performance/overview/cpu_box.rs -> pages::performance::cpu
-pages/performance/overview/disk_box.rs -> pages::performance
-pages/performance/overview/edit.rs -> pages::performance::page
-pages/performance/overview/gpu_box.rs -> pages::performance
 pages/performance/overview/gpu_box.rs -> pages::performance::gpu
-pages/performance/overview/layout.rs -> pages::performance::page
-pages/performance/overview/mem_box.rs -> pages::performance
-pages/performance/overview/mod.rs -> pages::performance
 pages/performance/overview/mod.rs -> pages::performance::page
 pages/performance/overview/mod.rs -> pages::performance::sidebar
 pages/performance/overview/mod.rs -> pages::performance::status_bar
-pages/performance/overview/net_box.rs -> pages::performance
-pages/performance/overview/parts.rs -> pages::performance
 pages/performance/widget/look.rs -> pages::performance::cpu
 pages/performance/widget/look.rs -> pages::performance::memory
-pages/performance/widget/members.rs -> pages::performance
 pages/performance/widget/members.rs -> pages::performance::gpu
 pages/performance/widget/members.rs -> pages::performance::sidebar
-pages/performance/widget/menu.rs -> pages::performance
 pages/performance/widget/menu.rs -> pages::performance::gpu
 pages/performance/widget/meta.rs -> pages::performance::gpu
 pages/performance/widget/meta.rs -> pages::performance::net
 pages/performance/widget/meta.rs -> pages::performance::status_bar::rules
-pages/performance/widget/source.rs -> pages::performance
 pages/performance/widget/source.rs -> pages::performance::cpu
 pages/performance/widget/source.rs -> pages::performance::gpu
 pages/performance/widget/source.rs -> pages::performance::sensors
@@ -45,13 +33,11 @@ pages/performance/overview/timeline.rs -> pages::processes::history
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
 
-# tl-ui-perf-core -> tl-ui-perf: 7
+# tl-ui-perf-core -> tl-ui-perf: 5
 pages/minigraph/bridge.rs -> windows::mini
 pages/minigraph/card.rs -> pages::performance
 pages/minigraph/panel.rs -> pages::performance
 pages/minigraph/sources.rs -> pages::performance
-pages/performance/actions.rs -> pages::performance
-pages/performance/core_clocks.rs -> pages::performance::cpu
 tray_bridge.rs -> pages::performance
 
 # tl-ui-procs -> tl-ui-perf: 1

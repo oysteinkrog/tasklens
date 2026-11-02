@@ -84,15 +84,15 @@ use self::procs_box::ProcsBox;
 use self::range::{RangeText, history_request};
 use self::splitter::{Drag, Splitter, Target, set_span, splitters};
 use self::timeline::{OverviewPause, Paused, TimelineBox};
-use super::actions::{
+use super::core::actions::{
     PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfOverviewSetTimelineClick,
     PerfSetStatusBar,
 };
-use super::details::KeyValueModel;
+use super::core::details::KeyValueModel;
+use super::core::{DeviceKey, DeviceKind};
 use super::page::DevicePage;
 use super::sidebar::DeviceSidebar;
 use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
-use super::{DeviceKey, DeviceKind};
 use crate::chart::{NetFormat, ValueFormat, format_value};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::menu::TlMenu;
@@ -106,7 +106,7 @@ use crate::template::Template;
 use crate::theme::{current, metrics};
 
 /// The Overview page's key.
-pub const OVERVIEW_KEY: &str = "overview";
+pub const OVERVIEW_KEY: &str = DeviceKey::OVERVIEW;
 
 /// The prefix of every box's debug selector (`perf-overview-box-cpu`).
 pub const BOX_ID_PREFIX: &str = "perf-overview-box-";

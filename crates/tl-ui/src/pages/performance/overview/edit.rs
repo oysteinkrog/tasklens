@@ -46,11 +46,11 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::tr;
-use crate::pages::performance::actions::{
+use crate::pages::performance::core::PAGE_PAD;
+use crate::pages::performance::core::actions::{
     PerfOverviewAddBox, PerfOverviewEditDone, PerfOverviewEditLayout, PerfOverviewHideBox,
     PerfOverviewMoveBox, PerfOverviewResetLayout, PerfOverviewResizeBox,
 };
-use crate::pages::performance::page::PAGE_PAD;
 use crate::selector::TlSelector;
 use crate::theme::{current, metrics};
 

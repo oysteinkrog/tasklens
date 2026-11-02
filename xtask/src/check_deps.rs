@@ -131,7 +131,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "serde_json",
             "fluent-bundle",
             "unic-langid",
-            // Plural rules in `pages/performance/details.rs`, in use since o55.37 (ADR-001).
+            // Plural rules in `pages/performance/core/details.rs`, in use since o55.37 (ADR-001).
             "intl_pluralrules",
             "async-channel",
             "jiff",

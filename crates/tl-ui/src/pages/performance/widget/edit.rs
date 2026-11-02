@@ -68,7 +68,7 @@ use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::TlTooltip;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
-use crate::pages::performance::actions::{
+use crate::pages::performance::core::actions::{
     PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup,
     PerfWidgetApply, PerfWidgetCancel, PerfWidgetMove, PerfWidgetRemove, PerfWidgetReset,
     PerfWidgetResize, PerfWidgetSelectNext, PerfWidgetSelectPrev, PerfWidgetSetForm,

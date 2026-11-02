@@ -80,9 +80,6 @@ const LAYERS: &[(&str, &str)] = &[
     ("table/", "tl-ui-table"),
     ("text_cache.rs", "tl-ui-table"),
     // tl-ui-perf-core
-    ("pages/performance/actions.rs", "tl-ui-perf-core"),
-    ("pages/performance/details.rs", "tl-ui-perf-core"),
-    ("pages/performance/core_clocks.rs", "tl-ui-perf-core"),
     ("pages/performance/core/", "tl-ui-perf-core"),
     ("pages/minigraph/", "tl-ui-perf-core"),
     ("tray_bridge.rs", "tl-ui-perf-core"),
@@ -1219,7 +1216,7 @@ mod tests {
     fn layer_table_longest_prefix_wins() {
         assert_eq!(layer_of("pages/performance/mod.rs"), Some("tl-ui-perf"));
         assert_eq!(
-            layer_of("pages/performance/actions.rs"),
+            layer_of("pages/performance/core/actions.rs"),
             Some("tl-ui-perf-core")
         );
         assert_eq!(
