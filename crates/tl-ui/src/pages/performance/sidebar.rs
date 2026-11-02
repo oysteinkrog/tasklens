@@ -58,6 +58,7 @@ use super::card::{
 };
 pub(super) use super::core::retain_whole_disks;
 use super::menu::card_menu_in;
+use super::overview::{CardList, DeviceCards};
 use super::widget::edit::{WidgetEditMode, any_editing};
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, fan_connected, initial_selection,
@@ -573,6 +574,16 @@ pub struct DeviceSidebar {
 }
 
 impl EventEmitter<SidebarEvent> for DeviceSidebar {}
+
+impl DeviceCards for DeviceSidebar {
+    fn live_cards(&self, kind: DeviceKind) -> CardList {
+        self.cards
+            .iter()
+            .filter(|c| !c.is_removing() && c.row.kind == kind)
+            .map(|c| (c.row.key.clone(), c.row.idx, c.lines.heading.clone()))
+            .collect()
+    }
+}
 
 impl DeviceSidebar {
     /// Builds the cards from the installed snapshot and selects the saved device, or the first

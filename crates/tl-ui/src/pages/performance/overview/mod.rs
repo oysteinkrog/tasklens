@@ -32,6 +32,7 @@
 pub mod box_menu;
 pub mod cpu_box;
 pub mod cpu_flow;
+pub mod device_page;
 pub mod disk_box;
 pub mod disk_flow;
 pub mod edit;
@@ -51,6 +52,7 @@ pub mod picked;
 pub mod procs_box;
 pub mod range;
 pub mod splitter;
+pub mod status_bar;
 pub mod timeline;
 
 use std::cell::Cell;
@@ -73,6 +75,7 @@ use tl_ui_settings::layout_boxes::convert_box;
 use tl_ui_settings::settings::{OverviewRange, StatusBarPlacement};
 
 use self::cpu_box::{CpuBox, PowerSplitChanged};
+use self::device_page::DevicePage;
 use self::disk_box::DiskBox;
 use self::edit::EditState;
 use self::fixed_box::{FixedBox, FixedPlaced};
@@ -84,6 +87,7 @@ use self::net_box::NetBox;
 use self::procs_box::ProcsBox;
 use self::range::{RangeText, history_request};
 use self::splitter::{Drag, Splitter, Target, set_span, splitters};
+use self::status_bar::{EdgesChanged, StatusBar, state_color};
 use self::timeline::{OverviewPause, Paused, TimelineBox};
 use super::core::actions::{
     PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfOverviewSetTimelineClick,
@@ -91,9 +95,6 @@ use super::core::actions::{
 };
 use super::core::details::KeyValueModel;
 use super::core::{DeviceKey, DeviceKind};
-use super::page::DevicePage;
-use super::sidebar::DeviceSidebar;
-use super::status_bar::{self, EdgesChanged, StatusBar, state_color};
 use crate::chart::{NetFormat, ValueFormat, format_value};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::menu::TlMenu;
@@ -164,27 +165,21 @@ struct ActiveDrag {
 }
 
 /// (key, device, heading) of each live GPU or disk card, in sidebar order.
-type CardList = SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>;
+pub type CardList = SmallVec<[(DeviceKey, DeviceIdx, SharedString); 8]>;
 
-/// The live cards of `kind` in `sidebar`.
-fn cards_of(sidebar: &Entity<DeviceSidebar>, kind: DeviceKind, cx: &App) -> CardList {
-    sidebar
-        .read(cx)
-        .cards()
-        .iter()
-        .filter(|c| !c.is_removing() && c.row.kind == kind)
-        .map(|c| (c.row.key.clone(), c.row.idx, c.lines.heading.clone()))
-        .collect()
+/// The device cards the Overview boxes follow. The Performance sidebar implements it, so the
+/// page reads the cards without naming the sidebar (ADR-020: the sidebar sits in a higher layer).
+pub trait DeviceCards: 'static {
+    /// The live cards of `kind` (not the ones being removed), in sidebar order.
+    fn live_cards(&self, kind: DeviceKind) -> CardList;
 }
 
-/// The key of the first live card of `kind` in `sidebar`.
-fn first_card(sidebar: &Entity<DeviceSidebar>, kind: DeviceKind, cx: &App) -> Option<DeviceKey> {
-    sidebar
-        .read(cx)
-        .cards()
-        .iter()
-        .find(|c| !c.is_removing() && c.row.kind == kind)
-        .map(|c| c.row.key.clone())
+/// Reads the live cards of a kind from the entity [`OverviewPage::new`] was given.
+type CardsOf = Rc<dyn Fn(DeviceKind, &App) -> CardList>;
+
+/// The key of the first live card of `kind`.
+fn first_card(cards: &CardsOf, kind: DeviceKind, cx: &App) -> Option<DeviceKey> {
+    cards(kind, cx).first().map(|c| c.0.clone())
 }
 
 /// The saved layout (`[performance.overview]`); the default before settings load or when none
@@ -230,7 +225,8 @@ pub struct OverviewPage {
     /// The time the page is held at, and CLOCK_REALTIME when it was set, so the request end
     /// stays the same until the pause or the range changes (UI-PRF-057).
     paused: Option<(Paused, i64)>,
-    sidebar: Entity<DeviceSidebar>,
+    /// The sidebar's cards.
+    cards: CardsOf,
     gpu_keys: SmallVec<[DeviceKey; 4]>,
     disk_keys: SmallVec<[DeviceKey; 8]>,
     /// The GPU and disk cards the boxes were last given.
@@ -288,13 +284,17 @@ struct Hosted<T: 'static> {
 }
 
 impl OverviewPage {
-    pub fn new(
+    pub fn new<S: DeviceCards>(
         key: DeviceKey,
         hub: Entity<SnapshotHub>,
         demand: Entity<DemandAggregator>,
-        sidebar: &Entity<DeviceSidebar>,
+        sidebar: &Entity<S>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let cards: CardsOf = {
+            let sidebar = sidebar.clone();
+            Rc::new(move |kind, cx| sidebar.read(cx).live_cards(kind))
+        };
         let snap = std::sync::Arc::clone(hub.read(cx).current());
         let find = |identity: tl_model::devices::DeviceIdentity| {
             snap.devices
@@ -303,8 +303,8 @@ impl OverviewPage {
         };
         let cpu_idx = find(tl_model::devices::DeviceIdentity::CpuPackage);
         let mem_idx = find(tl_model::devices::DeviceIdentity::Memory);
-        let gpu_cards = cards_of(sidebar, DeviceKind::Gpu, cx);
-        let disk_cards = cards_of(sidebar, DeviceKind::Disk, cx);
+        let gpu_cards = cards(DeviceKind::Gpu, cx);
+        let disk_cards = cards(DeviceKind::Disk, cx);
         let cpu = cx.new(|cx| CpuBox::new(&hub, cpu_idx, cx));
         let layout = saved_layout(cx);
         let cpu_mode = layout.config(BoxKind::Cpu).mode.id;
@@ -348,7 +348,7 @@ impl OverviewPage {
         if let Some(arrange) = layout.arrange(BoxKind::Disk) {
             disk.update(cx, |b, cx| b.set_arrange(arrange, cx));
         }
-        let net_target = first_card(sidebar, DeviceKind::Net, cx);
+        let net_target = first_card(&cards, DeviceKind::Net, cx);
         let net = cx.new(|cx| {
             let mut b = NetBox::new(&hub, cx);
             b.set_target(net_target, cx);
@@ -406,7 +406,7 @@ impl OverviewPage {
             procs,
             timeline,
             paused: timeline::paused(cx).map(|p| (p, timeline::now_realtime_ns())),
-            sidebar: sidebar.clone(),
+            cards,
             gpu_keys: gpu_cards.iter().map(|c| c.0.clone()).collect(),
             disk_keys: disk_cards.iter().map(|c| c.0.clone()).collect(),
             gpu_cards,
@@ -625,8 +625,8 @@ impl OverviewPage {
     /// The sidebar changed: the boxes take new GPU and disk lists when they differ; the page
     /// lays out again only when a box came or went.
     fn sync_cards(&mut self, cx: &mut Context<Self>) {
-        let gpus = cards_of(&self.sidebar, DeviceKind::Gpu, cx);
-        let disks = cards_of(&self.sidebar, DeviceKind::Disk, cx);
+        let gpus = (self.cards)(DeviceKind::Gpu, cx);
+        let disks = (self.cards)(DeviceKind::Disk, cx);
         let before = (self.present(BoxKind::Gpu), self.present(BoxKind::Disk));
         if gpus != self.gpu_cards {
             self.gpu_keys = gpus.iter().map(|c| c.0.clone()).collect();
@@ -638,7 +638,7 @@ impl OverviewPage {
             self.disk.update(cx, |b, cx| b.set_disks(&disks, cx));
             self.disk_cards = disks;
         }
-        let net = first_card(&self.sidebar, DeviceKind::Net, cx);
+        let net = first_card(&self.cards, DeviceKind::Net, cx);
         self.net.update(cx, |b, cx| b.set_target(net, cx));
         if (self.present(BoxKind::Gpu), self.present(BoxKind::Disk)) != before {
             self.relayout(cx);

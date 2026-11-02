@@ -36,18 +36,17 @@ use tl_ui_settings::settings::{OverviewRange, StatusBarPlacement};
 use self::rules::{
     Chip, ChipKind, MachineState, Reading, Reason, Source, StatusRules, Tone, chips,
 };
-use super::actions::{PerfSelectDevice, PerfStatusOpen};
-use super::overview::OVERVIEW_KEY;
-use super::overview::layout::BoxKind;
-use super::overview::range::{STATUS_SWITCH, current_range, range_switch};
-use super::page::PAGE_PAD;
-use super::{DeviceKey, PerformancePage};
+use super::OVERVIEW_KEY;
+use super::layout::BoxKind;
+use super::range::{STATUS_SWITCH, current_range, range_switch};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
+use crate::pages::performance::core::actions::{PerfSelectDevice, PerfStatusOpen};
+use crate::pages::performance::core::{DeviceKey, PAGE_PAD};
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;
@@ -715,17 +714,21 @@ impl StatusBar {
     }
 }
 
+/// Selects `key` in the sidebar of the main window's Performance page and returns true, or
+/// returns false when the main window has no Performance page. The Performance page sets it, so
+/// the bar selects a device without naming the page type (ADR-020: the page sits in a higher
+/// layer).
+pub struct SelectOnPerfPage(pub fn(DeviceKey, &mut App) -> bool);
+
+impl Global for SelectOnPerfPage {}
+
 /// Selects `key` on the Performance tab, switching to that tab first when the main window shows
 /// another. Without a main window (a test host) the action goes up from the bar.
 pub fn open_page(key: DeviceKey, window: &mut Window, cx: &mut App) {
     ShellApi::select_tab(Tab::Performance, window, cx);
-    let perf = ShellApi::page::<PerformancePage>(cx, Tab::Performance);
-    match perf {
-        Some(perf) => {
-            let sidebar = perf.read(cx).sidebar.clone();
-            sidebar.update(cx, |s, cx| s.select(key, cx));
-        }
-        None => window.dispatch_action(Box::new(PerfSelectDevice { key }), cx),
+    let select = cx.try_global::<SelectOnPerfPage>().map(|g| g.0);
+    if !select.is_some_and(|select| select(key.clone(), cx)) {
+        window.dispatch_action(Box::new(PerfSelectDevice { key }), cx);
     }
 }
 

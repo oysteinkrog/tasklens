@@ -24,7 +24,6 @@ pub mod page;
 pub mod page_flow;
 pub mod sensors;
 pub mod sidebar;
-pub mod status_bar;
 pub mod summary;
 pub mod widget;
 
@@ -34,8 +33,8 @@ pub use self::core::{
     sidebar_order, visible_rows,
 };
 pub use self::core::{actions, core_clocks, details};
-// memory_apps moved into overview/ (tasklens-zljr5.22).
-pub use self::overview::memory_apps;
+// memory_apps and status_bar moved into overview/ (tasklens-zljr5.22).
+pub use self::overview::{memory_apps, status_bar};
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
@@ -69,7 +68,7 @@ use crate::hub::SnapshotHub;
 use crate::i18n::tr;
 use crate::selector::TlSelector;
 use crate::settings_global::{TlSettings, animations_on};
-use crate::shell::{ShellPage, StatusChanged, main_window_title};
+use crate::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
 use crate::theme::metrics;
 use crate::util::clipboard_write;
 
@@ -115,6 +114,18 @@ struct SidebarAnim {
     showing: bool,
     /// Bumped on each toggle, so a new toggle restarts the animation.
     generation: u32,
+}
+
+/// Selects `key` in the sidebar of the main window's Performance page; false without one. The
+/// status bar calls it through [`status_bar::SelectOnPerfPage`].
+fn select_on_perf_page(key: DeviceKey, cx: &mut App) -> bool {
+    let Some(perf) = ShellApi::page::<PerformancePage>(cx, tl_model::command::Tab::Performance)
+    else {
+        return false;
+    };
+    let sidebar = perf.read(cx).sidebar.clone();
+    sidebar.update(cx, |s, cx| s.select(key, cx));
+    true
 }
 
 /// The Performance tab entity. Later E24 beads add the summary field (R-262).
@@ -187,6 +198,7 @@ impl PerformancePage {
             .expect("the Performance page needs the host's demand aggregator");
         let sidebar = cx.new(|cx| sidebar::DeviceSidebar::new(hub.clone(), demand.clone(), cx));
         cx.set_global(page::PerfSidebar(sidebar.downgrade()));
+        cx.set_global(status_bar::SelectOnPerfPage(select_on_perf_page));
         let sidebar_focus = sidebar.read(cx).focus.clone();
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&sidebar, Self::on_sidebar));
