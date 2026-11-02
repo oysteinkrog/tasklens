@@ -57,7 +57,6 @@ fn esc_outcome_order() {
 
 /// The main window's Esc chain (E20-011, UI-SHL-122) and Tab order (UI-SHL-121). Tab and
 /// Shift+Tab are the kit `Root` bindings, so the tests press the real keys.
-
 mod esc_chain {
     use std::cell::RefCell;
     use std::rc::Rc;
