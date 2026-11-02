@@ -3,13 +3,13 @@
 use gpui_kit::TestAppContext;
 use rustc_hash::FxHashSet;
 use tl_model::ids::ColumnId;
-use tl_ui::i18n::{init_strings, tr};
-use tl_ui::pages::processes::cells::{
+use tl_ui_base::i18n::{init_strings, tr};
+use tl_ui_procs::pages::processes::cells::{
     DEFAULT_VISIBLE, HeatRef, NO_SOURCE, PROCESS_COLUMNS, PickerGroup, ProcColumnKind,
     process_column,
 };
-use tl_ui::table::columns::ColumnAlign;
 use tl_ui_settings::settings::ColumnTables;
+use tl_ui_table::table::columns::ColumnAlign;
 
 const UNSORTABLE: [ColumnId; 6] = [
     ColumnId::Pss,
@@ -252,15 +252,15 @@ mod values {
     use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::cells::{
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_procs::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, fill_cell, process_column, split_pid_text,
         subtree_column, subtree_total,
     };
-    use tl_ui::table::cells::CellOut;
-    use tl_ui::table::tree_table::RowKind;
-    use tl_ui::text_cache::CellTextCache;
     use tl_ui_settings::settings::Settings;
+    use tl_ui_table::table::cells::CellOut;
+    use tl_ui_table::table::tree_table::RowKind;
+    use tl_ui_table::text_cache::CellTextCache;
 
     fn meta() -> ProcessMeta {
         let a = |s: &str| Arc::<str>::from(s);
@@ -917,8 +917,8 @@ mod values {
     /// The Windows column is the only phase-3 column and the build offers it (tasklens-pdu.46).
     #[test]
     fn phase_3_columns_offered() {
-        use tl_ui::pages::processes::cells::PROCESS_COLUMNS;
-        use tl_ui::pages::processes::delegate::SHIPPED_PHASE;
+        use tl_ui_procs::pages::processes::cells::PROCESS_COLUMNS;
+        use tl_ui_procs::pages::processes::delegate::SHIPPED_PHASE;
 
         let phase3: Vec<ColumnId> = PROCESS_COLUMNS
             .iter()
@@ -982,8 +982,8 @@ mod values {
     /// (tasklens-pdu.47).
     #[test]
     fn phase_4_columns_offered() {
-        use tl_ui::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS};
-        use tl_ui::pages::processes::delegate::SHIPPED_PHASE;
+        use tl_ui_procs::pages::processes::cells::{NO_SOURCE, PROCESS_COLUMNS};
+        use tl_ui_procs::pages::processes::delegate::SHIPPED_PHASE;
 
         const { assert!(SHIPPED_PHASE >= 4) };
         let offered: Vec<ColumnId> = PROCESS_COLUMNS
@@ -1428,18 +1428,18 @@ mod paint {
     use tl_model::system::CpuSet;
     use tl_model::table::ProcessTableView;
     use tl_model::validity::Validity;
-    use tl_ui::pages::processes::cells::{
+    use tl_ui_base::theme::{TlTheme, current, metrics};
+    use tl_ui_procs::pages::processes::cells::{
         CellCtx, CellWords, DELETED_SUFFIX, GroupMembers, PaintState, ProcColumn, SUBTREE_PREFIX,
         cell_suffix, dims_zero, heat_alpha, heat_background, process_column,
     };
-    use tl_ui::table::cells::{
+    use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings};
+    use tl_ui_table::table::cells::{
         CellCtx as PaintCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color, value_cell,
         with_overrides,
     };
-    use tl_ui::table::columns::{ColumnAlign, ColumnKind};
-    use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, metric_cell_opacity};
-    use tl_ui::theme::{TlTheme, current, metrics};
-    use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings};
+    use tl_ui_table::table::columns::{ColumnAlign, ColumnKind};
+    use tl_ui_table::table::tree_table::{RowFlags, STALE_OPACITY, metric_cell_opacity};
 
     struct Env {
         view: ProcessTableView,
@@ -1488,7 +1488,7 @@ mod paint {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -1624,7 +1624,7 @@ mod paint {
                 theme: &theme,
                 selected: self.st.selected,
                 width: px(120.),
-                at: tl_ui::table::cells::CellAt::Alone,
+                at: tl_ui_table::table::cells::CellAt::Alone,
             };
             let col = process_column(self.col);
             let cell = value_cell(kind(col), self.text.clone(), &self.out, Rc::default(), &ctx);
@@ -1944,7 +1944,7 @@ mod paint {
             theme: &theme,
             selected: false,
             width: px(120.),
-            at: tl_ui::table::cells::CellAt::Alone,
+            at: tl_ui_table::table::cells::CellAt::Alone,
         };
         assert_eq!(cell_text_color(&exited, &paint), Some(theme.text_secondary));
 
@@ -2002,7 +2002,7 @@ mod paint {
             theme: &t,
             selected: st.selected,
             width: px(120.),
-            at: tl_ui::table::cells::CellAt::Alone,
+            at: tl_ui_table::table::cells::CellAt::Alone,
         };
         let filled = CellOut {
             bits: out.bits,
@@ -2148,16 +2148,16 @@ mod name_cell {
         TestAppContext, VisualTestContext, Window, div, point, px, size,
     };
     use proptest::prelude::*;
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::delegate::sibling_pass;
-    use tl_ui::pages::processes::name_cell::{
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_base::theme::{current, metrics};
+    use tl_ui_procs::pages::processes::delegate::sibling_pass;
+    use tl_ui_procs::pages::processes::name_cell::{
         NameCellData, NameIcon, NameWords, StateGlyph, icon_slot, name_cell, name_flags,
         render_group_header, render_name_cell, row_icon,
     };
-    use tl_ui::table::cells::{CellCtx, IconSourceCache, guide_quads, name_look};
-    use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind, STALE_OPACITY};
-    use tl_ui::theme::{current, metrics};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui_table::table::cells::{CellCtx, IconSourceCache, guide_quads, name_look};
+    use tl_ui_table::table::tree_table::{IconSlot, RowFlags, RowKind, STALE_OPACITY};
 
     fn data(kind: RowKind, depth: u8, expandable: Option<bool>) -> NameCellData {
         NameCellData {
@@ -2197,7 +2197,7 @@ mod name_cell {
                 theme: &theme,
                 selected: false,
                 width: self.width,
-                at: tl_ui::table::cells::CellAt::Alone,
+                at: tl_ui_table::table::cells::CellAt::Alone,
             };
             let cell = match &self.cell {
                 Cell::Name(make) => render_name_cell(
@@ -2225,7 +2225,7 @@ mod name_cell {
     fn open_at(cx: &mut TestAppContext, cell: Cell, width: Pixels) -> &mut VisualTestContext {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
@@ -2423,7 +2423,7 @@ mod name_cell {
     fn exited_icon_60_and_secondary_text(cx: &mut TestAppContext) {
         let (theme, m) = cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
@@ -2442,7 +2442,7 @@ mod name_cell {
                 theme: &theme,
                 selected,
                 width: px(400.),
-                at: tl_ui::table::cells::CellAt::Alone,
+                at: tl_ui_table::table::cells::CellAt::Alone,
             };
             assert_eq!(name_look(gone, &ctx), (ctx.secondary(), STALE_OPACITY));
             assert_eq!(name_look(live, &ctx), (ctx.primary(), 1.0));
@@ -2657,12 +2657,12 @@ mod group_fields {
     use tl_model::system::CpuSet;
     use tl_model::table::{Manager, ProcessTableView, UnitRef};
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::pages::processes::cells::{
+    use tl_ui_procs::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, fill_cell, process_column,
     };
-    use tl_ui::table::cells::CellOut;
-    use tl_ui::table::tree_table::RowKind;
     use tl_ui_settings::settings::Settings;
+    use tl_ui_table::table::cells::CellOut;
+    use tl_ui_table::table::tree_table::RowKind;
 
     fn group(kind: GroupRowKind) -> GroupRow {
         GroupRow {
@@ -2910,10 +2910,10 @@ mod header_totals {
     use tl_model::ids::ColumnId;
     use tl_model::table::{TableTotals, Total};
     use tl_model::validity::Validity;
-    use tl_ui::pages::processes::cells::process_column;
-    use tl_ui::pages::processes::header_totals::header_total;
-    use tl_ui::table::cells::CellOut;
+    use tl_ui_procs::pages::processes::cells::process_column;
+    use tl_ui_procs::pages::processes::header_totals::header_total;
     use tl_ui_settings::settings::{NetworkUnit, Settings};
+    use tl_ui_table::table::cells::CellOut;
 
     fn valid<T>(value: T) -> Total<T> {
         Total {
@@ -3128,18 +3128,18 @@ mod highlight {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::{BootId, TimeNs, now_boot_ns};
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::anim::AnimationDriver;
-    use tl_ui::components::motion::ease_out_cubic;
-    use tl_ui::host::HostContext;
-    use tl_ui::pages::processes::cells::{
+    use tl_ui_base::anim::AnimationDriver;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::theme::{current, metrics};
+    use tl_ui_kit::components::motion::ease_out_cubic;
+    use tl_ui_procs::pages::processes::cells::{
         TINT_ALPHA, TintKind, linger_ns, row_tint, tint_deadline,
     };
-    use tl_ui::pages::processes::delegate::ProcessDelegate;
-    use tl_ui::table::actions::OpenProperties;
-    use tl_ui::table::cells::{CellCtx, CellOut, name_look};
-    use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, TlTreeTable, TreeTableDelegate};
-    use tl_ui::theme::{current, metrics};
+    use tl_ui_procs::pages::processes::delegate::ProcessDelegate;
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui_table::table::actions::OpenProperties;
+    use tl_ui_table::table::cells::{CellCtx, CellOut, name_look};
+    use tl_ui_table::table::tree_table::{RowFlags, STALE_OPACITY, TlTreeTable, TreeTableDelegate};
 
     const MS: TimeNs = 1_000_000;
 
@@ -3363,7 +3363,7 @@ mod highlight {
         table: Entity<TlTreeTable<ProcessDelegate>>,
         driver: Entity<AnimationDriver>,
         opened: Rc<Cell<u32>>,
-        toasts: Entity<tl_ui::components::toast::ToastQueue>,
+        toasts: Entity<tl_ui_kit::components::toast::ToastQueue>,
         vcx: VisualTestContext,
     }
 
@@ -3381,15 +3381,15 @@ mod highlight {
     ) -> Rig {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::components::toast::init(cx);
-            tl_ui::table::actions::bind_keys_table(cx);
-            tl_ui::theme::store::init(
+            tl_ui_kit::components::toast::init(cx);
+            tl_ui_table::table::actions::bind_keys_table(cx);
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let slot = Rc::new(std::cell::RefCell::new(None));
         let opened = Rc::new(Cell::new(0));
@@ -3419,7 +3419,7 @@ mod highlight {
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, _| window.activate_window());
         let toasts = vcx.update(|window, cx| {
-            cx.new(|cx| tl_ui::components::toast::ToastQueue::new(window, cx, px(40.)))
+            cx.new(|cx| tl_ui_kit::components::toast::ToastQueue::new(window, cx, px(40.)))
         });
         redraw(&mut vcx);
         let (table, driver) = slot.borrow_mut().take().expect("table created");
@@ -3463,7 +3463,7 @@ mod highlight {
                 theme: &theme,
                 selected: false,
                 width: px(200.),
-                at: tl_ui::table::cells::CellAt::Alone,
+                at: tl_ui_table::table::cells::CellAt::Alone,
             };
             let flags = t.delegate.row_flags(1);
             assert!(flags.has(RowFlags::EXITED));
@@ -3660,7 +3660,7 @@ mod highlight {
             let mut rig = open(cx, snapshot(T, T), |d| d.set_fixed_now(Some(T)));
             let table = rig.table.clone();
             let select = |rig: &mut Rig, pid| {
-                let id = tl_ui::pages::processes::delegate::ProcRowId::Process(key(pid));
+                let id = tl_ui_procs::pages::processes::delegate::ProcRowId::Process(key(pid));
                 rig.vcx
                     .update(|_, cx| table.update(cx, |t, _| t.selection.click(id)));
             };
@@ -3707,13 +3707,13 @@ mod row_tooltip {
     use tl_model::table::{Manager, ProcessTableView, TableRow, Total, UnitRef, UnitType};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
-    use tl_ui::components::tooltip::DELAY_ROW_NAME;
-    use tl_ui::host::HostContext;
-    use tl_ui::pages::processes::cells::RowRef;
-    use tl_ui::pages::processes::delegate::ProcessDelegate;
-    use tl_ui::pages::processes::tooltip::{RowTipWords, TipLine, row_tooltip_lines};
-    use tl_ui::table::tree_table::{RowKind, TlTreeTable};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_kit::components::tooltip::DELAY_ROW_NAME;
+    use tl_ui_procs::pages::processes::cells::RowRef;
+    use tl_ui_procs::pages::processes::delegate::ProcessDelegate;
+    use tl_ui_procs::pages::processes::tooltip::{RowTipWords, TipLine, row_tooltip_lines};
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui_table::table::tree_table::{RowKind, TlTreeTable};
 
     fn a(s: &str) -> Arc<str> {
         Arc::from(s)
@@ -4110,13 +4110,13 @@ mod row_tooltip {
         let snap = Arc::new(s);
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui_base::i18n::init_strings(cx, "en-US");
         });
         let window = cx.add_window(move |window, cx| {
             let d = ProcessDelegate::new(
@@ -4180,14 +4180,14 @@ mod live {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
-    use tl_ui::host::HostContext;
-    use tl_ui::i18n::init_strings;
-    use tl_ui::pages::processes::cells::{DELETED_SUFFIX, SUBTREE_PREFIX};
-    use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate};
-    use tl_ui::table::cells::{CellCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color};
-    use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
-    use tl_ui::theme::{current, metrics};
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::i18n::init_strings;
+    use tl_ui_base::theme::{current, metrics};
+    use tl_ui_procs::pages::processes::cells::{DELETED_SUFFIX, SUBTREE_PREFIX};
+    use tl_ui_procs::pages::processes::delegate::{ProcRowId, ProcessDelegate};
     use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui_table::table::cells::{CellCtx, CellOut, CellSuffix, DIM_OPACITY, cell_text_color};
+    use tl_ui_table::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
 
     use super::values::{extras, group, record};
 
@@ -4253,8 +4253,8 @@ mod live {
     ) -> (Entity<TlTreeTable<ProcessDelegate>>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::table::actions::bind_keys_table(cx);
-            tl_ui::theme::store::init(
+            tl_ui_table::table::actions::bind_keys_table(cx);
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
@@ -4333,7 +4333,7 @@ mod live {
                 theme: &theme,
                 selected: false,
                 width: px(100.),
-                at: tl_ui::table::cells::CellAt::Alone,
+                at: tl_ui_table::table::cells::CellAt::Alone,
             };
             cell_text_color(&child, &ctx)
         });
@@ -4497,7 +4497,7 @@ mod live {
     #[gpui_kit::test]
     fn pseudo_rows_icons_and_blank_pid(cx: &mut TestAppContext) {
         use gpui_kit::assets::IconName;
-        use tl_ui::table::tree_table::{IconSlot, NameIcon};
+        use tl_ui_table::table::tree_table::{IconSlot, NameIcon};
 
         let (table, vcx) = open(cx, Settings::default(), pseudo_rows());
         for (ix, icon, name) in [
@@ -4725,7 +4725,7 @@ mod live {
     #[gpui_kit::test]
     fn frozen_glyph_and_state(cx: &mut TestAppContext) {
         use gpui_kit::assets::IconName;
-        use tl_ui::table::tree_table::RowFlags;
+        use tl_ui_table::table::tree_table::RowFlags;
 
         let (table, vcx) = open(cx, Settings::default(), group_rows(true));
         let (flags, glyphs) = vcx.update(|_, cx| {
@@ -4926,7 +4926,7 @@ mod boot_time {
     use tl_model::snapshot::Snapshot;
     use tl_model::time::BootId;
     use tl_model::validity::Validity;
-    use tl_ui::pages::processes::cells::boot_time_s;
+    use tl_ui_procs::pages::processes::cells::boot_time_s;
 
     #[test]
     fn start_time_base_comes_from_the_inventory() {

@@ -34,7 +34,6 @@ mod overview_range;
 mod overview_timeline;
 mod page_range;
 mod performance;
-mod process_cells;
 mod process_menu;
 mod processes;
 mod props;
