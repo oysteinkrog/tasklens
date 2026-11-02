@@ -11,21 +11,21 @@ use tl_model::snapshot::{
 use tl_model::table::{StartupColumn, StartupRef, StartupSource, SysColumnId, SysNodeId, SysRow};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
-use tl_ui::pages::startup::delegate::{
+use tl_ui_base::theme::{TlTheme, current};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_sys::pages::startup::delegate::{
     STARTUP_COLUMNS, StartupDelegate, StartupWords, default_width, id,
     impact_tooltip_lines as tooltip_lines, sys_status,
 };
-use tl_ui::pages::sys_status::{DotStyle, LabelTone, cell_colors, status_look};
-use tl_ui::pages::sys_table::SysDelegate as _;
-use tl_ui::table::cells::CellOut;
-use tl_ui::table::columns::TableColumn as _;
-use tl_ui::table::tree_table::{NameIcon, TreeTableDelegate as _};
-use tl_ui::theme::{TlTheme, current};
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::TableColumn as _;
+use tl_ui_table::table::sys_status::{DotStyle, LabelTone, cell_colors, status_look};
+use tl_ui_table::table::sys_table::SysDelegate as _;
+use tl_ui_table::table::tree_table::{NameIcon, TreeTableDelegate as _};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
-    tl_ui::theme::store::init(
+    tl_ui_base::theme::store::init(
         cx,
         &ThemeSettings::default(),
         &AppearanceSettings::default(),
@@ -421,6 +421,7 @@ mod page {
     use std::time::Duration;
 
     use super::*;
+    use crate::common::shell_free_init_client;
     use gpui_kit::Keystroke;
     use gpui_kit::base::Root;
     use gpui_kit::component::kbd::Kbd;
@@ -431,30 +432,26 @@ mod page {
         point, size,
     };
     use tl_model::client::EngineClient;
-    use tl_model::command::{Command, CommandError, Tab};
+    use tl_model::command::{Command, CommandError};
     use tl_model::demand::Demand;
     use tl_model::health::SourceId;
     use tl_model::journal::{JournalHandle, JournalQuery};
     use tl_model::snapshot::{Snapshot, StartupCounts};
     use tl_model::{actions::ActionEvent, table::SysTable};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_base::host::HostContext;
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_kit::components::menu::{
         MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu,
     };
-    use tl_ui::components::toast::{ToastKey, ToastQueue};
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::host::HostContext;
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::pages::startup::actions::bind_keys_startup;
-    use tl_ui::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
-    use tl_ui::pages::sys_table::SysBody;
-    use tl_ui::table::actions::OpenProperties;
-    use tl_ui::window::filter::FILTER_DEBOUNCE;
-    use tl_ui::window::main::{
-        MainWindow, PageSlot, main_window_view, open_main_window_on, set_test_page,
-    };
+    use tl_ui_kit::components::toast::{ToastKey, ToastQueue};
     use tl_ui_settings::settings::EngineSettings;
-    use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_settings::settings::UiState;
+    use tl_ui_sys::pages::startup::{REFRESH_TOAST_AFTER, StartupPage};
+    use tl_ui_table::table::actions::OpenProperties;
+    use tl_ui_table::table::sys_table::SysBody;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
@@ -487,30 +484,22 @@ mod page {
 
     fn rig(cx: &mut TestAppContext) -> Rig {
         let engine = FakeEngine::new();
-        rig_with_client(cx, engine.clone(), engine)
+        rig_with_client(cx, engine, None)
     }
 
     fn rig_with_client(
         cx: &mut TestAppContext,
         engine: Arc<FakeEngine>,
-        client: Arc<dyn EngineClient>,
+        client: Option<Arc<dyn EngineClient>>,
     ) -> Rig {
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client.clone(), init);
-            bind_keys_startup(cx);
-            cx.set_reduce_motion(true);
-        });
+        let _host = shell_free_init_client(
+            cx,
+            Arc::clone(&engine),
+            client,
+            Settings::default(),
+            UiState::default(),
+            AppEnv::test(),
+        );
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(0.), px(0.)),
@@ -629,12 +618,6 @@ mod page {
         }
     }
 
-    fn startup_page(window: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
-        let host_ctx = HostContext::local(cx);
-        let page = cx.new(|cx| StartupPage::new(&host_ctx, window, cx));
-        PageSlot::new(page, cx)
-    }
-
     impl Rig {
         /// Draws a frame and tells the hub the main window rendered, as `MainWindow::render`
         /// does. Without it the hub goes hidden after 1 s and drops Info toasts.
@@ -715,7 +698,7 @@ mod page {
             self.draw();
         }
 
-        fn table(&self) -> Entity<tl_ui::table::tree_table::TlTreeTable<StartupDelegate>> {
+        fn table(&self) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<StartupDelegate>> {
             self.vcx
                 .read_entity(&self.page, |page, _| page.table().clone())
         }
@@ -1042,8 +1025,8 @@ mod page {
 
     use tl_model::actions::{ActionError, ActionEvent as FlowEvent, ActionId, ActionRequest};
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason};
-    use tl_ui::pages::processes::actions::CopyDetails;
-    use tl_ui::pages::startup::actions::{
+    use tl_ui_procs::pages::processes::actions::CopyDetails;
+    use tl_ui_sys::pages::startup::actions::{
         StartupCopyCommand, StartupDisable, StartupEnable, StartupOpenFileLocation, StartupRunNow,
     };
 
@@ -1215,7 +1198,7 @@ mod page {
 
     #[gpui_kit::test]
     fn startup_updating_status_while_pending(cx: &mut TestAppContext) {
-        use tl_ui::pages::startup::delegate::UPDATING_LOOK;
+        use tl_ui_sys::pages::startup::delegate::UPDATING_LOOK;
         let mut rig = flow_rig(cx, vec![with_status("a", StartupStatus::Disabled)], &[0]);
         assert_eq!(rig.status_cell(0), "Disabled");
         rig.dispatch(Box::new(StartupEnable));
@@ -1408,7 +1391,7 @@ mod page {
         let client: Arc<dyn EngineClient> = Arc::new(DemandDrivenEngine {
             inner: Arc::clone(&inner),
         });
-        let mut rig = rig_with_client(cx, inner, client);
+        let mut rig = rig_with_client(cx, inner, Some(client));
         assert_eq!(
             rig.vcx.read_entity(&rig.page, |page, _| page.body()),
             SysBody::Skeleton
@@ -1554,10 +1537,10 @@ mod page {
 
         let starts = |rig: &mut Rig| {
             rig.vcx.update(|_, cx| {
-                cx.global::<tl_ui::window::registry::GlobalRegistry>()
+                cx.global::<tl_ui_base::registry::GlobalRegistry>()
                     .0
                     .read(cx)
-                    .count(tl_ui::window::registry::CapClass::StartupProps)
+                    .count(tl_ui_base::registry::CapClass::StartupProps)
             })
         };
         rig.double_click(below_rows);
@@ -1577,74 +1560,12 @@ mod page {
         assert_eq!(starts(&mut rig), 1, "header double-click with a selection");
     }
 
-    #[gpui_kit::test]
-    fn startup_filter_sends_query(cx: &mut TestAppContext) {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        let handle = cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            bind_keys_startup(cx);
-            set_test_page(cx, Tab::Startup, startup_page);
-            open_main_window_on(Tab::Startup, cx).expect("main window opens")
-        });
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let (main, page) = vcx.update(|_, cx| {
-            let main = main_window_view(cx).expect("main window view");
-            let page = main
-                .read(cx)
-                .page_entity::<StartupPage>(Tab::Startup)
-                .expect("startup page");
-            (main, page)
-        });
-        let focus = vcx.update(|_, cx| page.read(cx).table().read(cx).focus_handle().clone());
-        vcx.update(|window, cx| window.focus(&focus, cx));
-        vcx.simulate_keystrokes("d");
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-        let filter = vcx.read_entity(&main, |main, _| main.filter_box().clone());
-        let (text, focused) = vcx.update(|window, cx| {
-            let filter = filter.read(cx);
-            (
-                filter.input().read(cx).text().to_string(),
-                filter.is_focused(window, cx),
-            )
-        });
-        assert_eq!(text, "d");
-        assert!(focused, "printable key moves focus to the filter box");
-
-        vcx.executor().advance_clock(FILTER_DEBOUNCE);
-        vcx.run_until_parked();
-        let query = engine
-            .commands()
-            .into_iter()
-            .rev()
-            .find_map(|command| match command {
-                Command::SetSysTableQuery(query) => Some(query),
-                _ => None,
-            })
-            .expect("filter query sent");
-        assert_eq!(query.filter.as_ref(), "d");
-    }
-
     // Delete confirmation and flow (tasklens-9o0.10, UI-SYS-047).
 
-    use tl_ui::components::dialog::{DialogButton, TlDialogView};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::pages::startup::actions::StartupDelete;
-    use tl_ui::windows::confirm_startup_delete::{StartupEntryView, delete_texts};
+    use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_sys::pages::startup::actions::StartupDelete;
+    use tl_ui_sys::windows::confirm_startup_delete::{StartupEntryView, delete_texts};
 
     /// A deletable user entry of `kind` at its own path.
     fn deletable(name: &str, kind: StartupKind) -> StartupEntry {
@@ -1857,8 +1778,8 @@ mod page {
         cx: &mut TestAppContext,
         entries: &[StartupEntry],
         skipped: usize,
-    ) -> tl_ui::windows::confirm_startup_delete::DeleteTexts {
-        cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    ) -> tl_ui_sys::windows::confirm_startup_delete::DeleteTexts {
+        cx.update(|cx| tl_ui_base::i18n::init_strings(cx, "en-US"));
         cx.update(|cx| delete_texts(&views(entries), skipped, cx))
     }
 
@@ -2057,7 +1978,7 @@ mod page {
 
 #[gpui_kit::test]
 fn startup_keymap(cx: &mut TestAppContext) {
-    use tl_ui::pages::startup::actions::{StartupDelete, bind_keys_startup};
+    use tl_ui_sys::pages::startup::actions::{StartupDelete, bind_keys_startup};
 
     cx.update(|cx| {
         setup(cx);
@@ -2074,111 +1995,34 @@ fn startup_keymap(cx: &mut TestAppContext) {
     });
 }
 
-/// `TasklensUi::init` binds the Startup keys and the shell builds `StartupPage` for its tab
-/// (tasklens-9o0.13).
-#[gpui_kit::test]
-fn startup_keymap_registered(cx: &mut TestAppContext) {
-    use gpui_kit::{AppContext as _, VisualTestContext};
-    use tl_model::client::EngineClient;
-    use tl_model::command::Tab;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::startup::StartupPage;
-    use tl_ui::pages::startup::actions::StartupDelete;
-    use tl_ui::window::main::{main_window_view, open_main_window};
-    use tl_ui_settings::settings::{Settings, StartTab, UiState};
-    use tl_ui_testkit::fake_engine::FakeEngine;
-
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let mut settings = Settings::default();
-    settings.general.start_tab = StartTab::Startup;
-    let init = UiInit {
-        settings,
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
-    cx.update(|cx| TasklensUi::init(cx, client, init));
-    cx.run_until_parked();
-
-    cx.update(|cx| {
-        let keymap = cx.key_bindings();
-        let keymap = keymap.borrow();
-        assert!(
-            keymap.bindings_for_action(&StartupDelete).any(|b| {
-                b.keystrokes().len() == 1
-                    && b.keystrokes()[0].unparse() == "delete"
-                    && b.predicate()
-                        .is_some_and(|p| p.to_string() == "StartupTable")
-            }),
-            "delete in StartupTable maps to StartupDelete"
-        );
-    });
-
-    let handle = cx.update(open_main_window).expect("the main window opens");
-    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-    vcx.run_until_parked();
-    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-    let page = vcx.read_entity(&main, |m, _| m.page_entity::<StartupPage>(Tab::Startup));
-    assert!(page.is_some(), "the Startup tab builds a StartupPage");
-}
-
 /// The Startup Properties window (tasklens-9o0.12).
 mod props {
     use super::*;
+    use crate::common::{open_sink, shell_free_init, sink_toasts};
     use gpui_kit::base::Root;
     use gpui_kit::{Modifiers, VisualTestContext, WindowHandle};
-    use tl_model::client::EngineClient;
-    use tl_model::command::Tab;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
-    use tl_ui::windows::startup_properties::{StartupPropertiesView, open_startup_properties};
-    use tl_ui_settings::settings::{Settings, UiState};
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_sys::windows::startup_properties::{StartupPropertiesView, open_startup_properties};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
         main: VisualTestContext,
         version: u64,
+        cx: TestAppContext,
     }
 
     fn rig(cx: &mut TestAppContext, entries: Vec<StartupEntry>) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
-        });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Startup, cx))
-            .expect("the main window opens");
-        let mut main = VisualTestContext::from_window(handle.into(), cx);
-        main.update(|window, _| window.activate_window());
-        main.run_until_parked();
+        let (engine, host) = shell_free_init(cx, Settings::default());
+        let main = open_sink(cx, &host);
         let mut rig = Rig {
             engine,
             main,
             version: 0,
+            cx: cx.clone(),
         };
         rig.publish(entries);
         rig
@@ -2203,11 +2047,7 @@ mod props {
         }
 
         fn toasts(&mut self) -> Vec<String> {
-            self.main.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(ToString::to_string).collect()
-            })
+            sink_toasts(&mut self.cx)
         }
     }
 
@@ -2217,8 +2057,8 @@ mod props {
 
     /// Width of `text` in the table font, as the cell fit rule measures it.
     fn advance_width(vcx: &mut VisualTestContext, text: &str) -> gpui_kit::Pixels {
-        use tl_ui::text::metrics::TextMetricsCache;
-        use tl_ui::theme::metrics;
+        use tl_ui_base::text::metrics::TextMetricsCache;
+        use tl_ui_base::theme::metrics;
         vcx.update(|window, cx| {
             let size = metrics(cx).text.base;
             let mut cache = TextMetricsCache::default();
@@ -2240,7 +2080,7 @@ mod props {
         for (word, extra, c) in cases {
             let need = advance_width(&mut rig.main, word) + px(extra);
             assert!(
-                need <= px(tl_ui::pages::startup::delegate::default_width(c)),
+                need <= px(tl_ui_sys::pages::startup::delegate::default_width(c)),
                 "{word:?} needs {need:?} in {c:?}"
             );
         }
@@ -2249,7 +2089,7 @@ mod props {
     /// The longest Properties label fits its column, so it is not cut with an ellipsis.
     #[gpui_kit::test]
     fn startup_props_flags_label_fits(cx: &mut TestAppContext) {
-        use tl_ui::windows::startup_properties::LABEL_W;
+        use tl_ui_sys::windows::startup_properties::LABEL_W;
         let mut rig = rig(cx, vec![named("a")]);
         let label = "Can run / Can toggle / Can delete / File exists";
         let need = advance_width(&mut rig.main, label);
@@ -2307,7 +2147,7 @@ mod props {
         let frame = frame(cx, handle);
         cx.update(|cx| {
             let view = frame.read(cx).content().clone();
-            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let words = tl_ui_kit::components::kv_grid::kv_words(cx);
             view.read(cx).line_texts(&words)
         })
     }
@@ -2395,7 +2235,7 @@ mod props {
         let frame = frame(cx, handle);
         let secondary = cx.update(|cx| {
             let view = frame.read(cx).content().clone();
-            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let words = tl_ui_kit::components::kv_grid::kv_words(cx);
             let theme = current(cx).clone();
             let view = view.read(cx);
             view.is_removed()
@@ -2459,7 +2299,7 @@ mod props {
         );
         let frame = frame(cx, handle);
         let toasts = win.update(|window, cx| {
-            let queue = tl_ui::components::toast::ToastQueue::of_window(window, cx)
+            let queue = tl_ui_kit::components::toast::ToastQueue::of_window(window, cx)
                 .expect("the window's toast stack");
             let _ = &frame;
             queue
@@ -2503,67 +2343,45 @@ mod props {
     }
 }
 
-/// The Startup Apps tab inside `MainWindow`, end to end through the fake engine
+/// The Startup Apps page in a page-host window, end to end through the fake engine
 /// (tasklens-9o0.1, UI-SYS-040 to UI-SYS-050, table (b)).
 mod main_window {
     use super::*;
+    use crate::common::{open_page, shell_free_init, sink_toasts};
     use gpui_kit::AppContext as _;
     use gpui_kit::{Entity, Modifiers, MouseButton, MouseDownEvent, VisualTestContext, point, px};
     use tl_model::actions::{
         ActionEvent as FlowEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     };
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
+    use tl_model::command::Command;
     use tl_model::snapshot::StartupCounts;
     use tl_model::table::SysTable;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::pages::startup::StartupPage;
-    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
-    use tl_ui::window::registry::{CapClass, GlobalRegistry};
-    use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_base::registry::{CapClass, GlobalRegistry};
+    use tl_ui_kit::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_sys::pages::startup::StartupPage;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
         vcx: VisualTestContext,
-        main: Entity<MainWindow>,
+        page: Entity<StartupPage>,
         version: u64,
+        cx: TestAppContext,
     }
 
     fn boot(cx: &mut TestAppContext) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let mut settings = Settings::default();
-        settings.general.start_tab = StartTab::Processes;
-        let init = UiInit {
-            settings,
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
+        let (engine, host) = shell_free_init(cx, Settings::default());
+        let (page, vcx) = open_page(cx, &host, |host, window, cx| {
+            StartupPage::new(host, window, cx)
         });
-        cx.run_until_parked();
-        let handle = cx.update(open_main_window).expect("the main window opens");
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
         Rig {
             engine,
             vcx,
-            main,
+            page,
             version: 0,
+            cx: cx.clone(),
         }
     }
 
@@ -2587,20 +2405,17 @@ mod main_window {
             self.vcx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
-        fn select(&mut self, tab: Tab) {
-            self.main
-                .update_in(&mut self.vcx, |m, window, cx| m.select_tab(tab, window, cx));
+        /// Makes the page the active one, as a visit to its tab does.
+        fn show(&mut self) {
+            self.page
+                .update(&mut self.vcx, |page, cx| page.set_active(true, cx));
             self.draw();
         }
 
-        fn page(&mut self) -> Option<Entity<StartupPage>> {
-            self.vcx.read_entity(&self.main, |m, _| {
-                m.page_entity::<StartupPage>(Tab::Startup)
-            })
-        }
-
-        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<StartupDelegate>> {
-            let page = self.page().expect("the Startup page exists");
+        fn table(
+            &mut self,
+        ) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<StartupDelegate>> {
+            let page = self.page.clone();
             self.vcx.read_entity(&page, |page, _| page.table().clone())
         }
 
@@ -2658,7 +2473,7 @@ mod main_window {
 
         /// Visits the Startup tab and publishes the fixture.
         fn visit_with_fixture(&mut self) {
-            self.select(Tab::Startup);
+            self.show();
             self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
             self.publish(fixture());
         }
@@ -2691,27 +2506,7 @@ mod main_window {
         }
 
         fn toasts(&mut self) -> Vec<String> {
-            self.vcx.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(ToString::to_string).collect()
-            })
-        }
-
-        fn chip(&mut self) -> String {
-            let chip = self
-                .vcx
-                .read_entity(&self.main, |m, _| m.status_chip().clone());
-            self.vcx.read_entity(&chip, |c, _| c.drawn_text())
-        }
-
-        fn page_status(&mut self) -> String {
-            let page = self.page().expect("the Startup page exists");
-            self.vcx.read_entity(&page, |p, _| {
-                let mut out = String::new();
-                p.status_text(&mut out);
-                out
-            })
+            sink_toasts(&mut self.cx)
         }
 
         fn properties_count(&mut self) -> usize {
@@ -2767,7 +2562,7 @@ mod main_window {
                 .expect("the table body");
             let row_h = self
                 .vcx
-                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
+                .update(|_, cx| tl_ui_base::theme::metrics(cx).row_height);
             let at = point(
                 body.origin.x + px(40.),
                 body.origin.y + row_h * (ix as f32 + 0.5),
@@ -2805,71 +2600,6 @@ mod main_window {
     }
 
     #[gpui_kit::test]
-    fn startup_tab_mounted_and_kept(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        assert!(rig.page().is_none(), "no page before the first visit");
-        rig.vcx.simulate_keystrokes("ctrl-4");
-        rig.draw();
-        assert_eq!(
-            rig.vcx.read_entity(&rig.main, |m, _| m.active_tab()),
-            Tab::Startup
-        );
-        let first = rig.page().expect("Ctrl+4 builds the Startup page");
-        let expected = rig.page_status();
-        assert!(!expected.is_empty(), "the page has status text");
-        assert_eq!(rig.chip(), expected, "the chip shows the page text");
-        rig.select(Tab::Processes);
-        rig.select(Tab::Startup);
-        let again = rig.page().expect("the page is kept");
-        assert_eq!(first.entity_id(), again.entity_id());
-    }
-
-    #[gpui_kit::test]
-    fn startup_page_layout_golden(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        rig.visit_with_fixture();
-        let header = rig
-            .vcx
-            .debug_bounds("TlTreeTableHeader")
-            .expect("header drawn");
-        let mut last_x = px(-1.);
-        for key in [
-            "name",
-            "publisher",
-            "status",
-            "impact",
-            "type",
-            "location",
-            "command",
-        ] {
-            let b = rig
-                .vcx
-                .debug_bounds(format!("TlTreeTableHeader-label-{key}").leak())
-                .unwrap_or_else(|| panic!("{key} label drawn"));
-            assert!(b.origin.x > last_x, "{key} is right of the one before");
-            assert!(
-                b.origin.y >= header.origin.y && b.bottom() <= header.bottom(),
-                "{key} sits in the header"
-            );
-            last_x = b.origin.x;
-        }
-        let table = rig.table();
-        assert_eq!(
-            rig.vcx.read_entity(&table, |t, _| t.delegate.row_count()),
-            4
-        );
-        let body = rig
-            .vcx
-            .debug_bounds("TlTreeTable-body")
-            .expect("body drawn");
-        assert!(
-            body.origin.y >= header.bottom(),
-            "rows are below the header"
-        );
-        assert_eq!(rig.chip(), "4 Total | 3 Enabled | 1 Disabled");
-    }
-
-    #[gpui_kit::test]
     fn startup_keymap(cx: &mut TestAppContext) {
         let mut rig = boot(cx);
         rig.visit_with_fixture();
@@ -2884,8 +2614,7 @@ mod main_window {
         assert_eq!(rig.properties_count(), 1, "Enter opens Properties");
         let handle = rig.vcx.update(|_, cx| {
             let registry = cx.global::<GlobalRegistry>().0.clone();
-            let key =
-                tl_ui::window::registry::WindowKey::StartupProperties(fixture()[1].id.clone());
+            let key = tl_ui_base::registry::WindowKey::StartupProperties(fixture()[1].id.clone());
             registry
                 .read(cx)
                 .get(&key)
@@ -2983,25 +2712,6 @@ mod main_window {
             rig.toasts()
         );
     }
-
-    #[gpui_kit::test]
-    fn startup_demand_cleared_on_tab_switch(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        rig.visit_with_fixture();
-        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
-        rig.vcx.run_until_parked();
-        assert!(
-            rig.engine.demands().last().is_some_and(|d| d.startup),
-            "the Startup tab asks for startup data"
-        );
-        rig.select(Tab::Processes);
-        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
-        rig.vcx.run_until_parked();
-        assert!(
-            rig.engine.demands().last().is_some_and(|d| !d.startup),
-            "leaving the tab clears the demand"
-        );
-    }
 }
 
 /// Text cells draw their values, never the warming-up "…" glyph (tasklens-rsf.30).
@@ -3012,8 +2722,8 @@ mod drawn_text {
 
     use gpui_kit::base::Root;
     use gpui_kit::{AppContext as _, VisualTestContext};
-    use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
-    use tl_ui::table::tree_table::TlTreeTable;
+    use tl_ui_table::table::cells::{record_painted_texts, take_painted_texts};
+    use tl_ui_table::table::tree_table::TlTreeTable;
 
     #[gpui_kit::test]
     fn startup_table_draws_cell_values(cx: &mut TestAppContext) {
@@ -3031,7 +2741,7 @@ mod drawn_text {
         record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         let painted = take_painted_texts();
-        let glyphs: Vec<String> = crate::selectors::drawn_selectors(&mut vcx)
+        let glyphs: Vec<String> = tl_ui_pagehost::selectors::drawn_selectors(&mut vcx)
             .into_keys()
             .filter(|k| k.starts_with("TlCell-glyph"))
             .collect();

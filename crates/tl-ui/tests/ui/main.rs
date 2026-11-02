@@ -40,7 +40,7 @@ mod shell;
 mod shell_windows;
 mod shield;
 mod smart_window;
-mod startup;
+mod startup_shell;
 mod status_bar;
 mod sys_table;
 mod theme;

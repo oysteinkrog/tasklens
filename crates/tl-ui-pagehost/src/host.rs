@@ -135,6 +135,19 @@ impl PageHost {
         cx.update(|cx| Self::install_with_in(cx, engine, settings, state, env))
     }
 
+    /// [`PageHost::install_with`] with a `client` that wraps `engine`, for a test whose client
+    /// answers a demand with data. The hub, demand and engine global use `client`.
+    pub fn install_with_client(
+        cx: &mut TestAppContext,
+        engine: Arc<FakeEngine>,
+        client: Arc<dyn EngineClient>,
+        settings: Settings,
+        state: UiState,
+        env: AppEnv,
+    ) -> Self {
+        cx.update(|cx| Self::install_with_client_in(cx, engine, client, settings, state, env))
+    }
+
     /// [`PageHost::install`] on an `App`.
     pub fn install_in(cx: &mut App, engine: Arc<FakeEngine>, settings: Settings) -> Self {
         Self::install_with_in(cx, engine, settings, UiState::default(), AppEnv::test())
@@ -149,6 +162,18 @@ impl PageHost {
         env: AppEnv,
     ) -> Self {
         let client: Arc<dyn EngineClient> = engine.clone();
+        Self::install_with_client_in(cx, engine, client, settings, state, env)
+    }
+
+    /// [`PageHost::install_with_client`] on an `App`.
+    pub fn install_with_client_in(
+        cx: &mut App,
+        engine: Arc<FakeEngine>,
+        client: Arc<dyn EngineClient>,
+        settings: Settings,
+        state: UiState,
+        env: AppEnv,
+    ) -> Self {
         gpui_kit::init(cx);
         theme::store::init(cx, &settings.theme, &settings.appearance, Vec::new());
         theme::metrics::init_metrics(&settings.appearance, cx);
