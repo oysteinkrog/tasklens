@@ -24,10 +24,10 @@ use std::rc::Rc;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
-    FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
-    canvas, div, px,
+    AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
+    Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
+    px,
 };
 use smallvec::SmallVec;
 use tl_model::demand::DeviceHistoryRequest;
@@ -62,7 +62,6 @@ use crate::pages::performance::overview::range::{
 };
 // page_range_ns moved to overview/range.rs (tasklens-zljr5.22). This keeps the old path working.
 pub use crate::pages::performance::overview::range::page_range_ns;
-use crate::pages::performance::widget::edit::WidgetEditor;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
 use crate::template::Template;
