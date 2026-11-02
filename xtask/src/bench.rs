@@ -29,13 +29,23 @@ pub struct BenchCmd {
     pub scenes: Vec<String>,
     pub runs: u32,
     pub compare: Option<PathBuf>,
+    /// Build with fat LTO (`--release`) instead of the `perf` profile.
+    pub release: bool,
 }
 
-/// Parses `[--scene <name>]... [--runs <n>] [--compare <old.json>]`.
+impl BenchCmd {
+    /// The cargo profile name; it is also the directory its binary lands in.
+    fn profile(&self) -> &'static str {
+        if self.release { "release" } else { "perf" }
+    }
+}
+
+/// Parses `[--scene <name>]... [--runs <n>] [--compare <old.json>] [--release]`.
 pub fn parse_args(args: &[String]) -> anyhow::Result<BenchCmd> {
     let mut scenes = Vec::new();
     let mut runs = DEFAULT_RUNS;
     let mut compare = None;
+    let mut release = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -51,6 +61,7 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<BenchCmd> {
                 Some(path) => compare = Some(PathBuf::from(path)),
                 None => bail!("bench: --compare needs a file path"),
             },
+            "--release" => release = true,
             other => bail!("bench: unknown argument: {other}"),
         }
     }
@@ -61,17 +72,18 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<BenchCmd> {
         scenes,
         runs,
         compare,
+        release,
     })
 }
 
 pub fn run(cmd: BenchCmd) -> anyhow::Result<()> {
     let root = workspace_root()?;
-    build(&root)?;
+    build(&root, cmd.profile())?;
 
     let tmp = root.join("target/bench/tmp");
     std::fs::create_dir_all(&tmp)
         .with_context(|| format!("bench: cannot create {}", tmp.display()))?;
-    let binary = root.join("target/release/tasklens");
+    let binary = root.join(format!("target/{}/tasklens", cmd.profile()));
     let reports = run_scenes(&cmd.scenes, cmd.runs, &tmp, |scene, out| {
         Command::new(&binary)
             .args([
@@ -125,8 +137,16 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
 
 /// Builds the bench binary once. With `TL_BUILD_WRAP=1` the build runs through `heavy-build`
 /// (R-160 OI-10).
-fn build(root: &Path) -> anyhow::Result<()> {
-    let cargo_args = ["build", "--release", "-p", "tl-app", "--features", "bench"];
+fn build(root: &Path, profile: &str) -> anyhow::Result<()> {
+    let cargo_args = [
+        "build",
+        "--profile",
+        profile,
+        "-p",
+        "tl-app",
+        "--features",
+        "bench",
+    ];
     let mut cmd = if std::env::var("TL_BUILD_WRAP").as_deref() == Ok("1") {
         let mut c = Command::new("heavy-build");
         c.arg("cargo");
@@ -392,6 +412,13 @@ mod tests {
         assert_eq!(cmd.scenes.len(), 4);
         assert_eq!(cmd.runs, 3);
         assert!(cmd.compare.is_none());
+        assert_eq!(cmd.profile(), "perf");
+    }
+
+    #[test]
+    fn release_flag_selects_the_release_profile() {
+        let cmd = parse_args(&["--release".to_owned()]).unwrap();
+        assert_eq!(cmd.profile(), "release");
     }
 
     #[test]

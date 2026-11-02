@@ -278,10 +278,19 @@ panic = "unwind"              # required: supervisors and the engine session cat
 debug = "line-tables-only"    # readable crash backtraces
 strip = "none"
 
-[profile.profiling]
+[profile.perf]
 inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+incremental = false
+
+[profile.profiling]
+inherits = "perf"
 debug = true
 ```
+
+The `perf` profile is for `cargo xtask bench` and for profiling: it builds much faster than fat LTO. Packaging (PKGBUILD) still builds `--release`. Rule: the two arms of a bench A/B comparison must be built with the same profile. `cargo xtask bench --release` runs the bench on the fat-LTO build when someone wants packaging numbers.
 
 **Workspace lints:**
 
@@ -2239,7 +2248,7 @@ UI and rendering speed are the owner's top priority. Astra found the chart cost 
 - Process CPU: `/proc/self/stat` utime+stime over the run, divided by wall time, as percent of one core. Child `tl-gpu-probe` measured the same way and reported separately.
 - Memory: `VmRSS` from `/proc/self/status` at the end; PSS from `smaps_rollup` reported only.
 - GPU: NVML power and utilization sampled by the bench through the probe at 1 Hz, reported against a 30 s baseline with tasklens closed. Report only, no gate.
-- `cargo xtask bench` runs every scene 3 times and writes `target/bench/<date>-<git sha>.json` plus a table.
+- `cargo xtask bench` builds with `--profile perf` (thin LTO, ADR-002) and runs `target/perf/tasklens`; `--release` uses the fat-LTO build and `target/release/tasklens`. Compare only summaries made with the same profile. It runs every scene 3 times and writes `target/bench/<date>-<git sha>.json` plus a table.
 
 **Phase-0 fixture.** Window 1600 × 1000 logical px, on a 144 Hz monitor at 110%, focused, smooth graphs on.
 - Scene `perf-cpu`: Performance tab, CPU page. Total CPU chart (fill + line + kernel line) and a 32-core grid (8 × 4) with kernel overlays, 60 s range, 10 Hz data. Device sidebar with 9 mini graphs (CPU, memory, GPU, 4 disks, 2 networks) at 1 Hz. A stats block with 12 values updated at 1 Hz and per-core percent labels updated at 10 Hz.

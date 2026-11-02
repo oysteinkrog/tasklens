@@ -119,8 +119,17 @@ opt-level = "z"
 debug = false
 strip = true
 
-[profile.profiling]
+# Bench and profiling builds (ADR-002, ADR-014): thin LTO and 16 codegen units build much
+# faster than release. Packaging still uses release.
+[profile.perf]
 inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+incremental = false
+
+[profile.profiling]
+inherits = "perf"
 debug = true
 
 [workspace.lints.rust]

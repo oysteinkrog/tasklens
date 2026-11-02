@@ -39,6 +39,7 @@ stop, leave the bead open, and report the question in your final message.
 - Run every cargo build, check, clippy, test, doc and bench through `heavy-build`, for example
   `heavy-build cargo test -p tl-model`. It waits for the machine-wide build lock and caps memory.
   On exit 137 (OOM kill) retry once, then report. On exit 75 (low disk) stop and report.
+- Bench and profiling builds use the `perf` profile (thin LTO, ADR-002). Packaging (PKGBUILD) still builds `--release`.
 - Never set `CARGO_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` or `build.build-dir`. Use the workspace
   `target/`.
 - Never build or clone in `/tmp`. Scratch work goes in `/var/tmp/claude/`.
