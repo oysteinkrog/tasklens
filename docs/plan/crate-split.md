@@ -343,6 +343,8 @@ the `state.toml` persist callback, because the page host persists nothing and `s
 reads the persisted state. It binds the keys the main window binds for the page:
 `bind_keys_global`, `menu::bind_keys` and `bind_keys_performance`. The Performance keys use the
 "Performance" and "PerformanceSummary" contexts, not "Global", so they reach the page without
-MainWindow. The page is the window root at 1600 × 1000 px, so it gets the whole window rather
-than the area under the title bar and tab strip. All 34 moved tests pass with their assertions
-unchanged.
+MainWindow. MainWindow also draws two things the page needs, so the rig's root view does too:
+the summary view in place of the page, and the context menu layer over both. Like
+`gpui_kit::open_window`, the rig wraps that view in gpui-kit `Root`, which owns the window's text
+selection. The page gets the whole 1600 × 1000 px window rather than the area under the title
+bar and tab strip. All 34 moved tests pass with their assertions unchanged.
