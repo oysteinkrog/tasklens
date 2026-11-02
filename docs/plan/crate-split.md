@@ -236,3 +236,108 @@ on every loop.
 5. Phase 3 (tasklens-hzire) starts once CS-E7 (tl-ui-perf) and CS-F5 have closed, not after the whole epic.
 6. During the split, moved code keeps its old paths through root re-exports. CS-J1 rewrites them to direct
    crate paths after CS-E10 and CS-F9, before the final measurement.
+
+## 10. Shell-bound tests
+
+Triage for CS-F7 (tasklens-zljr5.41), at commit 6f2e93dd7. A module is shell-bound when it names
+`MainWindow`, `TasklensUi`, `start_for_test`, `open_first_for_test` or `main_window`. 40 modules in
+crates/tl-ui/tests/ui match (the bead counted 39). For each one: does it test the shell (tabs,
+menus, title bar, windows the shell opens, shortcuts, hosts, startup), or does it reach a page
+through the shell only?
+
+Verdicts:
+
+- **stays**: the tests check shell behaviour, so they stay in the tl-ui `ui` binary.
+- **convert**: move to the crate named, on the tl-ui-pagehost rig.
+- **split**: move the page tests to the crate named and keep the shell tests in tl-ui. Split by test,
+  not by file.
+
+The target crate is the lowest one whose dependency closure covers every path the moved tests use.
+Effort: S under an hour (a rig swap); M a rig swap plus tests to split; L a large module or many
+tests tied to the shell. Test counts are `#[test]` and `#[gpui_kit::test]` attributes. Rows other
+than overview, overview_range and performance were read but not converted, so their counts and
+splits are estimates for the bead that does the work.
+
+| Module | Lines | Tests | What it uses the shell for | Verdict | Effort | Bead |
+|---|---|---|---|---|---|---|
+| action_links | 244 | 2 | `TasklensUi::init`, to check that every keymap action resolves; a source sweep of app.rs | stays | S | |
+| actions | 1,330 | 36 | Only `with_shell` (1 test) opens MainWindow with fake pages. The other 35 test tracker toasts and dialogs in a plain window | split: 35 to tl-ui-kit, 1 stays (MainWindow and status events) | S | none yet |
+| connections | 3,608 | 80 | MainWindow on the Connections tab as page host and toast sink. 4 tests need the tab switch or the jump to Processes | split: 76 to tl-ui-sys, 4 stay (connections_page_registered, tab_mounted_and_kept, demand_cleared_on_tab_switch, end_to_end_jump) | M | zljr5.43 |
+| demand | 340 | 9 | Nothing. It matched on `DemandAggregator::set_main_window` | convert to tl-ui-base, with no page host (plain window) | S | none yet |
+| detached | 1,827 | 34 | Own rigs without the shell, except 2 tests that open the main window from a mini window card and keep detached windows when the main window closes | split: 32 to tl-ui-perf, 2 stay | M | none yet |
+| dialogs | 914 | 28 | `TasklensUi::init` only to install globals. Tests cover window frames, TlDialog and the window registry | convert to tl-ui-procs (one test uses `windows::frame`; the rest need only kit and base) | S | zljr5.42 |
+| dialogs_process | 3,807 | 62 | `TasklensUi::init` in 5 rigs; one test opens MainWindow on Processes as a bystander | convert to tl-ui-procs | S | zljr5.42 |
+| focus | 402 | 7 | `esc_chain` (5 tests) builds MainWindow for the Esc chain and Tab order | split: 2 to tl-ui-base, 5 stay | S | none yet |
+| handle_search | 823 | 15 | `TasklensUi::init` and MainWindow on Processes; one test reads the ProcessesPage through the shell | convert to tl-ui-procs | S | zljr5.42 |
+| helper_flow | 323 | 9 | MainWindow on Processes as the requester window and the fallback toast sink | convert to tl-ui-procs (toast checks read `ShellLog`) | M | zljr5.42 |
+| history | 3,290 | 82 | `row_actions` uses MainWindow only as toast sink. `mode` toggles history mode through MainWindow and reads the tab strip label. Also settings window, bench and filter box tests | split: 69 to tl-ui-procs, 13 stay (mode 6, settings window 4, bench 2, filter box 1) | M | zljr5.42 |
+| host_clock | 444 | 9 | One test opens Collector Health; one is a workspace source sweep | split: 5 to tl-ui-base, 2 to tl-ui-chart, 2 stay | S | none yet |
+| host_manage | 478 | 6 | Settings > Hosts editor, host tab context menu, MainWindow | stays | S | |
+| host_settings | 231 | 4 | Settings window pages, `menus_settings::refresh_marks`, persist hook | stays | S | |
+| host_tabs | 918 | 9 | Host tab strip, Ctrl+digit, window title, pages per host, reconnect | stays | S | |
+| hub | 687 | 23 | 16 tests check `TasklensUi::init`, `open_first_for_test`, `start_for_test` and the exit slots; 7 are plain SnapshotHub tests | split: 7 to tl-ui-base, 16 stay | S | none yet |
+| information | 2,907 | 77 | The Information page is in the shell crate. `main_window` (8) and the keymap test use MainWindow | stays (the page itself is in tl-ui) | S | |
+| low_memory | 1,261 | 26 | The Low memory window is in the shell crate; `start_for_test`, `OpenMode`, the Settings window | stays | S | |
+| minigraphs | 3,202 | 65 | `mounted` (7) opens MainWindow with the real Processes page; one test switches tabs. The other 58 have no shell | split: 64 to tl-ui-procs (about 17 need the Processes menu), 1 stays (panel_absent_on_other_tabs) | M | none yet |
+| overview | 12,202 | 171 | Only `wired` (19) opens MainWindow: tab leave, the cached Processes page, the title bar. `page` (84) needs the device sidebar. The other 68 need no shell | done: 68 to tl-ui-overview, 84 to tl-ui-perf, 19 stay | L | zljr5.41 |
+| overview_range | 982 | 10 | MainWindow mostly as host for the Performance page. One test measures box chrome at a window size, so it depends on the page area the main window gives | done: 9 to tl-ui-perf on the page host, 1 stays (overview_box_chrome_at_most_40). page_range (1) moved with the rig | S | zljr5.41 |
+| performance | 3,497 | 65 | `summary` (38) and one `tab` test open MainWindow; the rest need no shell | done: 26 to tl-ui-perf, 39 stay (see below) | M | zljr5.41 |
+| process_menu | 4,603 | 77 | `TasklensUi::init` for globals; `end` and `toasts` open MainWindow on Processes for the page and its toasts | convert to tl-ui-procs | M | zljr5.42 |
+| processes | 4,516 | 89 | MainWindow for the filter box, `FilterChanged`, the pause state, the status chip, tab visits, the toolbar and a fake Performance tab | split: 42 to tl-ui-procs (top 8, delegate 15, page 14, keys 5), 47 stay | L | zljr5.42 |
+| props | 6,260 | 135 | `window` (77) uses one rig with `TasklensUi::init` and MainWindow on Processes, for the page and the main toast queue | convert to tl-ui-procs | M | zljr5.42 |
+| run | 449 | 11 | The Run window is in the shell crate; MainWindow as parent and toast sink | stays | S | |
+| selectors | 372 | 5 | Opens MainWindow with the real Processes and Performance pages and switches tabs | split: 1 to tl-ui-procs, 1 to tl-ui-perf, 3 to tl-ui-base | M | none yet |
+| service_props | 2,886 | 64 | One rig: `TasklensUi::init`, MainWindow on Services, the main toasts | convert to tl-ui-sys | S | zljr5.43 |
+| services | 4,962 | 98 | MainWindow on Services as page host and toast sink. 4 tests check lazy page creation, toolbar slots, the status chip and the key binding at init | split: 94 to tl-ui-sys, 4 stay | L | zljr5.43 |
+| settings_window | 2,680 | 88 | The Settings window, persist counters, import, menus | stays | S | |
+| setup_window | 797 | 25 | The Additional Setup window | stays | S | |
+| shell | 5,992 | 198 | Toolbar, title bar, tab strip, status chip, filter, MainWindow | stays | S | |
+| shell_windows | 2,580 | 65 | Share Theme, Collector Health, Shortcuts, About, Reset, Crash report, Public IP, Theme editor | stays | S | |
+| shield | 1,015 | 24 | The shield in MainWindow, the Settings Privileges page, unlock at launch | stays | S | |
+| smart_window | 378 | 7 | The SMART window is in the shell crate; MainWindow on Services as host and toast sink | stays | S | |
+| startup | 3,079 | 68 | MainWindow with a fake page slot. 3 tests need the shell: the keymap, mount and keep on the tab, demand cleared on tab switch | split: 65 to tl-ui-sys, 3 stay | M | zljr5.43 |
+| status_bar | 622 | 7 | `performance_tab` (5) and `overview` (1) already use the page host. `main_window` (1) checks that every tab sits under the tab strip | split: 6 to tl-ui-perf, 1 stays | S | none yet |
+| sys_table | 2,049 | 44 | Only `frame` (6) calls `TasklensUi::init`, to install globals, in its own window. No MainWindow | convert to tl-ui-table | S | none yet |
+| theme | 207 | 5 | One test boots `TasklensUi::init` to follow the portal color scheme | split: 4 to tl-ui-base, 1 stays | S | none yet |
+| tray_bridge | 1,505 | 44 | `full()` runs `TasklensUi::init` and MainWindow so toasts have a queue. 8 tests check the shell: the open main window, close and minimize to tray, the Settings tray rows | split: 31 to tl-ui-perf-core, 5 to tl-ui-procs (the row menu), 8 stay | M | none yet |
+
+Totals: 18 modules stay, 9 convert and 13 split (3 of them done here). The two follow-up beads
+cover the procs and sys rows. The rows marked "none yet" (base, kit, chart, table, perf-core and
+perf targets) have no bead; they are small and could go in one bead per target crate.
+
+Open points for those beads:
+
+- `TasklensUi::init` installs more than `PageHost::install`: the toast queues, `bind_keys_global`,
+  the window frame keys (Esc, Ctrl+W), the helper flow and the action tracker. dialogs, helper_flow,
+  process_menu, props, service_props and tray_bridge depend on them. Either `PageHost` gains them or
+  each rig adds them.
+- `ShellLog` records each toast push, while the main toast queue merges repeats. Tests that count
+  toasts in process_menu, props, helper_flow and tray_bridge must keep their counts on the new rig.
+- The processes split is the least certain: filter, pause, status and jump may move once the page
+  host carries `GlobalShellEvents`; `legend` and `top_procs` cross from the Overview to the Processes
+  tab on purpose.
+
+### What zljr5.41 moved
+
+Counts from `cargo test -p tl-ui --features test-hooks --test ui -- --list` before the move
+(2,127 tests at 6f2e93dd7) and from each binary after it.
+
+| Module | Before (ui) | After | Stayed in tl-ui, and why |
+|---|---|---|---|
+| overview | 171 | tl-ui-overview `overview` 68 (top level 10, drawn 3, boxes 18, bottom 30, title_row 1, sweep 3, mem_by_app_box 3); tl-ui-perf `perf` 84 (page) | wired 19: opens MainWindow, leaves and revisits the tab, reads the title bar and the cached Processes page |
+| overview_range | 10 | tl-ui-perf 9, on the page host | overview_box_chrome_at_most_40: on the page host the page is taller than in the main window, and the GPU box chrome came out at 41 px against the 40 px limit |
+| page_range | 1 | tl-ui-perf 1 (uses the overview_range rig) | none |
+| performance | 65 | tl-ui-perf 26 (top level 4, page_frame 10, perf_keys 6, tab 6) | tab 1 (performance_tab_initial_focus_is_sidebar: first visit through MainWindow); summary 38: the rig opens the main window, and tests check the tab switch block, the title bar menus, the main toasts and keys through the window |
+
+Shared helpers moved rather than copied: `drawn_selectors` and `assert_none_drawn_twice` to
+`tl_ui_pagehost::selectors`, and `proc_key` and `proc_record` to `tl_ui_testkit::fixtures`.
+tl-ui keeps the main-window version of the overview_range rig for the chrome check,
+overview_timeline and device_pages, so that rig is now in both binaries.
+
+overview_timeline (8 tests) is not in the list of 40, but it builds on the overview_range rig. It
+stays in tl-ui: `timeline_click_modes` checks that a timeline click opens History mode, which goes
+through `ShellApi::process_jump` to MainWindow. The other 7 could move to tl-ui-perf with a split.
+
+The summary module is the largest page-test group left in tl-ui. About 30 of its 38 tests check the
+summary view itself and could move to tl-ui-perf on a page host rig that binds the same keys. That
+needs the rig to reproduce the key dispatch and the window size the main window gives the page.
