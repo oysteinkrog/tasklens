@@ -6,6 +6,4 @@ pub mod performance;
 pub mod processes;
 pub mod services;
 pub mod startup;
-pub mod sys_copy;
-pub mod sys_status;
-pub mod sys_table;
+pub use crate::table::{sys_copy, sys_status, sys_table};

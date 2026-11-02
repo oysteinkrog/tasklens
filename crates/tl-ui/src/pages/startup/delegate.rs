@@ -32,12 +32,12 @@ use super::menu::{StartupMenuTargets, row_menu};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::i18n::{Strings, tr, tr_en};
-use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
-use crate::pages::sys_table::SysDelegate;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
+use crate::table::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
+use crate::table::sys_table::SysDelegate;
 use crate::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
@@ -71,14 +71,7 @@ pub fn default_width(c: StartupColumn) -> f32 {
 
 /// Minimum width of `c`, logical px at 100% (UI-SYS-041). `SysColumnId::min_width` reads it.
 pub fn min_width(c: StartupColumn) -> f32 {
-    match c {
-        StartupColumn::Name => 120.,
-        StartupColumn::Status | StartupColumn::Impact => 80.,
-        StartupColumn::Publisher
-        | StartupColumn::Type
-        | StartupColumn::Location
-        | StartupColumn::Command => 60.,
-    }
+    crate::table::columns::startup_min_width(c)
 }
 
 /// The Startup id of `c`.

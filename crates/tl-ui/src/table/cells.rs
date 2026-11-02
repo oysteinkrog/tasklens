@@ -45,9 +45,9 @@ use tl_model::validity::Validity;
 
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat, glyph_start};
-use crate::pages::sys_status::{DotStyle, LabelTone, StatusLook, cell_colors};
 use crate::selector::TlSelector;
 use crate::table::columns::ColumnKind;
+use crate::table::sys_status::{DotStyle, LabelTone, StatusLook, cell_colors};
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
     STALE_OPACITY,

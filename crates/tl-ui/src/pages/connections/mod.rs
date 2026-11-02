@@ -45,13 +45,13 @@ use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
-use crate::pages::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
-use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::selector::TlSelector;
 use crate::shell::ShellState;
 use crate::shell::{FilterChanged, HelperInstalled, PauseChanged, ShellPage, StatusChanged};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
+use crate::table::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
+use crate::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::table::tree_table::TreeTableEvent;
 use crate::theme::{current, metrics};
 use crate::util::clipboard_write;
@@ -473,7 +473,7 @@ impl ConnectionsPage {
 
     /// The page's action layer, for the close toast tests.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    pub fn actions_for_test(&self) -> &Entity<crate::pages::sys_table::SysActions> {
+    pub fn actions_for_test(&self) -> &Entity<crate::table::sys_table::SysActions> {
         &self.frame.actions
     }
 

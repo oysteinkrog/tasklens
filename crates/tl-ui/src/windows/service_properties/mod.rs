@@ -52,10 +52,10 @@ use crate::pages::services::actions::{
     SERVICE_PROPS_CONTEXT, ServicePropsNextTab, ServicePropsOk, ServicePropsPrevTab,
     ServicePropsSelectTab,
 };
-use crate::pages::sys_table::SysActions;
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::selector::TlSelector;
 use crate::shell::ShellApi;
+use crate::table::sys_table::SysActions;
 use crate::theme::{current, metrics};
 
 /// Default window size at 100% scale.

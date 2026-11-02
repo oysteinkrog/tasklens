@@ -48,12 +48,12 @@ use crate::pages::services::flows::{
     UnitVerb, file_uri, run_jump_to_process, run_open_uri, run_unit_verb, startup_texts,
     submit_set_startup,
 };
-use crate::pages::sys_status::{
-    DotStyle, StatusLook, SysStatus, cell_colors, status_label, status_look,
-};
-use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
 use crate::selector::TlSelector;
 use crate::shell::ShellState;
+use crate::table::sys_status::{
+    DotStyle, StatusLook, SysStatus, cell_colors, status_label, status_look,
+};
+use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
 use crate::text::style::t_base;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 

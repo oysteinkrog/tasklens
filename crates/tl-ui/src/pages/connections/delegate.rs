@@ -30,12 +30,12 @@ use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
 use crate::host::HostContext;
 use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::pages::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
-use crate::pages::sys_table::SysDelegate;
 use crate::table::cells::{CellOut, CellSuffix};
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
+use crate::table::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
+use crate::table::sys_table::SysDelegate;
 use crate::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,
@@ -102,11 +102,7 @@ pub const fn default_width(column: ConnColumn) -> f32 {
 }
 
 pub const fn min_width(column: ConnColumn) -> f32 {
-    match column {
-        ConnColumn::Local | ConnColumn::Foreign => 120.,
-        ConnColumn::State => 90.,
-        _ => 60.,
-    }
+    crate::table::columns::connections_min_width(column)
 }
 
 const COLUMN_KEYS: [&str; 16] = [

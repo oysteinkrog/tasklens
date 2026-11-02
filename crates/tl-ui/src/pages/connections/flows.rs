@@ -25,8 +25,8 @@ use crate::i18n::{tr, tr_args};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
-use crate::pages::sys_table::{ActionKindTag, ActionTexts};
 use crate::shell::{ShellApi, ShellState};
+use crate::table::sys_table::{ActionKindTag, ActionTexts};
 use crate::text::style::t_base;
 use crate::theme::{current, metrics};
 

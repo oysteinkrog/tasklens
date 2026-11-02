@@ -73,13 +73,13 @@ use crate::pages::processes::actions::{
 use crate::pages::processes::menu::{MenuCaps, row_menu as process_row_menu};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::run_process_action;
-use crate::pages::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
-use crate::pages::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::settings_global::TlSettings;
 use crate::shell::{FilterChanged, PauseChanged, ShellPage, StatusChanged};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
+use crate::table::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
+use crate::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
 use crate::table::tree_table::{TlTreeTable, TreeTableEvent};
 use crate::theme::metrics;
 use crate::util::clipboard_write;

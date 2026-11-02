@@ -54,9 +54,9 @@ use crate::pages::services::actions::{
     JOURNAL_LIST_CONTEXT, ServiceLogsBottom, ServiceLogsCopySelected, ServiceLogsSelectAll,
     ServiceLogsTop,
 };
-use crate::pages::sys_status::{LabelTone, tone_color};
 use crate::selector::TlSelector;
 use crate::table::selection::{Selection, SelectionView};
+use crate::table::sys_status::{LabelTone, tone_color};
 use crate::text::fonts::MONO_FAMILY;
 use crate::theme::{TlTheme, current, metrics};
 

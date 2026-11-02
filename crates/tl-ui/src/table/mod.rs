@@ -6,6 +6,9 @@ pub mod columns;
 pub mod columns_window;
 pub mod header;
 pub mod selection;
+pub mod sys_copy;
+pub mod sys_status;
+pub mod sys_table;
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub mod test_delegate;
 pub mod tree_table;

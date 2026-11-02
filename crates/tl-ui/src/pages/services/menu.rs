@@ -22,8 +22,8 @@ use crate::components::menu::TlMenu;
 use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::pages::sys_table::SysActions;
 use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
+use crate::table::sys_table::SysActions;
 
 /// Most unit rows one menu acts on.
 const MAX_TARGETS: usize = 256;

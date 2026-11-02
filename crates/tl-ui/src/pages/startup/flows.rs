@@ -15,7 +15,7 @@ use super::actions::{StartupDelete, StartupDisable, StartupEnable, StartupRunNow
 use super::menu::StartupMenuTargets;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::i18n::tr;
-use crate::pages::sys_table::{ActionKindTag, ActionTexts};
+use crate::table::sys_table::{ActionKindTag, ActionTexts};
 use crate::windows::confirm_startup_delete::{StartupEntryView, open_startup_delete};
 
 /// The three flows differ only in their targets and texts.

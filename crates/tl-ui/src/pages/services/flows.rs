@@ -25,8 +25,8 @@ use crate::host::HostContext;
 use crate::i18n::tr;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
-use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::shell::{ShellApi, ShellState};
+use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
 
 /// The five service verbs that share one flow.
@@ -140,7 +140,7 @@ fn keys(
 pub fn unit_action_texts(v: UnitVerb, cx: &App) -> ActionTexts {
     let (pending_one, done_one, failed, pending_many, done_many, partial_many) = keys(v);
     let failed_button = (v != UnitVerb::ResetFailed).then(|| {
-        let make: crate::pages::sys_table::FailedButtonAction = Box::new(|t| match t {
+        let make: crate::table::sys_table::FailedButtonAction = Box::new(|t| match t {
             ActionTarget::Unit(u) => Box::new(ServiceOpenLogs(u.clone())),
             _ => Box::new(gpui::NoAction),
         });

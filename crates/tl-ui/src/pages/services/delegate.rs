@@ -47,13 +47,13 @@ use crate::pages::processes::cells::{
 use crate::pages::processes::delegate::{ProcessRowCells, ValidityTips, live_tip};
 use crate::pages::processes::name_cell::{self, NameCellData, NameWords, StateGlyph};
 use crate::pages::processes::tooltip::{RowTipState as ProcTipState, RowTipWords, RowTooltip};
-use crate::pages::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
-use crate::pages::sys_table::{ActionKindTag, SysDelegate};
 use crate::settings_global::{Section, TlSettings};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
+use crate::table::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
+use crate::table::sys_table::{ActionKindTag, SysDelegate};
 use crate::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,

@@ -16,7 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::ColumnId;
-use tl_model::table::{SortSpec, SysColumnId, SysSortSpec, SysTable};
+use tl_model::table::{ConnColumn, SortSpec, StartupColumn, SysColumnId, SysSortSpec, SysTable};
 use tl_ui_settings::settings::ColumnState;
 
 use crate::table::tree_table::ColumnResizeMode;
@@ -104,8 +104,8 @@ impl TableColumn for SysColumnId {
     /// The system-table minimums (UI-SYS-041 and UI-SYS-061).
     fn min_width(self) -> Option<f32> {
         match self {
-            SysColumnId::Startup(c) => Some(crate::pages::startup::delegate::min_width(c)),
-            SysColumnId::Connections(c) => Some(crate::pages::connections::delegate::min_width(c)),
+            SysColumnId::Startup(c) => Some(startup_min_width(c)),
+            SysColumnId::Connections(c) => Some(connections_min_width(c)),
             _ => None,
         }
     }
@@ -662,6 +662,27 @@ fn next_ascending<C: TableColumn>(current: C, ascending: bool, col: C, kind: Col
         !ascending
     } else {
         kind != ColumnKind::Numeric
+    }
+}
+
+/// Minimum width of a Startup column, logical px at 100% (UI-SYS-041).
+pub fn startup_min_width(c: StartupColumn) -> f32 {
+    match c {
+        StartupColumn::Name => 120.,
+        StartupColumn::Status | StartupColumn::Impact => 80.,
+        StartupColumn::Publisher
+        | StartupColumn::Type
+        | StartupColumn::Location
+        | StartupColumn::Command => 60.,
+    }
+}
+
+/// Minimum width of a Connections column, logical px at 100% (UI-SYS-061).
+pub const fn connections_min_width(column: ConnColumn) -> f32 {
+    match column {
+        ConnColumn::Local | ConnColumn::Foreign => 120.,
+        ConnColumn::State => 90.,
+        _ => 60.,
     }
 }
 

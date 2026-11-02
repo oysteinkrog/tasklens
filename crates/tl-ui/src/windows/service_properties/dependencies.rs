@@ -33,10 +33,10 @@ use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::ServicePropsOk;
 use crate::pages::services::delegate::service_sys_status;
-use crate::pages::sys_status::{
+use crate::selector::TlSelector;
+use crate::table::sys_status::{
     DotStyle, LabelTone, StatusLook, cell_colors, status_label, status_look,
 };
-use crate::selector::TlSelector;
 use crate::text::style::{label_style, t_base, t_xs};
 use crate::theme::{current, metrics};
 use fluent_bundle::FluentValue;

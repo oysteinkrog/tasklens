@@ -20,10 +20,10 @@ use tl_ui_settings::settings::Settings;
 use super::delegate::ServicesDelegate;
 use crate::i18n::tr_en;
 use crate::pages::processes::cells::{CellCtx, CellWords, GroupMembers, RowRef, copy_details};
-use crate::pages::sys_copy::{CopyTexts, SysCopySource};
-use crate::pages::sys_status::{StatusWords, SysStatus};
 use crate::table::TreeTableDelegate as _;
 use crate::table::cells::CellOut;
+use crate::table::sys_copy::{CopyTexts, SysCopySource};
+use crate::table::sys_status::{StatusWords, SysStatus};
 use crate::table::tree_table::{RowKind, TlTreeTable};
 
 /// Writes the "Copy row" block of one unit (no trailing newline). Labels and words are en-US.

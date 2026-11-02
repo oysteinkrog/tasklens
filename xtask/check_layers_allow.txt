@@ -62,7 +62,3 @@ pages/processes/menu.rs -> pages::services::actions
 windows/notices.rs -> pages::startup::delegate
 windows/props/fds.rs -> pages::connections::actions
 windows/props/general.rs -> pages::services::actions
-
-# tl-ui-table -> tl-ui-sys: 2
-table/columns.rs -> pages::connections::delegate
-table/columns.rs -> pages::startup::delegate

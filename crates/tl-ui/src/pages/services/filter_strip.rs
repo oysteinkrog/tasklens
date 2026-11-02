@@ -18,9 +18,9 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, set_open_menu_check};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{tr, tr_args};
-use crate::pages::sys_table::SysQuery;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
+use crate::table::sys_table::SysQuery;
 use crate::theme::{current, metrics};
 
 gpui_kit::gpui::actions!(tasklens, [ServicesOpenUnitTypes]);

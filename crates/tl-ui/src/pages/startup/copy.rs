@@ -23,9 +23,9 @@ use crate::action_tracker::ToastTexts;
 use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::pages::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable};
+use crate::table::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
 use crate::util::clipboard_write;
 
 /// What one copy command works on: the captured entries in view order and the words and columns

@@ -79,9 +79,6 @@ const LAYERS: &[(&str, &str)] = &[
     // tl-ui-table
     ("table/", "tl-ui-table"),
     ("text_cache.rs", "tl-ui-table"),
-    ("pages/sys_table.rs", "tl-ui-table"),
-    ("pages/sys_status.rs", "tl-ui-table"),
-    ("pages/sys_copy.rs", "tl-ui-table"),
     // tl-ui-perf-core
     ("pages/performance/actions.rs", "tl-ui-perf-core"),
     ("pages/performance/details.rs", "tl-ui-perf-core"),

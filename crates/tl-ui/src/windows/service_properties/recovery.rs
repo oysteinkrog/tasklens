@@ -45,8 +45,8 @@ use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::tr;
 use crate::pages::services::flows::startup_texts;
-use crate::pages::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::selector::TlSelector;
+use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 

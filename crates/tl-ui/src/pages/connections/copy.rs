@@ -13,9 +13,9 @@ use tl_model::validity::Validity;
 
 use super::ConnectionsPage;
 use super::delegate::id;
-use crate::pages::sys_copy::{CopyTexts, SysCopySource};
 use crate::table::TreeTableDelegate as _;
 use crate::table::cells::CellOut;
+use crate::table::sys_copy::{CopyTexts, SysCopySource};
 
 #[derive(Default)]
 pub(super) struct PreparedCopy {

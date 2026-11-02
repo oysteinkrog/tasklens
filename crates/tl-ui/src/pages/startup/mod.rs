@@ -34,13 +34,13 @@ use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
 use crate::host::HostContext;
 use crate::hub::SnapshotChanged;
 use crate::i18n::{tr, tr_args};
-use crate::pages::sys_copy::CopyTexts;
-use crate::pages::sys_table::{
-    ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
-};
 use crate::shell::{FilterChanged, ShellPage, StatusChanged};
 use crate::table::TreeTableDelegate as _;
 use crate::table::actions::OpenProperties;
+use crate::table::sys_copy::CopyTexts;
+use crate::table::sys_table::{
+    ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
+};
 use crate::table::tree_table::TreeTableEvent;
 use crate::windows::startup_properties::open_startup_properties_all;
 
