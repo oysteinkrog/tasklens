@@ -58,7 +58,6 @@ mod props;
 mod render_gallery;
 mod render_perf;
 mod render_support;
-mod render_theme;
 mod run;
 mod selectors;
 mod service_props;

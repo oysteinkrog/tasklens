@@ -2,20 +2,26 @@
 //! two kit widgets, rendered on lavapipe for both built-in themes at `ui_scale` 1.0 and 1.1 and
 //! compared with `tests/golden/theme_<name>_<scale>.png`. `TL_UPDATE_GOLDEN=1` rewrites them.
 //!
-//! Run with `cargo test -p tl-ui --features render-tests --test ui -- render_theme::`.
-//! The render helpers live in `tl_ui_testkit::render`, set up for tl-ui in `render_support`.
+//! Run with `cargo test -p tl-ui-kit --features render-tests --test render`.
+//! The render helpers live in `tl_ui_pagehost::render`.
 
-#![cfg(feature = "render-tests")]
-
-use crate::render_support::{RenderHarness, assert_golden, run_on_lavapipe};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{
     AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Render, Styled, Window, div, px,
     size,
 };
-use tl_ui::text::fonts::UI_FAMILY;
-use tl_ui::theme::{GraphPalette, StatusColors, ThemeSlot, current, metrics};
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::theme::{GraphPalette, StatusColors, ThemeSlot, current, metrics};
+use tl_ui_pagehost::render::{RenderHarness, run_on_lavapipe};
+
+/// Where this crate's golden PNGs live.
+const GOLDEN_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
+
+/// Compares `img` with `tests/golden/<name>.png`, or writes it when `TL_UPDATE_GOLDEN=1`.
+fn assert_golden(name: &str, img: &tl_ui_testkit::render::RgbaImage) {
+    tl_ui_pagehost::render::assert_golden(std::path::Path::new(GOLDEN_DIR), name, img);
+}
 
 /// Window size at `ui_scale` 1.0, in logical px.
 const WIDTH: f32 = 480.;

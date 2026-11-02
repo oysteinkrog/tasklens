@@ -8247,6 +8247,7 @@ dependencies = [
  "smallvec",
  "tl-model",
  "tl-ui-base",
+ "tl-ui-pagehost",
  "tl-ui-settings",
  "tl-ui-testkit",
  "tracing",

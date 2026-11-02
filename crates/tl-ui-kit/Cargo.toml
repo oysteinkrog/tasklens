@@ -17,12 +17,19 @@ tl-ui-settings = { workspace = true }
 
 [dev-dependencies]
 tl-ui-testkit = { workspace = true }   # FakeEngine for the keymap and toast tests
+tl-ui-pagehost = { workspace = true, features = ["test-support"] }   # render helpers
 gpui-kit = { workspace = true, features = ["test-support"] }
 
 [features]
 default = []
 bench = ["test-hooks"]   # the component gallery and static toast cards for --bench
 test-hooks = ["tl-ui-base/test-hooks"]
+render-tests = ["tl-ui-pagehost/render-tests"]   # headless screenshot tests (ADR-013)
+
+[[test]]
+name = "render"
+path = "tests/render/main.rs"
+required-features = ["render-tests"]
 
 [lints]
 workspace = true
