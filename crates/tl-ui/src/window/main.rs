@@ -114,7 +114,7 @@ use crate::tray_bridge::{TrayBridge, TrayStatus};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
-pub(crate) use crate::shell::PICK_NONE_TEXT;
+use crate::shell::PICK_NONE_TEXT;
 pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
     ShellEvents, ShellPage, ShellState, WINDOW_TITLE, main_window_title,

@@ -48,7 +48,7 @@ use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowS
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
-use crate::pages::performance::DeviceKey;
+use crate::pages::performance::core::DeviceKey;
 use crate::pages::processes::actions::{CapturedTargets, EndProcess, EndTask};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};

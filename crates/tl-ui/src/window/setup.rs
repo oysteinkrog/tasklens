@@ -29,7 +29,8 @@ use tracing::warn;
 
 use super::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::action_tracker::host_send_allowed;
-pub use crate::actions::{OpenAdditionalSetup, SetupRow};
+use crate::actions::OpenAdditionalSetup;
+pub use crate::actions::SetupRow;
 use crate::components::badge::{TlBadge, TlBadgeKind};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::dialog::{DialogResult, TlDialog};

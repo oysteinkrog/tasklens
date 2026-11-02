@@ -27,10 +27,9 @@ use crate::theme::user_store::ThemePersist;
 use crate::{actions, i18n, settings_global, text, theme};
 
 pub use crate::app_env::{
-    AdapterInfo, AppEnv, AppRequestFn, AppRequestHandler, BootSettings, BuildInfo, CrashReport,
-    EngineGlobal, GlobalShortcutApi, ImportSummary, ImportTaskslingerFn, ImportedSettings,
-    PersistFn, ReadTsThemesFn, RunHistoryEntry, RunHistoryStore, SetShortcutFn, StartOptions,
-    ToastKindTag, UiInit, WriteSettingsFn, window_app_id,
+    AdapterInfo, AppEnv, AppRequestHandler, BootSettings, BuildInfo, CrashReport, EngineGlobal,
+    GlobalShortcutApi, ImportSummary, ImportedSettings, PersistFn, RunHistoryEntry,
+    RunHistoryStore, StartOptions, ToastKindTag, UiInit,
 };
 pub use crate::theme::user_store::PersistTheme;
 

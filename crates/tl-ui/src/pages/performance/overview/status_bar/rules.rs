@@ -16,7 +16,7 @@ use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tl_model::system::Metric;
 use tl_model::time::TimeNs;
 
-pub use crate::pages::performance::core::sensors::cpu_hot_c;
+use crate::pages::performance::core::sensors::cpu_hot_c;
 use crate::pages::performance::overview::layout::BoxKind;
 
 /// CPU, GPU, disk active time or network use above this percent gives `Busy`.

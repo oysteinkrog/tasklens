@@ -6,6 +6,3 @@
 
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
-
-# tl-ui-procs -> tl-ui-perf: 1
-windows/disk_in_use.rs -> pages::performance
