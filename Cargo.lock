@@ -8248,6 +8248,7 @@ dependencies = [
  "tl-model",
  "tl-ui-base",
  "tl-ui-settings",
+ "tl-ui-testkit",
  "tracing",
 ]
 

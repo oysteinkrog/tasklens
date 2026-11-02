@@ -6,15 +6,15 @@ use std::sync::Arc;
 use gpui_kit::{Action, App, KeyContext, Keystroke, TestAppContext};
 use tl_model::client::EngineClient;
 use tl_model::table::TableMode;
-use tl_ui::actions::{
+use tl_ui_kit::actions::{
     CancelWindowPick, CloseWindow, EscapeChain, FilterAccept, FilterEscape, FocusFilter, MenuId,
     NextTab, OpenMenu, OpenRunDialog, OpenSettings, OpenShortcuts, PrevTab, Quit,
     RefreshCurrentTab, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetSetting, ToggleMiniWindow,
     ToggleSetting, bind_keys_global, register_global_handlers,
 };
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::components::slider::{SliderBigStepDown, SliderBigStepUp, SliderStepDown, SliderStepUp};
-use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_kit::components::slider::{SliderBigStepDown, SliderBigStepUp, SliderStepDown, SliderStepUp};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 

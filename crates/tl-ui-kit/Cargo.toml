@@ -16,6 +16,7 @@ tl-ui-base = { workspace = true }
 tl-ui-settings = { workspace = true }
 
 [dev-dependencies]
+tl-ui-testkit = { workspace = true }   # FakeEngine for the keymap and toast tests
 gpui-kit = { workspace = true, features = ["test-support"] }
 
 [features]

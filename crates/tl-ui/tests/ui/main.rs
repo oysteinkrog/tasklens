@@ -30,7 +30,6 @@ mod host_settings;
 mod host_tabs;
 mod hub;
 mod information;
-mod keymap;
 mod low_memory;
 mod memory_page;
 mod menus;
