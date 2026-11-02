@@ -26,7 +26,6 @@ mod host_tabs;
 mod hub;
 mod information;
 mod low_memory;
-mod memory_page;
 mod menus;
 mod minigraphs;
 mod net_page;

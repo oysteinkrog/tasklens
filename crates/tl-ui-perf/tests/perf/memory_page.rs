@@ -16,20 +16,20 @@ use tl_model::series::{Sample, SeriesView};
 use tl_model::snapshot::SystemSnapshot;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
-use tl_ui::anim::AnimationDriver;
-use tl_ui::app::{BootSettings, EngineGlobal};
-use tl_ui::chart::scale::{ScaleState, compute};
-use tl_ui::chart::{ChartState, ValueFormat, YScale, format_value};
-use tl_ui::components::kv_grid;
-use tl_ui::demand::DemandAggregator;
-use tl_ui::hub::SnapshotHub;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::actions::PerfToggleMemorySwapGraph;
-use tl_ui::pages::performance::memory::{COMMIT_ID, MemoryPage, PHYSICAL_ID, SWAP_ID};
-use tl_ui::pages::performance::overview::mem_box::{APPS_MODE, MemBox};
-use tl_ui::pages::performance::page::DevicePage as _;
-use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-use tl_ui::settings_global::TlSettings;
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::init_strings;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_chart::chart::scale::{ScaleState, compute};
+use tl_ui_chart::chart::{ChartState, ValueFormat, YScale, format_value};
+use tl_ui_kit::components::kv_grid;
+use tl_ui_overview::overview::mem_box::{APPS_MODE, MemBox};
+use tl_ui_perf::performance::actions::PerfToggleMemorySwapGraph;
+use tl_ui_perf::performance::memory::{COMMIT_ID, MemoryPage, PHYSICAL_ID, SWAP_ID};
+use tl_ui_perf::performance::page::DevicePage as _;
+use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -148,13 +148,13 @@ fn open_in(
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
         init_strings(cx, "en-US");
         kv_grid::init(cx);
         cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -277,7 +277,7 @@ fn memory_swap_toggle_follows_setting(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn memory_menu_checks_follow_settings(cx: &mut TestAppContext) {
-    use tl_ui::pages::performance::actions::PerfToggleMemoryComposition;
+    use tl_ui_perf::performance::actions::PerfToggleMemoryComposition;
     let r = open(
         cx,
         Settings::default(),
@@ -482,7 +482,7 @@ fn memory_totals_change_rebuilds_specs(cx: &mut TestAppContext) {
 
 mod composition {
     use gpui_kit::{Modifiers, StyleRefinement, point};
-    use tl_ui::pages::performance::memory_bar::{
+    use tl_ui_perf::performance::memory_bar::{
         BAR_ID, Composition, CompositionBarView, SegmentKind,
     };
 
@@ -509,13 +509,13 @@ mod composition {
     ) -> (Entity<CompositionBarView>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
         });
         let bar = cx.new(|cx| CompositionBarView::new(c, cx));
@@ -652,7 +652,7 @@ mod composition {
         let r = open(cx, Settings::default(), sys);
         let wrap = r
             .vcx
-            .debug_bounds(tl_ui::pages::performance::memory::BAR_WRAP_ID)
+            .debug_bounds(tl_ui_perf::performance::memory::BAR_WRAP_ID)
             .expect("bar box");
         let bar = r.vcx.debug_bounds(BAR_ID).expect("bar");
         assert!(
@@ -670,8 +670,8 @@ mod composition {
 
 mod details {
     use tl_model::system::{Metric, ZramTotals};
-    use tl_ui::pages::performance::details::KeyValueModel;
-    use tl_ui::pages::performance::memory::{
+    use tl_ui_perf::performance::details::KeyValueModel;
+    use tl_ui_perf::performance::memory::{
         MemoryDetailInputs, memory_details_model, update_memory_details,
     };
 
@@ -872,12 +872,12 @@ mod details {
 mod by_app {
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::system::{MemGroupBand, WineGroupInfo};
-    use tl_ui::pages::performance::memory::VIEW_SWITCH_ID;
-    use tl_ui::pages::performance::memory_apps::{
+    use tl_ui_base::settings_global::{SettingKey, SettingValue};
+    use tl_ui_perf::performance::memory::VIEW_SWITCH_ID;
+    use tl_ui_perf::performance::memory_apps::{
         APPS_ID, BandKind, KERNEL_PARTS, LEGEND_ID, MemoryAppsChart, Ranker, TOOLTIP_ID,
         legend_fit, legend_order, pick_colors, split_top,
     };
-    use tl_ui::settings_global::{SettingKey, SettingValue};
     use tl_ui_settings::settings::{GroupColor, MemoryView, OverviewRange};
 
     use super::*;
@@ -1549,8 +1549,12 @@ mod by_app {
         };
         let dark = colours(&mut r);
         r.vcx.update(|_, cx| {
-            tl_ui::theme::store::activate("Default Light", tl_ui::theme::ActivateSource::User, cx)
-                .expect("theme exists");
+            tl_ui_base::theme::store::activate(
+                "Default Light",
+                tl_ui_base::theme::ActivateSource::User,
+                cx,
+            )
+            .expect("theme exists");
         });
         draw(r.vcx);
         for (i, (light, dark)) in colours(&mut r).into_iter().zip(dark).enumerate() {
