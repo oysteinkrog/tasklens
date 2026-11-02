@@ -25,15 +25,15 @@ use crate::components::toast::ToastKind;
 use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
-use crate::pages::minigraph::actions::{
+use crate::minigraph::actions::{
     MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphHide,
     MinigraphRemove,
 };
-use crate::pages::minigraph::bridge::OwnWindowBridge;
-use crate::pages::minigraph::card::{CardEnded, MINI_CARD_H, MINI_CARD_W, MinigraphCard};
-use crate::pages::minigraph::menu::{color_submenu, range_submenu};
-use crate::pages::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
-use crate::pages::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
+use crate::minigraph::bridge::OwnWindowBridge;
+use crate::minigraph::card::{CardEnded, MINI_CARD_H, MINI_CARD_W, MinigraphCard};
+use crate::minigraph::menu::{color_submenu, range_submenu};
+use crate::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
+use crate::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
 use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::shell::ShellApi;
 use crate::theme::{current, metrics};

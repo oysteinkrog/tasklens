@@ -38,18 +38,18 @@ use crate::chart::scale::{self, ScaleState};
 use crate::chart::view::{derived_view, find_process_tiered, find_tiered};
 use crate::chart::{ValueFormat, YScale, format_value};
 use crate::components::toast::ToastKind;
+use crate::core::actions::PerfAddTrayGraph;
+use crate::core::{DeviceKey, DeviceKind};
 use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::i18n::tr;
-use crate::net_totals::NetTotal;
-use crate::pages::minigraph::GraphColor;
-use crate::pages::minigraph::card::CardState;
-use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
-use crate::pages::minigraph::sources::{
+use crate::minigraph::GraphColor;
+use crate::minigraph::card::CardState;
+use crate::minigraph::card::{chart_spec_for, device_for, resolve_colors};
+use crate::minigraph::sources::{
     GraphColumn, MinigraphSource, column_scale, name_match_count, resolve_process_source,
 };
-use crate::pages::performance::core::actions::PerfAddTrayGraph;
-use crate::pages::performance::core::{DeviceKey, DeviceKind};
+use crate::net_totals::NetTotal;
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;
 use crate::shell::ShellState;

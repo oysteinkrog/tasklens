@@ -187,6 +187,20 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "fluent-bundle",
         ],
     ),
+    // ADR-020 perf-core layer, moved out of tl-ui (CS-E5).
+    (
+        "tl-ui-perf-core",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "fluent-bundle",
+            "unicode-segmentation",
+        ],
+    ),
     (
         "tl-app",
         &[

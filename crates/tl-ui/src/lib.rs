@@ -29,10 +29,10 @@ pub use tl_ui_base::template;
 pub use tl_ui_base::text;
 pub use tl_ui_base::theme;
 pub use tl_ui_base::toast_types;
+pub use tl_ui_base::util;
+pub use tl_ui_perf_core::tray_bridge;
 pub use tl_ui_table::table;
 pub use tl_ui_table::text_cache;
-pub mod tray_bridge;
-pub use tl_ui_base::util;
 pub mod window;
 pub mod windows;
 

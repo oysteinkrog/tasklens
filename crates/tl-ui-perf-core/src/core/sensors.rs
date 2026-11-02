@@ -14,7 +14,7 @@ pub type SensorRef = Arc<str>;
 
 /// The fan's chip and path (`<hwmon name>:<path>`) and index from its persistent key
 /// `fan:<chip>:<path>:<n>`.
-pub(crate) fn fan_key_parts(key: &str) -> Option<(&str, &str)> {
+pub fn fan_key_parts(key: &str) -> Option<(&str, &str)> {
     key.strip_prefix("fan:")?.rsplit_once(':')
 }
 

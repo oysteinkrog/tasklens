@@ -18,8 +18,8 @@ use tl_ui_settings::settings::MinigraphState;
 use super::GraphColor;
 use super::card::{CardState, resolve_colors};
 use crate::chart::{ChartSeries, NetFormat, ValueFormat, YScale, format_value};
+use crate::core::DeviceKey;
 use crate::i18n::{tr, tr_args};
-use crate::pages::performance::core::DeviceKey;
 use crate::settings_global::SettingKey;
 use crate::theme::TlTheme;
 

@@ -55,10 +55,10 @@ pub fn adapter(snap: &Snapshot, device: DeviceIdx) -> Option<&GraphicsAdapter> {
 
 /// One engine: its settings key, its name's `en-US.ftl` key and its series.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Engine {
-    pub(crate) key: &'static str,
-    pub(crate) name: &'static str,
-    pub(crate) metric: MetricId,
+pub struct Engine {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub metric: MetricId,
     /// The engine's bit in the reported-engine mask.
     bit: u8,
 }
@@ -106,16 +106,16 @@ fn vendor_engines(vendor: GpuVendor) -> &'static [Engine] {
 
 /// One cell of the page's engine grid: the engine and its name's `en-US.ftl` key.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct EngineCell {
-    pub(crate) engine: GpuEngine,
-    pub(crate) name: &'static str,
+pub struct EngineCell {
+    pub engine: GpuEngine,
+    pub name: &'static str,
 }
 
 const fn cell(engine: GpuEngine, name: &'static str) -> EngineCell {
     EngineCell { engine, name }
 }
 
-pub(crate) const NAME_3D: &str = "perf-gpu-engine-3d";
+pub const NAME_3D: &str = "perf-gpu-engine-3d";
 
 /// NVIDIA's engines in grid order (PERF-063). JPEG and optical flow show only when the engine
 /// list reports them.
@@ -155,7 +155,7 @@ const UNKNOWN_CELLS: [EngineCell; 3] = [
 ];
 
 /// The grid engines of `vendor` in grid order.
-pub(crate) fn vendor_cells(vendor: GpuVendor) -> &'static [EngineCell] {
+pub fn vendor_cells(vendor: GpuVendor) -> &'static [EngineCell] {
     match vendor {
         GpuVendor::Nvidia => &NVIDIA_CELLS,
         GpuVendor::Amd => &AMD_CELLS,
@@ -191,20 +191,20 @@ fn engine_mask(vendor: GpuVendor, totals: Option<&GpuTotals>) -> u16 {
 /// What the grid is built from besides the settings: which engines the GPU reports, and whether
 /// fdinfo-based values miss other users' processes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Reported {
+pub struct Reported {
     mask: u16,
-    pub(crate) partial: bool,
+    pub partial: bool,
 }
 
 impl Reported {
-    pub(crate) fn of(vendor: GpuVendor, totals: Option<&GpuTotals>) -> Self {
+    pub fn of(vendor: GpuVendor, totals: Option<&GpuTotals>) -> Self {
         Self {
             mask: engine_mask(vendor, totals),
             partial: totals.is_some_and(|t| t.fdinfo_partial),
         }
     }
 
-    pub(crate) fn has(self, engine: GpuEngine) -> bool {
+    pub fn has(self, engine: GpuEngine) -> bool {
         self.mask & engine_bit(engine) != 0
     }
 }
@@ -227,7 +227,7 @@ pub fn engine_cells(
 /// The engines of a GPU of `vendor` with `totals` that are reported and not in `hidden`
 /// (`performance.hidden_gpu_engines`), in the vendor's order. The Overview GPU box draws one row
 /// per engine from here (crw.47).
-pub(crate) fn shown_engines<'a, H: AsRef<str>>(
+pub fn shown_engines<'a, H: AsRef<str>>(
     vendor: GpuVendor,
     totals: Option<&GpuTotals>,
     hidden: &'a [H],
@@ -244,7 +244,7 @@ pub(crate) fn shown_engines<'a, H: AsRef<str>>(
 /// The engines of the page's engine grid for a GPU of `vendor` with `totals`, as (engine, name
 /// key), in grid order, without those `hidden` hides (`performance.hidden_gpu_engines`). The
 /// Overview GPU box's `engine_charts` mode draws one chart per engine from here (crw.77).
-pub(crate) fn grid_engines<'a, H: AsRef<str>>(
+pub fn grid_engines<'a, H: AsRef<str>>(
     vendor: GpuVendor,
     totals: Option<&GpuTotals>,
     hidden: &'a [H],
@@ -272,7 +272,7 @@ pub fn device_engines(snap: &Snapshot, device: DeviceIdx) -> Vec<(Arc<str>, Shar
 /// The engines a GPU reports, as a mask of [`Engine::bit`]: every engine whose metric is not
 /// Unsupported. The memory controller counts only when the record's engine list reports it. A GPU
 /// without a record yet reports the three P1 engines, so the page keeps its shape.
-pub(crate) fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
+pub fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
     let Some(t) = totals else {
         return OTHER_ENGINES.iter().fold(0, |m, e| m | e.bit);
     };
@@ -293,7 +293,7 @@ pub(crate) fn reported_bits(totals: Option<&GpuTotals>) -> u8 {
 }
 
 /// The record of `device` in the snapshot.
-pub(crate) fn gpu_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&GpuTotals> {
+pub fn gpu_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&GpuTotals> {
     let gpus = &snap.system.gpus;
     gpus.binary_search_by_key(&device, |(i, _)| *i)
         .ok()

@@ -40,6 +40,18 @@ const UI_SRCS: &[(&str, &str)] = &[
     ("tl-ui-kit", "crates/tl-ui-kit/src"),
     ("tl-ui-chart", "crates/tl-ui-chart/src"),
     ("tl-ui-table", "crates/tl-ui-table/src"),
+    ("tl-ui-perf-core", "crates/tl-ui-perf-core/src"),
+];
+
+/// Modules that an extracted crate holds at a shorter path than tl-ui's module tree names them:
+/// the old module path and the path of its files in the new crate's tree. tl-ui re-exports each at
+/// the old path (`pub use tl_ui_perf_core::core;` in `pages/performance/mod.rs`), so code above
+/// still names the old path. The check rewrites an old path to the new one before it looks for the
+/// file. tasklens-zljr5.29 moved perf-core's modules to its crate root.
+const ALIASES: &[(&[&str], &[&str])] = &[
+    (&["pages", "performance", "core"], &["core"]),
+    (&["pages", "minigraph"], &["minigraph"]),
+    (&["windows", "detached_graph"], &["detached_graph"]),
 ];
 
 /// The allowlist of today's upward edges, relative to the workspace root.
@@ -57,7 +69,7 @@ const TESTKIT: &str = "tl-ui-testkit";
 /// and its crate. A prefix that ends in `/` is a directory and also matches the module file next
 /// to it (`a/` matches `a.rs`). Any other prefix is one file. The longest matching prefix wins.
 /// The table holds the files that the cycle beads create too (`template.rs`, `app_env.rs`,
-/// `registry.rs`, `shell.rs`, `motion.rs`, `toast_types.rs`, `pages/performance/core/`).
+/// `registry.rs`, `shell.rs`, `motion.rs`, `toast_types.rs`, `core/` in tl-ui-perf-core).
 const LAYERS: &[(&str, &str)] = &[
     // tl-ui-base
     ("theme/", "tl-ui-base"),
@@ -93,11 +105,11 @@ const LAYERS: &[(&str, &str)] = &[
     // tl-ui-table
     ("table/", "tl-ui-table"),
     ("text_cache.rs", "tl-ui-table"),
-    // tl-ui-perf-core
-    ("pages/performance/core/", "tl-ui-perf-core"),
-    ("pages/minigraph/", "tl-ui-perf-core"),
+    // tl-ui-perf-core, at its crate root (ALIASES maps the old module paths)
+    ("core/", "tl-ui-perf-core"),
+    ("minigraph/", "tl-ui-perf-core"),
     ("tray_bridge.rs", "tl-ui-perf-core"),
-    ("windows/detached_graph.rs", "tl-ui-perf-core"),
+    ("detached_graph.rs", "tl-ui-perf-core"),
     // tl-ui-overview
     ("pages/performance/overview/", "tl-ui-overview"),
     ("pages/performance/widget/", "tl-ui-overview"),
@@ -453,7 +465,7 @@ fn scan_tree(tree: &BTreeMap<String, String>) -> Scan {
         };
         let test_file = test_files.contains(*file);
         for hit in &file_scan.hits {
-            let (target, module) = resolve(&hit.path, &names);
+            let (target, module) = resolve(&alias(&hit.path), &names);
             // A target with no crate is an unmapped file, which is reported on its own.
             let Some(dst) = layer_of(&target) else {
                 continue;
@@ -522,6 +534,18 @@ fn file_module(file: &str) -> Vec<String> {
         segments.pop();
     }
     segments
+}
+
+/// `segments` with an old module path from `ALIASES` replaced by its new path.
+fn alias(segments: &[String]) -> Vec<String> {
+    for (old, new) in ALIASES {
+        if segments.len() >= old.len() && segments.iter().zip(old.iter()).all(|(a, b)| a == b) {
+            let mut out: Vec<String> = new.iter().map(|s| (*s).to_owned()).collect();
+            out.extend_from_slice(&segments[old.len()..]);
+            return out;
+        }
+    }
+    segments.to_vec()
 }
 
 /// The file that holds the deepest module named by `segments`, and that module's path. Names
@@ -1278,14 +1302,10 @@ mod tests {
     #[test]
     fn layer_table_longest_prefix_wins() {
         assert_eq!(layer_of("pages/performance/mod.rs"), Some("tl-ui-perf"));
-        assert_eq!(
-            layer_of("pages/performance/core/actions.rs"),
-            Some("tl-ui-perf-core")
-        );
-        assert_eq!(
-            layer_of("pages/performance/core/keys.rs"),
-            Some("tl-ui-perf-core")
-        );
+        assert_eq!(layer_of("core/actions.rs"), Some("tl-ui-perf-core"));
+        assert_eq!(layer_of("core/keys.rs"), Some("tl-ui-perf-core"));
+        assert_eq!(layer_of("minigraph/panel.rs"), Some("tl-ui-perf-core"));
+        assert_eq!(layer_of("detached_graph.rs"), Some("tl-ui-perf-core"));
         assert_eq!(
             layer_of("pages/performance/widget/grid.rs"),
             Some("tl-ui-overview")
@@ -1298,6 +1318,44 @@ mod tests {
         // A directory prefix also matches the module file next to it.
         assert_eq!(layer_of("chart.rs"), Some("tl-ui-chart"));
         assert_eq!(layer_of("pages/new_page.rs"), None);
+    }
+
+    #[test]
+    fn old_module_paths_resolve_to_the_new_crate_root() {
+        let files = tree(&[
+            ("lib.rs", "pub mod pages;\n"),
+            ("pages/mod.rs", "pub mod performance;\n"),
+            (
+                "pages/performance/mod.rs",
+                "pub mod overview;\npub mod page;\nuse self::core::DeviceKind;\n",
+            ),
+            ("pages/performance/page.rs", "pub struct Page;\n"),
+            (
+                "pages/performance/overview/mod.rs",
+                "use crate::pages::performance::core::DeviceKey;\n\
+                 use crate::pages::minigraph::panel::Panel;\n\
+                 use crate::windows::detached_graph::Window;\n",
+            ),
+            ("core/mod.rs", "pub struct DeviceKey;\n"),
+            ("minigraph/mod.rs", "pub mod panel;\n"),
+            (
+                "minigraph/panel.rs",
+                "use crate::core::DeviceKey;\nuse crate::pages::performance::page::Page;\n",
+            ),
+            ("detached_graph.rs", "use crate::minigraph::panel::Panel;\n"),
+        ]);
+        let scan = scan_tree(&files);
+        assert!(scan.unmapped.is_empty());
+        // overview -> perf-core through the old paths is allowed; perf-core -> perf is upward.
+        let edges: Vec<(&str, &str, &str)> = scan
+            .edges
+            .iter()
+            .map(|e| (e.file.as_str(), e.src, e.dst))
+            .collect();
+        assert_eq!(
+            edges,
+            vec![("minigraph/panel.rs", "tl-ui-perf-core", "tl-ui-perf")]
+        );
     }
 
     #[test]

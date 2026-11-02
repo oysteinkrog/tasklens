@@ -264,7 +264,7 @@ pub fn sidebar_order(
 
 /// Removes disk children from a sidebar list. The engine keeps partitions and device-mapper
 /// devices in the catalog for attribution, but only their whole parent disks get cards.
-pub(crate) fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &DeviceCatalog) {
+pub fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &DeviceCatalog) {
     rows.retain(|row| {
         row.kind != DeviceKind::Disk
             || catalog
@@ -329,7 +329,7 @@ pub fn visible_rows<'a>(
 
 /// `DeviceIdx` per logical CPU id from the catalog. An id the catalog skips gets
 /// `DeviceIdx(u16::MAX)`, which matches no series.
-pub(crate) fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
+pub fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
     out.clear();
     for e in catalog.entries.iter() {
         if let DeviceIdentity::CpuLogical { id } = e.identity {

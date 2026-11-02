@@ -46,17 +46,17 @@ use super::sources::{
 };
 use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::components::toast::ToastKind;
+use crate::core::{DeviceKey, DeviceKind};
 use crate::demand::DemandAggregator;
+use crate::detached_graph::{DetachedGraphWindow, open_detached, window_size};
 use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{tr, tr_args};
-use crate::pages::performance::core::{DeviceKey, DeviceKind};
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingValue, TlSettings, animations_on};
 use crate::shell::ShellApi;
 use crate::theme::metrics;
-use crate::windows::detached_graph::{DetachedGraphWindow, open_detached, window_size};
 
 /// Space between the grid and the table's bottom and right edges, before `ui_scale`.
 const MARGIN: f32 = 16.;

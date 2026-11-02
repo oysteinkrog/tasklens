@@ -14,6 +14,7 @@ members = [
   "crates/tl-ui-kit",
   "crates/tl-ui-chart",
   "crates/tl-ui-table",
+  "crates/tl-ui-perf-core",
   "crates/tl-ui",
   "crates/tl-ui-testkit",
   "crates/tl-ui-pagehost",
@@ -98,6 +99,7 @@ tl-collect = { path = "crates/tl-collect" }
 tl-ops     = { path = "crates/tl-ops" }
 tl-engine  = { path = "crates/tl-engine" }
 tl-ui      = { path = "crates/tl-ui" }
+tl-ui-perf-core = { path = "crates/tl-ui-perf-core" }
 tl-ui-table = { path = "crates/tl-ui-table" }
 tl-ui-chart = { path = "crates/tl-ui-chart" }
 tl-ui-base = { path = "crates/tl-ui-base" }

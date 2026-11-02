@@ -5,7 +5,7 @@ pub mod affinity;
 pub mod app_props;
 pub mod confirm_startup_delete;
 pub mod connection_properties;
-pub mod detached_graph;
+pub use tl_ui_perf_core::detached_graph;
 pub mod disk_in_use;
 pub mod frame;
 pub mod handle_search;
