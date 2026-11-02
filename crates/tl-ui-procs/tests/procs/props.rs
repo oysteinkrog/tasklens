@@ -1798,10 +1798,6 @@ mod window {
         );
     }
 
-    /// Pinning Process or App Properties sends `KeepAbove` for that window's caption. Their
-    /// frames carry the registry key: without it the pin only changed its look, which the old
-    /// `Floating` kind hid (tasklens-fut.25, R-073, D-031).
-
     fn member(pid: u32, group: GroupKey) -> ProcessRecord {
         let mut r = rec(pid, ProcFlags::empty());
         r.group = group;
