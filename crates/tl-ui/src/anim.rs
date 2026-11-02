@@ -42,18 +42,18 @@ pub struct AnimationDriver {
     cpu_clock: fn() -> u64,
     pub stats: FrameStats,
     /// Bench hook (E01-OI-6): set by the bench before measuring.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub paint_log: Option<PaintLog>,
 }
 
 /// Bench hook: one record per `ChartElement::paint` while the log is installed (E01-OI-6).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct PaintLog {
     /// Pre-allocated to 65,536, then stops growing.
     pub records: Vec<PaintRecord>,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl PaintLog {
     /// Appends `record` unless the log is full.
     pub fn push(&mut self, record: PaintRecord) {
@@ -63,7 +63,7 @@ impl PaintLog {
     }
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Copy, Debug)]
 pub struct PaintRecord {
     pub view: EntityId,
@@ -119,7 +119,7 @@ impl AnimationDriver {
             last_cpu: None,
             cpu_clock: tl_model::time::thread_cpu_ns,
             stats: FrameStats::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             paint_log: None,
         }
     }
@@ -198,19 +198,19 @@ impl AnimationDriver {
     }
 
     /// Replaces the thread CPU clock, so a test can count the calls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_cpu_clock(&mut self, clock: fn() -> u64) {
         self.cpu_clock = clock;
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn install_paint_log(&mut self) {
         self.paint_log = Some(PaintLog {
             records: Vec::with_capacity(SAMPLE_CAPACITY),
         });
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn take_paint_log(&mut self) -> Option<PaintLog> {
         self.paint_log.take()
     }

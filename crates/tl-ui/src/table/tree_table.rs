@@ -389,18 +389,18 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     hover_tips_ready: bool,
     /// Scratch for `delegate.cell`, reused for every cell.
     out: CellOut,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub rows_built_last_frame: Cell<u32>,
     /// The column separator quads painted since the last render, in window coordinates.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub separator_quads: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
     /// The tree guide line quads painted since the last render, in window coordinates.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub guide_quads: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
     /// Row line canvases (guides and separators) built since the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub line_canvases: Cell<u32>,
 }
 
@@ -457,15 +457,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             clip_sink: Rc::new(Cell::new(false)),
             hover_tips_ready: false,
             out: CellOut::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             rows_built_last_frame: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             separator_quads: Rc::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             guide_quads: Rc::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             line_canvases: Cell::new(0),
         }
     }
@@ -592,7 +592,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 
     /// The file icon image sources built so far, and how many the cache holds now.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn icon_sources(&self) -> (u32, usize) {
         (self.icons.built, self.icons.len())
     }
@@ -657,7 +657,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 
     /// Hits and misses of the cell text cache since the table was created.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn text_cache_stats(&self) -> (u64, u64) {
         self.text_cache.stats()
     }
@@ -773,7 +773,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     .into_any_element(),
             ];
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.rows_built_last_frame.set(range.len() as u32);
         self.record_frame(range.clone(), m.row_height);
         self.delegate.before_rows(range.clone(), window, cx);
@@ -1024,7 +1024,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let row_h = f.m.row_height;
         let ui_scale = f.m.ui_scale;
         let divider = f.theme.divider;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         let (guide_log, separator_log) = {
             self.line_canvases.set(self.line_canvases.get() + 1);
             (self.guide_quads.clone(), self.separator_quads.clone())
@@ -1039,7 +1039,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                         guide_quads(depth, flags, origin, row_h, ui_scale, window.scale_factor());
                     window.with_content_mask(Some(ContentMask { bounds: cell }), |window| {
                         for q in quads {
-                            #[cfg(any(test, feature = "test-hooks"))]
+                            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                             guide_log.borrow_mut().push(q);
                             window.paint_quad(fill(q, divider));
                         }
@@ -1053,7 +1053,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                         bounds.size.height,
                         line,
                     ) {
-                        #[cfg(any(test, feature = "test-hooks"))]
+                        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                         separator_log.borrow_mut().push(q);
                         window.paint_quad(fill(q, divider));
                     }
@@ -2470,7 +2470,7 @@ pub fn name_column<D: TreeTableDelegate>(delegate: &D) -> Option<D::Column> {
 
 impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();
@@ -2478,7 +2478,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         self.follow_ui_scale(m.ui_scale, cx);
         self.list_calls = 0;
         self.probe_gutter = None;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.separator_quads.borrow_mut().clear();
             self.guide_quads.borrow_mut().clear();

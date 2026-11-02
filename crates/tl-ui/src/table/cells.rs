@@ -666,7 +666,7 @@ impl Element for CellText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         PAINTED_TEXTS.with_borrow_mut(|log| {
             if let Some(log) = log {
                 log.push((bounds, self.inner.layout().text().into()));
@@ -681,10 +681,10 @@ impl Element for CellText {
 }
 
 /// One painted cell text and its bounds in window coordinates.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub type PaintedText = (Bounds<Pixels>, SharedString);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
     /// The texts [`CellText`] painted on this thread while recording. `None` while not
     /// recording.
@@ -694,14 +694,14 @@ thread_local! {
 
 /// Starts recording the shaped text of every text, path and numeric cell painted on this
 /// thread. Glyph cells and Name cells are not recorded. Drops an earlier record.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn record_painted_texts() {
     PAINTED_TEXTS.with_borrow_mut(|log| *log = Some(Vec::new()));
 }
 
 /// Stops recording and returns the cell texts painted since [`record_painted_texts`], in paint
 /// order, each with its text bounds in window coordinates.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn take_painted_texts() -> Vec<PaintedText> {
     PAINTED_TEXTS
         .with_borrow_mut(Option::take)
@@ -900,10 +900,10 @@ pub struct IconSourceCache {
     names: FxHashMap<SharedString, (SharedString, usize, u64)>,
     version: u64,
     /// Image sources built since the table was created.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub built: u32,
     /// Isolated name texts built since the table was created.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub names_built: u32,
 }
 
@@ -930,7 +930,7 @@ impl IconSourceCache {
             *used = version;
             return source.clone();
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.built += 1;
         }
@@ -952,7 +952,7 @@ impl IconSourceCache {
             *used = version;
             return isolated.clone();
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.names_built += 1;
         }

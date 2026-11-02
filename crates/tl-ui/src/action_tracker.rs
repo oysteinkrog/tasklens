@@ -327,7 +327,7 @@ pub struct DetailsRecord {
 }
 
 /// One toast the tracker pushed, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PushedToast {
     pub kind: ToastKind,
@@ -359,11 +359,11 @@ pub struct ActionTracker {
     _events: Task<()>,
     /// The hub's `LinkChanged` and `SnapshotChanged`: each can show a newer generation.
     _hub_events: SmallVec<[Subscription; 2]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pushed: Vec<PushedToast>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     restricted_notes: u32,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     opened_details: Vec<DetailsRecord>,
 }
 
@@ -443,11 +443,11 @@ impl ActionTracker {
             remote_name: None,
             _events: task,
             _hub_events: hub_events,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             pushed: Vec::new(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             restricted_notes: 0,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             opened_details: Vec::new(),
         }
     }
@@ -1049,7 +1049,7 @@ impl ActionTracker {
             warn!(target: "tasklens::ui", "no window for the action details");
             return;
         };
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.opened_details.push(record.clone());
         let close = action_words(cx).close.clone();
         let lines: Rc<[SharedString]> = record.lines.into();
@@ -1079,7 +1079,7 @@ impl ActionTracker {
         };
         let chip = main.read(cx).status_chip().clone();
         chip.update(cx, |c, cx| c.note_restricted_refusal(count, cx));
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.restricted_notes += 1;
         }
@@ -1111,7 +1111,7 @@ impl ActionTracker {
         if text.is_empty() {
             return;
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.pushed.push(PushedToast {
             kind,
             text: text.clone(),
@@ -1124,19 +1124,19 @@ impl ActionTracker {
     }
 
     /// Every toast pushed so far, oldest first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn pushed(&self) -> &[PushedToast] {
         &self.pushed
     }
 
     /// How often the status chip was told about a restricted refusal.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn restricted_notes(&self) -> u32 {
         self.restricted_notes
     }
 
     /// The Details dialogs opened so far, oldest first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn opened_details(&self) -> &[DetailsRecord] {
         &self.opened_details
     }

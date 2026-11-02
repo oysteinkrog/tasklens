@@ -269,7 +269,7 @@ pub struct InfoSection {
     /// page reads this and is notified when it changes.
     height: Rc<Cell<Pixels>>,
     owner: Option<EntityId>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     render_count: usize,
 }
 
@@ -288,7 +288,7 @@ impl InfoSection {
             loading: false,
             height: Rc::new(Cell::new(Pixels::ZERO)),
             owner: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: 0,
         }
     }
@@ -366,7 +366,7 @@ impl InfoSection {
     }
 
     /// Test hook: how many times the section rendered.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> usize {
         self.render_count
     }
@@ -438,7 +438,7 @@ impl InfoSection {
 
 impl Render for InfoSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.render_count += 1;
         }

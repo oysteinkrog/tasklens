@@ -4,12 +4,13 @@
 //! `debug_selector` directly. A source sweep in the ui tests fails on any other call.
 //!
 //! GPUI 0.3.7 keeps one `debug_bounds` entry per selector: when two painted elements share a
-//! selector, the later one silently wins. Its list of every painted selector is private. So under
-//! the `test-hooks` feature this module can tag one frame: [`tag_frame`] draws a window with
-//! every view rendered fresh and gives each selector set during that frame a tag unique in the
-//! frame. GPUI records the tagged selector only for an element it paints, so a test keeps the
-//! tags whose bounds exist and counts the painted elements per selector. Elements that are built
-//! but not painted (for example the row a list builds only to measure its height) drop out.
+//! selector, the later one silently wins. Its list of every painted selector is private. So in
+//! debug builds and under the `test-hooks` feature this module can tag one frame: [`tag_frame`]
+//! draws a window with every view rendered fresh and gives each selector set during that frame a
+//! tag unique in the frame. GPUI records the tagged selector only for an element it paints, so a
+//! test keeps the tags whose bounds exist and counts the painted elements per selector. Elements
+//! that are built but not painted (for example the row a list builds only to measure its height)
+//! drop out.
 //!
 //! Cached views: [`tag_frame`] calls `Window::refresh`, which makes every cached view render
 //! again in the next draw instead of reusing its last paint. So reused paint cannot hide a
@@ -30,7 +31,7 @@ pub trait TlSelector: Sized {
 impl<E: InteractiveElement> TlSelector for E {
     #[inline]
     fn tl_selector(self, f: impl FnOnce() -> String) -> Self {
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(debug_assertions, feature = "test-hooks"))]
         if tagging::active() {
             let tagged = tagging::push(f());
             return self.debug_selector(move || tagged);
@@ -39,10 +40,10 @@ impl<E: InteractiveElement> TlSelector for E {
     }
 }
 
-#[cfg(feature = "test-hooks")]
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 pub use tagging::{TaggedSelector, tag_frame, untag_frame};
 
-#[cfg(feature = "test-hooks")]
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 mod tagging {
     use std::cell::RefCell;
 

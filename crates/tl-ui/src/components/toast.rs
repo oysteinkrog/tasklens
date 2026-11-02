@@ -476,25 +476,25 @@ impl ToastQueue {
     }
 
     /// The shown texts in stack order, oldest first, with any count suffix.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn visible_texts(&self) -> Vec<SharedString> {
         self.visible.iter().map(ToastEntry::display_text).collect()
     }
 
     /// The waiting texts, next to show first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn waiting_texts(&self) -> Vec<SharedString> {
         self.waiting.iter().map(ToastEntry::display_text).collect()
     }
 
     /// Whether every visible timer is paused by hover or focus.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn is_paused(&self) -> bool {
         self.paused
     }
 
     /// The texts of the visible toasts that entered with the slide and fade.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn enter_animated_texts(&self) -> Vec<SharedString> {
         self.visible
             .iter()
@@ -504,13 +504,13 @@ impl ToastQueue {
     }
 
     /// The texts of closed toasts that are still fading out.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn exiting_texts(&self) -> Vec<SharedString> {
         self.exiting.iter().map(|e| e.view.text.clone()).collect()
     }
 
     /// Toasts drawn in the stack: the visible ones and those fading out.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn mounted_len(&self) -> usize {
         self.visible.len() + self.exiting.len()
     }

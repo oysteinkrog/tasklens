@@ -113,14 +113,14 @@ impl HostClock {
 
     /// A remote host's clock that reads this PC's clock as `local_shift_ns` later than it is.
     /// Tests use it to put a host hours behind this PC whatever the test machine's uptime.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn remote_with_local_shift(local_shift_ns: i64) -> Self {
         Self::remote_shifted(local_shift_ns)
     }
 
     /// Moves this PC's clock, as this remote clock reads it, `ns` later. Tests use it to stand
     /// in for a suspend of this PC, during which CLOCK_BOOTTIME runs on and the executor's does not.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn shift_local(&self, ns: i64) {
         if let Some(r) = &self.remote {
             r.local_shift_ns.fetch_add(ns, Ordering::Relaxed);
@@ -337,7 +337,7 @@ impl SnapshotHub {
 
     /// A remote host's hub on `clock`, for tests that need this PC's clock read as shifted
     /// ([`HostClock::remote_with_local_shift`]).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn new_remote_with_clock(
         client: Arc<dyn EngineClient>,
         clock: HostClock,

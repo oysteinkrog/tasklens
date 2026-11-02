@@ -102,14 +102,14 @@ pub fn client_frame_extra(decorations: Decorations) -> Pixels {
 /// and `frame_bottom` is 0. With this global set, every secondary window acts as an untiled
 /// client-decorated window: the frame pads its content by the shadow and border on each edge, the
 /// way the kit's window border does, and `frame_bottom` returns that inset (tasklens-fut.23).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct TestClientFrame;
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TestClientFrame {}
 
 /// The per-edge inset the test hook simulates, or `None` when it is off.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 fn test_frame_inset(cx: &App) -> Option<Pixels> {
     cx.has_global::<TestClientFrame>()
         .then(|| client_frame_extra(Decorations::Client) * 0.5)
@@ -118,7 +118,7 @@ fn test_frame_inset(cx: &App) -> Option<Pixels> {
 /// What the frame takes below the content in this window: the bottom shadow and border. Add it to
 /// a content-measured height before `Window::resize`, so the footer stays inside the window.
 pub fn frame_bottom(window: &Window, cx: &App) -> Pixels {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(inset) = test_frame_inset(cx) {
         return inset;
     }
@@ -568,7 +568,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
     /// The title text as last drawn, with "…" when it was cut. `None` under server
     /// decorations or before the first render. Call it after a draw: GPUI panics on a title
     /// that was rendered but not laid out.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drawn_title(&self) -> Option<String> {
         self.title_rendered.then(|| self.title_layout.text())
     }
@@ -954,7 +954,7 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
             .then(|| TlWindowPin::new(px(SERVER_PIN * m.ui_scale), look).on_pin(on_pin));
 
         let root = div();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         let root = match test_frame_inset(cx) {
             Some(inset) => root.p(inset),
             None => root,

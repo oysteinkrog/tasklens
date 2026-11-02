@@ -229,7 +229,7 @@ impl StartupPage {
             .unwrap_or_else(|| self.capture_targets(cx))
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn menu_target_refs_for_test(&self) -> &[tl_model::table::StartupRef] {
         self.menu_targets
             .as_ref()

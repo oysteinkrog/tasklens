@@ -170,7 +170,7 @@ impl Global for AppEnv {}
 
 impl AppEnv {
     /// Empty closures, `debug = false`, empty paths and no run history.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn test() -> Self {
         Self {
             debug: false,
@@ -510,11 +510,11 @@ struct ExitCell(Rc<Cell<Option<UiExit>>>);
 impl Global for ExitCell {}
 
 /// Counts the `cx.quit` calls `request_exit` makes, for the exit tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Debug, Default)]
 pub struct QuitCalls(pub u32);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for QuitCalls {}
 
 /// Stores `exit` unless an earlier exit is stored, then quits the app.
@@ -538,7 +538,7 @@ pub fn request_exit(cx: &mut App, exit: UiExit) {
 }
 
 fn quit(cx: &mut App) {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         cx.default_global::<QuitCalls>().0 += 1;
     }
@@ -641,13 +641,13 @@ pub(crate) fn open_first(cx: &mut App, mode: OpenMode) {
 }
 
 /// `open_first` for integration tests; `run` blocks, so tests never call it.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn open_first_for_test(cx: &mut App, mode: OpenMode) {
     open_first(cx, mode);
 }
 
 /// The `run` closure body for integration tests. Returns the cell `run` would read.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn start_for_test(cx: &mut App, launch: UiLaunch) -> Rc<Cell<Option<UiExit>>> {
     let exit = Rc::new(Cell::new(None));
     start(cx, launch, Rc::clone(&exit));

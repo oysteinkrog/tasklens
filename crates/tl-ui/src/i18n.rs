@@ -56,7 +56,7 @@ impl Strings {
     }
 
     fn format(&self, key: &str, args: Option<&FluentArgs>) -> SharedString {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         TR_CALLS.with(|n| n.set(n.get() + 1));
         format_in(&self.bundle, key, args)
             .or_else(|| format_in(&self.fallback, key, args))
@@ -78,20 +78,20 @@ pub fn set_language(cx: &mut App, setting: &str) {
     cx.refresh_windows();
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 thread_local! {
     static TR_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Test hook: how many strings `tr` and `tr_args` formatted on this thread.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn tr_calls() -> u64 {
     TR_CALLS.with(std::cell::Cell::get)
 }
 
 /// Test hook: like [`set_language`], with `ftl` as the catalogue. Keys it lacks fall back to
 /// English.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn set_test_catalogue(cx: &mut App, ftl: &str) {
     let version = cx
         .try_global::<Strings>()

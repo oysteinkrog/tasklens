@@ -6,7 +6,7 @@ pub mod columns;
 pub mod columns_window;
 pub mod header;
 pub mod selection;
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub mod test_delegate;
 pub mod tree_table;
 

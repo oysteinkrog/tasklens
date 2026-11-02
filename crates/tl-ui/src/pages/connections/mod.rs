@@ -472,12 +472,12 @@ impl ConnectionsPage {
     }
 
     /// The page's action layer, for the close toast tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn actions_for_test(&self) -> &Entity<crate::pages::sys_table::SysActions> {
         &self.frame.actions
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn menu_target_cookies_for_test(&self) -> &[u64] {
         self.menu_targets
             .as_ref()

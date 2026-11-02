@@ -37,7 +37,7 @@ use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQ
 use tl_model::validity::Validity;
 use tracing::{debug, warn};
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use crate::action_tracker::PushedToast;
 use crate::action_tracker::{
     ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
@@ -571,7 +571,7 @@ pub struct SysActions {
     requests: FxHashMap<ActionId, Tracked>,
     details: std::collections::VecDeque<(ActionId, DetailsRecord)>,
     _tracker_events: Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pushed: Vec<PushedToast>,
 }
 
@@ -593,7 +593,7 @@ impl SysActions {
             requests: FxHashMap::default(),
             details: std::collections::VecDeque::new(),
             _tracker_events: sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             pushed: Vec::new(),
         }
     }
@@ -929,7 +929,7 @@ impl SysActions {
         if text.is_empty() {
             return;
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.pushed.push(PushedToast {
             kind,
             text: text.clone(),
@@ -942,13 +942,13 @@ impl SysActions {
     }
 
     /// Every toast pushed so far, oldest first.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn pushed(&self) -> &[PushedToast] {
         &self.pushed
     }
 
     /// The lines of the Details dialog of request `id`, if it has one.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn details_lines(&self, id: ActionId) -> Option<Vec<SharedString>> {
         let (_, record) = self.details.iter().find(|(r, _)| *r == id)?;
         Some(record.lines.to_vec())
@@ -1101,7 +1101,7 @@ pub struct SysTableFrame<D: SysDelegate> {
     body: SysBody,
     /// Ctrl-pause: the table keeps the rows it shows.
     paused: bool,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     render_count: u64,
 }
 
@@ -1143,7 +1143,7 @@ impl<D: SysDelegate> SysTableFrame<D> {
             key_context,
             body: SysBody::Skeleton,
             paused: false,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: 0,
         }
     }
@@ -1273,7 +1273,7 @@ impl<D: SysDelegate> SysTableFrame<D> {
     }
 
     /// `render` calls, for the page re-render tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u64 {
         self.render_count
     }
@@ -1289,7 +1289,7 @@ impl<D: SysDelegate> SysTableFrame<D> {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.render_count += 1;
         }

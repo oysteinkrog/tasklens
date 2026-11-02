@@ -639,7 +639,7 @@ fn set_depth(menu: &Entity<TlMenuPopup>, depth: usize, cx: &mut App) {
 }
 
 /// What a test reads of one built entry ([`TlMenuPopup::entries_for_test`]).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct MenuEntryInfo {
     pub kind: MenuEntryKind,
     pub label: Option<SharedString>,
@@ -670,7 +670,7 @@ pub struct MenuEntryInfo {
     pub value: Option<SharedString>,
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuEntryKind {
     Item,
@@ -775,7 +775,7 @@ impl TlMenuPopup {
     }
 
     /// Every entry as built, top to bottom, with the shortcut hint the menu draws (tests).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn entries_for_test(&self, window: &Window) -> Vec<MenuEntryInfo> {
         self.entries
             .iter()
@@ -2027,7 +2027,7 @@ pub fn close_context_menu(window: &mut Window, cx: &mut App) {
 }
 
 /// The context menu open in this window, if any (tests).
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn open_context_menu(window: &Window, cx: &App) -> Option<Entity<TlMenuPopup>> {
     let window_id = window.window_handle().window_id();
     cx.try_global::<OpenMenus>()?

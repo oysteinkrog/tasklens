@@ -147,7 +147,7 @@ impl HelperFlow {
     }
 
     /// The window of the last start sent and not answered yet.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn requester(&self) -> Option<AnyWindowHandle> {
         self.requester
     }
