@@ -827,6 +827,7 @@ mod sidebar {
             });
             (vcx, None)
         };
+        tl_ui::pages::performance::card::count_paints_for_test();
         vcx.simulate_scale_factor_change(1.0);
         let focus = vcx.update(|_, cx| sidebar.read(cx).focus_handle(cx));
         vcx.update(|window, cx| focus.focus(window, cx));

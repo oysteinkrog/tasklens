@@ -507,7 +507,7 @@ pub struct StatusBar {
     shown_range: (StatusBarPlacement, OverviewRange),
     _sub: Subscription,
     _settings: Subscription,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
 }
 
@@ -551,7 +551,7 @@ impl StatusBar {
             shown_range: (placement(cx), current_range(cx)),
             _sub: sub,
             _settings: settings,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
         };
         this.evaluate(true, cx);
@@ -870,7 +870,7 @@ fn chip(
 
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let m = *metrics(cx);
         let theme = current(cx).clone();

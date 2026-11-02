@@ -8,7 +8,7 @@
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -1240,7 +1240,7 @@ pub struct DiskPage {
     /// The page root.
     focus: FocusHandle,
     _subs: SmallVec<[Subscription; 4]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -1321,7 +1321,7 @@ impl DiskPage {
             window: None,
             focus: cx.focus_handle(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
@@ -1822,7 +1822,7 @@ impl Focusable for DiskPage {
 
 impl Render for DiskPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();

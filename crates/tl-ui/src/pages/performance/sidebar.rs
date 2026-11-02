@@ -553,7 +553,7 @@ pub struct DeviceSidebar {
     /// the sidebar again. A drawn graph is a child view, so its notify already does.
     edit_chart_watch: FxHashMap<EntityId, Subscription>,
     /// What each edit card measured in the last render.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     edit_prepared: FxHashMap<DeviceKey, super::card::CardPrepared>,
     pub(crate) hub: Entity<SnapshotHub>,
     pub(crate) demand: Entity<DemandAggregator>,
@@ -583,7 +583,7 @@ pub struct DeviceSidebar {
     /// Focus in and out of the list redraw the focus ring. Set on the first render.
     focus_subs: Option<[Subscription; 2]>,
     cards_focused: bool,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -629,7 +629,7 @@ impl DeviceSidebar {
             edit_generation: 0,
             edit_stale: StaleTimer::default(),
             edit_chart_watch: FxHashMap::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             edit_prepared: FxHashMap::default(),
             hub,
             demand,
@@ -649,7 +649,7 @@ impl DeviceSidebar {
             _subs: subs,
             focus_subs: None,
             cards_focused: false,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         // The first cards are there at once.
@@ -724,7 +724,7 @@ impl DeviceSidebar {
         self.edit_mode
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_drag_for_test(&mut self, key: DeviceKey, over: Option<usize>) {
         self.drag = Some(DragState {
             group: key.kind(),
@@ -733,17 +733,17 @@ impl DeviceSidebar {
         });
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn dragging_for_test(&self) -> bool {
         self.drag.is_some()
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn drag_over_for_test(&self) -> Option<Option<usize>> {
         self.drag.as_ref().map(|drag| drag.over)
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn edit_rows_for_test(&self) -> Vec<(DeviceKey, DeviceKind, bool)> {
         self.edit_cards
             .iter()
@@ -758,13 +758,13 @@ impl DeviceSidebar {
     }
 
     /// The stale deadline the edit cards armed, if any.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn edit_stale_at_for_test(&self) -> Option<u64> {
         self.edit_stale.at()
     }
 
     /// What the edit card `key` measured in the last render, if it was drawn.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn edit_card_prepared_for_test(
         &self,
         key: &DeviceKey,
@@ -772,7 +772,7 @@ impl DeviceSidebar {
         self.edit_prepared.get(key).cloned()
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn edit_card_opacity_for_test(&self, key: &DeviceKey) -> Option<f32> {
         let card = self.edit_cards.iter().find(|card| card.row.key == *key)?;
         let visible = is_visible(&card.row, &self.settings.view());
@@ -1818,7 +1818,7 @@ impl Focusable for DeviceSidebar {
 
 impl Render for DeviceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();
@@ -1895,7 +1895,7 @@ impl Render for DeviceSidebar {
         let mut edit_stale_at: Option<u64> = None;
         // The charts of the edit cards that draw no graph.
         let mut unseen_charts: Vec<Entity<ChartView>> = Vec::new();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         let mut edit_prepared = FxHashMap::default();
         let content: AnyElement = if edit_present {
             let entering = self.edit_mode;
@@ -2060,7 +2060,7 @@ impl Render for DeviceSidebar {
                         if !prepared.graph {
                             unseen_charts.push(card.chart.clone());
                         }
-                        #[cfg(any(test, feature = "test-hooks"))]
+                        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                         edit_prepared.insert(card.row.key.clone(), prepared.clone());
                         edit_stale_at = match (edit_stale_at, stale_at) {
                             (Some(a), Some(b)) => Some(a.min(b)),
@@ -2239,7 +2239,7 @@ impl Render for DeviceSidebar {
             cx,
         );
         self.watch_edit_charts(unseen_charts, cx);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.edit_prepared = edit_prepared;
         }

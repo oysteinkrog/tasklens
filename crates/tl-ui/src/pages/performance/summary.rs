@@ -9,7 +9,7 @@
 //! While shown, the view sends its own demand part: CPU at the fast rate, so the CPU tile
 //! moves at 10 Hz (PERF-010).
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 
 use gpui_kit::{
@@ -152,7 +152,7 @@ pub struct SummaryView {
     /// `performance.graph_range_s` the tile charts show, in ns.
     range_ns: u64,
     _subs: [Subscription; 2],
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -248,7 +248,7 @@ impl SummaryView {
             window: None,
             range_ns: graph_range_ns(cx),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         this.resize(size, cx);
@@ -273,7 +273,7 @@ impl SummaryView {
     }
 
     /// Whether a tile menu's device page is drawn (tests).
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn has_menu_page(&self) -> bool {
         self.menu_page.is_some()
     }
@@ -494,7 +494,7 @@ impl Focusable for SummaryView {
 
 impl Render for SummaryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();

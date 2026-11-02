@@ -304,19 +304,19 @@ pub struct CompositionBarView {
     pub state: CompositionBarState,
     words: BarWords,
     _subs: SmallVec<[Subscription; 1]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// Hitboxes the last prepaint inserted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub hitbox_count: std::cell::Cell<u32>,
     /// Hatch path builds.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub hatch_builds: std::cell::Cell<u32>,
     /// Segment labels the last paint drew.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub painted_labels: std::cell::RefCell<SmallVec<[SegmentKind; 5]>>,
     /// Segment quads the last paint drew.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub painted_segments: std::cell::Cell<u32>,
 }
 
@@ -337,15 +337,15 @@ impl CompositionBarView {
             },
             words,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             hitbox_count: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             hatch_builds: std::cell::Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             painted_labels: std::cell::RefCell::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             painted_segments: std::cell::Cell::new(0),
         }
     }
@@ -379,7 +379,7 @@ impl CompositionBarView {
 
 impl Render for CompositionBarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         self.words.refresh(cx);
         let m = *metrics(cx);
@@ -538,7 +538,7 @@ impl Element for CompositionBar {
                         .push((seg.kind, window.insert_hitbox(b, HitboxBehavior::Normal)));
                 }
             }
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             view.hitbox_count.set(view.state.hitboxes.len() as u32);
         });
     }
@@ -616,7 +616,7 @@ fn paint_bar(
     window: &mut Window,
     cx: &mut App,
 ) {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         view.painted_labels.borrow_mut().clear();
         view.painted_segments.set(0);
@@ -644,7 +644,7 @@ fn paint_bar(
             bottom_right: r,
         };
         window.paint_quad(fill(b, color).corner_radii(corners));
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         view.painted_segments.set(view.painted_segments.get() + 1);
 
         if seg.kind == SegmentKind::Compressed {
@@ -660,7 +660,7 @@ fn paint_bar(
                 );
                 st.hatch_key = key;
                 st.hatch_h = h;
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 view.hatch_builds.set(view.hatch_builds.get() + 1);
             }
             if let Some(path) = &st.hatch {
@@ -701,7 +701,7 @@ fn paint_bar(
             bounds.top() + (bounds.size.height - row) / 2.0,
         );
         labels::paint_line(window, cx, line, origin, row);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         view.painted_labels.borrow_mut().push(seg.kind);
     }
 

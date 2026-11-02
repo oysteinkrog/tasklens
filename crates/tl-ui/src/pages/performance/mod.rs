@@ -31,7 +31,7 @@ pub mod status_bar;
 pub mod summary;
 pub mod widget;
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -453,10 +453,10 @@ pub struct PerformancePage {
     /// `performance.status_bar` at the last render, so a change renders again.
     status_placement: tl_model::settings::StatusBarPlacement,
     _subs: SmallVec<[Subscription; 2]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// The last title this page set; the test platform window does not report its title.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub window_title: String,
 }
 
@@ -510,9 +510,9 @@ impl PerformancePage {
             leaving: None,
             leave_generation: 0,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             window_title: String::new(),
         };
         if let Some(key) = first {
@@ -623,7 +623,7 @@ impl PerformancePage {
         let suffix = tr(cx, "perf-summary-title-suffix");
         let title = format!("{}{suffix}", main_window_title(&self.host));
         window.set_window_title(&title);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.window_title = title;
         }
@@ -650,7 +650,7 @@ impl PerformancePage {
         }
         let title = main_window_title(&self.host);
         window.set_window_title(&title);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.window_title = title;
         }
@@ -1254,7 +1254,7 @@ impl ShellPage for PerformancePage {
 
 impl Render for PerformancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         self.follow_page_focus(window, cx);
         self.status_placement = status_bar::placement(cx);

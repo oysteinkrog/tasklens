@@ -9,7 +9,7 @@
 //! value scaled by `axis_max / 100` and puts it in the chart's second slot after each snapshot
 //! (E25-OI-5). The axis has no labels for it.
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -612,7 +612,7 @@ pub struct FanPage {
     style_version: u64,
     words: Words,
     _subs: SmallVec<[Subscription; 3]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -680,7 +680,7 @@ impl FanPage {
             style_version: metrics(cx).style_version,
             words,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
@@ -1251,7 +1251,7 @@ impl Focusable for FanPage {
 
 impl Render for FanPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();
@@ -1811,7 +1811,7 @@ pub struct BatteryPage {
     /// The host this page shows. Set when it opens; never changes.
     host: HostContext,
     _subs: SmallVec<[Subscription; 3]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -1875,7 +1875,7 @@ impl BatteryPage {
             words,
             host: host.clone(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
@@ -2246,7 +2246,7 @@ impl Focusable for BatteryPage {
 
 impl Render for BatteryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let handle = window.window_handle();
         if self.window != Some(handle) {

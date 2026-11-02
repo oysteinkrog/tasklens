@@ -12,7 +12,7 @@
 //! The Aggregate storage page is the first page whose body is a widget container (ADR-019
 //! phase 3, `tasklens-hzire.3`); the Aggregate graphics page follows in `tasklens-hzire.9`.
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -426,9 +426,9 @@ pub struct AggregateDiskPage {
     window: Option<AnyWindowHandle>,
     focus: FocusHandle,
     _subs: SmallVec<[Subscription; 8]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub notify_count: Cell<u32>,
 }
 
@@ -535,9 +535,9 @@ impl AggregateDiskPage {
             window: None,
             focus: cx.focus_handle(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             notify_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
@@ -590,7 +590,7 @@ impl AggregateDiskPage {
     }
 
     fn notify(&self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
         cx.notify();
     }
@@ -835,7 +835,7 @@ impl Focusable for AggregateDiskPage {
 
 impl Render for AggregateDiskPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();
@@ -956,7 +956,7 @@ pub struct AggregateGpuPage {
     window: Option<AnyWindowHandle>,
     focus: FocusHandle,
     _subs: SmallVec<[Subscription; 4]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -1026,7 +1026,7 @@ impl AggregateGpuPage {
             window: None,
             focus: cx.focus_handle(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
@@ -1240,7 +1240,7 @@ impl Focusable for AggregateGpuPage {
 
 impl Render for AggregateGpuPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let handle = window.window_handle();
         if self.window != Some(handle) {

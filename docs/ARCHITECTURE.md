@@ -3507,6 +3507,13 @@ Switches in `pages/performance/overview/` and `pages/performance/widget/` (CS-B6
 | `overview/timeline.rs:188` `TEST_CLOCK`, set by `timeline.rs:195` `set_test_clock`, read at `now_realtime_ns` and `now_boot` | the clocks the timeline and the paused view read | the thread-local is `None` until a test sets it; the app never calls the setter |
 | `overview/parts.rs:129` `METER_QUADS`, `parts.rs:142` `CORE_LABELS`, `overview/fit.rs:386` `FIT_TEXTS`, each read and reset by its `take_*` function | collects the quads, core labels and fit texts of every paint (CS-B6 fix: each was a `Vec` that grew on every paint in a debug app) | each thread-local is `None` until the first `take_*` call; the paint writes only when it is `Some` |
 
+Switches in the other files under `pages/performance/` (CS-B7; paths under `crates/tl-ui/src/pages/performance/`). `status_bar/` and `page_flow/` have none beyond the recorders. The other hooks are recorders (`render_count`, `notify_count`, `paint_count`, `hitbox_count`, `hatch_builds`, `painted_segments`, `painted_labels`, `last_open`) or readers (the `*_for_test` getters in `sidebar.rs`, `has_menu_page` in `summary.rs`). `painted_labels` is cleared on each paint, so it does not grow. `window_title` in `mod.rs`, `prepared` in `card.rs` and `edit_prepared` in `sidebar.rs` are overwritten on each render, so they do not grow. One fix:
+
+| Hook | What it changes | Guard |
+|---|---|---|
+| `card.rs` `CardView::render` paint overlay, switched by `COUNT_PAINTS` and `count_paints_for_test` | wraps the card in a `div` with an absolute `canvas` that counts paints (CS-B7 fix: it was always on in a debug app, so it changed the element tree of every card) | the thread-local is `false` until a test calls `count_paints_for_test`; the sidebar test rig calls it before its first draw |
+| `sidebar.rs:728` `set_drag_for_test` | sets the drag state | only tests call it |
+
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 
 **Move method.** A crate extraction is one commit:

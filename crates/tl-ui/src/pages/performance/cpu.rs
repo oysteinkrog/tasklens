@@ -846,7 +846,7 @@ pub struct CpuPage {
     /// Reused buffer for that value's text.
     total_text: String,
     _subs: SmallVec<[Subscription; 3]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
@@ -939,7 +939,7 @@ impl CpuPage {
             total: Metric::default(),
             total_text: String::new(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
         cpu_temp_sensors(&snap.devices, &mut this.temp_sensors);
@@ -1767,7 +1767,7 @@ impl Focusable for CpuPage {
 
 impl Render for CpuPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         // The demand part carries the window, so it drops out while the window is hidden.
         let handle = window.window_handle();

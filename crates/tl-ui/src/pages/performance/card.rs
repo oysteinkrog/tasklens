@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use gpui_kit::canvas;
 use gpui_kit::component::h_flex;
 use gpui_kit::{
@@ -1487,14 +1487,26 @@ pub struct CardView {
     sidebar: EntityId,
     /// Draws the card again when its Valid value turns Stale.
     stale: StaleTimer,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     /// Whole-card paint callbacks. A cached paint replay does not increment this counter.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub paint_count: Rc<Cell<u32>>,
     /// What the last render measured.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub prepared: Option<CardPrepared>,
+}
+
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+thread_local! {
+    static COUNT_PAINTS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes the cards on this thread count their paints in `CardView::paint_count`. Only tests call
+/// it; without it a card renders with no overlay.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+pub fn count_paints_for_test() {
+    COUNT_PAINTS.with(|flag| flag.set(true));
 }
 
 impl CardView {
@@ -1520,11 +1532,11 @@ impl CardView {
             height,
             sidebar,
             stale: StaleTimer::default(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             paint_count: Rc::new(Cell::new(0)),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             prepared: None,
         }
     }
@@ -1580,7 +1592,7 @@ impl CardView {
 
 impl Render for CardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let mut card = DeviceCard {
             key: self.key.clone(),
@@ -1599,7 +1611,7 @@ impl Render for CardView {
         let height = prepared.height;
         let stale_at = prepared.stale_at(self.chart.read(cx));
         let now = self.chart.read(cx).now_ns();
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.prepared = Some(prepared.clone());
         }
@@ -1610,17 +1622,24 @@ impl Render for CardView {
         self.stale
             .arm(stale_at, now, |this: &mut Self| &mut this.stale, cx);
 
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
-            let paints = Rc::clone(&self.paint_count);
-            div().relative().size_full().child(card).child(
-                canvas(|_, _, _| {}, move |_, _, _, _| paints.set(paints.get() + 1))
-                    .absolute()
-                    .inset_0(),
-            )
+            // The overlay changes the element tree, so it stays off until a test turns it on.
+            if COUNT_PAINTS.with(Cell::get) {
+                let paints = Rc::clone(&self.paint_count);
+                return div()
+                    .relative()
+                    .size_full()
+                    .child(card)
+                    .child(
+                        canvas(|_, _, _| {}, move |_, _, _, _| paints.set(paints.get() + 1))
+                            .absolute()
+                            .inset_0(),
+                    )
+                    .into_any_element();
+            }
         }
-        #[cfg(not(any(test, feature = "test-hooks")))]
-        card
+        card.into_any_element()
     }
 }
 

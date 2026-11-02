@@ -562,7 +562,7 @@ pub struct MemoryAppsChart {
     body: Rc<Cell<Size<Pixels>>>,
     _subs: SmallVec<[Subscription; 5]>,
     /// The group key and name the last legend click opened.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub last_open: Option<(Arc<str>, SharedString)>,
 }
 
@@ -637,7 +637,7 @@ impl MemoryAppsChart {
             bounds: Rc::default(),
             body: Rc::default(),
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             last_open: None,
         };
         this.refresh(&snap, true, cx);
@@ -1389,7 +1389,7 @@ impl MemoryAppsChart {
             return;
         };
         let (key, name) = (Arc::clone(&band.key), band.name.clone());
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.last_open = Some((Arc::clone(&key), name.clone()));
         }
