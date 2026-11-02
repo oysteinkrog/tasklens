@@ -145,3 +145,22 @@ pub fn open_stand_in(cx: &mut TestAppContext, host: &PageHost) -> (StandIn, Visu
     vcx.run_until_parked();
     (StandIn { page, toasts }, vcx)
 }
+
+/// The texts of the stand-in window's toast queue, the visible ones first and then the waiting
+/// ones.
+pub fn stand_in_toasts(cx: &mut TestAppContext) -> Vec<String> {
+    cx.update(|cx| {
+        let queue = cx
+            .global::<StandInSlot>()
+            .toasts
+            .clone()
+            .expect("the stand-in window is open");
+        let queue = queue.read(cx);
+        queue
+            .visible_texts()
+            .into_iter()
+            .chain(queue.waiting_texts())
+            .map(|t| t.to_string())
+            .collect()
+    })
+}

@@ -6,69 +6,40 @@ use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{AnyWindowHandle, Entity, TestAppContext, VisualTestContext};
-use tl_model::client::EngineClient;
-use tl_model::command::{Command, Tab};
+use tl_model::command::Command;
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::snapshot::ProcessSnapshot;
-use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::shield::{EndHelperSession, StartHelperSession};
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::helper_flow::GlobalHelperFlow;
-use tl_ui::host::HostContext;
-use tl_ui::window::main::{main_window_view, open_main_window_on};
-use tl_ui::window::registry::{GlobalRegistry, WindowKey};
-use tl_ui::windows::actions::HandleSearchAll;
-use tl_ui::windows::handle_search::{HandleSearchWindow, open_handle_search};
-use tl_ui::windows::props::open_process_properties;
+use tl_ui_base::app_env::AppEnv;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_kit::components::shield::{EndHelperSession, StartHelperSession};
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::helper_flow::GlobalHelperFlow;
+use tl_ui_procs::windows::actions::HandleSearchAll;
+use tl_ui_procs::windows::handle_search::{HandleSearchWindow, open_handle_search};
+use tl_ui_procs::windows::props::open_process_properties;
 use tl_ui_settings::settings::{Settings, UiState};
 use tl_ui_testkit::fake_engine::FakeEngine;
 
-use super::common::{CANCELLED, FAILED, key, publish_helper, record, sent, starts_sent};
+use tl_ui_pagehost::helpers::publish_helper;
+use tl_ui_testkit::fixtures::{CANCELLED, FAILED, key, record, sent, starts_sent};
 
-/// App globals and the main window on Processes, active.
+use super::common::{open_stand_in, shell_free_init_with, stand_in_toasts as main_toasts};
+
+/// App globals and the stand-in for the main window on Processes, active.
 fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let init = UiInit {
-        settings: Settings::default(),
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
+    let (engine, host) =
+        shell_free_init_with(cx, Settings::default(), UiState::default(), AppEnv::test());
     cx.update(|cx| {
-        TasklensUi::init(cx, client, init);
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         cx.set_reduce_motion(true);
     });
-    let handle = cx
-        .update(|cx| open_main_window_on(Tab::Processes, cx))
-        .expect("the main window opens");
-    let mut main = VisualTestContext::from_window(handle.into(), cx);
-    main.update(|window, _| window.activate_window());
-    main.run_until_parked();
+    let (_, main) = open_stand_in(cx, &host);
     (engine, main)
 }
 
 fn requester(cx: &mut TestAppContext) -> Option<AnyWindowHandle> {
     cx.update(|cx| cx.global::<GlobalHelperFlow>().0.read(cx).requester())
-}
-
-fn main_toasts(cx: &mut TestAppContext) -> Vec<String> {
-    let main = cx.update(|cx| main_window_view(cx).expect("main window open"));
-    cx.update(|cx| {
-        let queue = main.read(cx).toasts().read(cx);
-        queue
-            .visible_texts()
-            .into_iter()
-            .chain(queue.waiting_texts())
-            .map(|t| t.to_string())
-            .collect()
-    })
 }
 
 /// Opens the Process Properties window for `pid` and activates it.
