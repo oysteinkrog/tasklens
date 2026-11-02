@@ -9,7 +9,7 @@ mod battery_page;
 mod bench_scenes;
 mod chart_cpu_grid_hover;
 mod common;
-mod components;
+mod components_words;
 mod connections;
 mod cpu_page;
 mod demand;
