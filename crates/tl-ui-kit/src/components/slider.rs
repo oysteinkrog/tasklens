@@ -124,7 +124,7 @@ fn rebuild(s: &mut SliderState, min: f32, max: f32, step: f32, value: f32) {
 
 /// A keyboard move.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum KeyMove {
+pub enum KeyMove {
     Steps(f32),
     Min,
     Max,
@@ -149,12 +149,7 @@ fn key_target(value: f32, min: f32, max: f32, step: f32, mv: KeyMove) -> f32 {
 
 /// Applies a keyboard move and emits `Commit` when the value changed. A press at a limit emits
 /// nothing.
-pub(crate) fn key_move(
-    state: &Entity<SliderState>,
-    mv: KeyMove,
-    window: &mut Window,
-    cx: &mut App,
-) {
+pub fn key_move(state: &Entity<SliderState>, mv: KeyMove, window: &mut Window, cx: &mut App) {
     state.update(cx, |s, cx| {
         let value = s.value().end();
         let next = key_target(value, s.min_value(), s.max_value(), s.step_value(), mv);

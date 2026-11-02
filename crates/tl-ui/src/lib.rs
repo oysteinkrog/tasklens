@@ -1,16 +1,14 @@
 //! tl-ui: GPUI views, chart element, process table and theme.
 
 pub use tl_ui_base::action_tracker;
-pub mod actions;
 pub use tl_ui_base::anim;
+pub use tl_ui_kit::actions;
 pub mod app;
 pub use tl_ui_base::app_env;
 pub mod chart;
-pub mod components;
 pub use tl_ui_base::demand;
 pub use tl_ui_base::engine_link;
 pub use tl_ui_base::focus;
-pub mod helper_flow;
 pub use tl_ui_base::host;
 pub use tl_ui_base::host_settings;
 pub use tl_ui_base::hosts_api;
@@ -18,6 +16,8 @@ pub use tl_ui_base::hosts_edit;
 pub use tl_ui_base::hub;
 pub use tl_ui_base::i18n;
 pub use tl_ui_base::motion;
+pub use tl_ui_kit::components;
+pub use tl_ui_kit::helper_flow;
 pub mod net_totals;
 pub mod pages;
 pub use tl_ui_base::registry;

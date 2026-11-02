@@ -158,6 +158,20 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "unicode-segmentation",
         ],
     ),
+    // ADR-020 kit layer, moved out of tl-ui (CS-E2). serde: `Deserialize` on the action structs
+    // in `actions.rs`, which CS-C6 put in the kit.
+    (
+        "tl-ui-kit",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "fluent-bundle",
+        ],
+    ),
     (
         "tl-app",
         &[

@@ -14,7 +14,7 @@ pub mod input;
 pub mod kv_grid;
 pub mod link;
 pub mod menu;
-pub use crate::motion;
+pub use tl_ui_base::motion;
 pub mod progress;
 pub mod radio;
 pub mod select;

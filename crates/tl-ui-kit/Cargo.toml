@@ -1,0 +1,27 @@
+[package]
+name = "tl-ui-kit"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tl-model = { workspace = true }
+gpui-kit = { workspace = true }
+serde = { workspace = true }   # Deserialize for the action structs in actions.rs
+smallvec = { workspace = true }
+rustc-hash = { workspace = true }
+tracing = { workspace = true }
+fluent-bundle = { workspace = true }
+tl-ui-base = { workspace = true }
+tl-ui-settings = { workspace = true }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+default = []
+bench = ["test-hooks"]   # the component gallery and static toast cards for --bench
+test-hooks = ["tl-ui-base/test-hooks"]
+
+[lints]
+workspace = true

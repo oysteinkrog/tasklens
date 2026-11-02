@@ -8,6 +8,7 @@ publish.workspace = true
 tl-model = { workspace = true }
 tl-ui-settings = { workspace = true }
 tl-ui-base = { workspace = true }
+tl-ui-kit = { workspace = true }
 gpui-kit = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,9 +32,9 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-bench = ["test-hooks", "gpui-kit/profiler"]     # frame histograms and paint log for --bench (ADR-014, E01-OI-6)
+bench = ["test-hooks", "gpui-kit/profiler", "tl-ui-kit/bench"]     # frame histograms and paint log for --bench (ADR-014, E01-OI-6)
 render-tests = ["bench", "gpui-kit/test-support", "dep:image", "tl-ui-testkit/render"]   # headless screenshot tests (ADR-013)
-test-hooks = ["tl-ui-base/test-hooks"]
+test-hooks = ["tl-ui-base/test-hooks", "tl-ui-kit/test-hooks"]
 
 [lints]
 workspace = true

@@ -34,7 +34,11 @@ pub const UI_SRC: &str = "crates/tl-ui/src";
 
 /// The source trees the check reads, relative to the workspace root: tl-ui's and one per extracted
 /// crate. Each extraction bead adds its crate (scripts/split/extract.py prints the line).
-const UI_SRCS: &[(&str, &str)] = &[(SHELL, UI_SRC), ("tl-ui-base", "crates/tl-ui-base/src")];
+const UI_SRCS: &[(&str, &str)] = &[
+    (SHELL, UI_SRC),
+    ("tl-ui-base", "crates/tl-ui-base/src"),
+    ("tl-ui-kit", "crates/tl-ui-kit/src"),
+];
 
 /// The allowlist of today's upward edges, relative to the workspace root.
 const ALLOWLIST: &str = "xtask/check_layers_allow.txt";
