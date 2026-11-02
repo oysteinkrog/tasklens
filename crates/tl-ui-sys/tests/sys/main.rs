@@ -4,5 +4,6 @@
 //! Run with `cargo test -p tl-ui-sys --test sys`.
 
 mod common;
+mod connections;
 mod service_props;
 mod startup;

@@ -16,20 +16,20 @@ use tl_model::snapshot::{
 use tl_model::table::{ConnColumn, SysNodeId, SysRow};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::host::HostContext;
-use tl_ui::pages::connections::delegate::{
+use tl_ui_base::host::HostContext;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_sys::pages::connections::delegate::{
     CONNECTION_COLUMNS, ConnectionsDelegate, DEFAULT_COLUMNS, default_width, id, state_class,
 };
-use tl_ui::pages::sys_table::SysDelegate as _;
-use tl_ui::table::cells::{CellCtx, CellOut, name_look};
-use tl_ui::table::columns::TableColumn as _;
-use tl_ui::table::tree_table::{NameIcon, RowFlags, TreeTableDelegate as _};
-use tl_ui::theme::{current, metrics};
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::cells::{CellCtx, CellOut, name_look};
+use tl_ui_table::table::columns::TableColumn as _;
+use tl_ui_table::table::sys_table::SysDelegate as _;
+use tl_ui_table::table::tree_table::{NameIcon, RowFlags, TreeTableDelegate as _};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
-    tl_ui::theme::store::init(
+    tl_ui_base::theme::store::init(
         cx,
         &ThemeSettings::default(),
         &AppearanceSettings::default(),
@@ -277,7 +277,7 @@ fn conn_row_kernel_owner(cx: &mut TestAppContext) {
             theme: &theme,
             selected: false,
             width: px(180.),
-            at: tl_ui::table::cells::CellAt::Alone,
+            at: tl_ui_table::table::cells::CellAt::Alone,
         };
         assert_eq!(name_look(flags, &ctx), (theme.text_secondary, 1.0));
     });
@@ -316,8 +316,8 @@ fn conn_row_restricted_lock(cx: &mut TestAppContext) {
 fn conn_restricted_tooltip_is_localized(cx: &mut TestAppContext) {
     let mut delegate = cx.update(|cx| {
         setup(cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
-        tl_ui::i18n::set_test_catalogue(
+        tl_ui_base::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::set_test_catalogue(
             cx,
             "connections-owner-restricted-tip = Socket de { $user } requires helper",
         );
@@ -470,6 +470,7 @@ mod page {
     use std::time::Duration;
 
     use super::*;
+    use crate::common::shell_free_init_client;
     use gpui_kit::base::Root;
     use gpui_kit::{
         Action, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Render,
@@ -484,18 +485,17 @@ mod page {
     use tl_model::journal::{JournalHandle, JournalQuery};
     use tl_model::snapshot::{ConnCounts, Snapshot};
     use tl_model::table::{Manager, SysColumnId, SysTable, UnitRef};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
-    use tl_ui::components::toast::ToastQueue;
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::hub::GlobalHub;
-    use tl_ui::pages::connections::actions::bind_keys_connections;
-    use tl_ui::pages::connections::actions::{ConnectionCopyForeign, ConnectionCopyLocal};
-    use tl_ui::pages::connections::{ConnectionsPage, REFRESH_TOAST_AFTER};
-    use tl_ui::pages::processes::actions::CopyDetails;
-    use tl_ui::pages::sys_table::SysBody;
-    use tl_ui::window::main::{GlobalShellEvents, PauseChanged};
+    use tl_ui_base::app_env::AppEnv;
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_base::hub::GlobalHub;
+    use tl_ui_base::shell::{GlobalShellEvents, PauseChanged};
+    use tl_ui_kit::components::menu::{MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup};
+    use tl_ui_kit::components::toast::ToastQueue;
+    use tl_ui_procs::pages::processes::actions::CopyDetails;
     use tl_ui_settings::settings::{EngineSettings, Settings, UiState};
+    use tl_ui_sys::pages::connections::actions::{ConnectionCopyForeign, ConnectionCopyLocal};
+    use tl_ui_sys::pages::connections::{ConnectionsPage, REFRESH_TOAST_AFTER};
+    use tl_ui_table::table::sys_table::SysBody;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Host {
@@ -522,30 +522,22 @@ mod page {
 
     fn rig(cx: &mut TestAppContext) -> Rig {
         let engine = FakeEngine::new();
-        rig_with_client(cx, engine.clone(), engine)
+        rig_with_client(cx, engine, None)
     }
 
     fn rig_with_client(
         cx: &mut TestAppContext,
         engine: Arc<FakeEngine>,
-        client: Arc<dyn EngineClient>,
+        client: Option<Arc<dyn EngineClient>>,
     ) -> Rig {
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client.clone(), init);
-            bind_keys_connections(cx);
-            cx.set_reduce_motion(true);
-        });
+        let _host = shell_free_init_client(
+            cx,
+            Arc::clone(&engine),
+            client,
+            Settings::default(),
+            UiState::default(),
+            AppEnv::test(),
+        );
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(0.), px(0.)),
@@ -766,7 +758,9 @@ mod page {
             })
         }
 
-        fn table(&self) -> Entity<tl_ui::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+        fn table(
+            &self,
+        ) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
             self.vcx
                 .read_entity(&self.page, |page, _| page.table().clone())
         }
@@ -1150,7 +1144,7 @@ mod page {
         record.owner_validity = Validity::Restricted;
         let mut rig = menu_rig(cx, vec![record]);
         rig.select(&[1]);
-        rig.dispatch(tl_ui::table::actions::CopyRowsAsTable);
+        rig.dispatch(tl_ui_table::table::actions::CopyRowsAsTable);
         let copied = rig.clipboard().unwrap();
         assert_eq!(
             copied.lines().next(),
@@ -1239,7 +1233,7 @@ mod page {
         let client: Arc<dyn EngineClient> = Arc::new(DemandDrivenEngine {
             inner: Arc::clone(&inner),
         });
-        let mut rig = rig_with_client(cx, inner, client);
+        let mut rig = rig_with_client(cx, inner, Some(client));
         assert_eq!(
             rig.vcx.read_entity(&rig.page, |page, _| page.body()),
             SysBody::Skeleton
@@ -1366,7 +1360,7 @@ mod page {
         rig.vcx.update(|_, cx| {
             let events = cx.global::<GlobalShellEvents>().0.clone();
             events.update(cx, |_, cx| {
-                cx.emit(tl_ui::window::main::FilterChanged {
+                cx.emit(tl_ui_base::shell::FilterChanged {
                     tab: Tab::Connections,
                     text: "443".into(),
                 });
@@ -1397,12 +1391,12 @@ mod page {
             ActionState, ActionTarget, RejectReason,
         };
         use tl_model::health::HelperState;
-        use tl_ui::action_tracker::PushedToast;
-        use tl_ui::components::dialog::{DialogButton, TlDialogView};
-        use tl_ui::components::toast::ToastKind;
-        use tl_ui::components::window_frame::TlSecondaryWindow;
-        use tl_ui::pages::connections::actions::ConnectionCloseTcp;
-        use tl_ui::pages::connections::listen_confirm_texts;
+        use tl_ui_base::action_tracker::PushedToast;
+        use tl_ui_kit::components::dialog::{DialogButton, TlDialogView};
+        use tl_ui_kit::components::toast::ToastKind;
+        use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+        use tl_ui_sys::pages::connections::actions::ConnectionCloseTcp;
+        use tl_ui_sys::pages::connections::listen_confirm_texts;
 
         const CLOSE: &str = "Close TCP connection";
 
@@ -1788,8 +1782,8 @@ mod page {
     mod netns {
         use super::*;
         use tl_model::health::{HelperStartOutcome, HelperState};
-        use tl_ui::pages::connections::actions::{ConnectionNetnsAll, ConnectionNetnsHost};
-        use tl_ui::window::main::HelperInstalled;
+        use tl_ui_base::shell::HelperInstalled;
+        use tl_ui_sys::pages::connections::actions::{ConnectionNetnsAll, ConnectionNetnsHost};
 
         fn installed_rig(cx: &mut TestAppContext, installed: bool) -> Rig {
             let mut rig = menu_rig(cx, vec![super::super::connection(1, SmallVec::new())]);
@@ -1935,529 +1929,27 @@ mod page {
     }
 }
 
-/// `TasklensUi::init` binds the Connections keys and the shell builds `ConnectionsPage` for its
-/// tab (tasklens-9o0.20).
-#[gpui_kit::test]
-fn connections_page_registered(cx: &mut TestAppContext) {
-    use gpui_kit::{AppContext as _, VisualTestContext};
-    use tl_model::client::EngineClient;
-    use tl_model::command::Tab;
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::window::main::{main_window_view, open_main_window};
-    use tl_ui_settings::settings::{Settings, StartTab, UiState};
-    use tl_ui_testkit::fake_engine::FakeEngine;
-
-    let engine = FakeEngine::new();
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let (_tx, rx) = async_channel::bounded(4);
-    let mut settings = Settings::default();
-    settings.general.start_tab = StartTab::Connections;
-    let init = UiInit {
-        settings,
-        state: UiState::default(),
-        themes_json: None,
-        persist: Box::new(|_, _| {}),
-        persist_themes: Box::new(|_| {}),
-        app_requests: rx,
-        startup_toasts: Vec::new(),
-        env: AppEnv::test(),
-    };
-    cx.update(|cx| TasklensUi::init(cx, client, init));
-    cx.run_until_parked();
-
-    let handle = cx.update(open_main_window).expect("the main window opens");
-    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-    vcx.run_until_parked();
-    let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
-    let page = vcx.read_entity(&main, |m, _| {
-        m.page_entity::<ConnectionsPage>(Tab::Connections)
-    });
-    assert!(
-        page.is_some(),
-        "the Connections tab builds a ConnectionsPage"
-    );
-}
-
-/// Jump to process and Go to service from the Connections tab (tasklens-9o0.18).
-mod jump {
-
-    use super::*;
-    use gpui_kit::{AppContext as _, VisualTestContext};
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
-    use tl_model::ids::NodeId;
-    use tl_model::snapshot::{
-        ConnCounts, ServiceStatus, ServicesSnapshot, StartupType, UnitRecord,
-    };
-    use tl_model::table::{
-        Manager, ProcessTableView, SysTable, TableRow, Total, UnitRef, UnitType,
-    };
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::pages::connections::actions::{
-        ConnectionGoToService, ConnectionJumpToProcess, GoToConnection,
-    };
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui_settings::settings::{Settings, UiState};
-    use tl_ui_testkit::fake_engine::FakeEngine;
-
-    struct Rig {
-        engine: Arc<FakeEngine>,
-        vcx: VisualTestContext,
-        page: gpui_kit::Entity<ConnectionsPage>,
-    }
-
-    fn unit_record(unit: UnitRef) -> UnitRecord {
-        UnitRecord {
-            unit,
-            kind: UnitType::Service,
-            description: Arc::from("OpenSSH Daemon"),
-            status: ServiceStatus::Running,
-            sub_state: Arc::from("running"),
-            load_state: Arc::from("loaded"),
-            startup: StartupType::Enabled,
-            main_pid: 4321,
-            user: Arc::from("root"),
-            path: Arc::from("/usr/bin/sshd"),
-            unit_file: None,
-            active_since_us: None,
-            triggered_by: Arc::from([]),
-            control_group: None,
-            can_reload: false,
-            has_cgroup_procs: false,
-            cgroup_pids: Arc::from([]),
-            cpu_pct: Total::default(),
-            memory_bytes: Total::default(),
-            disk_bps: Total::default(),
-            tasks: Total::default(),
-        }
-    }
-
-    fn rig(cx: &mut TestAppContext, record: ConnRecord, processes: Vec<ProcessRecord>) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let init = UiInit {
-            settings: Settings::default(),
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
-        });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Connections, cx))
-            .expect("the main window opens");
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        let page = vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .page_entity::<ConnectionsPage>(Tab::Connections)
-                .expect("Connections page")
-        });
-        let mut rig = Rig { engine, vcx, page };
-        rig.publish(record, processes);
-        rig
-    }
-
-    impl Rig {
-        fn draw(&mut self) {
-            self.vcx.run_until_parked();
-            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
-        }
-
-        fn publish(&mut self, record: ConnRecord, mut processes: Vec<ProcessRecord>) {
-            let generation = self
-                .engine
-                .commands()
-                .into_iter()
-                .rev()
-                .find_map(|command| match command {
-                    Command::SetSysTableQuery(query) => Some(query.generation),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            processes.sort_unstable_by_key(|process| process.key);
-            let cookie = record.cookie;
-            self.engine.publish_with(|snapshot| {
-                snapshot.connections = Arc::new(ConnectionsSnapshot {
-                    header: ComponentHeader {
-                        version: 1,
-                        validity: Validity::Valid,
-                        ..ComponentHeader::default()
-                    },
-                    rows: vec![SysRow {
-                        node: SysNodeId::Conn(cookie),
-                        depth: 0,
-                        expanded: false,
-                        has_children: false,
-                        record: Some(0),
-                    }]
-                    .into(),
-                    query_generation: generation,
-                    records: vec![record].into(),
-                    counts: ConnCounts {
-                        total: 1,
-                        tcp: 1,
-                        ..ConnCounts::default()
-                    },
-                    ..ConnectionsSnapshot::default()
-                });
-                snapshot.processes = Arc::new(ProcessSnapshot {
-                    records: processes.into(),
-                    ..ProcessSnapshot::default()
-                });
-            });
-            self.draw();
-        }
-
-        /// Selects the only row, focuses the table and dispatches `action`.
-        fn dispatch(&mut self, select: bool, action: impl gpui_kit::Action) {
-            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
-            if select {
-                let cookie = 1;
-                table.update(&mut self.vcx, |table, cx| {
-                    table.selection.click(cookie);
-                    cx.notify();
-                });
-            }
-            self.vcx
-                .update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
-            self.draw();
-            self.vcx.dispatch_action(action);
-            self.vcx.run_until_parked();
-        }
-
-        fn toasts(&mut self) -> Vec<String> {
-            self.vcx.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(ToString::to_string).collect()
-            })
-        }
-
-        /// Publishes `unit` as the only service and collapses both Services groups, so the
-        /// query the jump sends shows which manager group it expanded.
-        fn publish_unit(&mut self, unit: UnitRef) {
-            self.vcx.update(|_, cx| {
-                TlSettings::update(cx, |data| {
-                    data.state.services.group_expanded.system = false;
-                    data.state.services.group_expanded.user = false;
-                });
-            });
-            self.engine.publish_with(|snapshot| {
-                snapshot.services = Arc::new(ServicesSnapshot {
-                    units: vec![unit_record(unit)].into(),
-                    ..ServicesSnapshot::default()
-                });
-            });
-            self.draw();
-        }
-
-        /// The expanded rows of the last Services query the page sent.
-        fn services_expanded(&self) -> Vec<SysNodeId> {
-            self.engine
-                .commands()
-                .into_iter()
-                .rev()
-                .find_map(|command| match command {
-                    Command::SetSysTableQuery(query) if query.table == SysTable::Services => {
-                        Some(query.expanded.to_vec())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default()
-        }
-
-        fn active_tab(&mut self) -> Tab {
-            self.vcx.update(|_, cx| {
-                main_window_view(cx)
-                    .expect("main window")
-                    .read(cx)
-                    .active_tab()
-            })
-        }
-
-        fn table_queries(&self) -> Vec<tl_model::table::TableQuery> {
-            self.engine
-                .commands()
-                .into_iter()
-                .filter_map(|c| match c {
-                    Command::SetTableQuery(q) => Some(q),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        /// Answers the latest Processes query with `keys` as the view.
-        fn answer(&mut self, keys: &[ProcessKey]) {
-            let generation = self
-                .table_queries()
-                .last()
-                .expect("a Processes query was sent")
-                .generation;
-            let rows: Vec<TableRow> = keys
-                .iter()
-                .map(|key| TableRow {
-                    node: NodeId::Process(*key),
-                    depth: 0,
-                    expanded: false,
-                    has_children: false,
-                    record: Some(0),
-                    group: None,
-                    descendants: 0,
-                    subtree: None,
-                })
-                .collect();
-            self.engine.publish_with(|s| {
-                let header = ComponentHeader {
-                    version: s.sequence,
-                    ..ComponentHeader::default()
-                };
-                s.table = Arc::new(ProcessTableView {
-                    header,
-                    query_generation: generation,
-                    rows: rows.into(),
-                    ..ProcessTableView::default()
-                });
-            });
-            self.draw();
-        }
-
-        /// Cookies selected in the Connections table.
-        fn selected_conns(&mut self) -> Vec<u64> {
-            let table = self.vcx.read_entity(&self.page, |p, _| p.table().clone());
-            self.vcx
-                .read_entity(&table, |t, _| t.selection.ids().collect())
-        }
-
-        /// Publishes the record with an empty view, as a filter that hides it would.
-        fn publish_hidden(&mut self, record: ConnRecord) {
-            let generation = self
-                .engine
-                .commands()
-                .into_iter()
-                .rev()
-                .find_map(|command| match command {
-                    Command::SetSysTableQuery(query) => Some(query.generation),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            self.engine.publish_with(|snapshot| {
-                snapshot.connections = Arc::new(ConnectionsSnapshot {
-                    header: ComponentHeader {
-                        version: 2,
-                        validity: Validity::Valid,
-                        ..ComponentHeader::default()
-                    },
-                    query_generation: generation,
-                    records: vec![record].into(),
-                    ..ConnectionsSnapshot::default()
-                });
-            });
-            self.draw();
-        }
-
-        fn selected(&mut self) -> Vec<tl_ui::pages::processes::delegate::ProcRowId> {
-            self.vcx.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let page = view
-                    .read(cx)
-                    .page_entity::<ProcessesPage>(Tab::Processes)
-                    .expect("Processes page");
-                page.read(cx).table().read(cx).selection.ids().collect()
-            })
-        }
-    }
-
-    fn owned(pids: &[u32]) -> ConnRecord {
-        let owners: SmallVec<[ProcessKey; 1]> = pids.iter().map(|p| super::key(*p)).collect();
-        super::connection(1, owners)
-    }
-
-    fn procs(pids: &[u32]) -> Vec<ProcessRecord> {
-        pids.iter()
-            .map(|p| super::process(*p, "daemon", "root", 0))
-            .collect()
-    }
-
-    #[gpui_kit::test]
-    fn conn_jump_uses_lowest_pid(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[5000, 4321]), procs(&[5000, 4321]));
-        rig.dispatch(true, ConnectionJumpToProcess);
-        rig.answer(&[super::key(4321)]);
-        assert_eq!(
-            rig.selected(),
-            [tl_ui::pages::processes::delegate::ProcRowId::Process(
-                super::key(4321)
-            )]
-        );
-    }
-
-    #[gpui_kit::test]
-    fn conn_jump_success_toast(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
-        rig.dispatch(true, ConnectionJumpToProcess);
-        rig.answer(&[super::key(4321)]);
-        assert_eq!(rig.active_tab(), Tab::Processes);
-        assert_eq!(rig.selected().len(), 1);
-        assert_eq!(rig.toasts(), ["Switched to owning process."]);
-    }
-
-    #[gpui_kit::test]
-    fn conn_jump_hidden_show_button(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
-        // Build the lazy Processes page, then come back.
-        rig.vcx.update(|window, cx| {
-            let view = main_window_view(cx).expect("main window");
-            view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
-            view.update(cx, |v, cx| v.select_tab(Tab::Connections, window, cx));
-        });
-        rig.draw();
-        let processes = rig.vcx.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .page_entity::<ProcessesPage>(Tab::Processes)
-                .expect("Processes page")
-        });
-        rig.vcx.update(|_, cx| {
-            processes.update(cx, |p, cx| {
-                p.table()
-                    .update(cx, |t, _| t.delegate.query_mut().set_filter("foo".into()));
-            });
-        });
-        rig.dispatch(true, ConnectionJumpToProcess);
-        rig.answer(&[]);
-        assert_eq!(
-            rig.toasts(),
-            ["Owning process not visible in the current process view."]
-        );
-        assert!(rig.selected().is_empty());
-        // The Show button dispatches this action and clears the filter.
-        let before = rig.table_queries().len();
-        rig.vcx
-            .dispatch_action(tl_ui::pages::processes::actions::ProcessesShowHidden);
-        rig.draw();
-        let queries = rig.table_queries();
-        assert!(queries.len() > before, "Show sends a new query");
-        assert_eq!(queries.last().map(|q| q.filter.as_ref()), Some(""));
-    }
-
-    #[gpui_kit::test]
-    fn conn_jump_exited_toast(cx: &mut TestAppContext) {
-        // The owner is no longer in the process snapshot.
-        let mut rig = rig(cx, owned(&[4321]), Vec::new());
-        rig.dispatch(true, ConnectionJumpToProcess);
-        assert_eq!(rig.toasts(), ["Process not found in current view"]);
-    }
-
-    #[gpui_kit::test]
-    fn conn_jump_no_owner_toast(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[]), Vec::new());
-        let before = rig.table_queries().len();
-        rig.dispatch(true, ConnectionJumpToProcess);
-        assert_eq!(rig.toasts(), ["No owning process for this connection"]);
-        assert_eq!(rig.active_tab(), Tab::Connections);
-        assert_eq!(rig.table_queries().len(), before, "no query is sent");
-    }
-
-    #[gpui_kit::test]
-    fn go_to_connection_selects_row(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
-        rig.vcx.dispatch_action(GoToConnection { inode: 1234567 });
-        rig.draw();
-        assert_eq!(rig.selected_conns(), [1]);
-        assert_eq!(rig.active_tab(), Tab::Connections);
-        assert!(rig.toasts().is_empty());
-    }
-
-    #[gpui_kit::test]
-    fn go_to_connection_unknown_inode_toasts(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
-        rig.vcx.dispatch_action(GoToConnection { inode: 99 });
-        rig.draw();
-        assert!(rig.selected_conns().is_empty());
-        assert_eq!(rig.toasts(), ["Connection not found in current view"]);
-    }
-
-    #[gpui_kit::test]
-    fn go_to_connection_filtered_out_toasts(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, owned(&[4321]), procs(&[4321]));
-        rig.publish_hidden(owned(&[4321]));
-        rig.vcx.dispatch_action(GoToConnection { inode: 1234567 });
-        rig.draw();
-        assert!(rig.selected_conns().is_empty());
-        assert_eq!(rig.toasts(), ["Connection not found in current view"]);
-    }
-
-    #[gpui_kit::test]
-    fn conn_go_to_service(cx: &mut TestAppContext) {
-        let mut record = owned(&[4321]);
-        record.unit = Some(UnitRef {
-            manager: Manager::System,
-            name: Arc::from("sshd.service"),
-        });
-        let mut rig = rig(cx, record, procs(&[4321]));
-        rig.publish_unit(UnitRef {
-            manager: Manager::System,
-            name: Arc::from("sshd.service"),
-        });
-        // The main window handles GoToService itself: it switches to Services and the page
-        // looks the unit up by manager and name.
-        assert_eq!(rig.active_tab(), Tab::Connections);
-        rig.dispatch(true, ConnectionGoToService);
-        assert_eq!(rig.active_tab(), Tab::Services);
-        assert!(
-            rig.toasts().iter().any(|t| t == "Switched to Services tab"),
-            "the page found System sshd.service: {:?}",
-            rig.toasts()
-        );
-        assert_eq!(
-            rig.services_expanded(),
-            [SysNodeId::ServiceGroup(Manager::System)],
-            "the jump expanded only the System group"
-        );
-    }
-}
-
 /// The Connection Properties window (tasklens-9o0.19).
 mod props {
     use super::*;
+    use crate::common::{open_sink, shell_free_init, sink_toasts};
     use gpui_kit::base::Root;
     use gpui_kit::{VisualTestContext, WindowHandle};
-    use tl_model::client::EngineClient;
-    use tl_model::command::Tab;
     use tl_model::health::HelperState;
     use tl_model::snapshot::{ConnCounts, ProcessSnapshot, TcpInfoView};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
-    use tl_ui::demand::GlobalDemand;
-    use tl_ui::window::main::{main_window_view, open_main_window_on};
-    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
-    use tl_ui::windows::connection_properties::{
+    use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_kit::components::window_frame::{TestClientFrame, TlSecondaryWindow, frame_bottom};
+    use tl_ui_settings::settings::{Decorations, Settings};
+    use tl_ui_sys::windows::connection_properties::{
         ConnectionPropertiesView, open_connection_properties,
     };
-    use tl_ui_settings::settings::{Decorations, Settings, UiState};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     struct Rig {
         engine: Arc<FakeEngine>,
         main: VisualTestContext,
         version: u64,
+        cx: TestAppContext,
     }
 
     fn rig(
@@ -2465,38 +1957,17 @@ mod props {
         records: Vec<ConnRecord>,
         processes: Vec<ProcessRecord>,
     ) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
         // The window is checked with the kit title bar and the client frame. The default is
         // server decorations (D-035).
         let mut settings = Settings::default();
         settings.appearance.decorations = Decorations::Client;
-        let init = UiInit {
-            settings,
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
-        });
-        let handle = cx
-            .update(|cx| open_main_window_on(Tab::Connections, cx))
-            .expect("the main window opens");
-        let mut main = VisualTestContext::from_window(handle.into(), cx);
-        main.update(|window, _| window.activate_window());
-        main.run_until_parked();
+        let (engine, host) = shell_free_init(cx, settings);
+        let main = open_sink(cx, &host);
         let mut rig = Rig {
             engine,
             main,
             version: 0,
+            cx: cx.clone(),
         };
         rig.publish(records, processes);
         rig
@@ -2546,11 +2017,7 @@ mod props {
         }
 
         fn toasts(&mut self) -> Vec<String> {
-            self.main.update(|_, cx| {
-                let view = main_window_view(cx).expect("main window");
-                let texts = view.read(cx).toasts().read(cx).visible_texts();
-                texts.iter().map(ToString::to_string).collect()
-            })
+            sink_toasts(&mut self.cx)
         }
     }
 
@@ -2583,7 +2050,7 @@ mod props {
         let frame = frame(cx, handle);
         cx.update(|cx| {
             let view = frame.read(cx).content().clone();
-            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let words = tl_ui_kit::components::kv_grid::kv_words(cx);
             view.read(cx).line_texts(&words)
         })
     }
@@ -2781,7 +2248,7 @@ mod props {
         let frame = frame(cx, handle);
         let secondary = cx.update(|cx| {
             let view = frame.read(cx).content().clone();
-            let words = tl_ui::components::kv_grid::kv_words(cx);
+            let words = tl_ui_kit::components::kv_grid::kv_words(cx);
             let theme = current(cx).clone();
             view.read(cx)
                 .value_looks(&words, &theme)
@@ -2831,79 +2298,22 @@ mod props {
         });
         assert_eq!(count, 1);
     }
-
-    #[gpui_kit::test]
-    fn conn_props_keeps_demand_while_open(cx: &mut TestAppContext) {
-        let mut rig = rig(cx, vec![tcp_record(1)], procs());
-        let handle = open(cx, 1).expect("opened");
-        rig.main.update(|window, cx| {
-            let view = main_window_view(cx).expect("main window");
-            view.update(cx, |v, cx| v.select_tab(Tab::Processes, window, cx));
-        });
-        rig.main.run_until_parked();
-        let demanded = |cx: &mut TestAppContext| {
-            cx.update(|cx| cx.global::<GlobalDemand>().0.read(cx).merged().connections)
-        };
-        assert!(demanded(cx), "the open window holds Connections demand");
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-        cx.run_until_parked();
-        assert!(!demanded(cx), "released after the window closes");
-    }
-
-    #[gpui_kit::test]
-    fn conn_props_process_link_jumps(cx: &mut TestAppContext) {
-        let rig = rig(cx, vec![tcp_record(1)], procs());
-        let handle = open(cx, 1).expect("opened");
-        let mut win = VisualTestContext::from_window(handle.into(), cx);
-        let frame = frame(cx, handle);
-        let view = cx.update(|cx| frame.read(cx).content().clone());
-        win.update(|window, _| window.activate_window());
-        win.run_until_parked();
-        win.update(|window, cx| window.draw(cx).clear(cx));
-        win.update(|window, cx| view.read(cx).link_focus_handle().clone().focus(window, cx));
-        win.run_until_parked();
-        win.update(|window, cx| window.draw(cx).clear(cx));
-        let focused = win.update(|window, cx| view.read(cx).link_focus_handle().is_focused(window));
-        assert!(focused, "the Process link has focus");
-        let keystroke = gpui_kit::Keystroke::parse("enter").unwrap();
-        win.simulate_event(gpui_kit::KeyDownEvent {
-            keystroke: keystroke.clone(),
-            is_held: false,
-            prefer_character_input: false,
-        });
-        win.simulate_event(gpui_kit::KeyUpEvent { keystroke });
-        win.run_until_parked();
-        let mut rig = rig;
-        let tab = rig.main.update(|_, cx| {
-            main_window_view(cx)
-                .expect("main window")
-                .read(cx)
-                .active_tab()
-        });
-        assert_eq!(tab, Tab::Processes);
-    }
 }
 
-/// The Connections tab inside `MainWindow`, end to end through the fake engine
+/// The Connections page in a page-host window, end to end through the fake engine
 /// (tasklens-9o0.2, UI-SYS-060 to UI-SYS-068, table (b)).
 mod main_window {
     use super::*;
+    use crate::common::{open_page, shell_free_init};
     use gpui_kit::AppContext as _;
-    use gpui_kit::{Entity, Modifiers, MouseButton, MouseDownEvent, VisualTestContext, point};
-    use tl_model::client::EngineClient;
-    use tl_model::command::{Command, Tab};
-    use tl_model::ids::NodeId;
+    use gpui_kit::{Entity, VisualTestContext};
+    use tl_model::command::Command;
     use tl_model::snapshot::ConnCounts;
-    use tl_model::table::{ProcessTableView, SysTable, TableRow};
-    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-    use tl_ui::components::menu::{MenuEntryInfo, TlMenuPopup, open_context_menu};
-    use tl_ui::demand::DEMAND_COALESCE;
-    use tl_ui::pages::connections::ConnectionsPage;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::delegate::ProcRowId;
-    use tl_ui::window::main::{MainWindow, main_window_view, open_main_window};
-    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
-    use tl_ui_settings::settings::{Settings, StartTab, UiState};
+    use tl_model::table::SysTable;
+    use tl_ui_base::demand::DEMAND_COALESCE;
+    use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui_settings::settings::Settings;
+    use tl_ui_sys::pages::connections::ConnectionsPage;
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     const FIREFOX_COOKIE: u64 = 2;
@@ -2911,42 +2321,19 @@ mod main_window {
     struct Rig {
         engine: Arc<FakeEngine>,
         vcx: VisualTestContext,
-        main: Entity<MainWindow>,
+        page: Entity<ConnectionsPage>,
         version: u64,
     }
 
     fn boot(cx: &mut TestAppContext) -> Rig {
-        let engine = FakeEngine::new();
-        let client: Arc<dyn EngineClient> = engine.clone();
-        let (_tx, rx) = async_channel::bounded(4);
-        let mut settings = Settings::default();
-        settings.general.start_tab = StartTab::Processes;
-        let init = UiInit {
-            settings,
-            state: UiState::default(),
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
-            app_requests: rx,
-            startup_toasts: Vec::new(),
-            env: AppEnv::test(),
-        };
-        cx.update(|cx| {
-            TasklensUi::init(cx, client, init);
-            tl_ui::i18n::init_strings(cx, "en-US");
-            cx.set_reduce_motion(true);
+        let (engine, host) = shell_free_init(cx, Settings::default());
+        let (page, vcx) = open_page(cx, &host, |host, window, cx| {
+            ConnectionsPage::new(host, window, cx)
         });
-        cx.run_until_parked();
-        let handle = cx.update(open_main_window).expect("the main window opens");
-        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
-        vcx.update(|window, _| window.activate_window());
-        vcx.simulate_resize(gpui_kit::size(px(1280.), px(800.)));
-        vcx.run_until_parked();
-        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
         Rig {
             engine,
             vcx,
-            main,
+            page,
             version: 0,
         }
     }
@@ -2995,24 +2382,10 @@ mod main_window {
             self.vcx.update(|window, cx| window.draw(cx).clear(cx));
         }
 
-        fn select(&mut self, tab: Tab) {
-            self.main
-                .update_in(&mut self.vcx, |m, window, cx| m.select_tab(tab, window, cx));
-            self.draw();
-        }
-
-        fn active_tab(&mut self) -> Tab {
-            self.vcx.read_entity(&self.main, |m, _| m.active_tab())
-        }
-
-        fn page(&mut self) -> Option<Entity<ConnectionsPage>> {
-            self.vcx.read_entity(&self.main, |m, _| {
-                m.page_entity::<ConnectionsPage>(Tab::Connections)
-            })
-        }
-
-        fn table(&mut self) -> Entity<tl_ui::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
-            let page = self.page().expect("the Connections page exists");
+        fn table(
+            &mut self,
+        ) -> Entity<tl_ui_table::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+            let page = self.page.clone();
             self.vcx.read_entity(&page, |page, _| page.table().clone())
         }
 
@@ -3068,7 +2441,9 @@ mod main_window {
 
         /// Visits the Connections tab and publishes the fixture.
         fn visit_with_fixture(&mut self) {
-            self.select(Tab::Connections);
+            self.page
+                .update(&mut self.vcx, |page, cx| page.set_active(true, cx));
+            self.draw();
             self.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
             self.publish();
         }
@@ -3091,181 +2466,6 @@ mod main_window {
             self.vcx
                 .read_entity(&table, |table, _| table.selection.ids().collect())
         }
-
-        fn chip(&mut self) -> String {
-            let chip = self
-                .vcx
-                .read_entity(&self.main, |m, _| m.status_chip().clone());
-            self.vcx.read_entity(&chip, |c, _| c.drawn_text())
-        }
-
-        fn page_status(&mut self) -> String {
-            let page = self.page().expect("the Connections page exists");
-            self.vcx.read_entity(&page, |p, _| {
-                let mut out = String::new();
-                p.status_text(&mut out);
-                out
-            })
-        }
-
-        /// Right-clicks the first cell of the row for `cookie`.
-        fn right_click(&mut self, cookie: u64) -> Option<Entity<TlMenuPopup>> {
-            self.draw();
-            let table = self.table();
-            let ix = self
-                .vcx
-                .read_entity(&table, |t, _| t.delegate.row_index(cookie))
-                .expect("the row exists");
-            let body = self
-                .vcx
-                .debug_bounds("TlTreeTable-body")
-                .expect("the table body");
-            let row_h = self
-                .vcx
-                .update(|_, cx| tl_ui::theme::metrics(cx).row_height);
-            let at = point(
-                body.origin.x + px(40.),
-                body.origin.y + row_h * (ix as f32 + 0.5),
-            );
-            self.vcx.simulate_event(MouseDownEvent {
-                position: at,
-                modifiers: Modifiers::none(),
-                button: MouseButton::Right,
-                click_count: 1,
-                first_mouse: false,
-            });
-            self.vcx.run_until_parked();
-            self.draw();
-            self.vcx.update(|window, cx| open_context_menu(window, cx))
-        }
-
-        /// Runs the item labelled `label` as a click does: in the table's context.
-        fn run_item(&mut self, menu: &Entity<TlMenuPopup>, label: &str) {
-            let entries: Vec<MenuEntryInfo> = self
-                .vcx
-                .update(|window, cx| menu.read(cx).entries_for_test(window));
-            let action = entries
-                .into_iter()
-                .find(|e| e.label.as_deref() == Some(label))
-                .and_then(|e| e.action)
-                .unwrap_or_else(|| panic!("a {label} item"));
-            let table = self.table();
-            self.vcx.update(|window, cx| {
-                let focus = table.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-                window.dispatch_action(action, cx);
-            });
-            self.vcx.run_until_parked();
-        }
-
-        /// Answers the latest Processes query with `keys` as the view.
-        fn answer(&mut self, keys: &[ProcessKey]) {
-            let generation = self
-                .engine
-                .commands()
-                .into_iter()
-                .rev()
-                .find_map(|command| match command {
-                    Command::SetTableQuery(query) => Some(query.generation),
-                    _ => None,
-                })
-                .expect("a Processes query was sent");
-            let rows: Vec<TableRow> = keys
-                .iter()
-                .map(|key| TableRow {
-                    node: NodeId::Process(*key),
-                    depth: 0,
-                    expanded: false,
-                    has_children: false,
-                    record: Some(0),
-                    group: None,
-                    descendants: 0,
-                    subtree: None,
-                })
-                .collect();
-            self.engine.publish_with(|s| {
-                let header = ComponentHeader {
-                    version: s.sequence,
-                    ..ComponentHeader::default()
-                };
-                s.table = Arc::new(ProcessTableView {
-                    header,
-                    query_generation: generation,
-                    rows: rows.into(),
-                    ..ProcessTableView::default()
-                });
-            });
-            self.draw();
-        }
-
-        fn processes_selected(&mut self) -> Vec<ProcRowId> {
-            self.vcx.update(|_, cx| {
-                let page = main_window_view(cx)
-                    .expect("main window")
-                    .read(cx)
-                    .page_entity::<ProcessesPage>(Tab::Processes)
-                    .expect("Processes page");
-                page.read(cx).table().read(cx).selection.ids().collect()
-            })
-        }
-
-        fn last_demand_connections(&self) -> Option<bool> {
-            self.engine.demands().last().map(|d| d.connections)
-        }
-    }
-
-    #[gpui_kit::test]
-    fn connections_tab_mounted_and_kept(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        assert!(rig.page().is_none(), "no page before the first visit");
-        rig.vcx.simulate_keystrokes("ctrl-5");
-        rig.draw();
-        assert_eq!(rig.active_tab(), Tab::Connections);
-        let first = rig.page().expect("Ctrl+5 builds the Connections page");
-        let expected = rig.page_status();
-        assert!(!expected.is_empty(), "the page has status text");
-        assert_eq!(rig.chip(), expected, "the chip shows the page text");
-        rig.select(Tab::Processes);
-        rig.select(Tab::Connections);
-        let again = rig.page().expect("the page is kept");
-        assert_eq!(first.entity_id(), again.entity_id());
-    }
-
-    #[gpui_kit::test]
-    fn connections_page_layout_golden(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        rig.visit_with_fixture();
-        let header = rig
-            .vcx
-            .debug_bounds("TlTreeTableHeader")
-            .expect("header drawn");
-        let mut last_x = px(-1.);
-        for key in ["proto", "local", "foreign", "state", "pid", "process"] {
-            let b = rig
-                .vcx
-                .debug_bounds(format!("TlTreeTableHeader-label-{key}").leak())
-                .unwrap_or_else(|| panic!("{key} label drawn"));
-            assert!(b.origin.x > last_x, "{key} is right of the one before");
-            assert!(
-                b.origin.y >= header.origin.y && b.bottom() <= header.bottom(),
-                "{key} sits in the header"
-            );
-            last_x = b.origin.x;
-        }
-        let table = rig.table();
-        assert_eq!(
-            rig.vcx.read_entity(&table, |t, _| t.delegate.row_count()),
-            5
-        );
-        let body = rig
-            .vcx
-            .debug_bounds("TlTreeTable-body")
-            .expect("body drawn");
-        assert!(
-            body.origin.y >= header.bottom(),
-            "rows are below the header"
-        );
-        assert_eq!(rig.chip(), "5 Total | 4 TCP | 1 UDP | 1 EST | 2 LISTEN");
     }
 
     #[gpui_kit::test]
@@ -3281,19 +2481,6 @@ mod main_window {
             rig.publish();
             assert_eq!(rig.selected(), [FIREFOX_COOKIE], "the selection stays");
         }
-    }
-
-    #[gpui_kit::test]
-    fn connections_end_to_end_jump(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
-        rig.answer(&[key(4321)]);
-        rig.visit_with_fixture();
-        let menu = rig.right_click(FIREFOX_COOKIE).expect("the menu opens");
-        rig.run_item(&menu, "Jump to process");
-        rig.answer(&[key(4321)]);
-        assert_eq!(rig.active_tab(), Tab::Processes);
-        assert_eq!(rig.processes_selected(), [ProcRowId::Process(key(4321))]);
     }
 
     #[gpui_kit::test]
@@ -3315,27 +2502,6 @@ mod main_window {
         assert!(opened, "the Properties window is registered for the cookie");
         assert_eq!(count, 1);
     }
-
-    #[gpui_kit::test]
-    fn connections_demand_cleared_on_tab_switch(cx: &mut TestAppContext) {
-        let mut rig = boot(cx);
-        rig.visit_with_fixture();
-        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
-        rig.vcx.run_until_parked();
-        assert_eq!(
-            rig.last_demand_connections(),
-            Some(true),
-            "the Connections tab asks for connection data"
-        );
-        rig.select(Tab::Information);
-        rig.vcx.executor().advance_clock(DEMAND_COALESCE * 2);
-        rig.vcx.run_until_parked();
-        assert_eq!(
-            rig.last_demand_connections(),
-            Some(false),
-            "leaving the tab clears the demand"
-        );
-    }
 }
 
 /// The Remote host column (tasklens-9o0.30, UI-SYS-069).
@@ -3347,11 +2513,11 @@ mod remote_host {
     use gpui_kit::base::Root;
     use gpui_kit::{AppContext as _, Entity};
     use tl_model::client::EngineClient;
-    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::table::columns::Availability;
-    use tl_ui::table::columns_window::PickerColumn;
-    use tl_ui::table::tree_table::{TlTreeTable, demand_window};
+    use tl_ui_base::demand::{DEMAND_COALESCE, DemandAggregator, GlobalDemand};
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_table::table::columns::Availability;
+    use tl_ui_table::table::columns_window::PickerColumn;
+    use tl_ui_table::table::tree_table::{TlTreeTable, demand_window};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     fn foreign_record(cookie: u64, host: RemoteHost) -> ConnRecord {
@@ -3514,7 +2680,7 @@ mod remote_host {
             visible: false,
         };
         let key = column.note_key().expect("a note");
-        assert_eq!(tl_ui::i18n::tr_en(key, &[]), "Sends DNS queries");
+        assert_eq!(tl_ui_base::i18n::tr_en(key, &[]), "Sends DNS queries");
         let other = PickerColumn {
             key: "inode",
             ..column
@@ -3548,8 +2714,8 @@ mod drawn_text {
     use gpui_kit::{AppContext as _, VisualTestContext};
     use smallvec::smallvec;
     use tl_model::table::SysColumnId;
-    use tl_ui::table::cells::{record_painted_texts, take_painted_texts};
-    use tl_ui::table::tree_table::TlTreeTable;
+    use tl_ui_table::table::cells::{record_painted_texts, take_painted_texts};
+    use tl_ui_table::table::tree_table::TlTreeTable;
 
     #[gpui_kit::test]
     fn conn_table_draws_cell_values(cx: &mut TestAppContext) {
@@ -3571,7 +2737,7 @@ mod drawn_text {
         record_painted_texts();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         let painted = take_painted_texts();
-        let glyphs: Vec<String> = crate::selectors::drawn_selectors(&mut vcx)
+        let glyphs: Vec<String> = tl_ui_pagehost::selectors::drawn_selectors(&mut vcx)
             .into_keys()
             .filter(|k| k.starts_with("TlCell-glyph"))
             .collect();
