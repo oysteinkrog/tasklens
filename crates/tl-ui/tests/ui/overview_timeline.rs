@@ -1,5 +1,4 @@
-//! The Overview 24-hour timeline box (UI-PRF-057, D-030). Moved from the tl-ui `ui` binary with
-//! the overview_range rig it uses (tasklens-zljr5.41).
+//! The Overview 24-hour timeline box (UI-PRF-057, D-030).
 
 use std::sync::Arc;
 
@@ -21,16 +20,16 @@ use tl_model::snapshot::{
 use tl_model::system::{DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric, NetTotals};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui_base::host::HostContext;
-use tl_ui_base::settings_global::TlSettings;
-use tl_ui_chart::chart::ChartView;
-use tl_ui_kit::components::tooltip::DELAY_CONTROL;
-use tl_ui_perf::performance::overview::layout::BoxKind;
-use tl_ui_perf::performance::overview::range::{STATUS_SWITCH, segment_id};
-use tl_ui_perf::performance::overview::timeline::{
+use tl_ui::chart::ChartView;
+use tl_ui::components::tooltip::DELAY_CONTROL;
+use tl_ui::host::HostContext;
+use tl_ui::pages::performance::overview::layout::BoxKind;
+use tl_ui::pages::performance::overview::range::{STATUS_SWITCH, segment_id};
+use tl_ui::pages::performance::overview::timeline::{
     BACK_TO_LIVE_ID, BANDS_ID, DAY_NS, HISTORY_ASK_ID_BASE, HISTORY_ASK_TIMEOUT, PREVIEW_HOLD,
     PauseKind, Paused, TimelineBox, click_choices, click_mode, set_paused, set_test_clock,
 };
+use tl_ui::settings_global::TlSettings;
 use tl_ui_settings::settings::{OverviewLayoutSetting, OverviewRange, TimelineClick};
 
 use super::overview_range::{Rig, box_charts, click, draw, open, overview, pick, set_range};

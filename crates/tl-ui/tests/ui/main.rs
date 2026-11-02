@@ -30,6 +30,8 @@ mod menus;
 mod minigraphs;
 mod net_page;
 mod overview;
+mod overview_range;
+mod overview_timeline;
 mod performance;
 mod process_menu;
 mod processes;

@@ -419,7 +419,7 @@ mod shared_range {
     use tl_model::snapshot::{ComponentHeader, DeviceHistory, HistPoint};
     use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
     use tl_model::time::now_boot_ns;
-    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, segment_id, trigger_id};
+    use tl_ui::pages::performance::overview::range::{PAGE_SWITCH, trigger_id};
     use tl_ui::pages::performance::page::{LIVE_ONLY_ID, RANGE_ID};
     use tl_ui_settings::settings::OverviewRange;
 
@@ -429,40 +429,8 @@ mod shared_range {
     const FAN: &str = "fan:nct6797:2";
     const PAGES: [&str; 7] = ["cpu", "memory", DISKS[0], "net:enp38s0", GPU, FAN, MOUSE];
 
-    /// A left click on the centre of `id`, then two frames.
-    fn click(vcx: &mut VisualTestContext, id: &'static str) {
-        use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
-        let at = vcx.debug_bounds(id).expect(id).center();
-        vcx.simulate_event(MouseDownEvent {
-            button: MouseButton::Left,
-            position: at,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        vcx.simulate_event(MouseUpEvent {
-            button: MouseButton::Left,
-            position: at,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
-        draw(vcx);
-    }
-
-    /// Picks `range` from the drop-down `prefix`: opens the menu unless it is open, then clicks
-    /// the item. The same as `overview_range::pick`, which moved to the tl-ui-perf `perf` binary
-    /// with its rig (tasklens-zljr5.41).
-    fn pick(vcx: &mut VisualTestContext, prefix: &str, range: OverviewRange) {
-        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
-        let item = leak(segment_id(prefix, range));
-        if vcx.debug_bounds(item).is_none() {
-            click(vcx, leak(trigger_id(prefix)));
-        }
-        click(vcx, item);
-    }
-
     fn click_range(r: &mut Rig, range: OverviewRange) {
-        pick(r.vcx, PAGE_SWITCH, range);
+        crate::overview_range::pick(r.vcx, PAGE_SWITCH, range);
         r.vcx.executor().advance_clock(Duration::from_millis(200));
         draw(r.vcx);
     }
