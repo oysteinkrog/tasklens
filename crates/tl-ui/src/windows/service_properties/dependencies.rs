@@ -150,7 +150,7 @@ pub struct DependenciesTab {
     focus: FocusHandle,
     scroll: gpui_kit::UniformListScrollHandle,
     _sub: Option<Subscription>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
 }
 
@@ -189,7 +189,7 @@ impl DependenciesTab {
             focus: cx.focus_handle(),
             scroll: gpui_kit::UniformListScrollHandle::new(),
             _sub: sub,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
         };
         this.rebuild(cx);
@@ -638,14 +638,14 @@ impl DependenciesTab {
             .collect()
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
     }
 
     /// The tab's lines: a heading, "(None)", "Ordering (N)" as shown, a row as
     /// "<unit> <Relation>". "Collecting…" before the details arrive.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn lines_for_test(&self) -> Vec<String> {
         if self.details.is_none() {
             return vec![self.collecting.to_string()];
@@ -669,7 +669,7 @@ impl DependenciesTab {
     }
 
     /// The accessible name and look of each shown row, in order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rows_for_test(&self) -> Vec<(SharedString, StatusLook)> {
         self.items
             .iter()
@@ -691,7 +691,7 @@ impl DependenciesTab {
             .collect()
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
     }
@@ -725,7 +725,7 @@ impl ServicePropsTabView for DependenciesTab {
 
 impl Render for DependenciesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }

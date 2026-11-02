@@ -2560,6 +2560,8 @@ mod dump {
         cx.update(|cx| {
             TasklensUi::init(cx, client, init);
             cx.set_reduce_motion(true);
+            // The host's Yama setting must not change the refusal text.
+            set_test_ptrace_scope(cx, 0);
         });
         cx.run_until_parked();
         records.sort_by_key(|r| r.key);

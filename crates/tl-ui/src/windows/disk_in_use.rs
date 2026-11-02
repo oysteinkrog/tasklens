@@ -186,18 +186,19 @@ fn model_text(snap: &Snapshot, idx: DeviceIdx) -> SharedString {
 }
 
 /// The eject toasts, recorded for tests: they go to the main window, which tests do not have.
-#[cfg(any(test, feature = "test-hooks"))]
+/// Nothing is recorded until a test sets this global.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Default)]
 pub struct EjectToasts(pub Vec<(ToastKind, SharedString)>);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for EjectToasts {}
 
 fn toast(kind: ToastKind, text: SharedString, cx: &mut App) {
-    #[cfg(any(test, feature = "test-hooks"))]
-    cx.default_global::<EjectToasts>()
-        .0
-        .push((kind, text.clone()));
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    if cx.has_global::<EjectToasts>() {
+        cx.global_mut::<EjectToasts>().0.push((kind, text.clone()));
+    }
     push_main_toast(cx, kind, text, None, None);
 }
 

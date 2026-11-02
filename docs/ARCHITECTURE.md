@@ -3514,6 +3514,17 @@ Switches in the other files under `pages/performance/` (CS-B7; paths under `crat
 | `card.rs` `CardView::render` paint overlay, switched by `COUNT_PAINTS` and `count_paints_for_test` | wraps the card in a `div` with an absolute `canvas` that counts paints (CS-B7 fix: it was always on in a debug app, so it changed the element tree of every card) | the thread-local is `false` until a test calls `count_paints_for_test`; the sidebar test rig calls it before its first draw |
 | `sidebar.rs:728` `set_drag_for_test` | sets the drag state | only tests call it |
 
+Switches in `pages/processes/` and `windows/` (CS-B8a; paths under `crates/tl-ui/src/`). The other hooks are recorders (`renders`, `redraws`, `builds`, `build_count`, `painted_gaps`, `focus_ring_painted`, `plot_bounds`, `map_bounds`, `box_bounds`, `painted`, `check_icon_bounds`) or readers (the `*_for_test` getters and `render_count`). The painted-state recorders are overwritten or cleared on each paint, so they do not grow. One fix and the hooks that change behaviour:
+
+| Hook | What it changes | Guard |
+|---|---|---|
+| `windows/disk_in_use.rs:196` `toast`, read through `EjectToasts` | records every eject toast (CS-B8a fix: it called `default_global`, so a debug app kept every toast in a `Vec` that grew) | records only when a test has set the `EjectToasts` global; the `device_pages` test rig sets it in `setup` |
+| `pages/processes/delegate.rs:970` `fixed_now`, set by `set_fixed_now` | replaces the clock the rows read | `None` until a test calls the setter |
+| `windows/low_memory.rs:218` `FailLowMemoryOpen` | makes the open fail | read with `try_global`, so it does nothing until a test sets it |
+| `windows/mini.rs:108` `TestClientFrame` | uses a fixed client frame size | `has_global`, so it does nothing until a test sets it |
+| `windows/notices.rs:877` `TestPtraceScope`, `notices.rs:893` `TestHome`, set by `set_test_ptrace_scope` and `set_test_home` | replace the ptrace scope and home folder reads (CS-B8a fix: in a debug build `ptrace_scope_blocks` never read the real file) | `try_global`, so they fall through to the real read until a test sets them |
+| `windows/detached_graph.rs:399` `TitleBarProbe` in `start_move` | counts the move and skips `start_window_move` | `has_global`, so it does nothing until a test sets it |
+
 **Testkit and page host.** tl-ui-testkit depends only on tl-model and gpui-kit (`FakeEngine`, and the render helpers behind its `render` feature, which turns on gpui-kit `test-support`). Every tl-ui crate may use it from unit tests. tl-ui-pagehost depends on tl-ui-base, tl-ui-kit and tl-ui-testkit. It is used only from integration test binaries under `tests/`, never from `#[cfg(test)]` code in base or kit, because that would build two copies of base.
 
 **Move method.** A crate extraction is one commit:

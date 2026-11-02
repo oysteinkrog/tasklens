@@ -578,18 +578,18 @@ impl ConnectionPropertiesView {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn cookie(&self) -> u64 {
         self.cookie
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn is_closed(&self) -> bool {
         self.closed
     }
 
     /// The lines as "label: value", the way the golden file stores them.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn line_texts(&self, words: &crate::components::kv_grid::KvWords) -> Vec<String> {
         self.lines
             .iter()
@@ -600,7 +600,7 @@ impl ConnectionPropertiesView {
     }
 
     /// How each value draws, for the closed-colour check.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn value_looks(
         &self,
         words: &crate::components::kv_grid::KvWords,
@@ -613,7 +613,7 @@ impl ConnectionPropertiesView {
     }
 
     /// The focus handle of the Process link, for keyboard tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn link_focus_handle(&self) -> &FocusHandle {
         &self.link_focus
     }

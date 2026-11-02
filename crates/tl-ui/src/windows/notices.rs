@@ -873,52 +873,50 @@ impl DumpRequest {
 /// True when Yama `ptrace_scope` is above 0. No file means no Yama; a file that cannot be read
 /// or parsed counts as "not blocked", so the plain administrator text stays.
 fn ptrace_scope_blocks(cx: &App) -> bool {
-    #[cfg(any(test, feature = "test-hooks"))]
-    {
-        cx.try_global::<TestPtraceScope>().is_some_and(|s| s.0 > 0)
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    if let Some(scope) = cx.try_global::<TestPtraceScope>() {
+        return scope.0 > 0;
     }
-    #[cfg(not(any(test, feature = "test-hooks")))]
-    {
-        let _ = cx;
-        std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
-            .ok()
-            .and_then(|t| t.trim().parse::<u8>().ok())
-            .is_some_and(|scope| scope > 0)
-    }
+    #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
+    let _ = cx;
+    std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        .ok()
+        .and_then(|t| t.trim().parse::<u8>().ok())
+        .is_some_and(|scope| scope > 0)
 }
 
 /// `$HOME`, for the `~` form of the path.
 fn home_dir(cx: &App) -> String {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(home) = cx.try_global::<TestHome>() {
         return home.0.clone();
     }
-    #[cfg(not(any(test, feature = "test-hooks")))]
+    #[cfg(not(any(test, debug_assertions, feature = "test-hooks")))]
     let _ = cx;
     std::env::var("HOME").unwrap_or_default()
 }
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 struct TestHome(String);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TestHome {}
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 struct TestPtraceScope(u8);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for TestPtraceScope {}
 
 /// Makes the dump toasts act as if Yama `ptrace_scope` were `scope`. Without it they act as if
 /// there were no Yama, whatever the machine has.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn set_test_ptrace_scope(cx: &mut App, scope: u8) {
     cx.set_global(TestPtraceScope(scope));
 }
 
 /// Makes the dump toasts shorten paths under `home` instead of `$HOME`.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub fn set_test_home(cx: &mut App, home: &str) {
     cx.set_global(TestHome(home.to_owned()));
 }

@@ -4,7 +4,7 @@
 //! snapshot. When the entry leaves the snapshot the window keeps the last values, greys them
 //! and appends " (removed)" to the title. Paths and commands are shown, never logged (ADR-015).
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;
 use std::sync::Arc;
 
@@ -230,7 +230,7 @@ pub struct StartupPropertiesView {
     sig: Signature,
     copy_focus: Vec<FocusHandle>,
     focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     redraws: Cell<u32>,
     _subs: Vec<Subscription>,
 }
@@ -327,7 +327,7 @@ impl StartupPropertiesView {
             sig,
             copy_focus,
             focus,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             redraws: Cell::new(0),
             _subs: vec![sub],
         }
@@ -366,7 +366,7 @@ impl StartupPropertiesView {
     }
 
     fn redraw(&self, cx: &mut Context<Self>) {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.redraws.set(self.redraws.get() + 1);
         cx.notify();
     }
@@ -403,20 +403,20 @@ impl StartupPropertiesView {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn is_removed(&self) -> bool {
         self.removed
     }
 
     /// How many times the view asked for a redraw. The frame draws its content again on every
     /// frame, so this counts the view's own requests, which is what a snapshot can change.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn redraw_count(&self) -> u32 {
         self.redraws.get()
     }
 
     /// The lines as "label<TAB>value", the way the golden file stores them.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn line_texts(&self, words: &crate::components::kv_grid::KvWords) -> Vec<String> {
         self.lines
             .iter()
@@ -427,7 +427,7 @@ impl StartupPropertiesView {
     }
 
     /// How each value draws, for the removed-colour check.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn value_looks(
         &self,
         words: &crate::components::kv_grid::KvWords,

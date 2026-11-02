@@ -338,7 +338,7 @@ pub struct ProcessDelegate {
     /// The page that owns the table, where the row menu stores its captured targets.
     page: Option<WeakEntity<ProcessesPage>>,
     /// A fixed clock for tests.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     fixed_now: Option<TimeNs>,
 }
 
@@ -400,7 +400,7 @@ impl ProcessDelegate {
             cell_tip_words: CellTipWords::new(cx),
             cell_tips: RefCell::default(),
             page: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             fixed_now: None,
         };
         this.sync_devices(&snapshot, Some(&state.columns.processes));
@@ -966,7 +966,7 @@ impl ProcessDelegate {
     }
 
     fn clock(&self) -> TimeNs {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         if let Some(now) = self.fixed_now {
             return now;
         }
@@ -974,7 +974,7 @@ impl ProcessDelegate {
     }
 
     /// Fixes the clock the row tints read; `None` goes back to the host's `CLOCK_BOOTTIME`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_fixed_now(&mut self, now: Option<TimeNs>) {
         self.fixed_now = now;
     }

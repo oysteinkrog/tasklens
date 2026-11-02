@@ -460,7 +460,7 @@ impl ThreadsDelegate {
         Some(out)
     }
 
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn captured_targets_for_test(&self) -> SmallVec<[ActionTarget; 1]> {
         self.captured
             .as_ref()
@@ -1380,7 +1380,7 @@ fn signal_toasts(signo: i32, rows: &[ThreadRow], cx: &mut App) -> ToastTexts {
     texts
 }
 
-#[cfg(feature = "test-hooks")]
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 pub fn signal_success_for_test(signo: i32, tids: &[u32]) -> SharedString {
     signal_success(signo, tids)
 }

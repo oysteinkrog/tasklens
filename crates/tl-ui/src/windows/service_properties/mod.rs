@@ -14,7 +14,7 @@ mod recovery;
 pub use dependencies::DependenciesTab;
 pub use general::GeneralTab;
 pub use logon::LogOnTab;
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub use logs::{FollowStateForTest, LogRowForTest, LogsStatusForTest};
 pub use logs::{LogLine, LogsView};
 pub use recovery::{
@@ -285,7 +285,7 @@ pub struct ServicePropertiesWindow {
     failed_tab: Option<ServicePropsTab>,
     close_after_apply: bool,
     focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
     _subs: Vec<Subscription>,
 }
@@ -416,7 +416,7 @@ impl ServicePropertiesWindow {
             failed_tab: None,
             close_after_apply: false,
             focus: cx.focus_handle(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
             _subs: subs,
         };
@@ -689,54 +689,54 @@ impl ServicePropertiesWindow {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn find(handle: gpui_kit::WindowHandle<Root>, cx: &App) -> Option<Entity<Self>> {
         TlSecondaryWindow::<Self>::find(handle, cx).map(|frame| frame.read(cx).content().clone())
     }
 
     /// How many times `render` ran.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
     }
 
     /// The General tab view, once built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn general_tab(&self) -> Option<Entity<GeneralTab>> {
         let slot = self.tabs[ServicePropsTab::General.index()].as_ref()?;
         slot.view.clone().downcast::<GeneralTab>().ok()
     }
 
     /// The Log On tab view, once built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn logon_tab(&self) -> Option<Entity<LogOnTab>> {
         let slot = self.tabs[ServicePropsTab::LogOn.index()].as_ref()?;
         slot.view.clone().downcast::<LogOnTab>().ok()
     }
 
     /// The Recovery tab view, once built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn recovery_tab(&self) -> Option<Entity<RecoveryTab>> {
         let slot = self.tabs[ServicePropsTab::Recovery.index()].as_ref()?;
         slot.view.clone().downcast::<RecoveryTab>().ok()
     }
 
     /// The Dependencies tab view, once built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn dependencies_tab(&self) -> Option<Entity<DependenciesTab>> {
         let slot = self.tabs[ServicePropsTab::Dependencies.index()].as_ref()?;
         slot.view.clone().downcast::<DependenciesTab>().ok()
     }
 
     /// The Logs tab view, once built.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn logs_tab(&self) -> Option<Entity<LogsView>> {
         let slot = self.tabs[ServicePropsTab::Logs.index()].as_ref()?;
         slot.view.clone().downcast::<LogsView>().ok()
     }
 
     /// Puts `view` in the slot of `tab`, in place of a tab bead's view.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn install_tab_view<T: Render + ServicePropsTabView>(
         &mut self,
         tab: ServicePropsTab,
@@ -791,7 +791,7 @@ impl ServicePropertiesWindow {
 
 impl Render for ServicePropertiesWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }

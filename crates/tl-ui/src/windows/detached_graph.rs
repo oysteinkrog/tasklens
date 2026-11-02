@@ -395,7 +395,7 @@ pub fn open_detached(
 }
 
 fn start_move(window: &Window, cx: &mut App) {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if cx.has_global::<crate::window::titlebar::TitleBarProbe>() {
         cx.global_mut::<crate::window::titlebar::TitleBarProbe>()
             .moves += 1;

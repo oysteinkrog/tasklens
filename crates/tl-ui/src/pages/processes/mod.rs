@@ -393,7 +393,7 @@ impl ProcessesPage {
     }
 
     /// The History mode page, while History mode is on.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn history_page(&self) -> Option<&Entity<HistoryPage>> {
         self.history.as_ref()
     }
@@ -1309,7 +1309,7 @@ fn signal_targets(
 }
 
 /// Test hook for the row-menu adapter. Production callers use the two page action handlers.
-#[cfg(feature = "test-hooks")]
+#[cfg(any(debug_assertions, feature = "test-hooks"))]
 pub fn signal_targets_for_test(
     rows: &[CapturedTarget],
     p: &ProcessSnapshot,

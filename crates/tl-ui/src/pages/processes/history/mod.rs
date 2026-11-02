@@ -618,7 +618,7 @@ pub struct HistoryPage {
     paused: bool,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 5]>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
 }
 
@@ -745,7 +745,7 @@ impl HistoryPage {
             frame_version: 0,
             paused: false,
             _subs: subs,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
         };
         page.install(history);
@@ -846,7 +846,7 @@ impl HistoryPage {
     }
 
     /// The Live button's tooltip as it is now.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn live_tooltip(&self) -> &SharedString {
         if self.is_live() {
             &self.words.live_tip_on
@@ -874,19 +874,19 @@ impl HistoryPage {
     }
 
     /// The last installed view, for the legend's chip names.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn view(&self) -> Option<&Arc<HistoryView>> {
         self.view.as_ref()
     }
 
     /// The strip's cache, for its build counter and painted gap bands.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn scrubber(&self) -> &ScrubberCache {
         &self.scrubber
     }
 
     /// The minimap's cache, for its build counter and painted box.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn minimap(&self) -> &MinimapCache {
         &self.minimap
     }
@@ -1045,13 +1045,13 @@ impl HistoryPage {
     }
 
     /// Id of the Frame query in flight.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn query_in_flight(&self) -> Option<u64> {
         self.queries.in_flight()
     }
 
     /// The query waiting for the one in flight, or for a `Busy` retry.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn query_pending(&self) -> Option<(HistoryRange, HistoryWhat)> {
         self.queries.pending().cloned()
     }
@@ -1564,7 +1564,7 @@ impl HistoryPage {
 
 impl Render for HistoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
         let page = cx.entity();
         let strip_view = self

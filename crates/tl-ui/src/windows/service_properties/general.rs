@@ -527,7 +527,7 @@ pub struct GeneralTab {
     /// The text "Copy value" copies.
     menu_value: Option<SharedString>,
     focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
     _subs: Vec<Subscription>,
 }
@@ -576,7 +576,7 @@ impl GeneralTab {
             applied: None,
             menu_value: None,
             focus: cx.focus_handle(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
             _subs: subs,
         };
@@ -929,13 +929,13 @@ impl GeneralTab {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
     }
 
     /// The 13 labels and the shown value texts, in row order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rows_for_test(&self, cx: &App) -> Vec<(SharedString, SharedString)> {
         (0..LABEL_KEYS.len())
             .map(|row| (self.labels[row].clone(), self.value_text(row, cx)))
@@ -943,14 +943,14 @@ impl GeneralTab {
     }
 
     /// Whether the combo can change, and its tooltip.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn combo_for_test(&self, cx: &App) -> (bool, Option<SharedString>) {
         let state = self.combo_state(cx);
         (state.enabled, state.tooltip)
     }
 
     /// Picks a combo value as the user would.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn choose_for_test(&mut self, value: &str, cx: &mut Context<Self>) {
         self.startup
             .update(cx, |s, cx| s.set_selected_value(value, cx));
@@ -958,7 +958,7 @@ impl GeneralTab {
     }
 
     /// Start, Stop and Restart enablement.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn buttons_for_test(&self, cx: &App) -> [bool; 3] {
         self.buttons_enabled(cx)
     }
@@ -1027,7 +1027,7 @@ impl ServicePropsTabView for GeneralTab {
 
 impl Render for GeneralTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }

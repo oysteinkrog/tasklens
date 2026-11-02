@@ -546,7 +546,7 @@ pub struct GroupMembers {
     built_for: Option<(u64, usize, usize, usize, usize)>,
     apps: FxHashMap<GroupKey, u32>,
     units: FxHashMap<UnitRef, u32>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     builds: u64,
 }
 
@@ -584,14 +584,14 @@ impl GroupMembers {
                 self.units.insert(unit.clone(), i);
             }
         }
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.builds += 1;
         }
     }
 
     /// How many times `refresh` rebuilt the index.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn builds(&self) -> u64 {
         self.builds
     }

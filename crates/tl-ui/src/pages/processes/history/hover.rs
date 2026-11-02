@@ -425,13 +425,13 @@ impl HistoryPage {
     }
 
     /// The TopAt controller.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn top(&self) -> &TopController {
         &self.top
     }
 
     /// The card texts and where it was last painted.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn card(&self) -> &CardCache {
         &self.card
     }
@@ -505,10 +505,10 @@ pub struct CardCache {
     rows: SmallVec<[RowLines; 3]>,
     icons: IconSourceCache,
     /// Text builds over every frame.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub builds: u32,
     /// The card of the last frame that showed it, window logical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub painted: Option<Bounds<Pixels>>,
 }
 
@@ -555,7 +555,7 @@ impl CardCache {
         if self.key != Some(key) {
             self.key = Some(key);
             self.build(host, view, top.map(|t| &**t), stale_t, net, cx);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 self.builds += 1;
             }
@@ -795,7 +795,7 @@ pub(super) fn defer_card(
             card,
             ..
         } = p;
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             card.painted = None;
         }
@@ -931,7 +931,7 @@ impl Element for TopCard {
         );
         self.page.update(cx, |p, cx| {
             p.card.paint(bounds, m, theme, window, cx);
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 p.card.painted = Some(bounds);
             }

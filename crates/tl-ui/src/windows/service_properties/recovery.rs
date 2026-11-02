@@ -511,7 +511,7 @@ pub struct RecoveryTab {
     /// The "Run on failure" field text must be written from the form on the next render.
     sync_input: bool,
     focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
     _subs: Vec<Subscription>,
 }
@@ -582,7 +582,7 @@ impl RecoveryTab {
             on_failure,
             sync_input: false,
             focus: cx.focus_handle(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
             _subs: subs,
         }
@@ -1119,14 +1119,14 @@ impl RecoveryTab {
             .into_any_element()
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
     }
 
     /// The 7 labels and, before the details arrive, "Collecting…" for each; after, the
     /// "Restarts so far" text in its row and the form's words or numbers in the others.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rows_for_test(&self, _cx: &App) -> Vec<(SharedString, SharedString)> {
         let values: [SharedString; 7] = match &self.form {
             None => std::array::from_fn(|_| self.words.collecting.clone()),
@@ -1144,33 +1144,33 @@ impl RecoveryTab {
     }
 
     /// The form, once the details arrived.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn form_for_test(&self) -> Option<RecoveryForm> {
         self.form.clone()
     }
 
     /// Changes the form as the user would through the controls.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn edit_for_test(&mut self, f: impl FnOnce(&mut RecoveryForm), cx: &mut Context<Self>) {
         self.edit(f, cx);
         self.sync_controls(cx);
     }
 
     /// Whether the controls can change, and the tooltip they show.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn controls_for_test(&self) -> (bool, Option<SharedString>) {
         let tip = self.needs_helper().then(|| self.words.needs_helper.clone());
         (self.controls_enabled(), tip)
     }
 
     /// The "Saved as" path.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn saved_as_for_test(&self) -> SharedString {
         saved_as(&self.unit)
     }
 
     /// The values the "When giving up" and "Failure action" selects show.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn action_selects_for_test(&self, cx: &App) -> [Option<SharedString>; 2] {
         [&self.limit_action, &self.failure_action]
             .map(|state| state.read(cx).selected_value().cloned())
@@ -1178,7 +1178,7 @@ impl RecoveryTab {
 
     /// The accessible names of the focusable controls, in row order: the 3 selects, the 3
     /// number fields, then "Run on failure" with the current form text.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn control_names_for_test(&self) -> Vec<SharedString> {
         let valid = self
             .form
@@ -1287,7 +1287,7 @@ impl ServicePropsTabView for RecoveryTab {
 
 impl Render for RecoveryTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }

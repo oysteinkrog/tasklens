@@ -1421,7 +1421,7 @@ impl AppProcsDelegate {
     }
 
     /// Stands in for the row menu: captures `keys` as the menu's targets.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     pub fn capture_for_test(&mut self, keys: &[ProcessKey]) {
         self.captured = Some(CapturedProcs {
             keys: keys.iter().copied().collect(),

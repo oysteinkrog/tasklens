@@ -104,7 +104,7 @@ pub fn mini_height(
 /// them is the same constant, so a tiled window keeps this extra until the compositor says
 /// otherwise.
 fn frame_extra(window: &Window, cx: &App) -> f32 {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if cx.has_global::<crate::components::window_frame::TestClientFrame>() {
         return f32::from(client_frame_extra(Decorations::Client));
     }

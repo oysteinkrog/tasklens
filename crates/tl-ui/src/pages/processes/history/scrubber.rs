@@ -272,22 +272,22 @@ pub struct ScrubberCache {
     /// The gesture in progress.
     pub drag: Option<Drag>,
     /// Geometry builds over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub build_count: u32,
     /// Gap bands painted by the last paint, window x in logical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub painted_gaps: SmallVec<[Range<Pixels>; 4]>,
     /// The plot of the last paint, window logical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub plot_bounds: Bounds<Pixels>,
     /// True when the last paint drew the focus ring.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub focus_ring_painted: bool,
 }
 
 impl ScrubberCache {
     /// The texts of the labels the last build placed, in x order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn label_texts(&self) -> Vec<String> {
         self.labels
             .iter()
@@ -784,7 +784,7 @@ fn paint_strip(
         plot_width: pw as f32,
     };
     let has_frames = input.has_frames();
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         cache.plot_bounds = plot;
     }
@@ -804,7 +804,7 @@ fn paint_strip(
     if cache.key != Some(key) {
         cache.key = Some(key);
         build(cache, input, env, &map, ph as f32, window);
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             cache.build_count += 1;
         }
@@ -832,7 +832,7 @@ fn paint_strip(
     let axis_y = plot.bottom();
     let range = input.state.range.filter(|_| has_frames);
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     cache.painted_gaps.clear();
 
     if let Some((a, b)) = range {
@@ -862,7 +862,7 @@ fn paint_strip(
                 ));
             }
         });
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         cache.painted_gaps.extend(
             cache
                 .gaps
@@ -957,7 +957,7 @@ fn paint_strip(
 
     // Focus ring: 1 px `accent` inside the strip.
     let ring = TlFocusRing::show(input.focused, window);
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         cache.focus_ring_painted = ring;
     }

@@ -206,15 +206,15 @@ pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit
 
 /// Makes the rescue window open from the low-memory hook fail with this text, for the
 /// open-failure tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub struct FailLowMemoryOpen(pub String);
 
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 impl Global for FailLowMemoryOpen {}
 
 /// Opens the rescue window for the low-memory hook. The error text on failure.
 fn open_first_rescue(cx: &mut App, engine: Arc<dyn EngineClient>) -> Result<(), String> {
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     if let Some(fail) = cx.try_global::<FailLowMemoryOpen>() {
         return Err(fail.0.clone());
     }

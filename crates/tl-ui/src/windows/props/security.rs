@@ -860,7 +860,7 @@ pub struct CapDelegate {
     words: Rc<SecurityWords>,
     warning: Hsla,
     menu_cell: Option<(u8, CapColumn)>,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub check_icon_bounds: Rc<std::cell::RefCell<Vec<gpui_kit::Bounds<Pixels>>>>,
 }
 
@@ -882,7 +882,7 @@ impl CapDelegate {
             words,
             warning,
             menu_cell: None,
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             check_icon_bounds: Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
@@ -2190,7 +2190,7 @@ fn cap_checks(table: Entity<TlTreeTable<CapDelegate>>, m: UiMetrics) -> impl Int
                         CapColumn::Bounding,
                         CapColumn::Ambient,
                     ];
-                    #[cfg(any(test, feature = "test-hooks"))]
+                    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                     d.check_icon_bounds.borrow_mut().clear();
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         for ix in table.visible_range() {
@@ -2219,7 +2219,7 @@ fn cap_checks(table: Entity<TlTreeTable<CapDelegate>>, m: UiMetrics) -> impl Int
                                     bounds.left() + layout.offsets()[pos] + layout.width(col) / 2.
                                         - x_offset;
                                 let origin = point(cx - icon / 2., cy - icon / 2.);
-                                #[cfg(any(test, feature = "test-hooks"))]
+                                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                                 d.check_icon_bounds.borrow_mut().push(gpui_kit::Bounds::new(
                                     origin,
                                     gpui_kit::size(icon, icon),

@@ -2080,6 +2080,7 @@ mod disk_in_use {
     /// the app does, so the window's own toast stack takes the action toasts.
     fn setup(cx: &mut TestAppContext) -> Rig<'_> {
         cx.update(tl_ui::components::toast::init);
+        cx.update(|cx| cx.set_global(EjectToasts::default()));
         let mut r = open_with(cx, true);
         select(&mut r, SDA);
         publish(&mut r, None);

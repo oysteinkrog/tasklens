@@ -173,13 +173,13 @@ pub struct MinimapCache {
     /// The gesture in progress.
     pub drag: Option<MinDrag>,
     /// Path builds over every paint.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub build_count: u32,
     /// The map of the last paint, window logical px.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub map_bounds: Bounds<Pixels>,
     /// The viewport box of the last paint, window logical px. `None` when none was drawn.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub box_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -325,7 +325,7 @@ fn paint_map(
     let hairline = px(1.0 / sf);
     let pw = (f32::from(bounds.size.width) * sf).round().max(0.0) as u32;
     let ph = (f32::from(bounds.size.height) * sf).round().max(0.0) as u32;
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     {
         cache.map_bounds = bounds;
         cache.box_bounds = None;
@@ -347,7 +347,7 @@ fn paint_map(
             cache.key = Some(key);
             let color = metric_fill(&theme.graph, o.metric).alpha(AREA_ALPHA);
             cache.area = build_area(o, pw as f32, ph as f32).map(|p| (p, color));
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             {
                 cache.build_count += 1;
             }
@@ -375,7 +375,7 @@ fn paint_map(
                 let (l, r) = (to_x(v0), to_x(v1));
                 let b = Bounds::new(point(l, bounds.top()), size(r - l, bounds.size.height));
                 paint_box(cache, theme.accent, b, hairline, metrics.ui_scale, window);
-                #[cfg(any(test, feature = "test-hooks"))]
+                #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
                 {
                     cache.box_bounds = Some(b);
                 }

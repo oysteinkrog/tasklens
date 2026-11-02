@@ -996,7 +996,7 @@ impl LogsView {
     }
 
     /// The shown lines' text and colours, as the list draws them.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rows_for_test(&self, cx: &App) -> Vec<LogRowForTest> {
         let theme = current(cx);
         self.filtered
@@ -1026,20 +1026,20 @@ impl LogsView {
     }
 
     /// The format of `LogLine::time`, for a test that builds the expected copy text.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn time_for_test(realtime_us: u64) -> String {
         let mut out = String::new();
         local_time(realtime_us / 1_000_000, &mut out);
         out
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn filter_input_for_test(&self) -> Entity<InputState> {
         self.filter_input.clone()
     }
 
     /// The scroll and paging state, as the tab shows it.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn follow_state_for_test(&self, cx: &App) -> FollowStateForTest {
         let line_h = f32::from(px(LINE_H * metrics(cx).ui_scale));
         let base = self.scroll.0.borrow().base_handle.clone();
@@ -1055,14 +1055,14 @@ impl LogsView {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
     }
 }
 
 /// Scroll and paging state, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug)]
 pub struct FollowStateForTest {
     /// Index into the shown lines of the first line in view.
@@ -1078,7 +1078,7 @@ pub struct FollowStateForTest {
 }
 
 /// One shown line, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug)]
 pub struct LogRowForTest {
     pub time: String,
@@ -1157,7 +1157,7 @@ impl LogsView {
     }
 
     /// The list area's state, as the tab shows it.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn status_for_test(&self, cx: &App) -> LogsStatusForTest {
         let (heading, text, button) = match self.list_state() {
             ListState::Error(JournalError::NotFound) => {
@@ -1197,7 +1197,7 @@ impl LogsView {
 }
 
 /// The list area's state, for tests.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogsStatusForTest {
     pub banner: Option<String>,

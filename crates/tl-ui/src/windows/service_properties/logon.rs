@@ -226,7 +226,7 @@ pub struct LogOnTab {
     /// The text "Copy value" copies.
     menu_value: Option<SharedString>,
     focus: FocusHandle,
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     renders: u32,
 }
 
@@ -248,7 +248,7 @@ impl LogOnTab {
             user_name,
             menu_value: None,
             focus: cx.focus_handle(),
-            #[cfg(any(test, feature = "test-hooks"))]
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             renders: 0,
         }
     }
@@ -290,13 +290,13 @@ impl LogOnTab {
         }
     }
 
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn render_count(&self) -> u32 {
         self.renders
     }
 
     /// The 7 labels and the shown value texts, in row order.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn rows_for_test(&self, _cx: &App) -> Vec<(SharedString, SharedString)> {
         (0..LABEL_KEYS.len())
             .map(|row| (self.labels[row].clone(), self.fields.rows[row].text.clone()))
@@ -304,7 +304,7 @@ impl LogOnTab {
     }
 
     /// Replaces the current user's name, so tests do not depend on `USER`.
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn set_user_name_for_test(&mut self, name: Option<SharedString>, cx: &mut Context<Self>) {
         self.user_name = name;
         self.rebuild(cx);
@@ -340,7 +340,7 @@ impl ServicePropsTabView for LogOnTab {
 
 impl Render for LogOnTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.renders += 1;
         }
