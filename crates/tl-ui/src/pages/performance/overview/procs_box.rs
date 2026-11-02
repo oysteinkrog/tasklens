@@ -25,7 +25,6 @@ use gpui_kit::{
 };
 use rustc_hash::FxHasher;
 use smallvec::SmallVec;
-use tl_model::command::Tab;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::ProcessSnapshot;
@@ -41,10 +40,8 @@ use super::timeline::OverviewPause;
 use crate::chart::labels::LABEL_ROW;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::pages::processes::ProcessesPage;
-use crate::pages::processes::jump::JumpTexts;
 use crate::selector::TlSelector;
-use crate::shell::{ShellApi, ShellState};
+use crate::shell::{JumpTexts, ProcessJump, ShellApi, ShellState};
 use crate::text::style::{numeric_style, t_sm, t_xs};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -286,18 +283,8 @@ fn select_process(key: ProcessKey, window: &mut Window, cx: &mut App) {
             warn!(target: "tasklens::ui", "no main window for the Top processes click");
             return;
         }
-        let mut texts = JumpTexts::default();
-        if ShellApi::page::<ProcessesPage>(cx, Tab::Processes).is_none() {
-            // Selecting the tab builds the page. The tab is then already Processes, so the
-            // jump would not show its "Switched to Processes tab" toast on its own.
-            ShellApi::select_tab(Tab::Processes, window, cx);
-            texts.success = Some(tr(cx, "processes-jump-switched-tab"));
-        }
-        let Some(page) = ShellApi::page::<ProcessesPage>(cx, Tab::Processes) else {
-            warn!(target: "tasklens::ui", "no Processes page for the Top processes click");
-            return;
-        };
-        page.update(cx, |p, cx| p.select_by_key(key, texts, window, cx));
+        let texts = JumpTexts::default();
+        ShellApi::process_jump(window, cx, ProcessJump::SelectKey { key, texts });
     });
 }
 

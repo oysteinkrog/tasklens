@@ -64,7 +64,7 @@ use crate::i18n::{Strings, tr};
 use crate::net_totals;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
+use crate::shell::{ProcessJump, ShellApi};
 use crate::template::Template;
 use crate::text::style::t_xs;
 use crate::theme::palette::DeviceAccent;
@@ -930,7 +930,7 @@ impl TimelineBox {
         let (t, window) = (ask.t, ask.window);
         cx.defer(move |cx| {
             let _ = window.update(cx, |_, window, cx| {
-                crate::pages::processes::history::open_at(t, window, cx);
+                ShellApi::process_jump(window, cx, ProcessJump::HistoryAt(t));
             });
         });
     }

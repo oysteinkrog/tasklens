@@ -119,7 +119,7 @@ pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
     ShellEvents, ShellPage, ShellState, WINDOW_TITLE, main_window_title,
 };
-use crate::shell::{PublicIpFetch, ShellApi};
+use crate::shell::{ProcessJump, PublicIpFetch, ShellApi};
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
 /// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
@@ -1159,7 +1159,40 @@ pub fn install_shell_api(cx: &mut App) {
         public_ip_fetch: |window, cx, fetch: PublicIpFetch| {
             super::public_ip::request_public_ip_fetch(window, cx, fetch)
         },
+        process_jump: |window, cx, jump| run_process_jump(window, cx, jump),
     });
+}
+
+/// Runs `jump` on the Processes tab (the Overview's Top processes box, memory legend and
+/// timeline). Selecting the tab builds the page when it is not built yet.
+fn run_process_jump(window: &mut Window, cx: &mut App, jump: ProcessJump) {
+    if let ProcessJump::HistoryAt(t) = jump {
+        crate::pages::processes::history::open_at(t, window, cx);
+        return;
+    }
+    let built = ShellApi::page::<ProcessesPage>(cx, Tab::Processes).is_some();
+    if !built {
+        // Selecting the tab builds the page.
+        ShellApi::select_tab(Tab::Processes, window, cx);
+    }
+    let Some(page) = ShellApi::page::<ProcessesPage>(cx, Tab::Processes) else {
+        warn!(target: "tasklens::ui", "no Processes page for the jump");
+        return;
+    };
+    match jump {
+        ProcessJump::SelectKey { key, mut texts } => {
+            if !built {
+                // The tab is already Processes when the page is built, so the jump would not
+                // show its "Switched to Processes tab" toast on its own.
+                texts.success = Some(tr(cx, "processes-jump-switched-tab"));
+            }
+            page.update(cx, |p, cx| p.select_by_key(key, texts, window, cx));
+        }
+        ProcessJump::MemGroup { key, name } => {
+            page.update(cx, |p, cx| p.open_mem_group(key, name, window, cx));
+        }
+        ProcessJump::HistoryAt(_) => {}
+    }
 }
 
 /// Pushes a toast to the main window's queue. Without a main window the toast is dropped.

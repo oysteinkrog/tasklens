@@ -14,11 +14,15 @@ use gpui_kit::{
 };
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use gpui_kit::{Pixels, Point};
+use std::sync::Arc;
+
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::health::HelperState;
+use tl_model::ids::ProcessKey;
 use tl_model::table::TableMode;
+use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 use tracing::debug;
 
@@ -245,6 +249,35 @@ pub type PushToastFn = fn(&mut App, ToastKind, SharedString, Option<ToastKey>, O
 /// The fetch a public IP request runs once the user allows it.
 pub type PublicIpFetch = Box<dyn FnOnce(&mut Window, &mut App)>;
 
+/// The caller's toast texts for a jump to one process (`ProcessesPage::select_by_key`). An empty
+/// or `None` text means the Processes page's default string.
+#[derive(Clone, Debug, Default)]
+pub struct JumpTexts {
+    /// Shown when the tab changed; `None` is "Switched to Processes tab".
+    pub switched_tab: Option<SharedString>,
+    /// The caller's success toast. Replaces `switched_tab` when set, for example "Switched to
+    /// owning process.".
+    pub success: Option<SharedString>,
+    /// Empty (the default) is "Process not found in current view".
+    pub not_found: SharedString,
+    /// The caller's "not visible" text; `None` is the `not_found` text. Always shown with a Show
+    /// button.
+    pub hidden: Option<SharedString>,
+}
+
+/// A jump into the Processes tab that a lower layer asks the shell for (tasklens-zljr5.24). The
+/// Overview names this, not the Processes page.
+#[derive(Clone, Debug)]
+pub enum ProcessJump {
+    /// Selects one process: `ProcessesPage::select_by_key`.
+    SelectKey { key: ProcessKey, texts: JumpTexts },
+    /// Opens the tab filtered to one memory group, for example `exe:claude`, with its display
+    /// name: `ProcessesPage::open_mem_group`.
+    MemGroup { key: Arc<str>, name: SharedString },
+    /// Opens History mode scrubbed to a time: `pages::processes::history::open_at`.
+    HistoryAt(TimeNs),
+}
+
 /// Shell services that lower layers call without naming the shell (ADR-020 "ShellApi").
 /// `window::main::init` installs it. Each field acts on the main window; without one it does
 /// nothing and returns `None` or `false`. Call the wrappers below, not the fields.
@@ -267,6 +300,9 @@ pub struct ShellApi {
     /// Runs the fetch through the public IP notice (UI-SHL-096): at once when the notice was
     /// accepted, else after Continue.
     pub public_ip_fetch: fn(&mut Window, &mut App, PublicIpFetch),
+    /// Runs a jump into the Processes tab. Selecting the tab builds the page when it is not
+    /// built yet.
+    pub process_jump: fn(&mut Window, &mut App, ProcessJump),
 }
 
 impl Global for ShellApi {}
@@ -344,6 +380,14 @@ impl ShellApi {
     ) {
         if let Some(request) = Self::field(cx, "public_ip_fetch", |api| api.public_ip_fetch) {
             request(window, cx, Box::new(fetch));
+        }
+    }
+
+    /// Runs `jump` on the main window's Processes tab. `window` is the main window. Without a
+    /// shell the jump is dropped.
+    pub fn process_jump(window: &mut Window, cx: &mut App, jump: ProcessJump) {
+        if let Some(run) = Self::field(cx, "process_jump", |api| api.process_jump) {
+            run(window, cx, jump);
         }
     }
 }

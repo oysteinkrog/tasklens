@@ -4,12 +4,6 @@
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
 
-# tl-ui-overview -> tl-ui-procs: 4
-pages/performance/overview/memory_apps.rs -> pages::processes
-pages/performance/overview/procs_box.rs -> pages::processes
-pages/performance/overview/procs_box.rs -> pages::processes::jump
-pages/performance/overview/timeline.rs -> pages::processes::history
-
 # tl-ui-perf -> tl-ui-procs: 1
 pages/performance/disk.rs -> windows::disk_in_use
 

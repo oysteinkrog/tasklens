@@ -32,23 +32,9 @@ use crate::components::toast::{ToastAction, ToastKind};
 use crate::host::HostContext;
 use crate::i18n::{tr, tr_args};
 use crate::settings_global::TlSettings;
+pub use crate::shell::JumpTexts;
 use crate::shell::ShellApi;
 use crate::shell::ShellState;
-
-/// The caller's toast texts. An empty or `None` text means this module's default string.
-#[derive(Clone, Debug, Default)]
-pub struct JumpTexts {
-    /// Shown when the tab changed; `None` is "Switched to Processes tab".
-    pub switched_tab: Option<SharedString>,
-    /// The caller's success toast. Replaces `switched_tab` when set, for example "Switched to
-    /// owning process.".
-    pub success: Option<SharedString>,
-    /// Empty (the default) is "Process not found in current view".
-    pub not_found: SharedString,
-    /// The caller's "not visible" text; `None` is the `not_found` text. Always shown with a Show
-    /// button.
-    pub hidden: Option<SharedString>,
-}
 
 /// A jump waiting for the view of `generation`.
 pub(super) struct PendingJump {
