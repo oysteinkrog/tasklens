@@ -907,7 +907,7 @@ mod copy {
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::pages::services::copy::{
-        alias_column, block_service, column_alias, services_copy_texts,
+        ServicesCopy, alias_column, block_service, column_alias, services_copy_texts,
     };
     use tl_ui::pages::services::delegate::{ServicesDelegate, row_key};
     use tl_ui::pages::sys_copy::{SysCopySource as _, copy_row};
@@ -1107,7 +1107,7 @@ Binary: /usr/bin/sshd";
         fn copy(&mut self) {
             let table = self.table.clone();
             self.vcx.update(|window, cx| {
-                table.update(cx, |table, cx| copy_row(&*table, window, cx));
+                table.update(cx, |table, cx| copy_row(&ServicesCopy(&*table), window, cx));
             });
             self.vcx.run_until_parked();
         }
@@ -1256,7 +1256,7 @@ Start type: Enabled\nPID: \nUser: root\nBinary: ";
         r.select(&[cron_node(), sshd_node()]);
         let ids = r
             .table
-            .read_with(&r.vcx, |table, _| table.copy_rows().to_vec());
+            .read_with(&r.vcx, |table, _| ServicesCopy(table).copy_rows().to_vec());
         assert_eq!(ids, [row_key(&sshd_node()), row_key(&cron_node())]);
     }
 }

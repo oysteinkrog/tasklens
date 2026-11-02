@@ -148,13 +148,18 @@ fn process_row(rec: &ProcessRecord, record: u32) -> TableRow {
     }
 }
 
-impl SysCopySource for TlTreeTable<ServicesDelegate> {
+/// The Services table as a copy source. A wrapper because `SysCopySource` now lives in
+/// tl-ui-table, and the orphan rule bars the impl on `TlTreeTable<ServicesDelegate>`.
+pub struct ServicesCopy<'a>(pub &'a TlTreeTable<ServicesDelegate>);
+
+impl SysCopySource for ServicesCopy<'_> {
     /// The table row key (`row_key`), because `SysNodeId` is not `Copy`.
     type RowId = u64;
 
     fn copy_rows(&self) -> SmallVec<[u64; 8]> {
-        let delegate = &self.delegate;
+        let delegate = &self.0.delegate;
         let mut rows: SmallVec<[(usize, u64); 8]> = self
+            .0
             .selection
             .ids()
             .filter_map(|id| Some((delegate.row_index(id)?, id)))
@@ -170,7 +175,7 @@ impl SysCopySource for TlTreeTable<ServicesDelegate> {
     }
 
     fn write_block(&self, row: u64, out: &mut String) {
-        let delegate = &self.delegate;
+        let delegate = &self.0.delegate;
         let Some(ix) = delegate.row_index(row) else {
             return;
         };
@@ -191,7 +196,7 @@ impl SysCopySource for TlTreeTable<ServicesDelegate> {
     }
 
     fn visible_columns(&self) -> SmallVec<[(SharedString, ColumnId); 24]> {
-        let delegate = &self.delegate;
+        let delegate = &self.0.delegate;
         delegate
             .columns()
             .visible_columns()
@@ -209,7 +214,7 @@ impl SysCopySource for TlTreeTable<ServicesDelegate> {
     }
 
     fn write_cell(&self, row: u64, col: ColumnId, out: &mut String) {
-        let delegate = &self.delegate;
+        let delegate = &self.0.delegate;
         let Some(ix) = delegate.row_index(row) else {
             return;
         };
@@ -234,9 +239,14 @@ impl SysCopySource for TlTreeTable<ServicesDelegate> {
     }
 
     fn copy_texts(&self) -> &CopyTexts {
-        static TEXTS: std::sync::OnceLock<CopyTexts> = std::sync::OnceLock::new();
-        TEXTS.get_or_init(services_copy_texts)
+        shared_copy_texts()
     }
+}
+
+/// The Services copy texts, built once.
+pub fn shared_copy_texts() -> &'static CopyTexts {
+    static TEXTS: std::sync::OnceLock<CopyTexts> = std::sync::OnceLock::new();
+    TEXTS.get_or_init(services_copy_texts)
 }
 
 // `SysCopySource` predates system-table column ids. These aliases are private transport values;

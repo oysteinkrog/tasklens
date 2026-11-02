@@ -174,6 +174,19 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
     ),
     // ADR-020 chart layer, moved out of tl-ui (CS-E3).
     ("tl-ui-chart", &["tl-model", "gpui-kit", "smallvec", "jiff"]),
+    // ADR-020 table layer, moved out of tl-ui (CS-E4).
+    (
+        "tl-ui-table",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "fluent-bundle",
+        ],
+    ),
     (
         "tl-app",
         &[

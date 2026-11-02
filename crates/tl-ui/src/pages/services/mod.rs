@@ -48,6 +48,7 @@ use self::actions::{
     ServicesClearAllFilters, ServicesRemoveFilters, ServicesResetUnitTypes, ServicesShowHidden,
     ServicesToggleManagerFilter, ServicesToggleStateFilter, ServicesToggleUnitType,
 };
+use self::copy::{ServicesCopy, shared_copy_texts};
 use self::delegate::{ServicesDelegate, row_key};
 use self::filter_strip::{
     ServiceFilterState, ServicesOpenUnitTypes, apply_remove_filters, apply_reset_unit_types,
@@ -815,9 +816,9 @@ impl ServicesPage {
             return;
         };
         let col = a.col;
-        self.frame
-            .table
-            .update(cx, |table, cx| copy_cell(table, row, col, window, cx));
+        self.frame.table.update(cx, |table, cx| {
+            copy_cell(&ServicesCopy(table), row, col, window, cx)
+        });
     }
 
     fn on_copy_row(&mut self, _: &CopyRow, window: &mut Window, cx: &mut Context<Self>) {
@@ -868,7 +869,7 @@ impl ServicesPage {
         let rows = self.menu_rows.take();
         self.frame.table.update(cx, |table, cx| match rows {
             Some(rows) => copy_row(&MenuRows { table, rows }, window, cx),
-            None => copy_row(table, window, cx),
+            None => copy_row(&ServicesCopy(table), window, cx),
         });
     }
 
@@ -884,7 +885,7 @@ impl ServicesPage {
         let rows = self.menu_rows.take();
         self.frame.table.update(cx, |table, cx| match rows {
             Some(rows) => copy_rows_as_table(&MenuRows { table, rows }, window, cx),
-            None => copy_rows_as_table(table, window, cx),
+            None => copy_rows_as_table(&ServicesCopy(table), window, cx),
         });
     }
 
@@ -1193,19 +1194,19 @@ impl SysCopySource for MenuRows<'_> {
     }
 
     fn write_block(&self, row: u64, out: &mut String) {
-        self.table.write_block(row, out);
+        ServicesCopy(self.table).write_block(row, out);
     }
 
     fn visible_columns(&self) -> SmallVec<[(SharedString, ColumnId); 24]> {
-        SysCopySource::visible_columns(self.table)
+        ServicesCopy(self.table).visible_columns()
     }
 
     fn write_cell(&self, row: u64, col: ColumnId, out: &mut String) {
-        self.table.write_cell(row, col, out);
+        ServicesCopy(self.table).write_cell(row, col, out);
     }
 
     fn copy_texts(&self) -> &CopyTexts {
-        self.table.copy_texts()
+        shared_copy_texts()
     }
 }
 
