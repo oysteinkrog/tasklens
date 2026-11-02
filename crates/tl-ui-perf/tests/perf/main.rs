@@ -5,6 +5,7 @@
 //! Run with `cargo test -p tl-ui-perf --features test-hooks --test perf`.
 
 mod battery_page;
+mod cpu_page;
 mod overview_cpu_widgets;
 mod overview_disk_widgets;
 mod overview_fixed_widgets;

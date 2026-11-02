@@ -10,7 +10,6 @@ mod chart_cpu_grid_hover;
 mod common;
 mod components_words;
 mod connections;
-mod cpu_page;
 mod demand;
 mod detached;
 mod device_pages;

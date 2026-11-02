@@ -15,19 +15,19 @@ use tl_model::system::{
     CoreInfo, CoreKind, CpuSet, CpuTopology, Metric, SensorKind, SensorReading,
 };
 use tl_model::validity::Validity;
-use tl_ui::chart::grid_element::CellMark;
-use tl_ui::components::icons::AppIcon;
-use tl_ui::i18n::init_strings;
-use tl_ui::pages::performance::cpu_details::{
+use tl_ui_base::i18n::init_strings;
+use tl_ui_chart::chart::grid_element::CellMark;
+use tl_ui_kit::components::icons::AppIcon;
+use tl_ui_perf::performance::cpu_details::{
     CpuLiveInputs, CpuSensor, ROW_HYPERVISOR, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE,
     ROW_PLATFORM_PROFILE, ROW_POWER, ROW_RUNNING_IN_VM, ROW_SECURITY, ROW_SPEED, ROW_TEMPERATURE,
     ROW_UP_TIME, ROW_VIRTUALIZATION, cpu_details_model, cpu_temp_sensors, update_live,
     update_static,
 };
-use tl_ui::pages::performance::cpu_grid::{
+use tl_ui_perf::performance::cpu_grid::{
     GridWords, cell_specs, cell_specs_ranked, heading_tooltip,
 };
-use tl_ui::pages::performance::details::{KeyValueModel, KvRow};
+use tl_ui_perf::performance::details::{KeyValueModel, KvRow};
 
 const S: u64 = 1_000_000_000;
 
@@ -714,11 +714,11 @@ mod grid {
         Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
     };
     use tl_model::client::EngineClient;
-    use tl_ui::chart::LegendStyle;
-    use tl_ui::chart::grid_element::grid_layout;
-    use tl_ui::components::tooltip::DELAY_CONTROL;
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::performance::cpu_grid::{CpuGrid, GRID_ID, TRIGGER_ID};
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_chart::chart::LegendStyle;
+    use tl_ui_chart::chart::grid_element::grid_layout;
+    use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+    use tl_ui_perf::performance::cpu_grid::{CpuGrid, GRID_ID, TRIGGER_ID};
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
@@ -728,17 +728,17 @@ mod grid {
     fn grid(cx: &mut TestAppContext, n: u16, kernel: bool) -> CpuGrid {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
             let client: Arc<dyn EngineClient> = FakeEngine::new();
             let hub: Entity<SnapshotHub> = cx.new(|cx| SnapshotHub::new(client, cx));
-            let theme = tl_ui::theme::current(cx).clone();
+            let theme = tl_ui_base::theme::current(cx).clone();
             CpuGrid::new(
                 &hub,
                 Arc::new(topology(n)),
@@ -967,25 +967,25 @@ mod page {
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::{CpuDemand, Demand};
-    use tl_ui::app::{BootSettings, EngineGlobal};
-    use tl_ui::chart::YScale;
-    use tl_ui::chart::grid_element::grid_layout;
-    use tl_ui::chart::scale::{ScaleState, compute};
-    use tl_ui::components::kv_grid;
-    use tl_ui::demand::DemandAggregator;
-    use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::performance::actions::{
+    use tl_ui_base::app_env::{BootSettings, EngineGlobal};
+    use tl_ui_base::demand::DemandAggregator;
+    use tl_ui_base::hub::SnapshotHub;
+    use tl_ui_base::settings_global::TlSettings;
+    use tl_ui_chart::chart::YScale;
+    use tl_ui_chart::chart::grid_element::grid_layout;
+    use tl_ui_chart::chart::scale::{ScaleState, compute};
+    use tl_ui_kit::components::kv_grid;
+    use tl_ui_perf::performance::actions::{
         PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel,
     };
-    use tl_ui::pages::performance::cpu::{
+    use tl_ui_perf::performance::cpu::{
         CPU_EXTRA_MODES_ENABLED, CpuPage, FADE_NEW_ID, FADE_OLD_ID, OVERALL_ID, OVERLAID_ID,
         PageSettingsView, PowerState, SECONDARY_ID, STACKED_ID, SecondaryAvail, mode_items,
         overlaid_spec, secondary_items,
     };
-    use tl_ui::pages::performance::cpu_grid::GRID_ID;
-    use tl_ui::pages::performance::page::DevicePage as _;
-    use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
-    use tl_ui::settings_global::TlSettings;
+    use tl_ui_perf::performance::cpu_grid::GRID_ID;
+    use tl_ui_perf::performance::page::DevicePage as _;
+    use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
     use tl_ui_settings::settings::CpuSecondaryGraph;
     use tl_ui_settings::settings::{
         AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState,
@@ -1040,13 +1040,13 @@ mod page {
         let client: Arc<dyn EngineClient> = engine.clone();
         cx.update(|cx| {
             gpui_kit::init(cx);
-            tl_ui::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
                 Vec::new(),
             );
-            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
             init_strings(cx, "en-US");
             kv_grid::init(cx);
             cx.set_global(EngineGlobal(Arc::clone(&client)));
@@ -1193,7 +1193,7 @@ mod page {
                 ui_scale_pct: 125,
                 ..AppearanceSettings::default()
             };
-            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+            assert!(tl_ui_base::theme::metrics::recompute(&appearance, cx));
         });
         let (after, cell_h) = r.vcx.update(|_, cx| {
             let grid = &page.read(cx).grid().view;
@@ -1366,7 +1366,7 @@ mod page {
             assert!(!chart.labels.show_axis_max);
 
             // 4 CPUs: 1/4.
-            let theme = tl_ui::theme::current(cx).clone();
+            let theme = tl_ui_base::theme::current(cx).clone();
             let view = PageSettingsView {
                 range_ns: 60 * S,
                 smooth: false,
@@ -1436,8 +1436,8 @@ mod page {
     #[gpui_kit::test]
     fn cpu_stacked_axis_text(cx: &mut TestAppContext) {
         use tl_model::time::now_boot_ns;
-        use tl_ui::chart::YScale;
-        use tl_ui::chart::scale::{ScaleState, compute};
+        use tl_ui_chart::chart::YScale;
+        use tl_ui_chart::chart::scale::{ScaleState, compute};
         use tl_ui_settings::settings::NetworkUnit;
 
         let r = open(cx, with_mode(CpuGraphMode::AllCoresStacked));
@@ -1786,9 +1786,9 @@ mod page {
     use tl_model::series::{Sample, SeriesView};
     use tl_model::snapshot::{ComponentHeader, SeriesSet};
     use tl_model::time::now_boot_ns;
-    use tl_ui::pages::performance::cpu::{BOARD_AREA_ID, BOARD_CHART_ID};
-    use tl_ui::pages::performance::cpu_board::{BOARD_ID, CpuBoard};
-    use tl_ui::pages::performance::overview::parts::{core_spark_id, take_core_labels};
+    use tl_ui_overview::overview::parts::{core_spark_id, take_core_labels};
+    use tl_ui_perf::performance::cpu::{BOARD_AREA_ID, BOARD_CHART_ID};
+    use tl_ui_perf::performance::cpu_board::{BOARD_ID, CpuBoard};
     use tl_ui_settings::settings::{CoreSmoothing, CoreSort};
 
     /// The Core board mode with `sort`, and no smoothing, so the rows show the published loads.
