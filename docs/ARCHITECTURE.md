@@ -106,6 +106,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-ui-testkit | tl-model | gpui-kit (feature `test-support` only behind its `render` feature), async-channel, image (optional, `render` only, PNG goldens) |
 | tl-ui-pagehost | tl-model, tl-ui-settings, tl-ui-base, tl-ui-kit, tl-ui-testkit | gpui-kit |
 | tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142), wgpu `=29.0.4` (Rendering GPU adapter probe, R-142) |
+| tl-watch | none | libc (the low-memory watcher is std plus libc only, R-152) |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni, async-channel (R-278) |
 | tl-helper | tl-model, tl-ops, tl-collect (shared strings scanner `proc/strings.rs`, R-157) | rustix, postcard, serde |

@@ -158,8 +158,11 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "clap",
             "async-channel",
             "wgpu",
+            "serde_json",
         ],
     ),
+    // The low-memory watcher: std plus libc only (R-152, docs/ARCHITECTURE.md).
+    ("tl-watch", &["libc"]),
     (
         "tl-history",
         &[
