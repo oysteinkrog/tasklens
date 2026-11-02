@@ -3,7 +3,7 @@
 //! GPUI keeps one `debug_bounds` entry per selector, so a second element with the same selector
 //! hides the first from every test that looks it up. The page sweeps here check the Processes
 //! tab and each Performance resource page; the Overview sweep is
-//! `overview::page::overview_widget_selectors_unique_on_the_page`.
+//! `overview::page::overview_widget_selectors_unique_on_the_page` in the tl-ui-perf `perf` binary.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use tl_ui::demand::{DemandAggregator, GlobalDemand};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::{DeviceKey, PerformancePage};
-use tl_ui::selector::{TlSelector as _, tag_frame, untag_frame};
+use tl_ui::selector::TlSelector as _;
 use tl_ui::settings_global::TlSettings;
 use tl_ui::window::main::{self as shell, MainWindow, main_window_view, open_main_window};
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
@@ -34,33 +34,9 @@ use tl_ui_testkit::fake_engine::FakeEngine;
 
 use crate::common::{key, record};
 
-/// Every selector the window of `vcx` paints in one frame, with how many elements painted it.
-/// The frame renders every view fresh, so cached views count too (see `tl_ui::selector`).
-pub fn drawn_selectors(vcx: &mut VisualTestContext) -> BTreeMap<String, usize> {
-    vcx.run_until_parked();
-    let tagged = vcx.update(tag_frame);
-    let mut drawn = BTreeMap::new();
-    for t in tagged {
-        let name: &'static str = Box::leak(t.tagged.into_boxed_str());
-        if vcx.debug_bounds(name).is_some() {
-            *drawn.entry(t.name).or_insert(0) += 1;
-        }
-    }
-    vcx.update(untag_frame);
-    drawn
-}
-
-/// Asserts the window of `vcx` paints no selector twice, and returns the painted ones.
-pub fn assert_none_drawn_twice(vcx: &mut VisualTestContext, what: &str) -> BTreeMap<String, usize> {
-    let drawn = drawn_selectors(vcx);
-    let twice: Vec<(&String, &usize)> = drawn.iter().filter(|(_, n)| **n > 1).collect();
-    assert!(
-        twice.is_empty(),
-        "{what}: {} selectors drawn more than once: {twice:?}",
-        twice.len()
-    );
-    drawn
-}
+// The selector counts moved to the page host (tasklens-zljr5.41), so the page crates' tests use
+// them too. The re-export keeps `crate::selectors::` working for the shell tests.
+pub use tl_ui_pagehost::selectors::{assert_none_drawn_twice, drawn_selectors};
 
 /// No file in tl-ui or the other tl-ui crates calls GPUI's `debug_selector` outside the helper
 /// module, so the drawn-selector count sees every selector.

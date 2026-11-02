@@ -7,7 +7,7 @@
 //!
 //! [`install_theme`] is enough for component tests. [`PageHost::install`] adds the settings,
 //! strings, engine, hub, demand, window registry, `AppEnv` and a recording [`ShellApi`] whose
-//! calls a test reads from [`ShellLog`].
+//! calls a test reads from [`ShellLog`]. [`selectors`] counts the debug selectors a window paints.
 //!
 //! [`ShellApi`]: tl_ui_base::shell::ShellApi
 
@@ -19,3 +19,7 @@ pub use host::{LANGUAGE, PageHost, PushedToast, ShellLog, install_theme};
 
 #[cfg(feature = "render-tests")]
 pub mod render;
+
+// The selector tags exist in debug builds only (`tl_ui_base::selector`).
+#[cfg(all(any(test, feature = "test-support"), debug_assertions))]
+pub mod selectors;
