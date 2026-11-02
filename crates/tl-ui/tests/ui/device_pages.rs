@@ -2075,9 +2075,11 @@ mod disk_in_use {
     }
 
     /// The Disk page of sda with an action tracker installed. The toast layer is registered as
-    /// the app does, so the window's own toast stack takes the action toasts.
+    /// the app does, so the window's own toast stack takes the action toasts. The Disk page asks
+    /// the shell for the eject, so the shell services are installed (without a main window).
     fn setup(cx: &mut TestAppContext) -> Rig<'_> {
         cx.update(tl_ui::components::toast::init);
+        cx.update(tl_ui::window::main::install_shell_api);
         cx.update(|cx| cx.set_global(EjectToasts::default()));
         let mut r = open_with(cx, true);
         select(&mut r, SDA);

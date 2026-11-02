@@ -20,7 +20,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::health::HelperState;
-use tl_model::ids::ProcessKey;
+use tl_model::ids::{DeviceIdx, ProcessKey};
 use tl_model::table::TableMode;
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
@@ -28,6 +28,7 @@ use tracing::debug;
 
 pub use crate::app_env::APP_ID;
 use crate::host::HostContext;
+use crate::hub::SnapshotHub;
 use crate::registry::WindowKey;
 use crate::toast_types::{ToastAction, ToastKey, ToastKind};
 
@@ -278,6 +279,21 @@ pub enum ProcessJump {
     HistoryAt(TimeNs),
 }
 
+/// An eject that a Disk page asks the shell for (PERF-052, tasklens-zljr5.24). The Disk page
+/// names this, not the "Disk is in use" window, which lives in the Processes layer.
+#[derive(Clone)]
+pub struct DiskEject {
+    /// The page's host.
+    pub host: HostContext,
+    /// The Disk page's device key, the text inside `DeviceKey`.
+    pub key: Arc<str>,
+    pub idx: DeviceIdx,
+    /// The hub the page reads.
+    pub hub: Entity<SnapshotHub>,
+    /// The disk's name as the page header shows it.
+    pub label: SharedString,
+}
+
 /// Shell services that lower layers call without naming the shell (ADR-020 "ShellApi").
 /// `window::main::init` installs it. Each field acts on the main window; without one it does
 /// nothing and returns `None` or `false`. Call the wrappers below, not the fields.
@@ -303,6 +319,9 @@ pub struct ShellApi {
     /// Runs a jump into the Processes tab. Selecting the tab builds the page when it is not
     /// built yet.
     pub process_jump: fn(&mut Window, &mut App, ProcessJump),
+    /// Sends a disk eject and follows it, opening the "Disk is in use" window when the disk is
+    /// busy (`windows::disk_in_use::start_eject`).
+    pub disk_eject: fn(&mut App, DiskEject),
 }
 
 impl Global for ShellApi {}
@@ -388,6 +407,13 @@ impl ShellApi {
     pub fn process_jump(window: &mut Window, cx: &mut App, jump: ProcessJump) {
         if let Some(run) = Self::field(cx, "process_jump", |api| api.process_jump) {
             run(window, cx, jump);
+        }
+    }
+
+    /// Sends `eject` and follows it. Without a shell the eject is dropped.
+    pub fn disk_eject(eject: DiskEject, cx: &mut App) {
+        if let Some(run) = Self::field(cx, "disk_eject", |api| api.disk_eject) {
+            run(cx, eject);
         }
     }
 }

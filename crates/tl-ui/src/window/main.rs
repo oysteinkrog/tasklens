@@ -119,7 +119,7 @@ pub use crate::shell::{
     APP_ID, FilterChanged, GlobalShellEvents, HelperInstalled, MemGroupCleared, PauseChanged,
     ShellEvents, ShellPage, ShellState, WINDOW_TITLE, main_window_title,
 };
-use crate::shell::{ProcessJump, PublicIpFetch, ShellApi};
+use crate::shell::{DiskEject, ProcessJump, PublicIpFetch, ShellApi};
 
 /// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
 /// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
@@ -1160,6 +1160,10 @@ pub fn install_shell_api(cx: &mut App) {
             super::public_ip::request_public_ip_fetch(window, cx, fetch)
         },
         process_jump: |window, cx, jump| run_process_jump(window, cx, jump),
+        disk_eject: |cx, e: DiskEject| {
+            let key = crate::pages::performance::DeviceKey(e.key);
+            crate::windows::disk_in_use::start_eject(&e.host, key, e.idx, e.hub, e.label, cx);
+        },
     });
 }
 

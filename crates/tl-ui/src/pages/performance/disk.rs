@@ -59,6 +59,7 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
+use crate::shell::{DiskEject, ShellApi};
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -69,7 +70,6 @@ use crate::table::tree_table::{
 };
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use crate::windows::disk_in_use::start_eject;
 
 /// Debug selectors of the chart boxes.
 pub const ACTIVE_ID: &str = "perf-disk-active";
@@ -1630,14 +1630,20 @@ impl DiskPage {
         cx.notify();
     }
 
-    /// Sends the eject of this disk and follows it (PERF-052).
+    /// Asks the shell to send the eject of this disk and follow it (PERF-052).
     fn on_eject(&mut self, a: &PerfEject, _: &mut Window, cx: &mut Context<Self>) {
         if a.key != self.key {
             cx.propagate();
             return;
         }
-        let (key, hub, label) = (self.key.clone(), self.hub.clone(), self.header.0.clone());
-        start_eject(&self.host, key, self.row.idx, hub, label, cx);
+        let eject = DiskEject {
+            host: self.host.clone(),
+            key: self.key.0.clone(),
+            idx: self.row.idx,
+            hub: self.hub.clone(),
+            label: self.header.0.clone(),
+        };
+        ShellApi::disk_eject(eject, cx);
     }
 
     /// `chart` in a full-width box of `height`.

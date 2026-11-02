@@ -3,6 +3,3 @@
 # Written by `cargo xtask check-layers --write-allowlist` (tasklens-zljr5.2).
 # The list may only shrink: a cycle bead that removes an edge removes its line, and a
 # line that matches no edge fails `cargo xtask check-layers`. CS-C11 empties it.
-
-# tl-ui-perf -> tl-ui-procs: 1
-pages/performance/disk.rs -> windows::disk_in_use
