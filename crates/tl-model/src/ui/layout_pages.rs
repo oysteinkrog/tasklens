@@ -14,16 +14,16 @@
 //! id, never a device, and it runs only for a page with no entry.
 
 use crate::ids::MetricId;
-use crate::layout::{
+use crate::ui::layout::{
     ContainerLayout, DeviceSelector, FixedWidget, FormSet, LayoutEntry, METRIC_POWER, METRIC_TEMP,
     MetricKey, PresetSetting, SourceSelector, WidgetContent,
 };
-use crate::layout_boxes::{
+use crate::ui::layout_boxes::{
     DEVICE_CPU, DEVICE_MEMORY, DeviceKind, METRIC_CORE_CLOCKS, METRIC_CPU_TOTAL,
     METRIC_DISK_ACTIVE, METRIC_DISK_IO, METRIC_MEM_SWAP, METRIC_NET_TRAFFIC, METRIC_POWER_DRAW,
     MetricSeries,
 };
-use crate::settings::{
+use crate::ui::settings::{
     CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph, MemoryView, PerformanceSettings,
 };
 
@@ -126,7 +126,7 @@ pub const PAGE_METRICS: [(DeviceKind, &str); 25] = [
 ];
 
 /// The series of a phase 3 key on a device of `kind`; `None` for a key phase 3 does not add
-/// there. [`crate::layout_boxes::metric_series`] asks this after the phase 1 and phase 2 keys.
+/// there. [`crate::ui::layout_boxes::metric_series`] asks this after the phase 1 and phase 2 keys.
 pub fn page_metric_series(kind: DeviceKind, key: &str) -> Option<MetricSeries> {
     use MetricSeries::{NoSeries, One, Pair, Paired, PerLogical, Triple};
     let series = match (kind, key) {
@@ -489,9 +489,9 @@ pub fn reset_page_to_default(perf: &mut PerformanceSettings, container: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{GroupKind, LayoutsSetting, container_layout, reset_to_default};
-    use crate::layout_boxes::metric_series;
-    use crate::settings::{LAYOUTS_CONVERTED_KEY, Settings};
+    use crate::ui::layout::{GroupKind, LayoutsSetting, container_layout, reset_to_default};
+    use crate::ui::layout_boxes::metric_series;
+    use crate::ui::settings::{LAYOUTS_CONVERTED_KEY, Settings};
 
     const GPU: &str = "page.gpu:GPU-0a1b2c3d";
     const GPU2: &str = "page.gpu:pci:0000:03:00.0";
@@ -621,7 +621,7 @@ mod tests {
             let container = page_container(key);
             let l = default_page_layout(&container).expect("a default");
             assert_eq!(l.container, container);
-            assert_eq!(l.version, crate::layout::LAYOUT_VERSION, "{key}");
+            assert_eq!(l.version, crate::ui::layout::LAYOUT_VERSION, "{key}");
             let p = l.preset.as_ref().expect("a flow layout");
             assert_eq!(p.id, page_presets(kind)[0], "{key}");
             // Every list holds Details once; every widget names the page's own device.
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn page_grid_and_presets() {
-        use crate::layout::grid_cols;
+        use crate::ui::layout::grid_cols;
         assert_eq!(grid_cols("page.cpu"), PAGE_GRID_COLS);
         assert_eq!(grid_cols(GPU), 12);
         assert_eq!(grid_cols("page.nope"), 12);
@@ -968,7 +968,7 @@ mod tests {
         }
         assert_eq!(
             container_layout(&perf, "overview.gpu"),
-            crate::layout::box_layout(&perf, "gpu")
+            crate::ui::layout::box_layout(&perf, "gpu")
         );
         assert!(container_layout(&perf, "page.cpu:1").is_none());
         let mut perf = perf;

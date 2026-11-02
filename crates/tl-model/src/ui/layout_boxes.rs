@@ -5,18 +5,20 @@
 //! `power` can mean a CPU or a GPU metric. [`metric_series`] maps each key to its series. Each
 //! box's old modes are presets: [`preset_widgets`] gives a preset's widget list, and the
 //! `convert_*_box` functions turn a box's old grid keys into a flow layout, as
-//! [`crate::layout::convert_gpu_box`] does for the GPU box. Conversion is deterministic: it
+//! [`crate::ui::layout::convert_gpu_box`] does for the GPU box. Conversion is deterministic: it
 //! reads no device, and a group stands for whatever members are present.
 
 use crate::ids::MetricId;
-use crate::layout::{
+use crate::ui::layout::{
     CPU_BOX_CONTAINER, ContainerLayout, DISK_BOX_CONTAINER, DeviceSelector, FixedWidget, FormSet,
     GroupItems, GroupKind, GroupOptions, GroupSelector, MEMORY_BOX_CONTAINER, METRIC_POWER,
     METRIC_TEMP, MetricKey, NET_BOX_CONTAINER, PROCESSES_BOX_CONTAINER, PresetSetting,
     SourceSelector, TIMELINE_BOX_CONTAINER, WidgetContent, convert_gpu_box, converted_preset,
     presets_of,
 };
-use crate::settings::{OVERVIEW_POWER_PLACEMENTS, OVERVIEW_POWER_SPLIT_RANGE, OverviewGridSetting};
+use crate::ui::settings::{
+    OVERVIEW_POWER_PLACEMENTS, OVERVIEW_POWER_SPLIT_RANGE, OverviewGridSetting,
+};
 
 /// The persistent key of the CPU package (PERF-005).
 pub const DEVICE_CPU: &str = "cpu";
@@ -199,10 +201,10 @@ impl MetricSeries {
 
 /// The series of `metric` on a device of `kind`; `None` for a key this build does not know on
 /// that kind. GPU keys of phase 1 are [`MetricKey::metric`]; the keys phase 3 adds are
-/// [`crate::layout_pages::page_metric_series`].
+/// [`crate::ui::layout_pages::page_metric_series`].
 pub fn metric_series(kind: DeviceKind, metric: &MetricKey) -> Option<MetricSeries> {
     box_metric_series(kind, metric)
-        .or_else(|| crate::layout_pages::page_metric_series(kind, metric.as_str()))
+        .or_else(|| crate::ui::layout_pages::page_metric_series(kind, metric.as_str()))
 }
 
 /// The series of a phase 1 or phase 2 key.
@@ -364,7 +366,7 @@ pub fn cpu_power_draw_widget() -> (WidgetContent, FormSet) {
 /// unknown kind or the GPU box gives an empty list (the GPU box lists are
 /// [`convert_gpu_box`]'s, which need the slots).
 pub fn preset_widgets(kind: &str, preset: &PresetSetting) -> Vec<(WidgetContent, FormSet)> {
-    let container = crate::layout::overview_container(kind);
+    let container = crate::ui::layout::overview_container(kind);
     let presets = presets_of(&container);
     let id = if presets.contains(&preset.id.as_str()) {
         preset.id.as_str()
@@ -523,8 +525,8 @@ pub fn fixed_box_default(kind: &str) -> Option<ContainerLayout> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{GPU_BOX_CONTAINER, LAYOUT_CONTAINERS, overview_container};
-    use crate::settings::OVERVIEW_BOX_MODES;
+    use crate::ui::layout::{GPU_BOX_CONTAINER, LAYOUT_CONTAINERS, overview_container};
+    use crate::ui::settings::OVERVIEW_BOX_MODES;
 
     #[test]
     fn device_kinds() {
@@ -626,8 +628,8 @@ mod tests {
     #[test]
     fn every_container_has_a_default() {
         for container in LAYOUT_CONTAINERS {
-            let kind = crate::layout::overview_kind(container).expect("an Overview box");
-            let l = crate::layout::default_box_layout(kind).expect("a default");
+            let kind = crate::ui::layout::overview_kind(container).expect("an Overview box");
+            let l = crate::ui::layout::default_box_layout(kind).expect("a default");
             assert_eq!(l.container, *container);
             let p = l.preset.as_ref().expect("a flow layout");
             assert_eq!(p.id, presets_of(container)[0], "{container}");
