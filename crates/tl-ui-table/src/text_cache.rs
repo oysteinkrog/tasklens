@@ -13,8 +13,6 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::ids::ColumnId;
 use tl_model::validity::Validity;
 
-use crate::table::columns::TableColumn;
-
 /// Most cell entries kept after `begin_version` evicts.
 pub const MAX_ENTRIES: usize = 8192;
 
@@ -34,7 +32,7 @@ struct CacheEntry {
 
 /// Cache of formatted cell texts for one table. `R` is the table's row identity (`NodeId` for
 /// processes), `C` its column id (`ColumnId` for processes, `SysColumnId` for the system tables).
-pub struct CellTextCache<R: Eq + Hash, C: TableColumn = ColumnId> {
+pub struct CellTextCache<R: Eq + Hash, C: Copy + Eq + Hash = ColumnId> {
     cells: FxHashMap<(R, C), CacheEntry>,
     /// Key: row, column, width bucket `floor(width_px / 8)`. Value: FxHash of the source text and
     /// the truncated text.
@@ -47,13 +45,13 @@ pub struct CellTextCache<R: Eq + Hash, C: TableColumn = ColumnId> {
     scratch: String,
 }
 
-impl<R: Eq + Hash, C: TableColumn> Default for CellTextCache<R, C> {
+impl<R: Eq + Hash, C: Copy + Eq + Hash> Default for CellTextCache<R, C> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<R: Eq + Hash, C: TableColumn> CellTextCache<R, C> {
+impl<R: Eq + Hash, C: Copy + Eq + Hash> CellTextCache<R, C> {
     pub fn new() -> Self {
         Self {
             cells: FxHashMap::default(),

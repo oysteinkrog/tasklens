@@ -10,21 +10,16 @@ use std::hash::{BuildHasher, Hash};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{
-    Scrollbar, ScrollbarAxis, ScrollbarHandle, ScrollbarMode, ScrollbarThumbStyle, v_flex,
-};
+use gpui_kit::base::{ScrollbarHandle, v_flex};
 
 use gpui_kit::{
-    AnyElement, AnyView, App, AsyncApp, BorrowAppContext as _, Bounds, ClipboardItem, ContentMask,
-    Context, DismissEvent, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled, Subscription,
-    TextRun, UniformListScrollHandle, WeakEntity, Window, canvas, div, fill, font, point, px, size,
-    uniform_list,
+    AnyElement, AnyEntity, AnyView, App, BorrowAppContext as _, Bounds, Context, EventEmitter,
+    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point,
+    Render, ScrollStrategy, SharedString, Styled, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, point, px, size,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
@@ -33,23 +28,16 @@ use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
 use crate::actions::ClearFilter;
-use crate::components::empty::TlEmptyState;
-use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
-use crate::components::validity::copy_text;
+use crate::components::tooltip::{DELAY_CONTROL, TlTooltip};
 use crate::i18n::tr;
 use crate::selector::TlSelector;
 use crate::table::actions::{
-    CollapseOrParent, CopyRowsAsTable, EnableAllColumns, ExpandOrChild, HideColumn, MoveFocus,
-    MoveFocusEdge, MoveFocusPage, OpenColumnPicker, OpenContextMenu, OpenProperties, ResetColumns,
-    ResizeColumnsToFit, SelectAll, SortByColumn, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
+    EnableAllColumns, HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SortByColumn,
+    TABLE_CONTEXT,
 };
-use crate::table::cells::{
-    CellAt, CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background,
-    cell_text_color, guide_quads, icon_px, name_indent, paint_group_header_cell, paint_name_cell,
-    value_cell,
-};
+use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
     fit_width, min_width,
@@ -58,14 +46,16 @@ use crate::table::columns_window::{self, ColumnHost, ColumnPicker, PickerColumn}
 use crate::table::header::{
     self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ReorderDrag,
     ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_menu, header_tooltip,
-    insert_line, insertion_slot, sort_arrow_x,
+    insertion_slot, sort_arrow_x,
 };
 use crate::table::selection::{Selection, SelectionView};
-use crate::text::ellipsis::middle_ellipsis;
-use crate::text::fonts::UI_FAMILY;
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+use crate::table::tree_core::QuadLogs;
+use crate::table::tree_core::{
+    Click, ColKey, CoreCall, DynRows, DynTreeDelegate, FrameLayout, Link, RowKey, RowMenu,
+    TreeTableCore, open_boxed_menu, row_fill,
+};
 use crate::text::metrics::TextMetricsCache;
-use crate::text::style::t_base;
-use crate::text_cache::CellTextCache;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
@@ -323,72 +313,21 @@ impl<D: TreeTableDelegate> EventEmitter<TreeTableEvent> for TlTreeTable<D> {}
 /// Rendering cost per frame is bounded by the visible rows: the body is a `uniform_list` that
 /// builds only the requested range, each row is one `div` with absolutely positioned cells at
 /// the layout's precomputed offsets, and every cell text comes from `CellTextCache`.
+///
+/// This type holds the state its owners read by type (the delegate, the selection, the header
+/// state and the column layouts) and the header and column logic. The body rows, cells,
+/// keyboard and pointer handling live in the non-generic `TreeTableCore`, which reaches the
+/// delegate through `DynTreeDelegate`, so they are compiled once for every delegate type.
 pub struct TlTreeTable<D: TreeTableDelegate> {
     pub delegate: D,
     pub selection: Selection<D::RowId>,
-    scroll: UniformListScrollHandle,
-    /// Shared by header and body: how far the content is scrolled left. Read from `scroll` on
-    /// every render.
-    x_offset: Pixels,
-    /// Created in `new`, never in render.
-    focus: FocusHandle,
-    text_cache: CellTextCache<D::RowId, D::Column>,
-    /// Image sources of the Name cells' file icons, reused across frames.
-    icons: IconSourceCache,
-    /// Header hover, press, totals and this frame's header cells.
-    header_state: HeaderState<D::Column>,
-    /// Routes the header's pointer events to [`Self::header_event`]. Created once in `new`.
-    header_listener: HeaderListener,
-    /// `tables.column_resize`, passed in by the owner.
-    resize_mode: ColumnResizeMode,
-    /// `tables.column_separators`, passed in by the owner.
-    column_separators: bool,
-    /// The owner's default layout for "Reset to default". `None`: `ResetColumns` goes on to the
-    /// owner.
-    default_layout: Option<ColumnLayout<D::Column>>,
-    /// Catches Esc before any key binding while a column reorder drag is in progress.
-    reorder_esc: Option<Subscription>,
-    hover_row: Option<usize>,
     /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
     /// True from a left press on a row until the button is up. The owner keeps the rows still
     /// meanwhile, so the row under the pointer is the row pressed (UI-PRC-008).
     pub pressed: bool,
-    /// Bumped by every press, so a release timer of an earlier press does nothing.
-    press_gen: u64,
-    /// The body rows the last frame built, by flattened index.
-    visible_range: Range<usize>,
-    /// The top-most visible selectable row of the last frame: its identity, its rows from the
-    /// top visible row and the top row's hidden part. A new version keeps it at the same y.
-    anchor: Option<(D::RowId, usize, Pixels)>,
-    /// Executor time of the last wheel event over the body.
-    last_wheel: Option<Instant>,
-    /// True while the scrollbar thumb is dragged. Shared with the scrollbar's handle.
-    thumb_dragging: Rc<Cell<bool>>,
-    /// Order-free hash of the last id set sent to `on_visible_range`.
-    demand_hash: u64,
-    /// True while a demand check waits for the next frame.
-    demand_scheduled: bool,
-    /// Reused buffer for the demand ids.
-    demand_ids: Vec<D::RowId>,
-    last_version: u64,
-    last_style_version: u64,
-    /// Calls of the body's item builder in the current frame. The `uniform_list` calls it twice
-    /// to measure one row before it asks for the visible range.
-    list_calls: u8,
-    /// Whether this frame's probe row carried the scrollbar gutter, or `None` when no probe ran.
-    /// The probe reads the body width of the last frame, so after the frame
-    /// [`Self::check_gutter`] compares it with the new width.
-    probe_gutter: Option<bool>,
-    /// Truncation flags of the hovered row's cells, by visible column position. Kept across
-    /// frames so a cut cell gets its tooltip on the next render.
-    hover_clips: Vec<Rc<Cell<bool>>>,
-    /// Shared truncation flag of every cell outside the hovered row. Never read.
-    clip_sink: Rc<Cell<bool>>,
-    /// False until the hovered row has rendered once and set its truncation flags.
-    hover_tips_ready: bool,
-    /// Scratch for `delegate.cell`, reused for every cell.
-    out: CellOut,
+    core: TreeTableCore,
+    shell: Shell<D>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -404,59 +343,175 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     pub line_canvases: Cell<u32>,
 }
 
-/// What every row of one frame shares.
-struct FrameCtx<C> {
-    m: UiMetrics,
-    theme: Arc<TlTheme>,
-    hairline: Pixels,
-    total_width: Pixels,
-    guide_lines: bool,
-    separators: bool,
-    visible: Arc<[C]>,
-    offsets: Arc<[Pixels]>,
-    name_col: Option<C>,
+/// The typed table state the core does not hold.
+struct Shell<D: TreeTableDelegate> {
+    /// Header hover, press, totals and this frame's header cells.
+    header_state: HeaderState<D::Column>,
+    /// Routes the header's pointer events to [`TlTreeTable::header_event`]. Created once in
+    /// `new`.
+    header_listener: HeaderListener,
+    /// `tables.column_resize`, passed in by the owner.
+    resize_mode: ColumnResizeMode,
+    /// The owner's default layout for "Reset to default". `None`: `ResetColumns` goes on to the
+    /// owner.
+    default_layout: Option<ColumnLayout<D::Column>>,
+    /// Catches Esc before any key binding while a column reorder drag is in progress.
+    reorder_esc: Option<Subscription>,
+    /// The top-most visible selectable row of the last frame: its identity, its rows from the
+    /// top visible row and the top row's hidden part. A new version keeps it at the same y.
+    anchor: Option<(D::RowId, usize, Pixels)>,
+    /// Order-free hash of the last id set sent to `on_visible_range`.
+    demand_hash: u64,
+    /// Reused buffer for the demand ids.
+    demand_ids: Vec<D::RowId>,
+    /// The core's row keys.
+    rows: RowKeys<D::RowId>,
+    /// The core's column keys.
+    cols: ColKeys<D::Column>,
+}
+
+/// Row keys the shell keeps beyond twice the row count before it drops the keys of rows that
+/// left the view.
+const ROW_KEY_SLACK: usize = 256;
+
+/// The [`RowKey`] of every row id the core has asked about. Keys count up and are never
+/// reused. Once there are more than twice as many keys as rows plus [`ROW_KEY_SLACK`], a new
+/// table version drops the keys of rows that are not in the view. The core keeps keys only in
+/// its cell text cache and in the row listeners of the last frame, and both treat a key whose
+/// row left the view like the row itself: no text, no hit.
+struct RowKeys<R> {
+    keys: FxHashMap<R, RowKey>,
+    ids: FxHashMap<RowKey, R>,
+    next: u64,
+}
+
+impl<R: Copy + Eq + Hash> RowKeys<R> {
+    fn new() -> Self {
+        Self {
+            keys: FxHashMap::default(),
+            ids: FxHashMap::default(),
+            next: 0,
+        }
+    }
+
+    fn key(&mut self, id: R) -> RowKey {
+        let Self { keys, ids, next } = self;
+        *keys.entry(id).or_insert_with(|| {
+            let key = RowKey(*next);
+            *next += 1;
+            ids.insert(key, id);
+            key
+        })
+    }
+
+    fn id(&self, key: RowKey) -> Option<R> {
+        self.ids.get(&key).copied()
+    }
+
+    /// Drops the keys of rows `in_view` rejects, when there are too many keys for `rows` rows.
+    fn prune(&mut self, rows: usize, in_view: impl Fn(R) -> bool) {
+        if self.keys.len() <= rows.saturating_mul(2).saturating_add(ROW_KEY_SLACK) {
+            return;
+        }
+        self.keys.retain(|id, _| in_view(*id));
+        self.ids.clear();
+        self.ids
+            .extend(self.keys.iter().map(|(&id, &key)| (key, id)));
+    }
+}
+
+/// The [`ColKey`] of every column id the core has seen: an append-only registry, so a key
+/// names the same column for the table's life.
+struct ColKeys<C> {
+    cols: Vec<C>,
+    slots: FxHashMap<C, u32>,
+    /// The last visible list converted. Holding it keeps its address from being reused, so
+    /// pointer equality means the same list.
+    visible_source: Option<Arc<[C]>>,
+    /// `visible_source` as keys.
+    visible_keys: Arc<[ColKey]>,
+}
+
+impl<C: TableColumn> ColKeys<C> {
+    fn new() -> Self {
+        Self {
+            cols: Vec::new(),
+            slots: FxHashMap::default(),
+            visible_source: None,
+            visible_keys: Arc::from([]),
+        }
+    }
+
+    fn key(&mut self, col: C) -> ColKey {
+        let Self { cols, slots, .. } = self;
+        let slot = *slots.entry(col).or_insert_with(|| {
+            cols.push(col);
+            (cols.len() - 1) as u32
+        });
+        ColKey {
+            slot,
+            name: col.key(),
+        }
+    }
+
+    fn col(&self, key: ColKey) -> C {
+        self.cols[key.slot as usize]
+    }
+
+    /// `visible` as keys. Converts only when the list is not the one converted last.
+    fn visible(&mut self, visible: &Arc<[C]>) -> Arc<[ColKey]> {
+        if let Some(source) = &self.visible_source
+            && Arc::ptr_eq(source, visible)
+        {
+            return self.visible_keys.clone();
+        }
+        let keys: Arc<[ColKey]> = visible.iter().map(|&c| self.key(c)).collect();
+        self.visible_source = Some(visible.clone());
+        self.visible_keys = keys.clone();
+        keys
+    }
+}
+
+/// The layout the table draws: the live copy during a boundary drag, else the delegate's.
+fn live_layout<'a, D: TreeTableDelegate>(
+    header: &'a HeaderState<D::Column>,
+    delegate: &'a D,
+) -> &'a ColumnLayout<D::Column> {
+    match &header.resize {
+        Some(drag) => &drag.layout,
+        None => delegate.columns(),
+    }
 }
 
 impl<D: TreeTableDelegate> TlTreeTable<D> {
     pub fn new(delegate: D, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let weak = cx.weak_entity();
+        let link: Link = Rc::new(move |cx: &mut App, f: CoreCall<'_>| {
+            let _ = weak.update(cx, |t, cx| t.with_host(cx, |core, host| f(core, host)));
+        });
         Self {
             delegate,
             selection: Selection::new(),
-            scroll: UniformListScrollHandle::new(),
-            x_offset: Pixels::ZERO,
-            focus: cx.focus_handle(),
-            text_cache: CellTextCache::new(),
-            icons: IconSourceCache::new(),
-            header_state: HeaderState::default(),
-            header_listener: {
-                let this = cx.weak_entity();
-                Rc::new(move |ev, window, cx| {
-                    let _ = this.update(cx, |t, cx| t.header_event(ev, window, cx));
-                })
-            },
-            resize_mode: ColumnResizeMode::default(),
-            column_separators: false,
-            default_layout: None,
-            reorder_esc: None,
-            hover_row: None,
             paused: false,
             pressed: false,
-            press_gen: 0,
-            visible_range: 0..0,
-            anchor: None,
-            last_wheel: None,
-            thumb_dragging: Rc::new(Cell::new(false)),
-            demand_hash: 0,
-            demand_scheduled: false,
-            demand_ids: Vec::new(),
-            last_version: 0,
-            last_style_version: 0,
-            list_calls: 0,
-            probe_gutter: None,
-            hover_clips: Vec::new(),
-            clip_sink: Rc::new(Cell::new(false)),
-            hover_tips_ready: false,
-            out: CellOut::default(),
+            core: TreeTableCore::new(link, cx.focus_handle()),
+            shell: Shell {
+                header_state: HeaderState::default(),
+                header_listener: {
+                    let this = cx.weak_entity();
+                    Rc::new(move |ev, window, cx| {
+                        let _ = this.update(cx, |t, cx| t.header_event(ev, window, cx));
+                    })
+                },
+                resize_mode: ColumnResizeMode::default(),
+                default_layout: None,
+                reorder_esc: None,
+                anchor: None,
+                demand_hash: 0,
+                demand_ids: Vec::new(),
+                rows: RowKeys::new(),
+                cols: ColKeys::new(),
+            },
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -470,8 +525,49 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         }
     }
 
+    /// Runs `f` on the core with a host over the rest of the table and `cx`.
+    fn with_host<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut TreeTableCore, &mut dyn DynTreeDelegate) -> R,
+    ) -> R {
+        let Self {
+            delegate,
+            selection,
+            paused,
+            pressed,
+            core,
+            shell,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            rows_built_last_frame,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            separator_quads,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            guide_quads,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            line_canvases,
+            ..
+        } = self;
+        let mut host = Host {
+            delegate,
+            selection,
+            paused: *paused,
+            pressed,
+            shell,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            hooks: Hooks {
+                rows_built: rows_built_last_frame,
+                line_canvases,
+                separators: separator_quads,
+                guides: guide_quads,
+            },
+            cx,
+        };
+        f(core, &mut host)
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
-        &self.focus
+        &self.core.focus
     }
 
     pub fn delegate_mut(&mut self) -> &mut D {
@@ -480,27 +576,24 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// The layout the table draws: the live copy during a boundary drag, else the delegate's.
     pub fn columns(&self) -> &ColumnLayout<D::Column> {
-        match &self.header_state.resize {
-            Some(drag) => &drag.layout,
-            None => self.delegate.columns(),
-        }
+        live_layout(&self.shell.header_state, &self.delegate)
     }
 
     /// The owner passes the current `tables.column_resize` value; the table reads no settings.
     pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
-        self.resize_mode = mode;
+        self.shell.resize_mode = mode;
     }
 
     /// The owner passes the current `tables.column_separators` value: 1 px divider lines
     /// between the body's columns (UI-PRC-002, R-075).
     pub fn set_column_separators(&mut self, on: bool) {
-        self.column_separators = on;
+        self.core.column_separators = on;
     }
 
     /// The owner's default order, visible set and widths. With them the table handles
     /// `ResetColumns` itself; without them the action goes on to the owner.
     pub fn set_default_layout(&mut self, layout: ColumnLayout<D::Column>) {
-        self.default_layout = Some(layout);
+        self.shell.default_layout = Some(layout);
     }
 
     /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
@@ -508,39 +601,17 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     pub fn on_new_version(&mut self, cx: &mut Context<Self>) {
         let m = *metrics(cx);
         self.sync_versions(m.style_version);
-        self.keep_anchor(m.row_height, cx);
+        self.with_host(cx, |core, host| core.keep_anchor(m.row_height, host));
         cx.notify();
-    }
-
-    /// Scroll anchoring (UI-PRC-010): the top-most visible selectable row of the last frame
-    /// keeps its y, sub-row offset included. When it is gone the scroll position stays. Skipped
-    /// during Ctrl-pause, a thumb drag, and for [`WHEEL_QUIET`] after a wheel event.
-    fn keep_anchor(&mut self, row_h: Pixels, cx: &mut Context<Self>) {
-        if self.paused || self.thumb_dragging.get() {
-            return;
-        }
-        if let Some(t) = self.last_wheel
-            && cx.background_executor().now().saturating_duration_since(t) < WHEEL_QUIET
-        {
-            return;
-        }
-        let Some((id, rows_from_top, sub)) = self.anchor else {
-            return;
-        };
-        let Some(ix) = self.delegate.row_index(id) else {
-            return;
-        };
-        let top = (row_h * ix.saturating_sub(rows_from_top) + sub).max(Pixels::ZERO);
-        let x = ScrollbarHandle::offset(&self.scroll).x;
-        ScrollbarHandle::set_offset(&self.scroll, point(x, -top));
     }
 
     /// Scrolls to the first row and drops the scroll anchor, so the next view stays at the top.
     /// The owner calls this when a filter change replaces the rows.
     pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
-        self.anchor = None;
-        let x = ScrollbarHandle::offset(&self.scroll).x;
-        ScrollbarHandle::set_offset(&self.scroll, point(x, Pixels::ZERO));
+        self.shell.anchor = None;
+        let scroll = &self.core.scroll;
+        let x = ScrollbarHandle::offset(scroll).x;
+        ScrollbarHandle::set_offset(scroll, point(x, Pixels::ZERO));
         cx.notify();
     }
 
@@ -550,7 +621,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let Some(ix) = self.delegate.row_index(id) else {
             return false;
         };
-        self.scroll
+        self.core
+            .scroll
             .scroll_to_item_strict(ix, ScrollStrategy::Center);
         self.selection.click(id);
         cx.notify();
@@ -562,7 +634,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// when the table has no rows.
     pub fn first_visible_row(&self) -> Option<(D::RowId, usize)> {
         let last = self.delegate.row_count().checked_sub(1)?;
-        let ix = self.visible_range.start.min(last);
+        let ix = self.core.visible_range.start.min(last);
         Some((self.delegate.row_id(ix), ix))
     }
 
@@ -581,109 +653,58 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             .delegate
             .row_index(id)
             .unwrap_or_else(|| captured.min(last));
-        self.scroll
+        self.core
+            .scroll
             .scroll_to_item_strict_with_offset(ix, ScrollStrategy::Top, 0);
         cx.notify();
     }
 
     /// The body rows the last frame built.
     pub fn visible_range(&self) -> Range<usize> {
-        self.visible_range.clone()
+        self.core.visible_range.clone()
     }
 
     /// The file icon image sources built so far, and how many the cache holds now.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn icon_sources(&self) -> (u32, usize) {
-        (self.icons.built, self.icons.len())
-    }
-
-    /// After a keyboard focus move: scrolls the least amount that keeps one row of margin
-    /// between the focus row and the header or the bottom edge. gpui's `Nearest` with an offset
-    /// keeps the margin at the top only, so the bottom case targets the row below.
-    fn keep_focus_visible(&self, cx: &mut Context<Self>) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        let row_h = metrics(cx).row_height;
-        let scroll_top = -ScrollbarHandle::offset(&self.scroll).y;
-        if row_h * ix < scroll_top + row_h {
-            self.scroll
-                .scroll_to_item_with_offset(ix, ScrollStrategy::Nearest, 1);
-        } else {
-            let below = (ix + 1).min(self.delegate.row_count().saturating_sub(1));
-            self.scroll.scroll_to_item(below, ScrollStrategy::Nearest);
-        }
-    }
-
-    /// Reports the visible rows plus one viewport above and below, at most
-    /// [`DEMAND_MAX_IDS`], to the delegate when the id set changed (ADR-009 "Visible demand").
-    fn report_demand(&mut self, cx: &mut Context<Self>) {
-        self.demand_scheduled = false;
-        let count = self.delegate.row_count();
-        let range = self.visible_range.start.min(count)..self.visible_range.end.min(count);
-        let ids = demand_window(range, count);
-        self.demand_ids.clear();
-        let mut hash = ids.len() as u64;
-        for ix in ids {
-            let id = self.delegate.row_id(ix);
-            hash = hash.wrapping_add(FxBuildHasher.hash_one(id));
-            self.demand_ids.push(id);
-        }
-        if hash == self.demand_hash {
-            return;
-        }
-        self.demand_hash = hash;
-        let ids = std::mem::take(&mut self.demand_ids);
-        self.delegate.on_visible_range(&ids, cx);
-        self.demand_ids = ids;
-    }
-
-    /// Renders once more when the last frame's rows were measured with the wrong gutter: on the
-    /// first frame, or after the body width changed so the columns started or stopped
-    /// overflowing. Without it the last column could stay under the vertical scrollbar until
-    /// the next update.
-    fn check_gutter(&mut self, cx: &mut Context<Self>) {
-        if let Some(drawn) = self.probe_gutter.take()
-            && drawn != self.horizontal_overflow()
-        {
-            cx.notify();
-        }
+        (self.core.icons.built, self.core.icons.len())
     }
 
     /// A clone of the body's scroll handle. The handle is `Rc`-backed, so scrolling through the
     /// clone moves this table (R-186).
     pub fn scroll_handle(&self) -> UniformListScrollHandle {
-        self.scroll.clone()
+        self.core.scroll.clone()
     }
 
     /// Hits and misses of the cell text cache since the table was created.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn text_cache_stats(&self) -> (u64, u64) {
-        self.text_cache.stats()
+        self.core.text_cache.stats()
     }
 
     /// How far header and body are scrolled left.
     pub fn x_offset(&self) -> Pixels {
-        self.x_offset
+        self.core.x_offset
     }
 
     /// The row under the pointer, by flattened index.
     pub fn hover_row(&self) -> Option<usize> {
-        self.hover_row
+        self.core.hover_row
     }
 
     /// True when the columns are wider than the body, so the horizontal scrollbar shows. Uses
     /// the body bounds of the last frame.
     pub fn horizontal_overflow(&self) -> bool {
-        let viewport = ScrollbarHandle::viewport_bounds(&self.scroll).size.width;
-        viewport > Pixels::ZERO && self.columns().total_width() > viewport
+        self.core.horizontal_overflow(self.columns().total_width())
     }
 
     /// Column widths are stored at 100%. After a UI scale change the delegate's layout still
     /// holds the old scale, so rebuild it at `ui_scale` and hand it back. Skipped during a
     /// resize drag, which works on its own copy.
     fn follow_ui_scale(&mut self, ui_scale: f32, cx: &mut Context<Self>) {
-        if self.header_state.resize.is_some() || self.delegate.columns().ui_scale() == ui_scale {
+        if self.shell.header_state.resize.is_some()
+            || self.delegate.columns().ui_scale() == ui_scale
+        {
             return;
         }
         let mut layout = self.delegate.columns().clone();
@@ -693,989 +714,98 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     fn sync_versions(&mut self, style_version: u64) {
         let version = self.delegate.table_version();
-        if version != self.last_version || style_version != self.last_style_version {
-            self.text_cache.begin_version(version, style_version);
-            self.header_state
+        let core = &mut self.core;
+        if version != core.last_version || style_version != core.last_style_version {
+            core.text_cache.begin_version(version, style_version);
+            self.shell
+                .header_state
                 .totals
                 .begin_version(version, style_version);
-            self.icons.begin_version(version);
-            self.last_version = version;
-            self.last_style_version = style_version;
-        }
-    }
-
-    fn set_hover(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
-        if row != self.hover_row {
-            self.hover_row = row;
-            self.hover_tips_ready = false;
-            for flag in &self.hover_clips {
-                flag.set(false);
-            }
-            cx.notify();
-        } else if row.is_some() && !self.hover_tips_ready {
-            // The hovered row has now set its truncation flags; render once more so cut cells
-            // get their tooltips.
-            self.hover_tips_ready = true;
-            cx.notify();
+            core.icons.begin_version(version);
+            core.last_version = version;
+            core.last_style_version = style_version;
+            let delegate = &self.delegate;
+            self.shell
+                .rows
+                .prune(delegate.row_count(), |id| delegate.row_index(id).is_some());
         }
     }
 
     /// The fill of row `ix` (UI-PRC-002): the group band, else selected, else hover, else the
     /// zebra on the flattened index with the NEW or EXITED tint over it.
     pub fn row_background(&self, ix: usize, theme: &TlTheme) -> Hsla {
-        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-            return theme.header;
-        }
-        if self.selection.contains(&self.delegate.row_id(ix)) {
-            return theme.row_selected;
-        }
-        if self.hover_row == Some(ix) {
-            return theme.row_hover;
-        }
-        let zebra = if ix.is_multiple_of(2) {
-            theme.list_bg
-        } else {
-            theme.row_alt
-        };
-        match self.delegate.row_tint(ix, theme) {
-            Some(tint) => zebra.blend(tint),
-            None => zebra,
-        }
-    }
-
-    /// Builds the rows of `range` for the body. The two measuring calls get an empty row of the
-    /// same size.
-    fn build_rows(
-        &mut self,
-        range: Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let call = self.list_calls;
-        self.list_calls = self.list_calls.saturating_add(1);
-        let m = *metrics(cx);
-        let total_width = self.columns().total_width();
-        // When the columns overflow, the rows get the scrollbar's width on the right, so the
-        // last column can scroll out from under the vertical scrollbar.
-        let tail = if self.horizontal_overflow() {
-            px(SCROLLBAR_W * m.ui_scale)
-        } else {
-            Pixels::ZERO
-        };
-        // The list measures its content width from this first probe row, so it carries the
-        // gutter too.
-        if call < 2 && range.len() == 1 {
-            self.probe_gutter = Some(tail > Pixels::ZERO);
-            return vec![
-                div()
-                    .w(total_width + tail)
-                    .h(m.row_height)
-                    .into_any_element(),
-            ];
-        }
-        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-        self.rows_built_last_frame.set(range.len() as u32);
-        self.record_frame(range.clone(), m.row_height);
-        self.delegate.before_rows(range.clone(), window, cx);
-
-        let layout = self.columns();
-        let frame = FrameCtx {
-            m,
-            theme: current(cx).clone(),
-            hairline: UiMetrics::hairline(window),
-            total_width,
-            guide_lines: self.delegate.guide_lines(),
-            separators: self.column_separators,
-            visible: layout.visible_columns().clone(),
-            offsets: layout.offsets().clone(),
-            name_col: name_column(&self.delegate),
-        };
-        let columns = frame.visible.len();
-        if self.hover_clips.len() < columns {
-            self.hover_clips
-                .resize_with(columns, || Rc::new(Cell::new(false)));
-        }
-        let mut rows = Vec::with_capacity(range.len());
-        for ix in range {
-            let row = self.build_row(ix, &frame, window, cx);
-            rows.push(if tail > Pixels::ZERO {
-                div()
-                    .w(total_width + tail)
-                    .h(m.row_height)
-                    .child(row)
-                    .into_any_element()
-            } else {
-                row
-            });
-        }
-        rows
-    }
-
-    /// Keeps the frame's row range and anchor row. Runs inside the list's prepaint, after any
-    /// pending scroll was applied.
-    fn record_frame(&mut self, range: Range<usize>, row_h: Pixels) {
-        let scroll_top = -ScrollbarHandle::offset(&self.scroll).y;
-        let sub = (scroll_top - row_h * range.start).max(Pixels::ZERO);
-        // At the very top there is nothing to hold: a new view must show its own first rows,
-        // not follow the old top row to wherever the sort moved it.
-        self.anchor = if scroll_top <= Pixels::ZERO {
-            None
-        } else {
-            range
-                .clone()
-                .find(|&ix| self.delegate.selectable(ix))
-                .map(|ix| (self.delegate.row_id(ix), ix - range.start, sub))
-        };
-        self.visible_range = range;
-    }
-
-    fn build_row(
-        &mut self,
-        ix: usize,
-        f: &FrameCtx<D::Column>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let m = &f.m;
-        let theme = &*f.theme;
-        let kind = self.delegate.row_kind(ix);
-        let mut row = div()
-            .relative()
-            .w(f.total_width)
-            .h(m.row_height)
-            .bg(self.row_background(ix, theme));
-
-        let visible = &f.visible;
-        let offsets = &f.offsets;
-        let name_col = f.name_col;
-
-        let id = self.delegate.row_id(ix);
-        row = row.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                this.row_mouse_down(id, ev, window, cx);
-            }),
-        );
-
-        if kind == RowKind::GroupHeader {
-            row = row.tl_selector(|| format!("TlTreeTable-group-row-{ix}"));
-            if ix > 0 {
-                row = row.child(
-                    div()
-                        .tl_selector(|| format!("TlTreeTable-group-line-{ix}"))
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(f.total_width)
-                        .h(f.hairline)
-                        .bg(theme.divider),
-                );
-            }
-            if let Some(pos) = name_col.and_then(|c| visible.iter().position(|v| *v == c)) {
-                // The label stays at the left edge of the viewport while the table scrolls
-                // sideways, as far as the row reaches.
-                let x = offsets[pos];
-                let shift =
-                    (self.x_offset - x).clamp(Pixels::ZERO, (f.total_width - x).max(Pixels::ZERO));
-                let x = x + shift;
-                let ctx = CellCtx {
-                    m,
-                    theme,
-                    selected: false,
-                    width: f.total_width - x,
-                    at: CellAt::Row(ix, visible[pos].key()),
-                };
-                let name = self.delegate.name_cell(ix);
-                let cell = paint_group_header_cell(name, self.delegate.row_expandable(ix), &ctx);
-                row = row.child(cell.absolute().top_0().left(x));
-            }
-            return row.into_any_element();
-        }
-
-        let selected = self.selection.contains(&id);
-        let hovered = self.hover_row == Some(ix);
-        // Cell backgrounds show only under the zebra; hover and selection cover them.
-        let plain = !selected && !hovered;
-        let flags = self.delegate.row_flags(ix);
-        let stale = flags.has(RowFlags::STALE);
-        let tips = hovered && self.hover_tips_ready;
-        let row_key = FxBuildHasher.hash_one(id);
-        // The Name cell's tree guides, when this row draws any: (depth, cell left, cell width).
-        let mut guides = None;
-
-        row = row.on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
-            this.set_hover(Some(ix), cx);
-        }));
-
-        for (pos, &col) in visible.iter().enumerate() {
-            let x = offsets[pos];
-            let width = offsets.get(pos + 1).copied().unwrap_or(f.total_width) - x;
-            let ctx = CellCtx {
-                m,
-                theme,
-                selected,
-                width,
-                at: CellAt::Row(ix, col.key()),
-            };
-            if Some(col) == name_col {
-                let mut name = self.delegate.name_cell(ix);
-                if (hovered || selected)
-                    && let Some(trailing) = self.delegate.name_trailing(
-                        ix,
-                        hovered,
-                        selected,
-                        self.selection.focus() == Some(id),
-                        window,
-                        cx,
-                    )
-                {
-                    name.trailing = Some(trailing);
-                }
-                let depth = self.delegate.row_depth(ix);
-                let expandable = self.delegate.row_expandable(ix);
-                if f.guide_lines && (depth > 0 || flags.ancestor_continues != 0) {
-                    guides = Some((depth, x, width));
-                }
-                let mut cell = paint_name_cell(
-                    name,
-                    self.delegate.name_weight(ix),
-                    depth,
-                    expandable,
-                    self.delegate.flat_names(),
-                    flags,
-                    &ctx,
-                    tips.then_some(row_key),
-                    &mut self.icons,
-                    window,
-                    cx,
-                );
-                if tips && let Some(view) = self.delegate.row_tooltip(ix) {
-                    let key =
-                        ElementId::NamedInteger(SharedString::new_static("tl-row-tip"), row_key);
-                    let state = HoverTooltip::state(key, window, cx);
-                    cell = HoverTooltip::attach(
-                        &state,
-                        cell,
-                        DELAY_ROW_NAME,
-                        move |_, _| view.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                row = row.child(cell.absolute().top_0().left(x));
-                if let Some(expanded) = expandable {
-                    let left = x + name_indent(depth, m.ui_scale);
-                    row = row.child(
-                        self.chevron_hit(ix, id, expanded, left, hovered, row_key, m, window, cx),
-                    );
-                }
-                continue;
-            }
-
-            let (mut cell, text) = self.build_cell(ix, id, col, pos, hovered, &ctx, window);
-            if let Some(color) = cell_text_color(&self.out, &ctx) {
-                cell = cell.text_color(color);
-            }
-            // The row fill under the cell already holds the tint, so heat lies over it.
-            if plain && let Some(bg) = cell_background(&self.out, &ctx) {
-                cell = cell.bg(bg);
-            }
-            if stale {
-                cell = cell.opacity(metric_cell_opacity(flags));
-            }
-            if tips {
-                cell = self.attach_cell_tip(cell, col, pos, text, row_key, window, cx);
-            }
-            row = row.child(cell.absolute().top_0().left(x));
-        }
-        if f.separators || guides.is_some() {
-            // Painted after the cells so the cell fills do not cover the lines.
-            row = row.child(self.line_canvas(f, flags, guides));
-        }
-        if !selected && self.selection.focus() == Some(id) {
-            // The keyboard caret on a row that is not selected (UI-PRC-008).
-            row = row.child(
-                div()
-                    .tl_selector(|| "TlTreeTable-focus-row".into())
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .border(px(m.ui_scale))
-                    .border_color(theme.accent)
-                    .rounded(m.radius_small),
-            );
-        }
-        row.into_any_element()
-    }
-
-    /// The row's lines: one canvas whose paint draws the Name cell's tree guides (`guides` is
-    /// its depth, left edge and width, [`guide_quads`]), clipped to that cell, then one column
-    /// separator per boundary when they are on.
-    fn line_canvas(
-        &self,
-        f: &FrameCtx<D::Column>,
-        flags: RowFlags,
-        guides: Option<(u8, Pixels, Pixels)>,
-    ) -> impl IntoElement {
-        let offsets = f.separators.then(|| f.offsets.clone());
-        let total_width = f.total_width;
-        let line = f.hairline;
-        let row_h = f.m.row_height;
-        let ui_scale = f.m.ui_scale;
-        let divider = f.theme.divider;
-        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-        let (guide_log, separator_log) = {
-            self.line_canvases.set(self.line_canvases.get() + 1);
-            (self.guide_quads.clone(), self.separator_quads.clone())
-        };
-        canvas(
-            |_, _, _| (),
-            move |bounds, (), window, _| {
-                if let Some((depth, left, width)) = guides {
-                    let origin = bounds.origin + point(left, Pixels::ZERO);
-                    let cell = Bounds::new(origin, size(width, row_h));
-                    let quads =
-                        guide_quads(depth, flags, origin, row_h, ui_scale, window.scale_factor());
-                    window.with_content_mask(Some(ContentMask { bounds: cell }), |window| {
-                        for q in quads {
-                            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-                            guide_log.borrow_mut().push(q);
-                            window.paint_quad(fill(q, divider));
-                        }
-                    });
-                }
-                if let Some(offsets) = &offsets {
-                    for q in separator_quads(
-                        offsets,
-                        total_width,
-                        bounds.origin,
-                        bounds.size.height,
-                        line,
-                    ) {
-                        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-                        separator_log.borrow_mut().push(q);
-                        window.paint_quad(fill(q, divider));
-                    }
-                }
-            },
+        row_fill(
+            ix,
+            self.delegate.row_kind(ix) == RowKind::GroupHeader,
+            || self.selection.contains(&self.delegate.row_id(ix)),
+            self.core.hover_row == Some(ix),
+            || self.delegate.row_tint(ix, theme),
+            theme,
         )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    }
-
-    /// The chevron's 20 px hit area over the Name cell. `left` is the chevron box's left edge in
-    /// the row. A press toggles the row without changing the selection (UI-PRC-002). The
-    /// Expand or Collapse tooltip is attached on the hovered row only.
-    #[allow(clippy::too_many_arguments)]
-    fn chevron_hit(
-        &self,
-        ix: usize,
-        id: D::RowId,
-        expanded: bool,
-        left: Pixels,
-        hovered: bool,
-        row_key: u64,
-        m: &UiMetrics,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let s = m.ui_scale;
-        let hit = div()
-            .tl_selector(|| format!("TlTreeTable-chevron-{ix}"))
-            .absolute()
-            .top_0()
-            .left(left - px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s))
-            .w(px(CHEVRON_HIT_W * s))
-            .h(m.row_height)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    window.focus(&this.focus, cx);
-                    this.delegate.on_toggle_expand(id, cx);
-                }),
-            );
-        if !hovered {
-            return hit;
-        }
-        let key = ElementId::NamedInteger(SharedString::new_static("tl-chevron-tip"), row_key);
-        let label = if expanded {
-            "fnd-table-collapse"
-        } else {
-            "fnd-table-expand"
-        };
-        let state = HoverTooltip::state(key, window, cx);
-        HoverTooltip::attach(
-            &state,
-            hit,
-            DELAY_CONTROL,
-            move |_, cx| TlTooltip::text(tr(cx, label)).view(cx),
-            window,
-            cx,
-        )
-    }
-
-    /// One metric cell and the text it shows. Leaves the delegate's output in `self.out` for the
-    /// caller's overrides.
-    #[allow(clippy::too_many_arguments)]
-    fn build_cell(
-        &mut self,
-        ix: usize,
-        id: D::RowId,
-        col: D::Column,
-        pos: usize,
-        hovered: bool,
-        ctx: &CellCtx,
-        window: &mut Window,
-    ) -> (Div, SharedString) {
-        self.out.reset();
-        // Only the hovered row attaches tooltips, so only it asks for the ones that allocate.
-        self.out.want_tooltip = hovered && self.hover_tips_ready;
-        self.delegate.cell(ix, col, &mut self.out);
-        let kind = self.delegate.column_spec(col).kind;
-        let flag = if hovered {
-            self.hover_clips[pos].clone()
-        } else {
-            self.clip_sink.clone()
-        };
-        let text = match self.out.arc.clone() {
-            Some(arc) if kind == ColumnKind::Path => {
-                let room = (ctx.width - ctx.m.sp[4] * 2.0).max(Pixels::ZERO);
-                let font_size = ctx.m.text.base;
-                self.text_cache.path(id, col, room, &arc, |source, max| {
-                    let mut measure = |s: &str| -> Pixels {
-                        let run = TextRun {
-                            len: s.len(),
-                            font: font(UI_FAMILY),
-                            color: ctx.theme.text_primary,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        window
-                            .text_system()
-                            .shape_line(SharedString::new(s), font_size, &[run], None)
-                            .width
-                    };
-                    middle_ellipsis(source, max, &mut measure)
-                })
-            }
-            Some(arc) => self.text_cache.get_or_insert_arc(id, col, &arc),
-            None => self.formatted_text(ix, id, col),
-        };
-        let cell = value_cell(kind, text.clone(), &self.out, flag, ctx);
-        (cell, text)
-    }
-
-    /// The cached display text of a cell whose delegate output in `self.out` has no `arc`.
-    /// Formats it on a miss.
-    fn formatted_text(&mut self, ix: usize, id: D::RowId, col: D::Column) -> SharedString {
-        let delegate = &self.delegate;
-        self.text_cache
-            .get_or_format(id, col, self.out.bits, self.out.validity, |s| {
-                let mut full = CellOut {
-                    text: std::mem::take(s),
-                    want_text: true,
-                    ..CellOut::default()
-                };
-                delegate.cell(ix, col, &mut full);
-                *s = full.text;
-            })
-    }
-
-    /// The hover tooltip of a metric cell on the hovered row: the delegate's explicit tooltip,
-    /// else the full text when the cell was cut. `text` is the text the cell shows.
-    #[allow(clippy::too_many_arguments)]
-    fn attach_cell_tip(
-        &self,
-        cell: Div,
-        col: D::Column,
-        pos: usize,
-        text: SharedString,
-        row_key: u64,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Div {
-        let key = ElementId::NamedInteger(SharedString::new_static(col.key()), row_key);
-        let path_cut = match &self.out.arc {
-            Some(arc) if self.delegate.column_spec(col).kind == ColumnKind::Path => {
-                (text.as_str() != &**arc).then(|| SharedString::from(arc.clone()))
-            }
-            _ => None,
-        };
-        if let Some(tip) = self.out.tooltip.clone() {
-            let state = HoverTooltip::state(key, window, cx);
-            return HoverTooltip::attach(
-                &state,
-                cell,
-                self.delegate.cell_tip_delay(),
-                self.delegate.cell_tip_content(col, tip).build(),
-                window,
-                cx,
-            );
-        }
-        if let Some(tip) = path_cut {
-            let state = HoverTooltip::state(key, window, cx);
-            return HoverTooltip::attach(
-                &state,
-                cell,
-                DELAY_CONTROL,
-                TlTooltip::text(tip).build(),
-                window,
-                cx,
-            );
-        }
-        attach_cell_tooltip(cell, key, text, &self.hover_clips[pos], window, cx)
-    }
-
-    /// Left press on the row `id` (UI-PRC-008, UI-PRC-002). A press on a group header toggles
-    /// it and never touches the selection: the plain `Selection` gestures cannot tell a header
-    /// from a row.
-    fn row_mouse_down(
-        &mut self,
-        id: D::RowId,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        cx.stop_propagation();
-        window.focus(&self.focus, cx);
-        let Some(ix) = self.delegate.row_index(id) else {
-            return;
-        };
-        self.pressed = true;
-        self.press_gen += 1;
-        self.release_press_after(PRESS_HOLD_MAX, cx);
-        let double = ev.click_count == 2;
-        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-            // The first press of a double-click has toggled already; the second does nothing, so
-            // a double-click toggles once.
-            if !double {
-                self.delegate.on_toggle_expand(id, cx);
-            }
-            return;
-        }
-        if double {
-            if !self.delegate.double_click_expands() {
-                cx.emit(TreeTableEvent::Activate { row_index: ix });
-                self.delegate.on_activate(id, cx);
-                // A delegate that propagates for the keyboard path must not let the press reach
-                // the body, which would clear the selection Properties opens on.
-                cx.stop_propagation();
-            } else if self.delegate.row_expandable(ix).is_some() {
-                self.delegate.on_toggle_expand(id, cx);
-            }
-            return;
-        }
-        if !self.delegate.selectable(ix) {
-            return;
-        }
-        let v = DelegateView(&self.delegate);
-        match (ev.modifiers.control, ev.modifiers.shift) {
-            (true, true) => self.selection.ctrl_shift_click(id, &v),
-            (true, false) => self.selection.ctrl_click(id),
-            (false, true) => self.selection.shift_click(id, &v),
-            (false, false) => self.selection.click(id),
-        }
-        cx.notify();
-    }
-
-    /// The left button is up, over the table or anywhere else in the window. The hold ends after
-    /// [`PRESS_HOLD_AFTER_UP`] unless another press comes first (a double-click).
-    fn release_press(&mut self, cx: &mut Context<Self>) {
-        if self.pressed {
-            self.release_press_after(PRESS_HOLD_AFTER_UP, cx);
-        }
-    }
-
-    /// Ends the hold of the current press after `wait`; a later press cancels it.
-    fn release_press_after(&mut self, wait: Duration, cx: &mut Context<Self>) {
-        let gen_at = self.press_gen;
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            cx.background_executor().timer(wait).await;
-            this.update(cx, |t, cx| {
-                if t.press_gen == gen_at && std::mem::take(&mut t.pressed) {
-                    cx.emit(TreeTableEvent::PressReleased);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Left press on the body below the last row: nothing selected.
-    fn empty_mouse_down(
-        &mut self,
-        _: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus, cx);
-        if !self.selection.is_empty() || self.selection.focus().is_some() {
-            self.selection.clear();
-            cx.notify();
-        }
-    }
-
-    /// Display index of the focus row, when it is in the view.
-    fn focus_index(&self) -> Option<usize> {
-        self.selection
-            .focus()
-            .and_then(|id| self.delegate.row_index(id))
-    }
-
-    fn on_move_focus(&mut self, a: &MoveFocus, _: &mut Window, cx: &mut Context<Self>) {
-        let v = DelegateView(&self.delegate);
-        self.selection.move_focus(a.delta, a.extend, &v);
-        self.keep_focus_visible(cx);
-        cx.notify();
-    }
-
-    /// PgUp or PgDn: by the whole rows that fit the body, minus one, at least one.
-    fn on_move_focus_page(&mut self, a: &MoveFocusPage, _: &mut Window, cx: &mut Context<Self>) {
-        let viewport = ScrollbarHandle::viewport_bounds(&self.scroll).size.height;
-        let row_h = metrics(cx).row_height;
-        let fit = if row_h > Pixels::ZERO {
-            (viewport / row_h).floor().max(0.0) as usize
-        } else {
-            0
-        };
-        let v = DelegateView(&self.delegate);
-        self.selection
-            .move_page(fit.saturating_sub(1).max(1), a.down, a.extend, &v);
-        self.keep_focus_visible(cx);
-        cx.notify();
-    }
-
-    fn on_move_focus_edge(&mut self, a: &MoveFocusEdge, _: &mut Window, cx: &mut Context<Self>) {
-        let v = DelegateView(&self.delegate);
-        self.selection.move_edge(a.end, a.extend, &v);
-        self.keep_focus_visible(cx);
-        cx.notify();
-    }
-
-    fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        let v = DelegateView(&self.delegate);
-        self.selection.select_all(&v);
-        cx.notify();
-    }
-
-    fn on_toggle_select_focus(
-        &mut self,
-        _: &ToggleSelectFocus,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.selection.toggle_focus();
-        cx.notify();
-    }
-
-    /// Right: a collapsed row with children expands; an expanded row hands focus and selection
-    /// to its first child; a leaf does nothing.
-    fn on_expand_or_child(&mut self, _: &ExpandOrChild, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        match self.delegate.row_expandable(ix) {
-            Some(false) => self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx),
-            Some(true) => {
-                let child = ix + 1;
-                if child < self.delegate.row_count()
-                    && self.delegate.row_depth(child)
-                        == self.delegate.row_depth(ix).saturating_add(1)
-                    && self.delegate.selectable(child)
-                {
-                    self.selection.click(self.delegate.row_id(child));
-                    self.keep_focus_visible(cx);
-                    cx.notify();
-                }
-            }
-            None => {}
-        }
-    }
-
-    /// Left: an expanded row collapses; else focus and selection go to the parent. When the
-    /// parent is a group header (a depth-1 row in Grouped mode), the group collapses and the
-    /// selection stays (UI-PRC-009).
-    fn on_collapse_or_parent(
-        &mut self,
-        _: &CollapseOrParent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        if self.delegate.row_expandable(ix) == Some(true) {
-            self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx);
-            return;
-        }
-        let depth = self.delegate.row_depth(ix);
-        if depth == 0 {
-            return;
-        }
-        let Some(parent) = (0..ix).rev().find(|&p| self.delegate.row_depth(p) < depth) else {
-            return;
-        };
-        let parent_id = self.delegate.row_id(parent);
-        if self.delegate.row_kind(parent) == RowKind::GroupHeader {
-            self.delegate.on_toggle_expand(parent_id, cx);
-        } else if self.delegate.selectable(parent) {
-            self.selection.click(parent_id);
-            self.keep_focus_visible(cx);
-            cx.notify();
-        }
-    }
-
-    /// Space: toggles the focus row; nothing on a leaf.
-    fn on_toggle_expand(&mut self, _: &ToggleExpand, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        if self.delegate.row_expandable(ix).is_some() {
-            self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx);
-        }
-    }
-
-    /// Enter, Alt+Enter, Ctrl+I: a group header toggles, any other row is activated (D-008).
-    fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        let id = self.delegate.row_id(ix);
-        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-            self.delegate.on_toggle_expand(id, cx);
-        } else {
-            self.delegate.on_activate(id, cx);
-        }
-    }
-
-    /// The flattened index of the row under window y `y`, from the body bounds of the last frame.
-    fn row_at_y(&self, y: Pixels, row_h: Pixels) -> Option<usize> {
-        let body = ScrollbarHandle::viewport_bounds(&self.scroll);
-        if row_h <= Pixels::ZERO || y < body.origin.y || y >= body.bottom() {
-            return None;
-        }
-        let top = y - body.origin.y - ScrollbarHandle::offset(&self.scroll).y;
-        let ix = (top / row_h).floor() as usize;
-        (ix < self.delegate.row_count()).then_some(ix)
-    }
-
-    /// The visible column under window x `x`. Right of the last column: the last column.
-    fn column_at_x(&self, x: Pixels) -> Option<D::Column> {
-        let body = ScrollbarHandle::viewport_bounds(&self.scroll);
-        let content_x = x - body.origin.x - ScrollbarHandle::offset(&self.scroll).x;
-        let layout = self.columns();
-        let pos = layout
-            .offsets()
-            .partition_point(|&o| o <= content_x)
-            .saturating_sub(1);
-        layout.visible_columns().get(pos).copied()
-    }
-
-    /// Right press on the body (UI-PRC-008). One handler for every row: the row and the column
-    /// come from the pointer position. An unselected row becomes the only selection, a selected
-    /// row keeps the set, a group header changes nothing and is the only target.
-    fn body_right_down(
-        &mut self,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus, cx);
-        let row_h = metrics(cx).row_height;
-        let Some(ix) = self.row_at_y(ev.position.y, row_h) else {
-            return;
-        };
-        let Some(col) = self.column_at_x(ev.position.x) else {
-            return;
-        };
-        let id = self.delegate.row_id(ix);
-        let targets = if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-            smallvec![id]
-        } else {
-            if !self.delegate.selectable(ix) {
-                return;
-            }
-            if self.selection.right_click(id) {
-                cx.notify();
-            }
-            self.selection.in_view_order(&DelegateView(&self.delegate))
-        };
-        cx.stop_propagation();
-        self.open_menu(targets, Some(col), ev.position, window, cx);
-    }
-
-    /// Shift+F10 and the Menu key: the menu for the current selection, its top left corner at
-    /// the focus row's Name text start and the row's bottom edge (UI-PRC-009). Nothing without
-    /// a focus row or a selection.
-    fn on_open_context_menu(
-        &mut self,
-        _: &OpenContextMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(ix) = self.focus_index() else {
-            return;
-        };
-        let targets = self.selection.in_view_order(&DelegateView(&self.delegate));
-        let Some(col) = name_column(&self.delegate) else {
-            return;
-        };
-        if targets.is_empty() {
-            return;
-        }
-        let at = self.focus_menu_anchor(ix, col, cx);
-        self.open_menu(targets, None, at, window, cx);
-    }
-
-    /// Window position of row `ix`'s Name text start at the row's bottom edge. When the Name
-    /// column is hidden: the row's left edge plus `sp4`.
-    fn focus_menu_anchor(&self, ix: usize, name_col: D::Column, cx: &App) -> Point<Pixels> {
-        let m = metrics(cx);
-        let s = m.ui_scale;
-        let body = ScrollbarHandle::viewport_bounds(&self.scroll);
-        let scroll = ScrollbarHandle::offset(&self.scroll);
-        let layout = self.columns();
-        let x = match layout.visible_columns().iter().position(|c| *c == name_col) {
-            Some(pos) => {
-                let cell = self.delegate.name_cell(ix);
-                let icon = match cell.icon {
-                    NameIcon::None => 0.0,
-                    _ => ICON_GAP + icon_px(cell.icon_size),
-                };
-                let start = if self.delegate.flat_names() {
-                    m.sp[4] + px(icon * s)
-                } else {
-                    name_indent(self.delegate.row_depth(ix), s)
-                        + px((CHEVRON + icon + ICON_GAP) * s)
-                };
-                layout.offsets()[pos] + start + scroll.x
-            }
-            None => m.sp[4],
-        };
-        let y = m.row_height * (ix + 1) + scroll.y;
-        point(body.origin.x + x, body.origin.y + y)
-    }
-
-    /// Opens the delegate's menu for `targets` at `at`. The targets are captured now, so a
-    /// re-sort or a new version before an item runs does not change them.
-    fn open_menu(
-        &mut self,
-        targets: SmallVec<[D::RowId; 8]>,
-        col: Option<D::Column>,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let focus = self.focus.clone();
-        let table = cx.entity();
-        let table_closed = table.clone();
-        // Built once this update ends: the delegate needs the table's own context, and
-        // `TlMenu::build` hands its closure a plain `App`.
-        window.defer(cx, move |window, cx| {
-            let menu = TlMenu::build(window, cx, focus, |menu, window, cx| {
-                table.update(cx, |this, cx| {
-                    this.delegate.context_menu(&targets, col, menu, window, cx)
-                })
-            });
-            let sub = window.subscribe(&menu, cx, move |_, _: &DismissEvent, window, cx| {
-                // The item's action is queued before the dismiss, so queue behind it.
-                let table = table_closed.clone();
-                window.defer(cx, move |_, cx| {
-                    table.update(cx, |this, cx| this.delegate.on_menu_closed(cx));
-                });
-            });
-            sub.detach();
-            open_context_menu_at(at, window, cx, menu);
-        });
-    }
-
-    /// Ctrl+Shift+C (ADR-015): the selected rows in view order as TSV under a line of column
-    /// labels. Nothing without a selection.
-    fn on_copy_rows_as_table(
-        &mut self,
-        _: &CopyRowsAsTable,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ids = self.selection.in_view_order(&DelegateView(&self.delegate));
-        if ids.is_empty() {
-            return;
-        }
-        let text = self.rows_as_tsv(&ids);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        cx.emit(TreeTableEvent::CopiedRows { rows: ids.len() });
     }
 
     /// The labels of the visible columns joined by tabs, then one line per row in `ids` with
     /// each visible column's text. Cells copy the cached display text, the Name column its
     /// primary text and glyph cells their copy text (UI-FND-026). Group headers are left out.
     pub fn rows_as_tsv(&mut self, ids: &[D::RowId]) -> String {
-        let visible = self.columns().visible_columns().clone();
-        let name_col = name_column(&self.delegate);
-        let mut text = String::new();
-        for (pos, &col) in visible.iter().enumerate() {
-            if pos > 0 {
-                text.push('\t');
-            }
-            text.push_str(&self.delegate.column_spec(col).label);
-        }
-        for &id in ids {
-            let Some(ix) = self.delegate.row_index(id) else {
-                continue;
-            };
-            if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-                continue;
-            }
-            text.push('\n');
-            for (pos, &col) in visible.iter().enumerate() {
-                if pos > 0 {
-                    text.push('\t');
-                }
-                if Some(col) == name_col {
-                    text.push_str(&self.delegate.name_cell(ix).primary);
-                } else {
-                    text.push_str(&self.copy_cell_text(ix, id, col));
-                }
-            }
-        }
-        text
-    }
-
-    /// The text one metric cell copies: the full source of an `arc` cell, else the cached
-    /// display text, with the glyph copy text for a non-valid cell.
-    fn copy_cell_text(&mut self, ix: usize, id: D::RowId, col: D::Column) -> SharedString {
-        self.out.reset();
-        self.delegate.cell(ix, col, &mut self.out);
-        let text = match self.out.arc.clone() {
-            Some(arc) => SharedString::from(arc),
-            None => self.formatted_text(ix, id, col),
+        let rows: Vec<usize> = ids
+            .iter()
+            .filter_map(|&id| self.delegate.row_index(id))
+            .collect();
+        let Self {
+            delegate,
+            selection,
+            paused,
+            pressed,
+            core,
+            shell,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            rows_built_last_frame,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            separator_quads,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            guide_quads,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            line_canvases,
+            ..
+        } = self;
+        let mut host = Host {
+            delegate,
+            selection,
+            paused: *paused,
+            pressed,
+            shell,
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            hooks: Hooks {
+                rows_built: rows_built_last_frame,
+                line_canvases,
+                separators: separator_quads,
+                guides: guide_quads,
+            },
+            cx: (),
         };
-        copy_text(self.out.validity, &text)
+        core.rows_as_tsv(&rows, &mut host)
     }
 
     /// Header hover, press, totals and the cells of the last frame.
     pub fn header_state(&self) -> &HeaderState<D::Column> {
-        &self.header_state
+        &self.shell.header_state
     }
 
     /// The header total of `col` as line 2 shows it: the cached text and its validity. `None`
     /// when the delegate has no total for `col`. Formats only when the value or validity changed.
     pub fn header_total_text(&mut self, col: D::Column) -> Option<(SharedString, Validity)> {
-        self.out.reset();
-        if !self.delegate.header_total(col, &mut self.out) {
+        let out = &mut self.core.out;
+        out.reset();
+        if !self.delegate.header_total(col, out) {
             return None;
         }
-        let validity = self.out.validity;
+        let validity = out.validity;
         let delegate = &self.delegate;
-        let totals = &mut self.header_state.totals;
-        let text = match self.out.arc.clone() {
+        let totals = &mut self.shell.header_state.totals;
+        let text = match out.arc.clone() {
             Some(arc) => totals.get_or_insert_arc((), col, &arc),
-            None => totals.get_or_format((), col, self.out.bits, validity, |s| {
+            None => totals.get_or_format((), col, out.bits, validity, |s| {
                 let mut full = CellOut {
                     text: std::mem::take(s),
                     want_text: true,
@@ -1703,32 +833,32 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let total_width = layout.total_width();
         let sort = self.delegate.sort();
         let (sort_col, ascending) = (sort.column(), sort.ascending());
-        let mut cells = std::mem::take(&mut self.header_state.cells);
+        let mut cells = std::mem::take(&mut self.shell.header_state.cells);
         cells.clear();
-        self.header_state.arrow = None;
+        self.shell.header_state.arrow = None;
         for (pos, &id) in visible.iter().enumerate() {
             let x = offsets[pos];
             let w = offsets.get(pos + 1).copied().unwrap_or(total_width) - x;
             let spec = self.delegate.column_spec(id);
             let (label, align, sortable) = (spec.label.clone(), spec.align, spec.sortable);
             let sorted = sortable && id == sort_col;
+            let header = &mut self.shell.header_state;
             if sorted {
                 let label_w = if align == ColumnAlign::Left {
-                    self.header_state
-                        .label_width(id, &label, m.style_version, m, window)
+                    header.label_width(id, &label, m.style_version, m, window)
                 } else {
                     Pixels::ZERO
                 };
                 let (top, h) = header::line1(lines, m);
                 let a = px(SORT_ARROW * m.ui_scale);
                 let origin = point(x + sort_arrow_x(align, w, label_w, m), top + (h - a) / 2.0);
-                self.header_state.arrow = Some((id, ascending, Bounds::new(origin, size(a, a))));
+                header.arrow = Some((id, ascending, Bounds::new(origin, size(a, a))));
             }
             let total = match lines {
                 HeaderLines::Two => self.header_total_text(id),
                 HeaderLines::One => None,
             };
-            let fill = self.header_state.fill(id, sortable, theme);
+            let fill = self.shell.header_state.fill(id, sortable, theme);
             cells.push(HeaderCell {
                 id,
                 label,
@@ -1740,9 +870,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 fill,
             });
         }
-        self.header_state.cells = cells;
-        self.header_state.insert_x = self
-            .header_state
+        let header = &mut self.shell.header_state;
+        header.cells = cells;
+        header.insert_x = header
             .reorder
             .map(|d| offsets.get(d.slot).copied().unwrap_or(total_width));
     }
@@ -1762,24 +892,25 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 boundary,
                 at,
             } => {
-                if let Some(drag) = &mut self.header_state.resize {
+                if let Some(drag) = &mut self.shell.header_state.resize {
                     drag.drag_to(at.x);
                     cx.notify();
                     return;
                 }
-                if self.header_state.reorder.is_some() {
+                if self.shell.header_state.reorder.is_some() {
                     self.reorder_to(at.x);
                     cx.notify();
                     return;
                 }
                 let col = col_at(self, hovered);
                 let band = col_at(self, boundary);
-                let mut changed = self.header_state.set_hover(col);
-                if self.header_state.boundary_hover != band {
-                    self.header_state.boundary_hover = band;
+                let header = &mut self.shell.header_state;
+                let mut changed = header.set_hover(col);
+                if header.boundary_hover != band {
+                    header.boundary_hover = band;
                     changed = true;
                 }
-                if let Some(p) = &mut self.header_state.press
+                if let Some(p) = &mut header.press
                     && !p.dragged
                     && beyond_slop(p.at, at, scale)
                 {
@@ -1794,7 +925,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             }
             HeaderEvent::Down { pos, at } => {
                 if let Some(col) = col_at(self, Some(pos)) {
-                    self.header_state.press = Some(HeaderPress {
+                    self.shell.header_state.press = Some(HeaderPress {
                         col,
                         at,
                         dragged: false,
@@ -1810,7 +941,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 let Some(col) = col_at(self, Some(pos)) else {
                     return;
                 };
-                self.header_state.press = None;
+                self.shell.header_state.press = None;
                 if click_count >= 2 {
                     self.fit_columns(Some(col), window, cx);
                 } else {
@@ -1818,21 +949,21 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 }
             }
             HeaderEvent::Up { hovered, at } => {
-                if let Some(drag) = self.header_state.resize.take() {
+                if let Some(drag) = self.shell.header_state.resize.take() {
                     if drag.changed() {
                         self.delegate.on_columns_changed(&drag.layout, cx);
                     }
                     cx.notify();
                     return;
                 }
-                if let Some(drag) = self.header_state.reorder.take() {
-                    self.header_state.press = None;
-                    self.reorder_esc = None;
+                if let Some(drag) = self.shell.header_state.reorder.take() {
+                    self.shell.header_state.press = None;
+                    self.shell.reorder_esc = None;
                     self.drop_column(drag, cx);
                     cx.notify();
                     return;
                 }
-                let Some(p) = self.header_state.press.take() else {
+                let Some(p) = self.shell.header_state.press.take() else {
                     return;
                 };
                 cx.notify();
@@ -1843,10 +974,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 self.sort_by_column(p.col, cx);
             }
             HeaderEvent::ContextMenu { at } => {
-                if self.header_state.resize.is_some() || self.header_state.reorder.is_some() {
+                let header = &self.shell.header_state;
+                if header.resize.is_some() || header.reorder.is_some() {
                     return;
                 }
-                let x = self.header_state.content_x(at.x, self.x_offset);
+                let x = header.content_x(at.x, self.core.x_offset);
                 if let Some(col) = self.columns().column_at_x(x) {
                     cx.stop_propagation();
                     self.open_header_menu(col, at, window, cx);
@@ -1868,11 +1000,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let layout = self.delegate.columns().clone();
         let sort = self.delegate.sort();
         let fixed = self.delegate.columns_fixed();
-        let mode = self.resize_mode;
-        let menu = TlMenu::build(window, cx, self.focus.clone(), move |menu, window, cx| {
+        let mode = self.shell.resize_mode;
+        let build = Box::new(move |menu, window: &mut Window, cx: &mut App| {
             header_menu(&spec, &layout, &sort, fixed, mode, menu, window, cx)
         });
-        open_context_menu_at(at, window, cx, menu);
+        open_boxed_menu(at, self.core.focus.clone(), build, window, cx);
     }
 
     /// `HideColumn` from the header menu: hides the column and calls `on_columns_changed` once.
@@ -1906,6 +1038,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// or for another table, the action goes on to the owner.
     fn on_reset_columns(&mut self, a: &ResetColumns, window: &mut Window, cx: &mut Context<Self>) {
         let has_defaults = self
+            .shell
             .default_layout
             .as_ref()
             .is_some_and(|d| d.table == a.table);
@@ -1920,7 +1053,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// "Columns reset to default" in `window`. False and no change without defaults.
     fn reset_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let scale = self.delegate.columns().ui_scale();
-        let Some(defaults) = &self.default_layout else {
+        let Some(defaults) = &self.shell.default_layout else {
             return false;
         };
         let mut layout = defaults.clone();
@@ -2017,19 +1150,19 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         else {
             return;
         };
-        let x_offset = self.x_offset;
-        let grab = self.header_state.content_x(press.at.x, x_offset) - layout.offsets()[pos];
-        self.header_state.reorder = Some(ReorderDrag {
+        let x_offset = self.core.x_offset;
+        let grab = self.shell.header_state.content_x(press.at.x, x_offset) - layout.offsets()[pos];
+        self.shell.header_state.reorder = Some(ReorderDrag {
             col: press.col,
             grab,
             x: Pixels::ZERO,
             slot: pos,
         });
         self.reorder_to(at.x);
-        self.header_state.set_hover(None);
+        self.shell.header_state.set_hover(None);
         let this = cx.weak_entity();
         let handle = window.window_handle();
-        self.reorder_esc = Some(cx.intercept_keystrokes(move |ev, window, cx| {
+        self.shell.reorder_esc = Some(cx.intercept_keystrokes(move |ev, window, cx| {
             if ev.keystroke.key == "escape" && window.window_handle() == handle {
                 let _ = this.update(cx, |t, cx| t.cancel_reorder(cx));
                 cx.stop_propagation();
@@ -2039,15 +1172,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// Moves the reorder ghost to window x `x` and picks the nearest allowed boundary.
     fn reorder_to(&mut self, x: Pixels) {
-        let x = self.header_state.content_x(x, self.x_offset);
-        let layout = self.columns();
+        let x = self.shell.header_state.content_x(x, self.core.x_offset);
+        let layout = live_layout(&self.shell.header_state, &self.delegate);
         let slot = insertion_slot(
             layout.visible_columns(),
             layout.offsets(),
             layout.total_width(),
             x,
         );
-        if let Some(drag) = &mut self.header_state.reorder {
+        if let Some(drag) = &mut self.shell.header_state.reorder {
             drag.x = x;
             drag.slot = slot;
         }
@@ -2055,9 +1188,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// Esc during a reorder drag: ends it with no change. The release that follows does nothing.
     fn cancel_reorder(&mut self, cx: &mut Context<Self>) {
-        self.header_state.reorder = None;
-        self.header_state.press = None;
-        self.reorder_esc = None;
+        self.shell.header_state.reorder = None;
+        self.shell.header_state.press = None;
+        self.shell.reorder_esc = None;
         cx.notify();
     }
 
@@ -2093,7 +1226,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let mins = self.column_mins(window, cx);
         let layout = self.delegate.columns().clone();
         let scale = layout.ui_scale();
-        let body = ScrollbarHandle::viewport_bounds(&self.scroll).size.width;
+        let body = ScrollbarHandle::viewport_bounds(&self.core.scroll)
+            .size
+            .width;
         // Before the first layout of the body the table's own width stands in.
         let viewport = if body > Pixels::ZERO {
             body
@@ -2101,17 +1236,17 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             layout.total_width()
         } / scale;
         let start_widths = layout.widths.clone();
-        self.header_state.resize = Some(ResizeDrag {
+        self.shell.header_state.resize = Some(ResizeDrag {
             col,
             start_x: at.x,
             start_width: start_widths.get(&col).copied().unwrap_or(Pixels::ZERO),
             start_widths,
             mins,
             viewport,
-            mode: self.resize_mode,
+            mode: self.shell.resize_mode,
             layout,
         });
-        self.header_state.set_hover(None);
+        self.shell.header_state.set_hover(None);
         cx.notify();
     }
 
@@ -2159,12 +1294,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             Some(col) => smallvec![col],
             None => layout.visible_columns().iter().copied().collect(),
         };
-        let widest = self.widest_texts(&targets, &m, window, cx);
+        let keys: SmallVec<[ColKey; 24]> =
+            targets.iter().map(|&c| self.shell.cols.key(c)).collect();
+        let widest = self.with_host(cx, |core, host| core.widest_texts(&keys, &m, window, host));
         for (i, &col) in targets.iter().enumerate() {
             let label = self.delegate.column_spec(col).label.clone();
-            let label_w = self
-                .header_state
-                .label_width(col, &label, m.style_version, &m, window);
+            let label_w =
+                self.shell
+                    .header_state
+                    .label_width(col, &label, m.style_version, &m, window);
             let min = mins.get(&col).copied().unwrap_or(Pixels::ZERO) * scale;
             let w = fit_width(min, widest[i], label_w, &m);
             layout.widths.insert(col, w / scale);
@@ -2172,91 +1310,6 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         layout.rebuild(scale);
         self.delegate.on_columns_changed(&layout, cx);
         cx.notify();
-    }
-
-    /// The widest content of each column in `targets`, scaled, in `targets` order. The Name
-    /// column counts its indent, chevron and icon before the text. Numeric columns measure
-    /// digits at their `tnum` width.
-    fn widest_texts(
-        &mut self,
-        targets: &[D::Column],
-        m: &UiMetrics,
-        window: &Window,
-        cx: &mut App,
-    ) -> SmallVec<[Pixels; 24]> {
-        let s = m.ui_scale;
-        let name_col = name_column(&self.delegate);
-        let count = self.delegate.row_count();
-        let rows = self.visible_range.start.min(count)..self.visible_range.end.min(count);
-        // Texts of the visible rows: (target position, text, width before the text).
-        let mut texts: Vec<(usize, SharedString, Pixels)> =
-            Vec::with_capacity(rows.len() * targets.len());
-        for ix in rows {
-            if self.delegate.row_kind(ix) == RowKind::GroupHeader {
-                continue;
-            }
-            let id = self.delegate.row_id(ix);
-            for (i, &col) in targets.iter().enumerate() {
-                if Some(col) == name_col {
-                    let cell = self.delegate.name_cell(ix);
-                    let icon = match cell.icon {
-                        NameIcon::None => 0.0,
-                        _ => ICON_GAP + icon_px(cell.icon_size),
-                    };
-                    let prefix = name_indent(self.delegate.row_depth(ix), s)
-                        + px((CHEVRON + icon + ICON_GAP) * s);
-                    texts.push((i, cell.primary, prefix));
-                    continue;
-                }
-                self.out.reset();
-                self.delegate.cell(ix, col, &mut self.out);
-                let text = match self.out.arc.clone() {
-                    Some(arc) => SharedString::from(arc),
-                    None => self.formatted_text(ix, id, col),
-                };
-                texts.push((i, text, Pixels::ZERO));
-            }
-        }
-        for (i, &col) in targets.iter().enumerate() {
-            for text in self.delegate.fit_samples(col) {
-                texts.push((i, SharedString::from(text), Pixels::ZERO));
-            }
-        }
-        let numeric: SmallVec<[bool; 24]> = targets
-            .iter()
-            .map(|&c| self.delegate.column_spec(c).kind == ColumnKind::Numeric)
-            .collect();
-        let size = m.text.base;
-        let text_cache = &self.text_cache;
-        if !cx.has_global::<TextMetricsCache>() {
-            cx.set_global(TextMetricsCache::default());
-        }
-        cx.update_global::<TextMetricsCache, _>(|cache, cx| {
-            cache.clear_if_stale(m.style_version);
-            let digit = cache.template_width("0", size, window, cx);
-            let mut widest: SmallVec<[Pixels; 24]> = smallvec![Pixels::ZERO; targets.len()];
-            let mut measure = |i: usize, text: &str, before: Pixels| {
-                let w = text.chars().fold(before, |sum, ch| {
-                    sum + if numeric[i] && ch.is_ascii_digit() {
-                        digit
-                    } else {
-                        cache.char_advance(ch, size, window, cx)
-                    }
-                });
-                widest[i] = widest[i].max(w);
-            };
-            for (i, text, before) in &texts {
-                measure(*i, text, *before);
-            }
-            for (col, text) in text_cache.cell_texts() {
-                if Some(col) != name_col
-                    && let Some(i) = targets.iter().position(|c| *c == col)
-                {
-                    measure(i, text, Pixels::ZERO);
-                }
-            }
-            widest
-        })
     }
 
     /// `ResizeColumnsToFit` from the header menu: fits every visible column. An action for
@@ -2350,6 +1403,310 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
     }
 }
 
+/// The test-hook fields of the table, for the host.
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+struct Hooks<'a> {
+    rows_built: &'a Cell<u32>,
+    line_canvases: &'a Cell<u32>,
+    separators: &'a Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    guides: &'a Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+}
+
+/// The core's view of one table: the delegate, the selection and the typed shell state, and
+/// `cx`, the table's `Context` (or `()` where the caller has none). Built per call by
+/// [`TlTreeTable::with_host`].
+struct Host<'a, D: TreeTableDelegate, X> {
+    delegate: &'a mut D,
+    selection: &'a mut Selection<D::RowId>,
+    paused: bool,
+    pressed: &'a mut bool,
+    shell: &'a mut Shell<D>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    hooks: Hooks<'a>,
+    cx: X,
+}
+
+impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
+    fn row_count(&self) -> usize {
+        self.delegate.row_count()
+    }
+    fn row_key(&mut self, ix: usize) -> RowKey {
+        let id = self.delegate.row_id(ix);
+        self.shell.rows.key(id)
+    }
+    fn key_index(&self, key: RowKey) -> Option<usize> {
+        self.shell
+            .rows
+            .id(key)
+            .and_then(|id| self.delegate.row_index(id))
+    }
+    fn row_hash(&self, ix: usize) -> u64 {
+        FxBuildHasher.hash_one(self.delegate.row_id(ix))
+    }
+    fn row_kind(&self, ix: usize) -> RowKind {
+        self.delegate.row_kind(ix)
+    }
+    fn row_depth(&self, ix: usize) -> u8 {
+        self.delegate.row_depth(ix)
+    }
+    fn row_expandable(&self, ix: usize) -> Option<bool> {
+        self.delegate.row_expandable(ix)
+    }
+    fn row_flags(&self, ix: usize) -> RowFlags {
+        self.delegate.row_flags(ix)
+    }
+    fn selectable(&self, ix: usize) -> bool {
+        self.delegate.selectable(ix)
+    }
+    fn row_tint(&self, ix: usize, theme: &TlTheme) -> Option<Hsla> {
+        self.delegate.row_tint(ix, theme)
+    }
+    fn row_tooltip(&self, ix: usize) -> Option<AnyView> {
+        self.delegate.row_tooltip(ix)
+    }
+    fn name_cell(&self, ix: usize) -> NameCell {
+        self.delegate.name_cell(ix)
+    }
+    fn name_weight(&self, ix: usize) -> FontWeight {
+        self.delegate.name_weight(ix)
+    }
+    fn cell(&self, ix: usize, col: ColKey, out: &mut CellOut) {
+        self.delegate.cell(ix, self.shell.cols.col(col), out);
+    }
+
+    fn layout(&mut self) -> FrameLayout {
+        let Shell {
+            header_state, cols, ..
+        } = &mut *self.shell;
+        let layout = live_layout(header_state, &*self.delegate);
+        FrameLayout {
+            visible: cols.visible(layout.visible_columns()),
+            offsets: layout.offsets().clone(),
+        }
+    }
+    fn total_width(&self) -> Pixels {
+        live_layout(&self.shell.header_state, &*self.delegate).total_width()
+    }
+    fn name_column(&mut self) -> Option<ColKey> {
+        name_column(&*self.delegate).map(|c| self.shell.cols.key(c))
+    }
+    fn col_kind(&self, col: ColKey) -> ColumnKind {
+        self.delegate.column_spec(self.shell.cols.col(col)).kind
+    }
+    fn col_label(&self, col: ColKey) -> SharedString {
+        self.delegate
+            .column_spec(self.shell.cols.col(col))
+            .label
+            .clone()
+    }
+    fn fit_samples(&self, col: ColKey) -> Vec<Arc<str>> {
+        self.delegate.fit_samples(self.shell.cols.col(col))
+    }
+    fn cell_tip_delay(&self) -> Duration {
+        self.delegate.cell_tip_delay()
+    }
+    fn cell_tip_content(&self, col: ColKey, tip: SharedString) -> TlTooltip {
+        self.delegate
+            .cell_tip_content(self.shell.cols.col(col), tip)
+    }
+    fn flat_names(&self) -> bool {
+        self.delegate.flat_names()
+    }
+    fn guide_lines(&self) -> bool {
+        self.delegate.guide_lines()
+    }
+    fn double_click_expands(&self) -> bool {
+        self.delegate.double_click_expands()
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        self.delegate.empty_text()
+    }
+    fn empty_clear_filter(&self) -> bool {
+        self.delegate.empty_clear_filter()
+    }
+    fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
+        self.delegate.empty_clear_action()
+    }
+
+    fn is_selected(&self, ix: usize) -> bool {
+        self.selection.contains(&self.delegate.row_id(ix))
+    }
+    fn is_focus(&self, ix: usize) -> bool {
+        self.selection.focus() == Some(self.delegate.row_id(ix))
+    }
+    fn focus_index(&self) -> Option<usize> {
+        self.selection
+            .focus()
+            .and_then(|id| self.delegate.row_index(id))
+    }
+    fn selection_empty(&self) -> bool {
+        self.selection.is_empty()
+    }
+    fn has_focus_row(&self) -> bool {
+        self.selection.focus().is_some()
+    }
+    fn click(&mut self, ix: usize, click: Click) {
+        let id = self.delegate.row_id(ix);
+        let v = DelegateView(&*self.delegate);
+        match click {
+            Click::Plain => self.selection.click(id),
+            Click::Ctrl => self.selection.ctrl_click(id),
+            Click::Shift => self.selection.shift_click(id, &v),
+            Click::CtrlShift => self.selection.ctrl_shift_click(id, &v),
+        }
+    }
+    fn right_click(&mut self, ix: usize) -> bool {
+        let id = self.delegate.row_id(ix);
+        self.selection.right_click(id)
+    }
+    fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+    fn move_focus(&mut self, delta: i32, extend: bool) {
+        let v = DelegateView(&*self.delegate);
+        self.selection.move_focus(delta, extend, &v);
+    }
+    fn move_page(&mut self, rows: usize, down: bool, extend: bool) {
+        let v = DelegateView(&*self.delegate);
+        self.selection.move_page(rows, down, extend, &v);
+    }
+    fn move_edge(&mut self, end: bool, extend: bool) {
+        let v = DelegateView(&*self.delegate);
+        self.selection.move_edge(end, extend, &v);
+    }
+    fn select_all(&mut self) {
+        let v = DelegateView(&*self.delegate);
+        self.selection.select_all(&v);
+    }
+    fn toggle_focus(&mut self) {
+        self.selection.toggle_focus();
+    }
+    fn selected_in_view(&self) -> SmallVec<[usize; 8]> {
+        let v = DelegateView(&*self.delegate);
+        self.selection
+            .in_view_order(&v)
+            .into_iter()
+            .filter_map(|id| self.delegate.row_index(id))
+            .collect()
+    }
+
+    fn paused(&self) -> bool {
+        self.paused
+    }
+    fn pressed(&self) -> bool {
+        *self.pressed
+    }
+    fn set_pressed(&mut self) {
+        *self.pressed = true;
+    }
+    fn take_pressed(&mut self) -> bool {
+        std::mem::take(self.pressed)
+    }
+    fn set_anchor(&mut self, anchor: Option<(usize, usize, Pixels)>) {
+        self.shell.anchor =
+            anchor.map(|(ix, from_top, sub)| (self.delegate.row_id(ix), from_top, sub));
+    }
+    fn anchor(&self) -> Option<(usize, usize, Pixels)> {
+        let (id, from_top, sub) = self.shell.anchor?;
+        Some((self.delegate.row_index(id)?, from_top, sub))
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn set_rows_built(&self, rows: u32) {
+        self.hooks.rows_built.set(rows);
+    }
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn count_line_canvas(&self) {
+        let n = self.hooks.line_canvases;
+        n.set(n.get() + 1);
+    }
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    fn quad_logs(&self) -> QuadLogs {
+        (self.hooks.guides.clone(), self.hooks.separators.clone())
+    }
+}
+
+impl<D: TreeTableDelegate> DynTreeDelegate for Host<'_, D, &mut Context<'_, TlTreeTable<D>>> {
+    fn app(&mut self) -> &mut App {
+        self.cx
+    }
+    fn notify(&mut self) {
+        self.cx.notify();
+    }
+    fn emit(&mut self, event: TreeTableEvent) {
+        self.cx.emit(event);
+    }
+    fn keep_alive(&self) -> AnyEntity {
+        self.cx.entity().into_any()
+    }
+    fn name_trailing(
+        &mut self,
+        ix: usize,
+        hovered: bool,
+        selected: bool,
+        focused: bool,
+        window: &mut Window,
+    ) -> Option<AnyElement> {
+        self.delegate
+            .name_trailing(ix, hovered, selected, focused, window, self.cx)
+    }
+    fn before_rows(&mut self, range: Range<usize>, window: &mut Window) {
+        self.delegate.before_rows(range, window, self.cx);
+    }
+    fn toggle_expand(&mut self, ix: usize) {
+        let id = self.delegate.row_id(ix);
+        self.delegate.on_toggle_expand(id, self.cx);
+    }
+    fn toggle_expand_key(&mut self, key: RowKey) {
+        if let Some(id) = self.shell.rows.id(key) {
+            self.delegate.on_toggle_expand(id, self.cx);
+        }
+    }
+    fn activate(&mut self, ix: usize) {
+        let id = self.delegate.row_id(ix);
+        self.delegate.on_activate(id, self.cx);
+    }
+    fn row_menu(&mut self, targets: &[usize], col: Option<ColKey>) -> RowMenu {
+        let targets: SmallVec<[D::RowId; 8]> =
+            targets.iter().map(|&ix| self.delegate.row_id(ix)).collect();
+        let col = col.map(|c| self.shell.cols.col(c));
+        let table = self.cx.entity();
+        let table_closed = table.clone();
+        RowMenu {
+            build: Box::new(move |menu, window, cx| {
+                table.update(cx, |this, cx| {
+                    this.delegate.context_menu(&targets, col, menu, window, cx)
+                })
+            }),
+            closed: Rc::new(move |cx| {
+                table_closed.update(cx, |this, cx| this.delegate.on_menu_closed(cx));
+            }),
+        }
+    }
+    /// Reports the visible rows plus one viewport above and below, at most
+    /// [`DEMAND_MAX_IDS`], to the delegate when the id set changed (ADR-009 "Visible demand").
+    fn report_demand(&mut self, visible: Range<usize>) {
+        let count = self.delegate.row_count();
+        let range = visible.start.min(count)..visible.end.min(count);
+        let ids = demand_window(range, count);
+        let shell = &mut *self.shell;
+        shell.demand_ids.clear();
+        let mut hash = ids.len() as u64;
+        for ix in ids {
+            let id = self.delegate.row_id(ix);
+            hash = hash.wrapping_add(FxBuildHasher.hash_one(id));
+            shell.demand_ids.push(id);
+        }
+        if hash == shell.demand_hash {
+            return;
+        }
+        shell.demand_hash = hash;
+        let ids = std::mem::take(&mut shell.demand_ids);
+        self.delegate.on_visible_range(&ids, self.cx);
+        self.shell.demand_ids = ids;
+    }
+}
+
 /// Pushes a toast to the window's `ToastQueue`. A window without a queue shows nothing.
 fn push_toast(kind: ToastKind, text: SharedString, window: &mut Window, cx: &mut App) {
     let Some(queue) = ToastQueue::of_window(window, cx) else {
@@ -2391,35 +1748,6 @@ pub fn demand_window(visible: Range<usize>, count: usize) -> Range<usize> {
         .saturating_sub(DEMAND_MAX_IDS / 2)
         .clamp(start, end - DEMAND_MAX_IDS);
     first..first + DEMAND_MAX_IDS
-}
-
-/// The body's scroll handle as the scrollbar sees it. It tells the table when a thumb drag
-/// starts and ends, so anchoring pauses during the drag.
-#[derive(Clone)]
-struct BodyScroll {
-    list: UniformListScrollHandle,
-    dragging: Rc<Cell<bool>>,
-}
-
-impl ScrollbarHandle for BodyScroll {
-    fn viewport_bounds(&self) -> Bounds<Pixels> {
-        ScrollbarHandle::viewport_bounds(&self.list)
-    }
-    fn offset(&self) -> Point<Pixels> {
-        ScrollbarHandle::offset(&self.list)
-    }
-    fn set_offset(&self, offset: Point<Pixels>) {
-        ScrollbarHandle::set_offset(&self.list, offset);
-    }
-    fn content_size(&self) -> Size<Pixels> {
-        ScrollbarHandle::content_size(&self.list)
-    }
-    fn start_drag(&self) {
-        self.dragging.set(true);
-    }
-    fn end_drag(&self) {
-        self.dragging.set(false);
-    }
 }
 
 /// The delegate's rows in display order, for the `Selection` gestures.
@@ -2476,192 +1804,53 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
         self.follow_ui_scale(m.ui_scale, cx);
-        self.list_calls = 0;
-        self.probe_gutter = None;
+        self.core.list_calls = 0;
+        self.core.probe_gutter = None;
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         {
             self.separator_quads.borrow_mut().clear();
             self.guide_quads.borrow_mut().clear();
             self.line_canvases.set(0);
         }
-        self.x_offset = -ScrollbarHandle::offset(&self.scroll).x;
+        self.core.x_offset = -ScrollbarHandle::offset(&self.core.scroll).x;
         let hairline = UiMetrics::hairline(window);
 
         let lines = self.delegate.header_lines();
         self.prepare_header(lines, &m, &theme, window);
         let tooltip = self
+            .shell
             .header_state
             .hover
             .and_then(|c| header_tooltip(self.delegate.column_spec(c)));
         let header = TlTreeTableHeader {
             layout: self.columns(),
             lines,
-            x_offset: self.x_offset,
+            x_offset: self.core.x_offset,
             m: &m,
             theme: &theme,
             hairline,
-            state: &self.header_state,
-            listener: self.header_listener.clone(),
+            state: &self.shell.header_state,
+            listener: self.shell.header_listener.clone(),
         }
         .render(tooltip, window, cx);
 
-        let count = self.delegate.row_count();
-        if count == 0 {
-            // The list builds no rows, so nothing records the frame.
-            self.visible_range = 0..0;
-            self.anchor = None;
-        }
-        // Demand runs after every render, so a new version with the same range still reports
-        // a changed id set (ADR-009).
-        if !self.demand_scheduled {
-            self.demand_scheduled = true;
-            cx.on_next_frame(window, |this, _, cx| {
-                this.report_demand(cx);
-                this.check_gutter(cx);
-            });
-        }
-        let empty = if count == 0 {
-            self.delegate.empty_text()
-        } else {
-            None
-        };
-        let ring = self.focus.is_focused(window)
-            && window.last_input_was_keyboard()
-            && self.selection.is_empty()
-            && self.selection.focus().is_none();
+        let insert_x = self.shell.header_state.insert_x;
+        let body = self.with_host(cx, |core, host| {
+            core.render_body(insert_x, &m, &theme, window, host)
+        });
 
-        let list = uniform_list("tl-tree-table-body", count, cx.processor(Self::build_rows))
-            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-            .track_scroll(&self.scroll)
-            .size_full();
-
-        let bar = |st: ScrollbarThumbStyle, w: f32| {
-            st.bg(theme.scroll_thumb)
-                .width(px(w * m.ui_scale))
-                .inset(px(4.0 * m.ui_scale))
-                .radius(Pixels::ZERO)
-                .min_length(px(48.0 * m.ui_scale))
-        };
-        let handle = BodyScroll {
-            list: self.scroll.clone(),
-            dragging: self.thumb_dragging.clone(),
-        };
-        let scrollbar = Scrollbar::new(&handle)
-            .id("tl-tree-table-scrollbar")
-            .axis(ScrollbarAxis::Both)
-            .mode(ScrollbarMode::Always)
-            .styles(|s| {
-                s.track(|t| t.bg(theme.scroll_track).width(px(SCROLLBAR_W * m.ui_scale)))
-                    .track_hover(|t| t.bg(theme.scroll_track))
-                    .track_active(|t| t.bg(theme.scroll_track))
-                    .thumb(|t| bar(t, 6.0))
-                    .thumb_hover(|t| bar(t, 8.0))
-                    .thumb_active(|t| bar(t, 8.0))
-            });
-
-        let mut body = div()
-            .id("tl-tree-table-body-box")
-            .tl_selector(|| "TlTreeTable-body".into())
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_hidden()
-            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
-                this.last_wheel = Some(cx.background_executor().now());
-            }))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !*hovered {
-                    this.set_hover(None, cx);
-                }
-            }))
-            // Rows stop the press, so only a press below the last row gets here.
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::empty_mouse_down))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.release_press(cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.release_press(cx)),
-            )
-            // The one context-menu handler; rows do not stop the right press.
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::body_right_down))
-            .child(list)
-            .child(scrollbar);
-        if let Some(text) = empty.clone()
-            && self.delegate.empty_clear_filter()
-        {
-            body = body.child(
-                div()
-                    .tl_selector(|| "TlTreeTable-empty-state".into())
-                    .absolute()
-                    .top(px(EMPTY_STATE_TOP * m.ui_scale))
-                    .left_0()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        TlEmptyState::new(text).clear_filter(self.delegate.empty_clear_action()),
-                    ),
-            );
-        } else if let Some(text) = empty {
-            let mut label = div();
-            *label.text_style() = t_base(&m);
-            body = body.child(
-                label
-                    .tl_selector(|| "TlTreeTable-empty".into())
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme.text_secondary)
-                    .child(text),
-            );
-        }
-        if let Some(x) = self.header_state.insert_x {
-            body = body.child(
-                insert_line(x - self.x_offset, &theme, &m)
-                    .tl_selector(|| "TlTreeTable-insert".into()),
-            );
-        }
-        if ring {
-            body = body.child(
-                div()
-                    .tl_selector(|| "TlTreeTable-focus-ring".into())
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .border(px(m.ui_scale))
-                    .border_color(theme.accent),
-            );
-        }
-
-        v_flex()
+        let root = v_flex()
             .tl_selector(|| "TlTreeTable".into())
             .size_full()
             .bg(theme.list_bg)
             .key_context(TABLE_CONTEXT)
-            .track_focus(&self.focus)
+            .track_focus(&self.core.focus)
             .tab_index(0)
-            .tab_stop(self.delegate.tab_stop())
-            // CopyRow, CopyCell, CollapseAll and the header Actions have no handler here, so they
-            // bubble to the owner page (open item 16).
-            .on_action(cx.listener(Self::on_move_focus))
-            .on_action(cx.listener(Self::on_move_focus_page))
-            .on_action(cx.listener(Self::on_move_focus_edge))
-            .on_action(cx.listener(Self::on_select_all))
-            .on_action(cx.listener(Self::on_toggle_select_focus))
-            .on_action(cx.listener(Self::on_expand_or_child))
-            .on_action(cx.listener(Self::on_collapse_or_parent))
-            .on_action(cx.listener(Self::on_toggle_expand))
-            .on_action(cx.listener(Self::on_open_properties))
-            .on_action(cx.listener(Self::on_open_context_menu))
-            .on_action(cx.listener(Self::on_copy_rows_as_table))
+            .tab_stop(self.delegate.tab_stop());
+        // CopyRow, CopyCell, CollapseAll and the header Actions have no handler here, so they
+        // bubble to the owner page (open item 16).
+        self.core
+            .key_actions(root)
             .on_action(cx.listener(Self::on_sort_by_column))
             .on_action(cx.listener(Self::on_resize_columns_to_fit))
             .on_action(cx.listener(Self::on_hide_column))
