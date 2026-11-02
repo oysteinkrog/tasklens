@@ -10,7 +10,7 @@ use gpui_kit::{
     AppContext, Context, Entity, EntityId, IntoElement, Render, TestAppContext, VisualTestContext,
     Window, div,
 };
-use tl_ui::anim::AnimationDriver;
+use tl_ui_base::anim::AnimationDriver;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
