@@ -92,7 +92,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P2 for ADR-017 device history, P3 for ADR-012) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, libc (`close_range` in the GPU probe child only, R-290), postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
-| tl-ui | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), intl_pluralrules (plural rules in `pages/performance/details.rs`, in use since o55.37), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142), image (optional, `render-tests` only, PNG goldens, R-291) |
+| tl-ui (shell) | tl-model, tl-ui-settings, and the tl-ui-* crates of its ADR-020 row | gpui-kit, tracing, smallvec, rustc-hash, serde (action data, bench output), serde_json (theme JSON, bench output), fluent-bundle, async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), image (optional, `render-tests` only, PNG goldens, R-291) |
 | tl-ui-settings | tl-model | serde, toml (`LayoutEntry::Kept`, ADR-019), bitflags (`layout.rs`) |
 | tl-ui-base | tl-model, tl-ui-settings | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json, fluent-bundle, unic-langid, intl_pluralrules (plural rules in `template.rs`), async-channel, unicode-segmentation |
 | tl-ui-kit | tl-model, tl-ui-settings, tl-ui-base | gpui-kit, tracing, smallvec, rustc-hash, serde (`Deserialize` on the action structs in `actions.rs`), fluent-bundle |
@@ -113,7 +113,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-netmon | tl-model | decided in its own ADR when that phase starts |
 | xtask | none | serde, serde_json, anyhow |
 
-The tl-ui-* rows are reserved now, like the P3 rows; each crate is created by its extraction bead (ADR-020). Their external lists are what each crate's files used on 2026-11-01, found by grep. An extraction bead that finds another crate from the tl-ui row in use adds it to this table and to `xtask/src/check_deps.rs` in the same commit. Any crate outside the tl-ui row (the tl-model row for tl-ui-settings) needs an ADR change. After the split the tl-ui row covers only the shell; CS-E10 writes its final list. The UI settings and layout types moved from tl-model to tl-ui-settings in CS-D2.
+The tl-ui rows list what each crate's files use (ADR-020). The tl-ui row covers only the shell: CS-E10 (tasklens-zljr5.34) set it to what the files left in `crates/tl-ui/src` use, and unic-langid, intl_pluralrules and unicode-segmentation are now in the tl-ui-base and tl-ui-perf-core rows only. The tl-ui-* crates a tl-ui crate may depend on come from its ADR-020 row, which check-deps reads from `check_layers::EDGES`. A crate that needs another external crate adds it to its row here and in `xtask/src/check_deps.rs` in the same commit; a crate outside the old tl-ui row (the tl-model row for tl-ui-settings) needs an ADR change. The UI settings and layout types moved from tl-model to tl-ui-settings in CS-D2.
 
 **Dependency direction rule.** Edges only point toward `tl-model`:
 
@@ -3422,7 +3422,7 @@ Oystein approved splitting tl-ui into layered crates and moving the UI settings 
 | `tl-ui-testkit` (dev only) | `FakeEngine`; the render helpers behind its feature `render` | 0.8k |
 | `tl-ui-pagehost` (dev only) | A host that mounts one page with its globals, without `MainWindow` | 0.5k |
 
-**Where each file goes.** Paths are today's paths under `crates/tl-ui/src`. A file keeps its path relative to `src/` in its new crate, so `pages/processes/menu.rs` becomes `crates/tl-ui-procs/src/pages/processes/menu.rs`.
+**Where each file goes.** This table gives the paths under `crates/tl-ui/src` before the split. A file kept its path relative to `src/` in its new crate, so `pages/processes/menu.rs` became `crates/tl-ui-procs/src/pages/processes/menu.rs`. The perf-core, overview and perf modules are the exception: they moved to their crate's root, and the table after this one gives the final paths.
 
 | Crate | Files |
 |---|---|
@@ -3437,6 +3437,26 @@ Oystein approved splitting tl-ui into layered crates and moving the UI settings 
 | `tl-ui-sys` | `pages/services/`, `pages/connections/`, `pages/startup/`; `windows/service_properties/`, `windows/connection_properties.rs`, `windows/startup_properties.rs`, `windows/confirm_startup_delete.rs` |
 | `tl-ui` (shell) | `lib.rs`, `app.rs`, `window/`, `pages/mod.rs`, `pages/information/`, `windows/mod.rs`, `windows/run.rs`, `windows/run_history.rs`, `windows/low_memory.rs`, `windows/smart.rs`, `bench/` |
 | `tl-ui-testkit` | `testing/fake_engine.rs`; `testing/render.rs` behind feature `render` (CS-B1) |
+
+**Where the files are after the split** (CS-E10, tasklens-zljr5.34). Paths are under `crates/<crate>/src`. `lib.rs` of each extracted crate declares its modules and imports the lower crates' modules. The `LAYERS` table in `xtask/src/check_layers.rs` holds the same prefixes, and `ALIASES` there maps the old module paths of the perf-core, overview and perf modules to their new ones.
+
+| Crate | Files |
+|---|---|
+| `tl-ui-settings` | `settings.rs`, `layout.rs`, `layout_boxes.rs`, `layout_pages.rs` |
+| `tl-ui-base` | `theme/`, `text/`, `i18n.rs`, `template.rs`, `selector.rs`, `util.rs`, `focus.rs`, `anim.rs`, `motion.rs`, `toast_types.rs`, `hub.rs`, `demand.rs`, `settings_global.rs`, `host.rs`, `host_settings.rs`, `hosts_api.rs`, `hosts_edit.rs`, `action_tracker.rs`, `registry.rs`, `app_env.rs`, `shell.rs`, `engine_link.rs`, `request_ends.rs` |
+| `tl-ui-kit` | `components/`, `helper_flow.rs`, `actions.rs` |
+| `tl-ui-chart` | `chart/`, `net_totals.rs` |
+| `tl-ui-table` | `table/` (with `sys_table.rs`, `sys_status.rs`, `sys_copy.rs` and `test_delegate.rs`), `text_cache.rs` |
+| `tl-ui-perf-core` | `core/` (`actions.rs`, `details.rs`, `core_clocks.rs`, `cpu.rs`, `gpu.rs`, `look.rs`, `scales.rs`, `sensors.rs`), `minigraph/`, `tray_bridge.rs`, `detached_graph.rs` |
+| `tl-ui-overview` | `overview/` (with `memory_apps.rs` and `status_bar/`), `widget/` |
+| `tl-ui-perf` | `performance/` (`mod.rs` with `PerformancePage`, `page.rs`, `page_flow/`, `aggregate.rs`, `card.rs`, `sidebar.rs`, `menu.rs`, `summary.rs`, `cpu.rs`, `cpu_board.rs`, `cpu_details.rs`, `cpu_grid.rs`, `memory.rs`, `memory_bar.rs`, `disk.rs`, `gpu.rs`, `net.rs`, `sensors.rs`), `mini.rs` |
+| `tl-ui-procs` | `pages/processes/`; `windows/props/`, `windows/app_props.rs`, `windows/affinity.rs`, `windows/priority.rs`, `windows/signal.rs`, `windows/handle_search.rs`, `windows/notices.rs`, `windows/actions.rs`, `windows/disk_in_use.rs`, `windows/frame.rs` |
+| `tl-ui-sys` | `pages/services/`, `pages/connections/`, `pages/startup/`; `windows/service_properties/`, `windows/connection_properties.rs`, `windows/startup_properties.rs`, `windows/confirm_startup_delete.rs` |
+| `tl-ui` (shell) | `lib.rs`, `app.rs`, `window/`, `pages/mod.rs`, `pages/information/`, `windows/mod.rs`, `windows/run.rs`, `windows/run_history.rs`, `windows/low_memory.rs`, `windows/smart.rs`, `bench/` |
+| `tl-ui-testkit` | `fake_engine.rs`; `render.rs` behind feature `render` |
+| `tl-ui-pagehost` | `host.rs` |
+
+The shell's `pages/mod.rs` and `windows/mod.rs` re-export the page and window modules of the lower crates at their old paths. Its `lib.rs` re-exports the lower crates' root modules that the shell, tl-app or the `ui` tests still name (`tl_ui::theme`, `tl_ui::components` and the like). CS-E10 removed the root re-exports nothing named. CS-J1 rewrites the users to direct crate paths.
 
 A new file goes to the crate that holds its directory. A new file at the root of `src/`, or in `pages/` or `windows/` outside a listed subdirectory, needs a row in this table, added by the bead that creates it.
 
@@ -3544,7 +3564,9 @@ Switches in `pages/processes/` and `windows/` (CS-B8a; paths under `crates/tl-ui
 
 These root re-exports stay during the split. CS-J1 rewrites them to direct crate paths after CS-E10 and CS-F9. A move does not change behaviour: if a test needs a changed assertion, the move is wrong.
 
-**Actions.** Each crate that declares `actions!` exports `pub fn init(cx: &mut App)` (or a `bind_keys_*` function) that tl-ui's app init calls. That call keeps the crate linked, so its actions resolve from the keymap. A shell test (CS-E10) checks that every keymap action name resolves and that every crate with `actions!` is initialised.
+**Actions.** Each crate that declares `actions!` exports `pub fn init(cx: &mut App)` (or a `bind_keys_*` function) that tl-ui's app init calls. That call keeps the crate linked, so its actions resolve from the keymap. Two shell tests in `crates/tl-ui/tests/ui/action_links.rs` (CS-E10) check it. `keymap_actions_resolve` runs `TasklensUi::init` and builds every bound action by name; an action with data (`SelectTab(n)`) does not build from empty input, so for those the test checks that the name is registered. `every_crate_with_actions_is_initialised` sweeps `crates/tl-ui-*/src` for `actions!(` and `#[derive(.., Action)]` and fails when a crate that declares an action has no function called from `TasklensUi::init`. Today that is tl-ui-base, tl-ui-kit, tl-ui-table, tl-ui-perf-core, tl-ui-procs and tl-ui-sys.
+
+**Page-crate sibling rule.** `cargo xtask check-layers` fails when `check_layers::EDGES` lets one page crate depend on another, other than tl-ui-perf on tl-ui-overview and tl-ui-sys on tl-ui-procs, and prints that it holds. check-deps holds every Cargo dependency of a tl-ui crate to `EDGES`, so code in one page crate cannot name another page crate's modules.
 
 **Tests.** Each crate has one integration test binary, `crates/<crate>/tests/<short>/main.rs`, where `<short>` is the crate name without `tl-ui-` (for example `crates/tl-ui-kit/tests/kit/main.rs`). Tests that need the shell (`MainWindow`, app init, more than one page) stay in tl-ui's `tests/ui`. Page tests use tl-ui-pagehost. A test move takes the golden files only that test uses and reads them through `CARGO_MANIFEST_DIR`. Golden files shared between crates stay where they are, and the tests that read them name them in a comment.
 
