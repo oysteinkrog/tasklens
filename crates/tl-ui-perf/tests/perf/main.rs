@@ -18,6 +18,7 @@ mod overview_fixed_widgets;
 mod overview_mem_widgets;
 mod overview_net_widgets;
 mod overview_range;
+mod overview_timeline;
 mod overview_widget_look;
 mod page_range;
 mod page_widgets;
