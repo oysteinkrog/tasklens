@@ -95,6 +95,8 @@ fn keymap_actions_resolve(cx: &mut TestAppContext) {
 /// bound action must build. Keep this list exact: `keymap_actions_resolve` fails on a name
 /// that is missing here and on a name here that is not bound or builds.
 const DATA_ACTIONS: &[&str] = &[
+    "input::Enter",
+    "tasklens::MoveFocus",
     "tasklens::MoveFocusEdge",
     "tasklens::MoveFocusPage",
     "tasklens::OpenMenu",
@@ -109,6 +111,7 @@ const DATA_ACTIONS: &[&str] = &[
     "tasklens::SelectHost",
     "tasklens::SelectTab",
     "tasklens::ServicePropsSelectTab",
+    "ui::Confirm",
 ];
 
 #[test]
