@@ -17,6 +17,7 @@ tl-ui-base = { workspace = true }
 tl-ui-kit = { workspace = true }
 
 [dev-dependencies]
+tl-ui-testkit = { workspace = true }
 gpui-kit = { workspace = true, features = ["test-support"] }
 
 [features]

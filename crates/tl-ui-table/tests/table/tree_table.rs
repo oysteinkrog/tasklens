@@ -21,35 +21,35 @@ use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::table::{ServiceColumn, SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
-use tl_ui::components::menu::{TlMenu, context_menu_layer};
-use tl_ui::components::tooltip::DELAY_CONTROL;
-use tl_ui::components::validity::{GlyphContent, GlyphCtx, glyph_parts, tooltip_text};
-use tl_ui::pages::sys_status::{DotStyle, LabelTone, STALE_DOT_ALPHA};
-use tl_ui::table::actions::{
+use tl_ui_base::text::fonts::load_bundled_fonts;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::menu::{TlMenu, context_menu_layer};
+use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+use tl_ui_kit::components::validity::{GlyphContent, GlyphCtx, glyph_parts, tooltip_text};
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::actions::{
     CollapseAll, CollapseOrParent, CopyRow, CopyRowsAsTable, ExpandOrChild, MoveFocus,
     MoveFocusEdge, MoveFocusPage, OpenContextMenu, OpenProperties, SelectAll, TABLE_CONTEXT,
     ToggleExpand, ToggleSelectFocus,
 };
-use tl_ui::table::cells::{
+use tl_ui_table::table::cells::{
     CellCtx, CellOut, DIM_OPACITY, attach_cell_tooltip, cell_background, cell_text_color,
     glyph_cell, guide_quads, numeric_cell, text_cell, with_overrides,
 };
-use tl_ui::table::columns::{
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use tl_ui::table::header::{HeaderMenuItem, header_menu_rows};
-use tl_ui::table::tree_table::{
+use tl_ui_table::table::header::{HeaderMenuItem, header_menu_rows};
+use tl_ui_table::table::sys_status::{DotStyle, LabelTone, STALE_DOT_ALPHA};
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W, TlTreeTable,
     TreeTableDelegate, TreeTableEvent, metric_cell_opacity,
 };
-use tl_ui::text::fonts::load_bundled_fonts;
-use tl_ui::theme::{current, metrics};
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn setup(cx: &mut App) {
     gpui_kit::init(cx);
-    tl_ui::table::actions::bind_keys_table(cx);
-    tl_ui::theme::store::init(
+    tl_ui_table::table::actions::bind_keys_table(cx);
+    tl_ui_base::theme::store::init(
         cx,
         &ThemeSettings::default(),
         &AppearanceSettings::default(),
@@ -86,7 +86,7 @@ impl Render for Host {
             theme: &theme,
             selected: self.selected,
             width: self.width,
-            at: tl_ui::table::cells::CellAt::Alone,
+            at: tl_ui_table::table::cells::CellAt::Alone,
         };
         let cell = (self.cell)(&ctx, window, cx);
         div().size(px(400.)).child(
@@ -241,7 +241,7 @@ fn selected_row_uses_selected_text_colours(cx: &mut TestAppContext) {
         theme: &theme,
         selected: true,
         width: px(80.),
-        at: tl_ui::table::cells::CellAt::Alone,
+        at: tl_ui_table::table::cells::CellAt::Alone,
     };
     assert_eq!(ctx.primary(), theme.text_selected_primary);
     assert_eq!(ctx.secondary(), theme.text_selected_secondary);
@@ -284,7 +284,7 @@ fn no_heat_on_glyph_cells() {
         theme: &theme,
         selected: false,
         width: px(80.),
-        at: tl_ui::table::cells::CellAt::Alone,
+        at: tl_ui_table::table::cells::CellAt::Alone,
     };
     let failed = CellOut {
         validity: Validity::Failed,
@@ -1572,7 +1572,7 @@ fn mouse_gesture_matrix() {
 #[test]
 fn chevron_tooltip_on_hovered_row() {
     let mut cx = cosmic_cx();
-    cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    cx.update(|cx| tl_ui_base::i18n::init_strings(cx, "en-US"));
     let rows = vec![node(1, 0, Some(false)), node(2, 0, Some(true))];
     let (_, vcx) = open_table(&mut cx, TDelegate::new(rows), 600., 300.);
     // One hit area per row with a chevron.
@@ -2089,7 +2089,7 @@ fn open_menu_host(
     Ended,
     &mut VisualTestContext,
 ) {
-    cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    cx.update(|cx| tl_ui_base::i18n::init_strings(cx, "en-US"));
     let ended: Ended = Rc::default();
     let slot = Rc::new(RefCell::new(None));
     let (out, page_ended) = (slot.clone(), ended.clone());
@@ -2268,7 +2268,7 @@ fn shift_f10_opens_at_focus_row() {
 #[test]
 fn menu_esc_gives_keys_back_to_table() {
     let mut cx = cosmic_cx();
-    cx.update(tl_ui::components::menu::bind_keys);
+    cx.update(tl_ui_kit::components::menu::bind_keys);
     let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
     focus_table(vcx, &table);
     select(vcx, &table, 1);
@@ -2459,7 +2459,7 @@ fn render_counter_unchanged_without_new_version() {
     use std::sync::Arc;
 
     use tl_model::client::EngineClient;
-    use tl_ui::hub::{SnapshotChanged, SnapshotHub};
+    use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
     use tl_ui_testkit::fake_engine::FakeEngine;
 
     let mut cx = cosmic_cx();
@@ -2500,8 +2500,8 @@ mod name_cell_fixes {
     use std::sync::Arc;
 
     use gpui_kit::{AssetSource as _, MouseDownEvent, MouseUpEvent, SvgRenderer, TextRun};
-    use tl_ui::components::icons::TlAssets;
-    use tl_ui::table::cells::{IconSourceCache, name_primary_text};
+    use tl_ui_kit::components::icons::TlAssets;
+    use tl_ui_table::table::cells::{IconSourceCache, name_primary_text};
 
     use super::*;
 
@@ -2856,7 +2856,7 @@ fn sys_table_header_menu_sorts_and_hides() {
         "Display Name has no process column key"
     );
     let mut cx = cosmic_cx();
-    cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    cx.update(|cx| tl_ui_base::i18n::init_strings(cx, "en-US"));
     let slot = Rc::new(RefCell::new(None));
     let out = slot.clone();
     let (_, vcx) = cx.add_window_view(move |window, cx| {
@@ -2920,7 +2920,7 @@ fn scale_keeps_first_row() {
             ui_scale_pct: 150,
             ..AppearanceSettings::default()
         };
-        tl_ui::theme::store::apply_metrics(&appearance, cx);
+        tl_ui_base::theme::store::apply_metrics(&appearance, cx);
         assert_eq!(metrics(cx).row_height, px(42.));
         table.update(cx, |t, cx| t.restore_first_visible_row(anchor, cx));
     });
@@ -3213,7 +3213,7 @@ fn selected_text_color_kept_on_selected_row() {
         theme: &theme,
         selected,
         width: px(80.),
-        at: tl_ui::table::cells::CellAt::Alone,
+        at: tl_ui_table::table::cells::CellAt::Alone,
     };
     let out = CellOut {
         text_color: Some(danger),

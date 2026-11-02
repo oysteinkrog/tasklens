@@ -81,4 +81,3 @@ mod sys_table;
 mod theme;
 mod toasts;
 mod tray_bridge;
-mod tree_table;

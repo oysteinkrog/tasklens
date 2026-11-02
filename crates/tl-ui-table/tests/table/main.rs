@@ -4,3 +4,4 @@
 
 mod columns;
 mod selection;
+mod tree_table;
