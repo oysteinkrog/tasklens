@@ -36,8 +36,6 @@ mod page_range;
 mod performance;
 mod process_cells;
 mod process_menu;
-mod process_priority_menu;
-mod process_tooltips;
 mod processes;
 mod props;
 mod run;

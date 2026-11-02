@@ -10,14 +10,14 @@ use smallvec::SmallVec;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
 use tl_model::time::BootId;
-use tl_ui::components::menu::{MENU_MAX_W, TlMenu, context_menu_layer, open_context_menu_at};
-use tl_ui::host::HostContext;
-use tl_ui::pages::processes::actions::{CapturedTarget, CapturedTargets};
-use tl_ui::pages::processes::menu::priority_submenu;
-use tl_ui::table::tree_table::RowKind;
-use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
-use tl_ui::theme::metrics;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::text::fonts::{UI_FAMILY, load_bundled_fonts};
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::components::menu::{MENU_MAX_W, TlMenu, context_menu_layer, open_context_menu_at};
+use tl_ui_procs::pages::processes::actions::{CapturedTarget, CapturedTargets};
+use tl_ui_procs::pages::processes::menu::priority_submenu;
 use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::tree_table::RowKind;
 
 /// The en-US autogroup note, the first line of the submenu.
 const NOTE: &str = "With autogroup on, nice only orders processes within the same session.";
@@ -29,9 +29,9 @@ fn cosmic_cx() -> TestAppContext {
         let report = load_bundled_fonts(cx);
         assert!(report.ui_ok, "failed faces: {:?}", report.failed);
         gpui_kit::init(cx);
-        tl_ui::components::menu::bind_keys(cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
-        tl_ui::theme::store::init(
+        tl_ui_kit::components::menu::bind_keys(cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

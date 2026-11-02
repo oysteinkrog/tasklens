@@ -19,16 +19,16 @@ use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
-use tl_ui::components::tooltip::{DELAY_CONTROL, DELAY_PROCESS_CELL};
-use tl_ui::host::HostContext;
-use tl_ui::pages::processes::cells::{
+use tl_ui_base::host::HostContext;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, DELAY_PROCESS_CELL};
+use tl_ui_procs::pages::processes::cells::{
     CellCtx, CellTipWords, CellWords, GroupMembers, PowerSensor, RowRef, TipCtx, cell_tooltip,
     process_column,
 };
-use tl_ui::pages::processes::delegate::ProcessDelegate;
-use tl_ui::table::cells::CellOut;
-use tl_ui::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
+use tl_ui_procs::pages::processes::delegate::ProcessDelegate;
 use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate};
 
 const MIB: u64 = 1 << 20;
 const APP_MEMORY: &str = "Anonymous memory charged to this app's cgroup";
@@ -478,7 +478,7 @@ fn cell_tooltip_none_for_plain_cells() {
 #[gpui_kit::test]
 fn cell_tip_words_resolve(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         let w = CellTipWords::new(cx);
         let en = CellTipWords::default();
         assert_eq!(w.app_memory.as_ref(), APP_MEMORY);
@@ -546,13 +546,13 @@ fn open(cx: &mut TestAppContext) -> (Entity<TlTreeTable<ProcessDelegate>>, Visua
     let snap = app_snapshot();
     cx.update(|cx| {
         gpui_kit::init(cx);
-        tl_ui::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     });
     let mut table = None;
     let window = cx.add_window(|window, cx| {
