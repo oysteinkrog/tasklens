@@ -59,8 +59,8 @@ use crate::components::toast::ToastKind;
 use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::i18n::{Strings, tr};
-use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
-use crate::pages::minigraph::panel::MinigraphPanel;
+use crate::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use crate::minigraph::panel::MinigraphPanel;
 use crate::registry::{CapClass, GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
@@ -1092,7 +1092,7 @@ fn main_pid_unit(s: &ServicesSnapshot, pid: u32) -> Option<UnitRef> {
 
 /// The target of one process record, as a process row. `exe_deleted` is false and
 /// `io_priority` is `None`: they are in the extras, which only the row menu reads.
-pub(crate) fn record_target(r: &ProcessRecord) -> CapturedTarget {
+pub fn record_target(r: &ProcessRecord) -> CapturedTarget {
     CapturedTarget {
         node: NodeId::Process(r.key),
         kind: RowKind::Process,

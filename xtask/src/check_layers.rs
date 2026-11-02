@@ -43,6 +43,7 @@ const UI_SRCS: &[(&str, &str)] = &[
     ("tl-ui-perf-core", "crates/tl-ui-perf-core/src"),
     ("tl-ui-overview", "crates/tl-ui-overview/src"),
     ("tl-ui-perf", "crates/tl-ui-perf/src"),
+    ("tl-ui-procs", "crates/tl-ui-procs/src"),
 ];
 
 /// Modules that an extracted crate holds at a shorter path than tl-ui's module tree names them:
@@ -125,7 +126,8 @@ const LAYERS: &[(&str, &str)] = &[
     // tl-ui-perf, at its crate root (ALIASES maps the old module paths)
     ("performance/", "tl-ui-perf"),
     ("mini.rs", "tl-ui-perf"),
-    // tl-ui-procs
+    // tl-ui-procs, at the same paths under its src/ (its pages/mod.rs and windows/mod.rs only
+    // declare its modules, see `is_container`)
     ("pages/processes/", "tl-ui-procs"),
     ("windows/props/", "tl-ui-procs"),
     ("windows/app_props.rs", "tl-ui-procs"),
@@ -362,14 +364,17 @@ fn workspace_root() -> PathBuf {
 
 /// Every `.rs` file of every tree in `UI_SRCS`, keyed by its path relative to its `src/`. An
 /// extracted crate's `lib.rs` only declares its modules and imports the lower crates' modules, so
-/// it is skipped: tl-ui's `lib.rs` stays the root of the joined tree. A file must sit in the tree
-/// of the crate its layer names, so a file left behind in tl-ui or moved to the wrong crate fails.
+/// it is skipped: tl-ui's `lib.rs` stays the root of the joined tree. The same holds for an
+/// extracted crate's `pages/mod.rs` and `windows/mod.rs` (tl-ui-procs keeps its files under
+/// `pages/` and `windows/`): they only declare the crate's modules, and tl-ui's files at those
+/// paths stay in the joined tree. A file must sit in the tree of the crate its layer names, so a
+/// file left behind in tl-ui or moved to the wrong crate fails.
 fn read_trees(root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     let mut tree = BTreeMap::new();
     let mut misplaced = Vec::new();
     for &(krate, dir) in UI_SRCS {
         for (file, text) in read_tree(&root.join(dir))? {
-            if krate != SHELL && file == "lib.rs" {
+            if krate != SHELL && is_container(&file) {
                 continue;
             }
             match layer_of(&file) {
@@ -398,6 +403,12 @@ fn read_trees(root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
         );
     }
     Ok(tree)
+}
+
+/// An extracted crate's files that only declare its modules: `lib.rs`, and the `mod.rs` of the
+/// shell directories `pages/` and `windows/`, which ADR-020 puts in tl-ui.
+fn is_container(file: &str) -> bool {
+    matches!(file, "lib.rs" | "pages/mod.rs" | "windows/mod.rs")
 }
 
 /// The source tree that holds a crate's files: its own once it is extracted, tl-ui's until then.
@@ -1325,6 +1336,21 @@ mod tests {
         // A directory prefix also matches the module file next to it.
         assert_eq!(layer_of("chart.rs"), Some("tl-ui-chart"));
         assert_eq!(layer_of("pages/new_page.rs"), None);
+    }
+
+    #[test]
+    fn extracted_container_files_are_skipped() {
+        // tl-ui-procs keeps its files under pages/ and windows/; its mod.rs files there only
+        // declare modules, so tl-ui's files at the same paths stay in the joined tree.
+        assert!(is_container("lib.rs"));
+        assert!(is_container("pages/mod.rs"));
+        assert!(is_container("windows/mod.rs"));
+        assert!(!is_container("pages/processes/mod.rs"));
+        assert!(!is_container("windows/props/mod.rs"));
+        assert_eq!(layer_of("pages/processes/mod.rs"), Some("tl-ui-procs"));
+        assert_eq!(layer_of("windows/props/general.rs"), Some("tl-ui-procs"));
+        assert_eq!(layer_of("windows/actions.rs"), Some("tl-ui-procs"));
+        assert_eq!(src_dir("tl-ui-procs"), "crates/tl-ui-procs/src");
     }
 
     #[test]

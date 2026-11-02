@@ -227,6 +227,21 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "jiff",
         ],
     ),
+    // ADR-020 procs layer, moved out of tl-ui (CS-E8).
+    (
+        "tl-ui-procs",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "serde_json",
+            "fluent-bundle",
+            "jiff",
+        ],
+    ),
     (
         "tl-app",
         &[
