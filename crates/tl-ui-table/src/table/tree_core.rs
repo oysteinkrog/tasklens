@@ -158,6 +158,8 @@ pub(crate) trait DynRows {
     fn empty_text(&self) -> Option<SharedString>;
     fn empty_clear_filter(&self) -> bool;
     fn empty_clear_action(&self) -> Box<dyn Action>;
+    /// `TreeTableDelegate::tab_stop`.
+    fn tab_stop(&self) -> bool;
 
     /// Row `ix`'s id is in the selection.
     fn is_selected(&self, ix: usize) -> bool;

@@ -12,6 +12,7 @@ pub mod sys_table;
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 pub mod test_delegate;
 pub mod tree_core;
+pub mod tree_header;
 pub mod tree_table;
 
 pub use tree_table::{

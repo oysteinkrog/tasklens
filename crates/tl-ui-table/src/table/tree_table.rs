@@ -13,50 +13,37 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{ScrollbarHandle, v_flex};
+use gpui_kit::base::ScrollbarHandle;
 
 use gpui_kit::{
-    AnyElement, AnyEntity, AnyView, App, BorrowAppContext as _, Bounds, Context, EventEmitter,
-    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point,
-    Render, ScrollStrategy, SharedString, Styled, Subscription, UniformListScrollHandle,
-    WeakEntity, Window, point, px, size,
+    AnyElement, AnyEntity, AnyView, App, Bounds, Context, EventEmitter, FocusHandle, FontWeight,
+    Hsla, IntoElement, Pixels, Point, Render, ScrollStrategy, SharedString, Subscription,
+    UniformListScrollHandle, WeakEntity, Window, point, size,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
 use crate::actions::ClearFilter;
 use crate::components::menu::TlMenu;
-use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, TlTooltip};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::table::actions::{
-    EnableAllColumns, HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SortByColumn,
-    TABLE_CONTEXT,
-};
 use crate::table::cells::CellOut;
-use crate::table::columns::{
-    Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
-    fit_width, min_width,
-};
+use crate::table::columns::{ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::columns_window::{self, ColumnHost, ColumnPicker, PickerColumn};
-use crate::table::header::{
-    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ReorderDrag,
-    ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_menu, header_tooltip,
-    insertion_slot, sort_arrow_x,
-};
+use crate::table::header::HeaderState;
 use crate::table::selection::{Selection, SelectionView};
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use crate::table::tree_core::QuadLogs;
 use crate::table::tree_core::{
     Click, ColKey, CoreCall, DynRows, DynTreeDelegate, FrameLayout, Link, RowKey, RowMenu,
-    TreeTableCore, open_boxed_menu, row_fill,
+    TreeTableCore, row_fill,
 };
-use crate::text::metrics::TextMetricsCache;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use crate::table::tree_header::{
+    self, ColCall, ColLink, ColumnSource, DynColumns, HeaderCore, Parts, live_layout,
+};
+use crate::theme::{TlTheme, current, metrics};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
 pub use tl_ui_settings::settings::ColumnResize as ColumnResizeMode;
@@ -314,10 +301,12 @@ impl<D: TreeTableDelegate> EventEmitter<TreeTableEvent> for TlTreeTable<D> {}
 /// builds only the requested range, each row is one `div` with absolutely positioned cells at
 /// the layout's precomputed offsets, and every cell text comes from `CellTextCache`.
 ///
-/// This type holds the state its owners read by type (the delegate, the selection, the header
-/// state and the column layouts) and the header and column logic. The body rows, cells,
-/// keyboard and pointer handling live in the non-generic `TreeTableCore`, which reaches the
-/// delegate through `DynTreeDelegate`, so they are compiled once for every delegate type.
+/// This type holds the state its owners read by type: the delegate, the selection, the header
+/// state and the column layouts. The logic lives elsewhere, so it is not compiled once per
+/// delegate type. The body rows, cells, keyboard and pointer handling are in the non-generic
+/// `TreeTableCore`, which reaches the delegate through `DynTreeDelegate`. The header and column
+/// logic is in `tree_header`, generic over the column type only, which reaches it through
+/// `DynColumns`.
 pub struct TlTreeTable<D: TreeTableDelegate> {
     pub delegate: D,
     pub selection: Selection<D::RowId>,
@@ -345,18 +334,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
 
 /// The typed table state the core does not hold.
 struct Shell<D: TreeTableDelegate> {
-    /// Header hover, press, totals and this frame's header cells.
-    header_state: HeaderState<D::Column>,
-    /// Routes the header's pointer events to [`TlTreeTable::header_event`]. Created once in
-    /// `new`.
-    header_listener: HeaderListener,
-    /// `tables.column_resize`, passed in by the owner.
-    resize_mode: ColumnResizeMode,
-    /// The owner's default layout for "Reset to default". `None`: `ResetColumns` goes on to the
-    /// owner.
-    default_layout: Option<ColumnLayout<D::Column>>,
-    /// Catches Esc before any key binding while a column reorder drag is in progress.
-    reorder_esc: Option<Subscription>,
+    /// The header and column state.
+    head: HeaderCore<D::Column>,
     /// The top-most visible selectable row of the last frame: its identity, its rows from the
     /// top visible row and the top row's hidden part. A new version keeps it at the same y.
     anchor: Option<(D::RowId, usize, Pixels)>,
@@ -472,23 +451,16 @@ impl<C: TableColumn> ColKeys<C> {
     }
 }
 
-/// The layout the table draws: the live copy during a boundary drag, else the delegate's.
-fn live_layout<'a, D: TreeTableDelegate>(
-    header: &'a HeaderState<D::Column>,
-    delegate: &'a D,
-) -> &'a ColumnLayout<D::Column> {
-    match &header.resize {
-        Some(drag) => &drag.layout,
-        None => delegate.columns(),
-    }
-}
-
 impl<D: TreeTableDelegate> TlTreeTable<D> {
     pub fn new(delegate: D, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
-        let link: Link = Rc::new(move |cx: &mut App, f: CoreCall<'_>| {
-            let _ = weak.update(cx, |t, cx| t.with_host(cx, |core, host| f(core, host)));
+        let cols: ColLink<D::Column> = Rc::new(move |cx: &mut App, f: ColCall<'_, D::Column>| {
+            let _ = weak.update(cx, |t, cx| t.with_cols(cx, |core, h| f(core, h)));
         });
+        let link: Link = {
+            let cols = cols.clone();
+            Rc::new(move |cx: &mut App, f: CoreCall<'_>| cols(cx, &mut |core, h| f(core, h)))
+        };
         Self {
             delegate,
             selection: Selection::new(),
@@ -496,16 +468,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             pressed: false,
             core: TreeTableCore::new(link, cx.focus_handle()),
             shell: Shell {
-                header_state: HeaderState::default(),
-                header_listener: {
-                    let this = cx.weak_entity();
-                    Rc::new(move |ev, window, cx| {
-                        let _ = this.update(cx, |t, cx| t.header_event(ev, window, cx));
-                    })
-                },
-                resize_mode: ColumnResizeMode::default(),
-                default_layout: None,
-                reorder_esc: None,
+                head: HeaderCore::new(cols),
                 anchor: None,
                 demand_hash: 0,
                 demand_ids: Vec::new(),
@@ -530,6 +493,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut TreeTableCore, &mut dyn DynTreeDelegate) -> R,
+    ) -> R {
+        self.with_cols(cx, |core, h| f(core, h))
+    }
+
+    /// [`Self::with_host`] with the typed column calls.
+    fn with_cols<R>(
+        &mut self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut TreeTableCore, &mut dyn DynColumns<D::Column>) -> R,
     ) -> R {
         let Self {
             delegate,
@@ -576,12 +548,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// The layout the table draws: the live copy during a boundary drag, else the delegate's.
     pub fn columns(&self) -> &ColumnLayout<D::Column> {
-        live_layout(&self.shell.header_state, &self.delegate)
+        live_layout(&self.shell.head, &self.delegate)
     }
 
     /// The owner passes the current `tables.column_resize` value; the table reads no settings.
     pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
-        self.shell.resize_mode = mode;
+        self.shell.head.resize_mode = mode;
     }
 
     /// The owner passes the current `tables.column_separators` value: 1 px divider lines
@@ -593,7 +565,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// The owner's default order, visible set and widths. With them the table handles
     /// `ResetColumns` itself; without them the action goes on to the owner.
     pub fn set_default_layout(&mut self, layout: ColumnLayout<D::Column>) {
-        self.shell.default_layout = Some(layout);
+        self.shell.head.default_layout = Some(layout);
     }
 
     /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
@@ -698,27 +670,14 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         self.core.horizontal_overflow(self.columns().total_width())
     }
 
-    /// Column widths are stored at 100%. After a UI scale change the delegate's layout still
-    /// holds the old scale, so rebuild it at `ui_scale` and hand it back. Skipped during a
-    /// resize drag, which works on its own copy.
-    fn follow_ui_scale(&mut self, ui_scale: f32, cx: &mut Context<Self>) {
-        if self.shell.header_state.resize.is_some()
-            || self.delegate.columns().ui_scale() == ui_scale
-        {
-            return;
-        }
-        let mut layout = self.delegate.columns().clone();
-        layout.rebuild(ui_scale);
-        self.delegate.on_columns_changed(&layout, cx);
-    }
-
     fn sync_versions(&mut self, style_version: u64) {
         let version = self.delegate.table_version();
         let core = &mut self.core;
         if version != core.last_version || style_version != core.last_style_version {
             core.text_cache.begin_version(version, style_version);
             self.shell
-                .header_state
+                .head
+                .state
                 .totals
                 .begin_version(version, style_version);
             core.icons.begin_version(version);
@@ -789,560 +748,20 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// Header hover, press, totals and the cells of the last frame.
     pub fn header_state(&self) -> &HeaderState<D::Column> {
-        &self.shell.header_state
+        &self.shell.head.state
     }
 
     /// The header total of `col` as line 2 shows it: the cached text and its validity. `None`
     /// when the delegate has no total for `col`. Formats only when the value or validity changed.
     pub fn header_total_text(&mut self, col: D::Column) -> Option<(SharedString, Validity)> {
-        let out = &mut self.core.out;
-        out.reset();
-        if !self.delegate.header_total(col, out) {
-            return None;
-        }
-        let validity = out.validity;
-        let delegate = &self.delegate;
-        let totals = &mut self.shell.header_state.totals;
-        let text = match out.arc.clone() {
-            Some(arc) => totals.get_or_insert_arc((), col, &arc),
-            None => totals.get_or_format((), col, out.bits, validity, |s| {
-                let mut full = CellOut {
-                    text: std::mem::take(s),
-                    want_text: true,
-                    ..CellOut::default()
-                };
-                delegate.header_total(col, &mut full);
-                *s = full.text;
-            }),
-        };
-        Some((text, validity))
-    }
-
-    /// Fills `header_state.cells` and the sort arrow for this frame. The `Vec` keeps its
-    /// capacity; texts are `SharedString` clones and cached totals.
-    fn prepare_header(
-        &mut self,
-        lines: HeaderLines,
-        m: &UiMetrics,
-        theme: &TlTheme,
-        window: &Window,
-    ) {
-        let layout = self.columns();
-        let visible = layout.visible_columns().clone();
-        let offsets = layout.offsets().clone();
-        let total_width = layout.total_width();
-        let sort = self.delegate.sort();
-        let (sort_col, ascending) = (sort.column(), sort.ascending());
-        let mut cells = std::mem::take(&mut self.shell.header_state.cells);
-        cells.clear();
-        self.shell.header_state.arrow = None;
-        for (pos, &id) in visible.iter().enumerate() {
-            let x = offsets[pos];
-            let w = offsets.get(pos + 1).copied().unwrap_or(total_width) - x;
-            let spec = self.delegate.column_spec(id);
-            let (label, align, sortable) = (spec.label.clone(), spec.align, spec.sortable);
-            let sorted = sortable && id == sort_col;
-            let header = &mut self.shell.header_state;
-            if sorted {
-                let label_w = if align == ColumnAlign::Left {
-                    header.label_width(id, &label, m.style_version, m, window)
-                } else {
-                    Pixels::ZERO
-                };
-                let (top, h) = header::line1(lines, m);
-                let a = px(SORT_ARROW * m.ui_scale);
-                let origin = point(x + sort_arrow_x(align, w, label_w, m), top + (h - a) / 2.0);
-                header.arrow = Some((id, ascending, Bounds::new(origin, size(a, a))));
-            }
-            let total = match lines {
-                HeaderLines::Two => self.header_total_text(id),
-                HeaderLines::One => None,
-            };
-            let fill = self.shell.header_state.fill(id, sortable, theme);
-            cells.push(HeaderCell {
-                id,
-                label,
-                align,
-                x,
-                w,
-                sort: sorted.then_some(ascending),
-                total,
-                fill,
-            });
-        }
-        let header = &mut self.shell.header_state;
-        header.cells = cells;
-        header.insert_x = header
-            .reorder
-            .map(|d| offsets.get(d.slot).copied().unwrap_or(total_width));
-    }
-
-    /// Pointer events from the header's hitboxes (UI-PRC-005). A left press and release on the
-    /// same sortable cell, without moving more than 4 px, sorts by that column. Moving more than
-    /// 4 px drags the column to a new place, except Name. A press on a resize band starts a
-    /// boundary drag; a double-click on one fits that column.
-    fn header_event(&mut self, ev: HeaderEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let scale = metrics(cx).ui_scale;
-        let col_at = |this: &Self, pos: Option<usize>| {
-            pos.and_then(|p| this.columns().visible_columns().get(p).copied())
-        };
-        match ev {
-            HeaderEvent::Move {
-                hovered,
-                boundary,
-                at,
-            } => {
-                if let Some(drag) = &mut self.shell.header_state.resize {
-                    drag.drag_to(at.x);
-                    cx.notify();
-                    return;
-                }
-                if self.shell.header_state.reorder.is_some() {
-                    self.reorder_to(at.x);
-                    cx.notify();
-                    return;
-                }
-                let col = col_at(self, hovered);
-                let band = col_at(self, boundary);
-                let header = &mut self.shell.header_state;
-                let mut changed = header.set_hover(col);
-                if header.boundary_hover != band {
-                    header.boundary_hover = band;
-                    changed = true;
-                }
-                if let Some(p) = &mut header.press
-                    && !p.dragged
-                    && beyond_slop(p.at, at, scale)
-                {
-                    p.dragged = true;
-                    changed = true;
-                    let p = *p;
-                    self.start_reorder(p, at, window, cx);
-                }
-                if changed {
-                    cx.notify();
-                }
-            }
-            HeaderEvent::Down { pos, at } => {
-                if let Some(col) = col_at(self, Some(pos)) {
-                    self.shell.header_state.press = Some(HeaderPress {
-                        col,
-                        at,
-                        dragged: false,
-                    });
-                    cx.notify();
-                }
-            }
-            HeaderEvent::BoundaryDown {
-                pos,
-                at,
-                click_count,
-            } => {
-                let Some(col) = col_at(self, Some(pos)) else {
-                    return;
-                };
-                self.shell.header_state.press = None;
-                if click_count >= 2 {
-                    self.fit_columns(Some(col), window, cx);
-                } else {
-                    self.start_resize(col, at, window, cx);
-                }
-            }
-            HeaderEvent::Up { hovered, at } => {
-                if let Some(drag) = self.shell.header_state.resize.take() {
-                    if drag.changed() {
-                        self.delegate.on_columns_changed(&drag.layout, cx);
-                    }
-                    cx.notify();
-                    return;
-                }
-                if let Some(drag) = self.shell.header_state.reorder.take() {
-                    self.shell.header_state.press = None;
-                    self.shell.reorder_esc = None;
-                    self.drop_column(drag, cx);
-                    cx.notify();
-                    return;
-                }
-                let Some(p) = self.shell.header_state.press.take() else {
-                    return;
-                };
-                cx.notify();
-                if p.dragged || beyond_slop(p.at, at, scale) || col_at(self, hovered) != Some(p.col)
-                {
-                    return;
-                }
-                self.sort_by_column(p.col, cx);
-            }
-            HeaderEvent::ContextMenu { at } => {
-                let header = &self.shell.header_state;
-                if header.resize.is_some() || header.reorder.is_some() {
-                    return;
-                }
-                let x = header.content_x(at.x, self.core.x_offset);
-                if let Some(col) = self.columns().column_at_x(x) {
-                    cx.stop_propagation();
-                    self.open_header_menu(col, at, window, cx);
-                }
-            }
-        }
-    }
-
-    /// Opens the header menu (UI-PRC-006) for `col` with its top left corner at `at`. Its
-    /// actions run in the table's key context.
-    fn open_header_menu(
-        &mut self,
-        col: D::Column,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let spec = self.delegate.column_spec(col).clone();
-        let layout = self.delegate.columns().clone();
-        let sort = self.delegate.sort();
-        let fixed = self.delegate.columns_fixed();
-        let mode = self.shell.resize_mode;
-        let build = Box::new(move |menu, window: &mut Window, cx: &mut App| {
-            header_menu(&spec, &layout, &sort, fixed, mode, menu, window, cx)
-        });
-        open_boxed_menu(at, self.core.focus.clone(), build, window, cx);
-    }
-
-    /// `HideColumn` from the header menu: hides the column and calls `on_columns_changed` once.
-    /// Hiding the last visible column shows the Warning toast instead. A key outside this
-    /// table's column set goes on to the next handler.
-    fn on_hide_column(&mut self, a: &HideColumn, window: &mut Window, cx: &mut Context<Self>) {
-        let layout = self.delegate.columns();
-        let Some(col) = D::Column::parse(layout.table, &a.id) else {
-            cx.propagate();
-            return;
-        };
-        let mut layout = layout.clone();
-        match layout.set_visible(col, false) {
-            Ok(()) => {
-                layout.rebuild(layout.ui_scale());
-                self.delegate.on_columns_changed(&layout, cx);
-                cx.notify();
-            }
-            Err(ColumnError::LastVisible) => {
-                let text = tr(cx, "table-toast-last-visible");
-                push_toast(ToastKind::Warning, text, window, cx);
-            }
-            Err(err) => {
-                tracing::debug!(target: "tasklens::ui", ?err, ?col, "hide column refused");
-            }
-        }
-    }
-
-    /// `ResetColumns` (UI-PRC-006): with the owner's defaults, replaces the layout with them,
-    /// calls `on_columns_changed` once and shows "Columns reset to default". Without defaults,
-    /// or for another table, the action goes on to the owner.
-    fn on_reset_columns(&mut self, a: &ResetColumns, window: &mut Window, cx: &mut Context<Self>) {
-        let has_defaults = self
-            .shell
-            .default_layout
-            .as_ref()
-            .is_some_and(|d| d.table == a.table);
-        if !has_defaults {
-            cx.propagate();
-            return;
-        }
-        self.reset_columns(window, cx);
-    }
-
-    /// Replaces the layout with the owner's defaults, calls `on_columns_changed` once and shows
-    /// "Columns reset to default" in `window`. False and no change without defaults.
-    fn reset_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let scale = self.delegate.columns().ui_scale();
-        let Some(defaults) = &self.shell.default_layout else {
-            return false;
-        };
-        let mut layout = defaults.clone();
-        layout.rebuild(scale);
-        self.delegate.on_columns_changed(&layout, cx);
-        cx.notify();
-        let text = tr(cx, "table-toast-columns-reset");
-        push_toast(ToastKind::Info, text, window, cx);
-        true
-    }
-
-    /// `EnableAllColumns` (R-180): shows every column that exists on this system, each in its
-    /// remembered slot and width, and calls `on_columns_changed` once. Another table's id goes
-    /// on to the next handler.
-    fn on_enable_all_columns(
-        &mut self,
-        a: &EnableAllColumns,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let layout = self.delegate.columns();
-        if a.table != layout.table {
-            cx.propagate();
-            return;
-        }
-        let mut layout = layout.clone();
-        let ids = layout.order.clone();
-        for id in ids {
-            if self.delegate.column_spec(id).availability != Availability::NotOnThisSystem {
-                let _ = layout.set_visible(id, true);
-            }
-        }
-        layout.rebuild(layout.ui_scale());
-        self.delegate.on_columns_changed(&layout, cx);
-        cx.notify();
-    }
-
-    /// `OpenColumnPicker` for this table: opens the picker bound to it, or focuses the open one
-    /// and binds it here. A table with fixed columns or another id passes the action on.
-    fn on_open_column_picker(
-        &mut self,
-        a: &OpenColumnPicker,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if a.table != self.delegate.columns().table || self.delegate.columns_fixed() {
-            cx.propagate();
-            return;
-        }
-        let host: Rc<dyn ColumnHost> = Rc::new(cx.weak_entity());
-        let parent = Some(window.window_handle());
-        // The picker reads this table while it opens, so it opens after this update.
-        cx.defer(move |cx| columns_window::open_column_picker(host, parent, cx));
-    }
-
-    /// Shows or hides the column `key` for the picker and calls `on_columns_changed` once.
-    fn set_column_visible(
-        &mut self,
-        key: &str,
-        on: bool,
-        cx: &mut Context<Self>,
-    ) -> Result<(), ColumnError> {
-        let layout = self.delegate.columns();
-        let col = D::Column::parse(layout.table, key).ok_or(ColumnError::Unknown)?;
-        let mut layout = layout.clone();
-        if layout.visible.contains(&col) == on {
-            return Ok(());
-        }
-        layout.set_visible(col, on)?;
-        layout.rebuild(layout.ui_scale());
-        self.delegate.on_columns_changed(&layout, cx);
-        cx.notify();
-        Ok(())
-    }
-
-    /// Turns `press`, which just moved past the slop to window point `at`, into a reorder drag.
-    /// Name (`hideable == false`) never drags. Esc cancels the drag through a keystroke
-    /// interceptor, which runs before every key binding, so the global Esc chain never sees it.
-    fn start_reorder(
-        &mut self,
-        press: HeaderPress<D::Column>,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.delegate.column_spec(press.col).hideable {
-            return;
-        }
-        let layout = self.columns();
-        let Some(pos) = layout
-            .visible_columns()
-            .iter()
-            .position(|c| *c == press.col)
-        else {
-            return;
-        };
-        let x_offset = self.core.x_offset;
-        let grab = self.shell.header_state.content_x(press.at.x, x_offset) - layout.offsets()[pos];
-        self.shell.header_state.reorder = Some(ReorderDrag {
-            col: press.col,
-            grab,
-            x: Pixels::ZERO,
-            slot: pos,
-        });
-        self.reorder_to(at.x);
-        self.shell.header_state.set_hover(None);
-        let this = cx.weak_entity();
-        let handle = window.window_handle();
-        self.shell.reorder_esc = Some(cx.intercept_keystrokes(move |ev, window, cx| {
-            if ev.keystroke.key == "escape" && window.window_handle() == handle {
-                let _ = this.update(cx, |t, cx| t.cancel_reorder(cx));
-                cx.stop_propagation();
-            }
-        }));
-    }
-
-    /// Moves the reorder ghost to window x `x` and picks the nearest allowed boundary.
-    fn reorder_to(&mut self, x: Pixels) {
-        let x = self.shell.header_state.content_x(x, self.core.x_offset);
-        let layout = live_layout(&self.shell.header_state, &self.delegate);
-        let slot = insertion_slot(
-            layout.visible_columns(),
-            layout.offsets(),
-            layout.total_width(),
-            x,
-        );
-        if let Some(drag) = &mut self.shell.header_state.reorder {
-            drag.x = x;
-            drag.slot = slot;
-        }
-    }
-
-    /// Esc during a reorder drag: ends it with no change. The release that follows does nothing.
-    fn cancel_reorder(&mut self, cx: &mut Context<Self>) {
-        self.shell.header_state.reorder = None;
-        self.shell.header_state.press = None;
-        self.shell.reorder_esc = None;
-        cx.notify();
-    }
-
-    /// Applies a finished reorder drag: moves the column before the column at the drop slot, or
-    /// to the end, and calls `on_columns_changed` once. A drop on either edge of the column
-    /// itself changes nothing.
-    fn drop_column(&mut self, drag: ReorderDrag<D::Column>, cx: &mut Context<Self>) {
-        let layout = self.delegate.columns();
-        let visible = layout.visible_columns();
-        let Some(pos) = visible.iter().position(|c| *c == drag.col) else {
-            return;
-        };
-        if drag.slot == pos || drag.slot == pos + 1 {
-            return;
-        }
-        let before = visible.get(drag.slot).copied();
-        let mut layout = layout.clone();
-        if layout.move_column(drag.col, before).is_err() {
-            return;
-        }
-        layout.rebuild(layout.ui_scale());
-        self.delegate.on_columns_changed(&layout, cx);
-    }
-
-    /// Starts a boundary drag of `col` at window point `at`, on a copy of the delegate's layout.
-    fn start_resize(
-        &mut self,
-        col: D::Column,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let mins = self.column_mins(window, cx);
-        let layout = self.delegate.columns().clone();
-        let scale = layout.ui_scale();
-        let body = ScrollbarHandle::viewport_bounds(&self.core.scroll)
-            .size
-            .width;
-        // Before the first layout of the body the table's own width stands in.
-        let viewport = if body > Pixels::ZERO {
-            body
-        } else {
-            layout.total_width()
-        } / scale;
-        let start_widths = layout.widths.clone();
-        self.shell.header_state.resize = Some(ResizeDrag {
-            col,
-            start_x: at.x,
-            start_width: start_widths.get(&col).copied().unwrap_or(Pixels::ZERO),
-            start_widths,
-            mins,
-            viewport,
-            mode: self.shell.resize_mode,
-            layout,
-        });
-        self.shell.header_state.set_hover(None);
-        cx.notify();
-    }
-
-    /// The minimum width of every visible column at 100% (PROC-023), with the sort arrow's room
-    /// on the sort column. Measured through the global `TextMetricsCache`.
-    fn column_mins(&self, window: &Window, cx: &mut App) -> FxHashMap<D::Column, Pixels> {
-        let m = *metrics(cx);
-        let sort_col = self.delegate.sort().column();
-        let layout = self.delegate.columns();
-        let scale = layout.ui_scale();
-        if !cx.has_global::<TextMetricsCache>() {
-            cx.set_global(TextMetricsCache::default());
-        }
-        cx.update_global::<TextMetricsCache, _>(|cache, cx| {
-            cache.clear_if_stale(m.style_version);
-            layout
-                .visible_columns()
-                .iter()
-                .map(|&col| {
-                    let spec = self.delegate.column_spec(col);
-                    let sorted = spec.sortable && col == sort_col;
-                    let min = min_width(spec, sorted, cache, &m, window, cx);
-                    (col, min / scale)
-                })
-                .collect()
-        })
-    }
-
-    /// Fits `only`, or every visible column on `None`, to its content (UI-PRC-006): the largest
-    /// of the minimum, the widest text + 16 and the header label + 16 + 12. Texts come from the
-    /// rows the last frame built, the cell texts still cached from the last 3 table versions and
-    /// the delegate's `fit_samples`, never from a pass over all rows. Then calls
-    /// `on_columns_changed` once.
-    fn fit_columns(
-        &mut self,
-        only: Option<D::Column>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let m = *metrics(cx);
-        let mins = self.column_mins(window, cx);
-        let mut layout = self.delegate.columns().clone();
-        let scale = layout.ui_scale();
-        let targets: SmallVec<[D::Column; 24]> = match only {
-            Some(col) => smallvec![col],
-            None => layout.visible_columns().iter().copied().collect(),
-        };
-        let keys: SmallVec<[ColKey; 24]> =
-            targets.iter().map(|&c| self.shell.cols.key(c)).collect();
-        let widest = self.with_host(cx, |core, host| core.widest_texts(&keys, &m, window, host));
-        for (i, &col) in targets.iter().enumerate() {
-            let label = self.delegate.column_spec(col).label.clone();
-            let label_w =
-                self.shell
-                    .header_state
-                    .label_width(col, &label, m.style_version, &m, window);
-            let min = mins.get(&col).copied().unwrap_or(Pixels::ZERO) * scale;
-            let w = fit_width(min, widest[i], label_w, &m);
-            layout.widths.insert(col, w / scale);
-        }
-        layout.rebuild(scale);
-        self.delegate.on_columns_changed(&layout, cx);
-        cx.notify();
-    }
-
-    /// `ResizeColumnsToFit` from the header menu: fits every visible column. An action for
-    /// another table goes on to the next handler.
-    fn on_resize_columns_to_fit(
-        &mut self,
-        a: &ResizeColumnsToFit,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if a.table != self.delegate.columns().table {
-            cx.propagate();
-            return;
-        }
-        self.fit_columns(None, window, cx);
+        let totals = &mut self.shell.head.state.totals;
+        tree_header::header_total_text(totals, &mut self.core.out, &self.delegate, col)
     }
 
     /// Asks the delegate to sort by `col` (header click and `SortByColumn`). The delegate picks
     /// the direction with `next_sort`. Nothing on an unsortable column.
     pub fn sort_by_column(&mut self, col: D::Column, cx: &mut Context<Self>) {
-        if !self.delegate.column_spec(col).sortable {
-            return;
-        }
-        self.delegate.on_sort(col, cx);
-        cx.notify();
-    }
-
-    /// `SortByColumn` from the header menu. A key outside this table's column set is ignored.
-    fn on_sort_by_column(&mut self, a: &SortByColumn, _: &mut Window, cx: &mut Context<Self>) {
-        let table = self.columns().table;
-        if let Some(col) = D::Column::parse(table, &a.id) {
-            self.sort_by_column(col, cx);
-        }
+        self.with_cols(cx, |_, h| tree_header::sort_by_column(h, col));
     }
 }
 
@@ -1356,27 +775,10 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
     }
 
     fn columns(&self, cx: &App) -> Vec<PickerColumn> {
-        let Some(table) = self.upgrade() else {
-            return Vec::new();
-        };
-        let delegate = &table.read(cx).delegate;
-        let layout = delegate.columns();
-        layout
-            .order
-            .iter()
-            .map(|&id| {
-                let spec = delegate.column_spec(id);
-                PickerColumn {
-                    key: id.key(),
-                    label: spec.label.clone(),
-                    full_name: spec.full_name.clone(),
-                    group: spec.group.clone(),
-                    availability: spec.availability,
-                    hideable: spec.hideable,
-                    visible: layout.visible.contains(&id),
-                }
-            })
-            .collect()
+        match self.upgrade() {
+            Some(t) => tree_header::picker_columns(&t.read(cx).delegate),
+            None => Vec::new(),
+        }
     }
 
     fn set_visible(
@@ -1386,12 +788,16 @@ impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
         _: &mut Window,
         cx: &mut App,
     ) -> Result<(), ColumnError> {
-        self.update(cx, |t, cx| t.set_column_visible(key, on, cx))
-            .unwrap_or(Err(ColumnError::Unknown))
+        self.update(cx, |t, cx| {
+            t.with_cols(cx, |_, h| tree_header::set_column_visible(h, key, on))
+        })
+        .unwrap_or(Err(ColumnError::Unknown))
     }
 
     fn reset(&self, window: &mut Window, cx: &mut App) {
-        let reset = self.update(cx, |t, cx| t.reset_columns(window, cx));
+        let reset = self.update(cx, |t, cx| {
+            t.with_cols(cx, |_, h| tree_header::reset_columns(h, window))
+        });
         if !matches!(reset, Ok(true)) {
             tracing::debug!(target: "tasklens::ui", "picker reset: the table has no defaults");
         }
@@ -1475,17 +881,15 @@ impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
     }
 
     fn layout(&mut self) -> FrameLayout {
-        let Shell {
-            header_state, cols, ..
-        } = &mut *self.shell;
-        let layout = live_layout(header_state, &*self.delegate);
+        let Shell { head, cols, .. } = &mut *self.shell;
+        let layout = live_layout(head, &*self.delegate);
         FrameLayout {
             visible: cols.visible(layout.visible_columns()),
             offsets: layout.offsets().clone(),
         }
     }
     fn total_width(&self) -> Pixels {
-        live_layout(&self.shell.header_state, &*self.delegate).total_width()
+        live_layout(&self.shell.head, &*self.delegate).total_width()
     }
     fn name_column(&mut self) -> Option<ColKey> {
         name_column(&*self.delegate).map(|c| self.shell.cols.key(c))
@@ -1526,6 +930,9 @@ impl<D: TreeTableDelegate, X> DynRows for Host<'_, D, X> {
     }
     fn empty_clear_action(&self) -> Box<dyn gpui_kit::Action> {
         self.delegate.empty_clear_action()
+    }
+    fn tab_stop(&self) -> bool {
+        self.delegate.tab_stop()
     }
 
     fn is_selected(&self, ix: usize) -> bool {
@@ -1707,13 +1114,55 @@ impl<D: TreeTableDelegate> DynTreeDelegate for Host<'_, D, &mut Context<'_, TlTr
     }
 }
 
-/// Pushes a toast to the window's `ToastQueue`. A window without a queue shows nothing.
-fn push_toast(kind: ToastKind, text: SharedString, window: &mut Window, cx: &mut App) {
-    let Some(queue) = ToastQueue::of_window(window, cx) else {
-        tracing::debug!(target: "tasklens::ui", %text, "no toast queue in this window");
-        return;
-    };
-    queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
+impl<D: TreeTableDelegate> DynColumns<D::Column> for Host<'_, D, &mut Context<'_, TlTreeTable<D>>> {
+    fn parts(&mut self) -> Parts<'_, D::Column> {
+        Parts {
+            head: &mut self.shell.head,
+            src: &*self.delegate,
+            app: self.cx,
+        }
+    }
+    fn head_ref(&self) -> &HeaderCore<D::Column> {
+        &self.shell.head
+    }
+    fn source(&self) -> &dyn ColumnSource<D::Column> {
+        &*self.delegate
+    }
+    fn set_columns(&mut self, layout: &ColumnLayout<D::Column>) {
+        self.delegate.on_columns_changed(layout, self.cx);
+    }
+    fn sort_by(&mut self, col: D::Column) {
+        self.delegate.on_sort(col, self.cx);
+    }
+    fn col_key(&mut self, col: D::Column) -> ColKey {
+        self.shell.cols.key(col)
+    }
+    fn picker_host(&self) -> Rc<dyn ColumnHost> {
+        Rc::new(self.cx.weak_entity())
+    }
+}
+
+/// The delegate as the header and column logic reads it.
+impl<D: TreeTableDelegate> ColumnSource<D::Column> for D {
+    fn col_layout(&self) -> &ColumnLayout<D::Column> {
+        self.columns()
+    }
+    fn col_spec(&self, col: D::Column) -> &ColumnSpec<D::Column> {
+        self.column_spec(col)
+    }
+    fn col_sort(&self) -> (D::Column, bool) {
+        let sort = self.sort();
+        (sort.column(), sort.ascending())
+    }
+    fn cols_fixed(&self) -> bool {
+        self.columns_fixed()
+    }
+    fn col_lines(&self) -> HeaderLines {
+        self.header_lines()
+    }
+    fn col_total(&self, col: D::Column, out: &mut CellOut) -> bool {
+        self.header_total(col, out)
+    }
 }
 
 /// The column separators of one body row at `origin`: a `line`-wide quad on the right edge of
@@ -1803,7 +1252,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let m = *metrics(cx);
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
-        self.follow_ui_scale(m.ui_scale, cx);
+        self.with_cols(cx, |_, h| tree_header::follow_ui_scale(h, m.ui_scale));
         self.core.list_calls = 0;
         self.core.probe_gutter = None;
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -1813,52 +1262,9 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             self.line_canvases.set(0);
         }
         self.core.x_offset = -ScrollbarHandle::offset(&self.core.scroll).x;
-        let hairline = UiMetrics::hairline(window);
-
-        let lines = self.delegate.header_lines();
-        self.prepare_header(lines, &m, &theme, window);
-        let tooltip = self
-            .shell
-            .header_state
-            .hover
-            .and_then(|c| header_tooltip(self.delegate.column_spec(c)));
-        let header = TlTreeTableHeader {
-            layout: self.columns(),
-            lines,
-            x_offset: self.core.x_offset,
-            m: &m,
-            theme: &theme,
-            hairline,
-            state: &self.shell.header_state,
-            listener: self.shell.header_listener.clone(),
-        }
-        .render(tooltip, window, cx);
-
-        let insert_x = self.shell.header_state.insert_x;
-        let body = self.with_host(cx, |core, host| {
-            core.render_body(insert_x, &m, &theme, window, host)
-        });
-
-        let root = v_flex()
-            .tl_selector(|| "TlTreeTable".into())
-            .size_full()
-            .bg(theme.list_bg)
-            .key_context(TABLE_CONTEXT)
-            .track_focus(&self.core.focus)
-            .tab_index(0)
-            .tab_stop(self.delegate.tab_stop());
-        // CopyRow, CopyCell, CollapseAll and the header Actions have no handler here, so they
-        // bubble to the owner page (open item 16).
-        self.core
-            .key_actions(root)
-            .on_action(cx.listener(Self::on_sort_by_column))
-            .on_action(cx.listener(Self::on_resize_columns_to_fit))
-            .on_action(cx.listener(Self::on_hide_column))
-            .on_action(cx.listener(Self::on_reset_columns))
-            .on_action(cx.listener(Self::on_enable_all_columns))
-            .on_action(cx.listener(Self::on_open_column_picker))
-            .child(header)
-            .child(body)
+        self.with_cols(cx, |core, h| {
+            tree_header::render_table(h, core, &m, &theme, window)
+        })
     }
 }
 
