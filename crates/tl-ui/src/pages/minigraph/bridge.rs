@@ -19,7 +19,17 @@ use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged};
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::shell::keep_above_supported;
-use crate::windows::mini::{MINI_WINDOW_TITLE, MiniWindow};
+
+/// The mini window's caption. Never translated: the bridge matches it (R-086). The
+/// `mini-window-title` string carries the same text.
+pub const MINI_WINDOW_TITLE: &str = "tasklens Mini Window";
+
+/// Whether the open mini window keeps above other windows; false while none is open. The mini
+/// window sets it when it opens, so the bridge reads the flag without naming the window type
+/// (ADR-020: the mini window sits in a higher layer).
+pub struct MiniKeepAbove(pub fn(&App) -> bool);
+
+impl Global for MiniKeepAbove {}
 
 /// The last move of a detached window is saved this long after it.
 const POSITION_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -193,7 +203,7 @@ fn first_match(own: OwnWindow, frame: FrameGeometry, caption: &Arc<str>, cx: &Ap
             (true, saved.filter(|&xy| xy != (0, 0)))
         }
         OwnWindow::Mini => {
-            let on = MiniWindow::open_view(cx).is_some_and(|m| m.read(cx).always_on_top());
+            let on = cx.try_global::<MiniKeepAbove>().is_some_and(|q| (q.0)(cx));
             (on, None)
         }
     };

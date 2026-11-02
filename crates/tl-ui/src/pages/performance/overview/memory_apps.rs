@@ -53,9 +53,9 @@ use tl_model::units;
 use tl_ui_settings::settings::{GroupColor, MEMORY_BY_APP_COLORS_MAX, MEMORY_BY_APP_SLOTS};
 use tracing::warn;
 
-use super::overview::parts::{ChartSettings, box_chart, class_probe};
-use super::overview::timeline::{self, OverviewPause};
-use super::page::page_range_ns;
+use super::parts::{ChartSettings, box_chart, class_probe};
+use super::range::page_range_ns;
+use super::timeline::{self, OverviewPause};
 use crate::chart::geometry::right_edge_ns;
 use crate::chart::view::{HistoryClock, derived_view, find_tiered, history_view, reads_history};
 use crate::chart::{
@@ -1517,7 +1517,7 @@ impl Render for MemoryAppsChart {
         let order = legend_order(&self.bands);
         let rows = order.len();
         let row_h = LEGEND_ROW_H * m.ui_scale;
-        let page_h = super::page::GRAPH_H_OVERALL * m.ui_scale;
+        let page_h = crate::pages::performance::core::GRAPH_H_OVERALL * m.ui_scale;
         let (below, shown, more) = match self.place {
             AppsPlace::Page => {
                 let (shown, more) = legend_fit(rows, page_h, row_h);

@@ -45,7 +45,7 @@ use crate::host::HostContext;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::pages::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
-use crate::pages::minigraph::bridge::OwnWindowBridge;
+use crate::pages::minigraph::bridge::{MiniKeepAbove, OwnWindowBridge};
 use crate::pages::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
 use crate::pages::performance::card::{CARD_H, CardLines, CardView};
 use crate::pages::performance::sidebar::DeviceSidebar;
@@ -67,9 +67,9 @@ const SP4: f32 = 8.;
 /// The share of the work area height the window may take.
 const HEIGHT_CAP: f32 = 0.9;
 
-/// The window caption. Never translated: the KWin bridge matches it (R-086). The
-/// `mini-window-title` string carries the same text.
-pub const MINI_WINDOW_TITLE: &str = "tasklens Mini Window";
+/// The window caption. It moved to the KWin bridge (tasklens-zljr5.22); this keeps the old path
+/// working.
+pub use crate::pages::minigraph::bridge::MINI_WINDOW_TITLE;
 /// The key context of the window's one focus handle.
 pub const MINI_CONTEXT: &str = "MiniWindow";
 /// Element id of the scrolling card list.
@@ -271,6 +271,10 @@ impl MiniWindow {
         let driver = cx.new(AnimationDriver::new);
         AnimationDriver::register(&driver, window, cx);
         window.set_window_title(MINI_WINDOW_TITLE);
+        // The KWin bridge asks this when it pins the window (PERF-093).
+        cx.set_global(MiniKeepAbove(|cx| {
+            Self::open_view(cx).is_some_and(|m| m.read(cx).always_on_top())
+        }));
 
         // The sidebar subscribed to the hub and the settings first, so its handlers have run
         // when these do.

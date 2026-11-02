@@ -63,7 +63,6 @@ use tl_ui_settings::layout::{
 };
 use tl_ui_settings::settings::NetworkUnit;
 
-use super::super::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines};
 use super::box_menu::GPU_VRAM_ID;
 use super::cpu_box::value_text;
 use super::fit::fit_text;
@@ -91,6 +90,9 @@ use crate::chart::{
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::core::DeviceKey;
+use crate::pages::performance::core::gpu::{
+    GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines,
+};
 use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::grid::SlotDevice;

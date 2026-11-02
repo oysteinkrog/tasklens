@@ -48,12 +48,12 @@ use tl_model::validity::Validity;
 use tl_ui_settings::layout::{ContainerLayout, FixedWidget, MEMORY_BOX_CONTAINER};
 use tl_ui_settings::settings::NetworkUnit;
 
-use super::super::memory_apps::{AppsPlace, MemoryAppsChart};
 use super::cpu_box::value_text;
 use super::fit::{fit_text, whole_rows};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{Arrange, ArrangeChoice, BoxMode};
 use super::mem_flow::{self, MemFlowKeys, MemLook, MemPlan, PlanCell};
+use super::memory_apps::{AppsPlace, MemoryAppsChart};
 use super::parts::{
     ChartSettings, GridFit, Meter, SPARK_GRID, SPARK_W, arrange_grid, box_chart, box_frame,
     chart_section_versions, class_probe, edit_chrome, grid_cells, spark_chart,

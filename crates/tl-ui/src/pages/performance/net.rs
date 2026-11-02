@@ -41,6 +41,7 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::{NoOp, PerfFetchPublicIp, PerfOpenNetworkSettings};
+pub use super::core::scales::throughput_scale;
 use super::details::{Fallback, KeyValueModel};
 use super::page::{
     DetailsLinkClick, DetailsValuePrefix, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text,
@@ -180,21 +181,6 @@ fn section_versions(cx: &App) -> [u64; 4] {
         tl.version(Section::Appearance),
         tl.version(Section::Units),
     ]
-}
-
-/// The Throughput chart's Y scale (UI-PRF-031): the link speed when the scale follows it and the
-/// speed is known, otherwise auto, with powers of two under bytes (UI-PRF-001 fallback).
-pub fn throughput_scale(
-    dynamic_scale: bool,
-    link_speed_bps: Option<f32>,
-    unit: NetworkUnit,
-) -> YScale {
-    match link_speed_bps {
-        Some(speed) if !dynamic_scale => YScale::LinkSpeed(speed),
-        _ => YScale::AutoRate {
-            iec: unit == NetworkUnit::Bytes,
-        },
-    }
 }
 
 /// The interface's sysfs link speed in bits per second, `None` when it is not Valid or not above

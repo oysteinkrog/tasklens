@@ -46,7 +46,7 @@ use crate::components::validity::{GlyphContent, glyph_parts};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
 use crate::net_totals::NetTotal;
-use crate::pages::performance::DeviceKey;
+use crate::pages::performance::core::DeviceKey;
 use crate::selector::TlSelector;
 use crate::settings_global::{Section, TlSettings};
 use crate::text::ellipsis::ELLIPSIS;

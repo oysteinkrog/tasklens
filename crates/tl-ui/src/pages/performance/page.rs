@@ -60,6 +60,8 @@ use crate::pages::performance::overview::parts::title_value_style;
 use crate::pages::performance::overview::range::{
     PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
+// page_range_ns moved to overview/range.rs (tasklens-zljr5.22). This keeps the old path working.
+pub use crate::pages::performance::overview::range::page_range_ns;
 use crate::pages::performance::widget::edit::WidgetEditor;
 use crate::selector::TlSelector;
 use crate::settings_global::TlSettings;
@@ -67,7 +69,7 @@ use crate::template::Template;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
-pub use super::core::PAGE_PAD;
+pub use super::core::{GRAPH_H_OVERALL, PAGE_PAD};
 /// Height of the header row, × ui_scale. `page_header_h`.
 pub const PAGE_HEADER_H: f32 = 36.;
 /// Space between the graph area and the "Details" heading, × ui_scale. `details_gap`.
@@ -78,8 +80,6 @@ pub const PAGE_MIN_W: f32 = 400.;
 pub const GRAPH_H_SINGLE: f32 = 240.;
 /// Height of each of two stacked charts, × ui_scale.
 pub const GRAPH_H_STACKED: f32 = 150.;
-/// Height of the CPU Overall chart, × ui_scale.
-pub const GRAPH_H_OVERALL: f32 = 300.;
 /// Height of a secondary chart under the main one, × ui_scale.
 pub const SECONDARY_GRAPH_H: f32 = 120.;
 
@@ -94,12 +94,6 @@ pub const GRAPH_AREA_ID: &str = "perf-graph-area";
 pub const RANGE_ID: &str = "perf-page-range-switch";
 /// Debug selector of the "Live only" note over a chart.
 pub const LIVE_ONLY_ID: &str = "perf-live-only";
-
-/// The range of a device page chart in ns: `performance.overview_range`, the range the Overview
-/// draws too. Over 10 minutes a chart made `with_device_history` reads the device metric history.
-pub fn page_range_ns(cx: &App) -> u64 {
-    current_range(cx).span_ns()
-}
 
 /// The range of a page chart that reads only the live series: the shared range at 1 min and
 /// 5 min, `performance.graph_range_s` (the sidebar tiles' window) at 1 h, 24 h and 7 d.

@@ -44,7 +44,6 @@ use tl_model::validity::Validity;
 use tl_ui_settings::layout::{CPU_BOX_CONTAINER, ContainerLayout};
 use tl_ui_settings::settings::{CoreSmoothing, NetworkUnit};
 
-use super::super::cpu::{PowerState, SecondaryAvail, logical_devices};
 use super::cpu_flow::{self, CpuFlowKeys, CpuLook, CpuPlan, PlanCell, PlanPower};
 use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{
@@ -69,6 +68,8 @@ use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::performance::core::DeviceKey;
 use crate::pages::performance::core::core_clocks::CoreClocks;
+use crate::pages::performance::core::cpu::{PowerState, SecondaryAvail};
+use crate::pages::performance::core::logical_devices;
 use crate::pages::performance::widget::container::WidgetContainer;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::pages::performance::widget::group_widget::GroupFlowLook;

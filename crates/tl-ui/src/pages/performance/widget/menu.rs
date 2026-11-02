@@ -70,7 +70,7 @@ use crate::pages::performance::core::actions::{
     PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm,
     PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
 };
-use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
+use crate::pages::performance::core::gpu::{GpuVendor, gpu_totals, grid_engines};
 use crate::pages::performance::overview::layout::Arrange;
 use crate::settings_global::TlSettings;
 

@@ -39,9 +39,10 @@ use tl_model::validity::Validity;
 use super::actions::{
     PerfSetMemoryGroupsShown, PerfToggleMemoryComposition, PerfToggleMemorySwapGraph,
 };
+pub(crate) use super::core::look::DIRTY_ALPHA;
 use super::details::{Fallback, KeyValueModel, render_details};
-use super::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
 use super::memory_bar::{Composition, CompositionBarView};
+use super::overview::memory_apps::{GROUPS_SHOWN, MemoryAppsChart};
 use super::page::{
     DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_history_request, page_range_ns, page_words,
 };
@@ -121,9 +122,6 @@ const KEY_SWAP_TYPES: [&str; 3] = [
 pub const SWAP_TABLE_ID: &str = "perf-mem-swap-table";
 /// The table shows at most this many rows; more rows scroll.
 pub const SWAP_TABLE_MAX_ROWS: usize = 8;
-
-/// Alpha of the dirty-bytes line against `mem_line`.
-pub(crate) const DIRTY_ALPHA: f32 = 0.6;
 
 /// The page's words, translated once per strings version.
 #[derive(Clone, Debug, Default)]

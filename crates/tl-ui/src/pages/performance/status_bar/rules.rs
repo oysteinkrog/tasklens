@@ -10,13 +10,13 @@
 use std::sync::Arc;
 
 use smallvec::SmallVec;
-use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tl_model::system::Metric;
 use tl_model::time::TimeNs;
 
+pub use crate::pages::performance::core::sensors::cpu_hot_c;
 use crate::pages::performance::overview::layout::BoxKind;
 
 /// CPU, GPU, disk active time or network use above this percent gives `Busy`.
@@ -47,11 +47,6 @@ const SWEEP_FRESH_NS: u64 = 12 * NS;
 pub const GAP_NS: u64 = 3 * NS;
 
 const NS: u64 = 1_000_000_000;
-
-/// The hwmon chips the engine reads the CPU temperature from, in its order (tl-collect
-/// `CPU_TEMP_CHIPS`), and the labels it prefers on them.
-const CPU_TEMP_CHIPS: [&str; 4] = ["k10temp", "zenpower", "coretemp", "cpu_thermal"];
-const CPU_TEMP_LABELS: [&str; 2] = ["Tctl", "Package id 0"];
 
 /// The machine states, lowest first. The highest true one wins.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
@@ -199,26 +194,6 @@ fn valid(m: Metric<f32>) -> Option<f32> {
 
 fn flag(m: Metric<bool>) -> bool {
     m.validity.is_valid() && m.value
-}
-
-/// The CPU temperature's `hot_c`: the sensor the engine reads `CpuTotals.temp_c` from, the
-/// first CPU chip in the engine's order, the `Tctl` or `Package id 0` input on it, else its
-/// first input.
-pub fn cpu_hot_c(devices: &DeviceCatalog) -> Option<f32> {
-    let sensors = || {
-        devices.entries.iter().filter_map(|e| match &e.identity {
-            DeviceIdentity::Sensor { chip, label } if e.present => Some((chip, label, e.hot_c)),
-            _ => None,
-        })
-    };
-    let chip = CPU_TEMP_CHIPS
-        .iter()
-        .find(|wanted| sensors().any(|(chip, _, _)| &**chip == **wanted))?;
-    let on_chip = || sensors().filter(|(c, _, _)| &***c == *chip);
-    on_chip()
-        .find(|(_, label, _)| CPU_TEMP_LABELS.contains(&&***label))
-        .or_else(|| on_chip().next())
-        .and_then(|(_, _, hot)| hot)
 }
 
 impl Reading {
@@ -610,7 +585,7 @@ pub fn chips(r: &Reading, out: &mut SmallVec<[Chip; 8]>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_model::devices::DeviceEntry;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::ProcessKey;
     use tl_model::process::{GroupKind, ProcState, ProcessMeta};
     use tl_model::snapshot::ComponentHeader;

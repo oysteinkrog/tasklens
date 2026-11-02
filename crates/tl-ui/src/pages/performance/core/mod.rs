@@ -1,11 +1,17 @@
 //! The shared base of the Performance tab (ADR-020 layer tl-ui-perf-core): device keys and
 //! kinds, the sidebar order and visibility rules, the perf actions, the Details model, the core
-//! clock charts and the page padding. The Overview, the widgets and the device pages build on it;
-//! it names none of them.
+//! clock charts, the page padding, and the helpers the Overview and the widgets share with the
+//! device pages (GPU engines, CPU secondary chart, sensors, scales, line alphas). The Overview,
+//! the widgets and the device pages build on it; it names none of them.
 
 pub mod actions;
 pub mod core_clocks;
+pub mod cpu;
 pub mod details;
+pub mod gpu;
+pub mod look;
+pub mod scales;
+pub mod sensors;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -25,6 +31,8 @@ use crate::theme::palette::{DeviceAccent, accent_color};
 
 /// Page padding on every side, × ui_scale. `page_pad`.
 pub const PAGE_PAD: f32 = 16.;
+/// Height of the CPU Overall chart, × ui_scale.
+pub const GRAPH_H_OVERALL: f32 = 300.;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
 pub use tl_model::devices::NetKind as NetClass;
@@ -251,6 +259,19 @@ pub fn sidebar_order(
     out.sort_by_key(|row| {
         let saved = settings.order.iter().position(|k| *k == row.key);
         (saved.unwrap_or(usize::MAX), row.kind as u8)
+    });
+}
+
+/// Removes disk children from a sidebar list. The engine keeps partitions and device-mapper
+/// devices in the catalog for attribution, but only their whole parent disks get cards.
+pub(crate) fn retain_whole_disks(rows: &mut Vec<DeviceRow>, catalog: &DeviceCatalog) {
+    rows.retain(|row| {
+        row.kind != DeviceKind::Disk
+            || catalog
+                .entries
+                .iter()
+                .find(|entry| entry.idx == row.idx)
+                .is_none_or(|entry| entry.parent.is_none())
     });
 }
 

@@ -35,6 +35,9 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::actions::{PerfRenameFan, PerfSetFanTempSensor};
+#[cfg(test)]
+use super::core::sensors::fan_key_parts;
+pub use super::core::sensors::{SensorRef, default_sensor, sensor_device};
 use super::details::{Fallback, KeyValueModel};
 use super::page::{
     DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
@@ -74,10 +77,6 @@ pub const BATTERY_CHART_ID: &str = "perf-battery-chart";
 pub const BATTERY_HISTORY_ID: &str = "perf-battery-history";
 /// Debug selector of the first day label under the history chart.
 pub const BATTERY_DAY_LABEL_ID: &str = "perf-battery-day-label";
-
-/// `<hwmon name>:<device path>:temp<n>`, the persistent key of a temperature sensor without its
-/// `sensor:` prefix (table (a) `[fans]`).
-pub type SensorRef = Arc<str>;
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Fill alpha of a type that has one colour (UI-PRF-005 table note).
@@ -203,43 +202,6 @@ const BAT_STATES: [(&str, &str); 7] = [
 
 /// The value the Temperature chart shows without a sensor.
 const NO_VALUE: &str = "-";
-
-/// The fan's chip and path (`<hwmon name>:<path>`) and index from its persistent key
-/// `fan:<chip>:<path>:<n>`.
-fn fan_key_parts(key: &str) -> Option<(&str, &str)> {
-    key.strip_prefix("fan:")?.rsplit_once(':')
-}
-
-/// The default sensor of the fan with persistent key `fan_key` (PERF-077): the temperature
-/// `temp<n>` of the same chip and path, only when the chip has exactly one fan.
-pub fn default_sensor(snap: &Snapshot, fan_key: &str) -> Option<SensorRef> {
-    let (chip_path, n) = fan_key_parts(fan_key)?;
-    let fans = snap
-        .devices
-        .entries
-        .iter()
-        .filter(|e| matches!(e.identity, DeviceIdentity::Fan { .. }))
-        .filter(|e| fan_key_parts(&e.persistent_key).is_some_and(|(c, _)| c == chip_path))
-        .count();
-    if fans != 1 {
-        return None;
-    }
-    let sensor = format!("{chip_path}:temp{n}");
-    sensor_device(snap, &sensor).map(|_| SensorRef::from(sensor))
-}
-
-/// The catalog device of `sensor` (a [`SensorRef`]).
-pub fn sensor_device(snap: &Snapshot, sensor: &str) -> Option<DeviceIdx> {
-    snap.devices
-        .entries
-        .iter()
-        .find(|e| {
-            e.persistent_key
-                .strip_prefix("sensor:")
-                .is_some_and(|k| k == sensor)
-        })
-        .map(|e| e.idx)
-}
 
 /// The sensor the page shows: the saved choice of the fan when set, else the default pairing.
 /// A saved choice that is not in the catalog gives `None`.

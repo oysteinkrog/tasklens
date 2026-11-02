@@ -77,6 +77,12 @@ pub fn current_range(cx: &App) -> OverviewRange {
     }
 }
 
+/// The range of a device page chart in ns: `performance.overview_range`, the range the Overview
+/// draws too. Over 10 minutes a chart made `with_device_history` reads the device metric history.
+pub fn page_range_ns(cx: &App) -> u64 {
+    current_range(cx).span_ns()
+}
+
 /// Writes `performance.overview_range`.
 pub fn set_range(range: OverviewRange, cx: &mut App) {
     if cx.has_global::<TlSettings>() && current_range(cx) != range {

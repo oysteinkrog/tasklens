@@ -26,11 +26,11 @@ use tl_ui_settings::layout::{
 use tl_ui_settings::layout_boxes::CPU_LOGICAL_PREFIX;
 use tl_ui_settings::settings::PerformanceSettings;
 
+use crate::pages::performance::core::gpu::{GpuVendor, gpu_totals, grid_engines};
+use crate::pages::performance::core::retain_whole_disks;
 use crate::pages::performance::core::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, visible_rows,
 };
-use crate::pages::performance::gpu::{GpuVendor, gpu_totals, grid_engines};
-use crate::pages::performance::sidebar::retain_whole_disks;
 
 /// The name of loopback, which the Network box never counts.
 const LOOPBACK: &str = "lo";

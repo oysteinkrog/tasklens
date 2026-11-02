@@ -16,7 +16,6 @@ pub mod cpu_grid;
 pub mod disk;
 pub mod gpu;
 pub mod memory;
-pub mod memory_apps;
 pub mod memory_bar;
 pub mod menu;
 pub mod net;
@@ -35,6 +34,8 @@ pub use self::core::{
     sidebar_order, visible_rows,
 };
 pub use self::core::{actions, core_clocks, details};
+// memory_apps moved into overview/ (tasklens-zljr5.22).
+pub use self::overview::memory_apps;
 
 #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
 use std::cell::Cell;

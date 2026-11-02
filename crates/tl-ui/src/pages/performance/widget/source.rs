@@ -65,13 +65,13 @@ use crate::i18n::{Strings, tr, tr_args};
 use crate::net_totals::NetTotal;
 use crate::pages::performance::core::DeviceKey;
 use crate::pages::performance::core::core_clocks::core_lines;
-use crate::pages::performance::cpu::logical_devices;
-use crate::pages::performance::gpu::{GpuVendor, gpu_totals};
+use crate::pages::performance::core::gpu::{GpuVendor, gpu_totals};
+use crate::pages::performance::core::logical_devices;
+use crate::pages::performance::core::sensors::{default_sensor, sensor_device};
 use crate::pages::performance::overview::cpu_box::CoreAverage;
 use crate::pages::performance::overview::picked::{box_mask, box_snapshot};
 use crate::pages::performance::overview::range::{Figures, current_range, figures_text};
 use crate::pages::performance::overview::timeline::{OverviewPause, paused};
-use crate::pages::performance::sensors::{default_sensor, sensor_device};
 use crate::settings_global::TlSettings;
 use crate::template::Template;
 

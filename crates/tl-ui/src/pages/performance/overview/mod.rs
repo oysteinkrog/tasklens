@@ -43,6 +43,7 @@ pub mod inner_split;
 pub mod layout;
 pub mod mem_box;
 pub mod mem_flow;
+pub mod memory_apps;
 pub mod net_box;
 pub mod net_flow;
 pub mod parts;

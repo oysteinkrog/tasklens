@@ -48,8 +48,8 @@ use crate::pages::minigraph::card::{chart_spec_for, device_for, resolve_colors};
 use crate::pages::minigraph::sources::{
     GraphColumn, MinigraphSource, column_scale, name_match_count, resolve_process_source,
 };
-use crate::pages::performance::actions::PerfAddTrayGraph;
-use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::pages::performance::core::actions::PerfAddTrayGraph;
+use crate::pages::performance::core::{DeviceKey, DeviceKind};
 use crate::settings_global::TlSettings;
 use crate::shell::ShellApi;
 use crate::shell::ShellState;

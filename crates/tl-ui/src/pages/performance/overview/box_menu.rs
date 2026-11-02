@@ -50,7 +50,7 @@ use crate::pages::performance::core::actions::{
     PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement, PerfOverviewSetTimelineClick,
     PerfWidgetEditBox, PerfWidgetEditStart,
 };
-use crate::pages::performance::cpu::PowerState;
+use crate::pages::performance::core::cpu::PowerState;
 use crate::pages::performance::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
 use crate::pages::performance::widget::menu::{confirm_preset, confirm_reset_now};
 use crate::selector::TlSelector;

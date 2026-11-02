@@ -28,13 +28,16 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::{CpuStaticInfo, RaplState, Snapshot};
+use tl_model::snapshot::{CpuStaticInfo, Snapshot};
 use tl_model::system::{CpuTopology, Metric};
 use tl_model::validity::Validity;
 use tl_ui_settings::settings::{CpuGraphMode, CpuSecondaryGraph, NetworkUnit};
 
 use super::actions::{PerfSetCpuGraphMode, PerfSetCpuSecondaryGraph, PerfToggleCpuKernel};
 pub(crate) use super::core::logical_devices;
+// Moved to `core/` (tasklens-zljr5.22). These keep the old paths working.
+pub use super::core::cpu::{PowerState, SecondaryAvail};
+pub(crate) use super::core::look::{OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
 use super::core_clocks::CoreClocks;
 use super::cpu_board::CpuBoard;
 use super::cpu_details::{
@@ -89,12 +92,6 @@ const BOARD_CHART_SHARE: f32 = 0.4;
 pub const SECONDARY_ID: &str = "perf-cpu-secondary";
 /// Debug selector of the fallback tooltip trigger over the secondary chart's heading.
 pub const SECONDARY_TIP_ID: &str = "perf-cpu-secondary-tip";
-
-/// Lowest line alpha in the overlaid mode (PERF-029).
-pub(crate) const OVERLAID_MIN_ALPHA: f32 = 0.08;
-/// Band alphas in the stacked mode, alternating. No document gives a per-band colour step, so
-/// every band is `cpu_fill` and the alpha alternates (plan open item 7).
-pub(crate) const STACKED_ALPHAS: [f32; 2] = [0.85, 0.70];
 
 const KEY_OVERALL: &str = "perf-cpu-mode-overall";
 const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";
@@ -172,50 +169,6 @@ const fn mode_index(mode: CpuGraphMode) -> usize {
         CpuGraphMode::AllCoresOverlaid => 2,
         CpuGraphMode::AllCoresStacked => 3,
         CpuGraphMode::Board => 4,
-    }
-}
-
-/// Whether the CPU power draw can be read (PERF-038).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PowerState {
-    Readable,
-    /// A RAPL zone exists but the user cannot read it.
-    NeedsSetup,
-    /// No RAPL zone.
-    NoZone,
-}
-
-/// What the secondary chart can show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SecondaryAvail {
-    pub power: PowerState,
-    /// A CPU hwmon chip reports a temperature.
-    pub temperature: bool,
-    pub clock: bool,
-}
-
-impl SecondaryAvail {
-    /// From the static RAPL state, else, before the static info arrives, from the package
-    /// power's validity (Restricted is a zone the user cannot read). Temperature and clock are
-    /// available unless their validity is Unsupported or Missing.
-    pub fn read(snap: &Snapshot, info: &CpuStaticInfo) -> Self {
-        let cpu = &snap.system.cpu;
-        let power = match info.rapl {
-            Some(RaplState::Readable) => PowerState::Readable,
-            Some(RaplState::Unreadable) => PowerState::NeedsSetup,
-            Some(RaplState::NoZone) => PowerState::NoZone,
-            None => match cpu.package_power_w.validity {
-                Validity::Valid | Validity::Stale | Validity::WarmingUp => PowerState::Readable,
-                Validity::Restricted => PowerState::NeedsSetup,
-                _ => PowerState::NoZone,
-            },
-        };
-        let present = |v: Validity| !matches!(v, Validity::Unsupported | Validity::Missing);
-        Self {
-            power,
-            temperature: present(cpu.temp_c.validity),
-            clock: present(cpu.freq_mhz.validity),
-        }
     }
 }
 

@@ -50,7 +50,7 @@ use crate::demand::DemandAggregator;
 use crate::host::HostContext;
 use crate::hub::SnapshotHub;
 use crate::i18n::{tr, tr_args};
-use crate::pages::performance::{DeviceKey, DeviceKind};
+use crate::pages::performance::core::{DeviceKey, DeviceKind};
 use crate::registry::{GlobalRegistry, WindowKey};
 use crate::selector::TlSelector;
 use crate::settings_global::{SettingValue, TlSettings, animations_on};

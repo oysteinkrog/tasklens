@@ -56,6 +56,7 @@ use super::card::{
     CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardView, CardWords, DeviceCard, StaleTimer,
     card_chart_grid, card_chart_labels, card_words, update_card_lines,
 };
+pub(super) use super::core::retain_whole_disks;
 use super::menu::card_menu_in;
 use super::widget::edit::{WidgetEditMode, any_editing};
 use super::{
@@ -87,22 +88,6 @@ const UPLOAD_TINT: f32 = 0.3;
 /// Fan and battery line colours (UI-PRF-005: "Violet" and "Mint").
 const FAN_COLOR: &str = "violet";
 const BATTERY_COLOR: &str = "mint";
-
-/// Removes disk children from a sidebar list. The engine keeps partitions and device-mapper
-/// devices in the catalog for attribution, but only their whole parent disks get cards.
-pub(super) fn retain_whole_disks(
-    rows: &mut Vec<DeviceRow>,
-    catalog: &tl_model::devices::DeviceCatalog,
-) {
-    rows.retain(|row| {
-        row.kind != DeviceKind::Disk
-            || catalog
-                .entries
-                .iter()
-                .find(|entry| entry.idx == row.idx)
-                .is_none_or(|entry| entry.parent.is_none())
-    });
-}
 
 /// Edit-mode group. Overview shares Processor because it is derived from the CPU package and the
 /// edit-mode specification has no separate Overview group.
