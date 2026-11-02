@@ -20,30 +20,32 @@ use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
-use tl_ui::components::menu::{TlMenu, context_menu_layer};
-use tl_ui::components::toast::ToastQueue;
-use tl_ui::components::tooltip::DELAY_CONTROL;
-use tl_ui::components::validity::{GlyphContent, glyph_parts};
-use tl_ui::components::window_frame::TlSecondaryWindow;
-use tl_ui::table::actions::{EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
-use tl_ui::table::cells::CellOut;
-use tl_ui::table::columns::{
+use tl_ui_base::registry::GlobalRegistry;
+use tl_ui_base::text::fonts::load_bundled_fonts;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::menu::{TlMenu, context_menu_layer};
+use tl_ui_kit::components::toast::ToastQueue;
+use tl_ui_kit::components::tooltip::DELAY_CONTROL;
+use tl_ui_kit::components::validity::{GlyphContent, glyph_parts};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
+use tl_ui_table::table::actions::{
+    EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit,
+};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
-use tl_ui::table::columns_window::{ColumnPicker, PickerColumn, PickerItem};
-use tl_ui::table::header::{
+use tl_ui_table::table::columns_window::{ColumnPicker, PickerColumn, PickerItem};
+use tl_ui_table::table::header::{
     GHOST_OPACITY, HeaderMenuItem, HeaderMenuRow, UNSORTABLE_TOOLTIP, ghost_fill, header_menu_rows,
     header_tooltip, resize_behavior_rows,
 };
-use tl_ui::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     ColumnResizeMode, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,
 };
-use tl_ui::text::fonts::load_bundled_fonts;
-use tl_ui::text::metrics::TextMetricsCache;
-use tl_ui::theme::{current, metrics};
-use tl_ui::window::registry::GlobalRegistry;
-use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
 fn cosmic_cx() -> TestAppContext {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
@@ -52,11 +54,11 @@ fn cosmic_cx() -> TestAppContext {
         let report = load_bundled_fonts(cx);
         assert!(report.ui_ok, "failed faces: {:?}", report.failed);
         gpui_kit::init(cx);
-        tl_ui::table::actions::bind_keys_table(cx);
-        tl_ui::components::menu::bind_keys(cx);
-        tl_ui::components::toast::init(cx);
-        tl_ui::i18n::init_strings(cx, "en-US");
-        tl_ui::theme::store::init(
+        tl_ui_table::table::actions::bind_keys_table(cx);
+        tl_ui_kit::components::menu::bind_keys(cx);
+        tl_ui_kit::components::toast::init(cx);
+        tl_ui_base::i18n::init_strings(cx, "en-US");
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -687,7 +689,7 @@ fn drag_last_column_mode_and_minimum() {
     let (table, vcx) = open(&mut cx, HDelegate::new());
     vcx.update(|_, cx| {
         table.update(cx, |t, _| {
-            t.set_resize_mode(tl_ui::table::ColumnResizeMode::LastColumn)
+            t.set_resize_mode(tl_ui_table::table::ColumnResizeMode::LastColumn)
         })
     });
     // User 200..300 dragged far left: clamped to the text minimum 60; PSS takes the difference.
@@ -1556,7 +1558,7 @@ fn picker_name_always_on() {
     assert!(rig.pcx.debug_bounds("ColumnPicker-note-name").is_some());
     let text = rig
         .pcx
-        .update(|_, cx| tl_ui::i18n::tr(cx, "table-picker-always-on"));
+        .update(|_, cx| tl_ui_base::i18n::tr(cx, "table-picker-always-on"));
     assert_eq!(text.as_ref(), "always on");
 
     // A click on the Name row changes nothing.
@@ -1959,7 +1961,7 @@ fn column_widths_follow_ui_scale_change() {
             ui_scale_pct: 115,
             ..AppearanceSettings::default()
         };
-        assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+        assert!(tl_ui_base::theme::metrics::recompute(&appearance, cx));
         table.update(cx, |_, cx| cx.notify());
     });
     redraw(vcx);
