@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    Entity, Focusable as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
-    VisualTestContext, px, size,
+    AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    TestAppContext, VisualTestContext, px, size,
 };
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};

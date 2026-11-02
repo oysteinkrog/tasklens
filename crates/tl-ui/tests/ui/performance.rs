@@ -430,7 +430,6 @@ mod summary {
             demand,
             hub,
             engine,
-            persisted_state,
             vcx,
         }
     }
