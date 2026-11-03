@@ -12,7 +12,6 @@ use gpui_kit::{
     AnyView, App, AppContext as _, Entity, Focusable as _, SharedString, TestAppContext,
     VisualTestContext, px, size,
 };
-use tl_model::client::EngineClient;
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
@@ -27,14 +26,13 @@ use tl_model::system::{
 };
 use tl_model::validity::Validity;
 use tl_ui_base::action_tracker::{ActionTracker, GlobalActionTracker};
-use tl_ui_base::app_env::{BootSettings, EngineGlobal};
 use tl_ui_base::demand::DemandAggregator;
 use tl_ui_base::host::HostContext;
 use tl_ui_base::hub::SnapshotHub;
 use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::theme::metrics;
-use tl_ui_kit::components::kv_grid;
+use tl_ui_pagehost::PageHost;
 use tl_ui_perf::performance::actions::PerfSetGraphRange;
 use tl_ui_perf::performance::aggregate::{
     AggregateDiskPage, AggregateGpuPage, ROW_ADAPTERS, ROW_DISKS, ROW_TYPE as AGG_ROW_TYPE,
@@ -66,7 +64,7 @@ use tl_ui_perf::performance::sensors::{BatteryPage, FanPage, local_midnights};
 use tl_ui_perf::performance::{
     DeviceKey, DeviceKind, DeviceRow, PerformancePage, PerformanceSettingsView, sidebar_order,
 };
-use tl_ui_settings::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_ui_settings::settings::Settings;
 use tl_ui_testkit::fake_engine::FakeEngine;
 
 const GPU: &str = "gpu:pci:0000:2d:00.0";
@@ -159,7 +157,8 @@ fn hidden_overview() -> Settings {
     s
 }
 
-fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
+/// A fake engine with the device catalog published.
+fn engine() -> Arc<FakeEngine> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
         s.devices = Arc::new(DeviceCatalog {
@@ -167,28 +166,13 @@ fn install(cx: &mut TestAppContext) -> Arc<FakeEngine> {
             entries: Arc::from(catalog()),
         });
     });
-    let client: Arc<dyn EngineClient> = engine.clone();
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        tl_ui_base::theme::store::init(
-            cx,
-            &ThemeSettings::default(),
-            &AppearanceSettings::default(),
-            Vec::new(),
-        );
-        tl_ui_base::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
-        init_strings(cx, "en-US");
-        kv_grid::init(cx);
-        cx.set_global(EngineGlobal(client));
-        cx.set_global(BootSettings {
-            settings: hidden_overview(),
-            state: UiState::default(),
-            persist: None,
-            startup_toasts: Vec::new(),
-        });
-        TlSettings::init(cx);
-    });
     engine
+}
+
+/// The page host on `engine` with the Overview card hidden. Publish what the hub should start
+/// from before this call.
+fn install(cx: &mut TestAppContext, engine: Arc<FakeEngine>) -> PageHost {
+    PageHost::install(cx, engine, hidden_overview())
 }
 
 /// The Performance tab as the window root, 1280 × 800, CPU selected.
@@ -199,22 +183,29 @@ fn open(cx: &mut TestAppContext) -> Rig<'_> {
 /// `open`, and with `with_tracker` also an action tracker in the page's host, set as
 /// `GlobalActionTracker` too. The tracker belongs to the host when the page is built.
 fn open_with(cx: &mut TestAppContext, with_tracker: bool) -> Rig<'_> {
-    let engine = install(cx);
-    let client: Arc<dyn EngineClient> = engine.clone();
-    let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+    let host = install(cx, engine());
+    let client = Arc::clone(&host.client);
     let tracker = with_tracker.then(|| {
         let tracker = cx.new(|cx| ActionTracker::new(Arc::clone(&client), None, cx));
         cx.update(|cx| cx.set_global(GlobalActionTracker(tracker.clone())));
         tracker
     });
-    // Only EngineGlobal (and the tracker) are installed here; the hub and demand are the test's.
-    let host = HostContext::from_parts(Some(client), Some(hub), Some(demand), tracker, None);
-    let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(&host, cx));
-    vcx.simulate_scale_factor_change(1.0);
-    vcx.simulate_resize(size(px(1280.), px(800.)));
+    let ctx = HostContext::from_parts(
+        Some(client),
+        Some(host.hub.clone()),
+        Some(host.demand.clone()),
+        tracker,
+        None,
+    );
+    let (page, vcx) = host.open(cx, size(px(1280.), px(800.)), move |_, cx| {
+        PerformancePage::new(&ctx, cx)
+    });
     draw(vcx);
-    Rig { page, engine, vcx }
+    Rig {
+        page,
+        engine: host.engine,
+        vcx,
+    }
 }
 
 fn key(s: &str) -> DeviceKey {
@@ -2680,19 +2671,23 @@ mod net_settings {
         Entity<PerformancePage>,
         Entity<ToastQueue>,
     ) {
-        let engine = install(cx);
-        let client: Arc<dyn EngineClient> = engine.clone();
+        let host = install(cx, engine());
+        let client = Arc::clone(&host.client);
         cx.update(|cx| {
             toast::init(cx);
             cx.set_global(NetSettingsDesktop(desktop));
         });
-        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-        let demand = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
         let tracker = cx.new(|cx| ActionTracker::new(Arc::clone(&client), None, cx));
         cx.update(|cx| cx.set_global(GlobalActionTracker(tracker.clone())));
-        let host =
-            HostContext::from_parts(Some(client), Some(hub), Some(demand), Some(tracker), None);
-        let page = cx.new(|cx| PerformancePage::new(&host, cx));
+        let ctx = HostContext::from_parts(
+            Some(client),
+            Some(host.hub.clone()),
+            Some(host.demand.clone()),
+            Some(tracker),
+            None,
+        );
+        let engine = host.engine;
+        let page = cx.new(|cx| PerformancePage::new(&ctx, cx));
         let root_page = page.clone();
         let window = cx.add_window(move |window, cx| Root::new(root_page, window, cx));
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
@@ -2932,7 +2927,7 @@ fn aggregate_hub(
     entries: Vec<DeviceEntry>,
     kinds: &[(u16, &str)],
 ) -> (Entity<SnapshotHub>, Entity<DemandAggregator>) {
-    let engine = install(cx);
+    let engine = engine();
     let kinds: Vec<_> = kinds
         .iter()
         .map(|(i, k)| {
@@ -2954,10 +2949,8 @@ fn aggregate_hub(
         details.header.version += 1;
         details.disks = Arc::from(kinds);
     });
-    let client: Arc<dyn EngineClient> = engine;
-    let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
-    let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-    (hub, demand)
+    let host = install(cx, engine);
+    (host.hub, host.demand)
 }
 
 #[gpui_kit::test]
