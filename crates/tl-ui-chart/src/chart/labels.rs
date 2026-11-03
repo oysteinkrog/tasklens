@@ -19,11 +19,11 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::NetworkUnit;
 
 use super::{ChartLabels, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat, YScale};
-use crate::components::icons::TlIcon;
-use crate::settings_global::TlSettings;
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::TNUM;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::TNUM;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
+use tl_ui_kit::components::icons::TlIcon;
 
 const NS_PER_S: u64 = 1_000_000_000;
 

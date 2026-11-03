@@ -61,23 +61,23 @@ use super::parts::{
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
 use super::timeline::OverviewPause;
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
-    ValueFormat, YScale, format_value,
-};
-use crate::core::DeviceKey;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_sm, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::widget::fixed_widget::FixedContent;
 use crate::widget::metric_widget::FlowLook;
 use crate::widget::source::SourceStore;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{numeric_style, t_sm, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
+    ValueFormat, YScale, format_value,
+};
+use tl_ui_perf_core::core::DeviceKey;
 
 /// The box's debug selector.
 pub const MEM_BOX_ID: &str = "perf-overview-box-memory";

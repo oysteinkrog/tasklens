@@ -29,22 +29,22 @@ use tl_model::validity::Validity;
 
 use super::StartupPage;
 use super::menu::{StartupMenuTargets, row_menu};
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, current};
+/// Moved to `util` so the process windows can use it without naming this page.
+pub use tl_ui_base::util::home_tilde;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use crate::table::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
-use crate::table::sys_table::SysDelegate;
-use crate::table::tree_table::{
+use tl_ui_table::table::sys_status::{DotStyle, LabelTone, StatusLook, SysStatus, status_look};
+use tl_ui_table::table::sys_table::SysDelegate;
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
-use crate::template::Template;
-use crate::theme::{TlTheme, current};
-/// Moved to `util` so the process windows can use it without naming this page.
-pub use crate::util::home_tilde;
 
 /// The seven columns in display order (UI-SYS-041).
 pub const STARTUP_COLUMNS: [StartupColumn; 7] = [
@@ -73,7 +73,7 @@ pub fn default_width(c: StartupColumn) -> f32 {
 
 /// Minimum width of `c`, logical px at 100% (UI-SYS-041). `SysColumnId::min_width` reads it.
 pub fn min_width(c: StartupColumn) -> f32 {
-    crate::table::columns::startup_min_width(c)
+    tl_ui_table::table::columns::startup_min_width(c)
 }
 
 /// The Startup id of `c`.
@@ -747,7 +747,7 @@ impl TreeTableDelegate for StartupDelegate {
         if captured.entries.is_empty() {
             return menu;
         }
-        let mut host = crate::host::HostContext::local(cx);
+        let mut host = tl_ui_base::host::HostContext::local(cx);
         if let Some(page) = self.page.as_ref().and_then(WeakEntity::upgrade) {
             let stored = captured.clone();
             host = page.read(cx).host.clone();

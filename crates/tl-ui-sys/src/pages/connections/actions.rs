@@ -2,10 +2,10 @@
 
 use gpui_kit::{App, KeyBinding};
 
+use crate::pages::processes::actions::CopyDetails;
 /// `GoToConnection` moved to the shared `actions` module, so the process windows can dispatch it
 /// without naming this page. Re-exported here for the Connections page.
-pub use crate::actions::GoToConnection;
-use crate::pages::processes::actions::CopyDetails;
+pub use tl_ui_kit::actions::GoToConnection;
 
 gpui_kit::actions!(
     tasklens,

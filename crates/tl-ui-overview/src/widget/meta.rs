@@ -38,13 +38,13 @@ use tl_ui_settings::layout_pages::{
 };
 use tl_ui_settings::settings::OverviewRange;
 
-use crate::chart::labels::{NetFormat, format_value};
-use crate::chart::{ValueFormat, YScale};
-use crate::core::core_clocks::ClockScale;
-use crate::core::gpu::gpu_totals;
-use crate::core::scales::throughput_scale;
-use crate::core::sensors::cpu_hot_c;
 use crate::overview::range::{Figures, figures, figures_minus};
+use tl_ui_chart::chart::labels::{NetFormat, format_value};
+use tl_ui_chart::chart::{ValueFormat, YScale};
+use tl_ui_perf_core::core::core_clocks::ClockScale;
+use tl_ui_perf_core::core::gpu::gpu_totals;
+use tl_ui_perf_core::core::scales::throughput_scale;
+use tl_ui_perf_core::core::sensors::cpu_hot_c;
 
 /// The unit a metric's values are in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1033,7 +1033,7 @@ impl MetricMeta {
         match text {
             ValueText::Plain | ValueText::Part => one(value, out),
             ValueText::WholePercent => {
-                let _ = write!(out, "{}%", crate::components::progress::bucket(value));
+                let _ = write!(out, "{}%", tl_ui_kit::components::progress::bucket(value));
             }
             ValueText::OfTotal => {
                 one(value, out);

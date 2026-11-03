@@ -31,15 +31,15 @@ use super::overview::parts::{
     ChartSettings, CoreBarsLayout, CoreBarsModel, core_bars_layout, core_board, spark_labels,
 };
 use super::page::page_range_ns;
-use crate::chart::view::ChangedRuns;
-use crate::chart::{ChartBg, ChartSpec, ChartView, ValueFormat};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::text::style::t_sm;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::view::ChangedRuns;
+use tl_ui_chart::chart::{ChartBg, ChartSpec, ChartView, ValueFormat};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
 
 /// The board's debug selector.
 pub const BOARD_ID: &str = "perf-cpu-board";

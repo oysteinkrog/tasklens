@@ -35,9 +35,9 @@ use super::icons::{TlIcon, icon};
 use super::motion::ease_out_cubic;
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
 
 /// The filter box width at rest and while focused or holding text, × ui_scale.
 pub const FILTER_WIDTH: f32 = 160.;
@@ -484,7 +484,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
@@ -669,7 +669,7 @@ mod tests {
     /// Counts painted quads with a 1 px border in `color`.
     fn border_quads(
         cx: &mut VisualTestContext,
-        pick: fn(&crate::theme::TlTheme) -> gpui_kit::Hsla,
+        pick: fn(&tl_ui_base::theme::TlTheme) -> gpui_kit::Hsla,
     ) -> usize {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);

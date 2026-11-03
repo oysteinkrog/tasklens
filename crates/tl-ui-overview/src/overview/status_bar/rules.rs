@@ -16,8 +16,8 @@ use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tl_model::system::Metric;
 use tl_model::time::TimeNs;
 
-use crate::core::sensors::cpu_hot_c;
 use crate::overview::layout::BoxKind;
+use tl_ui_perf_core::core::sensors::cpu_hot_c;
 
 /// CPU, GPU, disk active time or network use above this percent gives `Busy`.
 pub const BUSY_PCT: f32 = 80.;

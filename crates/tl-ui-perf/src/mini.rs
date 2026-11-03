@@ -34,29 +34,29 @@ use tl_model::command::{Command, KWinCommand, Tab};
 use tl_model::demand::Demand;
 use tl_ui_settings::settings::Decorations;
 
-use crate::actions::{ShowMainWindow, ToggleMiniWindow};
-use crate::anim::AnimationDriver;
-use crate::chart::ChartView;
-use crate::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
-use crate::components::toast::ToastKind;
-use crate::components::window_frame::client_frame_extra;
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
-use crate::minigraph::bridge::{MiniKeepAbove, OwnWindowBridge};
 use crate::performance::actions::{PerfSelectDevice, PerfShowMiniWindow};
 use crate::performance::card::{CARD_H, CardLines, CardView};
 use crate::performance::sidebar::DeviceSidebar;
 use crate::performance::{DeviceKey, PerformancePage};
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
-use crate::shell::keep_above_supported;
-use crate::theme::{UiMetrics, current, metrics};
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::shell::keep_above_supported;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_chart::chart::ChartView;
+use tl_ui_kit::actions::{ShowMainWindow, ToggleMiniWindow};
+use tl_ui_kit::components::menu::{TlMenu, context_menu_layer, open_context_menu_at};
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::window_frame::client_frame_extra;
+use tl_ui_perf_core::minigraph::actions::{CloseMiniWindow, ToggleMiniAlwaysOnTop};
+use tl_ui_perf_core::minigraph::bridge::{MiniKeepAbove, OwnWindowBridge};
 
 /// The window width at ui_scale 1 (PERF-093).
 pub const MINI_W: f32 = 260.;
@@ -69,7 +69,7 @@ const HEIGHT_CAP: f32 = 0.9;
 
 /// The window caption. It moved to the KWin bridge (tasklens-zljr5.22); this keeps the old path
 /// working.
-pub use crate::minigraph::bridge::MINI_WINDOW_TITLE;
+pub use tl_ui_perf_core::minigraph::bridge::MINI_WINDOW_TITLE;
 /// The key context of the window's one focus handle.
 pub const MINI_CONTEXT: &str = "MiniWindow";
 /// Element id of the scrolling card list.
@@ -106,7 +106,7 @@ pub fn mini_height(
 /// otherwise.
 fn frame_extra(window: &Window, cx: &App) -> f32 {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    if cx.has_global::<crate::components::window_frame::TestClientFrame>() {
+    if cx.has_global::<tl_ui_kit::components::window_frame::TestClientFrame>() {
         return f32::from(client_frame_extra(Decorations::Client));
     }
     let _ = cx;
@@ -138,7 +138,7 @@ pub fn mini_window_options(size: Size<Pixels>, cx: &mut App) -> WindowOptions {
         titlebar: None,
         is_resizable: false,
         is_movable: true,
-        app_id: Some(crate::app_env::window_app_id(cx)),
+        app_id: Some(tl_ui_base::app_env::window_app_id(cx)),
         window_background: WindowBackgroundAppearance::Opaque,
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         ..Default::default()

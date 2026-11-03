@@ -27,19 +27,19 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::system::{CoreKind, CpuTopology};
 use tl_model::validity::Validity;
 
-use crate::chart::grid_element::{
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{TlTheme, metrics};
+use tl_ui_chart::chart::grid_element::{
     CellMark, ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
 };
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{LegendStyle, ValueFormat, YScale};
-use crate::components::icons::AppIcon;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::SnapshotHub;
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::theme::{TlTheme, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{LegendStyle, ValueFormat, YScale};
+use tl_ui_kit::components::icons::AppIcon;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
-use crate::template::Template;
+use tl_ui_base::template::Template;
 
 /// Debug selector of the box around the grid.
 pub const GRID_ID: &str = "perf-cpu-grid";

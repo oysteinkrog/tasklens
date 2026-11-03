@@ -7,11 +7,11 @@ use std::rc::Rc;
 use gpui_kit::{AnyElement, App, Bounds, Entity, FocusHandle, Pixels, SharedString, Window};
 use smallvec::SmallVec;
 
-use crate::components::menu::TlMenu;
-use crate::core::DeviceKey;
-use crate::core::details::KeyValueModel;
-use crate::hub::SnapshotHub;
 use crate::widget::edit::WidgetEditor;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::details::KeyValueModel;
 
 /// One device page. The page entity owns its charts, Details model and blocks; the frame lays
 /// them out. Every method runs inside the page's own render.
@@ -66,7 +66,7 @@ pub trait DevicePage: 'static {
 }
 
 /// A Details value prefix builder: flat row index, the element and its width.
-pub type DetailsValuePrefix = crate::components::kv_grid::ValuePrefix;
+pub type DetailsValuePrefix = tl_ui_kit::components::kv_grid::ValuePrefix;
 
 /// A Details link click handler: flat row index and the link's bounds.
 pub type DetailsLinkClick = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;

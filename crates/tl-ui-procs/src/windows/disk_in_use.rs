@@ -40,24 +40,24 @@ use tl_model::snapshot::{Blocker, DiskDetails, EjectState, Snapshot};
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use crate::action_tracker::{ActionTrackerEvent, action_words, host_send_allowed};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::toast::ToastKind;
-use crate::components::tooltip::TlTooltip;
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::core::DeviceKey;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::processes::actions::{CapturedTargets, EndProcess, EndTask};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::{OnSent, RunOptions, run_process_action_with};
 use crate::pages::processes::toasts::toast_words;
-use crate::registry::{GlobalRegistry, WindowKey};
-use crate::selector::TlSelector;
-use crate::shell::ShellApi;
-use crate::text::style::{label_style, t_base, t_sm, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::action_tracker::{ActionTrackerEvent, action_words, host_send_allowed};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::text::style::{label_style, t_base, t_sm, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use tl_ui_perf_core::core::DeviceKey;
 
 /// Window size, × ui_scale.
 pub const SIZE: (f32, f32) = (520., 400.);

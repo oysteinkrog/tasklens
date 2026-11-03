@@ -47,17 +47,17 @@ use super::{
     group_plan, is_plasma_unit, members, other_user, process_keys, record_target, signal_targets,
     topmost_window,
 };
-use crate::action_tracker::{ActionTrackerEvent, reconnecting_refusal};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr};
-use crate::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
-use crate::minigraph::panel::MinigraphPanel;
-use crate::minigraph::sources::GraphColumn;
-use crate::shell::{ShellApi, ShellState};
-use crate::table::tree_table::RowKind;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::signal::{open_rt_signal, send_signal};
+use tl_ui_base::action_tracker::{ActionTrackerEvent, reconnecting_refusal};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::shell::{ShellApi, ShellState};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_perf_core::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use tl_ui_perf_core::minigraph::panel::MinigraphPanel;
+use tl_ui_perf_core::minigraph::sources::GraphColumn;
+use tl_ui_table::table::tree_table::RowKind;
 
 /// Called with the id of each request the action tracker accepted. It runs after the current
 /// update, so it may update the entity that ran the command.

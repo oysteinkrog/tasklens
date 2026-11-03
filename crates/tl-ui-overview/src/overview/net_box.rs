@@ -65,27 +65,27 @@ use super::parts::{
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
 use super::timeline::{self, OverviewPause};
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
-    ValueFormat, YScale, format_value,
-};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::core::DeviceKey;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::net_totals::NetTotal;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::template::Template;
-use crate::text::style::{label_style, numeric_style, t_xs};
-use crate::theme::derived::blend_over;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::widget::group_widget::GroupFlowLook;
 use crate::widget::metric_widget::FlowLook;
 use crate::widget::source::SourceStore;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{label_style, numeric_style, t_xs};
+use tl_ui_base::theme::derived::blend_over;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
+    ValueFormat, YScale, format_value,
+};
+use tl_ui_chart::net_totals::NetTotal;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_perf_core::core::DeviceKey;
 
 /// The box's debug selector.
 pub const NET_BOX_ID: &str = "perf-overview-box-net";

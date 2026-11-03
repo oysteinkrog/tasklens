@@ -34,12 +34,6 @@ use gpui_kit::{
 use gpui_kit::{BorrowAppContext as _, DismissEvent};
 use smallvec::{SmallVec, smallvec};
 
-use crate::components::empty::TlEmptyState;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
-use crate::components::validity::copy_text;
-use crate::i18n::tr;
-use crate::selector::TlSelector;
 use crate::table::actions::{
     CollapseOrParent, CopyRowsAsTable, ExpandOrChild, MoveFocus, MoveFocusEdge, MoveFocusPage,
     OpenContextMenu, OpenProperties, SelectAll, ToggleExpand, ToggleSelectFocus,
@@ -57,12 +51,18 @@ use crate::table::tree_table::{
     PRESS_HOLD_AFTER_UP, PRESS_HOLD_MAX, RowFlags, RowKind, SCROLLBAR_W, TreeTableEvent,
     WHEEL_QUIET, metric_cell_opacity, separator_quads,
 };
-use crate::text::ellipsis::middle_ellipsis;
-use crate::text::fonts::UI_FAMILY;
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::t_base;
 use crate::text_cache::CellTextCache;
-use crate::theme::{TlTheme, UiMetrics, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::ellipsis::middle_ellipsis;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{TlTheme, UiMetrics, metrics};
+use tl_ui_kit::components::empty::TlEmptyState;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::validity::copy_text;
 
 /// A row id as the core sees it. The typed shell maps each row id it is asked about to one key
 /// and back. Keys are never reused within one table.
@@ -555,7 +555,7 @@ impl TreeTableCore {
         let (visible, offsets) = (layout.visible_columns().clone(), layout.offsets().clone());
         let frame = FrameCtx {
             m,
-            theme: crate::theme::current(host.app()).clone(),
+            theme: tl_ui_base::theme::current(host.app()).clone(),
             hairline: UiMetrics::hairline(window),
             total_width,
             guide_lines: host.guide_lines(),

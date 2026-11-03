@@ -38,24 +38,24 @@ use super::OverviewPage;
 use super::layout::{Arrange, ArrangeChoice, BoxKind, PowerPlacement};
 use super::parts::{TITLE_ROW, TITLE_TOP};
 use super::timeline;
-use crate::actions::OpenAdditionalSetup;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::core::actions::{
+use crate::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
+use crate::widget::menu::{confirm_preset, confirm_reset_now};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_perf_core::core::actions::{
     PerfOverviewEditDone, PerfOverviewResetBox, PerfOverviewSetBoxArrange,
     PerfOverviewSetBoxClocks, PerfOverviewSetBoxEngine, PerfOverviewSetBoxMode,
     PerfOverviewSetBoxPower, PerfOverviewSetBoxPowerPlacement, PerfOverviewSetTimelineClick,
     PerfWidgetEditBox, PerfWidgetEditStart,
 };
-use crate::core::cpu::PowerState;
-use crate::hub::SnapshotHub;
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::theme::metrics;
-use crate::widget::edit::{WidgetEditEvent, WidgetEditor, editor_of};
-use crate::widget::menu::{confirm_preset, confirm_reset_now};
+use tl_ui_perf_core::core::cpu::PowerState;
 
 /// The title line a right-click opens the box menu on: the 1 px top border, the space above the
 /// title row and the title row of the box frame, logical px.

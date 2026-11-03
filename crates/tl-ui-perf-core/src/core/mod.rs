@@ -25,9 +25,9 @@ use tl_model::ids::DeviceIdx;
 use tl_model::system::{SensorKind, SensorReading};
 use tl_ui_settings::settings::DeviceVisibility;
 
-use crate::components::icons::TlIcon;
-use crate::theme::TlTheme;
-use crate::theme::palette::{DeviceAccent, accent_color};
+use tl_ui_base::theme::TlTheme;
+use tl_ui_base::theme::palette::{DeviceAccent, accent_color};
+use tl_ui_kit::components::icons::TlIcon;
 
 /// Page padding on every side, × ui_scale. `page_pad`.
 pub const PAGE_PAD: f32 = 16.;

@@ -14,11 +14,11 @@ use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::table::TableMode;
 
-use crate::actions::{CycleViewMode, ToggleHideSystem};
-use crate::components::icons::TlIcon;
-use crate::components::toolbar_button::{toolbar_icon, toolbar_toggle};
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::shell::{ToolbarContent, ToolbarModel};
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::shell::{ToolbarContent, ToolbarModel};
+use tl_ui_kit::actions::{CycleViewMode, ToggleHideSystem};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::toolbar_button::{toolbar_icon, toolbar_toggle};
 
 /// Element id of the Hide system processes toggle. Its debug selector is `TlButton-<id>`.
 pub const HIDE_SYSTEM_ID: &str = "processes-hide-system";

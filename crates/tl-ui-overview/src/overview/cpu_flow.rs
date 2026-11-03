@@ -28,10 +28,10 @@ use tl_ui_settings::layout_boxes::{
 use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::{Arrange, PowerPlacement};
-use crate::theme::UiMetrics;
 use crate::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::widget::source::Availability;
+use tl_ui_base::theme::UiMetrics;
 
 /// The CPU box settings a flow layout is made from: the old keys of UI-PRF-019.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -427,7 +427,7 @@ mod tests {
     fn plan(look: CpuLook) -> CpuPlan {
         CpuPlan {
             look,
-            m: crate::theme::metrics::compute(
+            m: tl_ui_base::theme::metrics::compute(
                 &tl_ui_settings::settings::AppearanceSettings::default(),
                 0,
             ),

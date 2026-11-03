@@ -19,14 +19,16 @@ use super::StartupPage;
 use super::actions::{StartupCopyCommand, StartupOpenFileLocation};
 use super::delegate::{StartupWords, home_tilde};
 use super::menu::StartupMenuTargets;
-use crate::action_tracker::ToastTexts;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::table::TreeTableDelegate as _;
-use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable};
-use crate::table::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
-use crate::util::clipboard_write;
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_table::table::TreeTableDelegate as _;
+use tl_ui_table::table::actions::{CopyCell, CopyRow, CopyRowsAsTable};
+use tl_ui_table::table::sys_copy::{
+    CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table,
+};
 
 /// What one copy command works on: the captured entries in view order and the words and columns
 /// of the table at that moment.

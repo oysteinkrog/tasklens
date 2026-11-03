@@ -39,20 +39,20 @@ use tl_ui_settings::settings::OVERVIEW_GRID_ROWS_MAX;
 use super::OverviewPage;
 use super::layout::{BoxKind, GRID_COLS, GridBox, GridMetrics, OverviewLayout, PlacedBox};
 use super::parts::{EditChrome, TITLE_ROW, TITLE_TOP};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::focus::TlFocusRing;
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::core::PAGE_PAD;
-use crate::core::actions::{
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::focus::TlFocusRing;
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_perf_core::core::PAGE_PAD;
+use tl_ui_perf_core::core::actions::{
     PerfOverviewAddBox, PerfOverviewEditDone, PerfOverviewEditLayout, PerfOverviewHideBox,
     PerfOverviewMoveBox, PerfOverviewResetLayout, PerfOverviewResizeBox,
 };
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::theme::{current, metrics};
 
 /// The toolbar height, logical px.
 pub const TOOLBAR_H: f32 = 40.;

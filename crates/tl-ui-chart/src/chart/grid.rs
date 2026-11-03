@@ -14,7 +14,7 @@ use gpui_kit::{
 
 use super::GridStyle;
 use super::geometry::TimeMap;
-use crate::theme::TlTheme;
+use tl_ui_base::theme::TlTheme;
 
 /// No grid on plots lower than this (the tray graph). Sidebar cards are 56 high and keep it.
 const MIN_GRID_HEIGHT: f32 = 40.0;

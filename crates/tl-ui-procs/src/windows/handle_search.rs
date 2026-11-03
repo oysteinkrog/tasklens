@@ -46,40 +46,40 @@ use super::actions::{
     StartHandleSearch, StopHandleSearch,
 };
 use super::frame::{PwnWindow, TITLE_HANDLE_SEARCH, pwn_window_spec};
-use crate::action_tracker::{ToastTexts, action_words};
-use crate::actions::OpenHandleSearch;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::checkbox::TlCheckbox;
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::menu::TlMenu;
-use crate::components::progress::{TlProgress, TlProgressSize};
-use crate::components::shield::StartHelperSession;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::TlTooltip;
-use crate::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{Strings, tr};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CapturedTarget, CapturedTargets};
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toasts::{refusal_reason, toast_words};
-use crate::registry::{GlobalRegistry, WindowKey};
-use crate::selector::TlSelector;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::action_tracker::{ToastTexts, action_words};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{numeric_style, t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::OpenHandleSearch;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::progress::{TlProgress, TlProgressSize};
+use tl_ui_kit::components::shield::StartHelperSession;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_kit::components::window_frame::{CloseSecondaryWindow, TlSecondaryWindow};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate,
 };
-use crate::template::Template;
-use crate::text::style::{numeric_style, t_base, t_sm};
-use crate::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens_handles, [HandleSearchOpenLocation]);
 
@@ -1191,7 +1191,7 @@ impl HandleSearchWindow {
             self.start(true, cx);
         } else {
             self.pending_all = true;
-            crate::helper_flow::note_start(window.window_handle(), cx);
+            tl_ui_kit::helper_flow::note_start(window.window_handle(), cx);
             window.dispatch_action(Box::new(StartHelperSession), cx);
             cx.notify();
         }

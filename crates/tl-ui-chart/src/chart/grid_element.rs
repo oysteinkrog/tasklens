@@ -59,11 +59,11 @@ use super::{
     ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
     GridStyle, LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
 };
-use crate::anim::AnimationDriver;
-use crate::components::icons::AppIcon;
-use crate::hub::{HostClock, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::hub::{HostClock, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::theme::{TlTheme, UiMetrics};
+use tl_ui_kit::components::icons::AppIcon;
 
 /// Period used when no cell has data: 1 s.
 const DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
@@ -739,9 +739,9 @@ impl Element for ChartGridElement {
             scale_factor: window.scale_factor(),
             now: self.view.read(cx).clock.now_ns(),
             metrics: *cx.global::<UiMetrics>(),
-            theme: crate::theme::current(cx).clone(),
+            theme: tl_ui_base::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),
-            power_saving: crate::demand::power_saving(cx),
+            power_saving: tl_ui_base::demand::power_saving(cx),
             network_unit: NetFormat::of(cx),
         };
         let view_id = self.view.entity_id();

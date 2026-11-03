@@ -26,21 +26,21 @@ use tl_model::table::{ConnColumn, SysColumnId, SysNodeId, SysRow, SysSortSpec};
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::table::cells::{CellOut, CellSuffix};
-use crate::table::columns::{
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::theme::{TlTheme, current};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
+use tl_ui_table::table::cells::{CellOut, CellSuffix};
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use crate::table::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
-use crate::table::sys_table::SysDelegate;
-use crate::table::tree_table::{
+use tl_ui_table::table::sys_status::{ConnStateClass, LabelTone, conn_state_tone};
+use tl_ui_table::table::sys_table::SysDelegate;
+use tl_ui_table::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,
 };
-use crate::theme::{TlTheme, current};
 
 use super::ConnectionsPage;
 use super::menu::{ConnMenuTargets, ConnRecordRef, row_menu};
@@ -102,7 +102,7 @@ pub const fn default_width(column: ConnColumn) -> f32 {
 }
 
 pub const fn min_width(column: ConnColumn) -> f32 {
-    crate::table::columns::connections_min_width(column)
+    tl_ui_table::table::columns::connections_min_width(column)
 }
 
 const COLUMN_KEYS: [&str; 16] = [

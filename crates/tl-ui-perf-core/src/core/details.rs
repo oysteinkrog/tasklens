@@ -17,13 +17,13 @@ use gpui_kit::{Action, App, Global, SharedString, px};
 use tl_model::units::short_age;
 use tl_model::validity::Validity;
 
-use crate::actions::OpenAdditionalSetup;
-use crate::components::kv_grid::{
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::template::{HOLES, Template, next_hole};
+use tl_ui_base::theme::UiMetrics;
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, value_copy_form,
 };
-use crate::i18n::{Strings, tr, tr_en};
-use crate::template::{HOLES, Template, next_hole};
-use crate::theme::UiMetrics;
 
 /// Row pitch of the stats grid (label, value and gap), × ui_scale. `kv_row_h`.
 pub const KV_ROW_H: f32 = 46.;

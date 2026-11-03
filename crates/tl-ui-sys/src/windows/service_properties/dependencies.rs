@@ -24,22 +24,22 @@ use tl_model::table::UnitRef;
 use tracing::warn;
 
 use super::{ServicePropertiesWindow, ServicePropsTab, ServicePropsTabView};
-use crate::components::badge::{TlBadge, TlBadgeKind};
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::ServicePropsOk;
 use crate::pages::services::delegate::service_sys_status;
-use crate::selector::TlSelector;
-use crate::table::sys_status::{
+use fluent_bundle::FluentValue;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{label_style, t_base, t_xs};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::badge::{TlBadge, TlBadgeKind};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::sys_status::{
     DotStyle, LabelTone, StatusLook, cell_colors, status_label, status_look,
 };
-use crate::text::style::{label_style, t_base, t_xs};
-use crate::theme::{current, metrics};
-use fluent_bundle::FluentValue;
 
 /// A block with more rows than this is drawn through `uniform_list`.
 const LIST_ROWS: usize = 200;
@@ -481,7 +481,7 @@ impl DependenciesTab {
         let Some(text) = self.menu_value.take() else {
             return;
         };
-        if crate::util::clipboard_write(cx, text.to_string()).is_ok() {
+        if tl_ui_base::util::clipboard_write(cx, text.to_string()).is_ok() {
             let toast = tr(cx, "sys-sys006-copied-to-clipboard");
             window_toast(window, cx, ToastKind::Success, toast);
         }

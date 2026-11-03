@@ -18,12 +18,12 @@ use super::actions::{
     ServiceStop, ServiceViewLogs, StartupChoice,
 };
 use super::copy::column_alias;
-use crate::components::menu::TlMenu;
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
-use crate::table::sys_table::SysActions;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
+use tl_ui_table::table::sys_table::SysActions;
 
 /// Most unit rows one menu acts on.
 const MAX_TARGETS: usize = 256;

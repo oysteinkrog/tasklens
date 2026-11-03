@@ -30,25 +30,25 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::{NetworkUnit, Settings, SortState, UiState};
 
 use super::actions::{DeleteFromHistory, HistoryShowInLiveTable};
-use crate::components::icons::TlIcon;
-use crate::components::menu::TlMenu;
-use crate::components::validity::copy_text;
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::cells::process_column;
 use crate::pages::processes::delegate::ValidityTips;
-use crate::settings_global::TlSettings;
-use crate::table::actions::{CopyCell, CopyRowsAsTable};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, next_sort,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
-use crate::template::Template;
-use crate::theme::metrics;
 
 /// The columns in default order (UI-PRC-031). Ids are the R-007 `ColumnId` strings.
 pub const HISTORY_COLUMNS: [ColumnId; 9] = [
@@ -578,7 +578,7 @@ fn net_unit(settings: &Settings) -> (NetUnit, bool) {
 }
 
 fn ui_scale(cx: &App) -> f32 {
-    if cx.has_global::<crate::theme::UiMetrics>() {
+    if cx.has_global::<tl_ui_base::theme::UiMetrics>() {
         metrics(cx).ui_scale
     } else {
         1.0

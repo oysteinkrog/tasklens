@@ -25,14 +25,14 @@ use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 use tl_ui_settings::settings::{NetworkUnit, Settings};
 
-use crate::components::motion::{M_SLOW, ease_out_cubic};
-use crate::components::validity::copy_text;
-use crate::i18n::{tr, tr_en};
-use crate::table::cells::{CellOut, CellSuffix};
-use crate::table::columns::ColumnAlign;
-use crate::table::tree_table::RowKind;
-use crate::template::Template;
-use crate::theme::TlTheme;
+use tl_ui_base::i18n::{tr, tr_en};
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::TlTheme;
+use tl_ui_kit::components::motion::{M_SLOW, ease_out_cubic};
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_table::table::cells::{CellOut, CellSuffix};
+use tl_ui_table::table::columns::ColumnAlign;
+use tl_ui_table::table::tree_table::RowKind;
 
 /// What a process cell holds. The cell formatter dispatches on it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -29,8 +29,8 @@ use gpui_kit::{
 
 use super::layout::SPLIT_RANGE;
 use super::parts::edit_chrome;
-use crate::selector::TlSelector;
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{current, metrics};
 
 /// The smallest part when a mode sets no other minimum, logical px.
 pub const PART_MIN: f32 = 120.;

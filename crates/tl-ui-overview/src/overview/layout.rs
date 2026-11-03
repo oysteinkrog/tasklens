@@ -14,8 +14,8 @@ use smallvec::{SmallVec, smallvec};
 use tl_ui_settings::settings::{OverviewGridSetting, OverviewLayoutSetting};
 
 use super::{cpu_box, disk_box, gpu_box, mem_box, net_box, procs_box, timeline};
-use crate::core::PAGE_PAD;
-use crate::theme::DeviceAccent;
+use tl_ui_base::theme::DeviceAccent;
+use tl_ui_perf_core::core::PAGE_PAD;
 
 /// The grid's columns (UI-PRF-056).
 pub const GRID_COLS: u16 = 12;

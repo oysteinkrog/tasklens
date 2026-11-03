@@ -26,9 +26,9 @@ use tl_ui_settings::layout::{
 use tl_ui_settings::layout_boxes::CPU_LOGICAL_PREFIX;
 use tl_ui_settings::settings::PerformanceSettings;
 
-use crate::core::gpu::{GpuVendor, gpu_totals, grid_engines};
-use crate::core::retain_whole_disks;
-use crate::core::{
+use tl_ui_perf_core::core::gpu::{GpuVendor, gpu_totals, grid_engines};
+use tl_ui_perf_core::core::retain_whole_disks;
+use tl_ui_perf_core::core::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, visible_rows,
 };
 

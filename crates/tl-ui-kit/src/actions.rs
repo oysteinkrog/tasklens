@@ -25,7 +25,7 @@ use tl_model::table::TableMode;
 
 pub use crate::components::shield::{EndHelperSession, StartHelperSession};
 use crate::components::{checkbox, window_frame};
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
 
 gpui_kit::actions!(
     tasklens,

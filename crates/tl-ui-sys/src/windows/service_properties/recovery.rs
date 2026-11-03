@@ -30,25 +30,25 @@ use tl_model::units;
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::ActionTrackerEvent;
-use crate::actions::OpenAdditionalSetup;
-use crate::actions::SetupRow;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::input::TlTextInput;
-use crate::components::kv_grid::KEY_CONTEXT;
-use crate::components::link::TlLink;
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::components::stepper::TlStepper;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::tr;
 use crate::pages::services::flows::startup_texts;
-use crate::selector::TlSelector;
-use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::action_tracker::ActionTrackerEvent;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::actions::SetupRow;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::input::TlTextInput;
+use tl_ui_kit::components::kv_grid::KEY_CONTEXT;
+use tl_ui_kit::components::link::TlLink;
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
+use tl_ui_kit::components::stepper::TlStepper;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 
 /// Label column width at 100% scale.
 const LABEL_WIDTH: f32 = 200.;
@@ -1321,7 +1321,7 @@ impl Render for RecoveryTab {
                     cx.propagate();
                     return;
                 }
-                let _ = crate::util::clipboard_write(cx, text.to_owned());
+                let _ = tl_ui_base::util::clipboard_write(cx, text.to_owned());
             })
             .size_full()
             .overflow_y_scroll()

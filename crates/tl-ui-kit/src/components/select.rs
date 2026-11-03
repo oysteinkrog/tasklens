@@ -39,9 +39,9 @@ use gpui_kit::{
 use super::icons::{TlIcon, icon};
 use super::input::{TlInputSize, TlTextInput};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::t_base;
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens, [OpenSelect]);
 
@@ -837,7 +837,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

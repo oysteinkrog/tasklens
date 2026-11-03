@@ -33,20 +33,20 @@ use tl_ui_settings::settings::NetworkUnit;
 
 use super::actions::PerfSelectDevice;
 use super::{DeviceKey, DeviceKind};
-use crate::chart::{
+use crate::performance::overview::parts::title_value_style;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::ellipsis::ELLIPSIS;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::{TNUM, label_style};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartView, GridStyle, NetFormat, ValueAlign, ValueFormat, format_value,
 };
-use crate::components::icons::{TlIcon, icon};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::validity::copy_text;
-use crate::i18n::{Strings, tr, tr_en};
-use crate::performance::overview::parts::title_value_style;
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::ellipsis::ELLIPSIS;
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{TNUM, label_style};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::validity::copy_text;
 
 /// Least card height, × ui_scale. A card grows when its wrapped text needs more.
 pub const CARD_H: f32 = 80.0;
@@ -1221,7 +1221,7 @@ fn cut_row(
 
 /// Per-character advances of the card fonts, by character, font, size and window scale. A line
 /// is measured as the sum of its characters, as
-/// [`crate::text::metrics::TextMetricsCache::char_advance`] does for the label font, so a card
+/// [`tl_ui_base::text::metrics::TextMetricsCache::char_advance`] does for the label font, so a card
 /// render shapes nothing after the first. Cleared when the `UiMetrics` style version changes.
 #[derive(Default)]
 struct CardAdvances {
@@ -2873,7 +2873,7 @@ mod tests {
 
     #[test]
     fn card_text_width_leaves_the_fixed_graph() {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let m = tl_ui_base::theme::metrics::compute(&Default::default(), 0);
         let full = card_graph_full_w(&m);
         // nav_width 252 less sp4 on each side: 236 less border, sp5 inset, 80 graph, 10 gap.
         assert_eq!(card_text_width(px(236.), full, &m), px(132.));
@@ -2887,7 +2887,7 @@ mod tests {
     /// title fits on one row beside the edit button's 30 px column.
     #[test]
     fn card_graph_width_leaves_the_top_title_room() {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let m = tl_ui_base::theme::metrics::compute(&Default::default(), 0);
         // nav_width 180: 164 less border, sp5 inset, 10 gap, 30 for the button, and "Overview"
         // (67.2 px, rounded up, plus 1 px) leaves 41.
         assert_eq!(card_graph_width(px(164.), px(67.2), &m), px(41.));
@@ -2906,7 +2906,7 @@ mod tests {
     /// under 16 px drops its graph, and its text then has the whole card.
     #[test]
     fn card_shows_graph_drops_it_only_on_narrow_edit_cards() {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let m = tl_ui_base::theme::metrics::compute(&Default::default(), 0);
         // The edit card at nav_width 180: 96 px leaves an 8 px column next to the graph.
         assert!(card_shows_graph(px(96.), false, &m));
         assert!(!card_shows_graph(px(96.), true, &m));
@@ -2975,8 +2975,11 @@ mod tests {
         assert_eq!(stale_deadline_ns(&[None]), None);
         for (period, newest) in [(100_000_000, 7_000_000_000), (1_000_000_000, 9_000_000_000)] {
             let at = stale_deadline_ns(&[series(period, newest), None]).expect("deadline");
-            assert!(!crate::chart::is_stale(newest, at - 1, period), "{period}");
-            assert!(crate::chart::is_stale(newest, at, period), "{period}");
+            assert!(
+                !tl_ui_chart::chart::is_stale(newest, at - 1, period),
+                "{period}"
+            );
+            assert!(tl_ui_chart::chart::is_stale(newest, at, period), "{period}");
         }
         // The newest sample of any series and the shortest period count.
         let at = stale_deadline_ns(&[series(1_000_000_000, 5), series(100_000_000, 9)]);

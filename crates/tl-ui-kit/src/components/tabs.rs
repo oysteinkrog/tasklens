@@ -38,9 +38,9 @@ use super::focus::TlFocusRing;
 use super::icons::TlIcon;
 use super::motion::{M_FAST, ease_out_cubic};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::{label_style, numeric_style};
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{label_style, numeric_style};
+use tl_ui_base::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens, [NextInWindowTab, PrevInWindowTab]);
 
@@ -232,7 +232,7 @@ fn overflow_items(tabs: &[TlTabSpec], selected: usize, cx: &App) -> Vec<PopupMen
 
 /// The label run (end ellipsis at 160 px) and the `tnum` count run.
 fn cell_text(
-    m: &crate::theme::UiMetrics,
+    m: &tl_ui_base::theme::UiMetrics,
     label: SharedString,
     count: Option<SharedString>,
     weight: FontWeight,
@@ -665,7 +665,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

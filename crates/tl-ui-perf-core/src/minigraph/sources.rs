@@ -17,11 +17,11 @@ use tl_ui_settings::settings::MinigraphState;
 
 use super::GraphColor;
 use super::card::{CardState, resolve_colors};
-use crate::chart::{ChartSeries, NetFormat, ValueFormat, YScale, format_value};
 use crate::core::DeviceKey;
-use crate::i18n::{tr, tr_args};
-use crate::settings_global::SettingKey;
-use crate::theme::TlTheme;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::SettingKey;
+use tl_ui_base::theme::TlTheme;
+use tl_ui_chart::chart::{ChartSeries, NetFormat, ValueFormat, YScale, format_value};
 
 /// A card's identity, assigned at load and stable while the app runs. Never stored.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]

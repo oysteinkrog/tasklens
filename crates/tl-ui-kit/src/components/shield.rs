@@ -23,9 +23,9 @@ use super::focus::TlFocusRing;
 use super::icons::{AppIcon, TlIcon, icon};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{TlTheme, current, metrics};
 
 /// Starts the privileged helper session: the engine runs pkexec, with a 120 s polkit deadline
 /// (ADR-006). Also dispatched by the "Retry as administrator" toast button (PROC-058). E20's
@@ -248,13 +248,13 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        crate::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     }
 
     /// Renders the shield for `state` and counts the helper actions that reach the root.

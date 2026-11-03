@@ -10,7 +10,7 @@ use tl_model::snapshot::{GraphicsAdapter, Snapshot};
 use tl_model::system::{GpuEngine, GpuTotals};
 use tl_model::validity::Validity;
 
-use crate::i18n::tr_en;
+use tl_ui_base::i18n::tr_en;
 
 /// The GPU maker. Only NVIDIA has a probe, so only NVIDIA shows probe states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

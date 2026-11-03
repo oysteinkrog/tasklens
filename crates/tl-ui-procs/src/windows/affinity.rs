@@ -36,28 +36,28 @@ use tl_model::snapshot::{ComponentMask, Snapshot};
 use tl_model::system::{CoreKind, CpuSet, CpuTopology};
 use tracing::warn;
 
-use crate::action_tracker::{SummaryTexts, ToastTexts, short_reason};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::checkbox::{CheckboxLabelStyle, TlCheckbox};
-use crate::components::focus::TlFocusRing;
-use crate::components::icons::{AppIcon, TlIcon};
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::TlSecondaryWindow;
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::Strings;
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::{label_style, t_sm, t_xs};
-use crate::theme::{current, metrics};
 use crate::windows::actions::{
     AFFINITY_DIALOG_CONTEXT, AffinityApply, AffinityEnd, AffinityHome, AffinityMoveDown,
     AffinityMoveLeft, AffinityMoveRight, AffinityMoveUp, AffinityReset, AffinityToggle,
     AffinityToggleGroup,
 };
 use crate::windows::frame::{AFFINITY_HEIGHT, PwnWindow, open_pwn};
+use tl_ui_base::action_tracker::{SummaryTexts, ToastTexts, short_reason};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::Strings;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{label_style, t_sm, t_xs};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::checkbox::{CheckboxLabelStyle, TlCheckbox};
+use tl_ui_kit::components::focus::TlFocusRing;
+use tl_ui_kit::components::icons::{AppIcon, TlIcon};
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 
 /// Targets captured when the menu opens (`Demand.affinity_targets` max).
 pub const MAX_TARGETS: usize = 256;
@@ -605,12 +605,12 @@ impl AffinityWords {
     }
 
     fn en() -> Self {
-        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+        Self::with(|key| tl_ui_base::i18n::tr_en(key, &[]), Template::en)
     }
 
     fn translated(cx: &App) -> Self {
         Self::with(
-            |key| crate::i18n::tr(cx, key),
+            |key| tl_ui_base::i18n::tr(cx, key),
             |key, args| Template::new(cx, key, args),
         )
     }

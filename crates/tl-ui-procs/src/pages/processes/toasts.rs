@@ -23,13 +23,13 @@ use tracing::warn;
 
 use super::ProcessesPage;
 use super::actions::{CapturedTarget, CapturedTargets};
-use crate::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_en};
-use crate::shell::ShellApi;
-use crate::table::tree_table::RowKind;
-use crate::template::Template;
+use tl_ui_base::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::template::Template;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::tree_table::RowKind;
 
 /// (done, total, failed) to the kind and text of a mixed or failed multi-target result.
 /// `failed` holds one (count, reason) per distinct reason, in the order of first occurrence,
@@ -173,7 +173,7 @@ pub fn submit_to_then(
     req: ActionRequest,
     texts: ActionToastTexts,
     queue: Option<WeakEntity<ToastQueue>>,
-    on_sent: Option<crate::action_tracker::OnSentId>,
+    on_sent: Option<tl_ui_base::action_tracker::OnSentId>,
     cx: &mut App,
 ) -> Option<ActionId> {
     let Some(tracker) = host.tracker().cloned() else {

@@ -62,22 +62,22 @@ use super::grid::{self, Drawn, InnerGrid, SlotDevice};
 use super::menu::{self, OPTION_DASHED, OPTION_FILL, SourceGroup};
 use super::meta::MetricMeta;
 use super::source::Availability;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::TlTooltip;
-use crate::core::actions::{
+use crate::overview::picked::box_snapshot;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_perf_core::core::actions::{
     PERF_WIDGET_EDIT_CONTEXT, PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup,
     PerfWidgetApply, PerfWidgetCancel, PerfWidgetMove, PerfWidgetRemove, PerfWidgetReset,
     PerfWidgetResize, PerfWidgetSelectNext, PerfWidgetSelectPrev, PerfWidgetSetForm,
     PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, PerfWidgetUndo, WidgetSource,
 };
-use crate::hub::SnapshotHub;
-use crate::i18n::tr;
-use crate::overview::picked::box_snapshot;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::theme::{current, metrics};
 
 /// The most undo steps an edit keeps.
 pub const UNDO_LIMIT: usize = 100;

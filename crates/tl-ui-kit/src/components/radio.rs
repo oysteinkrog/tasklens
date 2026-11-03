@@ -15,8 +15,8 @@ use gpui_kit::{
 
 use super::focus::TlFocusRing;
 use super::motion::{M_FAST, ease_out_cubic};
-use crate::selector::TlSelector;
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens, [RadioPrev, RadioNext, RadioFirst, RadioLast]);
 
@@ -433,7 +433,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

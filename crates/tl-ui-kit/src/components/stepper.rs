@@ -32,9 +32,9 @@ use super::button::{TlButton, TlButtonKind};
 use super::icons::TlIcon;
 use super::input::TlTextInput;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::TNUM;
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::TNUM;
+use tl_ui_base::theme::{current, metrics};
 
 /// Group height and button size, × ui_scale.
 const HEIGHT: f32 = 28.;
@@ -394,7 +394,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

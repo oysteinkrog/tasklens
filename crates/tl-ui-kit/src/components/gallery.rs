@@ -64,13 +64,13 @@ use super::toast::{self, ToastAction, ToastKind};
 use super::tooltip::TlTooltip;
 use super::validity::glyph;
 use super::window_frame::{TlTitleBar, TlWindowPin, pin_look};
-use crate::i18n::{Strings, init_strings};
-use crate::text::ellipsis::middle_ellipsis;
-use crate::text::fonts::{MONO_FAMILY, UI_FAMILY};
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::{label_style, numeric_style, t_base, t_sm, t_xs};
-use crate::theme::map;
-use crate::theme::{ThemeMode, ThemeStore, TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::i18n::{Strings, init_strings};
+use tl_ui_base::text::ellipsis::middle_ellipsis;
+use tl_ui_base::text::fonts::{MONO_FAMILY, UI_FAMILY};
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::{label_style, numeric_style, t_base, t_sm, t_xs};
+use tl_ui_base::theme::map;
+use tl_ui_base::theme::{ThemeMode, ThemeStore, TlTheme, UiMetrics, current, metrics};
 
 gpui_kit::actions!(
     tl_gallery,
@@ -1891,7 +1891,7 @@ mod tests {
                 "components::{module} has no gallery page"
             );
         }
-        // Every page is a component module, except `text`, which shows `crate::text`.
+        // Every page is a component module, except `text`, which shows `tl_ui_base::text`.
         for page in GALLERY_PAGES {
             assert!(
                 *page == "text" || modules.contains(page),

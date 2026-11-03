@@ -10,9 +10,9 @@ use gpui_kit::{App, SharedString, Window};
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{Strings, tr_args, tr_en};
-use crate::util::clipboard_write;
+use tl_ui_base::i18n::{Strings, tr_args, tr_en};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 /// "Copied: { $value }".
 const COPIED_KEY: &str = "sys-sys006-copied-value";

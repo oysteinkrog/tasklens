@@ -15,10 +15,10 @@ use tl_model::command::{Command, KWinCommand};
 use tl_model::snapshot::FrameGeometry;
 
 use super::panel::MinigraphPanel;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::registry::{GlobalRegistry, WindowKey};
-use crate::shell::keep_above_supported;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::registry::{GlobalRegistry, WindowKey};
+use tl_ui_base::shell::keep_above_supported;
 
 /// The mini window's caption. Never translated: the bridge matches it (R-086). The
 /// `mini-window-title` string carries the same text.

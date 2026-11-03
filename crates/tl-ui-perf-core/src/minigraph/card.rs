@@ -34,27 +34,27 @@ use super::sources::{
     MinigraphEntry, MinigraphId, MinigraphSource, ProcessLabel, ProcessSourceView,
     resolve_process_source,
 };
-use crate::chart::view::ChangedRuns;
-use crate::chart::{
+use crate::core::DeviceKey;
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::text::ellipsis::ELLIPSIS;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::TNUM;
+use tl_ui_base::theme::metrics::UiMetrics;
+use tl_ui_base::theme::palette::accent_color;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_chart::chart::view::ChangedRuns;
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, NetFormat, ValueAlign,
     ValueFormat, YScale, format_value,
 };
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::TlTooltip;
-use crate::components::validity::{GlyphContent, glyph_parts};
-use crate::core::DeviceKey;
-use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::tr;
-use crate::net_totals::NetTotal;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::text::ellipsis::ELLIPSIS;
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::TNUM;
-use crate::theme::metrics::UiMetrics;
-use crate::theme::palette::accent_color;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_chart::net_totals::NetTotal;
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_kit::components::validity::{GlyphContent, glyph_parts};
 
 pub const MINI_CARD_W: f32 = 180.;
 pub const MINI_CARD_H: f32 = 90.;
@@ -1264,7 +1264,7 @@ mod tests {
 
     #[test]
     fn card_color_named_overrides() {
-        let theme = crate::theme::tests::test_theme(crate::theme::ThemeMode::Dark);
+        let theme = tl_ui_base::theme::tests::test_theme(tl_ui_base::theme::ThemeMode::Dark);
         let coral = accent_color("coral").expect("coral");
         assert_eq!(
             resolve_colors(&MinigraphSource::Memory, GraphColor::Coral, &theme),

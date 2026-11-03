@@ -10,7 +10,7 @@
 //!
 //! Tree connector lines (PROC-017, `processes.tree_guide_lines`) are quads that `TlTreeTable`
 //! paints over the row from its depth and its `LAST_SIBLING`, `IN_GROUP` and
-//! `ancestor_continues` flags ([`crate::table::cells::guide_quads`]). The delegate computes the
+//! `ancestor_continues` flags ([`tl_ui_table::table::cells::guide_quads`]). The delegate computes the
 //! flags once per table version ([`super::delegate::sibling_pass`]).
 //!
 //! The window button (PROC-053) sits at the cell's right edge on a hovered or selected row that
@@ -29,13 +29,15 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::ids::PseudoKind;
 
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::i18n::tr;
-use crate::table::cells::{CellCtx, IconSourceCache, paint_group_header_cell, paint_name_cell};
-pub use crate::table::tree_table::NameIcon;
-use crate::table::tree_table::{IconSlot, NameCell, RowFlags, RowKind};
-use crate::theme::metrics;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_table::table::cells::{
+    CellCtx, IconSourceCache, paint_group_header_cell, paint_name_cell,
+};
+pub use tl_ui_table::table::tree_table::NameIcon;
+use tl_ui_table::table::tree_table::{IconSlot, NameCell, RowFlags, RowKind};
 
 /// Fluent keys of the state glyph tooltips (R-132).
 const SUSPENDED_KEY: &str = "processes-name-suspended";

@@ -18,9 +18,9 @@ use gpui_kit::{
 use crate::components::focus::TlFocusRing;
 use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_FAST, ease_out_cubic};
-use crate::selector::TlSelector;
-use crate::text::style::numeric_style;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::theme::{TlTheme, current, metrics};
 
 gpui_kit::actions!(tasklens, [ToggleCheckbox]);
 
@@ -388,7 +388,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

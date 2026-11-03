@@ -26,10 +26,10 @@ use tracing::debug;
 
 use crate::components::shield::{EndHelperSession, StartHelperSession};
 use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::shell::ShellApi;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::shell::ShellApi;
 
 const AUTH_CANCELLED_TEXT: &str = "fnd-shield-auth-cancelled";
 const START_FAILED_TEXT: &str = "fnd-shield-start-failed";

@@ -62,17 +62,17 @@ use super::grid::{self, InnerGrid, SlotDevice};
 use super::members::{Members, members};
 use super::meta::MetricMeta;
 use super::source::{box_reading, reading};
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::menu::TlMenu;
-use crate::core::DeviceKey;
-use crate::core::actions::{
+use crate::overview::layout::Arrange;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::actions::{
     PerfWidgetAdd, PerfWidgetAddFixed, PerfWidgetAddGroup, PerfWidgetRemove, PerfWidgetSetForm,
     PerfWidgetSetGroup, PerfWidgetSetOption, PerfWidgetSetSource, WidgetSource,
 };
-use crate::core::gpu::{GpuVendor, gpu_totals, grid_engines};
-use crate::i18n::{tr, tr_args};
-use crate::overview::layout::Arrange;
-use crate::settings_global::TlSettings;
+use tl_ui_perf_core::core::gpu::{GpuVendor, gpu_totals, grid_engines};
 
 /// The device facts after the engines, in menu order, with their name keys.
 const OTHER_METRICS: [(&str, &str); 5] = [

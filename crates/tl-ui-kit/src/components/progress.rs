@@ -29,7 +29,7 @@ use gpui_kit::{
 };
 
 use crate::components::icons::{TlIcon, icon};
-use crate::theme::{current, metrics};
+use tl_ui_base::theme::{current, metrics};
 
 /// Width of the indeterminate segment, as a fraction of the track.
 pub const SEGMENT: f32 = 0.3;
@@ -274,7 +274,7 @@ mod tests {
     fn setup(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

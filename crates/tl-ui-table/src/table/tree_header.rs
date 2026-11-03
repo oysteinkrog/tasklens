@@ -16,9 +16,6 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use tl_model::validity::Validity;
 
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
 use crate::table::actions::{
     EnableAllColumns, HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SortByColumn,
     TABLE_CONTEXT,
@@ -37,9 +34,12 @@ use crate::table::tree_core::{
     ColKey, DynRows, DynTreeDelegate, Link, TreeTableCore, open_boxed_menu,
 };
 use crate::table::tree_table::{ColumnResizeMode, HeaderLines, TableSort};
-use crate::text::metrics::TextMetricsCache;
 use crate::text_cache::CellTextCache;
-use crate::theme::{TlTheme, UiMetrics, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::theme::{TlTheme, UiMetrics, metrics};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 /// The header and column state of one table.
 pub(crate) struct HeaderCore {

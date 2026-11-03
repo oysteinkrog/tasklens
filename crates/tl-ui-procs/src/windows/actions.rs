@@ -202,7 +202,7 @@ pub fn bind_keys_process_windows(cx: &mut App) {
     let search = Some(HANDLE_SEARCH_CONTEXT);
     let table_ctx = format!(
         "{HANDLE_SEARCH_CONTEXT} > {}",
-        crate::table::actions::TABLE_CONTEXT
+        tl_ui_table::table::actions::TABLE_CONTEXT
     );
     let search_table = Some(table_ctx.as_str());
 
@@ -265,8 +265,8 @@ mod tests {
     use gpui_kit::{KeyContext, Keystroke, TestAppContext};
 
     use super::*;
-    use crate::actions::bind_keys_global;
-    use crate::table::actions::bind_keys_table;
+    use tl_ui_kit::actions::bind_keys_global;
+    use tl_ui_table::table::actions::bind_keys_table;
 
     /// The Action the keymap resolves `keys` to with `contexts` as the stack (outermost first).
     fn resolve(cx: &App, keys: &str, contexts: &[&str]) -> Option<Box<dyn Action>> {

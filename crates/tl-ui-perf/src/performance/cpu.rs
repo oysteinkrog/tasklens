@@ -51,23 +51,23 @@ use super::page::{
     page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow};
-use crate::actions::OpenAdditionalSetup;
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings, animations_on};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale, format_value, grid_height, grid_layout,
 };
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::motion::{M_BASE, ease_out_cubic};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings, animations_on};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::motion::{M_BASE, ease_out_cubic};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// The overlaid and stacked modes are in the mode menu (E24-018).
 pub const CPU_EXTRA_MODES_ENABLED: bool = true;

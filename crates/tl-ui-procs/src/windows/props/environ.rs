@@ -34,27 +34,27 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::TlMenu;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::TlTooltip;
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::table::actions::{CopyRow, CopyRowsAsTable, ToggleExpand};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use crate::windows::actions::PropsToggleRevealEnv;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_table::table::actions::{CopyRow, CopyRowsAsTable, ToggleExpand};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
-use crate::windows::actions::PropsToggleRevealEnv;
 
 gpui_kit::actions!(tasklens_env, [EnvCopyName, EnvCopyValue, EnvCopyAll]);
 

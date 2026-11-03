@@ -23,8 +23,8 @@ use gpui_kit::{
 
 use crate::components::focus::TlFocusRing;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, current, metrics};
 
 /// Press darkens the link colour by this fraction.
 const PRESS_SHADE: f32 = 0.08;
@@ -258,7 +258,7 @@ mod tests {
     ) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),
@@ -287,7 +287,7 @@ mod tests {
     ) -> (&mut VisualTestContext, Rc<Cell<usize>>, SeenBounds) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

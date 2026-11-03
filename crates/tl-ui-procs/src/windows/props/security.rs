@@ -45,31 +45,31 @@ use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
 use super::general::{
     GeneralCopyRow, GeneralCopySection, GeneralWords, escape_controls, general_words,
 };
-use crate::components::kv_grid::{
-    KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
-    kv_words, shown_text_in, value_copy_form,
-};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::table::actions::CopyRow;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
-    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
-};
-use crate::table::tree_table::{
-    HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort,
-    TlTreeTable, TreeTableDelegate, TreeTableEvent,
-};
-use crate::template::Template;
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::label_style;
-use crate::theme::{UiMetrics, current, metrics};
-use crate::util::clipboard_write;
 use crate::windows::actions::{
     KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
     PropsFieldEnd, PropsFieldHome, PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp,
+};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::kv_grid::{
+    KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, ValueTone,
+    kv_words, shown_text_in, value_copy_form,
+};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::actions::CopyRow;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use tl_ui_table::table::tree_table::{
+    HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort,
+    TlTreeTable, TreeTableDelegate, TreeTableEvent,
 };
 
 /// Row height, × ui_scale.
@@ -391,7 +391,7 @@ impl SecurityWords {
 
     /// The en-US words, for code that runs without the strings.
     pub fn en() -> Self {
-        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+        Self::with(|key| tl_ui_base::i18n::tr_en(key, &[]), Template::en)
     }
 
     /// The label of `id`, such as "User:".

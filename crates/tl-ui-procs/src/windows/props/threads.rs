@@ -31,28 +31,28 @@ use tl_model::units;
 use tl_model::validity::Validity;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH_THREADS, PropsFilter, lowercase};
-use crate::action_tracker::{SummaryTexts, ToastTexts, action_words};
-use crate::components::menu::TlMenu;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr};
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
-use crate::selector::TlSelector;
-use crate::table::actions::CopyRow;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
-    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
-};
-use crate::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
-    TreeTableDelegate, TreeTableEvent,
-};
-use crate::template::Template;
 use crate::windows::actions::{
     OpenCustomPriority, SetAffinity, SetThreadNice, SetThreadSched, SignalThread,
 };
 use crate::windows::affinity::{self, AffinitySubject, MAX_CPU, parse_cpu_list};
 use crate::windows::{priority, signal};
+use tl_ui_base::action_tracker::{SummaryTexts, ToastTexts, action_words};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::actions::CopyRow;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use tl_ui_table::table::tree_table::{
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
+    TreeTableDelegate, TreeTableEvent,
+};
 
 const THREAD_MENU_MIN_W: f32 = 220.;
 const MAX_TARGETS: usize = 256;

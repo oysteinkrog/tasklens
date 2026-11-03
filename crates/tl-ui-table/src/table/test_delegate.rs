@@ -12,7 +12,6 @@ use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::table::{ServiceColumn, SortSpec, SysColumnId, SysSortSpec};
 
-use crate::components::menu::TlMenu;
 use crate::table::cells::CellOut;
 use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
@@ -20,6 +19,7 @@ use crate::table::columns::{
 use crate::table::tree_table::{
     IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable, TreeTableDelegate,
 };
+use tl_ui_kit::components::menu::TlMenu;
 
 /// A column id set `VecDelegate` can run on, with its sort type.
 pub trait VecColumn: TableColumn {

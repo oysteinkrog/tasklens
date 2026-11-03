@@ -43,10 +43,10 @@ use super::input::TlTextInput;
 use super::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec, frame_bottom,
 };
-use crate::action_tracker::ConfirmDialog;
-use crate::selector::TlSelector;
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::action_tracker::ConfirmDialog;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The key context of the dialog content.
 pub const CONTEXT: &str = "TlDialog";
@@ -872,8 +872,8 @@ mod tests {
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
-    use crate::theme::ThemeMode;
-    use crate::theme::tests::test_theme;
+    use tl_ui_base::theme::ThemeMode;
+    use tl_ui_base::theme::tests::test_theme;
 
     /// Draws a dialog body with Cancel, a second action and the action button.
     struct ThreeButtons {
@@ -900,7 +900,7 @@ mod tests {
     fn second_action_sits_between_cancel_and_select(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

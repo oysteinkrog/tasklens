@@ -54,25 +54,27 @@ use self::delegate::ProcessDelegate;
 use self::filter::FilterBinding;
 use self::history::HistoryPage;
 use self::run::{RunOptions, run_process_action_with};
-use crate::action_tracker::host_send_allowed;
-use crate::components::toast::ToastKind;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::{Strings, tr};
-use crate::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
-use crate::minigraph::panel::MinigraphPanel;
-use crate::registry::{CapClass, GlobalRegistry, WindowKey};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::shell::{PauseChanged, ShellPage, StatusAction, StatusChanged};
-use crate::shell::{ShellApi, ShellState};
-use crate::table::actions::{CollapseAll, CopyCell, OpenProperties};
-use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
-use crate::theme::{UiMetrics, bump_style_version, current, metrics};
-use crate::util::clipboard_write;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::signal::{OtherUserTarget, SignalRefusal, TargetNames};
 use status::{StatusCounts, write_actions, write_status};
+use tl_ui_base::action_tracker::host_send_allowed;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::shell::{PauseChanged, ShellPage, StatusAction, StatusChanged};
+use tl_ui_base::shell::{ShellApi, ShellState};
+use tl_ui_base::theme::{UiMetrics, bump_style_version, current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_perf_core::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use tl_ui_perf_core::minigraph::panel::MinigraphPanel;
+use tl_ui_table::table::actions::{CollapseAll, CopyCell, OpenProperties};
+use tl_ui_table::table::tree_table::{
+    RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent,
+};
 
 /// Key context of the page div. The table inside it has `Table`.
 pub const PAGE_CONTEXT: &str = "ProcessTable";

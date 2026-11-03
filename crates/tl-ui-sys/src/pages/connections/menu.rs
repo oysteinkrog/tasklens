@@ -19,11 +19,11 @@ use super::actions::{
     ConnectionCloseTcp, ConnectionCopyForeign, ConnectionCopyLocal, ConnectionGoToService,
     ConnectionJumpToProcess,
 };
-use crate::components::menu::TlMenu;
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 
 /// The column type stored for a Connections menu cell.
 pub type ColumnId = SysColumnId;

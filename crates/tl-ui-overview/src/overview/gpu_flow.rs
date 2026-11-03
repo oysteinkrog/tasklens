@@ -54,11 +54,11 @@ use super::gpu_box::{
 use super::inner_split::clamp_split;
 use super::layout::Arrange;
 use super::parts::{MIN_CHART_H, arrange_min_h};
-use crate::text::style::numeric_style;
-use crate::theme::UiMetrics;
 use crate::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::widget::source::Availability;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::theme::UiMetrics;
 
 /// The flow layout of preset `mode` with `arrange`, `split` and the box's hidden engine names
 /// (D-029): the widget list of `layout::convert_gpu_box`, so it is the same list a converted
@@ -740,7 +740,7 @@ mod tests {
 
     /// `chart_engines` with one GPU: 3D, encode and decode rows, VRAM, temperature and power.
     fn rows_plan() -> FlowPlan {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
+        let m = tl_ui_base::theme::metrics::compute(&Default::default(), 0);
         FlowPlan {
             look: PlanLook::Rows,
             arrange: Arrange::Auto,
@@ -985,8 +985,8 @@ mod tests {
     /// The line draws in the `t_xs` size and weight with tabular digits.
     #[test]
     fn line_style_is_t_xs_with_tnum() {
-        let m = crate::theme::metrics::compute(&Default::default(), 0);
-        let (line, xs) = (line_style(&m), crate::text::style::t_xs(&m));
+        let m = tl_ui_base::theme::metrics::compute(&Default::default(), 0);
+        let (line, xs) = (line_style(&m), tl_ui_base::text::style::t_xs(&m));
         assert_eq!(line.font_size, xs.font_size);
         assert_eq!(line.font_weight, xs.font_weight);
         assert_eq!(line.line_height, xs.line_height);

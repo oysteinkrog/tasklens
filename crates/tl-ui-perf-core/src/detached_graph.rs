@@ -16,15 +16,6 @@ use gpui_kit::{
 use tl_model::demand::Demand;
 use tl_ui_settings::settings::DetachedWindowState;
 
-use crate::actions::{Quit, ShowMainWindow};
-use crate::anim::AnimationDriver;
-use crate::components::menu::{
-    TlMenu, context_menu_layer, context_menu_open, open_context_menu_at,
-};
-use crate::components::toast::ToastKind;
-use crate::host::HostContext;
-use crate::hub::SnapshotHub;
-use crate::i18n::tr;
 use crate::minigraph::actions::{
     MinigraphAddToWindow, MinigraphAttach, MinigraphCloseDetachedWindow, MinigraphHide,
     MinigraphRemove,
@@ -34,9 +25,18 @@ use crate::minigraph::card::{CardEnded, MINI_CARD_H, MINI_CARD_W, MinigraphCard}
 use crate::minigraph::menu::{color_submenu, range_submenu};
 use crate::minigraph::panel::{MinigraphPanel, SYSTEM, cards_demand, gpu_order, same_kind};
 use crate::minigraph::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::shell::ShellApi;
-use crate::theme::{current, metrics};
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::actions::{Quit, ShowMainWindow};
+use tl_ui_kit::components::menu::{
+    TlMenu, context_menu_layer, context_menu_open, open_context_menu_at,
+};
+use tl_ui_kit::components::toast::ToastKind;
 
 /// The `sp[2]` spacing at ui_scale 1: the window padding and the gap between cards.
 const SP2: f32 = 4.;
@@ -78,7 +78,7 @@ pub fn detached_window_options(size: Size<Pixels>, cx: &mut App) -> WindowOption
         titlebar: None,
         is_resizable: false,
         is_movable: true,
-        app_id: Some(crate::app_env::window_app_id(cx)),
+        app_id: Some(tl_ui_base::app_env::window_app_id(cx)),
         window_background: WindowBackgroundAppearance::Opaque,
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         ..Default::default()
@@ -396,8 +396,8 @@ pub fn open_detached(
 
 fn start_move(window: &Window, cx: &mut App) {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    if cx.has_global::<crate::shell::TitleBarProbe>() {
-        cx.global_mut::<crate::shell::TitleBarProbe>().moves += 1;
+    if cx.has_global::<tl_ui_base::shell::TitleBarProbe>() {
+        cx.global_mut::<tl_ui_base::shell::TitleBarProbe>().moves += 1;
         return;
     }
     let _ = cx;

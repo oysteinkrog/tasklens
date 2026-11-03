@@ -55,20 +55,22 @@ use tracing::warn;
 use super::parts::{ChartSettings, box_chart, class_probe};
 use super::range::page_range_ns;
 use super::timeline::{self, OverviewPause};
-use crate::chart::geometry::right_edge_ns;
-use crate::chart::view::{HistoryClock, derived_view, find_tiered, history_view, reads_history};
-use crate::chart::{
+use tl_ui_base::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::shell::{ProcessJump, ShellApi, ShellState};
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{numeric_style, t_sm};
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_chart::chart::geometry::right_edge_ns;
+use tl_ui_chart::chart::view::{
+    HistoryClock, derived_view, find_tiered, history_view, reads_history,
+};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale,
 };
-use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::shell::{ProcessJump, ShellApi, ShellState};
-use crate::template::Template;
-use crate::text::style::{numeric_style, t_sm};
-use crate::theme::{UiMetrics, current, metrics};
 
 /// Debug selector of the chart box.
 pub const APPS_ID: &str = "perf-mem-apps";
@@ -1507,7 +1509,7 @@ impl Render for MemoryAppsChart {
         let order = legend_order(&self.bands);
         let rows = order.len();
         let row_h = LEGEND_ROW_H * m.ui_scale;
-        let page_h = crate::core::GRAPH_H_OVERALL * m.ui_scale;
+        let page_h = tl_ui_perf_core::core::GRAPH_H_OVERALL * m.ui_scale;
         let (below, shown, more) = match self.place {
             AppsPlace::Page => {
                 let (shown, more) = legend_fit(rows, page_h, row_h);

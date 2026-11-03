@@ -48,25 +48,25 @@ use super::page::{
     page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
-use crate::action_tracker::ToastTexts;
-use crate::actions::SetSetting;
-use crate::chart::{
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings};
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::link::TlLink;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::ToastQueue;
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
-use crate::shell::ShellApi;
-use crate::template::Template;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::actions::SetSetting;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::link::TlLink;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::ToastQueue;
 
 /// Debug selector of the chart box.
 pub const THROUGHPUT_ID: &str = "perf-net-throughput";

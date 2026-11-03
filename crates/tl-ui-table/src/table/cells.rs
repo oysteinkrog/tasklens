@@ -43,19 +43,19 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::validity::Validity;
 
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::validity::{glyph, glyph_allows_heat, glyph_start};
-use crate::selector::TlSelector;
 use crate::table::columns::ColumnKind;
 use crate::table::sys_status::{DotStyle, LabelTone, StatusLook, cell_colors};
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
     STALE_OPACITY,
 };
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{TNUM, label_style, numeric_style, t_base};
-use crate::text::untrusted::{debug_assert_clean, split_fffd_runs};
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::{TNUM, label_style, numeric_style, t_base};
+use tl_ui_base::text::untrusted::{debug_assert_clean, split_fffd_runs};
+use tl_ui_base::theme::{TlTheme, UiMetrics};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::validity::{glyph, glyph_allows_heat, glyph_start};
 
 /// Height of a cell's usage bar and the width of the text beside it, in logical px at 100%.
 const BAR_H: f32 = 12.0;
@@ -1309,9 +1309,9 @@ mod tests {
     use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
-    use crate::theme::ThemeMode;
-    use crate::theme::metrics::compute;
-    use crate::theme::tests::test_theme;
+    use tl_ui_base::theme::ThemeMode;
+    use tl_ui_base::theme::metrics::compute;
+    use tl_ui_base::theme::tests::test_theme;
 
     #[test]
     fn reset_clears_every_field() {

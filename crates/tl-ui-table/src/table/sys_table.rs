@@ -37,24 +37,24 @@ use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQ
 use tl_model::validity::Validity;
 use tracing::{debug, warn};
 
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-use crate::action_tracker::PushedToast;
-use crate::action_tracker::{
-    ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
-};
-use crate::actions::RefreshCurrentTab;
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::empty::{TlEmptyState, TlEmptyTone};
-use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
-use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args, tr_en};
-use crate::selector::TlSelector;
-use crate::shell::CHIP_H;
 use crate::table::TreeTableDelegate;
 use crate::table::tree_table::{HEADER_H_ONE, TlTreeTable};
-use crate::theme::{UiMetrics, current, metrics};
+#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+use tl_ui_base::action_tracker::PushedToast;
+use tl_ui_base::action_tracker::{
+    ActionTracker, ActionTrackerEvent, ToastTexts, action_words, message, root_confirm_dialog,
+};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::CHIP_H;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_kit::actions::RefreshCurrentTab;
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::empty::{TlEmptyState, TlEmptyTone};
+use tl_ui_kit::components::skeleton::{TlSkeletonRows, skeleton_row_count};
+use tl_ui_kit::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 
 /// Query owner for one system table. Generations start at 1 and only grow.
 pub struct SysQuery {

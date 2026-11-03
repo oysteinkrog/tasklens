@@ -52,9 +52,9 @@ use super::grid::{self, InnerGrid, InnerPlacement, PlacedWidget};
 use super::group_widget::{GroupFlowLook, GroupWidget};
 use super::metric_widget::{FlowLook, MetricWidget};
 use super::source::{Availability, AvailabilityChanged, SourceData, SourceStore};
-use crate::hub::SnapshotHub;
-use crate::selector::TlSelector;
-use crate::theme::{UiMetrics, metrics};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{UiMetrics, metrics};
 
 /// The debug selector of container `id`'s body ("overview.gpu" gives
 /// "perf-widget-container-overview.gpu").

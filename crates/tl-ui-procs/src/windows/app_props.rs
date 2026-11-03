@@ -48,40 +48,40 @@ use super::props::filter::{
     FilterChanged, NO_MATCH, PropsFilter, filter_bar, lowercase, matches, on_clear,
 };
 use super::props::general::{escape_controls, go_to_service};
-use crate::action_tracker::ToastTexts;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::kv_grid::{
+use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::jump::JumpTexts;
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::text::style::{label_style, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, kv_words,
     row_copy_text, section_copy_text, shown_text_in, value_copy_form,
 };
-use crate::components::menu::{
+use tl_ui_kit::components::menu::{
     TlMenu, close_context_menu, context_menu_open, open_context_menu_at,
 };
-use crate::components::tabs::{TlTabSpec, TlTabs};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::TlSecondaryWindow;
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{Strings, tr};
-use crate::pages::processes::ProcessesPage;
-use crate::pages::processes::jump::JumpTexts;
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
-use crate::table::actions::CopyRowsAsTable;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_kit::components::tabs::{TlTabSpec, TlTabs};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
+use tl_ui_table::table::actions::CopyRowsAsTable;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
-use crate::text::style::{label_style, t_sm};
-use crate::theme::{current, metrics};
 
 gpui_kit::actions!(
     tasklens,

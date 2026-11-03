@@ -52,26 +52,26 @@ use self::actions::{
     HistoryStepForward, HistoryStepForwardMinute, SCRUBBED,
 };
 use self::legend::{LegendWords, legend_model, render_legend};
-use crate::actions::SetSetting;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::toast::{ToastAction, ToastKind};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::actions::{CopyAllMetrics, CopyDetails};
 use crate::pages::processes::jump::JumpTexts;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
-use crate::shell::FilterChanged;
-use crate::shell::ShellApi;
-use crate::table::actions::{CopyCell, OpenProperties};
-use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
-use crate::template::Template;
-use crate::theme::{TlTheme, bump_style_version, current, metrics};
-use crate::util::clipboard_write;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings};
+use tl_ui_base::shell::FilterChanged;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, bump_style_version, current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::SetSetting;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::toast::{ToastAction, ToastKind};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_table::table::actions::{CopyCell, OpenProperties};
+use tl_ui_table::table::tree_table::{TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 
 use self::minimap::{KeptOverview, MinimapCache, MinimapView};
 use self::scrubber::{ScrubberCache, StripView};
@@ -487,24 +487,24 @@ pub fn open_at(t: TimeNs, window: &mut Window, cx: &mut App) {
     cx.default_global::<HistorySession>().pending_scrub = Some(t);
     if history_mode(cx) {
         window.dispatch_action(
-            Box::new(crate::actions::SelectTab(Tab::Processes as usize)),
+            Box::new(tl_ui_kit::actions::SelectTab(Tab::Processes as usize)),
             cx,
         );
     } else {
-        window.dispatch_action(Box::new(crate::actions::ToggleHistoryMode), cx);
+        window.dispatch_action(Box::new(tl_ui_kit::actions::ToggleHistoryMode), cx);
     }
 }
 
 /// True while `history.enabled`, a host setting, is off. Before the engine gives it (and
 /// without a hub, in tests) recording does not count as off.
 fn recording_off(host: &HostContext, cx: &App) -> bool {
-    let settings = crate::host_settings::current(host, cx);
+    let settings = tl_ui_base::host_settings::current(host, cx);
     settings.rev > 0 && !settings.values.history.enabled
 }
 
 /// Turns recording on in the host settings, which makes the engine switch to the store.
 fn enable_recording(host: &HostContext, cx: &mut App) {
-    crate::host_settings::change(host, cx, |v| v.history.enabled = true);
+    tl_ui_base::host_settings::change(host, cx, |v| v.history.enabled = true);
 }
 
 fn problem_index(p: HistoryLoadProblem) -> usize {

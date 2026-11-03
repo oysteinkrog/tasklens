@@ -22,9 +22,9 @@ use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
 use super::link::TlLink;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::t_sm;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Strip height before the UI scale.
 pub const HEIGHT: f32 = 32.0;
@@ -190,7 +190,7 @@ mod tests {
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
-    use crate::text::fonts::{UI_FAMILY, load_bundled_fonts};
+    use tl_ui_base::text::fonts::{UI_FAMILY, load_bundled_fonts};
 
     gpui_kit::actions!(tl_banner_test, [First, Second]);
 
@@ -198,7 +198,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

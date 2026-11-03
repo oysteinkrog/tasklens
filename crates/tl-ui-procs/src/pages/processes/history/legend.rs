@@ -26,11 +26,11 @@ use super::actions::{
 };
 use super::scrubber::series_color;
 use super::{HistoryUiState, MAX_SERIES};
-use crate::components::icons::{TlIcon, icon};
-use crate::i18n::{tr, tr_en};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::i18n::{tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_kit::components::icons::{TlIcon, icon};
 
 /// Chip height, × ui_scale.
 const CHIP_H: f32 = 24.;

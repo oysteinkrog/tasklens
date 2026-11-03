@@ -20,14 +20,14 @@ use tl_model::table::{UnitRef, UnitType};
 use tracing::warn;
 
 use super::actions::StartupChoice;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
-use crate::shell::{ShellApi, ShellState};
-use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::shell::{ShellApi, ShellState};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts, SysActions};
 
 /// The five service verbs that share one flow.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,7 +140,7 @@ fn keys(
 pub fn unit_action_texts(v: UnitVerb, cx: &App) -> ActionTexts {
     let (pending_one, done_one, failed, pending_many, done_many, partial_many) = keys(v);
     let failed_button = (v != UnitVerb::ResetFailed).then(|| {
-        let make: crate::table::sys_table::FailedButtonAction = Box::new(|t| match t {
+        let make: tl_ui_table::table::sys_table::FailedButtonAction = Box::new(|t| match t {
             ActionTarget::Unit(u) => Box::new(ServiceOpenLogs(u.clone())),
             _ => Box::new(gpui::NoAction),
         });

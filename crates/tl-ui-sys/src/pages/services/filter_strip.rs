@@ -13,15 +13,15 @@ use super::actions::{
     ManagerArg, ServicesRemoveFilters, ServicesResetUnitTypes, ServicesToggleManagerFilter,
     ServicesToggleStateFilter, ServicesToggleUnitType, StateFilterArg, UnitTypeArg,
 };
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, set_open_menu_check};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::table::sys_table::SysQuery;
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, set_open_menu_check};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::sys_table::SysQuery;
 
 gpui_kit::gpui::actions!(tasklens, [ServicesOpenUnitTypes]);
 

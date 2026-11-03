@@ -24,26 +24,26 @@ use tl_model::units;
 use tl_model::validity::Validity;
 use tracing::warn;
 
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::kv_grid::{
+use crate::pages::connections::actions::ConnectionJumpToProcess;
+use crate::pages::connections::jump_to_owner;
+use tl_ui_base::host::{HostContext, with_host_name};
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::kv_grid::{
     KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, kv_words,
     shown_text_in,
 };
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::host::{HostContext, with_host_name};
-use crate::hub::SnapshotChanged;
-use crate::i18n::{tr, tr_args};
-use crate::pages::connections::actions::ConnectionJumpToProcess;
-use crate::pages::connections::jump_to_owner;
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::shell::ShellApi;
-use crate::theme::{current, metrics};
-use crate::util::clipboard_write;
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (560., 520.);
@@ -590,7 +590,7 @@ impl ConnectionPropertiesView {
 
     /// The lines as "label: value", the way the golden file stores them.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    pub fn line_texts(&self, words: &crate::components::kv_grid::KvWords) -> Vec<String> {
+    pub fn line_texts(&self, words: &tl_ui_kit::components::kv_grid::KvWords) -> Vec<String> {
         self.lines
             .iter()
             .filter_map(|l| {
@@ -603,12 +603,12 @@ impl ConnectionPropertiesView {
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub fn value_looks(
         &self,
-        words: &crate::components::kv_grid::KvWords,
-        theme: &crate::theme::TlTheme,
-    ) -> Vec<crate::components::kv_grid::ValueLook> {
+        words: &tl_ui_kit::components::kv_grid::KvWords,
+        theme: &tl_ui_base::theme::TlTheme,
+    ) -> Vec<tl_ui_kit::components::kv_grid::ValueLook> {
         self.lines
             .iter()
-            .filter_map(|l| crate::components::kv_grid::value_look_in(&l.value, words, theme))
+            .filter_map(|l| tl_ui_kit::components::kv_grid::value_look_in(&l.value, words, theme))
             .collect()
     }
 

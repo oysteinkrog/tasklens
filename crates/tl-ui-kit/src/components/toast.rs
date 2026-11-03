@@ -46,14 +46,14 @@ use super::icons::{TlIcon, icon};
 use super::motion::{M_BASE, ease_out_cubic};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::action_tracker::{ConfirmDialog, OnConfirm, TrackerUi};
-use crate::host::HostContext;
-use crate::i18n::tr_args;
-use crate::selector::TlSelector;
-use crate::settings_global::animations_on;
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{TNUM, t_base};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::action_tracker::{ConfirmDialog, OnConfirm, TrackerUi};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr_args;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::animations_on;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::{TNUM, t_base};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Keys at or above this are fixed keys owned by pages. Tracker keys (`id << 8 | index`, with
 /// `ActionId` below 2^55) never reach it (R-232).
@@ -107,7 +107,7 @@ impl Render for ToastLayer {
 
 impl RootPlugin for ToastLayer {}
 
-pub use crate::toast_types::{ToastAction, ToastKey, ToastKind};
+pub use tl_ui_base::toast_types::{ToastAction, ToastKey, ToastKind};
 
 /// The queue's rules per kind. `ToastKind` lives in base (`toast_types.rs`), so these stay here
 /// as a private trait.

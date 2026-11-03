@@ -26,9 +26,6 @@ use tl_model::ids::ColumnId;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
-use crate::actions::ClearFilter;
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_CONTROL, TlTooltip};
 use crate::table::cells::CellOut;
 use crate::table::columns::{ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::columns_window::{self, ColumnHost, ColumnPicker, PickerColumn};
@@ -40,7 +37,10 @@ use crate::table::tree_core::{
     row_fill,
 };
 use crate::table::tree_header::{self, HeaderView};
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_kit::actions::ClearFilter;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, TlTooltip};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
 pub use tl_ui_settings::settings::ColumnResize as ColumnResizeMode;

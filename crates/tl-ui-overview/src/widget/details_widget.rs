@@ -26,9 +26,9 @@ use gpui_kit::{
 };
 use tl_model::validity::Validity;
 
-use crate::core::details::KeyValueModel;
-use crate::selector::TlSelector;
-use crate::theme::metrics;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::metrics;
+use tl_ui_perf_core::core::details::KeyValueModel;
 
 /// The debug selector of the Details view of container `container`.
 pub fn details_id(container: &str) -> String {

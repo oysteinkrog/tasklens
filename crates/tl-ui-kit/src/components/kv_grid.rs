@@ -77,13 +77,13 @@ use super::link::TlLink;
 use super::motion::{M_FAST, ease_out_cubic};
 use super::skeleton::TlSkeletonBlock;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::text::ellipsis::middle_ellipsis;
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::{label_style, numeric_style, t_base, t_md, t_sm};
-use crate::text::untrusted::debug_assert_clean;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::ellipsis::middle_ellipsis;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::{label_style, numeric_style, t_base, t_md, t_sm};
+use tl_ui_base::text::untrusted::debug_assert_clean;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Key context of the grid, where [`init`] binds Ctrl+C.
 pub const KEY_CONTEXT: &str = "TlKeyValueGrid";
@@ -1541,7 +1541,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

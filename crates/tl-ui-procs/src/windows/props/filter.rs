@@ -21,12 +21,12 @@ use gpui_kit::{
     px,
 };
 
-use crate::components::empty::TlEmptyState;
-use crate::components::icons::TlIcon;
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::empty::TlEmptyState;
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
 
 gpui_kit::actions!(
     props_filter,
@@ -390,13 +390,13 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),
             Vec::new(),
         );
-        crate::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
     }
 
     /// A tab: the bar, then the empty state when `empty` is set. The root holds focus, as the
@@ -613,14 +613,18 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("TlEmptyState-text").is_some());
 
-        let before = crate::i18n::tr_calls();
+        let before = tl_ui_base::i18n::tr_calls();
         for _ in 0..60 {
             cx.update(|window, cx| {
                 window.refresh();
                 window.draw(cx).clear(cx);
             });
         }
-        assert_eq!(crate::i18n::tr_calls(), before, "60 frames make no tr call");
+        assert_eq!(
+            tl_ui_base::i18n::tr_calls(),
+            before,
+            "60 frames make no tr call"
+        );
 
         let f = filter(&view, cx);
         let threads = cx.update(|_, cx| f.read(cx).words.no_match(NO_MATCH_THREADS).clone());

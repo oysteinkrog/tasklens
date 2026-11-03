@@ -44,21 +44,23 @@ use tl_model::ids::ProcessKey;
 use tl_model::units;
 use tracing::warn;
 
-use crate::action_tracker::{
+use crate::pages::processes::confirm::{self, ConfirmKind};
+use crate::windows::actions::OpenDumpFolder;
+use tl_ui_base::action_tracker::{
     ActionTracker, ActionTrackerEvent, RetryActionAsAdmin, ToastTexts, action_words,
 };
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::toast::{self, ToastAction, ToastClosed, ToastKey, ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::{tr, tr_args};
-use crate::pages::processes::confirm::{self, ConfirmKind};
-use crate::settings_global::TlSettings;
-use crate::text::ellipsis::middle_ellipsis;
-use crate::text::metrics::TextMetricsCache;
-use crate::theme::{UiMetrics, metrics};
-use crate::util::{clipboard_write, home_tilde};
-use crate::windows::actions::OpenDumpFolder;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::ellipsis::middle_ellipsis;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::theme::{UiMetrics, metrics};
+use tl_ui_base::util::{clipboard_write, home_tilde};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::toast::{
+    self, ToastAction, ToastClosed, ToastKey, ToastKind, ToastQueue,
+};
 
 /// How long the hash may take before the "Computing SHA-256…" toast shows.
 pub const TOAST_DELAY: Duration = Duration::from_millis(500);

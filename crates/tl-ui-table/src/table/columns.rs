@@ -20,8 +20,8 @@ use tl_model::table::{ConnColumn, SortSpec, StartupColumn, SysColumnId, SysSortS
 use tl_ui_settings::settings::ColumnState;
 
 use crate::table::tree_table::ColumnResizeMode;
-use crate::text::metrics::TextMetricsCache;
-use crate::theme::metrics::UiMetrics;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::theme::metrics::UiMetrics;
 
 /// The five tables of canonical table (a) `[columns.*]`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, JsonSchema)]
@@ -710,8 +710,8 @@ mod tests {
     use tl_ui_settings::settings::AppearanceSettings;
 
     use super::*;
-    use crate::text::fonts::load_bundled_fonts;
-    use crate::theme::metrics::compute;
+    use tl_ui_base::text::fonts::load_bundled_fonts;
+    use tl_ui_base::theme::metrics::compute;
 
     fn spec(id: ColumnId, kind: ColumnKind, width: f32) -> ColumnSpec {
         let label = SharedString::new(id.as_str());

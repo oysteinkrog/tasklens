@@ -34,12 +34,12 @@ use tl_model::time::TimeNs;
 use super::actions::{HistoryLive, HistoryScrub, HistorySetRange};
 use super::hover;
 use super::{HistoryPage, HistoryUiState, MAX_SERIES};
-use crate::chart::GridStyle;
-use crate::chart::geometry::TimeMap;
-use crate::chart::grid::{self, GridPaint};
-use crate::chart::labels::{CachedLine, LineStyle, paint_line};
-use crate::components::focus::TlFocusRing;
-use crate::theme::{GraphPalette, TlTheme, UiMetrics};
+use tl_ui_base::theme::{GraphPalette, TlTheme, UiMetrics};
+use tl_ui_chart::chart::GridStyle;
+use tl_ui_chart::chart::geometry::TimeMap;
+use tl_ui_chart::chart::grid::{self, GridPaint};
+use tl_ui_chart::chart::labels::{CachedLine, LineStyle, paint_line};
+use tl_ui_kit::components::focus::TlFocusRing;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -436,7 +436,7 @@ impl Element for HistoryScrubber {
         let env = Env {
             sf: window.scale_factor(),
             metrics: *cx.global::<UiMetrics>(),
-            theme: crate::theme::current(cx).clone(),
+            theme: tl_ui_base::theme::current(cx).clone(),
         };
         self.page.update(cx, |page, cx| {
             let HistoryPage {

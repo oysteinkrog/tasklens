@@ -20,8 +20,8 @@ use super::actions::{
 use super::page::DevicePage;
 use super::widget::edit::{any_editing, saved_layout};
 use super::{DeviceKey, DeviceKind};
-use crate::components::menu::TlMenu;
-use crate::i18n::tr;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::menu::TlMenu;
 
 /// The card menu of `key`. `visible_count` is the number of visible cards, `hidden` whether
 /// `key` is hidden (only edit mode shows hidden cards). `tray_available` is `None` before P3,
@@ -94,7 +94,7 @@ pub fn card_menu_in(
 /// "Add tray icon graph": enabled, disabled with a tooltip, or left out (PERF-088).
 fn tray_item(menu: TlMenu, key: &DeviceKey, tray: Option<bool>, cx: &App) -> TlMenu {
     // Overview, fan and battery cards have no tray source (wox.2).
-    let tray = tray.filter(|_| crate::tray_bridge::tray_source_of_card(key).is_some());
+    let tray = tray.filter(|_| tl_ui_perf_core::tray_bridge::tray_source_of_card(key).is_some());
     match tray {
         Some(true) => menu.item(
             tr(cx, "perf-menu-add-tray"),

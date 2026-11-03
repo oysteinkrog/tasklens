@@ -29,33 +29,33 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::ActionTrackerEvent;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::kv_grid::{
-    KEY_CONTEXT, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
-    UnsupportedWord,
-};
-use crate::components::link::TlLink;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::StartupChoice;
 use crate::pages::services::copy::status_word;
 use crate::pages::services::flows::{
     UnitVerb, file_uri, run_jump_to_process, run_open_uri, run_unit_verb, startup_texts,
     submit_set_startup,
 };
-use crate::selector::TlSelector;
-use crate::shell::ShellState;
-use crate::table::sys_status::{
+use tl_ui_base::action_tracker::ActionTrackerEvent;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::kv_grid::{
+    KEY_CONTEXT, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    UnsupportedWord,
+};
+use tl_ui_kit::components::link::TlLink;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_table::table::sys_status::{
     DotStyle, StatusLook, SysStatus, cell_colors, status_label, status_look,
 };
-use crate::table::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
-use crate::text::style::t_base;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
 
 /// Label column width at 100% scale.
 const LABEL_WIDTH: f32 = 120.;

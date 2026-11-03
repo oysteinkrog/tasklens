@@ -33,10 +33,10 @@ use tl_ui_settings::settings::OverviewGridSetting;
 
 use super::layout::Arrange;
 use super::mem_box::{ROWS, charts_fit, row_min_h};
-use crate::theme::UiMetrics;
 use crate::widget::container::{FlowInput, FlowPlace, list_flow};
 use crate::widget::grid::{self, InnerPlacement, PlacedWidget};
 use crate::widget::source::Availability;
+use tl_ui_base::theme::UiMetrics;
 
 /// The metric of each Memory box row, in row order.
 pub const ROW_KEYS: [&str; ROWS] = [
@@ -388,7 +388,7 @@ mod tests {
     fn plan(look: MemLook) -> MemPlan {
         MemPlan {
             look,
-            m: crate::theme::metrics::compute(
+            m: tl_ui_base::theme::metrics::compute(
                 &tl_ui_settings::settings::AppearanceSettings::default(),
                 0,
             ),

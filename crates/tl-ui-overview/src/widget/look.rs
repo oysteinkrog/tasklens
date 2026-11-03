@@ -36,16 +36,16 @@ use tl_ui_settings::layout_boxes::{
 };
 
 use super::meta::Lines;
-use crate::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
-use crate::core::core_clocks::clock_series;
-use crate::core::look::{DIRTY_ALPHA, OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
-use crate::i18n::tr;
 use crate::overview::cpu_box::SPARK_MEAN_NS;
 use crate::overview::mem_box::row_colors;
 use crate::overview::net_box::UPLOAD_TINT;
 use crate::overview::parts::spark_labels;
-use crate::theme::TlTheme;
-use crate::theme::derived::blend_over;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::theme::TlTheme;
+use tl_ui_base::theme::derived::blend_over;
+use tl_ui_chart::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
+use tl_ui_perf_core::core::core_clocks::clock_series;
+use tl_ui_perf_core::core::look::{DIRTY_ALPHA, OVERLAID_MIN_ALPHA, STACKED_ALPHAS};
 
 /// The CPU box's range word and legend (`cpu_box::total_labels`).
 const KEY_CPU_RANGE: &str = "perf-cpu-heading-utilization";

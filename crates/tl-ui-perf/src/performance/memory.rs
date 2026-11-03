@@ -47,31 +47,31 @@ use super::page::{
     DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_history_request, page_range_ns, page_words,
 };
 use super::{DeviceKey, DeviceRow};
-use crate::chart::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, SettingKey, SettingValue, TlSettings, animations_on};
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::TlMenu;
-use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings, animations_on};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_settings::settings::MemoryView;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HEADER_H_ONE, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W,
     TableSort, TlTreeTable, TreeTableDelegate,
 };
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_settings::settings::MemoryView;
 
 /// Debug selectors of the chart boxes.
 pub const PHYSICAL_ID: &str = "perf-mem-physical";

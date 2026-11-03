@@ -35,9 +35,9 @@ use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Hover lightens Primary and Danger by this much; pressed darkens by the same.
 const STATE_STEP: f32 = 0.08;
@@ -577,7 +577,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

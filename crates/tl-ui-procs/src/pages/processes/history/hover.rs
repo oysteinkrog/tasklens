@@ -31,13 +31,13 @@ use tl_model::units::{self, NetUnit};
 use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use super::{HistoryPage, NS_PER_SEC, QUERY_TIMEOUT, clock};
-use crate::chart::labels::{CachedLine, LineStyle, paint_line};
-use crate::host::HostContext;
-use crate::i18n::Strings;
-use crate::settings_global::{Section, TlSettings};
-use crate::table::cells::IconSourceCache;
-use crate::template::Template;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::Strings;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
+use tl_ui_chart::chart::labels::{CachedLine, LineStyle, paint_line};
+use tl_ui_table::table::cells::IconSourceCache;
 
 /// TopAt query ids start here, so they never equal a Frame query id. With no last view the
 /// engine answers a TopAt query with a frame that carries the TopAt id.
@@ -778,7 +778,7 @@ pub(super) fn defer_card(
     cx: &mut App,
 ) {
     let m = *cx.global::<UiMetrics>();
-    let theme = crate::theme::current(cx).clone();
+    let theme = tl_ui_base::theme::current(cx).clone();
     let (units_version, net) = match cx.try_global::<TlSettings>() {
         Some(tl) => (
             tl.version(Section::Units),

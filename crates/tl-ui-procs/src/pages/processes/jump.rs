@@ -27,14 +27,14 @@ use super::ProcessesPage;
 use super::actions::ProcessesShowHidden;
 use super::delegate::ProcRowId;
 use super::table::GroupHeader;
-use crate::actions::{ClearFilter, SelectTab};
-use crate::components::toast::{ToastAction, ToastKind};
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
-use crate::settings_global::TlSettings;
-pub use crate::shell::JumpTexts;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::TlSettings;
+pub use tl_ui_base::shell::JumpTexts;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_kit::actions::{ClearFilter, SelectTab};
+use tl_ui_kit::components::toast::{ToastAction, ToastKind};
 
 /// A jump waiting for the view of `generation`.
 pub(super) struct PendingJump {

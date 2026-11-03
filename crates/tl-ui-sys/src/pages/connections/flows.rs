@@ -19,16 +19,16 @@ use tracing::warn;
 use super::ConnectionsPage;
 use super::actions::ConnectionCloseTcp;
 use super::menu::ConnRecordRef;
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{tr, tr_args};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
 use crate::pages::services::actions::{GoToService, JumpOrigin, ManagerArg};
-use crate::shell::{ShellApi, ShellState};
-use crate::table::sys_table::{ActionKindTag, ActionTexts};
-use crate::text::style::t_base;
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::shell::{ShellApi, ShellState};
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts};
 
 /// Selects the owning process on the Processes tab. A shared socket jumps to the lowest PID.
 pub(super) fn run_jump_to_process(record: &ConnRecordRef, window: &mut Window, cx: &mut App) {

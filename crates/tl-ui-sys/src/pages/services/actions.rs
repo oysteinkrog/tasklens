@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 /// The jump Actions moved to the shared `actions` module, so Processes can dispatch them without
 /// naming this page. Re-exported here for the Services and Connections pages.
-pub use crate::actions::{GoToService, JumpOrigin, ManagerArg};
+pub use tl_ui_kit::actions::{GoToService, JumpOrigin, ManagerArg};
 
 /// Key context of the Services table.
 pub const SERVICE_TABLE_CONTEXT: &str = "ServiceTable";

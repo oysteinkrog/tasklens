@@ -31,8 +31,8 @@ use gpui_kit::{
 };
 
 use crate::components::focus::TlFocusRing;
-use crate::selector::TlSelector;
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::{current, metrics};
 
 gpui_kit::actions!(
     tasklens,
@@ -459,7 +459,7 @@ mod tests {
     ) -> (&mut VisualTestContext, Entity<SliderState>, Events) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

@@ -16,7 +16,7 @@ use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::ProcFlags;
 use tl_model::table::UnitRef;
 
-use crate::table::tree_table::RowKind;
+use tl_ui_table::table::tree_table::RowKind;
 
 gpui_kit::actions!(
     tasklens,
@@ -304,8 +304,8 @@ mod tests {
         assert_eq!(names.len(), 22);
 
         // No name here is also declared by the table or the shell.
-        use crate::actions as shell;
-        use crate::table::actions as table;
+        use tl_ui_kit::actions as shell;
+        use tl_ui_table::table::actions as table;
         let others = [
             table::SelectAll.name(),
             table::ToggleExpand.name(),

@@ -1,14 +1,14 @@
 //! The toolbar button builders page toolbars use (E20-003, UI-SHL-010, R-108, tasklens-zljr5.15).
 //!
 //! The toolbar row itself is `window/toolbar.rs`. These builders sit in the kit so a page's
-//! [`ToolbarContent`](crate::shell::ToolbarContent) can build its buttons without naming the
+//! [`ToolbarContent`](tl_ui_base::shell::ToolbarContent) can build its buttons without naming the
 //! shell.
 
 use gpui_kit::{Action, ElementId, SharedString};
 
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
-use crate::shell::ToolbarModel;
+use tl_ui_base::shell::ToolbarModel;
 
 /// The rules every toolbar button shares: 24 × 24, `i_md` icon, not a Tab stop, a tooltip with
 /// the Action's key hint, and a `text_secondary` icon while the window is inactive.

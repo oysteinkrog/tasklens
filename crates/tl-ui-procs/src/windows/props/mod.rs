@@ -57,28 +57,28 @@ use self::maps::{MapsCountChanged, MapsTab};
 use self::security::SecurityTab;
 use self::strings::StringsTab;
 use self::threads::ThreadsTab;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::menu::{close_context_menu, context_menu_open};
-use crate::components::progress::TlSpinner;
-use crate::components::shield::StartHelperSession;
-use crate::components::tabs::{TlTabSpec, TlTabs};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::TlSecondaryWindow;
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::Strings;
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::shell::ShellApi;
-use crate::template::Template;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
 use crate::windows::actions::{
     PROPS_WINDOW_CONTEXT, PropsCancelStringScan, PropsCloseWindow, PropsEscape, PropsFocusFilter,
     PropsNextTab, PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsStartStringScan,
     PropsVerifyPackage,
 };
 use crate::windows::frame::{EscStep, PwnWindow, esc_step, props_title, pwn_window_spec};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::Strings;
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::menu::{close_context_menu, context_menu_open};
+use tl_ui_kit::components::progress::TlSpinner;
+use tl_ui_kit::components::shield::StartHelperSession;
+use tl_ui_kit::components::tabs::{TlTabSpec, TlTabs};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::TlSecondaryWindow;
 
 /// Access block texts (UI-PWN-018, P2). [`access_block`] shows the translated text.
 pub const ACCESS_FDS: &str = "Handles unavailable (insufficient privileges)";
@@ -189,14 +189,14 @@ impl PropsWords {
 
     fn en() -> Self {
         Self::with(
-            |key| crate::i18n::tr_en(key, &[]),
+            |key| tl_ui_base::i18n::tr_en(key, &[]),
             Template::en(KEY_TAB_TIP, &["label", "n"]),
         )
     }
 
     fn translated(cx: &App) -> Self {
         Self::with(
-            |key| crate::i18n::tr(cx, key),
+            |key| tl_ui_base::i18n::tr(cx, key),
             Template::new(cx, KEY_TAB_TIP, &["label", "n"]),
         )
     }
@@ -1179,7 +1179,7 @@ impl PropsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::helper_flow::note_start(window.window_handle(), cx);
+        tl_ui_kit::helper_flow::note_start(window.window_handle(), cx);
         if !self.exited && self.helper == HelperState::Locked {
             self.grant_pending = true;
         }

@@ -12,8 +12,8 @@ use gpui_kit::private::schemars::JsonSchema;
 use gpui_kit::{Hsla, SharedString};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::TlTheme;
-use crate::theme::palette::accent_color;
+use tl_ui_base::theme::TlTheme;
+use tl_ui_base::theme::palette::accent_color;
 
 /// A card's graph colour (R-263, R-083): the accent colour or one of the 17 APP-039 names. One
 /// type for E26 and the E21-032 Graph Color submenu. Its JSON form is [`GraphColor::as_str`].

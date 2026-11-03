@@ -48,25 +48,25 @@ use super::net::NetPage;
 use super::sensors::{BatteryPage, FanPage};
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind, DeviceRow};
-use crate::chart::{ChartView, NetFormat};
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::SnapshotHub;
-use crate::i18n::{Strings, tr, tr_en};
 use crate::performance::overview::parts::title_value_style;
 use crate::performance::overview::range::{
     PAGE_SWITCH, SwitchWords, current_range, history_request, page_range_switch,
 };
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_chart::chart::{ChartView, NetFormat};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 // page_range_ns moved to overview/range.rs (tasklens-zljr5.22). This keeps the old path working.
 pub use crate::performance::overview::range::page_range_ns;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::template::Template;
-use crate::text::style::{label_style, t_sm};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{label_style, t_sm};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 pub use super::core::{GRAPH_H_OVERALL, PAGE_PAD};
 // The DevicePage trait moved into overview/ (tasklens-zljr5.22).

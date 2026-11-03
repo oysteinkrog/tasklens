@@ -47,22 +47,22 @@ use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
 };
-use crate::chart::view::{find_series, find_tiered};
-use crate::chart::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings, set_fan_label, set_fan_temp};
+use tl_ui_base::text::style::{label_style, t_xs};
+use tl_ui_base::theme::palette::accent_color;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_chart::chart::view::{find_series, find_tiered};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GapStyle, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::components::menu::TlMenu;
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub, is_dead_reading};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings, set_fan_label, set_fan_temp};
-use crate::text::style::{label_style, t_xs};
-use crate::theme::palette::accent_color;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
+use tl_ui_kit::components::menu::TlMenu;
 
 /// Debug selector of the Fan speed chart box.
 pub const SPEED_ID: &str = "perf-fan-speed";
@@ -250,7 +250,7 @@ impl Words {
     /// Translates every word when the strings changed since the last call. True when it did.
     fn refresh(&mut self, cx: &App) -> bool {
         let version = Some(
-            cx.try_global::<crate::i18n::Strings>()
+            cx.try_global::<tl_ui_base::i18n::Strings>()
                 .map(|s| s.strings_version),
         );
         if self.version == version {
@@ -613,7 +613,7 @@ impl FanPage {
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
-        subs.push(cx.observe_global::<crate::theme::UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<tl_ui_base::theme::UiMetrics>(Self::sync_style));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -917,7 +917,7 @@ impl FanPage {
         &self,
         view: &Entity<ChartView>,
         selector: &'static str,
-        m: &crate::theme::UiMetrics,
+        m: &tl_ui_base::theme::UiMetrics,
     ) -> gpui_kit::Div {
         div()
             .tl_selector(move || selector.into())
@@ -928,7 +928,7 @@ impl FanPage {
 
     /// The empty Temperature plot: the value `-` at the right of the heading row and the centred
     /// text "Choose a sensor".
-    fn empty_overlay(&self, m: &crate::theme::UiMetrics, theme: &TlTheme) -> AnyElement {
+    fn empty_overlay(&self, m: &tl_ui_base::theme::UiMetrics, theme: &TlTheme) -> AnyElement {
         let mut value = div()
             .tl_selector(|| NO_VALUE_ID.into())
             .absolute()
@@ -1417,7 +1417,7 @@ impl BatWords {
     /// True when the strings changed since the last call.
     fn refresh(&mut self, cx: &App) -> bool {
         let version = Some(
-            cx.try_global::<crate::i18n::Strings>()
+            cx.try_global::<tl_ui_base::i18n::Strings>()
                 .map(|s| s.strings_version),
         );
         if self.version == version {
@@ -1803,7 +1803,7 @@ impl BatteryPage {
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
-        subs.push(cx.observe_global::<crate::theme::UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<tl_ui_base::theme::UiMetrics>(Self::sync_style));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))

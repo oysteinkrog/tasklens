@@ -25,15 +25,15 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::components::kv_grid::{
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::theme::metrics;
+use tl_ui_kit::components::kv_grid::{
     KEY_CONTEXT, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
     UnsupportedWord,
 };
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
-use crate::theme::metrics;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 /// Label column width at 100% scale.
 const LABEL_WIDTH: f32 = 160.;
@@ -284,7 +284,7 @@ impl LogOnTab {
         let Some(text) = self.menu_value.take() else {
             return;
         };
-        if crate::util::clipboard_write(cx, text.to_string()).is_ok() {
+        if tl_ui_base::util::clipboard_write(cx, text.to_string()).is_ok() {
             let toast = tr(cx, "sys-sys006-copied-to-clipboard");
             window_toast(window, cx, ToastKind::Success, toast);
         }
@@ -382,7 +382,7 @@ impl Render for LogOnTab {
                     cx.propagate();
                     return;
                 }
-                let _ = crate::util::clipboard_write(cx, text.to_owned());
+                let _ = tl_ui_base::util::clipboard_write(cx, text.to_owned());
             })
             .on_action(cx.listener(Self::on_copy_value))
             .size_full()

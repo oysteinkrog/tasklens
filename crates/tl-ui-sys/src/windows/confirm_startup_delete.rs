@@ -13,10 +13,10 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::snapshot::StartupKind;
 
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::i18n::{tr, tr_args};
-use crate::text::style::{label_style, t_base, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::text::style::{label_style, t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
 
 /// Names listed in the several-entries form before "and <m> more".
 const MAX_NAMES: usize = 5;

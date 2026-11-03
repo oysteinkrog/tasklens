@@ -30,18 +30,18 @@ use super::{
     SuspendLabel, group_frozen, group_targets, plasma_restart_unit, suspend_or_resume,
     topmost_window,
 };
-use crate::actions::{GoToService, JumpOrigin, ManagerArg};
-use crate::components::menu::TlMenu;
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
-use crate::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
-use crate::minigraph::panel::MinigraphPanel;
-use crate::minigraph::sources::{GraphColumn, MinigraphSource};
-use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
-use crate::table::tree_table::RowKind;
-use crate::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge, tray_available};
 use crate::windows::actions::{OpenCustomPriority, SetAffinity};
 use crate::windows::signal::signal_submenu;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_kit::actions::{GoToService, JumpOrigin, ManagerArg};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_perf_core::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
+use tl_ui_perf_core::minigraph::panel::MinigraphPanel;
+use tl_ui_perf_core::minigraph::sources::{GraphColumn, MinigraphSource};
+use tl_ui_perf_core::tray_bridge::{AddTrayGraph, RemoveTrayGraph, TrayBridge, tray_available};
+use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
+use tl_ui_table::table::tree_table::RowKind;
 
 /// Minimum width of the row and group header menus before the UI scale (R-112).
 pub const ROW_MENU_MIN_W: f32 = 240.0;

@@ -33,27 +33,27 @@ use tl_ui_settings::settings::{
     NetworkUnit, PerformanceSettings, TrayGraphState as TrayGraphEntry,
 };
 
-use crate::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
-use crate::chart::scale::{self, ScaleState};
-use crate::chart::view::{derived_view, find_process_tiered, find_tiered};
-use crate::chart::{ValueFormat, YScale, format_value};
-use crate::components::toast::ToastKind;
 use crate::core::actions::PerfAddTrayGraph;
 use crate::core::{DeviceKey, DeviceKind};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::minigraph::GraphColor;
 use crate::minigraph::card::CardState;
 use crate::minigraph::card::{chart_spec_for, device_for, resolve_colors};
 use crate::minigraph::sources::{
     GraphColumn, MinigraphSource, column_scale, name_match_count, resolve_process_source,
 };
-use crate::net_totals::NetTotal;
-use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
-use crate::theme::current;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::theme::current;
+use tl_ui_chart::chart::scale::{self, ScaleState};
+use tl_ui_chart::chart::view::{derived_view, find_process_tiered, find_tiered};
+use tl_ui_chart::chart::{ValueFormat, YScale, format_value};
+use tl_ui_chart::net_totals::NetTotal;
+use tl_ui_kit::actions::{Quit, ShowMainWindow, ToggleMainWindow, ToggleMiniWindow};
+use tl_ui_kit::components::toast::ToastKind;
 
 /// Time between two models.
 pub const TRAY_TICK: Duration = Duration::from_millis(1000);
@@ -576,7 +576,7 @@ fn is_process_source(source: &str) -> bool {
 struct Ctx<'a> {
     snap: &'a Snapshot,
     gpu_order: &'a [DeviceKey],
-    theme: &'a crate::theme::TlTheme,
+    theme: &'a tl_ui_base::theme::TlTheme,
     unit: NetworkUnit,
     auto_scale: bool,
     /// The window's network total.

@@ -21,8 +21,8 @@ use super::actions::{CapturedTarget, CapturedTargets, EndTask};
 use super::confirm::{ConfirmKind, ConfirmResult, confirm};
 use super::jump::JumpTexts;
 use super::{ProcessesPage, record_target};
-use crate::host::HostContext;
-use crate::shell::PICK_NONE_TEXT;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::shell::PICK_NONE_TEXT;
 
 const NO_WINDOW_TEXT: &str = "prc-055-no-window-found";
 const UNKNOWN_TEXT: &str = "prc-055-unknown-process";

@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use smallvec::SmallVec;
 
-use crate::theme::metrics;
+use tl_ui_base::theme::metrics;
 
 /// Bar widths in a skeleton row, as fractions of the column width. Column `c` of row `r` uses
 /// entry `(r + c) % 5`, so each row starts one step further along.
@@ -185,7 +185,7 @@ mod tests {
     fn setup(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

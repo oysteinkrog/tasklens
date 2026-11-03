@@ -34,28 +34,28 @@ use tl_model::units;
 
 use self::delegate::{ConnectionsDelegate, DEFAULT_SORT};
 use self::menu::ConnMenuTargets;
-use crate::actions::ClearFilter;
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, TlMenuPopup, open_context_menu_at};
-use crate::components::shield::StartHelperSession;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::i18n::{tr, tr_args};
 use crate::pages::processes::actions::CopyDetails;
-use crate::selector::TlSelector;
-use crate::shell::ShellState;
-use crate::shell::{FilterChanged, HelperInstalled, PauseChanged, ShellPage, StatusChanged};
-use crate::table::TreeTableDelegate as _;
-use crate::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
-use crate::table::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
-use crate::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
-use crate::table::tree_table::TreeTableEvent;
-use crate::theme::{current, metrics};
-use crate::util::clipboard_write;
 use crate::windows::connection_properties::open_connection_properties;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::shell::{FilterChanged, HelperInstalled, PauseChanged, ShellPage, StatusChanged};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::ClearFilter;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, TlMenuPopup, open_context_menu_at};
+use tl_ui_kit::components::shield::StartHelperSession;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_table::table::TreeTableDelegate as _;
+use tl_ui_table::table::actions::{CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
+use tl_ui_table::table::sys_copy::{CopyTexts, copy_cell, copy_row, copy_rows_as_table};
+use tl_ui_table::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
+use tl_ui_table::table::tree_table::TreeTableEvent;
 
 /// The most Properties windows one command opens (the window cap).
 const MAX_PROPERTIES_WINDOWS: usize = 10;
@@ -327,7 +327,7 @@ impl ConnectionsPage {
         let snap = Arc::clone(hub.read(cx).current());
         if snap.health.helper == HelperState::Locked {
             self.netns_start_after = Some(snap.health.helper_start.as_ref().map_or(0, |(s, _)| *s));
-            crate::helper_flow::note_start(window.window_handle(), cx);
+            tl_ui_kit::helper_flow::note_start(window.window_handle(), cx);
             window.dispatch_action(Box::new(StartHelperSession), cx);
         }
     }
@@ -400,7 +400,7 @@ impl ConnectionsPage {
             .tl_selector(|| "ConnectionsNamespaces-control".into())
             .absolute()
             .right(m.sp[4])
-            .bottom(m.sp[4] + px(crate::shell::CHIP_H * m.ui_scale))
+            .bottom(m.sp[4] + px(tl_ui_base::shell::CHIP_H * m.ui_scale))
             .bg(theme.menu_bg)
             .border_1()
             .border_color(theme.divider)
@@ -432,7 +432,9 @@ impl ConnectionsPage {
         self.refresh = Some((version, timer));
     }
 
-    pub fn table(&self) -> &Entity<crate::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
+    pub fn table(
+        &self,
+    ) -> &Entity<tl_ui_table::table::tree_table::TlTreeTable<ConnectionsDelegate>> {
         &self.frame.table
     }
 
@@ -473,7 +475,7 @@ impl ConnectionsPage {
 
     /// The page's action layer, for the close toast tests.
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-    pub fn actions_for_test(&self) -> &Entity<crate::table::sys_table::SysActions> {
+    pub fn actions_for_test(&self) -> &Entity<tl_ui_table::table::sys_table::SysActions> {
         &self.frame.actions
     }
 

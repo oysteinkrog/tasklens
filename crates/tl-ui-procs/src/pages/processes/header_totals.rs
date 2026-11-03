@@ -12,7 +12,7 @@ use tl_model::validity::Validity;
 use tl_ui_settings::settings::{NetworkUnit, Settings};
 
 use super::cells::ProcColumn;
-use crate::table::cells::CellOut;
+use tl_ui_table::table::cells::CellOut;
 
 /// Set in `bits` when Network shows a percent of the link speed, so a percent never shares bits
 /// with a rate. A rate is a non-negative `f64`, whose sign bit is clear.

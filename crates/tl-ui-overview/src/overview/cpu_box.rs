@@ -57,28 +57,28 @@ use super::parts::{
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
 use super::timeline::{self, OverviewPause};
-use crate::chart::hover::HoverLink;
-use crate::chart::view::ChangedRuns;
-use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
-    ValueFormat, YScale, format_value,
-};
-use crate::components::validity::copy_text;
-use crate::core::DeviceKey;
-use crate::core::core_clocks::CoreClocks;
-use crate::core::cpu::{PowerState, SecondaryAvail};
-use crate::core::logical_devices;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::widget::group_widget::GroupFlowLook;
 use crate::widget::metric_widget::FlowLook;
 use crate::widget::source::SourceStore;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{numeric_style, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::hover::HoverLink;
+use tl_ui_chart::chart::view::ChangedRuns;
+use tl_ui_chart::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, LegendStyle, ValueAlign,
+    ValueFormat, YScale, format_value,
+};
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::core_clocks::CoreClocks;
+use tl_ui_perf_core::core::cpu::{PowerState, SecondaryAvail};
+use tl_ui_perf_core::core::logical_devices;
 
 /// The debug selector of the gap between the chart and the core rows.
 pub const CPU_SPLITTER_ID: &str = "perf-overview-cpu-splitter";
@@ -956,7 +956,7 @@ impl CpuBox {
         }
         self.clocks = on;
         if on && self.core_clocks.is_none() {
-            let labels = crate::core::core_clocks::clocks_labels(false, cx);
+            let labels = tl_ui_perf_core::core::core_clocks::clocks_labels(false, cx);
             let view = box_chart(clocks_base(&self.settings), labels, &self.hub, cx);
             view.update(cx, |v, cx| v.set_hover_link(self.hover_link.clone(), cx));
             let snap = box_snapshot(&self.hub, cx);

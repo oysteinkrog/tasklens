@@ -36,30 +36,30 @@ use tl_model::units::LocalDateTime;
 use tl_model::validity::Validity;
 use tl_ui_settings::settings::{Settings, SortState, UiState};
 
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use crate::host::HostContext;
-use crate::hub::HostClock;
-use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::processes::cells::{
     CellCtx, CellWords, GroupMembers, PaintState, RowRef, boot_time_s, copy_all_metrics,
 };
 use crate::pages::processes::delegate::{ProcessRowCells, ValidityTips, live_tip};
 use crate::pages::processes::name_cell::{self, NameCellData, NameWords, StateGlyph};
 use crate::pages::processes::tooltip::{RowTipState as ProcTipState, RowTipWords, RowTooltip};
-use crate::settings_global::{Section, TlSettings};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::HostClock;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{TlTheme, current};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use crate::table::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
-use crate::table::sys_table::{ActionKindTag, SysDelegate};
-use crate::table::tree_table::{
+use tl_ui_table::table::sys_status::{DotStyle, LabelTone, SysStatus, status_look, tone_color};
+use tl_ui_table::table::sys_table::{ActionKindTag, SysDelegate};
+use tl_ui_table::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
     TreeTableDelegate,
 };
-use crate::template::Template;
-use crate::theme::{TlTheme, current};
 
 /// Static metadata for one Services column.
 #[derive(Clone, Copy, Debug, PartialEq)]

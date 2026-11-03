@@ -14,11 +14,11 @@ use tl_model::command::Tab;
 use tl_model::table::TableMode;
 
 use super::{ProcessesPage, toast};
-use crate::components::toast::ToastKind;
-use crate::host::HostContext;
-use crate::i18n::tr;
-use crate::settings_global::TlSettings;
-use crate::shell::{FilterChanged, MemGroupCleared};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::{FilterChanged, MemGroupCleared};
+use tl_ui_kit::components::toast::ToastKind;
 
 /// "Include children" shows while the filter has text or the mode is Tree (UI-SHL-025). The
 /// shell's checkbox applies the same rule.

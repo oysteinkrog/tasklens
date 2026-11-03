@@ -57,14 +57,6 @@ use self::filter_strip::{
 };
 use self::flows::UnitVerb;
 use self::menu::{MenuChoice, ServiceMenuTargets, menu_choice, service_menu};
-use crate::actions::ClearFilter;
-use crate::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
-use crate::components::toast::{
-    SERVICES_LOADING_TOAST, ToastAction, ToastKey, ToastKind, ToastQueue,
-};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{tr, tr_args};
 use crate::pages::minigraph::actions::{AddAppGraph, AddMinigraph, AddNameGraph};
 use crate::pages::processes::actions::{
     CapturedTargets, CopyAllMetrics, CopyDetails, CreateDump, EndProcess, EndProcessTree, EndTask,
@@ -74,19 +66,31 @@ use crate::pages::processes::actions::{
 use crate::pages::processes::menu::{MenuCaps, row_menu as process_row_menu};
 use crate::pages::processes::record_target;
 use crate::pages::processes::run::run_process_action;
-use crate::registry::{CapClass, GlobalRegistry, WindowKey};
-use crate::settings_global::TlSettings;
-use crate::shell::{FilterChanged, PauseChanged, ShellPage, StatusChanged};
-use crate::table::TreeTableDelegate as _;
-use crate::table::actions::{CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, OpenProperties};
-use crate::table::sys_copy::{CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table};
-use crate::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
-use crate::table::tree_table::{TlTreeTable, TreeTableEvent};
-use crate::theme::metrics;
-use crate::util::clipboard_write;
 use crate::windows::actions::{OpenCustomPriority, SendSignal, SetAffinity, SignalOpenRealtime};
 use crate::windows::props::open_process_properties;
 use crate::windows::service_properties::{ServicePropertiesWindow, ServicePropsTab};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::registry::{CapClass, GlobalRegistry, WindowKey};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::{FilterChanged, PauseChanged, ShellPage, StatusChanged};
+use tl_ui_base::theme::metrics;
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::actions::ClearFilter;
+use tl_ui_kit::components::menu::{TlMenu, close_context_menu, open_context_menu_at};
+use tl_ui_kit::components::toast::{
+    SERVICES_LOADING_TOAST, ToastAction, ToastKey, ToastKind, ToastQueue,
+};
+use tl_ui_table::table::TreeTableDelegate as _;
+use tl_ui_table::table::actions::{
+    CollapseAll, CopyCell, CopyRow, CopyRowsAsTable, OpenProperties,
+};
+use tl_ui_table::table::sys_copy::{
+    CopyTexts, SysCopySource, copy_cell, copy_row, copy_rows_as_table,
+};
+use tl_ui_table::table::sys_table::{SysActionsEvent, SysBody, SysTableFrame, loading_status_text};
+use tl_ui_table::table::tree_table::{TlTreeTable, TreeTableEvent};
 
 /// The latest a manual refresh waits for a new services version.
 pub const REFRESH_TOAST_AFTER: Duration = Duration::from_secs(2);

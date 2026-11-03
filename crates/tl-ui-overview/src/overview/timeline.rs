@@ -57,18 +57,18 @@ use super::fit::whole_rows;
 use super::fixed_box::FixedBoxSpec;
 use super::layout::BoxMode;
 use super::range;
-use crate::components::toast::ToastKind;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::net_totals;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::{ProcessJump, ShellApi};
-use crate::template::Template;
-use crate::text::style::t_xs;
-use crate::theme::palette::DeviceAccent;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::hub::{ComponentMask, HostClock, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::{ProcessJump, ShellApi};
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::t_xs;
+use tl_ui_base::theme::palette::DeviceAccent;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::net_totals;
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// The box's debug selector.
 pub const TIMELINE_BOX_ID: &str = "perf-overview-box-timeline";
@@ -252,7 +252,7 @@ pub fn click_mode(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> TimelineClick 
     if !cx.has_global::<TlSettings>() {
         return TimelineClick::default();
     }
-    let recording = crate::host_settings::current_of(hub, cx)
+    let recording = tl_ui_base::host_settings::current_of(hub, cx)
         .values
         .history
         .enabled;
@@ -265,7 +265,7 @@ pub fn click_mode(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> TimelineClick 
 /// The click choices offered now: `history` only while `history.enabled` is on.
 /// `hub` is the hub of the page's host.
 pub fn click_choices(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> SmallVec<[TimelineClick; 3]> {
-    let recording = crate::host_settings::current_of(hub, cx)
+    let recording = tl_ui_base::host_settings::current_of(hub, cx)
         .values
         .history
         .enabled;

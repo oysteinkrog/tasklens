@@ -20,9 +20,9 @@ use gpui_kit::{
     Window, div, px,
 };
 
-use crate::selector::TlSelector;
-use crate::text::style::{TNUM, label_style};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{TNUM, label_style};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Pill height and minimum width before the UI scale.
 pub const HEIGHT: f32 = 18.0;
@@ -208,7 +208,7 @@ mod tests {
     ) -> (Entity<Host>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::theme::store::init(
+            tl_ui_base::theme::store::init(
                 cx,
                 &ThemeSettings::default(),
                 &AppearanceSettings::default(),

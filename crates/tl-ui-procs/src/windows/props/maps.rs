@@ -35,26 +35,26 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{ClearPropsFilter, FilterChanged, NO_MATCH, PropsFilter, lowercase};
-use crate::action_tracker::ToastTexts;
-use crate::components::checkbox::TlCheckbox;
-use crate::components::menu::TlMenu;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::TlTooltip;
-use crate::components::validity::copy_text;
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::table::actions::CopyRow;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{SettingKey, SettingValue, TlSettings};
+use tl_ui_base::template::Template;
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::TlTooltip;
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_table::table::actions::CopyRow;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
     TreeTableDelegate, TreeTableEvent,
 };
-use crate::template::Template;
 
 gpui_kit::actions!(
     tasklens_maps,

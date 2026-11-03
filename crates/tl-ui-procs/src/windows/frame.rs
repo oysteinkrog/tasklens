@@ -9,8 +9,8 @@ use gpui_kit::base::Root;
 use gpui_kit::{AnyWindowHandle, App, Entity, Pixels, Render, SharedString, Window, WindowHandle};
 use gpui_kit::{px, size};
 
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::theme::metrics::metrics;
+use tl_ui_base::theme::metrics::metrics;
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 
 /// Window title of the Set Affinity dialog.
 pub const TITLE_SET_AFFINITY: &str = "tasklens Set Affinity";

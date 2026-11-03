@@ -19,11 +19,11 @@ use tl_model::system::CpuTopology;
 use tl_model::validity::Validity;
 
 use super::logical_devices;
-use crate::chart::{
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::theme::{TlTheme, current};
+use tl_ui_chart::chart::{
     ChartLabels, ChartSeries, ChartSpec, ChartView, LineSet, ValueAlign, ValueFormat, YScale,
 };
-use crate::i18n::{tr, tr_args};
-use crate::theme::{TlTheme, current};
 
 /// Alpha of each core's line: 16 lines that cross stay apart.
 pub const LINE_ALPHA: f32 = 0.6;

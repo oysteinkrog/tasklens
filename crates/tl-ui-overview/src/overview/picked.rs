@@ -27,7 +27,7 @@ use tl_model::system::{
 use tl_model::validity::Validity;
 
 use super::timeline;
-use crate::hub::SnapshotHub;
+use tl_ui_base::hub::SnapshotHub;
 
 /// How far back the series of the snapshot at the picked time reach.
 const SERIES_WINDOW_NS: i64 = 60_000_000_000;

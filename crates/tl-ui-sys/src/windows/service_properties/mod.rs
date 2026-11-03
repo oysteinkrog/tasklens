@@ -40,23 +40,23 @@ use tl_model::snapshot::{
 use tl_model::table::UnitRef;
 use tracing::warn;
 
-use crate::action_tracker::ActionTrackerEvent;
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::tabs::{TlTabSpec, TlTabs};
-use crate::components::toast::ToastKind;
-use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::{
     SERVICE_PROPS_CONTEXT, ServicePropsNextTab, ServicePropsOk, ServicePropsPrevTab,
     ServicePropsSelectTab,
 };
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::shell::ShellApi;
-use crate::table::sys_table::SysActions;
-use crate::theme::{current, metrics};
+use tl_ui_base::action_tracker::ActionTrackerEvent;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::tabs::{TlTabSpec, TlTabs};
+use tl_ui_kit::components::toast::ToastKind;
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+use tl_ui_table::table::sys_table::SysActions;
 
 /// Default window size at 100% scale.
 const WINDOW_SIZE: (f32, f32) = (720., 560.);

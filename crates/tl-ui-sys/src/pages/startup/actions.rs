@@ -3,7 +3,7 @@
 use gpui_kit::{App, KeyBinding};
 
 use crate::pages::processes::actions::CopyDetails;
-use crate::table::actions::OpenProperties;
+use tl_ui_table::table::actions::OpenProperties;
 
 gpui_kit::actions!(
     tasklens,

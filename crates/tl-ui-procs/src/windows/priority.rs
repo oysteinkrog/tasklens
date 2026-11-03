@@ -30,24 +30,24 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionRequest, ActionState, ActionTarget, SchedPolicy};
 use tracing::warn;
 
-use crate::action_tracker::{ActionTrackerEvent, SummaryTexts, ToastTexts, short_reason};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::icons::TlIcon;
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::components::slider::{KeyMove, SliderPageDown, SliderPageUp, TlSlider, key_move};
-use crate::components::stepper::TlStepper;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
-use crate::host::HostContext;
-use crate::i18n::Strings;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, confirm};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::{t_base, t_sm, t_xs};
-use crate::theme::{current, metrics};
 use crate::windows::actions::{PRIORITY_DIALOG_CONTEXT, PriorityApply, PrioritySliderStep};
 use crate::windows::frame::{PwnWindow, open_pwn};
+use tl_ui_base::action_tracker::{ActionTrackerEvent, SummaryTexts, ToastTexts, short_reason};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::Strings;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{t_base, t_sm, t_xs};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
+use tl_ui_kit::components::slider::{KeyMove, SliderPageDown, SliderPageUp, TlSlider, key_move};
+use tl_ui_kit::components::stepper::TlStepper;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, frame_bottom};
 
 /// The nice range.
 pub const NICE_MIN: i8 = -20;
@@ -221,11 +221,11 @@ impl PriorityWords {
     pub fn new(cx: &App) -> Self {
         if cx.try_global::<Strings>().is_some() {
             Self::with(
-                |key| crate::i18n::tr(cx, key),
+                |key| tl_ui_base::i18n::tr(cx, key),
                 |key, args| Template::new(cx, key, args),
             )
         } else {
-            Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+            Self::with(|key| tl_ui_base::i18n::tr_en(key, &[]), Template::en)
         }
     }
 
@@ -613,7 +613,7 @@ impl PriorityDialog {
 /// succeeded, under `first`'s toast key. The subscription ends with `first`.
 #[allow(clippy::too_many_arguments)]
 fn follow_with_nice(
-    tracker: &Entity<crate::action_tracker::ActionTracker>,
+    tracker: &Entity<tl_ui_base::action_tracker::ActionTracker>,
     first: tl_model::actions::ActionId,
     nice: i8,
     targets: Vec<ActionTarget>,

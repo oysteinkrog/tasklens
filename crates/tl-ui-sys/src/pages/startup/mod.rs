@@ -28,21 +28,21 @@ use tl_model::units;
 
 use self::delegate::StartupDelegate;
 use self::menu::StartupMenuTargets;
-use crate::action_tracker::ActionTrackerEvent;
-use crate::actions::ClearFilter;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::hub::SnapshotChanged;
-use crate::i18n::{tr, tr_args};
-use crate::shell::{FilterChanged, ShellPage, StatusChanged};
-use crate::table::TreeTableDelegate as _;
-use crate::table::actions::OpenProperties;
-use crate::table::sys_copy::CopyTexts;
-use crate::table::sys_table::{
+use crate::windows::startup_properties::open_startup_properties_all;
+use tl_ui_base::action_tracker::ActionTrackerEvent;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotChanged;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::shell::{FilterChanged, ShellPage, StatusChanged};
+use tl_ui_kit::actions::ClearFilter;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_table::table::TreeTableDelegate as _;
+use tl_ui_table::table::actions::OpenProperties;
+use tl_ui_table::table::sys_copy::CopyTexts;
+use tl_ui_table::table::sys_table::{
     ActionKindTag, SysActionsEvent, SysBody, SysTableFrame, loading_status_text,
 };
-use crate::table::tree_table::TreeTableEvent;
-use crate::windows::startup_properties::open_startup_properties_all;
+use tl_ui_table::table::tree_table::TreeTableEvent;
 
 /// The latest a manual refresh waits for a new Startup component version.
 pub const REFRESH_TOAST_AFTER: Duration = Duration::from_secs(2);
@@ -190,7 +190,7 @@ impl StartupPage {
         self.refresh = Some((version, timer));
     }
 
-    pub fn table(&self) -> &Entity<crate::table::tree_table::TlTreeTable<StartupDelegate>> {
+    pub fn table(&self) -> &Entity<tl_ui_table::table::tree_table::TlTreeTable<StartupDelegate>> {
         &self.frame.table
     }
 

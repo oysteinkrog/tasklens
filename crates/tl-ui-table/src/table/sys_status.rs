@@ -14,10 +14,10 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::text::style::t_base;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::t_base;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
 
 /// One label colour role; resolved against TlTheme at paint time.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

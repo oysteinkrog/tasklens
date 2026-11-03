@@ -57,23 +57,23 @@ use tl_ui_settings::layout_pages::{
 use tl_ui_settings::settings::OverviewRange;
 
 use super::meta::{MetricMeta, NetView};
-use crate::chart::labels::{NetFormat, format_value};
-use crate::chart::{ChartState, YScale};
-use crate::components::validity::copy_text;
-use crate::core::DeviceKey;
-use crate::core::core_clocks::core_lines;
-use crate::core::gpu::{GpuVendor, gpu_totals};
-use crate::core::logical_devices;
-use crate::core::sensors::{default_sensor, sensor_device};
-use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::net_totals::NetTotal;
 use crate::overview::cpu_box::CoreAverage;
 use crate::overview::picked::{box_mask, box_snapshot};
 use crate::overview::range::{Figures, current_range, figures_text};
 use crate::overview::timeline::{OverviewPause, paused};
-use crate::settings_global::TlSettings;
-use crate::template::Template;
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::template::Template;
+use tl_ui_chart::chart::labels::{NetFormat, format_value};
+use tl_ui_chart::chart::{ChartState, YScale};
+use tl_ui_chart::net_totals::NetTotal;
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::core_clocks::core_lines;
+use tl_ui_perf_core::core::gpu::{GpuVendor, gpu_totals};
+use tl_ui_perf_core::core::logical_devices;
+use tl_ui_perf_core::core::sensors::{default_sensor, sensor_device};
 
 /// The name of VRAM.
 const KEY_VRAM: &str = "perf-overview-gpu-vram";
@@ -550,7 +550,7 @@ impl Followed {
                 format: NetFormat::of(cx),
                 dynamic_scale: p.network_dynamic_scale,
             },
-            hidden_nets: crate::net_totals::hidden_kinds(p).collect(),
+            hidden_nets: tl_ui_chart::net_totals::hidden_kinds(p).collect(),
             tau_s: p.overview_core_smoothing.tau_s(),
             fan_temp,
         }

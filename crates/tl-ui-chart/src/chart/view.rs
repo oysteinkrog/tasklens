@@ -21,7 +21,7 @@ use super::element::ChartElement;
 use super::{
     ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, lines, scale,
 };
-use crate::hub::{HostClock, SnapshotChanged, SnapshotHub};
+use tl_ui_base::hub::{HostClock, SnapshotChanged, SnapshotHub};
 
 pub struct ChartView {
     pub spec: ChartSpec,

@@ -7,9 +7,9 @@ use smallvec::SmallVec;
 use tl_model::health::HelperState;
 use tl_model::table::ProcessTableView;
 
-use crate::actions::{EndHelperSession, StartHelperSession};
-use crate::i18n::{tr, tr_args};
-use crate::shell::{StatusAction, StatusActionKind};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::shell::{StatusAction, StatusActionKind};
+use tl_ui_kit::actions::{EndHelperSession, StartHelperSession};
 
 /// What the chip text shows. The text is rebuilt only when this changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

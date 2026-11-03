@@ -64,22 +64,22 @@ use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, fan_connected, initial_selection,
     is_visible, sidebar_order, tray_available, type_number, visible_rows,
 };
-use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
-use crate::components::switch::TlSwitch;
-use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings, animations_on};
-use crate::theme::derived::blend_over;
-use crate::theme::palette::accent_color;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings, animations_on};
+use tl_ui_base::theme::derived::blend_over;
+use tl_ui_base::theme::palette::accent_color;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
+use tl_ui_kit::components::switch::TlSwitch;
+use tl_ui_kit::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Fill alpha of a type that has one colour (UI-PRF-005 table note).
@@ -1714,7 +1714,7 @@ impl DeviceSidebar {
         action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
-    ) -> Entity<crate::components::menu::TlMenuPopup> {
+    ) -> Entity<tl_ui_kit::components::menu::TlMenuPopup> {
         let (key, count) = (key.clone(), self.live().count());
         let hidden = !self.index.contains_key(&key);
         let edit_mode = self.edit_mode;

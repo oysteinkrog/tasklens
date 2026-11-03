@@ -53,14 +53,14 @@ use super::widget::fixed_widget::FixedContent;
 use super::widget::menu::confirm_reset_page;
 use super::widget::source::SourceStore;
 use super::{DeviceKey, DeviceKind, DeviceRow};
-use crate::chart::{ChartLabels, ChartSeries, ChartView, ValueAlign, ValueFormat, YScale};
-use crate::components::menu::TlMenu;
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{ChartLabels, ChartSeries, ChartView, ValueAlign, ValueFormat, YScale};
+use tl_ui_kit::components::menu::TlMenu;
 
 /// Debug selectors of the chart boxes.
 pub const DISK_ACTIVE_ID: &str = "perf-agg-disk-active";
@@ -895,7 +895,7 @@ fn utilization_spec(
     device: DeviceIdx,
     s: &PageSettings,
     theme: &TlTheme,
-) -> crate::chart::ChartSpec {
+) -> tl_ui_chart::chart::ChartSpec {
     let series = smallvec![ChartSeries {
         id: tl_model::ids::SeriesId {
             device,
@@ -918,7 +918,7 @@ fn aggregate_memory_spec(
     total: u64,
     s: &PageSettings,
     theme: &TlTheme,
-) -> crate::chart::ChartSpec {
+) -> tl_ui_chart::chart::ChartSpec {
     let mut spec = gpu::memory_spec(device, false, total, theme);
     spec.range_ns = s.range_ns();
     spec

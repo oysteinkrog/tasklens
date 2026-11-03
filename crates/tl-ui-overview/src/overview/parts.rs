@@ -24,17 +24,17 @@ use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 use tl_ui_settings::settings::Settings;
 
-use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
-use crate::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat};
-use crate::components::icons::icon;
-use crate::components::progress::bucket;
-use crate::core::actions::PerfSelectDevice;
-use crate::core::{DeviceKey, DeviceKind};
-use crate::hub::SnapshotHub;
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::text::style::{numeric_style, t_md, t_sm, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::text::style::{numeric_style, t_md, t_sm, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current};
+use tl_ui_chart::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
+use tl_ui_chart::chart::{ChartLabels, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat};
+use tl_ui_kit::components::icons::icon;
+use tl_ui_kit::components::progress::bucket;
+use tl_ui_perf_core::core::actions::PerfSelectDevice;
+use tl_ui_perf_core::core::{DeviceKey, DeviceKind};
 
 use super::fit::fit_text;
 use super::layout::{Arrange, BoxKind};
@@ -2032,8 +2032,8 @@ pub fn spark_row(
 #[cfg(test)]
 mod polish_tests {
     use super::*;
-    use crate::theme::ThemeMode;
-    use crate::theme::tests::test_theme;
+    use tl_ui_base::theme::ThemeMode;
+    use tl_ui_base::theme::tests::test_theme;
 
     #[test]
     fn polish_box_shadow_follows_derived_shadow() {

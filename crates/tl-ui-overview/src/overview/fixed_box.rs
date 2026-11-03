@@ -29,16 +29,16 @@ use tl_ui_settings::layout_boxes::fixed_box_default;
 
 use super::parts::{box_frame, edit_chrome};
 use super::range::RangeText;
-use crate::hub::SnapshotHub;
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::t_xs;
-use crate::theme::{UiMetrics, current, metrics};
 use crate::widget::container::{WidgetContainer, fixed_flow};
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::widget::fixed_widget::FixedContent;
 use crate::widget::source::SourceStore;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::t_xs;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
 
 /// Reads the title line's summary from the content view.
 type LineFn = Rc<dyn Fn(&App) -> SharedString>;

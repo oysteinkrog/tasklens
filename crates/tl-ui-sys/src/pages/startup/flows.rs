@@ -13,10 +13,10 @@ use tl_model::snapshot::StartupStatus;
 use super::StartupPage;
 use super::actions::{StartupDelete, StartupDisable, StartupEnable, StartupRunNow};
 use super::menu::StartupMenuTargets;
-use crate::components::toast::{ToastKey, ToastKind, ToastQueue};
-use crate::i18n::tr;
-use crate::table::sys_table::{ActionKindTag, ActionTexts};
 use crate::windows::confirm_startup_delete::{StartupEntryView, open_startup_delete};
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::toast::{ToastKey, ToastKind, ToastQueue};
+use tl_ui_table::table::sys_table::{ActionKindTag, ActionTexts};
 
 /// The three flows differ only in their targets and texts.
 #[derive(Clone, Copy)]

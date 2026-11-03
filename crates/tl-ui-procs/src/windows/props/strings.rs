@@ -46,30 +46,30 @@ use tl_model::validity::Validity;
 use tracing::warn;
 
 use super::filter::{FilterChanged, NO_MATCH, PropsFilter, SYNC_MAX_ROWS, lowercase};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::checkbox::TlCheckbox;
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::TlMenu;
-use crate::components::progress::{TlProgress, TlProgressSize};
-use crate::components::stepper::TlStepper;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::table::actions::CopyRow;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
-    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
-};
-use crate::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
-    TreeTableDelegate, TreeTableEvent,
-};
-use crate::template::Template;
-use crate::text::style::{numeric_style, t_base, t_sm};
-use crate::theme::{current, metrics};
 use crate::windows::actions::{
     PropsCancelStringScan, PropsStartStringScan, STRINGS_OPTIONS_CONTEXT,
+};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{numeric_style, t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::progress::{TlProgress, TlProgressSize};
+use tl_ui_kit::components::stepper::TlStepper;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_table::table::actions::CopyRow;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
+};
+use tl_ui_table::table::tree_table::{
+    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable,
+    TreeTableDelegate, TreeTableEvent,
 };
 
 gpui_kit::actions!(
@@ -862,7 +862,7 @@ impl StringsTab {
                 this.set_words(Rc::new(StringsWords::translated(cx)), cx);
             }
         }));
-        if let Some(ends) = crate::request_ends::global(cx) {
+        if let Some(ends) = tl_ui_base::request_ends::global(cx) {
             subs.push(cx.subscribe(&ends, |this, _, ev: &RequestEvent, cx| {
                 this.on_request_end(*ev, cx);
             }));

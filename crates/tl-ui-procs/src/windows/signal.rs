@@ -15,21 +15,21 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionKind, ActionRequest, ActionTarget, SIGRTMAX, SIGRTMIN, Signal};
 use tracing::warn;
 
-use crate::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::menu::TlMenu;
-use crate::components::stepper::TlStepper;
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{TlSecondaryWindow, frame_bottom};
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::pages::processes::confirm::{ConfirmKind, ConfirmResult, ProtectedAction, confirm};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::{t_base, t_sm};
-use crate::theme::{current, metrics};
 use crate::windows::actions::{SIGNAL_DIALOG_CONTEXT, SendSignal, SignalSendRealtime};
 use crate::windows::frame::{PwnWindow, open_pwn};
+use tl_ui_base::action_tracker::{ActionWords, SummaryTexts, ToastTexts, action_words};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{t_base, t_sm};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::stepper::TlStepper;
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{TlSecondaryWindow, frame_bottom};
 
 /// One standard signal in menu order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -39,20 +39,20 @@ use self::rules::{
 use super::OVERVIEW_KEY;
 use super::layout::BoxKind;
 use super::range::{STATUS_SWITCH, current_range, range_switch};
-use crate::components::icons::{TlIcon, icon};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::core::actions::{PerfSelectDevice, PerfStatusOpen};
-use crate::core::{DeviceKey, PAGE_PAD};
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
-use crate::template::Template;
-use crate::text::style::{label_style, numeric_style, t_sm};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::{label_style, numeric_style, t_sm};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::icons::{TlIcon, icon};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use tl_ui_perf_core::core::actions::{PerfSelectDevice, PerfStatusOpen};
+use tl_ui_perf_core::core::{DeviceKey, PAGE_PAD};
 
 /// The bar's debug selector.
 pub const BAR_ID: &str = "perf-status-bar";

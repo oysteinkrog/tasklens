@@ -31,9 +31,9 @@ use super::labels::{self, LabelPaint, LabelRows, NetFormat};
 use super::lines;
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
-use crate::anim::AnimationDriver;
-use crate::settings_global::TlSettings;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
 
 /// Period used when no series has data: 1 s.
 const DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
@@ -123,9 +123,9 @@ impl Element for ChartElement {
             scale_factor: window.scale_factor(),
             now: self.view.read(cx).now_ns(),
             metrics: *cx.global::<UiMetrics>(),
-            theme: crate::theme::current(cx).clone(),
+            theme: tl_ui_base::theme::current(cx).clone(),
             reduce_motion: cx.reduce_motion(),
-            power_saving: crate::demand::power_saving(cx),
+            power_saving: tl_ui_base::demand::power_saving(cx),
             network_unit: NetFormat::of(cx),
             curved: cx.has_global::<TlSettings>()
                 && TlSettings::settings(cx).performance.curved_lines,
@@ -143,7 +143,7 @@ impl Element for ChartElement {
         if let Some(driver) = AnimationDriver::try_global(window, cx) {
             driver.update(cx, |d, _| {
                 if let Some(log) = d.paint_log.as_mut() {
-                    log.push(crate::anim::PaintRecord {
+                    log.push(tl_ui_base::anim::PaintRecord {
                         view: view_id,
                         newest_ns: out.newest_ns,
                         painted_at_ns: env.now,

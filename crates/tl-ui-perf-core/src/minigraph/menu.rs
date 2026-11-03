@@ -9,9 +9,9 @@ use super::actions::{
     MinigraphSetRange, ResetMinigraphLayout,
 };
 use super::sources::{GraphColumn, MinigraphId};
-use crate::components::menu::TlMenu;
-use crate::i18n::tr;
 use crate::tray_bridge::{AddTrayGraph, tray_available};
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::menu::TlMenu;
 
 /// What the card menu needs of its card.
 pub struct CardMenuCtx {
@@ -173,7 +173,7 @@ pub fn graph_color_menu(
     action: impl Fn(GraphColor) -> Box<dyn gpui_kit::Action>,
     cx: &App,
 ) -> TlMenu {
-    let theme = crate::theme::current(cx).clone();
+    let theme = tl_ui_base::theme::current(cx).clone();
     for color in GraphColor::ALL {
         let key = format!("shell-graph-color-{}", color.as_str());
         menu = menu.swatch_radio_item(

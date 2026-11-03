@@ -29,14 +29,14 @@ use super::actions::{
 use super::set_graph_range;
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
-use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
-use crate::components::menu::TlMenuPopup;
-use crate::components::motion::{M_BASE, ease_out_cubic};
-use crate::demand::DemandAggregator;
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::{TlSettings, animations_on};
-use crate::theme::{current, metrics};
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{TlSettings, animations_on};
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_chart::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
+use tl_ui_kit::components::menu::TlMenuPopup;
+use tl_ui_kit::components::motion::{M_BASE, ease_out_cubic};
 
 /// Debug selector of the tile grid and the prefix of each tile's (`perf-summary-tile-<i>`).
 pub const GRID_ID: &str = "perf-summary-grid";
@@ -508,7 +508,7 @@ impl Render for SummaryView {
         let theme = current(cx);
         let s = m.ui_scale;
         let l = self.layout;
-        let marker_top = m.sp[3] + px(crate::chart::labels::LABEL_ROW * s);
+        let marker_top = m.sp[3] + px(tl_ui_chart::chart::labels::LABEL_ROW * s);
         let selected = self.selected_on_entry.clone();
 
         let tiles = self.tiles.iter().enumerate().map(|(i, tile)| {

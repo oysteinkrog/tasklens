@@ -13,11 +13,11 @@ use super::actions::{
     StartupCopyCommand, StartupDelete, StartupDisable, StartupEnable, StartupOpenFileLocation,
     StartupRunNow,
 };
-use crate::components::menu::TlMenu;
-use crate::host::HostContext;
-use crate::i18n::tr;
 use crate::pages::processes::actions::CopyDetails;
-use crate::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::tr;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_table::table::actions::{CopyCell, CopyRowsAsTable, OpenProperties};
 
 /// Rows and the optional pointer cell captured when a row menu opens.
 #[derive(Clone, Debug, Default)]

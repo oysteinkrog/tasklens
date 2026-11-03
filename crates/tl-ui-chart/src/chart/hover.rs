@@ -24,7 +24,7 @@ use tl_model::units;
 use super::geometry::{self, TimeMap};
 use super::labels::{self, CachedLine, LABEL_ROW, LineStyle};
 use super::{ChartLabels, ChartSpec, LegendStyle};
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::theme::{TlTheme, UiMetrics};
 
 const NS_PER_S: u64 = 1_000_000_000;
 /// Ranges above this show minutes and seconds.

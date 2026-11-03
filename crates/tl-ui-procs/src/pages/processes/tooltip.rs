@@ -24,11 +24,11 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::RowRef;
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::table::tree_table::RowKind;
-use crate::text::style::t_sm;
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_table::table::tree_table::RowKind;
 
 /// The command line line keeps this many characters (PROC-039).
 pub const TIP_CMDLINE_CHARS: usize = 512;

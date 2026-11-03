@@ -59,18 +59,18 @@ use self::menu::{ClickedEngine, PageMenuCtx, VIEW_KINDS, page_menu};
 use self::overview::box_menu::{ClickedBox, box_menu};
 use self::page::DevicePage;
 use self::status_bar::{Slot, StatusBar};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
-use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::SnapshotHub;
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::settings_global::{TlSettings, animations_on};
-use crate::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
-use crate::theme::metrics;
-use crate::util::clipboard_write;
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{TlSettings, animations_on};
+use tl_ui_base::shell::{ShellApi, ShellPage, StatusChanged, main_window_title};
+use tl_ui_base::theme::metrics;
+use tl_ui_base::util::clipboard_write;
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::motion::{M_BASE, M_FAST, ease_out_cubic};
+use tl_ui_kit::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 
 /// The selection after the selected row at `removed_at` of `visible` (the rows before the
 /// removal) goes away: the next row below, else the one above, else `None`.
@@ -1122,13 +1122,13 @@ mod tests {
     use tl_ui_settings::settings::DeviceVisibility;
 
     use super::*;
-    use crate::components::icons::TlIcon;
+    use tl_ui_kit::components::icons::TlIcon;
 
     /// The icon and tint of each kind, for box titles and page headers. Sidebar cards draw no
     /// icon (D-033); `card_has_no_device_icon` in tests/ui/sidebar.rs checks that.
     #[test]
     fn polish_icons_per_kind() {
-        let mut theme = crate::theme::tests::test_theme(crate::theme::ThemeMode::Dark);
+        let mut theme = tl_ui_base::theme::tests::test_theme(tl_ui_base::theme::ThemeMode::Dark);
         let color = |v: u32| -> Hsla { gpui_kit::rgb(v).into() };
         theme.accent = color(0x000001);
         theme.graph.cpu_line = color(0x000002);
@@ -1170,7 +1170,7 @@ mod tests {
         assert_eq!(style.font_size, Some(m.text.lg.into()));
         let features = style.font_features.as_ref().expect("font features");
         assert!(
-            Arc::ptr_eq(&features.0, &crate::text::style::TNUM.0),
+            Arc::ptr_eq(&features.0, &tl_ui_base::text::style::TNUM.0),
             "tnum"
         );
     }

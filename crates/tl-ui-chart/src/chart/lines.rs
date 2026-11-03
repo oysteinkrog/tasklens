@@ -33,7 +33,7 @@ use super::geometry::{self, BuildInput, Scratch, TimeMap};
 use super::hover::{nearest_index, offset_text};
 use super::labels::{self, CachedLine, LABEL_ROW, LineStyle, NetFormat};
 use super::{ChartCache, ChartSeries, ChartSpec, PathSet, ValueFormat};
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::theme::{TlTheme, UiMetrics};
 
 /// Alpha factor of the other lines while one is highlighted.
 pub const DIM: f32 = 0.3;

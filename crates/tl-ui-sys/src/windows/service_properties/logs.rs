@@ -38,27 +38,27 @@ use tl_model::units::{self, LocalDateTime};
 use tracing::warn;
 
 use super::ServicePropsTabView;
-use crate::action_tracker::{ActionTrackerEvent, ToastTexts};
-use crate::actions::OpenAdditionalSetup;
-use crate::actions::SetupRow;
-use crate::components::banner::{TlBanner, TlBannerKind};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::empty::{TlEmptyState, TlEmptyTone};
-use crate::components::icons::TlIcon;
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_ROW_NAME, HoverTooltip, TlTooltip};
-use crate::host::HostContext;
-use crate::i18n::{tr, tr_args};
 use crate::pages::services::actions::{
     JOURNAL_LIST_CONTEXT, ServiceLogsBottom, ServiceLogsCopySelected, ServiceLogsSelectAll,
     ServiceLogsTop,
 };
-use crate::selector::TlSelector;
-use crate::table::selection::{Selection, SelectionView};
-use crate::table::sys_status::{LabelTone, tone_color};
-use crate::text::fonts::MONO_FAMILY;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::action_tracker::{ActionTrackerEvent, ToastTexts};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::fonts::MONO_FAMILY;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_kit::actions::OpenAdditionalSetup;
+use tl_ui_kit::actions::SetupRow;
+use tl_ui_kit::components::banner::{TlBanner, TlBannerKind};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::empty::{TlEmptyState, TlEmptyTone};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_ROW_NAME, HoverTooltip, TlTooltip};
+use tl_ui_table::table::selection::{Selection, SelectionView};
+use tl_ui_table::table::sys_status::{LabelTone, tone_color};
 
 /// Quiet time after the last keystroke before the filter applies.
 pub const FILTER_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -689,7 +689,7 @@ impl LogsView {
     }
 
     fn copy(&self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::util::clipboard_write(cx, text).is_ok() {
+        if tl_ui_base::util::clipboard_write(cx, text).is_ok() {
             let toast = tr(cx, "sys-sys006-copied-to-clipboard");
             window_toast(window, cx, ToastKind::Success, toast);
         }

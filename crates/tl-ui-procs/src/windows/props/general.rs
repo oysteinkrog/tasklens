@@ -61,33 +61,33 @@ use tl_ui_settings::settings::{NetworkUnit, UnitsSettings};
 use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
-use crate::action_tracker::ToastTexts;
-use crate::actions::{GoToService, JumpOrigin, ManagerArg};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::kv_grid::{
-    KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
-    ValueTone, kv_words, shown_text_in, value_copy_form,
-};
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::host::HostContext;
-use crate::i18n::{Strings, tr, tr_args};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::jump::JumpTexts;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::shell::ShellApi;
-use crate::shell::ShellState;
-use crate::template::Template;
-use crate::text::metrics::TextMetricsCache;
-use crate::text::style::{label_style, t_sm};
-use crate::theme::{UiMetrics, current, metrics};
 use crate::windows::actions::{
     KV_GRID_CONTEXT, PropsActivateField, PropsCopyAllFields, PropsCopyValue, PropsFieldDown,
     PropsFieldEnd, PropsFieldHome, PropsFieldLeft, PropsFieldMenu, PropsFieldRight, PropsFieldUp,
     PropsVerifyPackage,
 };
+use tl_ui_base::action_tracker::ToastTexts;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::shell::ShellApi;
+use tl_ui_base::shell::ShellState;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::text::style::{label_style, t_sm};
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_kit::actions::{GoToService, JumpOrigin, ManagerArg};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::kv_grid::{
+    KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    ValueTone, kv_words, shown_text_in, value_copy_form,
+};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
 
 gpui_kit::actions!(
     tasklens_general,
@@ -379,7 +379,7 @@ impl GeneralWords {
 
     /// The en-US words, for code that runs without the strings.
     pub fn en() -> Self {
-        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+        Self::with(|key| tl_ui_base::i18n::tr_en(key, &[]), Template::en)
     }
 
     /// The label of `id`, such as "Process:". Empty for [`FieldId::WindowMore`].
@@ -418,7 +418,7 @@ pub fn general_words(cx: &mut App) -> Rc<GeneralWords> {
         return cache.words.clone();
     }
     let words = Rc::new(GeneralWords::with(
-        |key| crate::i18n::tr(cx, key),
+        |key| tl_ui_base::i18n::tr(cx, key),
         |key, args| Template::new(cx, key, args),
     ));
     cx.set_global(GeneralWordsCache {

@@ -20,9 +20,9 @@ use gpui_kit::{
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
-use crate::selector::TlSelector;
-use crate::text::style::{t_base, t_md, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_base, t_md, t_sm};
+use tl_ui_base::theme::{current, metrics};
 
 /// The button label unless the owner sets another.
 const CLEAR_FILTER_LABEL: &str = "Clear filter";
@@ -211,7 +211,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

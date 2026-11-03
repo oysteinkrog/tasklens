@@ -21,13 +21,13 @@ use tl_model::system::MemoryTotals;
 use tl_model::units;
 use tl_model::validity::Validity;
 
-use crate::chart::labels::{self, CachedLine, LineStyle};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{Strings, tr, tr_en};
-use crate::selector::TlSelector;
-use crate::template::Template;
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::i18n::{Strings, tr, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::template::Template;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::{self, CachedLine, LineStyle};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// Bar height, × ui_scale.
 pub const BAR_H: f32 = 24.;

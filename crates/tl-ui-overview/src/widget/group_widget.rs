@@ -55,10 +55,6 @@ use super::members::{Members, members};
 use super::meta::MetricMeta;
 use super::metric_widget::{MemberLook, MetricWidget, part_id, widget_id};
 use super::source::{SourceData, SourceStore};
-use crate::chart::ChartView;
-use crate::chart::labels::WARMING;
-use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
 use crate::overview::cpu_box::core_charts_element;
 use crate::overview::disk_box::{DiskModel, disk_cells_element, disk_rows_element};
 use crate::overview::layout::Arrange;
@@ -69,10 +65,14 @@ use crate::overview::parts::{
 };
 use crate::overview::picked::{box_mask, box_snapshot};
 use crate::overview::timeline::OverviewPause;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::t_sm;
-use crate::theme::{UiMetrics, current, metrics};
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::t_sm;
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_chart::chart::ChartView;
+use tl_ui_chart::chart::labels::WARMING;
 
 /// The edge every item keeps free in Edit Widgets, px at every scale: the selected outline.
 const EDIT_EDGE: f32 = super::edit::OUTLINE;

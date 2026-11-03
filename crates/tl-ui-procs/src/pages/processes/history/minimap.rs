@@ -26,7 +26,7 @@ use tl_model::time::TimeNs;
 
 use super::HistoryPage;
 use super::scrubber::{pan, x_to_t, zoom};
-use crate::theme::{GraphPalette, UiMetrics};
+use tl_ui_base::theme::{GraphPalette, UiMetrics};
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -282,7 +282,7 @@ impl Element for HistoryMinimap {
                 .map(Entity::entity_id),
         };
         register_events(&self.page, &geo, window);
-        let theme = crate::theme::current(cx).clone();
+        let theme = tl_ui_base::theme::current(cx).clone();
         let sf = window.scale_factor();
         self.page.update(cx, |page, _| {
             let span = page.view.as_ref().and_then(|v| v.span);
@@ -317,7 +317,7 @@ struct Input<'a> {
 fn paint_map(
     cache: &mut MinimapCache,
     input: &Input,
-    (theme, metrics, sf): (&crate::theme::TlTheme, &UiMetrics, f32),
+    (theme, metrics, sf): (&tl_ui_base::theme::TlTheme, &UiMetrics, f32),
     bounds: Bounds<Pixels>,
     hitbox: &Hitbox,
     window: &mut Window,

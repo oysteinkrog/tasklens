@@ -66,12 +66,6 @@ use super::grid::is_page;
 use super::look::{ChartLook, PageChart, accent};
 use super::meta::ValueText;
 use super::source::{Availability, SourceData};
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
-use crate::components::validity::copy_text;
-use crate::core::actions::PerfShowMiniWindow;
-use crate::hub::SnapshotHub;
-use crate::i18n::{Strings, tr};
 use crate::overview::fit::fit_text;
 use crate::overview::gpu_flow::line_style;
 use crate::overview::mem_box::{MemRowsRef, MeterRow, mem_cell_part, mem_row_part};
@@ -80,10 +74,16 @@ use crate::overview::parts::{
     ChartSettings, CoreBarsLayout, CoreCellFit, METER_H, Meter, PLOT_LINE, SPARK_GRID, box_chart,
     chart_section_versions, class_probe, core_bars_layout_marked, core_cell, spark_row,
 };
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::{numeric_style, t_lg, t_sm, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{numeric_style, t_lg, t_sm, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{ChartBg, ChartSpec, ChartView, GridStyle, ValueFormat, YScale};
+use tl_ui_kit::components::validity::copy_text;
+use tl_ui_perf_core::core::actions::PerfShowMiniWindow;
 
 /// The joint between the device name and the metric name.
 const SEP: &str = " · ";
@@ -1017,7 +1017,7 @@ fn chart_spec(key: &ChartKey, cell: bool, s: &ChartSettings, theme: &TlTheme) ->
 /// `sum` its value is the sum of its lines' newest samples.
 fn page_chart<T: 'static>(
     spec: ChartSpec,
-    labels: crate::chart::ChartLabels,
+    labels: tl_ui_chart::chart::ChartLabels,
     sum: bool,
     hub: &Entity<SnapshotHub>,
     cx: &mut Context<T>,

@@ -60,24 +60,24 @@ use super::name_cell::{
 use super::table::{GroupHeader, ProcessQuery};
 use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
 use super::{ProcessesPage, capture_row};
-use crate::anim::AnimationDriver;
-use crate::components::menu::{TlMenu, open_context_menu_at};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
-use crate::components::validity::{GlyphCtx, tooltip_text};
-use crate::host::HostContext;
-use crate::hub::HostClock;
-use crate::i18n::{tr, tr_args};
-use crate::settings_global::TlSettings;
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_base::anim::AnimationDriver;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::HostClock;
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::metrics::TextMetricsCache;
+use tl_ui_base::theme::{TlTheme, current, metrics};
+use tl_ui_kit::components::menu::{TlMenu, open_context_menu_at};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
+use tl_ui_kit::components::validity::{GlyphCtx, tooltip_text};
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     DEMAND_MAX_IDS, HeaderLines, NameCell, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
-use crate::text::metrics::TextMetricsCache;
-use crate::theme::{TlTheme, current, metrics};
 
 /// The highest column phase this build offers. Later beads raise it.
 pub const SHIPPED_PHASE: u8 = 4;
@@ -1136,7 +1136,7 @@ fn spec(
     c: &ProcColumn,
     net_bytes: bool,
     measure: &mut TextMetricsCache,
-    m: &crate::theme::UiMetrics,
+    m: &tl_ui_base::theme::UiMetrics,
     window: &Window,
     cx: &App,
 ) -> ColumnSpec {

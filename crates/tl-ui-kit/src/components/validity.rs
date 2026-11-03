@@ -31,9 +31,9 @@ use tl_model::validity::Validity;
 
 use super::icons::{TlIcon, icon};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::selector::TlSelector;
-use crate::text::style::numeric_style;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::numeric_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
 
 static WARMING: SharedString = SharedString::new_static("…");
 static UNSUPPORTED: SharedString = SharedString::new_static("n/a");
@@ -255,9 +255,9 @@ mod tests {
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
-    use crate::text::fonts::load_bundled_fonts;
-    use crate::text::metrics::TextMetricsCache;
-    use crate::theme::{current, metrics};
+    use tl_ui_base::text::fonts::load_bundled_fonts;
+    use tl_ui_base::text::metrics::TextMetricsCache;
+    use tl_ui_base::theme::{current, metrics};
 
     const ALL: [Validity; 7] = [
         Validity::Valid,
@@ -271,7 +271,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

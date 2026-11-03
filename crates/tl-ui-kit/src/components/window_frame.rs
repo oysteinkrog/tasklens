@@ -42,13 +42,13 @@ use super::icons::{TlIcon, icon};
 use super::menu::context_menu_layer;
 use super::toast::ToastQueue;
 use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged};
-use crate::registry::WindowKey;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged};
+use tl_ui_base::registry::WindowKey;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, current, metrics};
 
 /// The Wayland app id and X11 class of every tasklens window.
 pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
@@ -319,7 +319,7 @@ pub fn window_options(
         kind: spec.kind.window_kind(),
         is_resizable: spec.kind.resizable(),
         window_min_size: Some(min_size),
-        app_id: Some(crate::app_env::window_app_id(cx)),
+        app_id: Some(tl_ui_base::app_env::window_app_id(cx)),
         ..base
     }
 }

@@ -82,24 +82,26 @@ use super::parts::{
 use super::picked::{box_mask, box_snapshot};
 use super::range::RangeText;
 use super::timeline::OverviewPause;
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
-    YScale, format_value,
-};
-use crate::core::DeviceKey;
-use crate::core::gpu::{GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines};
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::text::style::{label_style, numeric_style, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
 use crate::widget::grid::SlotDevice;
 use crate::widget::metric_widget::{FlowLook, MetricWidget};
 use crate::widget::source::SourceStore;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::text::style::{label_style, numeric_style, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{
+    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
+    YScale, format_value,
+};
+use tl_ui_perf_core::core::DeviceKey;
+use tl_ui_perf_core::core::gpu::{
+    GpuVendor, device_engines, gpu_totals, grid_engines, shown_engines,
+};
 
 /// The box's debug selector.
 pub const GPU_BOX_ID: &str = "perf-overview-box-gpu";

@@ -20,7 +20,7 @@ use gpui_kit::{
 
 use super::focus::TlFocusRing;
 use super::motion::M_FAST;
-use crate::theme::{TlTheme, current, metrics};
+use tl_ui_base::theme::{TlTheme, current, metrics};
 
 /// Track hover: lightness up by 0.08.
 const HOVER_STEP: f32 = 0.08;
@@ -184,7 +184,7 @@ mod tests {
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

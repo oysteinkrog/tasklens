@@ -37,11 +37,6 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
 use tl_model::validity::Validity;
 
-use crate::components::icons::TlIcon;
-use crate::components::menu::TlMenu;
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
 use crate::table::actions::{
     HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SetColumnResize, SortByColumn,
 };
@@ -49,10 +44,15 @@ use crate::table::cells::{CellAt, CellCtx, glyph_cell, numeric_cell};
 use crate::table::columns::{ColumnAlign, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::tree_table::{ColumnResizeMode, TableSort};
 use crate::table::tree_table::{HEADER_H_ONE, HEADER_H_TWO, HeaderLines};
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::label_style;
 use crate::text_cache::CellTextCache;
-use crate::theme::{TlTheme, UiMetrics};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// Top of line 1 in the two-line header.
 pub const LINE1_TOP: f32 = 4.0;

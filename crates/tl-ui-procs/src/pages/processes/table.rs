@@ -22,7 +22,7 @@ use tl_ui_settings::settings::{Settings, SortState, UiState};
 use tracing::{debug, warn};
 
 use super::cells::ProcColumnKind;
-use crate::settings_global::TlSettings;
+use tl_ui_base::settings_global::TlSettings;
 
 /// The three group headers of grouped mode, in display order (PROC-004).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

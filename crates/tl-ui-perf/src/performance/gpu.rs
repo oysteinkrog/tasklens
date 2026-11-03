@@ -47,22 +47,22 @@ use super::page::{
     page_words,
 };
 use super::{DeviceKey, DeviceKind, DeviceRow};
-use crate::chart::labels::LABEL_ROW;
-use crate::chart::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args, tr_en};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings, animations_on};
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
+use tl_ui_chart::chart::{
     ChartBg, ChartGridSpec, ChartGridView, ChartLabels, ChartSeries, ChartSpec, ChartState,
     ChartView, GridCellSpec, GridStyle, LegendStyle, ValueAlign, ValueFormat, YScale, grid_height,
     grid_layout,
 };
-use crate::components::menu::TlMenu;
-use crate::components::motion::{M_BASE, ease_out_cubic};
-use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::demand::DemandAggregator;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args, tr_en};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings, animations_on};
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_kit::components::motion::{M_BASE, ease_out_cubic};
+use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 /// `grid_cell_h`, × ui_scale.
 pub const ENGINE_CELL_H: f32 = 112.;

@@ -37,13 +37,13 @@ use super::layout::BoxMode;
 use super::parts::Meter;
 use super::picked::{box_mask, box_snapshot};
 use super::timeline::OverviewPause;
-use crate::chart::labels::LABEL_ROW;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr};
-use crate::selector::TlSelector;
-use crate::shell::{JumpTexts, ProcessJump, ShellApi, ShellState};
-use crate::text::style::{numeric_style, t_sm, t_xs};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::shell::{JumpTexts, ProcessJump, ShellApi, ShellState};
+use tl_ui_base::text::style::{numeric_style, t_sm, t_xs};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::labels::LABEL_ROW;
 
 /// The box's debug selector.
 pub const PROCS_BOX_ID: &str = "perf-overview-box-processes";

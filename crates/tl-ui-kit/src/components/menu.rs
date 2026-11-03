@@ -52,11 +52,11 @@ use super::icons::{TlIcon, icon};
 use super::motion::{M_FAST, ease_out_cubic};
 use super::slider::{KeyMove, MENU_ROW_HEIGHT, TlSlider, key_move};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::i18n::{tr, tr_args};
-use crate::selector::TlSelector;
-use crate::text::fonts::UI_FAMILY;
-use crate::text::style::{t_base, t_xs};
-use crate::theme::{UiMetrics, current, metrics};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::fonts::UI_FAMILY;
+use tl_ui_base::text::style::{t_base, t_xs};
+use tl_ui_base::theme::{UiMetrics, current, metrics};
 
 /// Item height at 100% scale.
 pub const MENU_ITEM_H: f32 = 26.0;
@@ -2150,7 +2150,7 @@ mod tests {
 
     fn setup_scaled(cx: &mut App, ui_scale_pct: u16) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings {
@@ -2159,7 +2159,7 @@ mod tests {
             },
             Vec::new(),
         );
-        crate::i18n::init_strings(cx, "en-US");
+        tl_ui_base::i18n::init_strings(cx, "en-US");
         bind_keys(cx);
         cx.set_reduce_motion(true);
     }

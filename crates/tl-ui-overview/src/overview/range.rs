@@ -30,14 +30,14 @@ use tl_model::snapshot::{DeviceHistory, HistPoint, Snapshot};
 use tl_ui_settings::settings::OverviewRange;
 
 use super::timeline::{self, Paused};
-use crate::chart::view::{derived_view, find_tiered};
-use crate::components::select::{TlSelect, TlSelectItem, TlSelectState};
-use crate::hub::SnapshotHub;
-use crate::i18n::tr;
-use crate::net_totals::hist_minus;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::template::Template;
+use tl_ui_base::hub::SnapshotHub;
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::template::Template;
+use tl_ui_chart::chart::view::{derived_view, find_tiered};
+use tl_ui_chart::net_totals::hist_minus;
+use tl_ui_kit::components::select::{TlSelect, TlSelectItem, TlSelectState};
 
 /// The switch labels, in [`OverviewRange::ALL`] order.
 pub const SWITCH_KEYS: [&str; 5] = [
@@ -117,7 +117,7 @@ pub fn history_request(
 /// `history.device_metrics`, a host setting, on before the engine gives it. 24 h and 7 d read
 /// only the stored history, so with it off their segments are disabled (UI-PRF-060).
 pub fn history_kept(hub: Option<&Entity<SnapshotHub>>, cx: &App) -> bool {
-    crate::host_settings::current_of(hub, cx)
+    tl_ui_base::host_settings::current_of(hub, cx)
         .values
         .history
         .device_metrics

@@ -46,30 +46,30 @@ use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
 };
-use crate::chart::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::host::HostContext;
+use tl_ui_base::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::{Strings, tr, tr_args};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::{Section, TlSettings};
+use tl_ui_base::shell::{DiskEject, ShellApi};
+use tl_ui_base::text::style::label_style;
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_chart::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::icons::TlIcon;
-use crate::components::menu::TlMenu;
-use crate::demand::DemandAggregator;
-use crate::host::HostContext;
-use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::{Strings, tr, tr_args};
-use crate::selector::TlSelector;
-use crate::settings_global::{Section, TlSettings};
-use crate::shell::{DiskEject, ShellApi};
-use crate::table::cells::CellOut;
-use crate::table::columns::{
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_table::table::cells::CellOut;
+use tl_ui_table::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
-use crate::table::tree_table::{
+use tl_ui_table::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, SCROLLBAR_W, TableSort,
     TlTreeTable, TreeTableDelegate,
 };
-use crate::text::style::label_style;
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Debug selectors of the chart boxes.
 pub const ACTIVE_ID: &str = "perf-disk-active";

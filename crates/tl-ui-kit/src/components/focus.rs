@@ -13,7 +13,7 @@
 
 use gpui_kit::{AbsoluteLength, Hsla, ParentElement, Pixels, Styled, Window, div, px};
 
-use crate::theme::TlTheme;
+use tl_ui_base::theme::TlTheme;
 
 /// `true`: the ring shows only after keyboard input (U-42). `false`: the ring shows whenever the
 /// element is focused, the kit default (R-123).

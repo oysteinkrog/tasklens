@@ -89,23 +89,23 @@ use self::range::{RangeText, history_request};
 use self::splitter::{Drag, Splitter, Target, set_span, splitters};
 use self::status_bar::{EdgesChanged, StatusBar, state_color};
 use self::timeline::{OverviewPause, Paused, TimelineBox};
-use crate::chart::{NetFormat, ValueFormat, format_value};
-use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
-use crate::components::menu::TlMenu;
-use crate::core::actions::{
+use tl_ui_base::demand::DemandAggregator;
+use tl_ui_base::hub::{SnapshotChanged, SnapshotHub};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::settings_global::TlSettings;
+use tl_ui_base::template::Template;
+use tl_ui_base::theme::{current, metrics};
+use tl_ui_chart::chart::{NetFormat, ValueFormat, format_value};
+use tl_ui_chart::net_totals::NetTotal;
+use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use tl_ui_kit::components::menu::TlMenu;
+use tl_ui_perf_core::core::actions::{
     PERFORMANCE_OVERVIEW_EDIT_CONTEXT, PerfOverviewEditLayout, PerfOverviewSetTimelineClick,
     PerfSetStatusBar,
 };
-use crate::core::details::KeyValueModel;
-use crate::core::{DeviceKey, DeviceKind};
-use crate::demand::DemandAggregator;
-use crate::hub::{SnapshotChanged, SnapshotHub};
-use crate::i18n::tr;
-use crate::net_totals::NetTotal;
-use crate::selector::TlSelector;
-use crate::settings_global::TlSettings;
-use crate::template::Template;
-use crate::theme::{current, metrics};
+use tl_ui_perf_core::core::details::KeyValueModel;
+use tl_ui_perf_core::core::{DeviceKey, DeviceKind};
 
 /// The Overview page's key.
 pub const OVERVIEW_KEY: &str = DeviceKey::OVERVIEW;

@@ -33,9 +33,9 @@ use gpui_kit::{
     point, prelude::FluentBuilder as _, px,
 };
 
-use crate::selector::TlSelector;
-use crate::text::style::{t_sm, t_xs};
-use crate::theme::{current, metrics};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{t_sm, t_xs};
+use tl_ui_base::theme::{current, metrics};
 
 /// Hover delay for buttons and glyphs (the kit default).
 pub const DELAY_CONTROL: Duration = Duration::from_millis(500);
@@ -563,13 +563,13 @@ mod tests {
     use tl_ui_settings::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
-    use crate::text::fonts::load_bundled_fonts;
+    use tl_ui_base::text::fonts::load_bundled_fonts;
 
     gpui_kit::actions!(tl_tooltip_test, [FocusNext, EndTask]);
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
-        crate::theme::store::init(
+        tl_ui_base::theme::store::init(
             cx,
             &ThemeSettings::default(),
             &AppearanceSettings::default(),

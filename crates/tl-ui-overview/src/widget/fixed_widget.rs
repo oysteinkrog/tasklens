@@ -30,10 +30,10 @@ use gpui_kit::{
 use tl_ui_settings::layout::{FixedWidget, WidgetContent, WidgetSetting};
 
 use super::metric_widget::{part_id, widget_id};
-use crate::i18n::tr;
-use crate::selector::TlSelector;
-use crate::text::style::{label_style, t_sm};
-use crate::theme::{current, metrics};
+use tl_ui_base::i18n::tr;
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{label_style, t_sm};
+use tl_ui_base::theme::{current, metrics};
 
 /// The content view the host gives for a fixed kind, `None` when it has none.
 pub type FixedContent = Rc<dyn Fn(&FixedWidget, &mut App) -> Option<AnyView>>;

@@ -12,8 +12,8 @@ use fluent_bundle::FluentValue;
 use gpui_kit::{AnyWindowHandle, App, SharedString};
 use tl_model::units;
 
-use crate::components::dialog::{DialogResult, TlDialog};
-use crate::i18n::{tr, tr_args};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_kit::components::dialog::{DialogResult, TlDialog};
 
 /// The action a protected-target confirmation names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

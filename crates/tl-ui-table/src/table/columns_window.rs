@@ -20,20 +20,20 @@ use gpui_kit::{
     UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, size, uniform_list,
 };
 
-use crate::components::button::{TlButton, TlButtonKind};
-use crate::components::checkbox::TlCheckbox;
-use crate::components::icons::TlIcon;
-use crate::components::input::{TlInputSize, TlTextInput};
-use crate::components::toast::{ToastKind, ToastQueue};
-use crate::components::window_frame::{
+use crate::table::columns::{Availability, ColumnError, TableId};
+use tl_ui_base::i18n::{tr, tr_args};
+use tl_ui_base::registry::{GlobalRegistry, OpenOutcome, WindowKey};
+use tl_ui_base::selector::TlSelector;
+use tl_ui_base::text::style::{label_style, t_base, t_sm};
+use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
+use tl_ui_kit::components::button::{TlButton, TlButtonKind};
+use tl_ui_kit::components::checkbox::TlCheckbox;
+use tl_ui_kit::components::icons::TlIcon;
+use tl_ui_kit::components::input::{TlInputSize, TlTextInput};
+use tl_ui_kit::components::toast::{ToastKind, ToastQueue};
+use tl_ui_kit::components::window_frame::{
     CloseSecondaryWindow, TlSecondaryWindow, TlWindowKind, TlWindowSpec,
 };
-use crate::i18n::{tr, tr_args};
-use crate::registry::{GlobalRegistry, OpenOutcome, WindowKey};
-use crate::selector::TlSelector;
-use crate::table::columns::{Availability, ColumnError, TableId};
-use crate::text::style::{label_style, t_base, t_sm};
-use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Default window size, × ui_scale (R-106).
 pub const PICKER_SIZE: (f32, f32) = (420., 560.);
