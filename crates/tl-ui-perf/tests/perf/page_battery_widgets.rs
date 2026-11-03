@@ -923,3 +923,30 @@ fn page_battery_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     let editor = r.editor();
     super::page_look::sweep(r.vcx, &container, &editor, "battery");
 }
+
+/// A battery chart draws in Mint with the fill at 85%, as the 1.3.0 Battery page did
+/// (UI-PRF-005), not in the GPU colour (tasklens-hzire.10, visual check).
+fn assert_battery_colour(cx: &mut TestAppContext, system: bool, metric: &str) {
+    let mint = tl_ui_base::theme::palette::accent_color("mint").expect("mint");
+    let mut r = open(cx, 1200., 900., system);
+    let id = r.metric_id(metric);
+    let [chart] = r.charts([id]);
+    r.vcx.update(|_, cx| {
+        let spec = &chart.read(cx).spec;
+        assert!(!spec.series.is_empty(), "{metric} draws a series");
+        assert_eq!(spec.series[0].line, mint, "{metric}");
+        assert_eq!(spec.series[0].fill, Some(mint.opacity(0.85)), "{metric}");
+    });
+}
+
+/// The Power chart of a system battery is Mint.
+#[gpui_kit::test]
+fn page_battery_power_chart_uses_the_battery_colour(cx: &mut TestAppContext) {
+    assert_battery_colour(cx, true, METRIC_POWER);
+}
+
+/// The Percentage chart of any other battery is Mint.
+#[gpui_kit::test]
+fn page_battery_percent_chart_uses_the_battery_colour(cx: &mut TestAppContext) {
+    assert_battery_colour(cx, false, METRIC_PERCENT);
+}

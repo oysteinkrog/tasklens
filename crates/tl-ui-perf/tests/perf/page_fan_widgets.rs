@@ -844,3 +844,27 @@ fn page_fan_look_survives_edit_and_apply(cx: &mut TestAppContext) {
     let editor = r.editor();
     super::page_look::sweep(r.vcx, &container, &editor, "fan");
 }
+
+/// The Fan speed and Temperature charts draw in Violet with the fill at 85%, as the 1.3.0 Fan
+/// page did (UI-PRF-005), not in the GPU colour (tasklens-hzire.10, visual check).
+#[gpui_kit::test]
+fn page_fan_charts_use_the_fan_colour(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let ids = [r.metric_id(METRIC_SPEED), r.metric_id(METRIC_TEMP)];
+    let charts = r.charts(ids);
+    let violet = tl_ui_base::theme::palette::accent_color("violet").expect("violet");
+    r.vcx.update(|_, cx| {
+        for (chart, id) in charts.iter().zip(ids) {
+            let spec = &chart.read(cx).spec;
+            assert!(!spec.series.is_empty(), "widget {id} draws a series");
+            for s in &spec.series {
+                assert_eq!(s.line, violet, "widget {id}");
+            }
+            assert_eq!(
+                spec.series[0].fill,
+                Some(violet.opacity(0.85)),
+                "widget {id}"
+            );
+        }
+    });
+}

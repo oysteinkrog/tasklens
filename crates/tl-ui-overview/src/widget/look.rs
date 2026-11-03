@@ -52,6 +52,7 @@ use crate::overview::parts::spark_labels;
 use tl_ui_base::i18n::tr;
 use tl_ui_base::theme::TlTheme;
 use tl_ui_base::theme::derived::blend_over;
+use tl_ui_base::theme::palette::accent_color;
 use tl_ui_chart::chart::{ChartLabels, ChartSeries, LegendStyle, ValueAlign, ValueFormat};
 use tl_ui_perf_core::core::core_clocks::clock_series;
 use tl_ui_perf_core::core::look::{
@@ -168,13 +169,27 @@ pub fn accent(kind: DeviceKind, metric: &str, theme: &TlTheme) -> Accent {
         },
         DeviceKind::Disk | DeviceKind::Disks => (g.disk_line, g.disk_fill),
         DeviceKind::Net | DeviceKind::Nets => (g.net_line, g.net_fill),
-        DeviceKind::Gpu
-        | DeviceKind::AggregateGpu
-        | DeviceKind::Fan
-        | DeviceKind::Battery
-        | DeviceKind::Other => (g.gpu_line, g.gpu_fill),
+        // The 1.3.0 Fan and Battery pages draw in Violet and Mint (UI-PRF-005).
+        DeviceKind::Fan => named_accent(FAN_ACCENT, theme),
+        DeviceKind::Battery => named_accent(BATTERY_ACCENT, theme),
+        DeviceKind::Gpu | DeviceKind::AggregateGpu | DeviceKind::Other => (g.gpu_line, g.gpu_fill),
     };
     Accent { line, fill }
+}
+
+/// The accent name of the Fan page's charts.
+pub const FAN_ACCENT: &str = "violet";
+/// The accent name of the Battery page's charts.
+pub const BATTERY_ACCENT: &str = "mint";
+/// The fill of a Fan or Battery chart: its line at 85%, as the 1.3.0 sensor pages.
+pub const SENSOR_FILL_ALPHA: f32 = 0.85;
+
+/// The line and fill of the accent called `name`, or the GPU colours for an unknown name.
+fn named_accent(name: &str, theme: &TlTheme) -> (Hsla, Hsla) {
+    match accent_color(name) {
+        Some(line) => (line, line.opacity(SENSOR_FILL_ALPHA)),
+        None => (theme.graph.gpu_line, theme.graph.gpu_fill),
+    }
 }
 
 /// The upload line: the network colour blended with white, as the Network box draws it.
