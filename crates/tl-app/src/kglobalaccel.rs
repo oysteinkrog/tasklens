@@ -118,22 +118,22 @@ fn set_on(
     call(conn, "doRegister", &(&tl,))?;
     if on {
         call(conn, "setForeignShortcutKeys", &(&sm, Vec::<KeySeq>::new()))?;
-        call(
+        if let Err(e) = call(
             conn,
             "setShortcutKeys",
             &(&tl, vec![key_seq(META_ESC)], SET_PRESENT | NO_AUTOLOADING),
-        )?;
+        ) {
+            // Never leave the user with no Meta+Esc at all.
+            let _ = restore_system_monitor(conn, &sm);
+            return Err(e);
+        }
     } else {
         call(
             conn,
             "setShortcutKeys",
             &(&tl, Vec::<KeySeq>::new(), SET_PRESENT | NO_AUTOLOADING),
         )?;
-        let defaults: Vec<KeySeq> = call(conn, "defaultShortcutKeys", &(&sm,))?
-            .body()
-            .deserialize()
-            .map_err(|e| KgaError::Call(e.to_string()))?;
-        call(conn, "setForeignShortcutKeys", &(&sm, defaults))?;
+        restore_system_monitor(conn, &sm)?;
     }
     if tasklens_bound(conn)? == on {
         return Ok(Applied::Live);
@@ -141,6 +141,18 @@ fn set_on(
     warn!(target: "tasklens::shortcut", on, "kglobalaccel did not take the change; editing kglobalshortcutsrc");
     rc_fallback(rc_file, on)?;
     Ok(Applied::NeedsRelogin)
+}
+
+/// Gives System Monitor its default launch keys back (Meta+Esc on Plasma 6), never a fixed key.
+fn restore_system_monitor(
+    conn: &zbus::blocking::Connection,
+    sm: &[String],
+) -> Result<(), KgaError> {
+    let defaults: Vec<KeySeq> = call(conn, "defaultShortcutKeys", &(sm,))?
+        .body()
+        .deserialize()
+        .map_err(|e| KgaError::Call(e.to_string()))?;
+    call(conn, "setForeignShortcutKeys", &(sm, defaults)).map(|_| ())
 }
 
 /// Reads the tasklens launch keys back.
