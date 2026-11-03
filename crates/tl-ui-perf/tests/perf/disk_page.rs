@@ -1,5 +1,6 @@
 //! Disk page: the two charts, the header, the demand and the source failure state (E25,
-//! UI-PRF-029; PERF-047, PERF-048).
+//! UI-PRF-029; PERF-047, PERF-048). The charts are the page container's widgets
+//! (`tasklens-hzire.7`); `page_disk_widgets` tests the container itself.
 
 use std::sync::Arc;
 
@@ -28,9 +29,8 @@ use tl_ui_base::theme::{current, metrics};
 use tl_ui_chart::chart::scale::{ScaleState, compute};
 use tl_ui_chart::chart::{ChartState, ValueFormat, YScale, format_value};
 use tl_ui_kit::components::kv_grid;
-use tl_ui_perf::performance::disk::{
-    ACTIVE_ID, DiskPage, PARTITIONS_TABLE_ID, PartColumn, TRANSFER_ID,
-};
+use tl_ui_overview::widget::metric_widget::widget_id;
+use tl_ui_perf::performance::disk::{DiskPage, PARTITIONS_TABLE_ID, PartColumn};
 use tl_ui_perf::performance::page::DevicePage as _;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
@@ -192,9 +192,12 @@ fn series(metric: MetricId, value: f32) -> Arc<SeriesView> {
 #[gpui_kit::test]
 fn disk_transfer_value_is_sum(cx: &mut TestAppContext) {
     let r = open(cx);
-    let chart = r
-        .vcx
-        .update(|_, cx| r.page.read(cx).transfer_chart().clone());
+    let chart = r.vcx.update(|_, cx| {
+        r.page
+            .read(cx)
+            .transfer_chart(cx)
+            .expect("Transfer rate chart")
+    });
     chart.update(r.vcx, |v, cx| {
         v.set_series_for_test(
             [
@@ -228,10 +231,15 @@ fn disk_transfer_value_is_sum(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn disk_page_two_charts_and_header(cx: &mut TestAppContext) {
     let r = open(cx);
-    let active = r.vcx.debug_bounds(ACTIVE_ID).expect("Active time chart");
+    // The default layout's widgets: Active time is 1, Transfer rate 2.
+    let container = r
+        .vcx
+        .update(|_, cx| r.page.read(cx).container_id().to_string());
+    let selector = |id| -> &'static str { Box::leak(widget_id(&container, id).into_boxed_str()) };
+    let active = r.vcx.debug_bounds(selector(1)).expect("Active time chart");
     let transfer = r
         .vcx
-        .debug_bounds(TRANSFER_ID)
+        .debug_bounds(selector(2))
         .expect("Transfer rate chart");
     assert_eq!(active.size.height, px(150.));
     assert_eq!(transfer.size.height, px(150.));
@@ -245,7 +253,9 @@ fn disk_page_two_charts_and_header(cx: &mut TestAppContext) {
     assert_eq!(header.1.as_ref(), "WD_BLACK SN850X 1000GB (nvme0n1)");
     assert!(smart);
 
-    let chart = r.vcx.update(|_, cx| page.read(cx).active_chart().clone());
+    let chart = r
+        .vcx
+        .update(|_, cx| page.read(cx).active_chart(cx).expect("Active time chart"));
     let (y, heading) = r
         .vcx
         .read_entity(&chart, |v, _| (v.spec.y, v.labels.heading.clone()));
@@ -339,7 +349,10 @@ fn disk_charts_failed_on_source_failure(cx: &mut TestAppContext) {
     let page = r.page.clone();
     let charts = r.vcx.update(|_, cx| {
         let p = page.read(cx);
-        [p.active_chart().clone(), p.transfer_chart().clone()]
+        [
+            p.active_chart(cx).expect("Active time chart"),
+            p.transfer_chart(cx).expect("Transfer rate chart"),
+        ]
     });
     for chart in charts {
         let state = r.vcx.read_entity(&chart, |v, _| v.state.clone());
@@ -350,9 +363,12 @@ fn disk_charts_failed_on_source_failure(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn disk_axis_pow2(cx: &mut TestAppContext) {
     let r = open(cx);
-    let chart = r
-        .vcx
-        .update(|_, cx| r.page.read(cx).transfer_chart().clone());
+    let chart = r.vcx.update(|_, cx| {
+        r.page
+            .read(cx)
+            .transfer_chart(cx)
+            .expect("Transfer rate chart")
+    });
     let (y, labels) = r
         .vcx
         .read_entity(&chart, |v, _| (v.spec.y, v.labels.clone()));

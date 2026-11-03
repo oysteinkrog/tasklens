@@ -350,10 +350,12 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let page = disk.read(cx);
         assert_eq!(page.header().0.as_ref(), "Disk 0");
-        assert!(!page.active_chart().read(cx).spec.series.is_empty());
-        assert!(!page.transfer_chart().read(cx).spec.series.is_empty());
-        assert!(page.active_chart().read(cx).spec.hover);
-        assert!(page.transfer_chart().read(cx).spec.hover);
+        let active = page.active_chart(cx).expect("Active time chart");
+        let transfer = page.transfer_chart(cx).expect("Transfer rate chart");
+        assert!(!active.read(cx).spec.series.is_empty());
+        assert!(!transfer.read(cx).spec.series.is_empty());
+        assert!(active.read(cx).spec.hover);
+        assert!(transfer.read(cx).spec.hover);
         assert_rows(
             page,
             &[ROW_ACTIVE, ROW_RESPONSE, ROW_READ, ROW_WRITE, ROW_CAPACITY],
@@ -477,7 +479,7 @@ mod shared_range {
                 // The default CPU page shows the per-core grid, not the Overall chart.
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 ns(&memory.read(cx).physical(cx).expect("physical chart")),
-                ns(disk.read(cx).active_chart()),
+                ns(&disk.read(cx).active_chart(cx).expect("active chart")),
                 ns(net.read(cx).throughput()),
                 ns(&gpu.read(cx).memory(cx).expect("memory chart")),
                 ns(fan.read(cx).speed()),
@@ -625,7 +627,11 @@ mod shared_range {
         draw(r.vcx);
         let disk = page::<DiskPage>(&mut r, DISKS[0]);
         let n = r.vcx.update(|_, cx| {
-            disk.read(cx).active_chart().read(cx).resolved()[0]
+            disk.read(cx)
+                .active_chart(cx)
+                .expect("active chart")
+                .read(cx)
+                .resolved()[0]
                 .as_ref()
                 .map(|v| v.samples.len())
         });

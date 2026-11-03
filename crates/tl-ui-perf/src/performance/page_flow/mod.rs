@@ -27,6 +27,7 @@ use super::widget::grid::{InnerGrid, InnerPlacement, PlacedWidget};
 use super::widget::source::Availability;
 
 pub mod cpu;
+pub mod disk;
 pub mod gpu;
 pub mod memory;
 

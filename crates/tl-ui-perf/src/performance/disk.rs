@@ -1,17 +1,20 @@
 //! The Disk page: one page per physical disk with the Active time and Transfer rate charts
-//! above the Details grid, and the page's demand (docs/ui/performance.md UI-PRF-029,
-//! UI-PRF-020; PERF-047, PERF-048; ADR-008).
+//! above the Details grid and the partitions block, and the page's demand
+//! (docs/ui/performance.md UI-PRF-029, UI-PRF-020, UI-PRF-030; PERF-047, PERF-048; ADR-008).
 //!
-//! The charts are cached views that re-render for their own series. The page re-renders only
-//! when its header or Details rows change. The specs are built again only when a chart setting
-//! or the theme changed.
+//! The page's body is one widget container (ADR-019 phase 3, `tasklens-hzire.7`), one layout
+//! per disk (`page.disk:<key>`). By default it draws the 1.3.0 parts in their 1.3.0 places
+//! (`page_flow::disk`): the `active` and `io` chart widgets, the Details widget and the
+//! `disk_partitions` block. Edit Widgets changes them. The page keeps the header, the buttons,
+//! the Details model and the partition table; it hands the Details rows to its `DetailsView`
+//! and the block to its part view, each of which renders only for its own change.
 //!
 //! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
@@ -20,28 +23,40 @@ use gpui_kit::component::v_flex;
 use gpui_kit::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
     FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StyleRefinement, Styled as _, Subscription, Window,
-    div, px,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    px,
 };
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use tl_model::demand::Demand;
-use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::health::SourceId;
+use tl_model::ids::DeviceIdx;
 use tl_model::snapshot::{
     DiskDetails, InvField, PartitionRow, PartitionTable, SmartKind, Snapshot,
 };
 use tl_model::system::{DiskTotals, Metric};
 use tl_model::units;
 use tl_model::validity::Validity;
+use tl_ui_settings::layout::FixedWidget;
+use tl_ui_settings::layout_boxes::{METRIC_DISK_ACTIVE, METRIC_DISK_IO};
+use tl_ui_settings::layout_pages::page_container;
 
-use super::actions::{PerfEject, PerfShowSmart};
+use super::actions::{PerfEject, PerfShowSmart, PerfWidgetEditStart, PerfWidgetResetPage};
+use super::aggregate::{add_demand, page_layout, reset_page, start_page_edit, strings_version};
 use super::details::{Fallback, KeyValueModel};
+use super::gpu_views::PartResized;
 use super::memory::flat_static_table;
+use super::memory_views::{MemoryPartView, PartDraw, PartShown};
 use super::page::{
-    DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_history_request, page_range_ns,
+    DevicePage, DevicePageFrame, details_draw, header_text, page_history_request, page_range_ns,
     page_words,
 };
+use super::page_flow::disk::{DiskParts, disk_flow};
 use super::sidebar::retain_whole_disks;
+use super::widget::container::WidgetContainer;
+use super::widget::details_widget::{DetailsResized, DetailsShown, DetailsView};
+use super::widget::edit::WidgetEditor;
+use super::widget::fixed_widget::FixedContent;
+use super::widget::source::SourceStore;
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
     visible_rows,
@@ -54,11 +69,8 @@ use tl_ui_base::selector::TlSelector;
 use tl_ui_base::settings_global::{Section, TlSettings};
 use tl_ui_base::shell::{DiskEject, ShellApi};
 use tl_ui_base::text::style::label_style;
-use tl_ui_base::theme::{TlTheme, UiMetrics, current, metrics};
-use tl_ui_chart::chart::{
-    ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale,
-};
+use tl_ui_base::theme::{UiMetrics, current, metrics};
+use tl_ui_chart::chart::{ChartBg, ChartSeries, ChartSpec, ChartView, GridStyle, YScale};
 use tl_ui_kit::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use tl_ui_kit::components::icons::TlIcon;
 use tl_ui_kit::components::menu::TlMenu;
@@ -71,15 +83,6 @@ use tl_ui_table::table::tree_table::{
     TlTreeTable, TreeTableDelegate,
 };
 
-/// Debug selectors of the chart boxes.
-pub const ACTIVE_ID: &str = "perf-disk-active";
-pub const TRANSFER_ID: &str = "perf-disk-transfer";
-
-const KEY_ACTIVE: &str = "perf-disk-heading-active";
-const KEY_TRANSFER: &str = "perf-disk-heading-transfer";
-const KEY_READ: &str = "perf-disk-legend-read";
-const KEY_WRITE: &str = "perf-disk-legend-write";
-const KEY_THROUGHPUT: &str = "perf-disk-range-throughput";
 const KEY_BTN_SMART: &str = "perf-disk-btn-smart";
 const KEY_BTN_EJECT: &str = "perf-disk-btn-eject";
 const KEY_MENU_SMART: &str = "perf-disk-menu-smart";
@@ -118,11 +121,6 @@ pub const EJECT_BUTTON_ID: &str = "perf-disk-eject";
 pub struct Words {
     /// `None` before the first refresh; then the strings version, `None` without strings.
     version: Option<Option<u64>>,
-    pub active: SharedString,
-    pub transfer: SharedString,
-    pub read: SharedString,
-    pub write: SharedString,
-    pub throughput: SharedString,
     pub btn_smart: SharedString,
     pub btn_eject: SharedString,
     pub menu_smart: SharedString,
@@ -143,11 +141,6 @@ impl Words {
         }
         self.version = version;
         let t = |key| tr(cx, key);
-        self.active = t(KEY_ACTIVE);
-        self.transfer = t(KEY_TRANSFER);
-        self.read = t(KEY_READ);
-        self.write = t(KEY_WRITE);
-        self.throughput = t(KEY_THROUGHPUT);
         self.btn_smart = t(KEY_BTN_SMART);
         self.btn_eject = t(KEY_BTN_EJECT);
         self.menu_smart = t(KEY_MENU_SMART);
@@ -160,7 +153,8 @@ impl Words {
     }
 }
 
-/// The settings the charts draw from.
+/// The settings the page charts draw from (`spec`, the Aggregate graphics charts) and the
+/// range the page asks the history for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PageSettings {
     range_ns: u64,
@@ -194,10 +188,6 @@ pub(super) fn section_versions(cx: &App) -> [u64; 3] {
     ]
 }
 
-fn series(device: DeviceIdx, metric: MetricId) -> SeriesId {
-    SeriesId { device, metric }
-}
-
 pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettings) -> ChartSpec {
     ChartSpec {
         series,
@@ -214,82 +204,6 @@ pub(super) fn spec(series: SmallVec<[ChartSeries; 4]>, y: YScale, s: &PageSettin
         background: ChartBg::Window,
         hover: true,
         ..ChartSpec::default()
-    }
-}
-
-/// Active time with fill, 0..100.
-pub(super) fn active_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let series = smallvec![ChartSeries {
-        id: series(device, MetricId::DISK_ACTIVE),
-        fill: Some(theme.graph.disk_fill),
-        line: theme.graph.disk_line,
-        ..ChartSeries::default()
-    }];
-    let y = YScale::Fixed {
-        min: 0.0,
-        max: 100.0,
-    };
-    spec(series, y, s)
-}
-
-/// Read with fill and write as a dashed line, on a power-of-two scale.
-pub(super) fn transfer_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSpec {
-    let line = theme.graph.disk_line;
-    let series = smallvec![
-        ChartSeries {
-            id: series(device, MetricId::DISK_READ),
-            fill: Some(theme.graph.disk_fill),
-            line,
-            ..ChartSeries::default()
-        },
-        ChartSeries {
-            id: series(device, MetricId::DISK_WRITE),
-            line,
-            dashed: true,
-            ..ChartSeries::default()
-        },
-    ];
-    spec(series, YScale::AutoRate { iec: true }, s)
-}
-
-pub(super) fn active_labels(w: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.active.clone()),
-        value_fmt: ValueFormat::Percent,
-        value_align: ValueAlign::Right,
-        range_word: w.active.clone(),
-        legend: SmallVec::new(),
-        show_axis_max: false,
-    }
-}
-
-pub(super) fn transfer_labels(w: &Words) -> ChartLabels {
-    ChartLabels {
-        heading: Some(w.transfer.clone()),
-        value_fmt: ValueFormat::RateIec,
-        value_align: ValueAlign::Right,
-        range_word: w.throughput.clone(),
-        legend: smallvec![
-            (w.read.clone(), LegendStyle::Solid),
-            (w.write.clone(), LegendStyle::Dashed)
-        ],
-        show_axis_max: true,
-    }
-}
-
-/// The chart state from the disk source health: Failed with its error, else Live (the views
-/// derive WarmingUp and Stale themselves).
-pub(super) fn health_state(snap: &Snapshot) -> ChartState {
-    let h = snap.health.get(SourceId::Disk);
-    match h.state {
-        SourceState::Failed => ChartState::Failed(
-            h.last_error
-                .as_deref()
-                .unwrap_or_default()
-                .to_owned()
-                .into(),
-        ),
-        _ => ChartState::Live,
     }
 }
 
@@ -1200,16 +1114,43 @@ impl TreeTableDelegate for PartitionsDelegate {
     }
 }
 
-/// The Disk device page.
+/// The part name of the partitions block, as its debug selector names it
+/// (`memory_views::part_id`).
+pub const PART_PARTITIONS: &str = "disk-partitions";
+
+/// The draw of the partitions block from the page. `None` once the page is gone, or while the
+/// partition table is not read.
+fn partitions_draw(page: WeakEntity<DiskPage>) -> PartDraw {
+    Rc::new(move |window: &mut Window, cx: &mut App| {
+        page.upgrade()?.update(cx, |p, cx| {
+            p.sync_partitions_table(window, cx);
+            p.partitions_element(cx)
+        })
+    })
+}
+
+/// The Disk device page. Its body is one widget container (ADR-019 phase 3,
+/// `tasklens-hzire.7`); see the module docs.
+///
+/// Render contract: the page renders on a header change, a button change, a range change and
+/// a layout change, never because of a sample. A Details value change notifies only the
+/// `DetailsView`, a partition table change only the block's part view.
 pub struct DiskPage {
     /// The host this page shows. Set when it opens; never changes.
     host: HostContext,
     key: DeviceKey,
     row: DeviceRow,
-    active: Entity<ChartView>,
-    transfer: Entity<ChartView>,
+    /// The container id, `page.<disk key>`.
+    container_id: SharedString,
     /// The rows from `update_disk_details_p1` and `update_disk_details_p2`.
     details: KeyValueModel,
+    details_view: Entity<DetailsView>,
+    /// The partitions block (fixed widget `disk_partitions`).
+    partitions_view: Entity<MemoryPartView>,
+    /// The heights and the shown flag the flow placer reads.
+    parts: DiskParts,
+    container: Entity<WidgetContainer>,
+    editor: Entity<WidgetEditor>,
     /// The partitions block; `None` until the table is read.
     partitions: Option<PartitionsBlock>,
     /// The table behind `partitions`, for the heading when the strings change.
@@ -1227,7 +1168,7 @@ pub struct DiskPage {
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
-    /// `UiMetrics.style_version` the chart colours were built for.
+    /// `UiMetrics.style_version` the partitions block was drawn for.
     style_version: u64,
     words: Words,
     hub: Entity<SnapshotHub>,
@@ -1239,9 +1180,14 @@ pub struct DiskPage {
     window: Option<AnyWindowHandle>,
     /// The page root.
     focus: FocusHandle,
-    _subs: SmallVec<[Subscription; 4]>,
+    _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub notify_count: Cell<u32>,
+    /// How many times the page asked the container to place its widgets again.
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub place_count: Cell<u32>,
 }
 
 impl DiskPage {
@@ -1254,33 +1200,63 @@ impl DiskPage {
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let theme = current(cx).clone();
+        let container_id = SharedString::from(page_container(&key.0));
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
         let mut words = Words::default();
         words.refresh(cx);
+        let this = cx.weak_entity();
 
-        let idx = row.idx;
-        let active = {
-            let (spec, labels) = (active_spec(idx, &settings, &theme), active_labels(&words));
-            cx.new(|cx| {
-                ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap)
+        let mut details = disk_details_model();
+        details.refresh_strings(cx);
+        let details_view = {
+            let shown = DetailsShown::of(&details, strings_version(cx));
+            let draw = details_draw(this.clone());
+            let id = container_id.clone();
+            cx.new(|_| DetailsView::new(id, shown, draw))
+        };
+        let partitions_view = {
+            let id = container_id.clone();
+            let draw = partitions_draw(this);
+            cx.new(move |_| MemoryPartView::new(id, PART_PARTITIONS, PartShown::default(), draw))
+        };
+        let parts = DiskParts {
+            details: details_view.read(cx).natural_height(),
+            partitions: partitions_view.read(cx).natural_height(),
+            partitions_shown: Rc::new(Cell::new(false)),
+        };
+        let content: FixedContent = {
+            let details: AnyView = details_view.clone().into();
+            let partitions: AnyView = partitions_view.clone().into();
+            let shown = Rc::clone(&parts.partitions_shown);
+            Rc::new(move |kind: &FixedWidget, _: &mut App| match kind {
+                FixedWidget::Details => Some(details.clone()),
+                // Before the table is read the block shows "Nothing to show on this device" in
+                // a grid layout.
+                FixedWidget::DiskPartitions => shown.get().then(|| partitions.clone()),
+                _ => None,
             })
         };
-        let transfer = {
-            let (spec, labels) = (
-                transfer_spec(idx, &settings, &theme),
-                transfer_labels(&words),
-            );
-            cx.new(|cx| {
-                let mut view = ChartView::new(spec, labels, &hub, cx)
-                    .with_newest_marks()
-                    .with_device_history(&snap);
-                // The value is read plus write.
-                view.set_value_sum(true, cx);
-                view
+        let container = {
+            let store = Rc::new(RefCell::new(SourceStore::for_page(&hub)));
+            let layout = page_layout(&container_id, cx);
+            let id = container_id.clone();
+            let hub = hub.clone();
+            let flow = disk_flow(parts.clone());
+            cx.new(move |cx| {
+                let mut c = WidgetContainer::new(id, layout, &hub, store, cx);
+                c.set_flow_placer(Some(flow), cx);
+                c.set_fixed_content(Some(content), cx);
+                c
+            })
+        };
+        let editor = {
+            let container = container.clone();
+            let hub = hub.clone();
+            cx.new(move |cx| {
+                let mut e = WidgetEditor::new(container, &hub, cx);
+                e.set_page_parts(page_parts(false));
+                e
             })
         };
 
@@ -1289,6 +1265,19 @@ impl DiskPage {
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         subs.push(cx.observe_global::<Strings>(Self::sync_words));
+        // A part got taller or shorter: the parts under it move.
+        subs.push(
+            cx.subscribe(&details_view, |this, _, _: &DetailsResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        subs.push(
+            cx.subscribe(&partitions_view, |this, _, _: &PartResized, cx| {
+                this.place_again(cx);
+            }),
+        );
+        // A layout change can change what the page asks for.
+        subs.push(cx.observe(&container, |this, _, cx| this.send_demand(cx)));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -1298,9 +1287,13 @@ impl DiskPage {
             host: host.clone(),
             key,
             row,
-            active,
-            transfer,
-            details: disk_details_model(),
+            container_id,
+            details,
+            details_view,
+            partitions_view,
+            parts,
+            container,
+            editor,
             partitions: None,
             partition_table: None,
             partitions_table: None,
@@ -1323,17 +1316,59 @@ impl DiskPage {
             _subs: subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            notify_count: Cell::new(0),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            place_count: Cell::new(0),
         };
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        this.sync_partitions_view(cx);
         this
     }
 
-    pub fn active_chart(&self) -> &Entity<ChartView> {
-        &self.active
+    /// The chart of the first placed widget of `metric` that draws one.
+    pub fn chart_of(&self, metric: &str, cx: &App) -> Option<Entity<ChartView>> {
+        let c = self.container.read(cx);
+        c.layout()
+            .widgets
+            .iter()
+            .filter(|w| w.content.metric_key().is_some_and(|k| k.as_str() == metric))
+            .find_map(|w| c.widget(w.id)?.read(cx).chart().cloned())
     }
 
-    pub fn transfer_chart(&self) -> &Entity<ChartView> {
-        &self.transfer
+    /// The Active time chart, while the page shows it.
+    pub fn active_chart(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_DISK_ACTIVE, cx)
+    }
+
+    /// The Transfer rate chart, while the page shows it.
+    pub fn transfer_chart(&self, cx: &App) -> Option<Entity<ChartView>> {
+        self.chart_of(METRIC_DISK_IO, cx)
+    }
+
+    /// The page's widget container.
+    pub fn container(&self) -> &Entity<WidgetContainer> {
+        &self.container
+    }
+
+    /// The editor around the container (Edit Widgets).
+    pub fn editor(&self) -> &Entity<WidgetEditor> {
+        &self.editor
+    }
+
+    /// The Details widget's view.
+    pub fn details_view(&self) -> &Entity<DetailsView> {
+        &self.details_view
+    }
+
+    /// The partitions block's view (fixed widget `disk_partitions`).
+    pub fn partitions_view(&self) -> &Entity<MemoryPartView> {
+        &self.partitions_view
+    }
+
+    /// The container id, `page.<disk key>`.
+    pub fn container_id(&self) -> &SharedString {
+        &self.container_id
     }
 
     pub fn smart_available(&self) -> bool {
@@ -1361,7 +1396,7 @@ impl DiskPage {
         self.partitions.as_ref()
     }
 
-    /// The partitions table, once the page has rendered with rows.
+    /// The partitions table, once the block has drawn with rows.
     pub fn partitions_table(&self) -> Option<&Entity<TlTreeTable<PartitionsDelegate>>> {
         self.partitions_table.as_ref()
     }
@@ -1371,23 +1406,42 @@ impl DiskPage {
         self.is_active
     }
 
-    /// This page's demand part while it is active: disks, and the device metric history at
-    /// 1 h, 24 h and 7 d.
-    pub fn demand_part(&self) -> Demand {
-        Demand {
+    /// This page's demand part while it is active: disks, the device metric history at 1 h,
+    /// 24 h and 7 d, and what the placed widgets read. With the default layout it equals
+    /// 1.3.0's.
+    pub fn demand_part(&self, cx: &App) -> Demand {
+        let mut demand = Demand {
             any_surface_visible: true,
             disks: true,
             device_history_range: page_history_request(self.settings.range_ns),
             ..Demand::default()
-        }
+        };
+        add_demand(&mut demand, &self.container.read(cx).demand_part());
+        demand
     }
 
     fn send_demand(&self, cx: &mut App) {
         if !self.is_active {
             return;
         }
-        let (id, window, part) = (self.id, self.window, self.demand_part());
+        let (id, window, part) = (self.id, self.window, self.demand_part(cx));
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
+    }
+
+    fn notify(&self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.notify_count.set(self.notify_count.get() + 1);
+        cx.notify();
+    }
+
+    /// A part's height or the block's shown state changed: the flow layout places the parts
+    /// again.
+    fn place_again(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.place_count.set(self.place_count.get() + 1);
+        self.container.update(cx, |c, cx| {
+            c.place_again(cx);
+        });
     }
 
     fn on_snapshot(
@@ -1400,8 +1454,11 @@ impl DiskPage {
         self.apply_snapshot(&snap, ev.mask, cx);
     }
 
-    /// Brings the header, the button flags and the chart state up to date with the components
-    /// in `mask`. Notifies only when something the page draws changed.
+    /// Brings the header, the button flags, the Details rows and the partitions block up to
+    /// date with the components in `mask`. Only a header or button change renders the page;
+    /// a row change goes to the Details view and a table change to the block's view. The sample
+    /// in which the table is first read (or goes) places the widgets once. A failed disk
+    /// collector reaches the chart widgets through their sources (`SourceData::chart_state`).
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let mut changed = false;
         let details = mask.contains(ComponentMask::DEVICE_DETAILS);
@@ -1424,13 +1481,6 @@ impl DiskPage {
                 changed = true;
             }
         }
-        if mask.contains(ComponentMask::HEALTH) {
-            let state = health_state(snap);
-            for chart in [&self.active, &self.transfer] {
-                let state = state.clone();
-                chart.update(cx, |v, cx| v.set_state(state, cx));
-            }
-        }
         if mask.intersects(
             ComponentMask::SYSTEM | ComponentMask::HEALTH | ComponentMask::DEVICE_DETAILS,
         ) {
@@ -1440,8 +1490,10 @@ impl DiskPage {
                 totals: disk_totals(snap, self.row.idx),
                 error: snap.health.get(SourceId::Disk).last_error.as_deref(),
             };
-            changed |= update_disk_details_p1(&mut self.details, &inputs);
-            changed |= update_disk_details_p2(&mut self.details, &inputs, d);
+            let p1 = update_disk_details_p1(&mut self.details, &inputs);
+            if update_disk_details_p2(&mut self.details, &inputs, d) || p1 {
+                self.sync_details(cx);
+            }
         }
         if details {
             let table = d.and_then(|d| d.partitions.clone());
@@ -1453,7 +1505,6 @@ impl DiskPage {
             if !same {
                 self.partition_table = table;
                 self.sync_partitions(cx);
-                changed = true;
             }
         }
         // The model comes from the disk details or the inventory.
@@ -1461,25 +1512,65 @@ impl DiskPage {
             changed |= self.sync_header(snap, cx);
         }
         if changed {
-            cx.notify();
+            self.notify(cx);
+        }
+        // The disk went away: an edit ends as Cancel does.
+        if mask.contains(ComponentMask::DEVICES)
+            && !snap
+                .devices
+                .entries
+                .iter()
+                .any(|e| e.idx == self.row.idx && e.present)
+        {
+            self.editor.update(cx, |e, cx| e.cancel(cx));
         }
     }
 
-    /// Rebuilds the block and the table rows from `partition_table`.
+    /// Hands the Details view what the grid shows; it notifies only when that changed.
+    fn sync_details(&mut self, cx: &mut Context<Self>) {
+        let shown = DetailsShown::of(&self.details, strings_version(cx));
+        self.details_view.update(cx, |v, cx| v.set_shown(shown, cx));
+    }
+
+    /// Rebuilds the block and the table rows from `partition_table`, then hands the block's
+    /// view what it shows.
     fn sync_partitions(&mut self, cx: &mut Context<Self>) {
         self.partitions = self.partition_table.as_deref().map(|t| PartitionsBlock {
             heading: partitions_heading(t, &self.words, cx),
             rows: Arc::clone(&t.rows),
         });
-        let Some(table) = &self.partitions_table else {
-            return;
+        if let Some(table) = &self.partitions_table {
+            let (rows, tips) = self.rows_and_tips(cx);
+            table.update(cx, |t, cx| {
+                if t.delegate_mut().set_rows(rows, tips) {
+                    t.on_new_version(cx);
+                }
+            });
+        }
+        self.sync_partitions_view(cx);
+    }
+
+    /// Hands the block's view its heading and row count; it renders only when they changed.
+    /// The table renders its rows itself. The flow places the parts again when the block starts
+    /// or stops taking space, and Add Widget lists it only while it has something to show.
+    fn sync_partitions_view(&mut self, cx: &mut Context<Self>) {
+        let shown = self.partitions.is_some();
+        let part = match &self.partitions {
+            Some(block) => PartShown {
+                texts: vec![block.heading.clone()],
+                numbers: vec![block.rows.len() as u64],
+                flags: vec![true],
+                ..PartShown::default()
+            },
+            None => PartShown::default(),
         };
-        let (rows, tips) = self.rows_and_tips(cx);
-        table.update(cx, |t, cx| {
-            if t.delegate_mut().set_rows(rows, tips) {
-                t.on_new_version(cx);
-            }
-        });
+        self.partitions_view
+            .update(cx, |v, cx| v.set_shown(part, cx));
+        if self.parts.partitions_shown.replace(shown) != shown {
+            self.editor
+                .update(cx, |e, _| e.set_page_parts(page_parts(shown)));
+            self.place_again(cx);
+        }
     }
 
     /// The rows of the table and the tooltip of each row's Mount path.
@@ -1504,8 +1595,8 @@ impl DiskPage {
         (rows, tips)
     }
 
-    /// Creates the partitions table on the first render with rows, and keeps its scale, colour
-    /// and flex columns current.
+    /// Creates the partitions table on the block's first draw with rows, and keeps its scale,
+    /// colour and flex columns current.
     fn sync_partitions_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.partitions.as_ref().is_none_or(|p| p.rows.is_empty()) {
             return;
@@ -1547,8 +1638,31 @@ impl DiskPage {
         }
     }
 
+    /// The partitions block (UI-PRF-030): its heading and, with rows, the table. `None` while
+    /// the table is not read.
+    fn partitions_element(&self, cx: &App) -> Option<AnyElement> {
+        let block = self.partitions.as_ref()?;
+        let (m, theme) = (metrics(cx), current(cx));
+        let mut heading = div()
+            .text_color(theme.text_primary)
+            .child(block.heading.clone());
+        *heading.text_style() = label_style(m, m.text.md, FontWeight::MEDIUM);
+        let mut el = v_flex().gap(m.sp[4]).child(heading);
+        if let Some(table) = self
+            .partitions_table
+            .as_ref()
+            .filter(|_| !block.rows.is_empty())
+        {
+            el = el.child(
+                flat_static_table(table, block.rows.len(), PARTITIONS_MAX_ROWS, m)
+                    .tl_selector(|| PARTITIONS_TABLE_ID.into()),
+            );
+        }
+        Some(el.into_any_element())
+    }
+
     /// The header from the catalog entry and the disk model. True when it changed.
-    fn sync_header(&mut self, snap: &Snapshot, cx: &mut App) -> bool {
+    fn sync_header(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
         let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx) else {
             return false;
         };
@@ -1557,12 +1671,19 @@ impl DiskPage {
         if header == self.header {
             return false;
         }
+        let word = header.0.clone();
+        self.editor.update(cx, |e, _| e.set_page_name(word));
         self.header = header;
         true
     }
 
-    /// Applies the chart settings and the disk number when one of their sections changed.
+    /// Applies the page's settings when one of their sections changed: the range and the disk
+    /// number. A saved layout (Apply, Reset Page) shows when the page is not in Edit Widgets.
     fn sync_settings(&mut self, cx: &mut Context<Self>) {
+        if !self.editor.read(cx).is_editing() {
+            let layout = page_layout(&self.container_id, cx);
+            self.container.update(cx, |c, cx| c.set_layout(layout, cx));
+        }
         let versions = section_versions(cx);
         if versions == self.settings_versions {
             return;
@@ -1573,50 +1694,41 @@ impl DiskPage {
         if new != self.settings {
             let range_moved = new.range_ns != self.settings.range_ns;
             self.settings = new;
-            self.rebuild_specs(cx);
             if range_moved {
                 // The header switch shows the new range.
                 self.send_demand(cx);
-                cx.notify();
+                self.notify(cx);
             }
         }
         // `device_order` and the visibility settings move the number in "Disk N".
         if performance_moved {
             let snap = Arc::clone(self.hub.read(cx).current());
             if self.sync_header(&snap, cx) {
-                cx.notify();
+                self.notify(cx);
             }
         }
     }
 
-    fn rebuild_specs(&self, cx: &mut App) {
-        let (idx, s) = (self.row.idx, self.settings);
-        let theme = current(cx).clone();
-        let active = active_spec(idx, &s, &theme);
-        let transfer = transfer_spec(idx, &s, &theme);
-        self.active.update(cx, |v, cx| v.set_spec(active, cx));
-        self.transfer.update(cx, |v, cx| v.set_spec(transfer, cx));
-    }
-
-    /// A new theme: the charts take the new colours.
+    /// A new theme or UI scale: the partitions block draws again with the new colours and
+    /// sizes.
     fn sync_style(&mut self, cx: &mut Context<Self>) {
         let version = metrics(cx).style_version;
         if version == self.style_version {
             return;
         }
         self.style_version = version;
-        self.rebuild_specs(cx);
-        cx.notify();
+        self.partitions_view.update(cx, |_, cx| cx.notify());
+        self.notify(cx);
     }
 
-    /// New strings: the chart labels and the header.
+    /// New strings: the Details words, the partitions block and table, and the header.
     fn sync_words(&mut self, cx: &mut Context<Self>) {
-        if !self.words.refresh(cx) {
+        let words = self.words.refresh(cx);
+        let details = self.details.refresh_strings(cx);
+        if !(words || details) {
             return;
         }
-        let (active, transfer) = (active_labels(&self.words), transfer_labels(&self.words));
-        self.active.update(cx, |v, cx| v.set_labels(active, cx));
-        self.transfer.update(cx, |v, cx| v.set_labels(transfer, cx));
+        self.sync_details(cx);
         self.sync_partitions(cx);
         if let Some(table) = &self.partitions_table {
             let words = self.words.clone();
@@ -1627,7 +1739,7 @@ impl DiskPage {
         }
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_header(&snap, cx);
-        cx.notify();
+        self.notify(cx);
     }
 
     /// Asks the shell to send the eject of this disk and follow it (PERF-052).
@@ -1646,15 +1758,35 @@ impl DiskPage {
         ShellApi::disk_eject(eject, cx);
     }
 
-    /// `chart` in a full-width box of `height`.
-    fn chart_box(id: &'static str, chart: &Entity<ChartView>, height: f32) -> gpui_kit::Div {
-        div()
-            .tl_selector(move || id.into())
-            .flex_none()
-            .w_full()
-            .h(px(height))
-            .child(chart.clone().cached(StyleRefinement::default().size_full()))
+    /// "Edit Widgets…" in the page menu.
+    fn on_edit_start(
+        &mut self,
+        _: &PerfWidgetEditStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        start_page_edit(&self.editor, &self.hub, window, cx);
     }
+
+    /// "Reset Page" in the page menu (ADR-019 phase 3 "Reset").
+    fn on_reset_page(
+        &mut self,
+        _: &PerfWidgetResetPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        reset_page(&self.container_id, self.header.0.clone(), window, cx);
+    }
+}
+
+/// The page parts Add Widget lists on a Disk page: Details, and the partitions block while the
+/// partition table is read.
+fn page_parts(partitions: bool) -> Vec<FixedWidget> {
+    let mut parts = vec![FixedWidget::Details];
+    if partitions {
+        parts.push(FixedWidget::DiskPartitions);
+    }
+    parts
 }
 
 impl DevicePage for DiskPage {
@@ -1705,44 +1837,18 @@ impl DevicePage for DiskPage {
         out
     }
 
-    fn graphs(&self, _: &mut Window, cx: &mut App) -> AnyElement {
-        let m = *metrics(cx);
-        let h = GRAPH_H_STACKED * m.ui_scale;
-        v_flex()
-            .w_full()
-            .gap(m.sp[4])
-            .child(Self::chart_box(ACTIVE_ID, &self.active, h))
-            .child(Self::chart_box(TRANSFER_ID, &self.transfer, h))
-            .into_any_element()
+    fn graphs(&self, _: &mut Window, _: &mut App) -> AnyElement {
+        // The charts are widgets of the container.
+        div().into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
         &self.details
     }
 
-    fn blocks(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 3]> {
-        let mut blocks = SmallVec::new();
-        let Some(block) = &self.partitions else {
-            return blocks;
-        };
-        let (m, theme) = (metrics(cx), current(cx));
-        let mut heading = div()
-            .text_color(theme.text_primary)
-            .child(block.heading.clone());
-        *heading.text_style() = label_style(m, m.text.md, FontWeight::MEDIUM);
-        let mut el = v_flex().gap(m.sp[4]).child(heading);
-        if let Some(table) = self
-            .partitions_table
-            .as_ref()
-            .filter(|_| !block.rows.is_empty())
-        {
-            el = el.child(
-                flat_static_table(table, block.rows.len(), PARTITIONS_MAX_ROWS, m)
-                    .tl_selector(|| PARTITIONS_TABLE_ID.into()),
-            );
-        }
-        blocks.push(el.into_any_element());
-        blocks
+    fn blocks(&self, _: &mut Window, _: &mut App) -> SmallVec<[AnyElement; 3]> {
+        // The partitions block is a widget of the container.
+        SmallVec::new()
     }
 
     fn menu_items(&self, mut menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
@@ -1761,7 +1867,8 @@ impl DevicePage for DiskPage {
     }
 
     /// The Disk copy text (PERF-011, UI-PRF-022): the header lines, the Details rows, then the
-    /// Partitions block with one paragraph per table row. The SMART window is not part of it.
+    /// Partitions block with one paragraph per table row, whatever the layout holds. The SMART
+    /// window is not part of it.
     fn copy_text(&self, out: &mut String) {
         let (word, model) = &self.header;
         out.push_str(word);
@@ -1806,6 +1913,10 @@ impl DevicePage for DiskPage {
         out
     }
 
+    fn widget_editor(&self) -> Option<&Entity<WidgetEditor>> {
+        Some(&self.editor)
+    }
+
     fn set_active(&mut self, active: bool, cx: &mut App) {
         if self.is_active == active {
             return;
@@ -1836,14 +1947,14 @@ impl Render for DiskPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
-        self.details.refresh_strings(cx);
         let m = *metrics(cx);
         let theme = current(cx).clone();
-        self.sync_partitions_table(window, cx);
         div()
             .size_full()
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_eject))
+            .on_action(cx.listener(Self::on_edit_start))
+            .on_action(cx.listener(Self::on_reset_page))
             .child(
                 DevicePageFrame {
                     page: self,
