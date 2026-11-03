@@ -197,7 +197,7 @@ fn bench_scene_perf_overview_builds_five_boxes(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(selected.as_deref(), Some(OVERVIEW_KEY));
-    assert_eq!(boxes, 5, "CPU, memory, GPU, disk and network");
+    assert_eq!(boxes, 6, "CPU, memory, GPU, disk, network and Timeline");
     assert_eq!(bars, 32, "one bar per logical CPU");
     assert!(!cpu_built, "the CPU page is not built");
     let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
@@ -236,7 +236,10 @@ fn bench_scene_perf_overview_procs_shows_top_processes(cx: &mut TestAppContext) 
                 .unwrap_or(0),
         )
     });
-    assert_eq!(boxes, 6, "the five boxes and Top processes");
+    assert_eq!(
+        boxes, 7,
+        "the five device boxes, Timeline and Top processes"
+    );
     assert_eq!(rows, 10);
     let merged = vcx.update(|_, cx| cx.global::<GlobalDemand>().0.read(cx).merged());
     assert!(merged.process_top && !merged.process_table, "{merged:?}");

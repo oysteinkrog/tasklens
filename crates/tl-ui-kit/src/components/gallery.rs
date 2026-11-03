@@ -32,7 +32,9 @@ use gpui_kit::{
     InteractiveElement, IntoElement, KeyBinding, LayoutId, ParentElement, Pixels, Render,
     SharedString, Styled, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
+use tl_model::command::Tab;
 use tl_model::health::HelperState;
+use tl_model::table::TableMode;
 use tl_model::units;
 use tl_model::validity::Validity;
 use tl_ui_settings::settings::AppearanceSettings;
@@ -61,10 +63,12 @@ use super::stepper::TlStepper;
 use super::switch::TlSwitch;
 use super::tabs::{NextInWindowTab, PrevInWindowTab, TlTabSpec, TlTabs, tabs_window_context};
 use super::toast::{self, ToastAction, ToastKind};
+use super::toolbar_button::{toolbar_icon, toolbar_toggle};
 use super::tooltip::TlTooltip;
 use super::validity::glyph;
 use super::window_frame::{TlTitleBar, TlWindowPin, pin_look};
 use tl_ui_base::i18n::{Strings, init_strings};
+use tl_ui_base::shell::ToolbarModel;
 use tl_ui_base::text::ellipsis::middle_ellipsis;
 use tl_ui_base::text::fonts::{MONO_FAMILY, UI_FAMILY};
 use tl_ui_base::text::metrics::TextMetricsCache;
@@ -111,6 +115,7 @@ pub const GALLERY_PAGES: &[&str] = &[
     "window_frame",
     "menu",
     "shield",
+    "toolbar_button",
 ];
 
 /// Window size in logical px.
@@ -619,6 +624,7 @@ fn page_body(page: &str, p: &mut PageCx, window: &mut Window, cx: &mut App) -> V
         "window_frame" => page_window_frame(p),
         "menu" => page_menu(p),
         "shield" => page_shield(p),
+        "toolbar_button" => page_toolbar_button(p),
         _ => vec![p.heading(&format!("No page for {page}"))],
     }
 }
@@ -1780,6 +1786,74 @@ fn page_shield(p: &mut PageCx) -> Vec<AnyElement> {
     out.push(p.heading(
         "Starting shows a spinner; under reduced motion it is the static loader-circle at 50%.",
     ));
+    out
+}
+
+fn page_toolbar_button(p: &mut PageCx) -> Vec<AnyElement> {
+    let model = |window_active: bool| ToolbarModel {
+        tab: Tab::Processes,
+        history_mode: false,
+        hide_system: false,
+        mode: TableMode::Grouped,
+        helper: HelperState::Missing,
+        helper_installed: false,
+        picker_available: true,
+        picking: false,
+        window_active,
+    };
+    let mut out =
+        vec![p.heading(
+            "Each row: toggle off, toggle on, icon, icon disabled. 24 x 24, not a Tab stop.",
+        )];
+    for (name, active) in [("Active window", true), ("Inactive window", false)] {
+        let m = model(active);
+        let id = |what: &str| ElementId::Name(format!("toolbar-{what}-{active}").into());
+        let tip = |text: &str| SharedString::from(text.to_owned());
+        out.push(
+            p.row(
+                name,
+                [
+                    toolbar_toggle(
+                        id("toggle-off"),
+                        TlIcon::ListTree,
+                        false,
+                        tip("Tree view"),
+                        GalleryNoop.boxed_clone(),
+                        &m,
+                    )
+                    .into_any_element(),
+                    toolbar_toggle(
+                        id("toggle-on"),
+                        TlIcon::Pin,
+                        true,
+                        tip("Always on top"),
+                        GalleryNoop.boxed_clone(),
+                        &m,
+                    )
+                    .into_any_element(),
+                    toolbar_icon(
+                        id("icon"),
+                        TlIcon::ScanSearch,
+                        tip("Find a window"),
+                        GalleryNoop.boxed_clone(),
+                        false,
+                        &m,
+                    )
+                    .into_any_element(),
+                    toolbar_icon(
+                        id("icon-disabled"),
+                        TlIcon::ScanSearch,
+                        tip("Find a window: not supported by this desktop"),
+                        GalleryNoop.boxed_clone(),
+                        true,
+                        &m,
+                    )
+                    .into_any_element(),
+                ],
+            ),
+        );
+    }
+    out.push(p.heading("An inactive window draws the icons in text_secondary."));
     out
 }
 
