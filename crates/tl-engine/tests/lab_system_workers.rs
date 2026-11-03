@@ -4128,26 +4128,34 @@ fn gpu_page() -> Demand {
     }
 }
 
-/// An inventory loop watching `watch` that counts its scans.
+/// An inventory loop watching `watch` that counts its scans and the scans that run KScreen.
 struct WatchRig {
     fl: FakeLab,
     demand_tx: asupersync::channel::watch::Sender<Demand>,
+    control: asupersync::channel::watch::Sender<tl_engine::source::WorkerControl>,
     rx: mpsc::Receiver<EngineMsg>,
     scans: Arc<AtomicU32>,
+    kscreen_runs: Arc<AtomicU32>,
     task: asupersync::runtime::TaskHandle<()>,
 }
 
 impl WatchRig {
-    fn start(dir: &Path, watch: PathBuf, first: Demand) -> Self {
+    fn start(dir: &Path, watch: impl Into<Option<PathBuf>>, first: Demand) -> Self {
+        let watch = watch.into();
         let mut fl = FakeLab::new();
         let (updates, rx, demand_tx, settings, control) = channels();
         demand_tx.send(first).expect("watch has receivers");
         let scans = Arc::new(AtomicU32::new(0));
+        let kscreen_runs = Arc::new(AtomicU32::new(0));
         let scan = {
             let scans = Arc::clone(&scans);
+            let kscreen_runs = Arc::clone(&kscreen_runs);
             let dir = dir.to_path_buf();
-            move || {
+            move |kscreen: bool| {
                 scans.fetch_add(1, Ordering::SeqCst);
+                if kscreen {
+                    kscreen_runs.fetch_add(1, Ordering::SeqCst);
+                }
                 inventory_scan(&dir)
             }
         };
@@ -4160,16 +4168,42 @@ impl WatchRig {
         Self {
             fl,
             demand_tx,
+            control,
             rx,
             scans,
+            kscreen_runs,
             task,
         }
+    }
+
+    fn kscreen_runs(&self) -> u32 {
+        self.kscreen_runs.load(Ordering::SeqCst)
+    }
+
+    /// Sends `RefreshNow(Inventory)` as command `seq`.
+    fn refresh(&mut self, seq: u64) {
+        let progress = Arc::clone(&self.control.borrow().progress);
+        self.control
+            .send(tl_engine::source::WorkerControl {
+                commands: Arc::from([tl_engine::source::QueuedCommand {
+                    seq,
+                    target: SourceId::Inventory,
+                    command: WorkerCommand::RefreshNow,
+                }]),
+                progress,
+                ..tl_engine::source::WorkerControl::default()
+            })
+            .expect("control sends");
     }
 
     /// Sends `demand`, runs `secs` seconds and returns the scan count.
     fn show(&mut self, demand: Demand, secs: u64) -> u32 {
         self.demand_tx.send(demand).expect("watch has receivers");
         self.run(secs)
+    }
+
+    fn scans(&self) -> u32 {
+        self.scans.load(Ordering::SeqCst)
     }
 
     fn run(&mut self, secs: u64) -> u32 {
@@ -4201,7 +4235,9 @@ fn kscreen_config_change_rescans() {
     let mut rig = WatchRig::start(&dir, config.clone(), gpu_page());
     assert_eq!(rig.run(2), 1, "open");
     set_mtime(&config, 2_000);
-    assert_eq!(rig.run(1), 2, "config change");
+    // KScreen runs at most once a minute; the change waits for that, then rescans.
+    assert_eq!(rig.run(1), 1, "config change inside a minute");
+    assert_eq!(rig.run(60), 2, "config change after a minute");
     assert_eq!(rig.run(2), 2, "no change");
 
     assert_eq!(rig.show(Demand::default(), 1), 2, "close");
@@ -4258,6 +4294,79 @@ fn gpu_page_open_scans_while_inventory_visible() {
     assert_eq!(rig.run(2), 3, "config change, Memory page");
     assert_eq!(rig.show(gpu_page(), 2), 4, "GPU page open over Memory");
     set_mtime(&config, 3_000);
-    assert_eq!(rig.run(1), 5, "config change, GPU page");
+    // The scans so far are inside a minute of the first, so both changes wait for one rescan.
+    assert_eq!(rig.run(1), 4, "config change, GPU page");
+    assert_eq!(rig.run(60), 5, "config changes after a minute");
+    assert_eq!(rig.kscreen_runs(), 2);
+    rig.finish();
+}
+
+/// Opening and closing the GPU page runs `kscreen-doctor` once; a config change runs it again,
+/// but never sooner than a minute after the last run, and `RefreshNow` does not run it.
+#[test]
+fn kscreen_runs_once_per_config_change() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let config = dir.join("kwinoutputconfig.json");
+    fs::write(&config, "{}").expect("write config");
+    set_mtime(&config, 1_000);
+
+    let mut rig = WatchRig::start(&dir, config.clone(), Demand::default());
+    for _ in 0..20 {
+        rig.show(gpu_page(), 1);
+        rig.show(Demand::default(), 1);
+    }
+    assert_eq!(rig.scans(), 20, "every open scans");
+    assert_eq!(rig.kscreen_runs(), 1, "only the first scan runs KScreen");
+
+    // 40 s after the first run: the change waits until the minute is over.
+    rig.show(gpu_page(), 1);
+    set_mtime(&config, 2_000);
+    rig.run(15);
+    assert_eq!(rig.kscreen_runs(), 1, "inside a minute");
+    rig.run(10);
+    assert_eq!(rig.kscreen_runs(), 2, "after a minute");
+    let scans = rig.scans();
+
+    rig.refresh(1);
+    rig.run(2);
+    assert_eq!(rig.scans(), scans + 1, "RefreshNow scans");
+    assert_eq!(rig.kscreen_runs(), 2, "RefreshNow reuses the kept outputs");
+    rig.run(70);
+    rig.refresh(2);
+    rig.run(2);
+    assert_eq!(
+        rig.kscreen_runs(),
+        2,
+        "RefreshNow never runs it with a config file"
+    );
+    rig.finish();
+}
+
+/// Plasma 5 has no config file: `kscreen-doctor` runs on the first scan and on `RefreshNow`, at
+/// most once a minute.
+#[test]
+fn kscreen_without_config_runs_on_refresh() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let mut rig = WatchRig::start(&dir, None, gpu_page());
+    rig.run(2);
+    assert_eq!(rig.kscreen_runs(), 1, "first scan");
+    rig.show(Demand::default(), 1);
+    rig.show(gpu_page(), 1);
+    assert_eq!((rig.scans(), rig.kscreen_runs()), (2, 1), "page open");
+    rig.refresh(1);
+    rig.run(2);
+    assert_eq!(
+        (rig.scans(), rig.kscreen_runs()),
+        (3, 1),
+        "RefreshNow inside a minute"
+    );
+    rig.run(60);
+    rig.refresh(2);
+    rig.run(2);
+    assert_eq!(
+        (rig.scans(), rig.kscreen_runs()),
+        (4, 2),
+        "RefreshNow after a minute"
+    );
     rig.finish();
 }

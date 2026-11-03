@@ -1,14 +1,23 @@
 //! The KScreen display reader for the inventory scan (E12, PERF-072, PERF-073, R-057).
 //!
-//! On KDE every host inventory scan runs `kscreen-doctor -j` once. The scan runs when the GPU
-//! page or the Information tab opens, on `RefreshNow`, and when KWin's output config file
-//! `kwinoutputconfig.json` changes while one of them is open (the KScreen config change). The
-//! JSON supplies the enabled state, primary output (`priority == 1`), rotation, scale and the
-//! current mode with its refresh rate. Max bpc stays `None` until KMS (P4).
+//! On KDE a host inventory scan may run `kscreen-doctor -j`. Each run stalls KWin's main thread
+//! for a moment, so the worker keeps the last result (a failed run too) and [`Gate`] decides when
+//! to run it again:
 //!
-//! Only `kwinoutputconfig.json` is watched, with one `stat` per turn. Plasma 5 has no such file,
-//! so there the values refresh when the GPU page or the Information tab opens and on a manual
-//! refresh, not on a config change.
+//! - on the first scan of a worker generation;
+//! - when the modification time of KWin's output config `kwinoutputconfig.json` differs from the
+//!   one seen at the last run (the KScreen config change);
+//! - on Plasma 5, which has no such file, on `RefreshNow`;
+//! - never sooner than [`MIN_GAP`] after the last run. A config change inside the gap waits and
+//!   runs when the gap ends; a `RefreshNow` inside it is dropped.
+//!
+//! Every other scan (the GPU page or the Information tab opening, `RefreshNow` with the config
+//! file) reuses the kept outputs. The JSON supplies the enabled state, primary output
+//! (`priority == 1`), rotation, scale and the current mode with its refresh rate. Max bpc stays
+//! `None` until KMS (P4).
+//!
+//! The config file is checked with one `stat` per turn while a display surface is open, plus one
+//! per run.
 //!
 //! Without KDE or `kscreen-doctor`, or when it fails, times out or prints unexpected JSON, the
 //! sysfs values stay as they are. The text output (`kscreen-doctor -o`) is never parsed.
@@ -41,6 +50,46 @@ const NAME_MAX: usize = 64;
 const REFRESH_MAX_HZ: f64 = 1000.0;
 /// Largest scale factor kept.
 const SCALE_MAX: f64 = 10.0;
+
+/// Shortest time between two runs.
+pub const MIN_GAP: Duration = Duration::from_secs(60);
+
+/// Decides which scans run `kscreen-doctor` (see the module docs). Times are the worker
+/// loop's clock in nanoseconds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Gate {
+    /// True when there is a config file to watch (Plasma 6).
+    watch: bool,
+    /// The time of the last run and the config modification time seen then.
+    last: Option<(u64, Option<SystemTime>)>,
+}
+
+impl Gate {
+    pub fn new(watch: bool) -> Self {
+        Self { watch, last: None }
+    }
+
+    /// True when a scan at `now_ns` should run `kscreen-doctor`. `mtime` is `Some` when the
+    /// config file was checked this turn. `refresh` is a `RefreshNow` in this turn.
+    pub fn due(&self, now_ns: u64, mtime: Option<Option<SystemTime>>, refresh: bool) -> bool {
+        let Some((at, seen)) = self.last else {
+            return true;
+        };
+        let gap = u64::try_from(MIN_GAP.as_nanos()).unwrap_or(u64::MAX);
+        if now_ns.saturating_sub(at) < gap {
+            return false;
+        }
+        match mtime {
+            Some(mtime) => mtime != seen,
+            None => refresh && !self.watch,
+        }
+    }
+
+    /// Records a run at `now_ns` with the config modification time seen before it.
+    pub fn ran(&mut self, now_ns: u64, mtime: Option<SystemTime>) {
+        self.last = Some((now_ns, mtime));
+    }
+}
 
 /// The current mode of one output.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -308,6 +357,28 @@ mod tests {
     use super::*;
 
     const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/kscreen/doctor-j.json");
+
+    #[test]
+    fn gate_runs_first_then_on_change_at_most_once_a_minute() {
+        let s = |n: u64| n * 1_000_000_000;
+        let t = |n: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(n));
+        let mut gate = Gate::new(true);
+        assert!(gate.due(0, None, false), "first scan");
+        gate.ran(s(1), t(10));
+        assert!(
+            !gate.due(s(30), Some(t(20)), true),
+            "change inside a minute"
+        );
+        assert!(gate.due(s(61), Some(t(20)), false), "change after a minute");
+        assert!(!gate.due(s(61), Some(t(10)), true), "no change, refresh");
+        assert!(!gate.due(s(61), None, true), "config not checked");
+
+        let mut plasma5 = Gate::new(false);
+        plasma5.ran(s(1), None);
+        assert!(!plasma5.due(s(30), None, true), "refresh inside a minute");
+        assert!(plasma5.due(s(61), None, true), "refresh after a minute");
+        assert!(!plasma5.due(s(61), None, false), "no refresh");
+    }
 
     fn kde() -> SystemEnv {
         SystemEnv {
