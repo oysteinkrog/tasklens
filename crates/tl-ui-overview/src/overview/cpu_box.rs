@@ -12,19 +12,27 @@
 //! core sparklines are cached child views that re-render for their own series. Pointer movement
 //! never notifies.
 //!
+//! The `apps` mode ("By app", UI-PRF-062, D-042) is CPU by app: [`AppsChart`] of
+//! [`AppsMetric::Cpu`] in its Overview place, with its legend at the right, or below the chart
+//! when the body is narrower than 480 px. The box makes it the first time it shows it, in the
+//! preset or as the fixed widget `cpu_by_app` of the user's layout, and asks the page for the
+//! process sweep while it shows ([`CpuAppsPlaced`]). Core clocks takes no space in `apps`; the
+//! power draw strip shows full width under it.
+//!
 //! D-041, ADR-019 phase 2: the modes are presets of the box's widget layout. A preset is a flow
-//! layout (`cpu_flow.rs`): the total chart, the cores group, and the Core clocks chart and the
-//! power draw strip when they are on. Each part is a widget of the box's `WidgetContainer` that
-//! draws its 1.2.0 part at the place the rules above give it: the charts as `MetricWidget`s
-//! with `FlowLook::Chart`, the core rows and the `core_charts` cells as the cores group's
-//! `GroupWidget` with a `GroupFlowLook`. The box keeps the charts, the core rows' model and the
-//! sparklines and hands them to the widgets, so nothing is built twice. When a core's 1% or
-//! 0.1 GHz bucket changes, only the cores group renders again. Each render makes a
-//! `cpu_flow::CpuPlan`, from which the container's placer works out every widget's rectangle.
+//! layout (`cpu_flow.rs`): the total chart, the cores group or CPU by app, and the Core clocks
+//! chart and the power draw strip when they are on. Each part is a widget of the box's
+//! `WidgetContainer` that draws its 1.2.0 part at the place the rules above give it: the charts
+//! as `MetricWidget`s with `FlowLook::Chart`, the core rows and the `core_charts` cells as the
+//! cores group's `GroupWidget` with a `GroupFlowLook`, CPU by app as a `FixedWidgetView`. The
+//! box keeps the charts, the core rows' model, the sparklines and the CPU by app chart and hands
+//! them to the widgets, so nothing is built twice. When a core's 1% or 0.1 GHz bucket changes,
+//! only the cores group renders again. Each render makes a `cpu_flow::CpuPlan`, from which the
+//! container's placer works out every widget's rectangle.
 //! A grid layout (the user's own widgets, after Apply) is drawn by the box's [`WidgetEditor`]
 //! and its `WidgetContainer`; so is the box while Edit Widgets is on.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
@@ -41,7 +49,7 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::Sample;
 use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
-use tl_ui_settings::layout::{CPU_BOX_CONTAINER, ContainerLayout};
+use tl_ui_settings::layout::{CPU_BOX_CONTAINER, ContainerLayout, FixedWidget};
 use tl_ui_settings::settings::{CoreSmoothing, NetworkUnit};
 
 use super::cpu_flow::{self, CpuFlowKeys, CpuLook, CpuPlan, PlanCell, PlanPower};
@@ -49,6 +57,7 @@ use super::inner_split::{InnerSplit, InnerSplitChanged, PART_MIN, SplitAxis};
 use super::layout::{
     Arrange, ArrangeChoice, BoxMode, POWER_SPLIT_DEFAULT, POWER_SPLIT_RANGE, PowerPlacement,
 };
+use super::memory_apps::{AppsChart, AppsMetric, AppsPlace};
 use super::parts::{
     ChartSettings, CoreBarsLayout, CoreBarsModel, SPARK_GRID, SPLIT_W, arrange_grid, box_chart,
     box_frame, chart_section_versions, class_probe, core_bars_layout, core_board, edit_chrome,
@@ -59,6 +68,7 @@ use super::range::RangeText;
 use super::timeline::{self, OverviewPause};
 use crate::widget::container::WidgetContainer;
 use crate::widget::edit::{WidgetEditEvent, WidgetEditor};
+use crate::widget::fixed_widget::FixedContent;
 use crate::widget::group_widget::GroupFlowLook;
 use crate::widget::metric_widget::FlowLook;
 use crate::widget::source::SourceStore;
@@ -98,6 +108,20 @@ pub const POWER_STRIP_ID: &str = "perf-overview-cpu-power-strip";
 
 /// The debug selector of the Core clocks chart's part (tasklens-o55.57).
 pub const CLOCKS_ID: &str = "perf-overview-cpu-clocks";
+
+/// The debug selector of the CPU by app part in `apps` (UI-PRF-062).
+pub const CPU_APPS_ID: &str = "perf-overview-cpu-apps";
+
+/// The id of the "By app" mode (UI-PRF-062). The page asks for the process sweep while the box
+/// shows it.
+pub const APPS_MODE: &str = "apps";
+
+/// Whether the box shows CPU by app now: in the `apps` preset, or as a widget of the user's
+/// layout or of Edit Widgets. The page asks for the process sweep while it does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CpuAppsPlaced(pub bool);
+
+impl EventEmitter<CpuAppsPlaced> for CpuBox {}
 
 /// The smallest power draw strip (UI-PRF-019 "Power draw strip"), logical px.
 pub const POWER_STRIP_MIN: f32 = 64.;
@@ -141,6 +165,11 @@ pub const MODES: &[BoxMode] = &[
         label: "perf-overview-mode-core-charts",
         split: None,
     },
+    BoxMode {
+        id: APPS_MODE,
+        label: "perf-overview-mode-apps",
+        split: None,
+    },
 ];
 
 /// The modes with an Arrange choice (UI-PRF-019, D-027): the grid of `core_charts` and the two
@@ -175,6 +204,7 @@ enum CpuMode {
     Chart,
     Cores,
     CoreCharts,
+    Apps,
 }
 
 impl CpuMode {
@@ -184,6 +214,7 @@ impl CpuMode {
             "chart" => Self::Chart,
             "cores" => Self::Cores,
             "core_charts" => Self::CoreCharts,
+            APPS_MODE => Self::Apps,
             _ => Self::ChartCores,
         }
     }
@@ -194,6 +225,7 @@ impl CpuMode {
             Self::Chart => MODES[1].id,
             Self::Cores => MODES[2].id,
             Self::CoreCharts => MODES[3].id,
+            Self::Apps => MODES[4].id,
         }
     }
 }
@@ -518,8 +550,12 @@ pub struct CpuBox {
     container: Entity<WidgetContainer>,
     /// The plan of the last flow render, which the container's placer reads.
     plan: PlanCell,
+    /// CPU by app, made the first time the box or one of its widgets shows it.
+    apps: Rc<OnceCell<Entity<AppsChart>>>,
+    /// Whether the box shows CPU by app now ([`CpuAppsPlaced`]).
+    apps_placed: bool,
     _subs: [Subscription; 5],
-    _editor_sub: Subscription,
+    _widget_subs: [Subscription; 2],
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
     #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -537,6 +573,28 @@ fn saved_grid(cx: &App) -> Option<ContainerLayout> {
         .known(CPU_BOX_CONTAINER)
         .filter(|l| l.preset.is_none())
         .cloned()
+}
+
+/// CPU by app in `cell`, made in its Overview place the first time it is asked for.
+fn apps_chart(
+    cell: &OnceCell<Entity<AppsChart>>,
+    hub: &Entity<SnapshotHub>,
+    cx: &mut App,
+) -> Entity<AppsChart> {
+    if let Some(chart) = cell.get() {
+        return chart.clone();
+    }
+    let hub = hub.clone();
+    let chart = cx.new(|cx| AppsChart::new_in(hub, AppsMetric::Cpu, AppsPlace::Overview, cx));
+    cell.get_or_init(|| chart).clone()
+}
+
+/// The content of the box's fixed widgets: `cpu_by_app` draws the box's CPU by app chart.
+fn fixed_content(cell: Rc<OnceCell<Entity<AppsChart>>>, hub: Entity<SnapshotHub>) -> FixedContent {
+    Rc::new(move |kind: &FixedWidget, cx: &mut App| match kind {
+        FixedWidget::CpuByApp => Some(apps_chart(&cell, &hub, cx).into()),
+        _ => None,
+    })
 }
 
 /// The keys of the default mode, with nothing switched on.
@@ -566,20 +624,27 @@ impl CpuBox {
         let flow = cpu_flow::flow_layout(default_keys());
         let saved = saved_grid(cx);
         let plan = PlanCell::default();
+        let apps: Rc<OnceCell<Entity<AppsChart>>> = Rc::default();
         let container = {
             let store = Rc::new(RefCell::new(SourceStore::new(hub)));
             let shown = saved.clone().unwrap_or_else(|| flow.clone());
             let plan = plan.clone();
+            let content = fixed_content(Rc::clone(&apps), hub.clone());
             cx.new(|cx| {
                 let mut c = WidgetContainer::new(CPU_BOX_CONTAINER, shown, hub, store, cx);
                 c.set_flow_placer(Some(cpu_flow::placer(plan)), cx);
+                c.set_fixed_content(Some(content), cx);
                 // The box draws the widgets of its flow layouts in their 1.2.0 parts.
                 c.set_hosted(true, cx);
                 c
             })
         };
         let editor = cx.new(|cx| WidgetEditor::new(container.clone(), hub, cx));
-        let editor_sub = cx.subscribe(&editor, Self::on_widget_edit);
+        let widget_subs = [
+            cx.subscribe(&editor, Self::on_widget_edit),
+            // The editor's layout changes reach the container: CPU by app may come or go.
+            cx.observe(&container, |this, _, cx| this.sync_apps(cx)),
+        ];
         let mut this = Self {
             range_text: RangeText::default(),
             hub: hub.clone(),
@@ -649,7 +714,9 @@ impl CpuBox {
             editor,
             container,
             plan,
-            _editor_sub: editor_sub,
+            apps,
+            apps_placed: false,
+            _widget_subs: widget_subs,
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
             render_count: Cell::new(0),
             #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
@@ -658,6 +725,7 @@ impl CpuBox {
         this.sync_devices(&snap, cx);
         this.sync_text(&snap, true);
         this.sync_power_state(&snap);
+        this.sync_apps(cx);
         // A hovered core row highlights its core in the Core clocks chart.
         let weak = cx.weak_entity();
         this.bars.borrow_mut().set_hover_sink(move |cpu, cx| {
@@ -757,6 +825,7 @@ impl CpuBox {
                 self.show_saved(cx);
             }
         }
+        self.sync_apps(cx);
         self.notify(cx);
     }
 
@@ -777,6 +846,7 @@ impl CpuBox {
             return;
         }
         self.show_saved(cx);
+        self.sync_apps(cx);
         self.notify(cx);
     }
 
@@ -803,6 +873,30 @@ impl CpuBox {
         true
     }
 
+    /// Whether CPU by app is shown changed: the page asks for the process sweep while it is.
+    fn sync_apps(&mut self, cx: &mut Context<Self>) {
+        let placed = if self.host_draws() {
+            self.mode == CpuMode::Apps && cpu_flow::apps_of(&self.flow).is_some()
+        } else {
+            cpu_flow::apps_of(self.container.read(cx).layout()).is_some()
+        };
+        if placed != self.apps_placed {
+            self.apps_placed = placed;
+            cx.emit(CpuAppsPlaced(placed));
+        }
+    }
+
+    /// Whether the box shows CPU by app now: in the `apps` preset, or as a widget of the user's
+    /// layout or of Edit Widgets.
+    pub fn apps_placed(&self) -> bool {
+        self.apps_placed
+    }
+
+    /// CPU by app, once the box or one of its widgets has shown it.
+    pub fn apps(&self) -> Option<&Entity<AppsChart>> {
+        self.apps.get()
+    }
+
     fn notify(&mut self, cx: &mut Context<Self>) {
         #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
         self.notify_count.set(self.notify_count.get() + 1);
@@ -811,10 +905,10 @@ impl CpuBox {
 
     /// A core row's text or bucket changed: the cores group draws the rows, so only it renders
     /// again. When the box draws no cores group (a grid layout keeps its own sources, and the
-    /// `chart` mode shows no rows) nothing renders; before the first flow render places the
-    /// group, the box renders.
+    /// `chart` and `apps` modes show no rows) nothing renders; before the first flow render
+    /// places the group, the box renders.
     fn notify_cores(&mut self, cx: &mut Context<Self>) {
-        if !self.host_draws() || self.mode == CpuMode::Chart {
+        if !self.host_draws() || matches!(self.mode, CpuMode::Chart | CpuMode::Apps) {
             return;
         }
         let Some(id) = cpu_flow::cores_of(&self.flow) else {
@@ -889,8 +983,12 @@ impl CpuBox {
         let mode = CpuMode::from_id(id);
         if mode != self.mode {
             self.mode = mode;
+            if mode == CpuMode::Apps {
+                apps_chart(&self.apps, &self.hub, cx);
+            }
             self.sync_flow(cx);
             self.sync_hover(cx);
+            self.sync_apps(cx);
             cx.notify();
         }
     }
@@ -1518,6 +1616,25 @@ impl CpuBox {
         })
     }
 
+    /// `apps`: CPU by app filling the body, drawn by its fixed widget.
+    fn apps_part(&self, drawn: &mut Drawn, cx: &mut Context<Self>) -> AnyElement {
+        let fixed = cpu_flow::apps_of(&self.flow).and_then(|id| {
+            let f = self.container.update(cx, |c, cx| c.flow_fixed(id, cx))?;
+            drawn.push(id);
+            Some(f)
+        });
+        let part = match fixed {
+            Some(f) => Some(cached_full(f)),
+            None => self.apps.get().cloned().map(cached_full),
+        };
+        div()
+            .tl_selector(|| CPU_APPS_ID.into())
+            .relative()
+            .size_full()
+            .children(part)
+            .into_any_element()
+    }
+
     /// The power draw strip, drawn by its widget.
     fn strip(
         &self,
@@ -1748,6 +1865,7 @@ impl CpuBox {
                 div().size_full().pb(m.sp[2]).child(rows).into_any_element()
             }
             CpuMode::CoreCharts => self.core_charts_part(&m, theme, drawn, cx),
+            CpuMode::Apps => self.apps_part(drawn, cx),
             CpuMode::ChartCores => {
                 let chart = self.graph_part(&m, drawn, cx);
                 // Under the graph the strip shares the chart's column and the core rows keep
@@ -1836,6 +1954,7 @@ impl CpuBox {
             CpuMode::Chart => CpuLook::Chart,
             CpuMode::Cores => CpuLook::Cores,
             CpuMode::CoreCharts => CpuLook::CoreCharts,
+            CpuMode::Apps => CpuLook::Apps,
         };
         let graph = matches!(self.mode, CpuMode::ChartCores | CpuMode::Chart);
         let flow = &self.flow;
@@ -1849,7 +1968,9 @@ impl CpuBox {
                 0.
             },
             total: cpu_flow::total_of(flow).filter(|_| graph),
-            cores: cpu_flow::cores_of(flow).filter(|_| self.mode != CpuMode::Chart),
+            cores: cpu_flow::cores_of(flow)
+                .filter(|_| !matches!(self.mode, CpuMode::Chart | CpuMode::Apps)),
+            apps: cpu_flow::apps_of(flow).filter(|_| self.mode == CpuMode::Apps),
             clocks: cpu_flow::clocks_of(flow)
                 .filter(|_| self.clocks_shown() && self.core_clocks.is_some()),
             power: cpu_flow::power_of(flow)

@@ -388,7 +388,9 @@ impl WidgetContainer {
                 device_demand(&mut demand, DeviceKind::of(device));
             }
             match content {
-                Some(WidgetContent::Fixed(FixedWidget::MemoryByApp | FixedWidget::Processes)) => {
+                Some(WidgetContent::Fixed(
+                    FixedWidget::MemoryByApp | FixedWidget::CpuByApp | FixedWidget::Processes,
+                )) => {
                     demand.process_top = true;
                 }
                 Some(WidgetContent::Fixed(FixedWidget::Timeline)) => demand.device_timeline = true,

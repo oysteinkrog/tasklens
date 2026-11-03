@@ -3,9 +3,10 @@
 //!
 //! A [`FixedWidgetView`] is a GPUI entity keyed by its widget id. It hosts the content view that
 //! its box draws today, out of the box frame: Memory by app (`AppsChart` of `AppsMetric::Memory`
-//! in its Overview place) in the Memory box. The box keeps the content view and hands it over
-//! through the container's [`FixedContent`], so the flow look and a grid layout draw the same
-//! view, with its own clicks, tooltips, legend and demand. The view has no forms and no
+//! in its Overview place) in the Memory box, and CPU by app (`AppsChart` of `AppsMetric::Cpu`,
+//! UI-PRF-062) in the CPU box and on the CPU page. The box keeps the content view and hands it
+//! over through the container's [`FixedContent`], so the flow look and a grid layout draw the
+//! same view, with its own clicks, tooltips, legend and demand. The view has no forms and no
 //! compositions: it draws its content at its rectangle.
 //!
 //! Render contract: the widget renders again only when its content view, its setting or its

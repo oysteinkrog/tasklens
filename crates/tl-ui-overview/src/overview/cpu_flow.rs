@@ -1,13 +1,15 @@
 //! The CPU box's presets as flow layouts (ADR-019 "Presets", UI-PRF-061 phase 2).
 //!
 //! A flow layout is the widget list of one CPU box mode (`layout_boxes::convert_cpu_box`):
-//! the `total` chart, the cores group as rows or cells, and after them the Core clocks chart
-//! and the power draw strip when they are switched on. The box draws each part at its 1.2.0
+//! the `total` chart, the cores group as rows or cells, or CPU by app (the fixed widget
+//! `cpu_by_app`, UI-PRF-062), and after them the Core clocks chart and the power draw strip
+//! when they are switched on. The box draws each part at its 1.2.0
 //! place by the rules of UI-PRF-017, UI-PRF-018, UI-PRF-019 and D-040, and each part is its
 //! widget's own entity: the total chart, the Core clocks chart and the strip are
 //! `MetricWidget`s with `FlowLook::Chart`, the core rows and the `core_charts` cells are the
-//! cores group's `GroupWidget` with a `GroupFlowLook`. The box draws only what is not a widget:
-//! the title line, the gutter and the splitters.
+//! cores group's `GroupWidget` with a `GroupFlowLook`, and CPU by app is a `FixedWidgetView`
+//! that fills the body. The box draws only what is not a widget: the title line, the gutter and
+//! the splitters.
 //!
 //! The box makes a [`CpuPlan`] on each render: the mode, which parts show, the splits as the
 //! box lays them out and the widget of each part, but no body size and no sample value. The
@@ -21,7 +23,9 @@ use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Size, point, px, size};
 use smallvec::SmallVec;
-use tl_ui_settings::layout::{ContainerLayout, GroupKind, WidgetContent, WidgetSetting, grid_cols};
+use tl_ui_settings::layout::{
+    ContainerLayout, FixedWidget, GroupKind, WidgetContent, WidgetSetting, grid_cols,
+};
 use tl_ui_settings::layout_boxes::{
     DEVICE_CPU, METRIC_CORE_CLOCKS, METRIC_CPU_TOTAL, METRIC_POWER_DRAW, convert_cpu_box,
 };
@@ -102,6 +106,15 @@ pub fn cores_of(layout: &ContainerLayout) -> Option<u32> {
         .map(|w| w.id)
 }
 
+/// The id of CPU by app's fixed widget (`cpu_by_app`, UI-PRF-062).
+pub fn apps_of(layout: &ContainerLayout) -> Option<u32> {
+    layout
+        .widgets
+        .iter()
+        .find(|w| matches!(&w.content, WidgetContent::Fixed(FixedWidget::CpuByApp)))
+        .map(|w| w.id)
+}
+
 /// The CPU box mode a [`CpuPlan`] is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuLook {
@@ -113,6 +126,8 @@ pub enum CpuLook {
     Cores,
     /// `core_charts`: one chart cell per logical CPU.
     CoreCharts,
+    /// `apps`: CPU by app alone (UI-PRF-062).
+    Apps,
 }
 
 impl CpuLook {
@@ -123,6 +138,7 @@ impl CpuLook {
             Self::Chart => "chart",
             Self::Cores => "cores",
             Self::CoreCharts => "core_charts",
+            Self::Apps => "apps",
         }
     }
 }
@@ -150,6 +166,8 @@ pub struct CpuPlan {
     pub share: f32,
     pub total: Option<u32>,
     pub cores: Option<u32>,
+    /// CPU by app, in `apps`.
+    pub apps: Option<u32>,
     /// The Core clocks chart, when the box draws it under the total chart.
     pub clocks: Option<u32>,
     /// The power draw strip, when the box draws it.
@@ -193,6 +211,11 @@ impl CpuPlan {
             }
             CpuLook::CoreCharts => {
                 if let Some(id) = self.cores {
+                    out.push((id, parts));
+                }
+            }
+            CpuLook::Apps => {
+                if let Some(id) = self.apps {
                     out.push((id, parts));
                 }
             }
@@ -406,6 +429,15 @@ mod tests {
         };
         assert_eq!(g.options.items, GroupItems::Cells);
         assert_eq!(g.options.arrange.as_deref(), Some("vertical"));
+
+        // `apps`: CPU by app alone; Core clocks stays in the list but is not a part.
+        let l = flow_layout(CpuFlowKeys {
+            clocks: true,
+            ..keys("apps")
+        });
+        assert_eq!(l.preset.as_ref().map(|p| p.id.as_str()), Some("apps"));
+        assert!(apps_of(&l).is_some() && total_of(&l).is_none() && cores_of(&l).is_none());
+        assert!(clocks_of(&l).is_some());
     }
 
     #[test]
@@ -435,6 +467,7 @@ mod tests {
             share: 0.4,
             total: Some(1),
             cores: Some(2),
+            apps: None,
             clocks: None,
             power: None,
         }
@@ -502,6 +535,30 @@ mod tests {
         assert_eq!(r[0], (4, [0., 200. + gap, 400., 200. - gap]));
         assert_eq!(r[1], (1, [0., 0., 400., 200.]));
         assert_eq!(r[2].1[3], 400.);
+    }
+
+    /// `apps` fills the body with CPU by app, over the full-width strip when it shows.
+    #[test]
+    fn apps_fills_the_body() {
+        let p = CpuPlan {
+            total: None,
+            cores: None,
+            apps: Some(5),
+            ..plan(CpuLook::Apps)
+        };
+        assert_eq!(rects_of(&p, 600., 400.), [(5, [0., 0., 600., 400.])]);
+        let gap = f32::from(p.m.sp[5]);
+        let p = CpuPlan {
+            power: Some(PlanPower {
+                id: 4,
+                parts_share: 0.75,
+                under_graph: false,
+            }),
+            ..p
+        };
+        let r = rects_of(&p, 600., 400.);
+        assert_eq!(r[0], (4, [0., 300. + gap, 600., 100. - gap]));
+        assert_eq!(r[1], (5, [0., 0., 600., 300.]));
     }
 
     #[test]

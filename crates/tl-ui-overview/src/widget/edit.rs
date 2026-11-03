@@ -84,8 +84,9 @@ pub const UNDO_LIMIT: usize = 100;
 
 /// The fixed widgets Add Widget offers, each in its own box, with their name keys
 /// (UI-PRF-061 phase 2).
-const FIXED_ADDS: [(FixedWidget, &str); 3] = [
+const FIXED_ADDS: [(FixedWidget, &str); 4] = [
     (FixedWidget::MemoryByApp, "perf-widget-fixed-by-app"),
+    (FixedWidget::CpuByApp, "perf-widget-fixed-cpu-by-app"),
     (FixedWidget::Processes, "perf-widget-fixed-processes"),
     (FixedWidget::Timeline, "perf-widget-fixed-timeline"),
 ];
@@ -1065,8 +1066,8 @@ impl WidgetEditor {
     }
 
     /// The fixed widget Add Widget offers: the one the box allows (Memory by app in the Memory
-    /// box, the table in Top processes, the bands in Timeline), while the working layout has
-    /// none.
+    /// box, CPU by app in the CPU box, the table in Top processes, the bands in Timeline), while
+    /// the working layout has none.
     pub fn fixed_add(&self, cx: &App) -> Option<menu::FixedAdd> {
         let (kind, key) = FIXED_ADDS
             .iter()
