@@ -9,8 +9,9 @@
 //!   widget fails;
 //! - in Edit Widgets the editor draws a frame over each widget, at the widget's bounds;
 //! - a metric widget's look is the parts it drew (name, value, stats, reason, bar, chart and the
-//!   empty-sensor lines), the text of each drawn text part, the fill of a drawn bar and the
-//!   series colours and legend of a drawn chart;
+//!   empty-sensor lines), the text of each drawn text part, the fill of a drawn bar, and of a
+//!   drawn chart its series colours, legend and the labels its last paint drew (a page chart
+//!   draws its heading and value itself) with their colours and texts;
 //! - a group's look is its state, its column count, its hidden count, its drawn lines and the
 //!   look of each drawn member, each member root drawn inside the group;
 //! - a fixed widget's look is the content view it hosts and the lines it drew.
@@ -19,6 +20,7 @@
 
 use gpui_kit::{AppContext as _, Bounds, Entity, EntityId, Hsla, Pixels, VisualTestContext, px};
 use tl_ui_chart::chart::ChartView;
+use tl_ui_chart::chart::labels::LabelKind;
 use tl_ui_overview::widget::container::{WidgetContainer, container_id};
 use tl_ui_overview::widget::edit::{WidgetEditor, editor_id, frame_id};
 use tl_ui_overview::widget::metric_widget::{MetricWidget, part_id, widget_id};
@@ -49,6 +51,11 @@ pub struct ChartLook {
     pub lines: Vec<Hsla>,
     /// The legend names.
     pub legend: Vec<String>,
+    /// The labels the last paint drew (heading, value, legend, axis max, range), each with its
+    /// colour, sorted. The axis ticks are left out.
+    pub painted: Vec<(String, Hsla)>,
+    /// The text of each painted heading, value and range label.
+    pub texts: Vec<(&'static str, String)>,
 }
 
 /// What a metric widget, or one member of a group, drew.
@@ -114,9 +121,34 @@ fn near(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
 }
 
 fn chart_look(c: &ChartView) -> ChartLook {
+    let mut painted: Vec<(String, Hsla)> = c
+        .label_cache()
+        .painted
+        .iter()
+        .filter(|l| !matches!(l.kind, LabelKind::XTick(_) | LabelKind::YTick(_)))
+        .map(|l| (format!("{:?}", l.kind), l.color))
+        .collect();
+    painted.sort_by(|a, b| a.0.cmp(&b.0));
+    let drew = |kind: LabelKind| c.label_cache().painted.iter().any(|l| l.kind == kind);
+    let mut texts = Vec::new();
+    if drew(LabelKind::Heading)
+        && let Some(h) = &c.labels.heading
+    {
+        texts.push(("heading", h.to_string()));
+    }
+    if drew(LabelKind::Value)
+        && let Some(v) = c.painted_value_text()
+    {
+        texts.push(("value", v.to_owned()));
+    }
+    if drew(LabelKind::Range) {
+        texts.push(("range", c.labels.range_word.to_string()));
+    }
     ChartLook {
         lines: c.spec.series.iter().map(|s| s.line).collect(),
         legend: c.labels.legend.iter().map(|(n, _)| n.to_string()).collect(),
+        painted,
+        texts,
     }
 }
 
@@ -341,7 +373,12 @@ pub fn sweep(
         "{page}: the page draws a chart: {flow:?}"
     );
     assert!(
-        metrics().any(|m| m.texts.iter().any(|(_, t)| !t.is_empty())),
+        metrics().any(|m| {
+            m.texts.iter().any(|(_, t)| !t.is_empty())
+                || m.chart
+                    .as_ref()
+                    .is_some_and(|c| c.texts.iter().any(|(_, t)| !t.is_empty()))
+        }),
         "{page}: the page draws a text: {flow:?}"
     );
     let compare = |after: &[(u32, Look)], stage: &str| {
