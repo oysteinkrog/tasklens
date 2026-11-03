@@ -265,10 +265,7 @@ impl SceneView {
             .page(&DeviceKey(Arc::from(DeviceKey::CPU)))
             .and_then(|view| view.clone().downcast::<CpuPage>().ok());
         if let Some(cpu) = cpu {
-            cpu.update(cx, |cpu, cx| {
-                cpu.bench_show_both = true;
-                cx.notify();
-            });
+            cpu.update(cx, |cpu, cx| cpu.set_bench_show_both(true, cx));
         }
         let focus = page.read(cx).primary_focus();
         focus.focus(window, cx);

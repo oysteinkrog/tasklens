@@ -26,6 +26,7 @@ use super::widget::container::{FlowInput, FlowPlace};
 use super::widget::grid::{InnerGrid, InnerPlacement, PlacedWidget};
 use super::widget::source::Availability;
 
+pub mod cpu;
 pub mod gpu;
 
 /// The gap between two page parts (`sp4`), logical px.

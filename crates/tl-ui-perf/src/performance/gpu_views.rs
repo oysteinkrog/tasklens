@@ -66,7 +66,7 @@ pub struct PartResized;
 
 /// Sets `natural` to `h` (logical px) and, when it moved by more than half a pixel, emits
 /// [`PartResized`] from `this` after the frame (an event during the frame is lost).
-fn report_height<V: EventEmitter<PartResized> + 'static>(
+pub(crate) fn report_height<V: EventEmitter<PartResized> + 'static>(
     natural: &Rc<Cell<f32>>,
     h: f32,
     this: &gpui_kit::WeakEntity<V>,

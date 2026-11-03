@@ -11,6 +11,12 @@
 //!
 //! The headings, tooltips and legend words are `perf-cpu-*` and `perf-legend-*` keys in
 //! `en-US.ftl`, translated once per strings version into [`GridWords`].
+//!
+//! On the CPU page the grid is the fixed widget `cpu_core_grid` (ADR-019 phase 3,
+//! `tasklens-hzire.5`), drawn by [`CpuCoreGridView`]. Its columns follow its width as in 1.3.0
+//! and its natural height is the grid's height at that width, which a flow layout places it at.
+//! In a grid layout its rows share the widget's height, at least `grid_cell_h` 112 px each, and
+//! a taller grid scrolls inside the widget.
 
 use std::cell::Cell;
 use std::fmt::Write as _;
@@ -19,8 +25,9 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Entity, IntoElement, ParentElement as _, Pixels,
-    SharedString, StyleRefinement, Styled as _, Window, canvas, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -40,6 +47,8 @@ use tl_ui_kit::components::icons::AppIcon;
 use tl_ui_kit::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 
 use tl_ui_base::template::Template;
+
+use super::gpu_views::{PartResized, report_height};
 
 /// Debug selector of the box around the grid.
 pub const GRID_ID: &str = "perf-cpu-grid";
@@ -426,6 +435,175 @@ impl CpuGrid {
             root = root.child(trigger);
         }
         root.into_any_element()
+    }
+}
+
+/// The debug selector of the core grid of page container `container`.
+pub fn grid_id(container: &str) -> String {
+    format!("{GRID_ID}-{container}")
+}
+
+/// The debug selector of the tooltip trigger over the hovered heading of the core grid of page
+/// container `container`.
+pub fn trigger_id(container: &str) -> String {
+    format!("{TRIGGER_ID}-{container}")
+}
+
+/// The CPU page's per-core grid part, the fixed widget `cpu_core_grid`. The page owns the grid
+/// ([`CpuGrid`]) and hands its view here; this view draws it with the heading tooltips.
+pub struct CpuCoreGridView {
+    /// The page container id, for the debug selectors and the tooltip ids.
+    container: SharedString,
+    grid: Entity<ChartGridView>,
+    /// The box width at the last paint.
+    width: Rc<Cell<Pixels>>,
+    /// The box height at the last paint, px; 0 before the first.
+    height: Rc<Cell<Pixels>>,
+    /// The grid's height at the box width with 112 px rows, logical px; 0 before the first
+    /// paint.
+    natural: Rc<Cell<f32>>,
+    #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+    pub render_count: Cell<u32>,
+}
+
+impl EventEmitter<PartResized> for CpuCoreGridView {}
+
+impl CpuCoreGridView {
+    pub fn new(container: SharedString, grid: Entity<ChartGridView>) -> Self {
+        Self {
+            container,
+            grid,
+            width: Rc::new(Cell::new(px(0.))),
+            height: Rc::new(Cell::new(px(0.))),
+            natural: Rc::new(Cell::new(0.)),
+            #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+            render_count: Cell::new(0),
+        }
+    }
+
+    /// The grid this view draws.
+    pub fn grid(&self) -> &Entity<ChartGridView> {
+        &self.grid
+    }
+
+    /// The grid's height at the box width, logical px; shared with the page's flow placer.
+    pub fn natural_height(&self) -> Rc<Cell<f32>> {
+        Rc::clone(&self.natural)
+    }
+
+    /// A new grid (the page built it again for a new theme or scale), or new cells (hotplug):
+    /// the view draws again.
+    pub fn set_grid(&mut self, grid: Entity<ChartGridView>, cx: &mut Context<Self>) {
+        self.grid = grid;
+        cx.notify();
+    }
+}
+
+impl Render for CpuCoreGridView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, debug_assertions, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let (n, min_w, gap) = {
+            let spec = &self.grid.read(cx).spec;
+            (spec.cells.len(), spec.cell_min_w, spec.gap)
+        };
+        let base_h = px(CELL_H * s);
+        let measured = |w: Pixels| if w > px(0.) { w } else { px(UNMEASURED_W) };
+        let layout = grid_layout(n, measured(self.width.get()), min_w, gap);
+        let natural = grid_height(&layout, base_h, gap);
+        // A grid layout taller than the rows need shares its height among the rows.
+        let row_h = move |height: Pixels, rows: usize| match rows {
+            0 => base_h,
+            rows => ((height - gap * (rows - 1) as f32) / rows as f32).max(base_h),
+        };
+        let cell_h = row_h(self.height.get(), layout.rows);
+        let drawn_h = grid_height(&layout, cell_h, gap);
+
+        let measure = {
+            let (width, height) = (Rc::clone(&self.width), Rc::clone(&self.height));
+            let natural_cell = Rc::clone(&self.natural);
+            let grid = self.grid.clone();
+            let this = cx.entity().downgrade();
+            canvas(
+                move |bounds, window, cx| {
+                    let old_w = width.replace(bounds.size.width);
+                    let old_h = height.replace(bounds.size.height);
+                    let at = |w: Pixels| grid_layout(n, measured(w), min_w, gap);
+                    let now = at(bounds.size.width);
+                    let natural = grid_height(&now, base_h, gap);
+                    report_height(&natural_cell, f32::from(natural) / s, &this, cx);
+                    // The grid's cells take the row height the box gives them.
+                    let want = row_h(bounds.size.height, now.rows);
+                    if grid.read(cx).spec.cell_h != want {
+                        let grid = grid.clone();
+                        cx.defer(move |cx| {
+                            grid.update(cx, |g, cx| {
+                                let mut spec = g.spec.clone();
+                                spec.cell_h = want;
+                                g.set_spec(spec, cx);
+                            });
+                        });
+                    }
+                    if at(old_w) != now || old_h != bounds.size.height {
+                        cx.notify(window.current_view());
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+
+        let id = grid_id(&self.container);
+        let mut grid_box = div()
+            .tl_selector(move || id)
+            .relative()
+            .w_full()
+            .flex_none()
+            .h(drawn_h)
+            .child(
+                self.grid
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            );
+        let view = self.grid.read(cx);
+        if let Some((i, text)) = view.hovered_cell().zip(view.hovered_tooltip().cloned()) {
+            let pad = m.sp[3];
+            let (col, row) = (i % layout.cols, i / layout.cols);
+            let tip = trigger_id(&self.container);
+            let trigger = div()
+                .tl_selector(move || tip)
+                .absolute()
+                .left((layout.cell_w + gap) * col as f32 + pad)
+                .top((cell_h + gap) * row as f32 + pad)
+                .w((layout.cell_w - pad * 2.).max(px(0.)))
+                .h(px(LABEL_ROW * s));
+            // One state per heading, so moving to another heading starts the delay again.
+            let state = HoverTooltip::state((TRIGGER_ID, i), window, cx);
+            grid_box = grid_box.child(HoverTooltip::attach(
+                &state,
+                trigger,
+                DELAY_CONTROL,
+                TlTooltip::text(text).build(),
+                window,
+                cx,
+            ));
+        }
+        // A grid taller than its widget scrolls inside it.
+        let scroll = SharedString::from(format!("{}-scroll", grid_id(&self.container)));
+        let body = div().id(scroll).size_full();
+        let body = if natural > self.height.get() + px(0.5) {
+            body.overflow_y_scroll()
+        } else {
+            body
+        };
+        div()
+            .relative()
+            .size_full()
+            .child(body.child(grid_box))
+            .child(measure)
     }
 }
 
