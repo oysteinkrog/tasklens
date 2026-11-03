@@ -1256,10 +1256,9 @@ fn gpu_cuda_hidden_off_nvidia(cx: &mut TestAppContext) {
     assert!(find(&rows, "Vulkan version").is_some());
 }
 
-#[gpui_kit::test]
-fn gpu_power_needs_setup_link(cx: &mut TestAppContext) {
-    let mut r = open(cx, "i915", "hwmon i915", false);
-    // An iGPU has no dedicated memory.
+/// Makes the rig's GPU an iGPU: no dedicated memory in the inventory or the record, and power
+/// `power`.
+fn igpu(r: &mut Rig, power: Metric<f32>) -> GpuTotals {
     r.engine.publish_with(|s| {
         let inv = Arc::make_mut(&mut s.inventory);
         inv.header.version += 1;
@@ -1276,8 +1275,15 @@ fn gpu_power_needs_setup_link(cx: &mut TestAppContext) {
     });
     let mut t = full_totals();
     t.mem_total = Metric::with(Validity::Unsupported);
-    t.power_w = Metric::with(Validity::Unsupported);
-    publish_totals(&mut r, &t);
+    t.power_w = power;
+    publish_totals(r, &t);
+    t
+}
+
+#[gpui_kit::test]
+fn gpu_power_needs_setup_link(cx: &mut TestAppContext) {
+    let mut r = open(cx, "i915", "hwmon i915", false);
+    igpu(&mut r, Metric::with(Validity::Unsupported));
     let rows = detail_rows(&mut r);
     assert_eq!(
         find(&rows, "Power draw").map(|r| r.1.as_str()),
@@ -1457,6 +1463,31 @@ mod optional {
                 Some("P3 · Throttled: power cap, hardware thermal")
             );
         });
+    }
+
+    /// The Power chart of an Intel iGPU whose CPU meter needs setup shows Unsupported, as in
+    /// 1.3.0, and goes live when the meter reads.
+    #[gpui_kit::test]
+    fn gpu_igpu_power_chart_needs_setup(cx: &mut TestAppContext) {
+        let mut r = open(cx, "i915", "hwmon i915", false);
+        let mut t = igpu(&mut r, Metric::with(Validity::Restricted));
+        set_optional(&mut r, &[GpuOptionalGraph::Power]);
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let page = r.page.read(cx);
+                page.power(cx).expect("power chart").read(cx).state.clone()
+            })
+        };
+        assert_eq!(state(&mut r), ChartState::Unsupported);
+        t.power_w = Metric::valid(12.5);
+        publish_totals(&mut r, &t);
+        assert_eq!(state(&mut r), ChartState::Live);
+        // With dedicated memory the GPU is a discrete card: its Unsupported power needs no
+        // setup, and the chart stays live.
+        let mut d = full_totals();
+        d.power_w = Metric::with(Validity::Unsupported);
+        publish_totals(&mut r, &d);
+        assert_eq!(state(&mut r), ChartState::Live);
     }
 
     /// The Power and Clocks items edit this page's flow layout and leave

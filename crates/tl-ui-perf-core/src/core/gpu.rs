@@ -340,6 +340,25 @@ pub fn probe_state(vendor: GpuVendor, snap: &Snapshot) -> ProbeState {
     }
 }
 
+/// An Intel iGPU whose power is Restricted or Unsupported: it has no dedicated memory and
+/// reads the CPU package's power meter, which needs setup. Its Details row reads "Needs setup"
+/// and its Power chart shows Unsupported, as in 1.3.0. False for every other GPU.
+pub fn igpu_power_needs_setup(snap: &Snapshot, device: DeviceIdx, vendor: GpuVendor) -> bool {
+    if vendor != GpuVendor::Intel {
+        return false;
+    }
+    let shown = |value: u64, validity: Validity| {
+        matches!(validity, Validity::Valid | Validity::Stale).then_some(value)
+    };
+    let totals = gpu_totals(snap, device);
+    let dedicated = adapter(snap, device)
+        .and_then(|a| shown(a.dedicated_bytes.value, a.dedicated_bytes.validity))
+        .or_else(|| totals.and_then(|t| shown(t.mem_total.value, t.mem_total.validity)));
+    let power = totals.map_or(Validity::Missing, |t| t.power_w.validity);
+    dedicated.is_none_or(|n| n == 0)
+        && matches!(power, Validity::Restricted | Validity::Unsupported)
+}
+
 /// The `en-US.ftl` key of the tooltip every GPU chart shows in `probe`, `None` while it is Ok.
 pub fn probe_tooltip_key(probe: ProbeState) -> Option<&'static str> {
     match probe {

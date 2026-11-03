@@ -72,8 +72,8 @@ use tl_ui_kit::components::validity::copy_text;
 use tl_ui_perf_core::core::DeviceKey;
 use tl_ui_perf_core::core::core_clocks::core_lines;
 use tl_ui_perf_core::core::gpu::{
-    GpuVendor, ProbeState, clocks_tooltip_text, gpu_totals, power_tooltip_text, probe_state,
-    probe_tooltip_key,
+    GpuVendor, ProbeState, clocks_tooltip_text, gpu_totals, igpu_power_needs_setup,
+    power_tooltip_text, probe_state, probe_tooltip_key,
 };
 use tl_ui_perf_core::core::logical_devices;
 use tl_ui_perf_core::core::sensors::{default_sensor, sensor_device};
@@ -586,8 +586,9 @@ struct SourceState {
     page: bool,
     /// On a device page, the state a chart shows over its data: Failed with the error of the
     /// collector of the source's kind while it has failed ([`failed_of`]), and on a GPU the
-    /// probe state (Failed while the probe restarts, Unsupported while it is missing). Always
-    /// Live in an Overview box, which shows no failed state.
+    /// probe state (Failed while the probe restarts, Unsupported while it is missing), and
+    /// Unsupported on the Power chart of an Intel iGPU whose meter needs setup. Always Live in
+    /// an Overview box, which shows no failed state.
     page_state: ChartState,
     /// On a device page, the tooltip on the widget's name: the GPU Power and Clocks headings'
     /// texts of 1.3.0, or the probe's text while the probe is not Ok (UI-PRF-032). Always
@@ -1177,7 +1178,8 @@ impl SourceData {
 
     /// The chart state and the name's tooltip on a device page. The health is read live, as the
     /// 1.3.0 pages read it. A GPU shows its probe state on every chart, with the probe's text
-    /// as the tooltip; while the probe is Ok, Power and Clocks carry their 1.3.0 heading texts.
+    /// as the tooltip; while the probe is Ok, Power and Clocks carry their 1.3.0 heading texts,
+    /// and the Power chart of an Intel iGPU whose meter needs setup shows Unsupported.
     fn page_extras(&self, idx: Option<DeviceIdx>, cx: &App) -> (ChartState, Option<SharedString>) {
         let live = self.hub.read(cx).current();
         if self.kind != DeviceKind::Gpu {
@@ -1197,12 +1199,20 @@ impl SourceData {
             return (state, Some(text));
         }
         let totals = gpu_totals(live, idx);
-        let tip = match self.selector.metric.as_str() {
+        let metric = self.selector.metric.as_str();
+        let tip = match metric {
             METRIC_POWER => power_tooltip_text(totals, cx),
             METRIC_GPU_CLOCKS => clocks_tooltip_text(totals, cx),
             _ => None,
         };
-        (ChartState::Live, tip)
+        // An Intel iGPU's Power chart reads a CPU meter that needs setup (1.3.0).
+        let state =
+            if metric == METRIC_POWER && igpu_power_needs_setup(live, idx, self.state.vendor) {
+                ChartState::Unsupported
+            } else {
+                ChartState::Live
+            };
+        (state, tip)
     }
 
     /// The metric's name, by the ADR-019 phase 2 rule: the metric's name on a CPU, memory, an
