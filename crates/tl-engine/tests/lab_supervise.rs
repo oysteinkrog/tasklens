@@ -135,14 +135,12 @@ const BUDGET_SCHEDULE_MS: [u64; 6] = [0, 500, 1_500, 3_500, 7_500, 15_500];
 
 /// Checks start offsets against `expected` ms. Each gap between starts is at
 /// least the backoff and at most `slack_ms` longer. With `chaos`, a prefix is
-/// enough, because a chaos cancel may end the run early.
+/// enough, because a chaos cancel may end the run early. Under asupersync 0.6.2
+/// the cancel can land before the first start, so the prefix may be empty.
 fn assert_schedule(starts: &Starts, expected: &[u64], slack_ms: u64, chaos: bool) {
     let got = offsets_ms(starts);
     if chaos {
-        assert!(
-            !got.is_empty() && got.len() <= expected.len(),
-            "starts {got:?}"
-        );
+        assert!(got.len() <= expected.len(), "starts {got:?}");
     } else {
         assert_eq!(got.len(), expected.len(), "starts {got:?}");
     }
@@ -166,12 +164,19 @@ fn cancelled(report: &Report) -> bool {
         })
 }
 
-/// The counts in `report` agree with the recorded starts.
-fn assert_counts(starts: &Starts, report: &Report) {
+/// The counts in `report` agree with the recorded starts. Under `chaos` asupersync 0.6.2 can
+/// cancel a generation it started before its body records the start, so the report may count
+/// more starts than were recorded.
+fn assert_counts(starts: &Starts, report: &Report, chaos: bool) {
     let recorded = starts.lock().expect("starts lock").len() as u64;
+    if chaos && cancelled(report) {
+        assert!(report.started >= recorded, "{report:?}");
+        assert_eq!(report.joined, report.started, "{report:?}");
+        return;
+    }
     assert_eq!(report.started, recorded);
     assert_eq!(report.joined, recorded);
-    assert_eq!(report.restart_batches, recorded - 1);
+    assert_eq!(report.restart_batches, recorded.saturating_sub(1));
 }
 
 fn fail_then_wait(generation: u64) -> Step {
@@ -197,7 +202,7 @@ fn backoff_case(lab: &mut LabRuntime, starts: &Starts, chaos: bool) {
     let _ = abort.send_blocking(());
     lab.run_until_idle();
     let report = take(&slot);
-    assert_counts(starts, &report);
+    assert_counts(starts, &report, chaos);
     if !chaos {
         assert_eq!(report.started, 5);
     }
@@ -214,7 +219,7 @@ fn check_budget(starts: &Starts, slot: &Slot, chaos: bool) -> bool {
     let report = take(slot);
     let slack = if chaos { CHAOS_SLACK_MS } else { 0 };
     assert_schedule(starts, &BUDGET_SCHEDULE_MS, slack, chaos);
-    assert_counts(starts, &report);
+    assert_counts(starts, &report, chaos);
     if chaos && cancelled(&report) {
         assert!(!budget_exhausted(&report));
         return false;

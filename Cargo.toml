@@ -24,7 +24,7 @@ publish = false
 
 [workspace.dependencies]
 # Runtime and UI (exact pins; upgrades only through an ADR change)
-asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros"] }
+asupersync = { version = "=0.6.2", default-features = false, features = ["proc-macros"] }
 gpui-kit   = { version = "=0.7.0" }                       # default features: component, assets
 nvml-wrapper = { version = "=0.13.0", default-features = false }
 ash        = { version = "=0.38.0", default-features = false }   # tl-gpu-probe --api-versions (ADR-007)
