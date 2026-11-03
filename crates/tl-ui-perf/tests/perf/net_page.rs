@@ -1,5 +1,6 @@
 //! Network page: the Throughput chart, its scale and value, the disconnected gap and the demand
-//! (E25, UI-PRF-031; PERF-054, PERF-055).
+//! (E25, UI-PRF-031; PERF-054, PERF-055). The chart is the page container's `traffic` widget
+//! (`tasklens-hzire.8`); `page_net_widgets` tests the container itself.
 //!
 //! The Public IP tests that click Fetch need the shell's public IP service and stay in tl-ui
 //! (`tests/ui/net_page_shell.rs`).
@@ -25,8 +26,9 @@ use tl_ui_base::i18n::init_strings;
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_chart::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
 use tl_ui_kit::components::menu::{context_menu_layer, open_context_menu};
+use tl_ui_overview::widget::metric_widget::widget_id;
 use tl_ui_pagehost::PageHost;
-use tl_ui_perf::performance::net::{NetPage, NetSettingsDesktop, THROUGHPUT_ID};
+use tl_ui_perf::performance::net::{NetPage, NetSettingsDesktop};
 use tl_ui_perf::performance::page::DevicePage as _;
 use tl_ui_perf::performance::{DeviceKey, DeviceKind, DeviceRow};
 use tl_ui_settings::settings::{NetworkUnit, Settings};
@@ -199,10 +201,26 @@ fn series(metric: MetricId, value: f32, gaps: u64) -> Arc<SeriesView> {
     })
 }
 
+/// The Throughput chart: the default layout's `traffic` widget.
+fn throughput(r: &mut Rig<'_>) -> Entity<ChartView> {
+    let page = r.page.clone();
+    r.vcx
+        .update(|_, cx| page.read(cx).throughput(cx).expect("Throughput chart"))
+}
+
+/// The debug selector of the Throughput widget, id 1 in the default layout.
+fn throughput_id(r: &mut Rig<'_>) -> &'static str {
+    let page = r.page.clone();
+    let container = r
+        .vcx
+        .update(|_, cx| page.read(cx).container_id().to_string());
+    Box::leak(widget_id(&container, 1).into_boxed_str())
+}
+
 /// Hands the chart download `rx` and upload `tx` in bytes per second, the last `gaps` samples
 /// invalid.
 fn feed(r: &mut Rig<'_>, rx: f32, tx: f32, gaps: u64) -> Entity<ChartView> {
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).throughput().clone());
+    let chart = throughput(r);
     chart.update(r.vcx, |v, cx| {
         v.set_series_for_test(
             [
@@ -238,10 +256,11 @@ fn with_unit(unit: NetworkUnit) -> Settings {
 
 #[gpui_kit::test]
 fn net_chart_anatomy(cx: &mut TestAppContext) {
-    let r = open(cx, Settings::default(), system(1000));
-    let bounds = r.vcx.debug_bounds(THROUGHPUT_ID).expect("chart box");
+    let mut r = open(cx, Settings::default(), system(1000));
+    let id = throughput_id(&mut r);
+    let bounds = r.vcx.debug_bounds(id).expect("chart box");
     assert_eq!(bounds.size.height, px(240.));
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).throughput().clone());
+    let chart = throughput(&mut r);
     let (ids, labels) = r.vcx.read_entity(&chart, |v, _| {
         (
             v.series_ids().map(|s| s.metric).collect::<Vec<_>>(),
@@ -265,8 +284,8 @@ fn net_chart_anatomy(cx: &mut TestAppContext) {
 fn net_link_speed_scale(cx: &mut TestAppContext) {
     let mut settings = Settings::default();
     settings.performance.network_dynamic_scale = false;
-    let r = open(cx, settings, system(1000));
-    let chart = r.vcx.update(|_, cx| r.page.read(cx).throughput().clone());
+    let mut r = open(cx, settings, system(1000));
+    let chart = throughput(&mut r);
     let y = r.vcx.read_entity(&chart, |v, _| v.spec.y);
     assert_eq!(y, YScale::LinkSpeed(1_000_000_000.));
 
@@ -342,13 +361,8 @@ fn net_disconnected_shows_gap(cx: &mut TestAppContext) {
         .vcx
         .read_entity(&chart, |v, _| v.stroke_right_x())
         .expect("strokes");
-    let width = f32::from(
-        r.vcx
-            .debug_bounds(THROUGHPUT_ID)
-            .expect("chart box")
-            .size
-            .width,
-    );
+    let id = throughput_id(&mut r);
+    let width = f32::from(r.vcx.debug_bounds(id).expect("chart box").size.width);
     // The interface went down 5 s ago: the engine marked the last 5 samples invalid.
     let chart = feed(&mut r, 2. * MBPS, MBPS, 5);
     r.vcx.read_entity(&chart, |v, _| {

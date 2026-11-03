@@ -26,6 +26,7 @@ mod page_cpu_widgets;
 mod page_disk_widgets;
 mod page_gpu_widgets;
 mod page_mem_widgets;
+mod page_net_widgets;
 mod page_range;
 mod page_widgets;
 mod performance;

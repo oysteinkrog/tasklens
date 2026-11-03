@@ -369,8 +369,9 @@ fn device_pages_render_smoke(cx: &mut TestAppContext) {
     r.vcx.update(|_, cx| {
         let page = net.read(cx);
         assert_eq!(page.header().0.as_ref(), "enp38s0");
-        assert_eq!(page.throughput().read(cx).spec.series.len(), 2);
-        assert!(page.throughput().read(cx).spec.hover);
+        let chart = page.throughput(cx).expect("Throughput chart");
+        assert_eq!(chart.read(cx).spec.series.len(), 2);
+        assert!(chart.read(cx).spec.hover);
         assert_rows(
             page,
             &[
@@ -480,7 +481,7 @@ mod shared_range {
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
                 ns(&memory.read(cx).physical(cx).expect("physical chart")),
                 ns(&disk.read(cx).active_chart(cx).expect("active chart")),
-                ns(net.read(cx).throughput()),
+                ns(&net.read(cx).throughput(cx).expect("throughput chart")),
                 ns(&gpu.read(cx).memory(cx).expect("memory chart")),
                 ns(fan.read(cx).speed()),
                 cpu.read(cx).grid().view.read(cx).spec.range_ns / S,
