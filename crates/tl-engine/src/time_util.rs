@@ -76,6 +76,8 @@ mod tests {
     use crate::bridge::DRAIN_BUDGET;
 
     type Slot<T> = Arc<Mutex<Option<T>>>;
+    /// The wait's result and the virtual time it took.
+    type WaitSlot = Slot<(Result<(), WaitEnd>, Duration)>;
 
     /// The D-Bus `READ_TIMEOUT` that the kwin serve loop waits in.
     const LONG: Duration = Duration::from_secs(2);
@@ -96,11 +98,8 @@ mod tests {
     fn spawn_wait(
         lab: &mut LabRuntime,
         masked: bool,
-    ) -> (
-        Slot<(Result<(), WaitEnd>, Duration)>,
-        asupersync::runtime::TaskHandle<()>,
-    ) {
-        let out: Slot<(Result<(), WaitEnd>, Duration)> = Slot::default();
+    ) -> (WaitSlot, asupersync::runtime::TaskHandle<()>) {
+        let out = WaitSlot::default();
         let sink = Arc::clone(&out);
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task, handle) = lab
