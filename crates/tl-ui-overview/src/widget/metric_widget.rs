@@ -736,7 +736,7 @@ impl MetricWidget {
                 page: self.page,
             },
             y: src.y_scale(),
-            format: meta.format,
+            format: src.chart_format().unwrap_or(meta.format),
         })
     }
 

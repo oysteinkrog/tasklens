@@ -66,7 +66,7 @@ use tl_ui_base::i18n::{Strings, tr, tr_args};
 use tl_ui_base::settings_global::TlSettings;
 use tl_ui_base::template::Template;
 use tl_ui_chart::chart::labels::{NetFormat, format_value};
-use tl_ui_chart::chart::{ChartState, YScale};
+use tl_ui_chart::chart::{ChartState, ValueFormat, YScale};
 use tl_ui_chart::net_totals::NetTotal;
 use tl_ui_kit::components::validity::copy_text;
 use tl_ui_perf_core::core::DeviceKey;
@@ -809,6 +809,12 @@ impl SourceData {
         } else {
             0.
         })
+    }
+
+    /// The format of the chart's values and axis text: commit as a percent of the commit limit
+    /// (the 1.3.0 Commit chart, "112%" above the limit), else the metric's format.
+    pub fn chart_format(&self) -> Option<ValueFormat> {
+        self.meta.map(|m| m.stats_format(self.state.reading.total))
     }
 
     /// The chart's Y axis on this device.
