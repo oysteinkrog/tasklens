@@ -23,6 +23,9 @@ use super::{
 };
 use tl_ui_base::hub::{HostClock, SnapshotChanged, SnapshotHub};
 
+/// A `percent_of_axis` series scaled once: the raw view, the axis maximum (bits) and the result.
+type PercentScaled = (Arc<SeriesView>, u32, Arc<SeriesView>);
+
 pub struct ChartView {
     pub spec: ChartSpec,
     pub labels: ChartLabels,
@@ -51,7 +54,7 @@ pub struct ChartView {
     pub series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
     /// The scaled view of each `percent_of_axis` series: the raw view it came from, the axis
     /// maximum (bits) and the result.
-    percent_cache: Vec<Option<(Arc<SeriesView>, u32, Arc<SeriesView>)>>,
+    percent_cache: Vec<Option<PercentScaled>>,
     /// True when the range wants the 1 Hz tier but a series resolved to its fast view because
     /// the snapshot has no 1 Hz view for it (P1 engine). The chart then draws the last 60 s.
     pub tier_fallback: bool,
