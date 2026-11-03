@@ -1482,10 +1482,10 @@ mod optional {
         t.power_w = Metric::valid(12.5);
         publish_totals(&mut r, &t);
         assert_eq!(state(&mut r), ChartState::Live);
-        // With dedicated memory the GPU is a discrete card: its Unsupported power needs no
+        // With dedicated memory the GPU is a discrete card: its Restricted power needs no
         // setup, and the chart stays live.
         let mut d = full_totals();
-        d.power_w = Metric::with(Validity::Unsupported);
+        d.power_w = Metric::with(Validity::Restricted);
         publish_totals(&mut r, &d);
         assert_eq!(state(&mut r), ChartState::Live);
     }
