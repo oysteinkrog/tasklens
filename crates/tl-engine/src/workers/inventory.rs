@@ -19,11 +19,12 @@
 //! reducer merges the catalog device and the API versions (R-166). Disk serials, MACs and IP
 //! addresses are shown on screen only and never logged.
 //!
-//! On KDE each host scan also runs `kscreen-doctor -j` for the display rows (`kscreen.rs`). The
-//! GPU page and the Information tab ask for both `gpus` and `inventory`; when that pair turns on
-//! the loop scans even if another page already kept the inventory visible. While it is on, the
-//! loop checks the modification time of KWin's output config each turn and scans again when it
-//! changes.
+//! On KDE a host scan fills the display rows from `kscreen-doctor -j` (`kscreen.rs`). It runs on
+//! the first scan of a generation and on a KWin output config change, at most once a minute
+//! (`kscreen::Gate`); other scans reuse the kept result. The GPU page and the Information tab ask
+//! for both `gpus` and `inventory`; when that pair turns on the loop scans even if another page
+//! already kept the inventory visible. While it is on, the loop checks the modification time of
+//! KWin's output config each turn and scans again when the gate lets KScreen run.
 //!
 //! The Public IP row (PERF-060) is fetched only on `DeviceCommand::FetchPublicIp`, whatever the
 //! demand, never at start (R-139 item 5). The worker keeps the result across scans.
@@ -31,8 +32,8 @@
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
@@ -161,10 +162,20 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
         None
     };
     let proc_root = root.proc.clone();
-    let scan = move |bus: SystemBus| {
+    // The last `kscreen-doctor` result, a failed run too, reused until the gate runs it again.
+    let kept: Arc<Mutex<Option<Vec<KScreenOutput>>>> = Arc::default();
+    let scan = move |bus: SystemBus, run_kscreen: bool| {
         let raw = read_inventory(&paths);
         let mut snap = from_raw(&raw, &root);
-        let outputs = if host { kscreen::read(&env) } else { None };
+        let outputs = if host {
+            let mut kept = kept.lock().unwrap_or_else(PoisonError::into_inner);
+            if run_kscreen {
+                *kept = kscreen::read(&env);
+            }
+            kept.clone()
+        } else {
+            None
+        };
         add_devices(&mut snap, &raw, &root, host, outputs.as_deref());
         let version = shell.get_or_init(|| desktop_shell_version(&env)).clone();
         let user = user_name(&paths.etc.join("passwd"));
@@ -196,31 +207,40 @@ where
     F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
     G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
-    run_loop(cx, io, None, None, move |_| scan(), fetch_ip).await
+    run_loop(cx, io, None, None, move |_, _| scan(), fetch_ip).await
 }
 
-/// [`run_with`] that also scans when the modification time of `config` changes while a display
-/// surface is open, as the KWin output config does.
+/// [`run_with`] that watches the KWin output config `config` (`None` for Plasma 5) as the host
+/// worker does. `scan` gets true when the scan should run `kscreen-doctor` (`kscreen::Gate`).
 #[doc(hidden)]
 pub async fn run_with_watch<F, G>(
     cx: Cx,
     io: WorkerIo,
-    config: PathBuf,
+    config: Option<PathBuf>,
     scan: F,
     fetch_ip: G,
 ) -> Outcome<(), WorkerError>
 where
-    F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
+    F: Fn(bool) -> InventorySnapshot + Clone + Send + Sync + 'static,
     G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
-    run_loop(cx, io, None, Some(config), move |_| scan(), fetch_ip).await
+    run_loop(
+        cx,
+        io,
+        None,
+        config,
+        move |_, kscreen| scan(kscreen),
+        fetch_ip,
+    )
+    .await
 }
 
 /// The event loop. Each scan reads the system bus first when `bus_env` is `Some` (else the bus
 /// fields are `Failed`), then runs `scan` with the result as a blocking job. A `FetchPublicIp`
 /// command runs `fetch_ip` as a blocking job after this turn's scan. A display surface (`gpus` and
 /// `inventory` both set) opening starts a scan, and while one is open a new modification time of
-/// `watch` (the KScreen config) does too.
+/// `watch` (the KScreen config) does too once `kscreen::Gate` lets KScreen run. `scan` gets true
+/// when it should run `kscreen-doctor`.
 async fn run_loop<F, G>(
     cx: Cx,
     io: WorkerIo,
@@ -230,7 +250,7 @@ async fn run_loop<F, G>(
     fetch_ip: G,
 ) -> Outcome<(), WorkerError>
 where
-    F: Fn(SystemBus) -> InventorySnapshot + Clone + Send + Sync + 'static,
+    F: Fn(SystemBus, bool) -> InventorySnapshot + Clone + Send + Sync + 'static,
     G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
     let running = SourceUpdate::Health {
@@ -255,8 +275,8 @@ where
     // Kept across scans and copied into every snapshot.
     let mut public_ip = PublicIpState::NotFetched;
     let mut last_snap: Option<InventorySnapshot> = None;
-    // The modification time of `watch` at the last scan that checked it.
-    let mut config_mtime: Option<SystemTime> = None;
+    // When scans run `kscreen-doctor` (PERF-072).
+    let mut gate = kscreen::Gate::new(watch.is_some());
 
     loop {
         sleep(cx.now(), IDLE_RECHECK).await;
@@ -277,8 +297,7 @@ where
         was_display = display;
         // One `stat` per turn, only while a display surface is open (ADR-008).
         let watched = watch.as_deref().filter(|_| display);
-        let mtime = watched.and_then(kscreen::modified);
-        let config_changed = watched.is_some() && mtime != config_mtime;
+        let mtime = watched.map(kscreen::modified);
 
         let control = io.control.borrow_and_clone();
         // The newest `RefreshNow` seen while visible or `FetchPublicIp`, done once this turn's
@@ -307,9 +326,14 @@ where
         }
         drop(control);
 
+        let now = cx.now().as_nanos();
+        let run_kscreen = gate.due(now, mtime, refresh);
+        // A config change waits until the gate lets KScreen run.
+        let config_changed = mtime.is_some() && run_kscreen;
         if opened || display_opened || refresh || config_changed {
-            if watched.is_some() {
-                config_mtime = mtime;
+            if run_kscreen {
+                let seen = mtime.unwrap_or_else(|| watch.as_deref().and_then(kscreen::modified));
+                gate.ran(now, seen);
             }
             let bus = match &bus_env {
                 Some(env) => read_system_bus(&cx, env).await,
@@ -319,7 +343,7 @@ where
                 return Outcome::Ok(());
             }
             let job_scan = scan.clone();
-            let mut snap = match blocking(&cx, move || job_scan(bus)).await {
+            let mut snap = match blocking(&cx, move || job_scan(bus, run_kscreen)).await {
                 Ok(snap) => snap,
                 Err(stop) => return stop,
             };
