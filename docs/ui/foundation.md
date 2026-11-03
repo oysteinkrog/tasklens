@@ -18,9 +18,9 @@ All sizes are logical px at `ui_scale_pct = 100`. Every size is multiplied by
 view. GPUI applies the compositor scale on top; nothing in tl-ui reads `window.scale_factor()`
 except the chart geometry key and the text cache invalidation (ADR-009).
 
-Every component in section 2 is a Rust type in `crates/tl-ui/src/components/`. Component names
+Every component in section 2 is a Rust type in `crates/tl-ui-kit/src/components/`. Component names
 are stable: other files use them as written here. Each component file has a `#[cfg(test)]`
-module and a story entry in `crates/tl-ui/src/components/gallery.rs` (UI-FND-030) that shows every
+module and a story entry in `crates/tl-ui-kit/src/components/gallery.rs` (UI-FND-030) that shows every
 state, so a reviewer can check the look without the engine.
 
 ## 1. Tokens
@@ -140,7 +140,7 @@ Derived tints (computed once per theme switch into `TlTheme.derived`, never per 
 - **States**: not applicable (data).
 - **Data binding**: `TlTheme` global; `theme.active`, `theme.follow_system`, `theme.light`,
   `theme.dark` from table (a); `appearance.heat_intensity_pct`, `appearance.shadow_intensity_pct`.
-- **Build**: `crates/tl-ui/src/theme/{mod.rs, builtin.rs, derived.rs}`; `assets/themes/builtin.json`.
+- **Build**: `crates/tl-ui-base/src/theme/{mod.rs, builtin.rs, derived.rs}`; `assets/themes/builtin.json`.
   Parse with `gpui::Rgba::try_from(&str)` then `.into()` to `Hsla`.
 - **Performance**: all derived colours are computed in `TlTheme::rebuild_derived` on theme switch
   or intensity change. Views read fields; nothing calls a colour function per cell except
@@ -258,7 +258,7 @@ Non-colour `Theme` fields set by `apply`:
 - **Interaction**: none.
 - **Data binding**: runs on `TlTheme` replacement and on every `UiMetrics` change, inside
   `Theme::update(cx, |t| apply(&tl, &m, t))`.
-- **Build**: `crates/tl-ui/src/theme/map.rs`. One function, one match-free straight-line body.
+- **Build**: `crates/tl-ui-base/src/theme/map.rs`. One function, one match-free straight-line body.
   A comment at the top names the gpui-component commit the names were checked against. If a
   future kit version drops a name, the bead maps it to the nearest existing token and records that
   in the same comment (ADR-009).
@@ -274,7 +274,7 @@ Non-colour `Theme` fields set by `apply`:
 
 - **Implements**: ADR-009 "Metrics and scale" and "Fonts", R-020, R-077, R-017, APP-040, APP-058,
   brief shared vocabulary.
-- **Anatomy**: `UiMetrics` (GPUI `Global`, `crates/tl-ui/src/theme/metrics.rs`). Every field
+- **Anatomy**: `UiMetrics` (GPUI `Global`, `crates/tl-ui-base/src/theme/metrics.rs`). Every field
   below is a `Pixels` already multiplied by `ui_scale`, except the plain numbers marked "ratio".
 
 ```rust
@@ -379,7 +379,7 @@ Documentation, PPID link).
 - **Data binding**: `appearance.ui_scale_pct`, `appearance.row_height_pct`,
   `appearance.rounded_corners`, `appearance.shadow_intensity_pct`, `motion.*`,
   `App::reduce_motion()`.
-- **Build**: `crates/tl-ui/src/theme/metrics.rs` (`UiMetrics`, `TextSizes`, `IconSizes`,
+- **Build**: `crates/tl-ui-base/src/theme/metrics.rs` (`UiMetrics`, `TextSizes`, `IconSizes`,
   `hairline`), `components/focus.rs`, `components/icons.rs`. `UiMetrics::recompute(settings,
   window)` runs on a settings change or `window.scale_factor()` change, bumps `style_version`,
   clears `CellTextCache` and calls `theme::map::apply` (ADR-009).
@@ -1254,7 +1254,7 @@ Build:               …                                          label ends wit
   window with a `TlTabs` strip, one page per component above, each page listing every variant and
   state in both themes side by side (left half Default Dark, right half Default Light, by
   rendering two `TlTheme`-scoped subtrees), with reduced motion toggled by a `TlSwitch` at the top.
-- **Build**: `crates/tl-ui/src/components/gallery.rs`. The render tests in ADR-013 open the same
+- **Build**: `crates/tl-ui-kit/src/components/gallery.rs`. The render tests in ADR-013 open the same
   pages headless and compare against golden PNGs (`TL_UPDATE_GOLDEN=1` rewrites them).
 - **Tests**: `gallery::tests::every_component_has_a_page` (a const list checked against the
   module list).
@@ -1320,7 +1320,7 @@ Build:               …                                          label ends wit
 - **Anatomy**:
 
 ```rust
-// crates/tl-ui/src/theme/mod.rs
+// crates/tl-ui-base/src/theme/mod.rs
 pub struct TlTheme {
     pub name: Arc<str>, pub mode: ThemeMode, pub version: u64, pub builtin: bool,
     // 22 slots + accent + graph (ADR-009), plus:

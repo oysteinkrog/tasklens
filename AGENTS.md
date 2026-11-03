@@ -48,6 +48,29 @@ stop, leave the bead open, and report the question in your final message.
 - `cargo gclippy -- -D warnings` (that is `cargo clippy -p tl-app` without `--all-targets`) and
   `cargo build -p tl-app` are leader-gate commands. They replace the 2026-11-01 rule that lanes also
   run `cargo check -p tl-app` without features.
+- Area to crate (ADR-020). A lane runs `lclippy` and `ltest` for the crate it edits. Test binary names are
+  in the last column; `crates/<crate>/tests/<binary>/main.rs` holds the modules.
+
+  | Area | Crate | Test binary |
+  |---|---|---|
+  | UI settings and widget layout types | tl-ui-settings | fixture tests, no filter binary |
+  | Theme, i18n, hub, host, action tracker, shell types | tl-ui-base | `base` |
+  | Components (`Tl*`), actions, gallery | tl-ui-kit | `kit` |
+  | Chart | tl-ui-chart | `chart` |
+  | Tables, tree table, sys table helpers | tl-ui-table | `table` |
+  | Device keys, perf actions, minigraph, detached graph | tl-ui-perf-core | none (unit tests only) |
+  | Overview boxes, widgets | tl-ui-overview | `overview` |
+  | Performance page, device pages, mini window | tl-ui-perf | `perf` |
+  | Processes page and process windows | tl-ui-procs | `procs` |
+  | Services, Startup, Connections pages and their windows | tl-ui-sys | `sys` |
+  | Main window, app init, Information, Run, bench | tl-ui | `ui` |
+  | FakeEngine, render helpers; page host (dev crates) | tl-ui-testkit, tl-ui-pagehost | none |
+
+  Example for a kit edit: `heavy-build cargo lclippy -p tl-ui-kit -- -D warnings`, then
+  `heavy-build cargo ltest -p tl-ui-kit`. Tests take no `test-hooks` flag. One binary with a filter:
+  `heavy-build cargo ltest -p tl-ui-kit --test kit -- badge::`. The headless screenshot binaries
+  (`render`, in kit, chart, table, perf) need `--features render-tests`. A crate that depends on
+  another UI crate rebuilds when that crate changes, so use the same `-p` list in both commands.
 - The aliases pass `--locked`, which fails when Cargo.lock must change. A bead that changes
   dependencies runs plain `cargo` once to update Cargo.lock and commits it.
 - Bench and profiling builds use the `perf` profile (thin LTO, ADR-002). Packaging (PKGBUILD) still builds `--release`.

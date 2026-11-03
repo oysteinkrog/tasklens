@@ -40,7 +40,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   is not in the merged specs; it is listed in "Decided here".
 - Action names are GPUI `Action` types in the single `tasklens` namespace (shell.md rule). Page
   actions carry the page word in the name (`ServiceStart`, `StartupRunNow`, `ConnectionCloseTcp`)
-  and live in `crates/tl-ui/src/pages/<page>/actions.rs`. Menu items and keys dispatch the same
+  and live in the page's `actions.rs` (`crates/tl-ui-sys/src/pages/<page>/actions.rs`). Menu items and keys dispatch the same
   Action (widgets rule 10).
 - Snapshot component bits are written `ComponentMask::SERVICES`, `::STARTUP`, `::CONNECTIONS`,
   `::INVENTORY`, `::PROCESSES`, `::SYSTEM`, `::HEALTH`, `::DEVICES` (one bit per `Snapshot`
@@ -130,7 +130,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   - On first visit and on every tab activation the page sets its demand flag
     (`Demand.services`, `.startup`, `.connections`) through `DemandAggregator`, and clears it when
     the tab is left. On first visit it also sends `Command::RefreshNow(SourceId::…)` (ADR-005).
-- **Build**: one entity per page in `crates/tl-ui/src/pages/services.rs`, `startup.rs`,
+- **Build**: one entity per page in `crates/tl-ui-sys/src/pages/services.rs`, `startup.rs`,
   `connections.rs` (ADR-009). Each page owns an `Entity<TlTreeTable<…Delegate>>` and, for Services,
   the filter strip state. The page root is embedded with `.cached(size_full)`; the table body is not
   cached. Entities, subscriptions and focus handles are created in `new`.
@@ -192,7 +192,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | `row_tooltip` (600 ms on the Name cell) | Description, unit file path, "Manager: System" or "Manager: User" | Command and Location | all owner PIDs when shared (SYS-030) |
 
 - **Data binding**: reads `rows` and `query_generation` from the table's component.
-- **Build**: `crates/tl-ui/src/pages/sys_table.rs` holds the shared query sender and the
+- **Build**: `crates/tl-ui-table/src/table/sys_table.rs` holds the shared query sender and the
   generation check. Delegates return `HeaderLines::One` and `RowKind::GroupHeader`, `Unit`,
   `Process` (Services) or `Plain` (Startup Apps, Connections). Delegates live in each page file.
 - **Performance**: no sort, filter or allocation per frame in the UI. Delegates format through
@@ -248,7 +248,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: none. Tooltip on the Status cell of a service: "<ActiveState> (<SubState>)",
   for example "active (running)" (chosen).
 - **Data binding**: the record's status enum; never a string from the engine.
-- **Build**: `crates/tl-ui/src/table/cells.rs` `paint_status_cell(dot: DotStyle, label:
+- **Build**: `crates/tl-ui-table/src/table/cells.rs` `paint_status_cell(dot: DotStyle, label:
   &SharedString, color)`. Dot is a `div` with `rounded_full` (8 px) and `bg` or `border_1p5`.
   Labels are static `SharedString`s from the message catalogue, so no allocation per frame.
 - **Performance**: no allocation; labels are interned once per language.
@@ -349,7 +349,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   - TSV values use the cell text without validity glyphs: a glyph cell becomes empty (chosen).
 - **Data binding**: the selected records at command time (not at menu open), except
   `CopyCell`, which captures the clicked row and column at menu open.
-- **Build**: `crates/tl-ui/src/pages/sys_copy.rs` with one `fn block_<table>(record, &mut String)`
+- **Build**: `crates/tl-ui-table/src/table/sys_copy.rs` with one `fn block_<table>(record, &mut String)`
   per table. Writes with `cx.write_to_clipboard(ClipboardItem::new_string(..))`.
 - **Performance**: runs once per command; one `String` sized by `capacity = rows × 256`.
 - **Accessibility**: keyboard path exists for every copy command except "Copy" (cell), which needs
@@ -451,7 +451,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   then the table. Key context `ServiceTable` inside `Table`.
 - **Data binding**: `Snapshot.services: Arc<ServicesSnapshot>`, `ComponentMask::SERVICES`. The page
   sets `Demand.services = true` while the tab is active.
-- **Build**: `ServicesPage` entity in `crates/tl-ui/src/pages/services.rs`; fields
+- **Build**: `ServicesPage` entity in `crates/tl-ui-sys/src/pages/services.rs`; fields
   `table: Entity<TlTreeTable<ServicesDelegate>>`, `strip: ServiceFilterState`,
   `unit_types_menu_open: bool`, `first_data_seen: bool`, `_subs: Vec<Subscription>`.
 - **Performance**: ADR-008 resync every 60 s while visible; the UI work is one row rebuild per
@@ -994,7 +994,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   `ServicesSnapshot.details: Arc<FxHashMap<UnitRef, Arc<UnitDetails>>>`. The window re-renders on
   `ComponentMask::SERVICES` only when its own `UnitDetails` Arc changed (pointer compare).
 - **Build**: `ServicePropertiesWindow` entity in
-  `crates/tl-ui/src/windows/service_properties/{mod.rs, general.rs, logon.rs, recovery.rs,
+  `crates/tl-ui-sys/src/windows/service_properties/{mod.rs, general.rs, logon.rs, recovery.rs,
   dependencies.rs, logs.rs}`. A per-app registry `PropertiesWindows` holds open handles by
   `UnitRef` for focus-existing and the cap.
 - **Performance**: one window renders only when its unit's details change; the Logs tab has its
@@ -1363,7 +1363,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: key context `StartupTable` inside `Table`. Tab order: table only.
 - **Data binding**: `Snapshot.startup` (`ComponentMask::STARTUP`); `Demand.startup = true` while the
   tab is active (rescans and inotify stop when it is not, R-082).
-- **Build**: `StartupPage` in `crates/tl-ui/src/pages/startup.rs` with
+- **Build**: `StartupPage` in `crates/tl-ui-sys/src/pages/startup.rs` with
   `table: Entity<TlTreeTable<StartupDelegate>>`.
 - **Performance**: rows change only on rescans.
 - **Accessibility**: as tables.
@@ -1562,7 +1562,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: results "Startup entry deleted." / "Failed to delete startup entry" (spec) in the
   main window.
 - **Data binding**: `ActionKind::StartupDelete` (ADR-005, R-119).
-- **Build**: `crates/tl-ui/src/windows/confirm_startup_delete.rs` using `TlDialog`.
+- **Build**: `crates/tl-ui-sys/src/windows/confirm_startup_delete.rs` using `TlDialog`.
 - **Tests**: `delete_dialog_texts_per_type`; `delete_dialog_focus_on_cancel`;
   `delete_multi_skips_undeletable`.
 - **Phase**: P2.
@@ -1644,7 +1644,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: copy button copies that line's value; toast "Copied to clipboard". Esc and
   "Close" close. Ctrl+C with a line focused copies its value (chosen).
 - **Data binding**: the entry in `Snapshot.startup` by `StartupRef`; `ComponentMask::STARTUP`.
-- **Build**: `crates/tl-ui/src/windows/startup_properties.rs`.
+- **Build**: `crates/tl-ui-sys/src/windows/startup_properties.rs`.
 - **Performance**: re-renders only when its entry changes (pointer compare).
 - **Accessibility**: each copy button has the accessible name "Copy <label>".
 - **Tests**: `startup_props_lines_golden`; `startup_props_removed_title`; `startup_props_cap`.
@@ -1683,7 +1683,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Data binding**: `Snapshot.connections` (`ComponentMask::CONNECTIONS`) and `Snapshot.processes`
   (`::PROCESSES`) for owner names and icons. `Demand.connections = true` while the tab is active or
   a Connection Properties window is open.
-- **Build**: `ConnectionsPage` in `crates/tl-ui/src/pages/connections.rs` with
+- **Build**: `ConnectionsPage` in `crates/tl-ui-sys/src/pages/connections.rs` with
   `table: Entity<TlTreeTable<ConnectionsDelegate>>`.
 - **Performance**: one row rebuild per 2 s; visible cells only re-format when values change
   (`CellTextCache`). Addresses and states rarely change, so the hit rate stays high.
@@ -1912,7 +1912,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: as UI-SYS-050; the Process link jumps.
 - **Data binding**: the record in `Snapshot.connections` by cookie; `Demand.connections` stays on
   while any such window is open.
-- **Build**: `crates/tl-ui/src/windows/connection_properties.rs`.
+- **Build**: `crates/tl-ui-sys/src/windows/connection_properties.rs`.
 - **Performance**: renders at most every 2 s.
 - **Accessibility**: as UI-SYS-050.
 - **Tests**: `conn_props_closed_title`; `conn_props_tcp_lines_only_for_tcp`.
@@ -2002,7 +2002,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
   disk, GPU and adapter lists. While the tab is active: `Demand.inventory = true`,
   `Demand.memory = true` (available, committed), `Demand.gpus = true` (GPU temperature, chosen),
   `Demand.disks = true` (free space, chosen).
-- **Build**: `InformationPage` in `crates/tl-ui/src/pages/information.rs` owns one
+- **Build**: `InformationPage` in `crates/tl-ui/src/pages/information/mod.rs` owns one
   `Entity<InfoSection>` per section (`pages/information/section.rs`), each embedded with
   `.cached(..)`, so a 1 Hz change re-renders only the sections that show live values.
 - **Performance**: about 120 text rows in total. Static sections never re-render after load.

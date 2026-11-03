@@ -126,7 +126,7 @@ Plan keys are listed per epic below. The ID column is filled once the beads exis
    gpui-base) to the workspace pins and the tl-ui row. E15-003 is blocked on it.
 3. `pages/processes/columns_window.rs` cannot compile before E22-A1 creates
    `pages/processes/mod.rs`, and E22 depends on E18-A2: a cycle. Recommend the file lives at
-   `crates/tl-ui/src/table/columns_window.rs` (E18).
+   `crates/tl-ui-table/src/table/columns_window.rs` (E18).
 4. `TasklensUi::init` signature: ADR-009 gives `(cx, client, settings)`; the UI also needs state,
    themes text, persist callbacks, the AppRequest receiver and queued start-up toasts. Proposed
    `UiInit` above; B1 (E33) must match.

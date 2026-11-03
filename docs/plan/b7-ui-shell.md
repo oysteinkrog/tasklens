@@ -182,7 +182,7 @@ E21 depends only on anchors across epics. These are the places where E21 needs s
 
 ## E23 ui-process-windows
 
-Epic bead `tasklens-gma`. Covers UI-PWN-001 to UI-PWN-031 and UI-PWN-034 to UI-PWN-036 (UI-PWN-032 and 033 are E32), UI-SHL-097 and 098, UI-PRC-021, PROC-065 to PROC-067, PROC-069 (dialog side), PROC-074, PROC-075, PROC-077 to PROC-085, PROC-095, PROC-096, APP-014, APP-015, U-15 (noted in the Run bead). All code is in `crates/tl-ui/src/windows/` plus chain edits to `pages/processes/{menu,mod}.rs` (E22), `windows/mod.rs`, `app.rs` and `assets/locales/en-US.ftl` (E16). Tests: `tests/ui_props.rs`, `tests/ui_dialogs_process.rs`, `tests/ui_run.rs`, `tests/ui_handle_search.rs`.
+Epic bead `tasklens-gma`. Covers UI-PWN-001 to UI-PWN-031 and UI-PWN-034 to UI-PWN-036 (UI-PWN-032 and 033 are E32), UI-SHL-097 and 098, UI-PRC-021, PROC-065 to PROC-067, PROC-069 (dialog side), PROC-074, PROC-075, PROC-077 to PROC-085, PROC-095, PROC-096, APP-014, APP-015, U-15 (noted in the Run bead). All code is in `crates/tl-ui-procs/src/windows/` (Run and low-memory in `crates/tl-ui/src/windows/`) plus chain edits to `crates/tl-ui-procs/src/pages/processes/{menu,mod}.rs` (E22), `windows/mod.rs`, `app.rs` and `assets/locales/en-US.ftl` (E16). Tests: `tests/ui_props.rs`, `tests/ui_dialogs_process.rs`, `tests/ui_run.rs`, `tests/ui_handle_search.rs`.
 
 Anchor layout: E23-A1 is the `PropsWindow` integration bead (it closes after the frame, actions, filter and General layout beads). E23-A2 is `windows/signal.rs` and depends on the Set Affinity and Custom priority beads, so when it closes all three dialog files exist. E23-A3 is `windows/notices.rs` with the VirusTotal flow; the P3 dump toasts extend it later.
 

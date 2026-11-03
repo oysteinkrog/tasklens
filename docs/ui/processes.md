@@ -35,7 +35,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   53 physical px, so 1 logical px at `row_h` 28 ≈ 1.9 physical px) and
   `tasklens-ref/evidence-frames/advanced-02.png`, `advanced-11.png`, `customize-28.png`. Each
   value says "measured", "spec" or "decided".
-- Every GPUI `Action` named here lives in `crates/tl-ui/src/pages/processes/actions.rs` (except the shell actions `ToggleHideSystem`, `CycleViewMode`, `SetViewMode`, `FocusFilter`, `ClearFilter` and `StartFilter`, which E20 declares in `window/actions.rs` and this page imports, R-179), namespace
+- Every GPUI `Action` named here lives in `crates/tl-ui-procs/src/pages/processes/actions.rs` (except the shell actions `ToggleHideSystem`, `CycleViewMode`, `SetViewMode`, `FocusFilter`, `ClearFilter` and `StartFilter`, which E20 declares in `window/actions.rs` and this page imports, R-179), namespace
   `tasklens`, and is dispatched identically from key binding, menu item and toolbar button
   (table b, rule "one command, one Action").
 - "Phase" uses P0 to P4 as in the merged spec (R-072).
@@ -95,7 +95,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     scrollbar at all times).
   - Horizontal scrollbar: same style, 16 high, shown only when the total column width exceeds the
     viewport width; header and body share one `x_offset: Pixels`.
-- **Delegate trait** (`crates/tl-ui/src/table/tree_table.rs`):
+- **Delegate trait** (`crates/tl-ui-table/src/table/tree_table.rs`):
 
   ```rust
   pub trait TreeTableDelegate: 'static {
@@ -151,7 +151,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Data binding**: generic; the delegate reads a snapshot component. The table re-renders when
   the delegate calls `cx.notify()`; the process delegate does so on `ComponentMask::PROCESSES`
   changes and on `ProcessTableView.query_generation` match (UI-PRC-002).
-- **Build**: custom element tree. File `crates/tl-ui/src/table/tree_table.rs` (element and entity),
+- **Build**: custom element tree. File `crates/tl-ui-table/src/table/tree_table.rs` (element and entity),
   `table/columns.rs` (`ColumnLayout`, `ColumnSpec`, templates, widths), `table/selection.rs`,
   `table/cells.rs` (cell painters), `table/header.rs`. Cached: `CellTextCache`
   (`text_cache.rs`), per-column x offsets `Arc<[Pixels]>` (rebuilt on layout change), the
@@ -267,7 +267,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   filter and expansion changes with a new `generation`; shows a view only when
   `query_generation` equals the last sent, else keeps the previous rows (ADR-009). Re-renders on
   `ComponentMask::PROCESSES | WINDOWS | SETTINGS`.
-- **Build**: `crates/tl-ui/src/pages/processes/table.rs` (`ProcessTableDelegate`), rows drawn
+- **Build**: `crates/tl-ui-procs/src/pages/processes/table.rs` (`ProcessTableDelegate`), rows drawn
   by `table/cells.rs`. Icons through `img(path)` for app and process icons (rasterized once per
   size by GPUI), Lucide through `gpui_kit_assets::IconName`. Cached: `CellTextCache` keyed by
   `(NodeId, ColumnId)`; the Name cell caches `(primary SharedString, secondary SharedString)` per
@@ -482,7 +482,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   [columns.processes]`, `[sort.processes]`; writes both through `on_columns_changed` and
   `on_sort` (atomic save, 500 ms debounce, ADR-011). Re-renders on `PROCESSES` (totals) and
   layout changes.
-- **Build**: `crates/tl-ui/src/table/header.rs::TlTreeTableHeader` custom element: one
+- **Build**: `crates/tl-ui-table/src/table/header.rs::TlTreeTableHeader` custom element: one
   `canvas` painting fills, dividers, arrows and the insertion line with `paint_quad` and
   `paint_svg`, plus one text `div` per line per column; hitboxes per cell and per boundary
   (`insert_hitbox`). Drag state in `with_element_state`. The header is `.cached()` as part of the
@@ -601,7 +601,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   availability), `[columns.<table>]`; the window is bound to the table that opened it and its
   title stays "tasklens Columns" (the list heading shows the table name as the first line, `t_sm`
   `text_secondary`: "Processes table").
-- **Build**: `crates/tl-ui/src/table/columns_window.rs` (table-generic, owned by E18; R-181), a `TlSecondaryWindow` whose content is
+- **Build**: `crates/tl-ui-table/src/table/columns_window.rs` (table-generic, owned by E18; R-181), a `TlSecondaryWindow` whose content is
   a `uniform_list` of 28 px rows (headings are rows too) with `TlCheckbox` children; filter via
   `TlTextInput` with 100 ms debounce.
 - **Performance**: 96 rows at most; trivial.
@@ -660,7 +660,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   only (narrowest entity).
 - **Data binding**: `NodeId` identities from `ProcessTableView.rows`; `row_index` map for
   gesture arithmetic; nothing is persisted.
-- **Build**: `crates/tl-ui/src/table/selection.rs` (pure logic, unit-tested without GPUI) and the
+- **Build**: `crates/tl-ui-table/src/table/selection.rs` (pure logic, unit-tested without GPUI) and the
   row mouse handlers in `tree_table.rs` (`on_mouse_down` with `event.modifiers`, `click_count`
   for double-click).
 - **Performance**: O(visible rows) fill checks per frame; range selection O(range).
@@ -1414,7 +1414,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   query on mode entry, on every scrub change (debounced to one in flight: a new scrub while a
   query is pending replaces the pending request, decided), on range change and every second
   while live. Re-render on `ComponentMask::HISTORY`.
-- **Build**: `crates/tl-ui/src/pages/processes/history/{mod.rs, table.rs, scrubber.rs,
+- **Build**: `crates/tl-ui-procs/src/pages/processes/history/{mod.rs, table.rs, scrubber.rs,
   minimap.rs, legend.rs}`; the header line is a `div`; strip and minimap are custom elements
   (ADR-009 chart element family).
 - **Performance**: scrub queries are rate-limited by the one-in-flight rule; the strip redraws

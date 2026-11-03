@@ -467,6 +467,24 @@ Aggregator files (`lib.rs`, `mod.rs`, root `Cargo.toml` members, `xtask` dispatc
 (`#[cfg(test)]`) unless a `tests/` file is listed; `tests/` files belong to the owner of the code
 they cover. When an earlier bead's struct needs a field, variant, arm, parameter or re-export whose type a later bead creates, the earlier bead leaves an insertion comment and the later bead adds it to that file as a named chain edit (R-262).
 
+**Paths after the crate split (ADR-020, plan `docs/plan/crate-split.md`).** The rows below keep the
+`tl-ui/src/...` paths they were written with. Read a path under `tl-ui/src/` through this map. A
+file keeps its name and its place under the new crate's `src/`; ownership by epic does not change.
+
+| Old path under `crates/tl-ui/src/` | Crate now |
+|---|---|
+| `theme/`, `text/`, `i18n.rs`, `hub.rs`, `demand.rs`, `anim.rs`, `action_tracker.rs`, `host*.rs`, `registry.rs`, `app_env.rs` (was in `app.rs`), `shell.rs`, `engine_link.rs` | `tl-ui-base` |
+| `components/`, `actions.rs`, `helper_flow.rs` | `tl-ui-kit` |
+| `chart/`, `net_totals.rs` | `tl-ui-chart` |
+| `table/`, `text_cache.rs`, `pages/sys_table.rs`, `pages/sys_copy.rs` | `tl-ui-table` (the sys files under `table/`) |
+| `pages/minigraph/`, `windows/detached_graph.rs`, `tray_bridge.rs`, `pages/performance/{actions,details,core_clocks}.rs` | `tl-ui-perf-core` (the performance files under `core/`) |
+| `pages/performance/{overview,widget}/`, `memory_apps.rs` (under `overview/`) | `tl-ui-overview` |
+| the other `pages/performance/` files, `windows/mini.rs` | `tl-ui-perf` (under `performance/`) |
+| `pages/processes/`, `windows/{props/,app_props,affinity,priority,signal,handle_search,notices,actions,disk_in_use,frame}` | `tl-ui-procs` |
+| `pages/{services,connections,startup}/`, `windows/{service_properties/,connection_properties,startup_properties,confirm_startup_delete}` | `tl-ui-sys` |
+| `window/`, `app.rs`, `pages/information/`, `windows/{run,run_history,low_memory,smart}`, `bench/` | `tl-ui` (the shell, stays) |
+| `tl-model` `settings.rs` UI half, `layout*.rs` | `tl-ui-settings` |
+
 ### Repository root
 
 | Path | Owner | Rule |
@@ -1306,7 +1324,7 @@ E09-030, E15-026, E18-017, E20-029, plus the E26 `AddRandomMinigraphs` bead (R-2
 
 4. **Settled, R-132. Fluent is not in `tl-ui`'s allowed row and the catalogue layout is undefined.** APP-043
    fixes `fluent-bundle` and `unic-langid` with embedded `.ftl` files. Recommendation: add both
-   to `tl-ui`'s row and the workspace pins; `tl-ui/src/i18n.rs` (E16-A1) exposes `tr(key)` and
+   to `tl-ui`'s row and the workspace pins; `crates/tl-ui-base/src/i18n.rs` (E16-A1) exposes `tr(key)` and
    `tr_args(key, args)` returning `SharedString`, with a `Strings` Global and `strings_version`;
    `assets/locales/en-US.ftl` is one file that every epic appends to by chain edit, keys named
    `<area>-<entry>-<slug>` (for example `processes-menu-end-task`). The locale list comes from

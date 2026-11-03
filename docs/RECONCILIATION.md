@@ -811,7 +811,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-133 Process-windows Actions use the `tasklens` namespace
 - Sources in conflict: process-windows.md conventions say `actions!(tl_pwn, [...])`; R-128 fixes one namespace, `tasklens`.
-- Resolution: `crates/tl-ui/src/windows/actions.rs` declares its Actions in `tasklens` with the prefixes `Props`, `Affinity`, `Priority`, `Signal`, `Run` and `HandleSearch`.
+- Resolution: `crates/tl-ui-procs/src/windows/actions.rs` declares its Actions in `tasklens` with the prefixes `Props`, `Affinity`, `Priority`, `Signal`, `Run` and `HandleSearch`.
 - Rule: R-128.
 - Edits: process-windows.md conventions.
 
@@ -1160,7 +1160,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-181 The column picker file lives in `table/` (OI-U11)
 - Question: 00-epics section 2 puts `pages/processes/columns_window.rs` under E18, but that directory is created by E22-A1, which depends on E18-A2. Raised by B5-3.
-- Resolution: `crates/tl-ui/src/table/columns_window.rs`, owned by E18-A2. The picker is table-generic.
+- Resolution: `crates/tl-ui-table/src/table/columns_window.rs`, owned by E18-A2. The picker is table-generic.
 - Basis: 00-epics section 2, R-106 [verified].
 - Edits: 00-epics section 2 (E18 `src/table/...` row); UI-PRC-007 Build line.
 
@@ -1666,7 +1666,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-263 `GraphColor` is one type, owned by E26-001
 - Question: E21-032 (`bj6.35`) defines `pub enum GraphColor` (18 variants, `as_str`, `from_str`, `label`) in `window/menubar.rs`; E26 (`xdh.3`, `xdh.4`, `xdh.5`, `xdh.7`) uses a `GraphColor /* Accent | Named(AccentName) */` of another shape. Leader entry, 2026-10-04.
-- Resolution: one type, `pub enum GraphColor { Accent, Coral, Orange, Amber, Yellow, Lime, Green, Mint, Teal, Cyan, Blue, Indigo, Violet, Lavender, Fuchsia, Pink, Rose, Slate }` with `as_str` (`"accent"` or the lower-case name, the stored value of R-083), `from_str` and `label`, defined in `crates/tl-ui/src/pages/minigraph/mod.rs` by E26-001 (`xdh.3`, P1). E21-032 (`bj6.35`, P3) imports it and keeps `graph_color_menu`; it depends on `xdh.3`. E26 texts say `GraphColor::Coral` and so on, not `Named(..)`.
+- Resolution: one type, `pub enum GraphColor { Accent, Coral, Orange, Amber, Yellow, Lime, Green, Mint, Teal, Cyan, Blue, Indigo, Violet, Lavender, Fuchsia, Pink, Rose, Slate }` with `as_str` (`"accent"` or the lower-case name, the stored value of R-083), `from_str` and `label`, defined in `crates/tl-ui-perf-core/src/minigraph/mod.rs` by E26-001 (`xdh.3`, P1). E21-032 (`bj6.35`, P3) imports it and keeps `graph_color_menu`; it depends on `xdh.3`. E26 texts say `GraphColor::Coral` and so on, not `Named(..)`.
 - Basis: UI-SHL-085, R-083, R-231 [verified].
 - Edits: beads xdh.3, xdh.5, bj6.35; edge bj6.35 on xdh.3.
 
@@ -1704,7 +1704,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Question: E17-002 (`tasklens-lgw.4`) ships Default Dark with `text_secondary` `#6C7072` (TaskSlinger's value, marked "plan" in UI-FND-001), but its own `contrast_floor` test needs every text pair at 4.5:1 or above. `#6C7072` on `list_bg` and `window_bg` (`#191B1D`) is 3.45:1. Secondary text is also drawn on alternate rows, headers, menus, toolbars, inputs and the title bar. Leader decision, 2026-10-04.
 - Resolution: Default Dark `text_secondary` is `#959A9C`. It keeps the hue of `#6C7072` and is the lightest grey on that hue that reaches 4.5:1 on every Dark background: 4.54:1 on `header` (`#2E3235`), 4.81:1 on `menu_bg`, 5.82:1 on `row_alt`. The 4.5:1 floor (UI-FND-043, R-122) stays the rule for every pair, with no exemption. `contrast_floor` checks `text_secondary` against every background slot in both themes, not only `list_bg` and `window_bg`. TaskSlinger fidelity for this one slot gives way to legibility. The checked backgrounds are `list_bg`, `window_bg`, `row_alt`, `row_hover`, `header`, `menu_bg`, `toolbar`, `input`, `input_focus`, `tab_bg`, `titlebar` and `tab_hover`. `menu_hover` is left out because a hovered menu item draws its shortcut text in `text_primary` (UI-FND menu states), and `row_selected` uses `text_selected_secondary`. Default Light `text_secondary` moves one step darker, from `#5F666B` to `#5E656A`, because `#5F666B` is 4.44:1 on Light `header` (`#DDE1E5`); `#5E656A` is at least 4.51:1 on every Light background.
 - Basis: the lgw.4 contrast test and the agent's measurements on all Dark backgrounds [verified]; WCAG 2 contrast formula [verified by computation].
-- Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; `assets/themes/builtin.json` and `crates/tl-ui/src/theme/builtin.rs` (bead lgw.4, follow-up commit).
+- Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; `assets/themes/builtin.json` and `crates/tl-ui-base/src/theme/builtin.rs` (bead lgw.4, follow-up commit).
 
 ### R-270 `FourTuple` keeps the IPv6 scope id over the helper wire
 - Question: E03-070 (`tasklens-as2.36`) needs a round trip of `FourTuple` with an IPv6 scope id. serde's built-in `SocketAddrV6` writes only (ip, port) in binary formats such as postcard and reads the scope id back as 0 (serde_core 1.0.229). A link-local `SockDestroy` would then lose its interface on the way to the helper. Leader decision, 2026-10-04.
@@ -1734,7 +1734,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Question: E17-004 (`tasklens-lgw.6`) must check every kit token name in its mapping against the gpui-kit 0.7.0 source and say what happens to kit fields the mapping does not name.
 - Resolution: every `ThemeColor` field the mapping names exists in gpui-component 0.7.0 `src/theme/theme_color.rs`, so `theme/map.rs` has no substitutions. One kit field, `list_head`, is neither mapped nor in the bead's "left at the kit default" list; it stays at the kit default through the reset line, like `table_foot`. Note for the caller of `map::apply` (the theme store): `Theme::update` reloads the kit's registered theme config when `mode` changes inside the closure, which overwrites the mapped colours. A mode switch must therefore set `mode` in one `Theme::update` and run `map::apply` in a second one, or write through `Theme::global_mut` and then call `Theme::sync_base` and refresh the windows.
 - Basis: gpui-component 0.7.0 `src/theme/theme_color.rs` and `src/theme/mod.rs` (`Theme::update`, `Theme::edit`) [verified by the lgw.6 agent]; `every_mapped_field_is_set` test.
-- Edits: `crates/tl-ui/src/theme/map.rs`; U-8 row below.
+- Edits: `crates/tl-ui-base/src/theme/map.rs`; U-8 row below.
 
 ### R-275 Intel xe fdinfo memory regions
 - Question: PERF-064 names the fdinfo regions `local0` and `system0`, which are i915's names. The xe driver names its regions after its TTM placements, so an xe client reports `drm-total-system` and, on a dGPU, `drm-total-vram0` (the `drm-basic` fixture's xe client uses `drm-total-system`). E06-023 (`tasklens-hx1.26`) would then give `None` for xe memory. Leader decision, 2026-10-04.

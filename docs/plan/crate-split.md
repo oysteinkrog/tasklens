@@ -1,6 +1,8 @@
 # tasklens crate split plan
 
-Status: planned 2026-11-01. Oystein approved the full split, to run before the phase 3 widget work
+Status: done 2026-11-03. Measured results are in `docs/plan/crate-split-results.md`. The plan below is kept as written; ADR-020 in `docs/ARCHITECTURE.md` holds the final layout and rules.
+
+Planned 2026-11-01. Oystein approved the full split, to run before the phase 3 widget work
 (epic tasklens-hzire, on hold). Beads: 49, keys CS-A1 to CS-I3 (section letters below). Rules for
 the new layout go in ADR-020 (bead CS-A1).
 

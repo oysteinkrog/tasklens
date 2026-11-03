@@ -1111,7 +1111,7 @@ pub enum JournalAccess { All, OwnOnly }
 pub enum JournalError { NotFound, Timeout, Exit { code: i32, stderr_first_line: Arc<str> } }
 ```
 
-`tl-engine::EngineHandle` implements it. `tl-ui` tests use `tl-ui/src/testing/fake_engine.rs`.
+`tl-engine::EngineHandle` implements it. `tl-ui` tests use `crates/tl-ui-testkit/src/fake_engine.rs`.
 
 **Engine to UI, latest state.**
 
@@ -1128,7 +1128,7 @@ match wake_tx.try_send(()) {
 }
 ```
 
-**UI receiver** (`tl-ui/src/hub.rs`, entity `SnapshotHub`, one per app):
+**UI receiver** (`crates/tl-ui-base/src/hub.rs`, entity `SnapshotHub`, one per app):
 
 ```rust
 cx.spawn(async move |this, cx| {
@@ -1277,7 +1277,7 @@ Event order per request: `Started` (or a single `Rejected`), then for each targe
 
 Dumps report progress through action events, on every host (ADR-018): while a dump runs, the engine reads the size of its output file every 500 ms and sends `Progress { bytes }` for that target. A progress event never waits for room in the queue; one that does not fit is dropped. The request carries only the file name; the engine joins it to its own `<state_dir>/dumps/`, refuses a name with a path separator or `..`, and ends the target with `Saved(full path)`, which a one-target dump's summary keeps. A path on a host is always chosen by that host's engine. The UI never reads the file (UI-PWN-034). Service jobs have no client-side timeout (SYS-005); every other action keeps the ADR-006 deadlines.
 
-**UI handling.** `ActionTracker` (entity in `tl-ui/src/action_tracker.rs`, R-129) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
+**UI handling.** `ActionTracker` (entity in `crates/tl-ui-base/src/action_tracker.rs`, R-129) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
 
 ### Consequences
 
@@ -1691,26 +1691,33 @@ GPUI and KIT notes: `DataTable` has single, index-based selection, no tree rows,
 
 ### Decision
 
-**Entity structure** (`crates/tl-ui/src/`):
+**Entity structure** (after the crate split, ADR-020; each line names the crate that holds the file):
 
 ```text
-app.rs            tl_ui::run(UiLaunch) -> UiExit; TasklensUi::init(cx, client: Arc<dyn EngineClient>, init: UiInit); AppEnv Global (R-153, R-171)
-hub.rs            SnapshotHub (Entity, one per app)
-demand.rs         DemandAggregator (Entity, one per app)
-anim.rs           AnimationDriver (Entity, one per window)
-action_tracker.rs ActionTracker (Entity, one per app) (R-129)
-actions.rs        window-level GPUI Actions and bind_keys_global; table/actions.rs and pages/<page>/actions.rs hold the rest
-i18n.rs           Fluent strings: tr(key), tr_args(key, args), Strings Global, strings_version; catalogue assets/locales/en-US.ftl (R-132)
-theme/            TlTheme, built-in themes, mapping onto gpui-kit Theme
-window/main.rs    MainWindow (Entity): title bar, tab strip, active page, status bar
-pages/performance/{mod.rs, sidebar.rs, cpu.rs, memory.rs, gpu.rs, disk.rs, net.rs, sensors.rs}
-pages/processes/{mod.rs, table.rs, header.rs, filter.rs, menu.rs}
-pages/{services.rs, startup.rs, connections.rs, information.rs}
-chart/{element.rs, view.rs, geometry.rs, grid.rs, scale.rs}
-table/{tree_table.rs, columns.rs, columns_window.rs, selection.rs, cells.rs, actions.rs}   # the column picker is table-generic (R-181)
-text_cache.rs
-testing/fake_engine.rs
+tl-ui          app.rs            tl_ui::run(UiLaunch) -> UiExit; TasklensUi::init(cx, client: Arc<dyn EngineClient>, init: UiInit) (R-153, R-171)
+tl-ui          window/main.rs    MainWindow (Entity): title bar, tab strip, active page, status bar
+tl-ui          pages/information/  InformationPage
+tl-ui          windows/{run, run_history, low_memory, smart}.rs, bench/
+tl-ui-base     hub.rs            SnapshotHub (Entity, one per app)
+tl-ui-base     demand.rs         DemandAggregator (Entity, one per app)
+tl-ui-base     anim.rs           AnimationDriver (Entity, one per window)
+tl-ui-base     action_tracker.rs ActionTracker (Entity, one per app) (R-129)
+tl-ui-base     i18n.rs           Fluent strings: tr(key), tr_args(key, args), Strings Global, strings_version; catalogue assets/locales/en-US.ftl (R-132)
+tl-ui-base     theme/            TlTheme, built-in themes, mapping onto gpui-kit Theme
+tl-ui-kit      actions.rs        window-level GPUI Actions and bind_keys_global; table/actions.rs and each page's actions.rs hold the rest
+tl-ui-kit      components/       Tl* components, gallery.rs
+tl-ui-chart    chart/{element.rs, view.rs, geometry.rs, grid.rs, scale.rs}
+tl-ui-table    table/{tree_table.rs, columns.rs, columns_window.rs, selection.rs, cells.rs, actions.rs}   # the column picker is table-generic (R-181)
+tl-ui-table    text_cache.rs
+tl-ui-perf-core  core/ (device keys, actions, details), minigraph/
+tl-ui-overview overview/, widget/
+tl-ui-perf     performance/{mod.rs, page.rs, sidebar.rs, cpu.rs, memory.rs, gpu.rs, disk.rs, net.rs, sensors.rs, page_flow/}
+tl-ui-procs    pages/processes/{mod.rs, table.rs, header.rs, filter.rs, menu.rs}, windows/{props/, affinity.rs, priority.rs, ...}
+tl-ui-sys      pages/{services, startup, connections}/, windows/{service_properties/, connection_properties.rs, ...}
+tl-ui-testkit  fake_engine.rs, render.rs (dev only)
 ```
+
+Crate roots are `crates/<crate>/src/`. The ADR-020 table lists every file and its crate.
 
 - Six tabs, in TaskSlinger's order and with these labels: Processes, Performance, Services, Startup Apps, Connections, Information. History is a mode of the Processes tab, not a tab; the tab label reads "History" while it is on. There are no Users, Details or App history tabs. A tab that is not built yet is not shown.
 - Page entities are created on first visit and kept. Only the active page renders (`match` in `MainWindow::render`).
@@ -2190,7 +2197,7 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 | Performance gates | `cargo xtask bench` | see ADR-014 | no; owner machine |
 | Static checks | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check-deps` | | yes |
 
-The FakeEngine row holds: those tests need no feature flag. The per-crate binaries arrive as each crate is extracted (CS-F1 to CS-F9). Until a crate has its own binary, its tests stay modules of the one `crates/tl-ui/tests/ui/` binary (`cargo test -p tl-ui --test ui`).
+The FakeEngine row holds: those tests need no feature flag. Each tl-ui crate has its own binary (CS-F1 to CS-F9): `base`, `kit`, `chart`, `table`, `overview`, `perf`, `procs` and `sys`. The shell binary `ui` (`cargo test -p tl-ui --test ui`) keeps the tests that need the shell. tl-ui-perf-core has no integration tests.
 
 `scripts/ci.sh` runs the CI rows in order. A GitHub Actions workflow on the private repo calls it on `ubuntu-latest` with the pinned toolchain.
 
@@ -2854,7 +2861,7 @@ A flow layout has `preset = { id = "chart_engines", arrange = "auto", split = 0.
 - The old keys of the GPU box's grid entry are kept as loaded and written back unchanged, and a build with an `overview.gpu` entry ignores them. So an older build that drops `[[performance.layouts]]` still shows the old mode. Every other box keeps using its old keys. The one exception is a reset to the default ("Editing", Reset): it removes them.
 - Before the first save after a load that converted a container, `tl-app` (`settings_store.rs`) copies the current `settings.toml` to `settings.toml.pre-layouts-v1` in the same directory, mode `0600`, unless that file already exists. `Settings::clamp` reports the conversion with the key `LAYOUTS_CONVERTED_KEY = "performance.layouts.converted"`, which the load step logs with `info!` and does not show as a clamped value.
 
-**Metric metadata** (`tl-ui/src/pages/performance/widget/meta.rs`, `MetricMeta`, one entry per metric key). Each entry gives: the unit; the `ValueFormat`; the chart `YScale`; gauge or counter; the bar's denominator (`BarMax::Fixed(100.)`, `BarMax::Total(fn)` from the device record, or `BarMax::None`); and the stats rule (`StatsRule::MinAvgPeak` or `StatsRule::None`). The forms a metric offers follow from it: `bar` only with a denominator, `stats` only with a stats rule. Phase 1 entries:
+**Metric metadata** (`crates/tl-ui-overview/src/widget/meta.rs`, `MetricMeta`, one entry per metric key). Each entry gives: the unit; the `ValueFormat`; the chart `YScale`; gauge or counter; the bar's denominator (`BarMax::Fixed(100.)`, `BarMax::Total(fn)` from the device record, or `BarMax::None`); and the stats rule (`StatsRule::MinAvgPeak` or `StatsRule::None`). The forms a metric offers follow from it: `bar` only with a denominator, `stats` only with a stats rule. Phase 1 entries:
 
 | Key | Format | Scale | Kind | Bar max | Stats |
 |---|---|---|---|---|---|
@@ -2867,7 +2874,7 @@ A flow layout has `preset = { id = "chart_engines", arrange = "auto", split = 0.
 
 A counter (later phases, for example energy) offers no bar and no stats; its value is the running total. `MinAvgPeak` covers the box range (`performance.overview_range`) with the figures UI-PRF-055 gives box titles: the valid samples of the live series for 1 min and 5 min, the `DeviceHistory` points (min of the mins, mean of the means, max of the maxes) for 1 h, 24 h and 7 d. With no valid sample in the range the stats text is empty, as in the box titles. The text uses the existing string `perf-overview-figures` ("min {$min}  avg {$avg}  peak {$peak}").
 
-**Entities and data flow** (`tl-ui/src/pages/performance/widget/`):
+**Entities and data flow** (`crates/tl-ui-overview/src/widget/`):
 
 - `MetricWidget` (`metric_widget.rs`) is one GPUI entity per widget, keyed by its widget id. It owns its `ChartView` when it shows a chart, picks its composition from its forms and size (`compose.rs`), formats its text only when the value, stats or bar bucket changed, and notifies only then.
 - `SourceData` (`source.rs`) is one entity per source in use. It resolves the `SourceSelector` to a `SeriesId` from the device catalog (again only when the catalog changes), subscribes to `SnapshotHub`, and on a snapshot whose series version changed it updates the current value and the stats and notifies. Each `MetricWidget` observes its `SourceData`. Widgets on the same source share one `SourceData`, so history is read and stats are computed once per data revision. Everything `SourceData` derives that a widget reads (reading, vendor, device, series, network total, minus list) and every input its text is formatted from (key, followed settings, strings version) lives in one `SourceState` with `PartialEq`, and an update compares the whole state before and after, never single fields, so a new derived field cannot be left out of the notify decision. `SourceStore` (one per Overview page) maps selectors to `SourceData` entities and drops an entry when no widget uses it.
@@ -2878,7 +2885,7 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 - Hidden widgets do no work. A widget that takes no space (a metric the device does not report, an empty slot, a widget cut by a fit rule) has no entity. A `SourceData` with no observer is dropped, and nothing reads a source while the Overview page is not shown (the demand part is withdrawn, as today).
 - **Render contract.** UI-PRF-017 and UI-PRF-019 still hold. GPUI marks every ancestor of a notifying view dirty (crw.34), so a widget's notify can make the container and page render once in that frame. A view GPUI re-renders also re-renders its cached children (`window.refreshing`, gpui-pre 0.3.7 `view.rs`), so the other widgets in the container can render once too. Each of these renders does fixed work: it reads no snapshot, formats nothing and builds no geometry; a widget that did not notify draws the text it already holds. The gate is therefore: on a sample, the page and the container never notify, no widget entity is created or dropped, and only the widgets on a changed source notify.
 
-**Flow placement** (`tl-ui/src/pages/performance/overview/gpu_flow.rs`). A flow layout is placed by its preset's rules, which are the GPU box rules of UI-PRF-017, UI-PRF-019 and UI-PRF-059 with the fixed engine lists replaced by the widget list:
+**Flow placement** (`crates/tl-ui-overview/src/overview/gpu_flow.rs`). A flow layout is placed by its preset's rules, which are the GPU box rules of UI-PRF-017, UI-PRF-019 and UI-PRF-059 with the fixed engine lists replaced by the widget list:
 
 - Slot 0 and slot 1 are the first and second GPU the box shows today (the sidebar's visible GPU cards, in order). At most two sections show; the second only when both fit; GPUs left over give the "+n more" row.
 - In a section, engine widgets draw in the order of the old mode: the GPU page grid order (`grid_engines`) in `engine_charts`, and the vendor order (`shown_engines`, with one shared "Video Encode/Decode" row when `enc_dec_shared`) in `chart_engines`. Other widgets keep list order after them. An engine widget whose engine the device does not report, or that `performance.hidden_gpu_engines` hides, takes no space. That global setting applies to flow layouts only; a widget in a grid layout shows what the user placed.
@@ -2886,7 +2893,7 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 - **One look in every layout** (tasklens-6swdr.12). A widget draws the same in a flow layout, in Edit Widgets and in a grid layout. Its accent comes from the kind of device it reads (the box's colour; a Memory row its row colour), and its chart's series, overlays and legend, its value format and a group's per-item columns come from the metric metadata, the widget's options and the settings every box follows (`performance.cpu_kernel`), never from the placement. The rules are in `widget/look.rs` and `widget/meta.rs`: CPU `total` filled in the CPU colour with the `CPU_KERNEL` line and the Total and Kernel legend while `cpu_kernel` is on; core `load` plotted as 1-second means and shown as a whole percent ("41%", as the CPU, memory pressure and disk active values); Memory rows in their row colours and `composition` as three stacked bands with their legend; disk `io` read filled and write dashed; Network download filled and upload as the lighter line, the hidden kinds taken off the aggregate; a cores group of `load` in Rows drawn as the core rows (name, sparkline, meter, percent and clock column, the core rows' fit and columns). Pinning a flow layout to the grid (what entering Edit Widgets does) keeps each widget's forms and options.
 - The box menu keeps "Layout" (preset radio items), "Arrange" and "Engines" for a flow layout. They edit the flow layout entry: a preset change replaces the widget list with that preset's list, leaving out the engines the Engines list hides; an Engines change removes or adds that engine's widgets.
 
-**Inner grid** (`tl-ui/src/pages/performance/widget/grid.rs`, pure functions with `proptest` tests, like `overview/layout.rs`). For grid layouts:
+**Inner grid** (`crates/tl-ui-overview/src/widget/grid.rs`, pure functions with `proptest` tests, like `overview/layout.rs`). For grid layouts:
 
 - The GPU box grid has `GPU_BOX_GRID_COLS` = 6 columns over the box body width, a row unit of 24 logical px and a 4 px gutter (`sp2`) in both directions. Column width `cw = (W − 5·gutter) / 6`. A later container sets its own column count and unit.
 - **Fill** (D-037, D-040): when the widgets end above the bottom of the body, every row grows by the same amount: the drawn row height is `max(unit, (H − (R − 1)·gutter) / R)`, where `R` is the last used row. A taller layout keeps the unit and the body scrolls vertically with a scrollbar. Columns never scroll sideways.
@@ -2900,7 +2907,7 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 - **Same look as the flow layout** (tasklens-6swdr.12): a widget on the grid draws its accent, series, overlays, legend, value format and group columns by the rule "One look in every layout" under "Flow placement". Moving or resizing a widget changes its composition only (UI-PRF-061), never these.
 - **Edit mode**: no edit decoration (grip, gear, border, selected outline, resize corner, placement preview) covers any text of any widget, and the body scrolls exactly as in the applied view: the wheel scrolls it over the widgets, and entering Edit Widgets keeps the scroll offset. UI-PRF-061 "Edit chrome" gives the margins a widget keeps free.
 
-**Editing** (`tl-ui/src/pages/performance/widget/edit.rs` and `menu.rs`). Editing the boxes on the page (Edit Layout, UI-PRF-018 and UI-PRF-056) and editing the widgets in one box (Edit Widgets, UI-PRF-061) are separate modes, and at most one is on. Starting Edit Widgets ends Edit Layout as "Done" does. Edit Layout is disabled while a box is in Edit Widgets.
+**Editing** (`crates/tl-ui-overview/src/widget/edit.rs` and `menu.rs`). Editing the boxes on the page (Edit Layout, UI-PRF-018 and UI-PRF-056) and editing the widgets in one box (Edit Widgets, UI-PRF-061) are separate modes, and at most one is on. Starting Edit Widgets ends Edit Layout as "Done" does. Edit Layout is disabled while a box is in Edit Widgets.
 
 - Inner editing is a transaction: `LayoutEdit { container, before: Option<ContainerLayout>, working: Option<ContainerLayout>, undo: Vec<Option<ContainerLayout>>, selected: Option<u32> }`. `None` means no entry (the built-in default). Each action pushes the previous working copy onto `undo`, at most 100 steps.
 - Entering Edit Widgets on a flow layout pins it into the working copy (`grid::pin`):
@@ -2918,14 +2925,14 @@ A counter (later phases, for example energy) offers no bar and no stats; its val
 | Bead | Files |
 |---|---|
 | `tasklens-lhliq.2` | `tl-model/src/layout.rs` (new: the types, metric key map, load rules, `convert_gpu_box`, `reset_to_default`, the hidden name map), `tl-model/src/settings.rs` (`PerformanceSettings.layouts`, conversion in `Settings::clamp`, `LAYOUTS_KEY`, `LAYOUTS_CONVERTED_KEY`), `tl-model/src/lib.rs` (mod line), `tl-app/src/settings_store.rs` (the `.pre-layouts-v1` copy) |
-| `tasklens-lhliq.3` | `tl-ui/src/pages/performance/widget/meta.rs` (new: `MetricMeta`, `BarMax`, `StatsRule`, `MetricKind`, the stats function), `widget/mod.rs` (new) |
+| `tasklens-lhliq.3` | `crates/tl-ui-overview/src/widget/meta.rs` (new: `MetricMeta`, `BarMax`, `StatsRule`, `MetricKind`, the stats function), `widget/mod.rs` (new) |
 | `tasklens-lhliq.4` | `widget/metric_widget.rs` (`MetricWidget`), `widget/compose.rs` (`Composition`, minimum sizes, form drop order), `widget/source.rs` (`SourceStore`, `SourceData`, `AvailabilityChanged`) |
 | `tasklens-lhliq.5` | `widget/container.rs` (`WidgetContainer`), `widget/grid.rs` (pure inner grid rules and pinning) |
 | `tasklens-lhliq.6` | `widget/edit.rs` (`LayoutEdit`, the edit toolbar, keys), `widget/menu.rs` (widget menu, Add Widget, the Reset and preset confirmations), `overview/box_menu.rs` ("Edit Widgets…"), `pages/performance/actions.rs` (the actions of UI-PRF-061), `assets/locales/en-US.ftl` (the UI-PRF-061 strings) |
 | `tasklens-lhliq.7` | `overview/gpu_box.rs` (hosts a `WidgetContainer` and draws each flow widget's entity at its 1.1.0 place), `overview/gpu_flow.rs` (new: the GPU presets' flow placement), `overview/mod.rs` (wiring), `widget/metric_widget.rs` (`FlowLook`: a flow widget draws its 1.1.0 part), `widget/container.rs` (a hosted container: the host draws the flow widgets, the values of one line joined by " · ") |
 | `tasklens-lhliq.8` | `crates/tl-model/tests/fixtures/layouts/*.toml` (old GPU box settings), `crates/tl-ui/tests/ui/overview_widgets.rs` (new module of the `ui` test binary), the `perf-overview` bench scenes |
 
-Paths under `widget/` are in `crates/tl-ui/src/pages/performance/widget/`.
+Paths under `widget/` are in `crates/tl-ui-overview/src/widget/`.
 
 ### Phase 2: every Overview box (epic E28, `tasklens-6swdr`)
 
@@ -3175,7 +3182,7 @@ The CPU box adds `core_clocks` when `clocks = true` and `power_draw` when `power
 
 **Demand.** A container asks for the series of the sources it places, group members included, and the demand of its fixed widgets. The CPU box asks for `cpu_fast` while it places a cores group or a core widget, as it does today. A widget or member that takes no space asks for nothing.
 
-**Files the phase 2 beads create or change.** Paths under `widget/` and `overview/` are in `crates/tl-ui/src/pages/performance/`.
+**Files the phase 2 beads create or change.** Paths under `widget/` and `overview/` are in `crates/tl-ui-overview/src/`.
 
 | Bead | Files |
 |---|---|
@@ -3370,13 +3377,13 @@ Every chart is 150 px high unless the table says otherwise. Flow rules:
 
 **Render contract and demand.** A page renders on a header change (`DEVICES`), a header button change, a layout change, an edit mode change and a resize, never because of a sample. Its body is one `WidgetContainer` cached view. The gate is the phase 1 gate with "page" in place of "Overview page": on a sample the page and its container never notify, no widget entity is created or dropped, and only widgets on a changed source (and a `DetailsView` whose rows changed) notify. The page asks for what its placed widgets and fixed widgets ask for, plus its 1.3.0 page bits (`cpu`, `memory`, `gpus`, `disks`, `nets`, `sensors`, `cpu_fast` while the core grid or board shows). With the default flow layout its demand equals 1.3.0's. A page that is not shown asks for nothing, as today. Each page has its own `SourceStore`.
 
-**Files the phase 3 beads create or change.** Paths under `widget/` and `page_flow/` are in `crates/tl-ui/src/pages/performance/`.
+**Files the phase 3 beads create or change.** `widget/` is in `crates/tl-ui-overview/src/` and `page_flow/` is in `crates/tl-ui-perf/src/performance/`.
 
 | Bead | Files |
 |---|---|
 | `tasklens-hzire.2` | `tl-model/src/layout_pages.rs` (new: `PAGE_CONTAINER_PREFIX`, `PAGE_KINDS`, `PAGE_GRID_COLS`, `page_container`, `page_key`, the phase 3 metric keys and their series, the page preset lists, `convert_page` and the three `convert_*_page`), `tl-model/src/settings.rs` (CPU and Memory page conversion in `Settings::clamp`), `tl-model/src/layout.rs` (`FixedWidget` kinds and where each is allowed, `is_layout_container`, `grid_cols` for pages, `container_layout`, `reset_to_default` of a page with its old keys), `tl-model/src/layout_boxes.rs` (`DeviceKind::Fan`, `Battery`, `AggregateGpu`), `tl-model/src/lib.rs` (mod line), `widget/meta.rs` (the phase 3 entries, `Lines::PerLogical`, `Physical`, `RpmPwm`, `menu_label`, `page_value`), `widget/source.rs` (readings and names of the phase 3 keys), `crates/tl-model/tests/fixtures/layouts/page_*.toml` |
 | `tasklens-hzire.3` | `page.rs` (fixed header, the edit toolbar row, the body as a `WidgetContainer`; `DevicePage` gains the container and the fixed views), `page_flow/mod.rs` (new: the column flow, gaps and side-by-side rows), `widget/details_widget.rs` (new: `DetailsView`), `widget/fixed_widget.rs` (page fixed kinds, "Nothing to show on this device"), `widget/container.rs` and `widget/grid.rs` (`grid_gutter`, no fill for pages), `widget/look.rs` and `widget/compose.rs` (page style Cell), `widget/edit.rs` (page containers, mode exclusion with Select Pages), `widget/menu.rs` (page source lists, page fixed items), `menu.rs` (Edit Widgets… and Reset Page), `sidebar.rs` (Select Pages disabled while editing), `actions.rs` (`PerfWidgetResetPage`), one page wired end to end (the Aggregate storage page: two charts and Details), `crates/tl-ui/tests/ui/page_widgets.rs` (new module) |
-| `tasklens-hzire.4` | `gpu.rs` (GPU page conversion on first build), `tl-ui/src/app.rs` (`AppEnv.keep_pre_layouts_copy`), `tl-app/src/main.rs` (wires it to `Store::keep_pre_layouts_copy`), `page_flow/gpu.rs` (new), the `gpu_engine_grid` and `gpu_displays` views, `crates/tl-ui/tests/ui/page_gpu_widgets.rs` |
+| `tasklens-hzire.4` | `gpu.rs` (GPU page conversion on first build), `crates/tl-ui-base/src/app_env.rs` (`AppEnv.keep_pre_layouts_copy`), `tl-app/src/main.rs` (wires it to `Store::keep_pre_layouts_copy`), `page_flow/gpu.rs` (new), the `gpu_engine_grid` and `gpu_displays` views, `crates/tl-ui/tests/ui/page_gpu_widgets.rs` |
 | `tasklens-hzire.5` | `cpu.rs`, `cpu_grid.rs`, `cpu_board.rs`, `page_flow/cpu.rs` (new), `crates/tl-ui/tests/ui/page_cpu_widgets.rs` |
 | `tasklens-hzire.6` | `memory.rs`, `memory_bar.rs`, `memory_apps.rs` (hosted on the page), `page_flow/memory.rs` (new), the block views, `crates/tl-ui/tests/ui/page_mem_widgets.rs` |
 | `tasklens-hzire.7` | `disk.rs`, `page_flow/disk.rs` (new), the `disk_partitions` view, `crates/tl-ui/tests/ui/page_disk_widgets.rs` |
@@ -3553,14 +3560,14 @@ Switches in the files CS-B2 converted (paths under `crates/tl-ui/src/`). None ne
 | `chart/element.rs:165` `PLOTS`, set by `element.rs:174` `take_plots`, written at `element.rs:156` | collects the plot of every chart paint (CS-B3 fix: it was a `Vec` that grew on every paint in a debug app) | the thread-local is `None` until a test's first `take_plots` call; the paint writes only when it is `Some` |
 | `chart/view.rs:642` `ChartView::set_series_for_test`, `chart/grid_element.rs:597` `ChartGridView::set_series_for_test` | replaces the series a chart shows | only tests call them |
 
-Switches in `pages/performance/overview/` and `pages/performance/widget/` (CS-B6; paths under `crates/tl-ui/src/pages/performance/`). The other hooks in these directories are recorders (`render_count`, `notify_count`, `relayout_count`, `stats_count`, `paint_count`, `shape_count`, `last_jump`, `last_toast`, `last_history_at`) or readers (`adapter_cells`). `last_cells` and `last_markers` in `overview/timeline.rs` are overwritten on each paint, so they do not grow. Two fixes:
+Switches in `overview/` and `widget/` (CS-B6; both under `crates/tl-ui-overview/src/`). The other hooks in these directories are recorders (`render_count`, `notify_count`, `relayout_count`, `stats_count`, `paint_count`, `shape_count`, `last_jump`, `last_toast`, `last_history_at`) or readers (`adapter_cells`). `last_cells` and `last_markers` in `overview/timeline.rs` are overwritten on each paint, so they do not grow. Two fixes:
 
 | Hook | What it changes | Guard |
 |---|---|---|
 | `overview/timeline.rs:188` `TEST_CLOCK`, set by `timeline.rs:195` `set_test_clock`, read at `now_realtime_ns` and `now_boot` | the clocks the timeline and the paused view read | the thread-local is `None` until a test sets it; the app never calls the setter |
 | `overview/parts.rs:129` `METER_QUADS`, `parts.rs:142` `CORE_LABELS`, `overview/fit.rs:386` `FIT_TEXTS`, each read and reset by its `take_*` function | collects the quads, core labels and fit texts of every paint (CS-B6 fix: each was a `Vec` that grew on every paint in a debug app) | each thread-local is `None` until the first `take_*` call; the paint writes only when it is `Some` |
 
-Switches in the other files under `pages/performance/` (CS-B7; paths under `crates/tl-ui/src/pages/performance/`). `status_bar/` and `page_flow/` have none beyond the recorders. The other hooks are recorders (`render_count`, `notify_count`, `paint_count`, `hitbox_count`, `hatch_builds`, `painted_segments`, `painted_labels`, `last_open`) or readers (the `*_for_test` getters in `sidebar.rs`, `has_menu_page` in `summary.rs`). `painted_labels` is cleared on each paint, so it does not grow. `window_title` in `mod.rs`, `prepared` in `card.rs` and `edit_prepared` in `sidebar.rs` are overwritten on each render, so they do not grow. One fix:
+Switches in the other files under `crates/tl-ui-perf/src/performance/` (CS-B7). `status_bar/` and `page_flow/` have none beyond the recorders. The other hooks are recorders (`render_count`, `notify_count`, `paint_count`, `hitbox_count`, `hatch_builds`, `painted_segments`, `painted_labels`, `last_open`) or readers (the `*_for_test` getters in `sidebar.rs`, `has_menu_page` in `summary.rs`). `painted_labels` is cleared on each paint, so it does not grow. `window_title` in `mod.rs`, `prepared` in `card.rs` and `edit_prepared` in `sidebar.rs` are overwritten on each render, so they do not grow. One fix:
 
 | Hook | What it changes | Guard |
 |---|---|---|

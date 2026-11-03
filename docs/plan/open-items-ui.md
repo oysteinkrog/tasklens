@@ -159,7 +159,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U11 The column picker file lives in `table/`
 - Raised by: B5-3
 - Question: 00-epics §2 puts `pages/processes/columns_window.rs` under E18, but that directory is created by E22-A1, which depends on E18-A2: a cycle.
-- Answer: `crates/tl-ui/src/table/columns_window.rs`, owned by E18-A2 (rsf.2). The picker is table-generic (UI-PRC-007 binds it to a `TableId`), so nothing in it is Processes-specific.
+- Answer: `crates/tl-ui-table/src/table/columns_window.rs`, owned by E18-A2 (rsf.2). The picker is table-generic (UI-PRC-007 binds it to a `TableId`), so nothing in it is Processes-specific.
 - Basis: 00-epics §2 ownership table [verified]; R-106 (`WindowKey::Columns`, one window bound to the active table) [verified].
 - Owner decision: no
 - Changes: 00-epics §2: move the file into the E18 `src/table/...` row. processes.md UI-PRC-007 Build line: new path. Bead rsf.2 already uses the new path (B5 says so); no bead change.

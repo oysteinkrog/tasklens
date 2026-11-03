@@ -21,7 +21,7 @@ Conventions used in every bead of this batch:
 
 ## E19 ui-chart (epic `tasklens-yrf`)
 
-Files owned: `crates/tl-ui/src/chart/{mod,element,view,geometry,grid,scale,labels,hover,grid_element}.rs`,
+Files owned: `crates/tl-ui-chart/src/chart/{mod,element,view,geometry,grid,scale,labels,hover,grid_element}.rs`,
 `crates/tl-ui/src/anim.rs`, `crates/tl-ui/tests/{ui_chart,chart_geometry,ui_anim,render_chart}.rs`.
 Chain edits: two `pub mod` lines in `crates/tl-ui/src/lib.rs` (E16-A1), four golden PNGs under
 `crates/tl-ui/tests/golden/` (E15-A3).
@@ -87,7 +87,7 @@ the P2 hover readout is E19-014 and E19-015, which depend on it.
 
 ## E24 ui-performance-frame (epic `tasklens-crw`)
 
-Files owned: `crates/tl-ui/src/pages/performance/{mod,page,sidebar,card,summary,menu,actions,details,cpu,cpu_grid,cpu_details}.rs`, `crates/tl-ui/tests/{ui_performance,ui_sidebar,ui_cpu_page}.rs`. Chain edits: `pub mod performance;` in `pages/mod.rs` and `bind_keys_performance` in `app.rs` (E16-A1), the `TabId::Performance` arm in `window/main.rs` (E20-A1).
+Files owned: `crates/tl-ui-perf/src/performance/{mod,page,sidebar,card,summary,menu,cpu,cpu_grid,cpu_details}.rs`, `crates/tl-ui-perf-core/src/core/{actions,details}.rs`, `crates/tl-ui/tests/{ui_performance,ui_sidebar,ui_cpu_page}.rs`. Chain edits: `pub mod performance;` in `pages/mod.rs` and `bind_keys_performance` in `app.rs` (E16-A1), the `TabId::Performance` arm in `window/main.rs` (E20-A1).
 
 | Plan key | Bead ID | Title | Phase | Depends on |
 |---|---|---|---|---|
@@ -145,7 +145,7 @@ was added on resume: the disconnected-fan rule (PERF-076) belongs to `is_visible
 
 ## E25 ui-performance-devices (epic `tasklens-o55`)
 
-Files owned: `crates/tl-ui/src/pages/performance/{memory,memory_bar,disk,net,gpu,sensors,aggregate}.rs`, `crates/tl-ui/src/windows/{smart,disk_in_use}.rs`, `crates/tl-ui/tests/ui_device_pages.rs`. Chain edits: one `build_page` arm per device kind in `pages/performance/page.rs` (E24-A1), two `pub mod` lines in `windows/mod.rs` (E16-A2). `pages/performance/battery.rs` from the 00-epics file list is folded into `sensors.rs` (UI-PRF-035 names `sensors.rs`).
+Files owned: `crates/tl-ui-perf/src/performance/{memory,memory_bar,disk,net,gpu,sensors,aggregate}.rs`, `crates/tl-ui/src/windows/smart.rs`, `crates/tl-ui-procs/src/windows/disk_in_use.rs`, `crates/tl-ui/tests/ui_device_pages.rs`. Chain edits: one `build_page` arm per device kind in `crates/tl-ui-perf/src/performance/page.rs` (E24-A1), two `pub mod` lines in `windows/mod.rs` (E16-A2). `battery.rs` from the 00-epics file list is folded into `sensors.rs` (UI-PRF-035 names `sensors.rs`).
 
 | Plan key | Bead ID | Title | Phase | Depends on |
 |---|---|---|---|---|
@@ -224,7 +224,7 @@ and E19-A1/A2. Every P2 bead depends on E25-A1 so the leader can schedule the P1
 
 ## E26 ui-minigraphs (epic `tasklens-xdh`)
 
-Files owned: `crates/tl-ui/src/pages/minigraph/{mod,panel,card,menu,actions,sources}.rs`, `crates/tl-ui/src/windows/{detached_graph,mini}.rs`, `crates/tl-ui/tests/{ui_minigraphs,ui_detached}.rs`. Chain edits: `pub mod minigraph;` in `pages/mod.rs` (E16-A1), the panel mount in `pages/processes/mod.rs` (E22-A1), the three graph submenus in `pages/processes/menu.rs` and their handlers in `pages/processes/mod.rs` (E22-A2), two `pub mod` lines in `windows/mod.rs` (E16-A2), one `register` line in `app.rs` (E16-A1).
+Files owned: `crates/tl-ui-perf-core/src/minigraph/{mod,panel,card,menu,actions,sources}.rs`, `crates/tl-ui-perf-core/src/detached_graph.rs`, `crates/tl-ui-perf/src/mini.rs`, `crates/tl-ui/tests/{ui_minigraphs,ui_detached}.rs`. Chain edits: `pub mod minigraph;` in `pages/mod.rs` (E16-A1), the panel mount in `pages/processes/mod.rs` (E22-A1), the three graph submenus in `pages/processes/menu.rs` and their handlers in `pages/processes/mod.rs` (E22-A2), two `pub mod` lines in `windows/mod.rs` (E16-A2), one `register` line in `app.rs` (E16-A1).
 
 | Plan key | Bead ID | Title | Phase | Depends on |
 |---|---|---|---|---|
