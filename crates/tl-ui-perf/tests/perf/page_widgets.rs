@@ -1,9 +1,10 @@
 //! A device page as a widget container (ADR-019 phase 3, UI-PRF-061 "Phase 3: device pages",
 //! `tasklens-hzire.3`), on the Aggregate storage page: the default flow layout places the two
 //! charts and Details where 1.3.0 drew them, the header stays while the body scrolls, the rows
-//! never fill, Edit Widgets adds, moves and applies, Cancel restores, a sample renders no page
-//! or container, the Details widget shows the 1.3.0 rows and only it notifies when one
-//! changes, Select Pages and Edit Widgets exclude each other, and Reset Page saves the default.
+//! never fill, Edit Widgets adds, moves and applies, Cancel restores, a sample that changes
+//! nothing shown renders no page or container and a changed sample notifies neither, the
+//! Details widget shows the 1.3.0 rows and only it notifies when one changes, Select Pages and
+//! Edit Widgets exclude each other, and Reset Page saves the default.
 
 use std::sync::Arc;
 
@@ -490,64 +491,66 @@ fn page_widget_details_rows_match_grid(cx: &mut TestAppContext) {
     assert!(!hidden && !value.is_empty(), "{value:?}");
 }
 
-/// The render contract (UI-PRF-017, UI-PRF-019, ADR-019) on the page. A sample that changes
-/// nothing shown renders nothing: not the page, the container, a widget, a chart or Details. A
-/// sample that moves the charts' series and a Details value: the page and the container never
-/// notify and place nothing, no widget entity is made or dropped, the two charts render with
-/// the new series, and only the Details view notifies of the page's own parts. GPUI marks the
-/// ancestors of a notifying view dirty (crw.34, no GPUI fork), so the page and the container
-/// may render at most once in that frame, with fixed work only.
-#[gpui_kit::test]
-fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
-    let mut r = open(cx, 1200., 900.);
-    let (page, container, details) = (r.page.clone(), r.container(), r.details());
-    let (active, io) = (r.metric_id(METRIC_DISK_ACTIVE), r.metric_id(METRIC_DISK_IO));
-    let charts = r.charts([active, io]);
-    let entities = |r: &mut Rig| {
-        let container = container.clone();
-        r.vcx.update(|_, cx| {
-            let c = container.read(cx);
-            [active, io].map(|id| c.widget(id).map(|w| w.entity_id()))
-        })
-    };
-    let notifies = |r: &mut Rig| {
-        let (page, container, details) = (page.clone(), container.clone(), details.clone());
+/// The entities the sample tests count: the page, its container, the Details view and the
+/// Active time and Transfer rate charts with their widget ids.
+struct Counted {
+    page: Entity<AggregateDiskPage>,
+    container: Entity<WidgetContainer>,
+    details: Entity<DetailsView>,
+    ids: [u32; 2],
+    charts: [Entity<ChartView>; 2],
+}
+
+impl Counted {
+    fn new(r: &mut Rig) -> Self {
+        let ids = [r.metric_id(METRIC_DISK_ACTIVE), r.metric_id(METRIC_DISK_IO)];
+        Self {
+            page: r.page.clone(),
+            container: r.container(),
+            details: r.details(),
+            ids,
+            charts: r.charts(ids),
+        }
+    }
+
+    /// Notifies of the page, the container and the Details view, and the container's
+    /// placements.
+    fn notifies(&self, r: &mut Rig) -> [u32; 4] {
         r.vcx.update(|_, cx| {
             [
-                page.read(cx).notify_count.get(),
-                container.read(cx).notify_count.get(),
-                container.read(cx).relayout_count.get(),
-                details.read(cx).notify_count.get(),
+                self.page.read(cx).notify_count.get(),
+                self.container.read(cx).notify_count.get(),
+                self.container.read(cx).relayout_count.get(),
+                self.details.read(cx).notify_count.get(),
             ]
         })
-    };
-    let renders = |r: &mut Rig| {
-        let (page, container, details) = (page.clone(), container.clone(), details.clone());
-        let charts = charts.clone();
+    }
+
+    /// Renders of the page, the container, the Details view and the two charts.
+    fn renders(&self, r: &mut Rig) -> [u32; 5] {
         r.vcx.update(|_, cx| {
             [
-                page.read(cx).render_count.get(),
-                container.read(cx).render_count.get(),
-                details.read(cx).render_count.get(),
-                charts[0].read(cx).render_count.get(),
-                charts[1].read(cx).render_count.get(),
+                self.page.read(cx).render_count.get(),
+                self.container.read(cx).render_count.get(),
+                self.details.read(cx).render_count.get(),
+                self.charts[0].read(cx).render_count.get(),
+                self.charts[1].read(cx).render_count.get(),
             ]
         })
-    };
-    let before_entities = entities(&mut r);
-    assert!(before_entities.iter().all(Option::is_some));
+    }
 
-    // A sample that changes nothing shown renders nothing.
-    let (n0, r0) = (notifies(&mut r), renders(&mut r));
-    r.publish_read(1.);
-    assert_eq!(notifies(&mut r), n0, "an unchanged sample notifies nothing");
-    assert_eq!(renders(&mut r), r0, "an unchanged sample renders nothing");
-
-    // New series for both charts and a new Read rate in Details.
-    let versions = |r: &mut Rig| {
-        let charts = charts.clone();
+    /// The entity ids of the two chart widgets.
+    fn entities(&self, r: &mut Rig) -> [Option<gpui_kit::EntityId>; 2] {
         r.vcx.update(|_, cx| {
-            charts.clone().map(|c| {
+            let c = self.container.read(cx);
+            self.ids.map(|id| c.widget(id).map(|w| w.entity_id()))
+        })
+    }
+
+    /// The series versions each chart holds.
+    fn versions(&self, r: &mut Rig) -> [Vec<Option<u64>>; 2] {
+        r.vcx.update(|_, cx| {
+            self.charts.clone().map(|c| {
                 c.read(cx)
                     .resolved()
                     .iter()
@@ -555,11 +558,51 @@ fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
                     .collect::<Vec<_>>()
             })
         })
-    };
-    let v0 = versions(&mut r);
+    }
+}
+
+/// The render contract (UI-PRF-017, UI-PRF-019, ADR-019) on the page: a sample that changes
+/// nothing shown renders nothing at all. Not the page, the container, a widget, a chart or
+/// Details renders or notifies, and no widget entity is made or dropped.
+#[gpui_kit::test]
+fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let c = Counted::new(&mut r);
+    let entities = c.entities(&mut r);
+    assert!(entities.iter().all(Option::is_some));
+
+    let (n0, r0) = (c.notifies(&mut r), c.renders(&mut r));
+    r.publish_read(1.);
+    assert_eq!(
+        c.notifies(&mut r),
+        n0,
+        "an unchanged sample notifies nothing"
+    );
+    assert_eq!(c.renders(&mut r), r0, "an unchanged sample renders nothing");
+    assert_eq!(c.entities(&mut r), entities, "same widget entities");
+}
+
+/// The ADR-019 gate for a sample that moves the charts' series and a Details value: the page
+/// and the container never notify and place nothing, no widget entity is made or dropped, the
+/// two charts render the new series, and of the page's own views only Details notifies. The
+/// same sample again renders nothing.
+///
+/// The page and the container are not held to zero renders in the frame of a changed sample.
+/// GPUI 0.3.7 marks every ancestor of a notifying view dirty (`Window::mark_view_dirty`,
+/// crw.34), and D-022 rules out a GPUI fork, so a chart that draws a new series renders its
+/// ancestors once. ADR-019 ("Render contract") sets the gate to "never notify" for this case;
+/// those renders do fixed work, and the container places nothing.
+#[gpui_kit::test]
+fn page_widget_changed_sample_notifies_no_page_or_container(cx: &mut TestAppContext) {
+    let mut r = open(cx, 1200., 900.);
+    let c = Counted::new(&mut r);
+    let entities = c.entities(&mut r);
+    assert!(entities.iter().all(Option::is_some));
+
+    let (n0, r0, v0) = (c.notifies(&mut r), c.renders(&mut r), c.versions(&mut r));
     r.publish_sample(7., 55.);
-    let (n1, r1) = (notifies(&mut r), renders(&mut r));
-    assert_ne!(versions(&mut r), v0, "the charts hold the new series");
+    let (n1, r1) = (c.notifies(&mut r), c.renders(&mut r));
+    assert_ne!(c.versions(&mut r), v0, "the charts hold the new series");
     assert_eq!(n1[0], n0[0], "the page does not notify");
     assert_eq!(n1[1], n0[1], "the container does not notify");
     assert_eq!(n1[2], n0[2], "the container places nothing");
@@ -574,14 +617,14 @@ fn page_widget_sample_renders_no_page_or_container(cx: &mut TestAppContext) {
         r1[4] > r0[4],
         "the Transfer rate chart renders the new series"
     );
-    assert_eq!(entities(&mut r), before_entities, "same widget entities");
-    assert_eq!(r.charts([active, io]), charts, "same chart entities");
+    assert_eq!(c.entities(&mut r), entities, "same widget entities");
+    assert_eq!(r.charts(c.ids), c.charts, "same chart entities");
 
     // The same sample again renders nothing.
-    let (n2, r2) = (notifies(&mut r), renders(&mut r));
+    let (n2, r2) = (c.notifies(&mut r), c.renders(&mut r));
     r.publish_read(7.);
-    assert_eq!(notifies(&mut r), n2);
-    assert_eq!(renders(&mut r), r2);
+    assert_eq!(c.notifies(&mut r), n2, "a repeated sample notifies nothing");
+    assert_eq!(c.renders(&mut r), r2, "a repeated sample renders nothing");
 }
 
 /// A failed disk collector shows "Failed" with its error on every chart of the page, as the
