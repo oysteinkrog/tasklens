@@ -166,6 +166,12 @@ pub struct CpuTotals {
     /// True when an Intel `thermal_throttle` count rose since the last read (ADR-016, UI-PRF-054).
     /// `Unsupported` where the files are missing (AMD).
     pub throttling: Metric<bool>,
+    /// The bands of the CPU-by-app chart from the last process sweep (D-042, UI-PRF-062): the
+    /// same `MemGroupBand` list as the memory chart (same groups, same order, same devices),
+    /// with each band's value in series `CPU_GROUP`. The reducer fills it. A thin `Arc<Vec>`
+    /// keeps `EngineMsg` within its 256 bytes. Empty when a remote peer sends none.
+    #[serde(default)]
+    pub groups: Arc<Vec<MemGroupBand>>,
 }
 
 /// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
@@ -228,7 +234,9 @@ pub struct KernelMemory {
     pub vmalloc_used: u64,
 }
 
-/// One band of the memory-by-app chart (D-036, UI-PRF-060).
+/// One band of the memory-by-app chart (D-036, UI-PRF-060). It also serves the CPU-by-app
+/// chart (D-042, UI-PRF-062): the band keeps its device, and `MEM_GROUP` and `CPU_GROUP` are
+/// two series on it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemGroupBand {
     /// The memory group key (`app:<app id>`, `exe:<name>`, `system`, `comm:<comm>`), or
@@ -636,6 +644,15 @@ mod tests {
             s.insert(c);
         }
         s
+    }
+
+    #[test]
+    fn cpu_totals_groups_default() {
+        // A CpuTotals from a peer that predates `groups` must still read.
+        let mut value = serde_json::to_value(CpuTotals::default()).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("groups").is_some());
+        let totals: CpuTotals = serde_json::from_value(value).unwrap();
+        assert!(totals.groups.is_empty());
     }
 
     #[test]

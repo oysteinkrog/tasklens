@@ -487,6 +487,8 @@ impl CpuSource {
             sockets: Metric::valid(self.sampler.topology().sockets),
             psi_some_pct: metric(last.psi_some_pct),
             throttling: metric(last.throttling),
+            // The reducer fills the CPU-by-app bands (D-042); the worker leaves them empty.
+            groups: Arc::default(),
         };
         let irq_pct = if r.interrupts_pct.validity.is_valid() {
             r.interrupts_pct.value
