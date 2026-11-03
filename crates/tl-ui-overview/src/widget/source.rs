@@ -84,6 +84,8 @@ const KEY_VRAM: &str = "perf-overview-gpu-vram";
 const KEY_FIGURES: &str = "perf-overview-figures";
 /// The swap row's value without swap.
 const KEY_NO_SWAP: &str = "perf-overview-mem-no-swap";
+/// The Memory page's Commit heading tooltip (UI-PRF-026).
+const KEY_COMMIT_TIP: &str = "perf-mem-commit-tooltip";
 /// Why a GPU widget is empty: "Not reported by this GPU".
 const KEY_NOT_REPORTED_GPU: &str = "perf-widget-not-reported";
 /// Why a widget of another device is empty: "Not reported by this device".
@@ -1193,14 +1195,18 @@ impl SourceData {
     }
 
     /// The chart state and the name's tooltip on a device page. The health is read live, as the
-    /// 1.3.0 pages read it. A GPU shows its probe state on every chart, with the probe's text
+    /// 1.3.0 pages read it. The Memory page's Commit carries its 1.3.0 heading text. A GPU shows its probe state on every chart, with the probe's text
     /// as the tooltip; while the probe is Ok, Power and Clocks carry their 1.3.0 heading texts,
     /// and the Power chart of an Intel iGPU whose meter needs setup shows Unsupported.
     fn page_extras(&self, idx: Option<DeviceIdx>, cx: &App) -> (ChartState, Option<SharedString>) {
         let live = self.hub.read(cx).current();
         if self.kind != DeviceKind::Gpu {
             let state = failed_of(self.kind, live).map_or(ChartState::Live, ChartState::Failed);
-            return (state, None);
+            // The 1.3.0 Commit chart's heading tooltip (UI-PRF-026).
+            let tip = (self.kind == DeviceKind::Memory
+                && self.selector.metric.as_str() == METRIC_COMMIT_PCT)
+                .then(|| tr(cx, KEY_COMMIT_TIP));
+            return (state, tip);
         }
         let Some(idx) = idx else {
             return (ChartState::Live, None);

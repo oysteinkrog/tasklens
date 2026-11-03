@@ -21,7 +21,9 @@
 //! heading, the legend, and the range text under the plot. A metric that has a 1.3.0 page chart
 //! keeps that chart's heading, range word and legend (a disk's Active time and Transfer rate,
 //! a GPU's Memory, Temperature, Power and Clocks, the CPU page's Utilization charts and its
-//! secondary charts).
+//! secondary charts, the Memory page's Physical memory, Commit and Swap charts). On a page a
+//! Memory chart draws in the memory colour, as the 1.3.0 Memory page does; the Memory box's row
+//! colours stay in the box.
 //!
 //! Pure functions: no drawing, no state.
 
@@ -37,7 +39,8 @@ use tl_ui_settings::layout_boxes::{
     METRIC_MEM_SWAP, METRIC_MEM_USED, METRIC_NET_TX, METRIC_POWER_DRAW,
 };
 use tl_ui_settings::layout_pages::{
-    METRIC_CLOCK, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED, METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY,
+    METRIC_CLOCK, METRIC_COMMIT_PCT, METRIC_CORES_OVERLAID, METRIC_CORES_STACKED,
+    METRIC_GPU_CLOCKS, METRIC_GPU_MEMORY, METRIC_PHYSICAL,
 };
 
 use super::meta::Lines;
@@ -78,6 +81,15 @@ const KEY_GPU_CLOCKS: &str = "perf-gpu-heading-clocks";
 const KEY_GPU_CLOCKS_RANGE: &str = "perf-gpu-row-clock";
 const KEY_GPU_CLOCK: &str = "perf-gpu-legend-gpu-clock";
 const KEY_GPU_MEM_CLOCK: &str = "perf-gpu-legend-mem-clock";
+/// The Memory page charts' headings, range words and legend (`memory::physical_labels`,
+/// `memory::commit_labels`, `memory::swap_labels` of 1.3.0).
+const KEY_MEM_PHYSICAL: &str = "perf-mem-heading-physical";
+const KEY_MEM_RANGE: &str = "perf-mem-range-memory";
+const KEY_MEM_USED: &str = "perf-mem-legend-used";
+const KEY_MEM_COMMITTED: &str = "perf-mem-legend-committed";
+const KEY_MEM_COMMIT: &str = "perf-mem-heading-commit";
+const KEY_MEM_SWAP: &str = "perf-mem-heading-swap";
+const KEY_MEM_SWAP_RANGE: &str = "perf-mem-range-swap";
 
 /// What a page style Cell's chart shows besides the plot: the widget's name, which of the name
 /// and the value its forms keep, and whether the value is the sum of the chart's lines.
@@ -167,6 +179,8 @@ pub struct ChartLook {
     pub series: SmallVec<[SeriesId; 4]>,
     /// The series the network aggregate takes off its lines (`SourceData::minus_list`).
     pub minus: SmallVec<[SeriesId; 5]>,
+    /// The widget is in a device page container: a Memory chart draws in the memory colour.
+    pub page: bool,
 }
 
 impl ChartLook {
@@ -214,7 +228,15 @@ impl ChartLook {
 
     /// The chart's series, and whether they stack.
     pub fn series(&self, theme: &TlTheme) -> (SmallVec<[ChartSeries; 4]>, bool) {
-        let accent = accent(self.kind, &self.metric, theme);
+        let accent = if self.page && self.kind == DeviceKind::Memory {
+            // The 1.3.0 Memory page draws every chart in the memory colour (UI-PRF-026).
+            Accent {
+                line: theme.graph.mem_line,
+                fill: theme.graph.mem_fill,
+            }
+        } else {
+            accent(self.kind, &self.metric, theme)
+        };
         let Some(&first) = self.series.first() else {
             return (SmallVec::new(), false);
         };
@@ -395,6 +417,7 @@ impl ChartLook {
         let disk = matches!(self.kind, DeviceKind::Disk | DeviceKind::Disks);
         let gpu = self.kind == DeviceKind::Gpu;
         let cpu = self.kind == DeviceKind::Cpu;
+        let mem = self.kind == DeviceKind::Memory;
         let heading = match &*self.metric {
             // The 1.3.0 CPU page's Overall chart: Utilization, Total and Kernel, no axis text.
             METRIC_CPU_TOTAL if cpu => {
@@ -449,6 +472,31 @@ impl ChartLook {
                 ];
                 labels.show_axis_max = false;
                 tr(cx, KEY_GPU_CLOCKS)
+            }
+            // The 1.3.0 Memory page charts (UI-PRF-026): Physical memory with In use and
+            // Committed, Commit with its axis text above 100%, Swap.
+            METRIC_PHYSICAL if mem => {
+                labels.range_word = tr(cx, KEY_MEM_RANGE);
+                // The modified line has no legend entry.
+                labels.legend = smallvec![
+                    (tr(cx, KEY_MEM_USED), LegendStyle::Solid),
+                    (tr(cx, KEY_MEM_COMMITTED), LegendStyle::Dashed),
+                ];
+                labels.show_axis_max = false;
+                tr(cx, KEY_MEM_PHYSICAL)
+            }
+            METRIC_COMMIT_PCT if mem => {
+                let word = tr(cx, KEY_MEM_COMMIT);
+                labels.range_word = word.clone();
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = true;
+                word
+            }
+            METRIC_MEM_SWAP if mem => {
+                labels.range_word = tr(cx, KEY_MEM_SWAP_RANGE);
+                labels.legend = SmallVec::new();
+                labels.show_axis_max = false;
+                tr(cx, KEY_MEM_SWAP)
             }
             METRIC_DISK_ACTIVE if disk => {
                 let word = tr(cx, KEY_DISK_ACTIVE);

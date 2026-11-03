@@ -733,6 +733,7 @@ impl MetricWidget {
                 kernel: self.settings.kernel,
                 series: src.series_list().iter().copied().collect(),
                 minus: src.minus_list().iter().copied().collect(),
+                page: self.page,
             },
             y: src.y_scale(),
             format: meta.format,

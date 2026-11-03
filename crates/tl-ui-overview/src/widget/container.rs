@@ -27,14 +27,18 @@
 //! widget's rectangle from what the host shows and the body size, and the host asks for a new
 //! placement ([`WidgetContainer::place_again`]) when what it shows changed. In Edit Widgets,
 //! and for a grid layout, the container draws the widgets itself.
+//!
+//! A page's flow layout can draw one view that is not a widget ([`FlowDecor`]): the Memory
+//! page's Usage and By app switch above its first part. The placer says where it goes; a grid
+//! layout and Edit Widgets do not draw it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AnyView, AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, Size,
+    AnyView, AppContext as _, Bounds, Context, Entity, EntityId, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString, Size,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
     div, point, px, size,
 };
@@ -85,6 +89,15 @@ pub struct FlowInput<'a> {
 
 /// Places a flow layout. A widget it leaves out takes no space and gets no entity.
 pub type FlowPlace = Rc<dyn Fn(&FlowInput<'_>) -> InnerPlacement>;
+
+/// A view a page's flow layout draws besides its widgets (ADR-019 phase 3 "Presets of the
+/// pages": the Memory page's Usage and By app switch). Its host keeps the view; the placer sets
+/// `bounds` (body px) each time it places, and leaves it `None` to leave the view out.
+#[derive(Clone)]
+pub struct FlowDecor {
+    pub view: AnyView,
+    pub bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
 
 /// The view of one placed widget.
 #[derive(Clone)]
@@ -214,6 +227,9 @@ pub struct WidgetContainer {
     hosted: bool,
     /// The content views the host gives its fixed widgets.
     fixed_content: Option<FixedContent>,
+    /// The view a flow layout draws besides its widgets, and where the last placement put it.
+    decor: Option<FlowDecor>,
+    decor_at: Option<Bounds<Pixels>>,
     /// The source of every widget of the layout, placed or not, by widget id.
     sources: FxHashMap<u32, Entity<SourceData>>,
     /// One availability subscription per source entity.
@@ -262,6 +278,8 @@ impl WidgetContainer {
             flow: None,
             hosted: false,
             fixed_content: None,
+            decor: None,
+            decor_at: None,
             sources: FxHashMap::default(),
             source_subs: FxHashMap::default(),
             widgets: FxHashMap::default(),
@@ -416,6 +434,19 @@ impl WidgetContainer {
         if self.relayout(cx) {
             self.notify(cx);
         }
+    }
+
+    /// The view a flow layout draws besides its widgets ([`FlowDecor`]); `None` draws none.
+    pub fn set_flow_decor(&mut self, decor: Option<FlowDecor>, cx: &mut Context<Self>) {
+        self.decor = decor;
+        if self.relayout(cx) {
+            self.notify(cx);
+        }
+    }
+
+    /// Where the flow layout draws its [`FlowDecor`] now, body px; `None` when it draws none.
+    pub fn decor_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.decor_at
     }
 
     /// The content view the host gives fixed kind `kind`.
@@ -719,12 +750,22 @@ impl WidgetContainer {
                 scale,
                 frozen: self.frozen,
             };
+            if let Some(d) = &self.decor {
+                d.bounds.set(None);
+            }
             match &self.flow {
                 Some(place) => place(&input),
                 None => list_flow(&input),
             }
         };
         let mut changed = placement != self.placement;
+        let decor_at = self
+            .decor
+            .as_ref()
+            .filter(|_| self.layout.preset.is_some())
+            .and_then(|d| d.bounds.get());
+        changed |= decor_at != self.decor_at;
+        self.decor_at = decor_at;
         let before = self.widgets.len();
         // In Edit Widgets a widget that leaves the layout keeps its entity, so Cancel or Undo
         // creates none again (ADR-019 "Editing"). It goes when editing ends.
@@ -881,6 +922,23 @@ impl Render for WidgetContainer {
                     .child(view.cached(StyleRefinement::default().size_full())),
             )
         });
+        let decor = self
+            .decor_at
+            .zip(self.decor.as_ref())
+            .filter(|_| !host_draws)
+            .map(|(b, d)| {
+                div()
+                    .absolute()
+                    .left(b.left())
+                    .top(b.top())
+                    .w(b.size.width)
+                    .h(b.size.height)
+                    .child(
+                        d.view
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    )
+            });
         let id = container_id(&self.id);
         // In Edit Widgets the editor's body scrolls, and the container is as tall as its rows.
         let body = if self.placement.scrolls && self.frozen.is_none() {
@@ -901,7 +959,8 @@ impl Render for WidgetContainer {
                                 .relative()
                                 .w_full()
                                 .h(self.placement.content_h)
-                                .children(items),
+                                .children(items)
+                                .children(decor),
                         ),
                 )
                 .vertical_scrollbar(&self.scroll)
@@ -911,6 +970,7 @@ impl Render for WidgetContainer {
                 .relative()
                 .size_full()
                 .children(items)
+                .children(decor)
                 .into_any_element()
         };
         div()

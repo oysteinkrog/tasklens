@@ -27,7 +27,9 @@
 //! history. On the
 //! page it draws over the shared range and reads the history at 1 h, 24 h and 7 d. The legend
 //! sits at the right, or below the chart when the body is narrower than
-//! [`LEGEND_BELOW_W`].
+//! [`LEGEND_BELOW_W`]. On the page the chart is the Memory page's `memory_by_app` widget
+//! (ADR-019 phase 3) and fills it: 300 px high in the page's flow layout, as in 1.3.0, with its
+//! legend at the right in whole rows.
 //!
 //! The chart itself is a cached `ChartView`; this view re-renders for the legend and hover only.
 
@@ -1480,6 +1482,18 @@ impl MemoryAppsChart {
     }
 }
 
+/// The legend rows that fit beside the page chart (ADR-019 phase 3): whole rows in the height
+/// of the widget, 300 px before the first paint, as the 1.3.0 page part.
+pub fn page_legend(size: Size<Pixels>, rows: usize, m: &UiMetrics) -> (usize, usize) {
+    let h = f32::from(size.height);
+    let h = if h > 0. {
+        h
+    } else {
+        tl_ui_perf_core::core::GRAPH_H_OVERALL * m.ui_scale
+    };
+    legend_fit(rows, h, LEGEND_ROW_H * m.ui_scale)
+}
+
 /// The Overview layout of a body of `size` with `rows` legend rows: whether the legend goes
 /// below the chart, and the rows shown and behind "+n more". At the right the legend is the body
 /// height; below, it takes at most half the body, whole rows only.
@@ -1509,10 +1523,9 @@ impl Render for MemoryAppsChart {
         let order = legend_order(&self.bands);
         let rows = order.len();
         let row_h = LEGEND_ROW_H * m.ui_scale;
-        let page_h = tl_ui_perf_core::core::GRAPH_H_OVERALL * m.ui_scale;
         let (below, shown, more) = match self.place {
             AppsPlace::Page => {
-                let (shown, more) = legend_fit(rows, page_h, row_h);
+                let (shown, more) = page_legend(self.body.get(), rows, &m);
                 (false, shown, more)
             }
             AppsPlace::Overview => overview_legend(self.body.get(), rows, &m),
@@ -1611,12 +1624,26 @@ impl Render for MemoryAppsChart {
         }
         let frame = div().flex().gap(m.sp[4]).w_full();
         let frame: AnyElement = match self.place {
-            AppsPlace::Page => frame
-                .flex_row()
-                .h(px(page_h))
-                .child(chart)
-                .child(legend)
-                .into_any_element(),
+            // The page widget's height: 300 px in the Memory page's flow layout (ADR-019
+            // phase 3). The probe re-renders this view when another number of rows fits.
+            AppsPlace::Page => {
+                let class =
+                    |(shown, more): (usize, usize)| (shown as u32) | (u32::from(more > 0) << 31);
+                let probe_m = m;
+                frame
+                    .relative()
+                    .flex_row()
+                    .size_full()
+                    .child(chart)
+                    .child(legend)
+                    .child(class_probe(
+                        Rc::clone(&self.body),
+                        class((shown, more)),
+                        move |size| class(page_legend(size, rows, &probe_m)),
+                        cx.entity_id(),
+                    ))
+                    .into_any_element()
+            }
             AppsPlace::Overview => {
                 // The probe re-renders this view when the body crosses the legend width rule
                 // or another number of legend rows fits.
