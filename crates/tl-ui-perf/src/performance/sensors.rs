@@ -9,9 +9,7 @@
 //! value scaled by `axis_max / 100` and puts it in the chart's second slot after each snapshot
 //! (E25-OI-5). The axis has no labels for it.
 
-#[cfg(any(test, debug_assertions, feature = "test-hooks"))]
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
