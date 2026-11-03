@@ -24,6 +24,7 @@ mod overview_range;
 mod overview_widget_look;
 mod page_cpu_widgets;
 mod page_gpu_widgets;
+mod page_mem_widgets;
 mod page_range;
 mod page_widgets;
 mod performance;
