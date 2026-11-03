@@ -514,7 +514,7 @@ fn cpu_by_app_colour_from_memory_pick(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn cpu_by_app_legend_percent(cx: &mut TestAppContext) {
     let fixture = flat(&[12.34, 2.], [0.5, 0.25, 0.75, 0.125, 0.375]);
-    let mut r = open(cx, &fixture, |_| {});
+    let r = open(cx, &fixture, |_| {});
     let lines = r
         .vcx
         .update(|_, cx| r.apps.read(cx).tooltip_lines(0, None, cx));
